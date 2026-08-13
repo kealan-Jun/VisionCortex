@@ -33,7 +33,15 @@
     Key-Material-Timestamps.csv
     Key-Material-Timestamps.xlsx
     Screening-Notes.txt
+  Lab-Daily-Reports/<YYYY-MM-DD>/
+    Lab-Daily-Report-<date>.json, .md, .html
+    Daily-Report-Eval.json
+    Human-Review.json
+  Professional-PDFs/
+    Lab-Daily-Report-<date>.pdf
 ```
+
+日报采用固定的 `VC-LAB-DAILY-REPORT-V1`：模型只产出结构化实验理解，确定性渲染器填充固定栏目，日报阶段不新增模型调用或 Token。模板栏目、版本策略和本地开发方式见 [实验室日报固定模板 V1](docs/daily-report-template-v1.md)。
 
 五类动作是 `hand_object_contact`（手与明确物体接触）、`object_movement`、`liquid_movement`、`container_state_change` 和 `device_panel_operation`。每个记录保留候选、接受/拒绝理由、视角支持、对齐置信度和不确定性，YOLO 框不会被直接当成最终证据。
 

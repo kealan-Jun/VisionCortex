@@ -84,6 +84,8 @@ class ArchiveLayout:
         self.key_materials = root / "Key-Materials"
         self.key_clips = self.key_materials / "Key-Clips"
         self.key_frames = self.key_materials / "Key-Frames"
+        self.daily_reports = root / "Lab-Daily-Reports"
+        self.professional_pdfs = root / "Professional-PDFs"
         self.work = root / ".work"
 
     def create(self) -> None:
@@ -92,6 +94,8 @@ class ArchiveLayout:
             self.json_config,
             self.key_clips,
             self.key_frames,
+            self.daily_reports,
+            self.professional_pdfs,
             self.work,
         ):
             path.mkdir(parents=True, exist_ok=True)

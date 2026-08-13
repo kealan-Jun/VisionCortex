@@ -323,8 +323,11 @@ def favicon() -> Response:
 @app.get("/api/health")
 def health() -> dict[str, Any]:
     settings = _settings()
+    storage_mode = "nas" if settings["storage"].get("sync_to_nas") else "local_development"
     return {
         "status": "ok",
+        "storage_mode": storage_mode,
+        "archive_label": "NAS 正式归档" if storage_mode == "nas" else "本地开发归档",
         "minimum_capacity": "6 views x 3 hours",
         "view_count_policy": "dynamic",
         "minimum_cross_view_sources": 2,
@@ -359,6 +362,7 @@ def list_archives() -> dict[str, Any]:
             continue
         experiment_root = folder / "Experiment-Clips"
         key_index = folder / "Key-Materials" / "Key-Materials-Model-Understanding.json"
+        daily_manifest = folder / "JSON-Config-Files" / "daily_report_manifest.json"
         status = _read_json(folder / "JSON-Config-Files" / "pipeline_status.json", {}) or {}
         metrics = _read_json(folder / "JSON-Config-Files" / "run_metrics.json", {}) or {}
         archives.append(
@@ -370,6 +374,7 @@ def list_archives() -> dict[str, Any]:
                 "pipeline_stage": status.get("stage") or ("completed" if metrics else "archived"),
                 "progress": status.get("progress"),
                 "has_model_understanding": key_index.is_file(),
+                "has_daily_report": daily_manifest.is_file(),
             }
         )
     return {"archive_root": str(root), "archives": archives}
@@ -393,6 +398,14 @@ def archive_detail(archive_name: str) -> dict[str, Any]:
     key_events = _read_json(
         root / "Key-Materials" / "Key-Materials-Model-Understanding.json", []
     ) or []
+    daily_manifest = _read_json(
+        root / "JSON-Config-Files" / "daily_report_manifest.json", {}
+    ) or {}
+    daily_report = (
+        _read_json(root / daily_manifest["json"], {})
+        if daily_manifest.get("json")
+        else {}
+    ) or {}
     group_by_folder = {
         str(group.get("archive_folder")): group for group in package.get("experiment_groups", [])
     }
@@ -452,6 +465,21 @@ def archive_detail(archive_name: str) -> dict[str, Any]:
         ),
         "metrics": _file_url(archive_name, "JSON-Config-Files/run_metrics.json"),
         "acceptance": _file_url(archive_name, "JSON-Config-Files/acceptance_report.json"),
+        "daily_report_json": _file_url(archive_name, daily_manifest["json"])
+        if daily_manifest.get("json")
+        else None,
+        "daily_report_markdown": _file_url(archive_name, daily_manifest["markdown"])
+        if daily_manifest.get("markdown")
+        else None,
+        "daily_report_html": _file_url(archive_name, daily_manifest["html"])
+        if daily_manifest.get("html")
+        else None,
+        "daily_report_pdf": _file_url(archive_name, daily_manifest["pdf"])
+        if daily_manifest.get("pdf")
+        else None,
+        "daily_report_eval": _file_url(archive_name, daily_manifest["evaluation"])
+        if daily_manifest.get("evaluation")
+        else None,
     }
     return {
         "name": archive_name,
@@ -460,6 +488,8 @@ def archive_detail(archive_name: str) -> dict[str, Any]:
         "experiments": experiments,
         "key_events": normalized_events,
         "metrics": metrics,
+        "daily_report": daily_report,
+        "daily_report_manifest": daily_manifest,
         "links": links,
     }
 

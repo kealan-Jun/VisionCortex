@@ -109,6 +109,13 @@ archive:
   create_side_by_side_video: true
   keep_debug_candidates: true
 
+daily_report:
+  enabled: true
+  template_id: VC-LAB-DAILY-REPORT-V1
+  timezone: Asia/Shanghai
+  generate_pdf: true
+  additional_mllm_calls: false
+
 storage:
   index_csv: Y:/experiment_record_index.csv
   archive_root: Y:/VisionCortexExperimentArchive

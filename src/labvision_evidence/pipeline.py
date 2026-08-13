@@ -38,6 +38,7 @@ from .archive import (
 )
 from .grouping import build_experiment_groups, select_key_events
 from .detection import scan_videos, validate_models
+from .daily_reports import generate_daily_report_archive
 from .schemas import (
     ActionCandidate,
     ActionType,
@@ -267,6 +268,13 @@ class EvidencePipeline:
             "tokens": {
                 "experiment_groups": experiment_groups,
                 "key_materials": key_materials,
+                "daily_report": {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "total_tokens": 0,
+                    "call_count": 0,
+                    "note": "Deterministic aggregation of already accepted evidence; no additional MLLM call.",
+                },
                 "run_total": {
                     "input_tokens": token_sum(all_calls, "input_tokens"),
                     "output_tokens": token_sum(all_calls, "output_tokens"),
@@ -513,7 +521,7 @@ class EvidencePipeline:
             physical_changes = build_physical_change_log(events)
 
             self._status(layout, "package", 0.96, "归档证据包并执行 evidence-package-eval")
-            finalize_archive(
+            summary = finalize_archive(
                 layout,
                 manifest,
                 infos,
@@ -531,6 +539,8 @@ class EvidencePipeline:
             # may contain multiple atomic segments but must count as one bounded
             # experiment in the user-facing output and boundary evaluation.
             self._run_sidecar_validation(layout, manifest, groups)
+            self._status(layout, "daily_report", 0.98, "从已验收证据生成实验室日报并执行一致性校验")
+            generate_daily_report_archive(layout, summary, self._metrics(events, groups), self.config)
             if not self.config["archive"].get("keep_debug_candidates") and layout.work.exists():
                 shutil.rmtree(layout.work)
             self._status(layout, "completed", 1.0, "处理完成")
@@ -538,7 +548,7 @@ class EvidencePipeline:
             # Refresh the package after the final stage has been closed so the
             # durable evidence package and the standalone ledger contain the
             # same complete stage durations and provider-reported token usage.
-            finalize_archive(
+            summary = finalize_archive(
                 layout,
                 manifest,
                 infos,
@@ -553,8 +563,17 @@ class EvidencePipeline:
                 disk_report,
                 run_metrics=run_metrics,
             )
+            # Refresh the report with the closed daily_report stage duration and
+            # final provider-reported token ledger. This remains deterministic.
+            generate_daily_report_archive(layout, summary, run_metrics, self.config)
             if self._publisher is not None:
-                for directory in ("Experiment-Clips", "Key-Materials", "JSON-Config-Files"):
+                for directory in (
+                    "Experiment-Clips",
+                    "Key-Materials",
+                    "JSON-Config-Files",
+                    "Lab-Daily-Reports",
+                    "Professional-PDFs",
+                ):
                     self._publisher.publish_directory(directory)
             return layout.root
         except Exception as exc:
@@ -735,7 +754,7 @@ def create_dry_run(output: Path, config: dict[str, Any]) -> Path:
             confidence=event.confidence,
         )
     ]
-    finalize_archive(
+    summary = finalize_archive(
         layout,
         manifest,
         {},
@@ -770,5 +789,19 @@ def create_dry_run(output: Path, config: dict[str, Any]) -> Path:
             ],
         },
     )
+    dry_metrics = {
+        "total_duration_seconds": 0.0,
+        "preprocessing_sla": {"actual_seconds": 0.0, "target_seconds": 1200.0, "met": True},
+        "stage_durations": [],
+        "tokens": {
+            "experiment_groups": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "call_count": 0},
+            "key_materials": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "call_count": 0},
+            "daily_report": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "call_count": 0},
+            "run_total": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+        },
+        "dry_run": True,
+    }
+    write_json(layout.json_config / "run_metrics.json", dry_metrics)
+    generate_daily_report_archive(layout, summary, dry_metrics, config)
     write_json(layout.root / "run_status.json", {"stage": "completed", "progress": 1.0, "dry_run": True})
     return layout.root

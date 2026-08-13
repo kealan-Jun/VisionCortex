@@ -14,6 +14,7 @@ import yaml
 
 from .config import load_config, load_manifest
 from .detection import validate_models
+from .daily_reports import generate_daily_report_from_archive
 from .pipeline import EvidencePipeline, create_dry_run
 from .archive import ArchiveLayout, refresh_key_material_metadata, write_json, _artifact_json
 from .schemas import RunSummary
@@ -25,6 +26,17 @@ app = typer.Typer(no_args_is_help=True, help="多视角化学实验视频证据�
 
 def _progress(stage: str, progress: float, message: str) -> None:
     typer.echo(f"[{progress:6.1%}] {stage}: {message}")
+
+
+@app.command("generate-daily-report")
+def generate_daily_report_command(
+    archive: Annotated[Path, typer.Option("--archive", "-a", exists=True, file_okay=False)],
+    config: Annotated[Path | None, typer.Option("--config", "-c", exists=True, dir_okay=False)] = None,
+) -> None:
+    """Generate or refresh a zero-additional-token report from an accepted archive."""
+
+    result = generate_daily_report_from_archive(archive, load_config(config))
+    typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 @app.command("run")

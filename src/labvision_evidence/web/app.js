@@ -63,6 +63,9 @@ const duration = (seconds) => {
   if (value >= 60) return `${Math.floor(value / 60)}分${String(Math.round(value % 60)).padStart(2,"0")}秒`;
   return `${value.toFixed(value < 10 ? 2 : 1)}秒`;
 };
+const isNasMode = () => state.health?.storage_mode === "nas";
+const archiveLabel = () => state.health?.archive_label || (isNasMode() ? "NAS 正式归档" : "实验归档");
+const archiveShortLabel = () => isNasMode() ? "NAS" : "本地";
 
 const ACTION_LABELS = {
   hand_object_contact: "手部与物体接触",
@@ -88,6 +91,7 @@ const STAGE_LABELS = {
   key_materials: "关键素材生成",
   mllm: "关键素材模型理解",
   package: "证据包与指标归档",
+  daily_report: "实验室日报生成与校验",
   completed: "分析完成",
   failed: "分析失败",
 };
@@ -118,7 +122,7 @@ function pageContext(route) {
   if (route === "new") return ["核心工作", "新建实验"];
   if (route === "tasks") return ["核心工作", "任务进度"];
   if (route === "materials") return ["实验产出", "关键素材库"];
-  if (route === "reports") return ["实验产出", "模型理解与文件"];
+  if (route === "reports") return ["实验产出", "实验室日报"];
   if (route === "operations") return ["系统管理", "服务健康"];
   if (route === "archive") return ["实验结果", "实验详情"];
   if (route === "experiments") return ["核心工作", "实验记录"];
@@ -145,7 +149,7 @@ function updateServiceChrome() {
   document.querySelector("#node-dot").classList.toggle("online", online);
   const running = state.runs.filter((run) => !["completed", "failed"].includes(run.state)).length;
   document.querySelector("#service-note").textContent = online
-    ? running ? `${running} 个任务正在分析` : "NAS 与分析服务可用"
+    ? running ? `${running} 个任务正在分析` : `${archiveLabel()}与分析服务可用`
     : "分析服务暂不可用";
   const badge = document.querySelector("#running-badge");
   badge.hidden = running === 0;
@@ -171,7 +175,7 @@ function statusCard(iconName, label, value, note) {
 }
 
 function archiveRows(archives, target = "experiments") {
-  if (!archives.length) return `<div class="empty-state"><strong>还没有实验档案</strong><p>点击“新建实验”上传第一批多视角视频；原视频会先留存在 NAS。</p><a class="primary-button" href="#/new">${icon("plus")}新建实验</a></div>`;
+  if (!archives.length) return `<div class="empty-state"><strong>还没有实验档案</strong><p>点击“新建实验”上传第一批多视角视频；原视频会先留存在${archiveLabel()}。</p><a class="primary-button" href="#/new">${icon("plus")}新建实验</a></div>`;
   return `<div class="archive-list">${archives.map((archive) => `
     <a class="archive-row" href="#/archive/${encodeURIComponent(archive.name)}/${target}">
       <span>${icon("check")}</span>
@@ -189,16 +193,17 @@ function renderHome() {
   const experimentTotal = state.archives.reduce((sum, archive) => sum + Number(archive.experiment_count || 0), 0);
   const keyTotal = state.archives.reduce((sum, archive) => sum + Number(archive.key_event_count || 0), 0);
   const recent = archives.slice(0, 6);
+  const archiveName = archiveLabel();
   main.innerHTML = `<div class="page">
     <header class="page-hero"><div><p class="eyebrow">LABORATORY SITUATIONAL AWARENESS</p><h1>多视角湿实验工作台</h1><p>上传任意实际路数的连续长视频，自动完成原视频留存、时间轴对齐、有界实验筛选、跨视角关键素材和细粒度步骤理解。系统容量已按至少 6 路、每路 3 小时设计。</p></div><div class="hero-actions"><button class="primary-button" id="rerun-benchmark" type="button">${icon("activity")}重跑六路 3 小时基准</button><a class="secondary-button" href="#/new">${icon("upload")}新建其他实验</a></div></header>
-    <section class="current-work"><span class="current-icon">${icon(running ? "activity" : "folder")}</span><div><small>${running ? "当前分析" : "最近正式归档"}</small><h2>${esc(running ? state.runs.find((run) => !["completed","failed"].includes(run.state))?.experiment_id : state.archives[0]?.name || "等待创建第一个实验")}</h2><p>${running ? "产出会在每个阶段完成时持续写入 NAS" : state.archives[0] ? "所有结果均从正式 NAS 归档读取" : "选择多路视频即可开始"}</p></div>${state.archives[0] ? `<a class="secondary-button" href="#/archive/${encodeURIComponent(state.archives[0].name)}/experiments">打开</a>` : ""}</section>
+    <section class="current-work"><span class="current-icon">${icon(running ? "activity" : "folder")}</span><div><small>${running ? "当前分析" : `最近${archiveName}`}</small><h2>${esc(running ? state.runs.find((run) => !["completed","failed"].includes(run.state))?.experiment_id : state.archives[0]?.name || "等待创建第一个实验")}</h2><p>${running ? `产出会在每个阶段完成时持续写入${archiveName}` : state.archives[0] ? `所有结果均从${archiveName}读取` : "选择多路视频即可开始"}</p></div>${state.archives[0] ? `<a class="secondary-button" href="#/archive/${encodeURIComponent(state.archives[0].name)}/experiments">打开</a>` : ""}</section>
     <section class="status-grid">
-      ${statusCard("folder", "NAS 实验档案", number(state.archives.length), "正式归档目录")}
+      ${statusCard("folder", `${archiveShortLabel()}实验档案`, number(state.archives.length), archiveName)}
       ${statusCard("flask", "有界实验", number(experimentTotal), "独立或连续实验组")}
       ${statusCard("image", "关键事件", number(keyTotal), "五大物理动作")}
       ${statusCard("activity", "正在处理", number(running), "上传与分析任务")}
     </section>
-    <section class="panel"><header class="panel-heading"><div><p class="eyebrow">RECENT EXPERIMENTS</p><h2>最近实验</h2><p>直接从 NAS 正式归档读取，不展示运行缓存。</p></div><a href="#/experiments">全部实验 ${icon("arrow")}</a></header>${archiveRows(recent)}</section>
+    <section class="panel"><header class="panel-heading"><div><p class="eyebrow">RECENT EXPERIMENTS</p><h2>最近实验</h2><p>直接从${archiveName}读取，不展示运行缓存。</p></div><a href="#/experiments">全部实验 ${icon("arrow")}</a></header>${archiveRows(recent)}</section>
     <section class="workflow-strip">
       <article><span>01</span><i>${icon("upload")}</i><div><strong>上传与原视频留存</strong><p>按实际路数创建机位</p></div></article>
       <article><span>02</span><i>${icon("clock")}</i><div><strong>对齐与有界筛选</strong><p>最近邻 + 视觉锚点</p></div></article>
@@ -232,13 +237,13 @@ async function rerunBenchmark() {
 
 function renderExperiments(target = "experiments") {
   setChrome(target);
-  const title = target === "materials" ? "关键素材库" : target === "reports" ? "模型理解与文件" : "实验记录";
+  const title = target === "materials" ? "关键素材库" : target === "reports" ? "实验室日报" : "实验记录";
   const copy = target === "materials"
     ? "按正式实验档案进入关键素材，查看五大类动作的对齐帧、对齐片段、时间戳与模型判断。"
     : target === "reports"
-      ? "进入档案后直接下载实验级理解 JSON、关键素材 JSON、阶段耗时、Token 与验收报告。"
-      : "按实验查看原视频留存、分析结果与 NAS 归档位置。";
-  main.innerHTML = `<div class="page"><header class="page-hero compact"><div><p class="eyebrow">FORMAL NAS ARCHIVE</p><h1>${title}</h1><p>${copy}</p></div><div class="hero-actions"><a class="primary-button" href="#/new">${icon("plus")}新建实验</a></div></header><section class="panel"><header class="panel-heading"><div><h2>NAS 档案目录</h2><p>${state.health?.nas_archive_root ? `根目录：${esc(state.health.nas_archive_root)}` : "正在读取 NAS 根目录"}</p></div></header>${archiveRows(filteredArchives(), target === "materials" ? "materials" : target === "reports" ? "metrics" : "experiments")}</section></div>`;
+      ? "从已验收证据自动生成日报 JSON、Markdown、HTML 与 PDF，并保留人工复核状态。"
+      : `按实验查看原视频留存、分析结果与${archiveLabel()}位置。`;
+  main.innerHTML = `<div class="page"><header class="page-hero compact"><div><p class="eyebrow">EVIDENCE ARCHIVE</p><h1>${title}</h1><p>${copy}</p></div><div class="hero-actions"><a class="primary-button" href="#/new">${icon("plus")}新建实验</a></div></header><section class="panel"><header class="panel-heading"><div><h2>${archiveLabel()}目录</h2><p>${state.health?.nas_archive_root ? `根目录：${esc(state.health.nas_archive_root)}` : "正在读取归档根目录"}</p></div></header>${archiveRows(filteredArchives(), target === "materials" ? "materials" : target === "reports" ? "reports" : "experiments")}</section></div>`;
 }
 
 function createSource(video = null, csv = null, index = state.sources.length) {
@@ -380,7 +385,7 @@ function xhrUpload(formData, progress) {
 }
 
 function renderStages(activeStage, progressValue) {
-  const stages = ["preflight","alignment","candidate_coarse","candidate_fine","candidate_audit","experiment_understanding","experiment_clips","key_materials","mllm","package"];
+  const stages = ["preflight","alignment","candidate_coarse","candidate_fine","candidate_audit","experiment_understanding","experiment_clips","key_materials","mllm","package","daily_report"];
   const activeIndex = stages.indexOf(activeStage);
   const element = document.querySelector("#run-stages");
   if (!element) return;
@@ -477,7 +482,7 @@ function resultHeader(data, tab) {
   const tokens = data.metrics?.tokens?.run_total || {};
   const preprocessing = data.metrics?.display_preprocessing_seconds;
   const endToEnd = data.metrics?.web_end_to_end?.total_duration_seconds ?? data.metrics?.fixed_benchmark_end_to_end?.total_duration_seconds;
-  return `<div class="result-header"><header class="page-hero compact"><div><p class="eyebrow">FORMAL NAS ARCHIVE</p><h1>${esc(data.name)}</h1><p>第一人称与第三人称统一时间轴产出；仅保留通过有界审计的真实实验片段。</p></div><div class="hero-actions"><button class="secondary-button" type="button" data-copy-path="${esc(data.path)}">${icon("copy")}复制 NAS 路径</button><button class="primary-button" type="button" data-open-folder="${esc(data.name)}">${icon("folder")}在资源管理器打开</button></div></header><div class="current-work"><span class="current-icon">${icon("folder")}</span><div><small>正式归档位置（资源管理器直接粘贴）</small><h2 class="archive-path">${esc(data.path)}</h2><p>网络位置：${esc(data.network_path || data.path)} · 原视频、实验片段、关键素材、模型 JSON、耗时与 Token 均在此目录。</p></div><span class="badge">NAS</span></div><section class="status-grid">${statusCard("flask","有界实验",number(data.experiments.length),"独立/连续实验组")}${statusCard("image","关键事件",number(data.key_events.length),"五大类物理动作")}${statusCard("clock","完整预处理",duration(preprocessing),"不含模型理解")}${statusCard("token","总 Token",number(tokens.total_tokens),endToEnd != null ? `端到端 ${duration(endToEnd)}` : `${number(tokens.input_tokens)} 输入 + ${number(tokens.output_tokens)} 输出`)}</section><nav class="result-tabs"><a class="result-tab ${tab==="experiments"?"active":""}" href="#/archive/${encodeURIComponent(data.name)}/experiments">实验片段与步骤理解</a><a class="result-tab ${tab==="materials"?"active":""}" href="#/archive/${encodeURIComponent(data.name)}/materials">关键素材与当前/下一步</a><a class="result-tab ${tab==="metrics"?"active":""}" href="#/archive/${encodeURIComponent(data.name)}/metrics">耗时、Token 与文件</a></nav></div>`;
+  return `<div class="result-header"><header class="page-hero compact"><div><p class="eyebrow">EVIDENCE ARCHIVE</p><h1>${esc(data.name)}</h1><p>第一人称与第三人称统一时间轴产出；仅保留通过有界审计的真实实验片段。</p></div><div class="hero-actions"><button class="secondary-button" type="button" data-copy-path="${esc(data.path)}">${icon("copy")}复制归档路径</button><button class="primary-button" type="button" data-open-folder="${esc(data.name)}">${icon("folder")}在资源管理器打开</button></div></header><div class="current-work"><span class="current-icon">${icon("folder")}</span><div><small>${archiveLabel()}位置（资源管理器直接粘贴）</small><h2 class="archive-path">${esc(data.path)}</h2><p>存储位置：${esc(data.network_path || data.path)} · 原视频、实验片段、关键素材、模型 JSON、耗时与 Token 均在此目录。</p></div><span class="badge">${archiveShortLabel()}</span></div><section class="status-grid">${statusCard("flask","有界实验",number(data.experiments.length),"独立/连续实验组")}${statusCard("image","关键事件",number(data.key_events.length),"五大类物理动作")}${statusCard("clock","完整预处理",duration(preprocessing),"不含模型理解")}${statusCard("token","总 Token",number(tokens.total_tokens),endToEnd != null ? `端到端 ${duration(endToEnd)}` : `${number(tokens.input_tokens)} 输入 + ${number(tokens.output_tokens)} 输出`)}</section><nav class="result-tabs"><a class="result-tab ${tab==="experiments"?"active":""}" href="#/archive/${encodeURIComponent(data.name)}/experiments">实验片段与步骤理解</a><a class="result-tab ${tab==="materials"?"active":""}" href="#/archive/${encodeURIComponent(data.name)}/materials">关键素材与当前/下一步</a><a class="result-tab ${tab==="reports"?"active":""}" href="#/archive/${encodeURIComponent(data.name)}/reports">实验室日报</a><a class="result-tab ${tab==="metrics"?"active":""}" href="#/archive/${encodeURIComponent(data.name)}/metrics">耗时、Token 与文件</a></nav></div>`;
 }
 
 function experimentCard(experiment) {
@@ -492,6 +497,28 @@ function materialCard(event) {
   return `<article class="material-card"><header><div><h2>${esc(event.event_id)} · ${esc(ACTION_LABELS[event.action_type] || event.action_type)}</h2><div class="timecode">${timecode(Number(event.start_us)/1000)} → ${timecode(Number(event.end_us)/1000)} · 峰值 ${timecode(Number(event.peak_timestamp_us)/1000)}</div></div><span class="badge">${esc(event.decision?.status || "unknown")}</span></header><div class="video-understanding"><div><div class="video-frame">${event.aligned_frame_url ? `<img loading="lazy" src="${esc(event.aligned_frame_url)}" alt="${esc(event.event_id)} 对齐关键帧"/>` : ""}</div>${event.aligned_clip_url ? `<div class="video-frame" style="margin-top:8px"><video controls preload="none" src="${esc(event.aligned_clip_url)}"></video></div>` : ""}</div><div class="understanding-panel"><div><strong>当前步骤</strong><p>${esc(mllm.current_step || facts[0] || "未知")}</p></div><div><strong>下一步骤</strong><p>${esc(next)}</p></div><div><strong>跨视角支持</strong><p>${esc(cross ? `${cross.consistency} · ${cross.both_views_support_action ? "第一/第三人称共同支持" : "仅部分视角支持"}` : "未建立跨视角关联")}</p></div><div><strong>对象</strong><p>${esc(Object.entries(event.objects || {}).map(([key,value])=>`${key}: ${value}`).join("；") || "未明确")}</p></div>${facts.length ? `<div><strong>可观察事实</strong><ul class="fact-list">${facts.slice(0,3).map((fact)=>`<li>${esc(fact)}</li>`).join("")}</ul></div>` : ""}<div class="usage-box">Token：${number(mllm.usage?.input_tokens)} 输入 + ${number(mllm.usage?.output_tokens)} 输出 = ${number(mllm.usage?.total_tokens)}</div></div></div></article>`;
 }
 
+function dailyReportView(data) {
+  const report = data.daily_report || {};
+  const overview = report.overview || {};
+  const alignment = report.alignment_summary || {};
+  const performance = report.performance || {};
+  const actions = report.action_summary || [];
+  const timeline = report.experiment_timeline || [];
+  const fullRunPreprocessing = performance.full_run_preprocessing || {};
+  if (!report.report_id) return `<section class="panel"><div class="empty-state"><strong>该历史档案尚未生成实验室日报</strong><p>下一次运行流水线会自动生成；也可使用 CLI 对已验收档案补生成。</p></div></section>`;
+  const links = [
+    ["daily_report_pdf", "正式 PDF"],
+    ["daily_report_html", "HTML 报告"],
+    ["daily_report_markdown", "Markdown"],
+    ["daily_report_json", "事实源 JSON"],
+    ["daily_report_eval", "日报验收 JSON"],
+  ].filter(([key]) => data.links?.[key]);
+  return `<section class="daily-report-cover"><div><p class="eyebrow">EVIDENCE-BACKED DAILY REPORT</p><h2>实验室日报 · ${esc(report.report_date)}</h2><p>${esc(report.experiment_id)}</p></div><span class="badge">${overview.evidence_package_eval_passed ? "证据包已验收" : "待验收"}</span><div class="daily-report-links">${links.map(([key,label])=>`<a class="secondary-button" target="_blank" href="${esc(data.links[key])}">${icon("file")}${label}</a>`).join("")}</div></section>
+  <section class="status-grid">${statusCard("video","输入视角",number(overview.input_view_count),`${number(overview.first_person_views)} 第一人称 + ${number(overview.third_person_views)} 第三人称`)}${statusCard("flask","有界实验",number(overview.experiment_group_count),"独立/连续实验组")}${statusCard("image","关键事件",number(overview.key_event_count),`${number(overview.physical_change_count)} 项状态变化`)}${statusCard("token","日报新增 Token",number(report.source_policy?.additional_model_tokens?.total_tokens),"复用已有模型理解")}</section>
+  <section class="panel"><header class="panel-heading"><div><h2>实验时间线与步骤理解</h2><p>时间均为统一实验相对时间；每项保留证据事件与跨视角素材链接。</p></div></header><div class="daily-timeline">${timeline.map((group,index)=>`<article><span class="daily-index">${String(index+1).padStart(2,"0")}</span><div><header><h3>${esc(group.experiment_name)}</h3><span class="badge">${group.continuity_type === "continuous" ? "连续实验" : "独立实验"}</span></header><p class="timecode">${esc(group.start_timecode)} → ${esc(group.end_timecode)}</p><p>${esc(group.overall_summary || "无模型摘要")}</p><details><summary>查看 ${number(group.steps?.length)} 个细粒度步骤</summary><div class="step-list">${(group.steps||[]).map((step)=>`<article class="step-card"><span class="step-number">步骤 ${esc(step.step_index)}<small>${esc(step.start_timecode)}<br/>${esc(step.end_timecode)}</small></span><div class="step-body"><strong>当前：${esc(step.current_step || "未说明")}</strong><p class="step-next"><b>下一步：</b>${esc(step.next_step || "证据不足")}</p><span class="step-meta">对象：${esc((step.objects||[]).join("、") || "未明确")} · ${number(step.supporting_views?.length)} 路证据</span></div></article>`).join("")}</div></details></div></article>`).join("")}</div></section>
+  <section class="panel"><header class="panel-heading"><div><h2>五类动作、质量与成本</h2><p>观察事实、证据支持的模型理解和不确定项在 JSON 中分别保存。</p></div></header><div class="daily-action-grid">${actions.map((item)=>`<article><strong>${number(item.event_count)}</strong><span>${esc(item.action_label)}</span></article>`).join("")}</div><table class="metric-table"><tbody><tr><td>时间对齐</td><td>${number(alignment.aligned)}/${number(alignment.view_count)} 路 aligned，平均置信度 ${alignment.mean_confidence ?? "—"}</td></tr><tr><td>不确定性 / 矛盾</td><td>${number(report.uncertainties?.length)} 组 / ${number(report.contradictions?.length)} 项</td></tr><tr><td>本次流水线总耗时</td><td>${duration(performance.total_duration_seconds)}</td></tr><tr><td>本次流水线预处理</td><td>${duration(performance.preprocessing_sla?.actual_seconds)}（不含模型理解；可能复用已验收 CV 账本）</td></tr>${fullRunPreprocessing.seconds != null ? `<tr><td>全量六路预处理验收</td><td>${duration(fullRunPreprocessing.seconds)}（${esc(fullRunPreprocessing.includes || "完整预处理") }）</td></tr>` : ""}<tr><td>总 Token</td><td>${number(performance.total_input_tokens)} 输入 + ${number(performance.total_output_tokens)} 输出 = ${number(performance.total_tokens)}</td></tr><tr><td>人工复核</td><td>${esc(report.human_review?.status || "pending")}</td></tr></tbody></table></section>`;
+}
+
 function metricsView(data) {
   const metrics = data.metrics || {};
   const tokens = metrics.tokens || {};
@@ -504,19 +531,19 @@ function metricsView(data) {
 
 async function renderArchive(name, tab = "experiments") {
   setChrome("archive", name);
-  main.innerHTML = `<div class="page-loading"><span class="spinner"></span><strong>正在读取 NAS 正式档案</strong></div>`;
+  main.innerHTML = `<div class="page-loading"><span class="spinner"></span><strong>正在读取${archiveLabel()}</strong></div>`;
   try {
     const data = await loadArchive(name);
-    main.innerHTML = `<div class="page">${resultHeader(data,tab)}${tab === "materials" ? `<section class="material-grid">${data.key_events.map(materialCard).join("")}</section>` : tab === "metrics" ? metricsView(data) : `<section class="step-list">${data.experiments.map(experimentCard).join("")}</section>`}</div>`;
+    main.innerHTML = `<div class="page">${resultHeader(data,tab)}${tab === "materials" ? `<section class="material-grid">${data.key_events.map(materialCard).join("")}</section>` : tab === "reports" ? dailyReportView(data) : tab === "metrics" ? metricsView(data) : `<section class="step-list">${data.experiments.map(experimentCard).join("")}</section>`}</div>`;
     bindArchiveActions();
   } catch (error) {
-    main.innerHTML = `<div class="empty-state"><strong>无法读取该 NAS 档案</strong><p>${esc(error.message)}</p><a class="secondary-button" href="#/experiments">返回实验记录</a></div>`;
+    main.innerHTML = `<div class="empty-state"><strong>无法读取该实验档案</strong><p>${esc(error.message)}</p><a class="secondary-button" href="#/experiments">返回实验记录</a></div>`;
   }
 }
 
 function bindArchiveActions() {
   document.querySelectorAll("[data-copy-path]").forEach((button) => button.addEventListener("click", async () => {
-    try { await navigator.clipboard.writeText(button.dataset.copyPath); toast("NAS 路径已复制。" ); }
+    try { await navigator.clipboard.writeText(button.dataset.copyPath); toast("归档路径已复制。" ); }
     catch { toast(`请手工复制：${button.dataset.copyPath}`, "error"); }
   }));
   document.querySelectorAll("[data-open-folder]").forEach((button) => button.addEventListener("click", async () => {

@@ -29,6 +29,8 @@ DERIVED_ARCHIVE_DIRECTORIES = (
     "Experiment-Clips",
     "JSON-Config-Files",
     "Key-Materials",
+    "Lab-Daily-Reports",
+    "Professional-PDFs",
 )
 
 
@@ -72,6 +74,18 @@ def promote_fixed_archive(
     evaluation = json.loads(evaluation_path.read_text(encoding="utf-8-sig"))
     if not evaluation.get("passed"):
         raise RuntimeError("Staged evidence package did not pass evaluation; promotion refused")
+    report_evaluations = list(
+        (staging_root / "Lab-Daily-Reports").glob("*/Daily-Report-Eval.json")
+    )
+    if not report_evaluations:
+        raise RuntimeError("Staged daily report evaluation is missing; promotion refused")
+    if not all(
+        json.loads(path.read_text(encoding="utf-8-sig")).get("passed")
+        for path in report_evaluations
+    ):
+        raise RuntimeError("Staged daily report did not pass evaluation; promotion refused")
+    if not any((staging_root / "Professional-PDFs").glob("Lab-Daily-Report-*.pdf")):
+        raise RuntimeError("Staged daily report PDF is missing; promotion refused")
 
     fixed_root.mkdir(parents=True, exist_ok=True)
     history_root.mkdir(parents=True, exist_ok=True)
