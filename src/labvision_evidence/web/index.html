@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#1e4a52" />
+    <title>VisionCortex · 多视角湿实验分析</title>
+    <link rel="stylesheet" href="/ui/styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">跳到主要内容</a>
+    <div class="vc-page">
+      <div class="vc-shell" id="vc-shell" data-collapsed="false">
+        <aside class="global-nav" aria-label="全局导航">
+          <a class="nav-brand" href="#/home" aria-label="VisionCortex 总览">
+            <span class="brand-mark" aria-hidden="true"><span>VC</span></span>
+            <span class="nav-title"><strong>VisionCortex</strong><small>实验过程数据沉淀理解平台</small></span>
+          </a>
+          <nav class="nav-list">
+            <p class="nav-section-label">核心工作</p>
+            <a class="nav-link" data-route="home" href="#/home"><span class="nav-icon" data-icon="dashboard"></span><span class="nav-label">总览</span></a>
+            <a class="nav-link" data-route="experiments" href="#/experiments"><span class="nav-icon" data-icon="flask"></span><span class="nav-label">实验记录</span></a>
+            <a class="nav-link" data-route="tasks" href="#/tasks"><span class="nav-icon" data-icon="activity"></span><span class="nav-label">任务进度</span><em id="running-badge" hidden>0</em></a>
+            <a class="nav-link nav-create" data-route="new" href="#/new"><span class="nav-icon" data-icon="plus"></span><span class="nav-label">新建实验</span></a>
+            <div class="nav-separator"></div>
+            <p class="nav-section-label">实验产出</p>
+            <a class="nav-link" data-route="materials" href="#/materials"><span class="nav-icon" data-icon="boxes"></span><span class="nav-label">关键素材库</span></a>
+            <a class="nav-link" data-route="reports" href="#/reports"><span class="nav-icon" data-icon="file"></span><span class="nav-label">模型理解与文件</span></a>
+            <div class="nav-separator"></div>
+            <p class="nav-section-label">系统管理</p>
+            <a class="nav-link" data-route="operations" href="#/operations"><span class="nav-icon" data-icon="server"></span><span class="nav-label">服务健康</span></a>
+          </nav>
+          <div class="nav-footer">
+            <span class="node-dot" id="node-dot"></span>
+            <div><strong>本机分析服务</strong><small id="service-note">正在连接 NAS 与分析服务</small></div>
+          </div>
+        </aside>
+
+        <div class="main-column">
+          <header class="product-topbar">
+            <button class="icon-button nav-toggle" id="nav-toggle" type="button" aria-label="收起全局导航"><span data-icon="chevron"></span></button>
+            <div class="topbar-context">
+              <div class="breadcrumb"><span id="section-name">核心工作</span><strong id="page-name">总览</strong></div>
+              <span class="phase-chip" id="phase-chip"><i></i><span>等待新任务</span></span>
+            </div>
+            <label class="topbar-search"><span data-icon="search"></span><input id="global-search" placeholder="按实验名称查找" aria-label="搜索实验" /></label>
+            <button class="secondary-button refresh-button" id="refresh-button" type="button"><span data-icon="refresh"></span><span>刷新</span></button>
+          </header>
+          <main class="product-content" id="main-content" tabindex="-1">
+            <div class="page-loading"><span class="spinner"></span><strong>正在读取 NAS 实验档案</strong></div>
+          </main>
+        </div>
+      </div>
+    </div>
+    <div class="toast-region" id="toast-region" aria-live="polite"></div>
+    <script src="/ui/app.js" defer></script>
+  </body>
+</html>

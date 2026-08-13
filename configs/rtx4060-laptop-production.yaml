@@ -1,0 +1,61 @@
+project:
+  output_root: D:/VisionCortexLocal/Runtime/outputs
+
+models:
+  first_person: ./models/first_person/best.pt
+  third_person: ./models/third_person/best.pt
+  first_person_engine: ./models/first_person/best.engine
+  third_person_engine: ./models/third_person/best.engine
+
+performance:
+  profile: rtx4060-laptop-8gb-six-view
+  preprocessing_budget_seconds: 1200
+  device: 0
+  half: true
+  tensor_rt: required
+  coarse_detection_fps: 1.5
+  coarse_image_size: 416
+  coarse_batch_size: 32
+  coarse_keyframes_only: false
+  motion_probe_fps: 4.0
+  motion_signature_size: [64, 36]
+  detection_fps: 10.0
+  image_size: 640
+  fine_batch_size: 16
+  coarse_decode_lanes: [cuda, cuda, cuda, cuda, cpu, cpu]
+  fine_decode_lanes: [cuda, cuda, cuda, cuda, cpu, cpu]
+  source_workers: 6
+  decode_queue_depth: 4
+  cpu_decode_threads: 8
+  yolo_inference_workers: 2
+  materialization_workers: 2
+  io_workers: 4
+  max_gpu_memory_fraction: 0.88
+  ffmpeg_hwaccel: cuda
+  ffmpeg_video_encoder: h264_nvenc
+  concurrent_role_scanners: true
+
+mllm:
+  model: doubao-seed-2-1-pro-260628
+  group_workers: 2
+  workers: 4
+
+resource_limits:
+  gpu_memory_normal_fraction: 0.70
+  gpu_memory_warning_fraction: 0.80
+  gpu_memory_contract_fraction: 0.88
+  system_memory_normal_fraction: 0.70
+  system_memory_warning_fraction: 0.80
+  system_memory_contract_fraction: 0.90
+  cpu_warning_percent: 85
+  gpu_temperature_warning_c: 80
+  telemetry_interval_seconds: 1.0
+
+storage:
+  index_csv: Y:/experiment_record_index.csv
+  archive_root: Y:/VisionCortexExperimentArchive
+  local_input_root: D:/VisionCortexLocal/Input
+  local_runtime_root: D:/VisionCortexLocal/Runtime
+  local_cache_root: D:/VisionCortexLocal/Cache
+  local_staging_root: D:/VisionCortexLocal/Runtime/outputs
+  sync_to_nas: true

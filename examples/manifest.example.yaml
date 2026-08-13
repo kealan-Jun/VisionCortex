@@ -1,0 +1,27 @@
+experiment_id: CHEM-20260813-001
+views:
+  - view_id: fp01
+    role: first_person
+    video: D:/LabVideos/session_001/first_person.mp4
+    timestamps_csv: D:/LabVideos/session_001/first_person_timestamps.csv
+  - view_id: tp01
+    role: third_person
+    video: D:/LabVideos/session_001/third_person.mp4
+    timestamps_csv: D:/LabVideos/session_001/third_person_timestamps.csv
+  - view_id: fp02
+    role: first_person
+    video: D:/LabVideos/session_001/first_person_02.mp4
+    timestamps_csv: D:/LabVideos/session_001/first_person_02_timestamps.csv
+  - view_id: fp03
+    role: first_person
+    video: D:/LabVideos/session_001/first_person_03.mp4
+    timestamps_csv: D:/LabVideos/session_001/first_person_03_timestamps.csv
+  - view_id: tp02
+    role: third_person
+    video: D:/LabVideos/session_001/third_person_02.mp4
+    timestamps_csv: D:/LabVideos/session_001/third_person_02_timestamps.csv
+  - view_id: tp03
+    role: third_person
+    video: D:/LabVideos/session_001/third_person_03.mp4
+    timestamps_csv: D:/LabVideos/session_001/third_person_03_timestamps.csv
+

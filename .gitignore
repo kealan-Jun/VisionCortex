@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.playwright-cli/
+.mypy_cache/
+.ruff_cache/
+.venv/
+dist/
+build/
+outputs/
+uploads/
+output/
+*.zip
+*.log
+*.engine
+*.onnx
+# The two deployment weights under models/ are intentionally portable.
+*.pt
+!models/
+!models/**/
+!models/**/best.pt
+.env

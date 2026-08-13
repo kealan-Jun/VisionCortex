@@ -1,0 +1,26 @@
+experiment_id: exp_20260810_144014_e918b762-clean-validation
+views:
+  - view_id: lubancat-e8cc0cb3_cam01
+    role: first_person
+    video: D:/VisionCortexValidation/exp_20260810_144014_e918b762/lubancat-e8cc0cb3_cam01/video--video.mp4
+    timestamps_csv: D:/VisionCortexValidation/exp_20260810_144014_e918b762/lubancat-e8cc0cb3_cam01/clock--clock.csv
+  - view_id: orangepi5pro-ab748372_cam01
+    role: third_person
+    video: D:/VisionCortexValidation/exp_20260810_144014_e918b762/orangepi5pro-ab748372_cam01/video--video.mp4
+    timestamps_csv: D:/VisionCortexValidation/exp_20260810_144014_e918b762/orangepi5pro-ab748372_cam01/clock--clock.csv
+  - view_id: orangepi5pro-b439137c_cam02
+    role: third_person
+    video: D:/VisionCortexValidation/exp_20260810_144014_e918b762/orangepi5pro-b439137c_cam02/video--video.mp4
+    timestamps_csv: D:/VisionCortexValidation/exp_20260810_144014_e918b762/orangepi5pro-b439137c_cam02/clock--clock.csv
+  - view_id: orangepi5pro-d12a4719_cam01
+    role: third_person
+    video: D:/VisionCortexValidation/exp_20260810_144014_e918b762/orangepi5pro-d12a4719_cam01/video--video.mp4
+    timestamps_csv: D:/VisionCortexValidation/exp_20260810_144014_e918b762/orangepi5pro-d12a4719_cam01/clock--clock.csv
+  - view_id: orangepi5pro-fe0ec3fe_cam01
+    role: third_person
+    video: D:/VisionCortexValidation/exp_20260810_144014_e918b762/orangepi5pro-fe0ec3fe_cam01/video--video.mp4
+    timestamps_csv: D:/VisionCortexValidation/exp_20260810_144014_e918b762/orangepi5pro-fe0ec3fe_cam01/clock--clock.csv
+  - view_id: rk3588-ubuntu_cam01
+    role: third_person
+    video: D:/VisionCortexValidation/exp_20260810_144014_e918b762/rk3588-ubuntu_cam01/video--video.mp4
+    timestamps_csv: D:/VisionCortexValidation/exp_20260810_144014_e918b762/rk3588-ubuntu_cam01/clock--clock.csv

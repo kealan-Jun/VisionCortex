@@ -1,0 +1,123 @@
+project:
+  output_root: ./outputs
+  experiment_id_prefix: CHEM
+
+models:
+  first_person: D:/LabModels/yolo/first_person/yolo26s_first_21_v1/best.pt
+  third_person: D:/LabModels/yolo/third_person/yolo26s_third_21_v1/best.pt
+  first_person_engine: D:/LabModels/yolo/first_person/yolo26s_first_21_v1/best.engine
+  third_person_engine: D:/LabModels/yolo/third_person/yolo26s_third_21_v1/best.engine
+  expected_class_count: 21
+  confidence: 0.25
+  iou: 0.55
+  max_detections: 300
+
+performance:
+  preprocessing_budget_seconds: 1200
+  device: 0
+  half: true
+  tensor_rt: auto
+  batch_size: 16
+  coarse_batch_size: 16
+  fine_batch_size: 16
+  image_size: 960
+  coarse_detection_fps: 0.125
+  coarse_image_size: 512
+  coarse_keyframes_only: true
+  detection_fps: 8.0
+  fine_window_padding_seconds: 75.0
+  motion_burst_percentile: 90.0
+  motion_burst_merge_gap_seconds: 16.0
+  motion_burst_min_observations: 2
+  max_gpu_memory_fraction: 0.92
+  ffmpeg_hwaccel: cuda
+  ffmpeg_video_encoder: h264_nvenc
+  workers: 2
+  decode_workers: 6
+  concurrent_role_scanners: true
+  chunk_seconds: 600
+  checkpoint_every_chunks: 1
+  frame_queue_size: 64
+  decode_queue_depth: 64
+  motion_probe_fps: 0.125
+  motion_signature_size: [64, 36]
+  coarse_decode_lanes: [cuda, cuda, cuda, cuda, cuda, cuda]
+  fine_decode_lanes: [cuda, cuda, cuda, cuda, cuda, cuda]
+  cpu_decode_threads: 8
+  source_workers: 6
+  yolo_inference_workers: 2
+  materialization_workers: 2
+  io_workers: 4
+
+alignment:
+  reference_view: first_person
+  nearest_tolerance_ms: 120.0
+  visual_anchor_search_seconds: 5.0
+  visual_anchor_fps: 4.0
+  max_drift_ppm: 2500.0
+  minimum_match_ratio: 0.60
+  cross_view_event_tolerance_ms: 750.0
+  visual_anchor_count: 3
+  visual_anchor_duration_seconds: 10.0
+  aligned_timestamps_fps: 2.0
+
+segmentation:
+  min_experiment_seconds: 5.0
+  experiment_gap_seconds: 30.0
+  experiment_pre_roll_seconds: 2.0
+  experiment_post_roll_seconds: 3.0
+  key_clip_pre_seconds: 2.0
+  key_clip_post_seconds: 3.0
+  event_merge_gap_seconds: 1.25
+  min_event_duration_seconds: 0.50
+  min_event_observations: 3
+  min_view_action_density_per_minute: 0.30
+  single_view_accept_confidence: 0.78
+  movement_threshold_norm: 0.025
+  contact_distance_norm: 0.035
+  liquid_motion_threshold: 6.0
+  require_both_roles: false
+
+continuity:
+  # Temporal proximity alone is insufficient: a shared third-person view and
+  # a shared container/sample object are also required.
+  max_gap_seconds: 300.0
+  require_shared_third_view: false
+  minimum_shared_objects: 1
+
+key_materials:
+  minimum_separation_seconds: 8.0
+  max_per_action_type_per_atomic_experiment: 2
+  max_per_experiment_group: 10
+
+mllm:
+  enabled: true
+  base_url: https://ark.cn-beijing.volces.com/api/v3
+  model: doubao-seed-2-1-pro-260628
+  api_key_env: ARK_API_KEY
+  timeout_seconds: 180
+  max_retries: 3
+  max_output_tokens: 4096
+  max_images_per_event: 8
+  storyboard_pairs_per_group: 4
+  group_workers: 2
+  workers: 4
+  response_language: zh-CN
+
+archive:
+  create_xlsx: true
+  create_side_by_side_video: true
+  keep_debug_candidates: true
+
+storage:
+  index_csv: Y:/experiment_record_index.csv
+  archive_root: Y:/VisionCortexExperimentArchive
+  local_input_root: D:/VisionCortexLocal/Input
+  local_runtime_root: D:/VisionCortexLocal/Runtime
+  local_cache_root: D:/VisionCortexLocal/Cache
+  local_staging_root: ./outputs
+  sync_to_nas: false
+
+validation:
+  use_sidecar_annotations: true
+  sidecar_name: video.annotation.json
