@@ -24,7 +24,7 @@
 }
 
 * { box-sizing: border-box; }
-html { scroll-behavior: smooth; }
+html { max-width: 100%; overflow-x: clip; scroll-behavior: smooth; }
 body { margin: 0; min-width: 320px; min-height: 100vh; }
 button, input, textarea, select { font: inherit; }
 button, a, summary, label.file-field { -webkit-tap-highlight-color: transparent; }
@@ -238,7 +238,7 @@ svg { display: block; width: 17px; height: 17px; fill: none; stroke: currentColo
 .archive-path { overflow-wrap: anywhere; color: var(--text-3); font: 9px/1.5 ui-monospace,"Cascadia Code",monospace; }
 .result-links { display: flex; flex-wrap: wrap; gap: 7px; }
 .result-links a { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: 9px; padding: 8px 10px; color: var(--brand); background: rgba(255,255,255,.78); font-size: 10px; font-weight: 730; text-decoration: none; }
-.result-tabs { position: sticky; top: 84px; z-index: 20; display: flex; gap: 4px; overflow-x: auto; border-radius: 13px; padding: 5px; }
+.result-tabs { position: sticky; top: 84px; z-index: 20; display: flex; max-width: 100%; gap: 4px; overflow-x: auto; contain: inline-size; border-radius: 13px; padding: 5px; }
 .result-tab { flex: 0 0 auto; border: 0; border-radius: 9px; padding: 10px 14px; color: var(--text-2); background: transparent; font-size: 11px; font-weight: 720; }
 .result-tab.active { color: #fff; background: var(--brand); }
 .experiment-card, .material-card { display: grid; min-width: 0; gap: 14px; border: 1px solid var(--border); border-radius: 16px; padding: 20px; background: var(--surface); box-shadow: var(--shadow-soft); }
@@ -272,6 +272,18 @@ svg { display: block; width: 17px; height: 17px; fill: none; stroke: currentColo
 .metric-table th { color: var(--text-3); font-size: 9px; }
 .metric-table td:last-child { font-family: ui-monospace,"Cascadia Code",monospace; }
 .queue-list { display: grid; }
+.live-run-card { overflow: visible; }
+.live-metric-grid { display: grid; grid-template-columns: repeat(6,minmax(0,1fr)); gap: 10px; padding: 18px 20px; }
+.live-metric-grid article { display: grid; gap: 4px; min-width: 0; border: 1px solid var(--border); border-radius: 12px; padding: 13px; background: #f9fbfb; }
+.live-metric-grid small, .live-metric-grid span { overflow: hidden; color: var(--text-3); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.live-metric-grid strong { overflow: hidden; font: 700 15px/1.25 ui-monospace,"Cascadia Code",monospace; text-overflow: ellipsis; white-space: nowrap; }
+.view-runtime-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 8px; border-top: 1px solid var(--border); padding: 14px 20px 18px; }
+.view-runtime-grid article { display: grid; grid-template-columns: 9px minmax(0,1fr); align-items: center; gap: 8px; border-radius: 10px; padding: 9px 10px; background: rgba(219,236,238,.26); }
+.view-runtime-grid strong, .view-runtime-grid small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.view-runtime-grid strong { font-size: 9px; }
+.view-runtime-grid small { margin-top: 2px; color: var(--text-3); font-size: 8px; }
+.view-state-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 3px rgba(32,138,104,.12); }
+.compact-empty { min-height: 62px; padding: 16px; }
 .queue-card { display: grid; grid-template-columns: 110px minmax(180px,.8fr) minmax(220px,1fr) auto; align-items: center; gap: 14px; border-bottom: 1px solid var(--border); padding: 15px 20px; }
 .queue-card:last-child { border-bottom: 0; }
 .queue-status { display: inline-flex; align-items: center; gap: 7px; font-size: 9px; font-weight: 750; }
@@ -314,6 +326,7 @@ svg { display: block; width: 17px; height: 17px; fill: none; stroke: currentColo
   .material-grid { grid-template-columns: 1fr; }
   .daily-action-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
   .workflow-strip { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .live-metric-grid { grid-template-columns: repeat(3,minmax(0,1fr)); }
 }
 @media (max-width: 850px) {
   .vc-shell, .vc-shell[data-collapsed="true"] { grid-template-columns: 1fr; padding: 7px; }
@@ -330,6 +343,7 @@ svg { display: block; width: 17px; height: 17px; fill: none; stroke: currentColo
   .archive-row { grid-template-columns: 22px minmax(0,1fr) auto; }
   .archive-row .archive-cell { display: none; }
   .file-grid, .analysis-method-overview, .health-grid { grid-template-columns: 1fr; }
+  .view-runtime-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
 }
 @media (max-width: 560px) {
   .nav-list { grid-template-columns: repeat(2,minmax(0,1fr)); }
@@ -341,5 +355,8 @@ svg { display: block; width: 17px; height: 17px; fill: none; stroke: currentColo
   .batch-actions { flex-direction: column; }
   .source-config-grid { grid-template-columns: 1fr; }
   .queue-card { grid-template-columns: 1fr; }
+  .live-metric-grid, .view-runtime-grid { grid-template-columns: 1fr; }
+  .result-tabs { flex-wrap: wrap; overflow-x: hidden; }
+  .result-tab { flex: 1 1 calc(50% - 4px); padding-inline: 8px; text-align: center; }
   .product-content { padding-inline: 0; }
 }

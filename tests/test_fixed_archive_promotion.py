@@ -21,6 +21,9 @@ def test_fixed_archive_promotion_replaces_derived_outputs_and_retains_previous(t
     (staging / "JSON-Config-Files" / "evidence_package_eval.json").write_text(
         json.dumps({"passed": True}), encoding="utf-8"
     )
+    (staging / "JSON-Config-Files" / "quality_acceptance.json").write_text(
+        json.dumps({"passed": True}), encoding="utf-8"
+    )
     daily_eval = staging / "Lab-Daily-Reports" / "2026-08-13" / "Daily-Report-Eval.json"
     daily_eval.parent.mkdir(parents=True, exist_ok=True)
     daily_eval.write_text(json.dumps({"passed": True}), encoding="utf-8")
@@ -32,6 +35,7 @@ def test_fixed_archive_promotion_replaces_derived_outputs_and_retains_previous(t
 
     assert original.read_bytes() == b"original"
     assert receipt["previous_package_retained"] is True
+    assert receipt["verification"]["status"] == "verified"
     for directory in DERIVED_ARCHIVE_DIRECTORIES:
         assert (fixed / directory / "version.txt").read_text(encoding="utf-8") == "new"
         assert (history / directory / "version.txt").read_text(encoding="utf-8") == "old"

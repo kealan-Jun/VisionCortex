@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
 import re
@@ -30,6 +31,25 @@ DERIVED_ARCHIVE_DIRECTORIES = (
     "Lab-Daily-Reports",
     "Professional-PDFs",
 )
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while block := handle.read(8 * 1024 * 1024):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _directory_manifest(root: Path) -> list[dict[str, Any]]:
+    return [
+        {
+            "path": source.relative_to(root).as_posix(),
+            "size_bytes": source.stat().st_size,
+            "sha256": _sha256_file(source),
+        }
+        for source in sorted(path for path in root.rglob("*") if path.is_file())
+    ]
 
 
 def safe_archive_name(value: str) -> str:
@@ -72,6 +92,12 @@ def promote_fixed_archive(
     evaluation = json.loads(evaluation_path.read_text(encoding="utf-8-sig"))
     if not evaluation.get("passed"):
         raise RuntimeError("Staged evidence package did not pass evaluation; promotion refused")
+    quality_path = staging_root / "JSON-Config-Files" / "quality_acceptance.json"
+    if not quality_path.is_file():
+        raise RuntimeError(f"Staged quality acceptance is missing: {quality_path}")
+    quality = json.loads(quality_path.read_text(encoding="utf-8-sig"))
+    if not quality.get("passed"):
+        raise RuntimeError("Staged experiment/material quality did not pass; promotion refused")
     report_evaluations = list(
         (staging_root / "Lab-Daily-Reports").glob("*/Daily-Report-Eval.json")
     )
@@ -84,6 +110,17 @@ def promote_fixed_archive(
         raise RuntimeError("Staged daily report did not pass evaluation; promotion refused")
     if not any((staging_root / "Professional-PDFs").glob("Lab-Daily-Report-*.pdf")):
         raise RuntimeError("Staged daily report PDF is missing; promotion refused")
+
+    staged_manifests = {
+        directory: _directory_manifest(staging_root / directory)
+        for directory in DERIVED_ARCHIVE_DIRECTORIES
+        if (staging_root / directory).is_dir()
+    }
+    missing_manifests = [
+        directory for directory in DERIVED_ARCHIVE_DIRECTORIES if directory not in staged_manifests
+    ]
+    if missing_manifests:
+        raise RuntimeError(f"Staged directories are missing: {missing_manifests}")
 
     fixed_root.mkdir(parents=True, exist_ok=True)
     history_root.mkdir(parents=True, exist_ok=True)
@@ -105,6 +142,12 @@ def promote_fixed_archive(
                 if had_previous and backup.is_dir() and not destination.exists():
                     os.replace(backup, destination)
                 raise
+            if _directory_manifest(destination) != staged_manifests[directory]:
+                if destination.is_dir() and not source.exists():
+                    os.replace(destination, source)
+                if had_previous and backup.is_dir() and not destination.exists():
+                    os.replace(backup, destination)
+                raise RuntimeError(f"Promoted directory checksum mismatch: {directory}")
             moved.append((source, destination, backup, had_previous))
     except Exception:
         for source, destination, backup, had_previous in reversed(moved):
@@ -121,6 +164,13 @@ def promote_fixed_archive(
         "history_root": str(history_root),
         "promoted_directories": list(DERIVED_ARCHIVE_DIRECTORIES),
         "previous_package_retained": any(item[3] for item in moved),
+        "verification": {
+            "algorithm": "sha256",
+            "status": "verified",
+            "directory_file_counts": {
+                directory: len(manifest) for directory, manifest in staged_manifests.items()
+            },
+        },
     }
     receipt_path = fixed_root / "JSON-Config-Files" / "fixed_archive_promotion.json"
     temporary = receipt_path.with_name(f".{receipt_path.name}.partial-{uuid.uuid4().hex[:8]}")
@@ -141,9 +191,19 @@ class IncrementalArchivePublisher:
         relative = source.relative_to(self.local_root)
         destination = self.nas_root / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
+        source_size = source.stat().st_size
+        if destination.is_file() and destination.stat().st_size == source_size:
+            if _sha256_file(destination) == _sha256_file(source):
+                return destination
         temporary = destination.with_name(f".{destination.name}.partial-{uuid.uuid4().hex[:8]}")
-        shutil.copy2(source, temporary)
-        os.replace(temporary, destination)
+        try:
+            shutil.copy2(source, temporary)
+            if temporary.stat().st_size != source_size or _sha256_file(temporary) != _sha256_file(source):
+                raise IOError(f"NAS published file verification failed: {destination}")
+            os.replace(temporary, destination)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
         return destination
 
     def publish_directory(self, relative: str | Path) -> int:

@@ -1,0 +1,54 @@
+{
+  "schema_version": "visioncortex-reviewed-acceptance-baseline/1",
+  "baseline_id": "six-view-three-hour-reviewed-baseline-20260813-v1",
+  "experiment_id": "exp_20260810_144014_e918b762",
+  "authority": "reviewed_and_user_accepted_pipeline_output",
+  "usage": "evaluation_only_not_inference",
+  "notes": [
+    "用户已人工查看并认可该五组有界片段的筛选质量。",
+    "该基线用于检测后续代码回归，不宣称替代逐帧人工真值。",
+    "边界来自 2026-08-13 本机完整六路验收档案。"
+  ],
+  "experiments": [
+    {
+      "baseline_id": "reviewed-exp-001",
+      "name": "固体称量实验",
+      "start_seconds": 299.25,
+      "end_seconds": 429.875,
+      "continuity_type": "independent",
+      "atomic_experiment_count": 1
+    },
+    {
+      "baseline_id": "reviewed-exp-002",
+      "name": "移液加液与磁力搅拌器操作实验",
+      "start_seconds": 1684.25,
+      "end_seconds": 1789.75,
+      "continuity_type": "independent",
+      "atomic_experiment_count": 1
+    },
+    {
+      "baseline_id": "reviewed-exp-003",
+      "name": "移液器移液与样品瓶操作实验",
+      "start_seconds": 4159.25,
+      "end_seconds": 4202.25,
+      "continuity_type": "independent",
+      "atomic_experiment_count": 1
+    },
+    {
+      "baseline_id": "reviewed-exp-004",
+      "name": "离心管开盖、洗手与移液加液连续实验",
+      "start_seconds": 7069.375,
+      "end_seconds": 7172.375,
+      "continuity_type": "continuous",
+      "atomic_experiment_count": 2
+    },
+    {
+      "baseline_id": "reviewed-exp-005",
+      "name": "固体称量实验",
+      "start_seconds": 11743.75,
+      "end_seconds": 11841.0,
+      "continuity_type": "independent",
+      "atomic_experiment_count": 1
+    }
+  ]
+}

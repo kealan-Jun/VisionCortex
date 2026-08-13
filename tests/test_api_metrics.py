@@ -50,3 +50,72 @@ def test_health_exposes_fixed_benchmark_and_cache_locations(monkeypatch, tmp_pat
     assert benchmark["archive_name"] == "Six-View-Three-Hour-Experiment-2026-08-13"
     assert "zero-copy" in benchmark["input_mode"]
     assert benchmark["local_cache_root"].endswith("cache")
+
+
+def test_run_snapshot_uses_durable_live_observability(tmp_path):
+    root = tmp_path / "archive"
+    json_root = root / "JSON-Config-Files"
+    json_root.mkdir(parents=True)
+    (json_root / "pipeline_status.json").write_text(
+        json.dumps({"stage": "coarse_scan", "updated_at": "status-time"}),
+        encoding="utf-8",
+    )
+    (json_root / "source_progress.json").write_text(
+        json.dumps(
+            {
+                "views": [
+                    {
+                        "view_id": "cam01",
+                        "decode_backend": "cuda",
+                        "state": "running",
+                        "completed_work_units": 3,
+                        "total_work_units": 12,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (json_root / "resource_telemetry_live.json").write_text(
+        json.dumps(
+            {
+                "updated_at": "telemetry-time",
+                "gpu": {"utilization_percent": 91.0, "decoder_percent": 72.0},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (json_root / "run_metrics_live.json").write_text(
+        json.dumps({"tokens": {"total_tokens": 4321}}), encoding="utf-8"
+    )
+
+    snapshot = api._run_snapshot_from_root(root)
+
+    assert snapshot["status"]["views"][0]["view_id"] == "cam01"
+    assert snapshot["live_telemetry"]["gpu"]["utilization_percent"] == 91.0
+    assert snapshot["metrics"]["tokens"]["total_tokens"] == 4321
+    assert snapshot["freshness"]["telemetry_updated_at"] == "telemetry-time"
+
+
+def test_service_restart_marks_orphaned_task_resumable(monkeypatch, tmp_path):
+    archive_root = tmp_path / "archive"
+    status_path = (
+        archive_root
+        / ".VisionCortex-Run-Staging"
+        / "benchmark"
+        / "run-001"
+        / "JSON-Config-Files"
+        / "pipeline_status.json"
+    )
+    status_path.parent.mkdir(parents=True)
+    status_path.write_text(
+        json.dumps({"stage": "fine_scan", "message": "still running"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(api, "_archive_root", lambda settings=None: archive_root)
+
+    api._recover_orphaned_tasks()
+
+    payload = json.loads(status_path.read_text(encoding="utf-8"))
+    assert payload["stage"] == "interrupted"
+    assert payload["recovery"]["resumable"] is True

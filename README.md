@@ -108,6 +108,19 @@ labvision serve --host 127.0.0.1 --port 8000
 
 `run_metrics.json` 记录总墙钟耗时、各阶段起止/耗时，以及每个关键素材调用的输入 token、输出 token、总 token、缓存命中 token、延迟和重试次数；随后汇总关键素材阶段与整次运行。Token 只采用服务端 `usage`，缺失时保留 `null`，不做伪精确估算。
 
+运行期间，Web“任务进度”页直接读取归档账本，而不是展示估算值：`source_progress.json` 给出每路解码后端、分块进度与状态，`resource_telemetry_live.json` 给出 GPU/NVDEC、CPU、内存、网络与进程 I/O，`run_metrics_live.json` 给出已执行/已复用模型调用及输入/输出 Token。服务重启后，未完成任务会标记为 `interrupted`，检测分块和已完成的豆包结果按同一运行身份续用。
+
+固定六路基准在归档前还会生成 `JSON-Config-Files/quality_acceptance.json`。评估基线只用于验收、不参与推理，分别检查五段实验的 Precision/Recall、起止边界误差、连续/独立关系、五类关键动作覆盖、关键帧/关键片段与模型结果完整性、跨视角支持或显式不确定性。任何正式固定归档缺少自动质量验收、日报/PDF或证据包验收，均拒绝覆盖 NAS 正式目录；目录提升后再做 SHA-256 清单核验。
+
+已有档案可以离线复验，不解码视频，也不调用模型：
+
+```powershell
+labvision validate-archive-quality `
+  --archive <实验档案目录> `
+  --baseline configs/acceptance/six-view-three-hour-reviewed-baseline.json `
+  --write
+```
+
 预处理 SLA 定义为视频探测、时间对齐、1 FPS 全量粗筛、8 FPS 候选窗精扫和边界审计，默认目标为 1200 秒（20 分钟）。`run_metrics.json.preprocessing_sla` 保存目标、实测值和是否达标；裁片编码与豆包调用不计入预处理时间。
 
 系统无法凭空保证“精确”：液体本身不在 21 类标签中，因此液体移动由容器/移液器目标、ROI 光流和跨视角一致性共同提出候选，再交给多模态模型确认；低置信或仅单视角可见的事件会明确标为不确定，而不会伪装成确定结果。

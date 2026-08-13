@@ -133,3 +133,8 @@ storage:
 validation:
   use_sidecar_annotations: true
   sidecar_name: video.annotation.json
+  acceptance_baseline: null
+  boundary_match_iou: 0.50
+  max_start_error_seconds: 8.0
+  max_end_error_seconds: 8.0
+  minimum_cross_view_event_rate: 0.25

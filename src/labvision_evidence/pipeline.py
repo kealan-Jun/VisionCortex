@@ -55,6 +55,7 @@ from .schemas import (
 from .video_io import check_disk_capacity, probe_view, view_source_files, view_timestamp_files
 from .storage import IncrementalArchivePublisher, initialize_nas_archive
 from .telemetry import ResourceMonitor
+from .validation import validate_experiment_and_material_quality
 
 
 ProgressCallback = Callable[[str, float, str], None]
@@ -158,6 +159,39 @@ class EvidencePipeline:
         self._input_mode = "unknown"
         self._publisher: IncrementalArchivePublisher | None = None
         self._resource_monitor: ResourceMonitor | None = None
+        self._view_runtime: dict[str, dict[str, Any]] = {}
+        self._runtime_lock = threading.Lock()
+        self._active_layout: ArchiveLayout | None = None
+
+    def _scan_progress(
+        self, phase: str, view_id: str, completed_units: int, total_units: int
+    ) -> None:
+        with self._runtime_lock:
+            runtime = self._view_runtime.setdefault(view_id, {})
+            runtime.update(
+                {
+                    "state": f"{phase}_running"
+                    if completed_units < total_units
+                    else f"{phase}_completed",
+                    "phase": phase,
+                    "completed_units": completed_units,
+                    "total_units": total_units,
+                    "unit_progress": completed_units / total_units if total_units else 0.0,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            if self._active_layout is None:
+                return
+            payload = {
+                "schema_version": "visioncortex-source-progress/1",
+                "phase": phase,
+                "updated_at": runtime["updated_at"],
+                "views": self._view_runtime,
+            }
+            path = self._active_layout.json_config / "source_progress.json"
+            write_json(path, payload)
+            if self._publisher is not None:
+                self._publisher.publish_file(path)
 
     def _status(self, layout: ArchiveLayout, stage: str, progress: float, message: str) -> None:
         if self._resource_monitor is not None:
@@ -181,41 +215,62 @@ class EvidencePipeline:
                 self._active_stage_started = now_perf
                 self._active_stage_started_iso = now_iso
         self.progress(stage, progress, message)
+        status_payload = {
+            "stage": stage,
+            "progress": progress,
+            "message": message,
+            "updated_at": now_iso,
+            "elapsed_seconds": round(now_perf - self._run_started_perf, 6)
+            if self._run_started_perf
+            else 0.0,
+            "input_view_count": self._input_view_count,
+            "input_mode": self._input_mode,
+            "views": self._view_runtime,
+            "completed_stages": [item["stage"] for item in self._stage_metrics],
+        }
         write_json(
             layout.root / "run_status.json",
-            {
-                "stage": stage,
-                "progress": progress,
-                "message": message,
-                "updated_at": now_iso,
-                "elapsed_seconds": round(now_perf - self._run_started_perf, 6) if self._run_started_perf else 0.0,
-            },
+            status_payload,
         )
         if self.config.get("storage", {}).get("run_output_mode") == "nas_direct":
-            write_json(
-                layout.json_config / "pipeline_status.json",
-                {
-                    "stage": stage,
-                    "progress": progress,
-                    "message": message,
-                    "updated_at": now_iso,
-                    "elapsed_seconds": round(now_perf - self._run_started_perf, 6)
-                    if self._run_started_perf
-                    else 0.0,
-                },
-            )
+            write_json(layout.json_config / "pipeline_status.json", status_payload)
         if self._publisher is not None:
-            self._publisher.publish_status(
-                {
-                    "stage": stage,
-                    "progress": progress,
-                    "message": message,
-                    "updated_at": now_iso,
-                    "elapsed_seconds": round(now_perf - self._run_started_perf, 6)
-                    if self._run_started_perf
-                    else 0.0,
-                }
-            )
+            self._publisher.publish_status(status_payload)
+
+    def _acceptance_baseline(self) -> dict[str, Any] | None:
+        configured = self.config.get("validation", {}).get("acceptance_baseline")
+        if not configured:
+            return None
+        path = Path(configured)
+        if not path.is_absolute():
+            path = Path(__file__).resolve().parents[2] / path
+        if not path.is_file():
+            raise FileNotFoundError(f"验收基线不存在: {path}")
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        if not isinstance(payload, dict):
+            raise ValueError(f"验收基线必须是 JSON 对象: {path}")
+        return payload
+
+    def _run_quality_acceptance(
+        self,
+        layout: ArchiveLayout,
+        groups: list[ExperimentGroup],
+        key_events: list[EvidenceEvent],
+    ) -> dict[str, Any]:
+        validation = self.config.get("validation", {})
+        report = validate_experiment_and_material_quality(
+            groups,
+            key_events,
+            self._acceptance_baseline(),
+            boundary_match_iou=float(validation.get("boundary_match_iou", 0.50)),
+            max_start_error_seconds=float(validation.get("max_start_error_seconds", 8.0)),
+            max_end_error_seconds=float(validation.get("max_end_error_seconds", 8.0)),
+            minimum_cross_view_event_rate=float(
+                validation.get("minimum_cross_view_event_rate", 0.25)
+            ),
+        )
+        write_json(layout.json_config / "quality_acceptance.json", report)
+        return report
 
     def _metrics(self, events, groups=()) -> dict[str, Any]:
         key_calls = []
@@ -230,6 +285,7 @@ class EvidencePipeline:
                         "status": understanding.get("status"),
                         "latency_seconds": understanding.get("latency_seconds"),
                         "attempts": understanding.get("attempts"),
+                        "cache_reused": bool(understanding.get("cache_reused")),
                         "usage": understanding.get("usage", {}),
                     }
                 )
@@ -246,12 +302,18 @@ class EvidencePipeline:
                         "status": understanding.get("status"),
                         "latency_seconds": understanding.get("latency_seconds"),
                         "attempts": understanding.get("attempts"),
+                        "cache_reused": bool(understanding.get("cache_reused")),
                         "usage": understanding.get("usage", {}),
                     }
                 )
 
         def token_sum(calls, field: str):
-            values = [call["usage"].get(field) for call in calls if call.get("usage", {}).get(field) is not None]
+            values = [
+                call["usage"].get(field)
+                for call in calls
+                if not call.get("cache_reused")
+                and call.get("usage", {}).get(field) is not None
+            ]
             return sum(values) if values else None
 
         key_materials = {
@@ -260,6 +322,8 @@ class EvidencePipeline:
             "total_tokens": token_sum(key_calls, "total_tokens"),
             "cached_input_tokens": token_sum(key_calls, "cached_input_tokens"),
             "call_count": len(key_calls),
+            "executed_call_count": sum(not call.get("cache_reused") for call in key_calls),
+            "reused_call_count": sum(bool(call.get("cache_reused")) for call in key_calls),
             "server_reported_for_all_calls": bool(key_calls)
             and all(call.get("usage", {}).get("server_reported") for call in key_calls),
         }
@@ -269,6 +333,8 @@ class EvidencePipeline:
             "total_tokens": token_sum(group_calls, "total_tokens"),
             "cached_input_tokens": token_sum(group_calls, "cached_input_tokens"),
             "call_count": len(group_calls),
+            "executed_call_count": sum(not call.get("cache_reused") for call in group_calls),
+            "reused_call_count": sum(bool(call.get("cache_reused")) for call in group_calls),
             "server_reported_for_all_calls": bool(group_calls)
             and all(call.get("usage", {}).get("server_reported") for call in group_calls),
         }
@@ -348,6 +414,9 @@ class EvidencePipeline:
             "image_size": image_size,
             "keyframes_only": keyframes_only,
             "phase": phase,
+            "progress_callback": lambda view_id, completed, total: self._scan_progress(
+                phase, view_id, completed, total
+            ),
         }
         perf = self.config["performance"]
         requested_sources = int(perf.get("source_workers", len(manifest.views)))
@@ -376,10 +445,21 @@ class EvidencePipeline:
                     f"synchronized segment waves require equal segment counts: {segment_counts}"
                 )
             kwargs["wave_barrier"] = threading.Barrier(len(manifest.views))
+        for view in manifest.views:
+            runtime = self._view_runtime.setdefault(view.view_id, {})
+            runtime.update(
+                {
+                    "role": view.role.value,
+                    "decode_backend": kwargs["decode_backends"][view.view_id],
+                    "state": f"{phase}_running",
+                }
+            )
         if not self.config["performance"].get("concurrent_role_scanners", True) or len(groups) == 1:
             result = {}
             for group in groups:
                 result.update(scan_videos(group, infos, transforms, work_dir, self.config, **kwargs))
+            for view in manifest.views:
+                self._view_runtime[view.view_id]["state"] = f"{phase}_completed"
             return result
         result = {}
         with ThreadPoolExecutor(max_workers=len(groups), thread_name_prefix="role-scanner") as executor:
@@ -389,6 +469,8 @@ class EvidencePipeline:
             ]
             for future in futures:
                 result.update(future.result())
+        for view in manifest.views:
+            self._view_runtime[view.view_id]["state"] = f"{phase}_completed"
         return result
 
     @staticmethod
@@ -426,6 +508,22 @@ class EvidencePipeline:
             if all(view.segments for view in manifest.views)
             else "continuous_file"
         )
+        lanes = list(self.config["performance"].get("coarse_decode_lanes") or [])
+        if not lanes:
+            lanes = [
+                "cuda" if self.config["performance"].get("ffmpeg_hwaccel") else "cpu"
+            ] * len(manifest.views)
+        if len(lanes) < len(manifest.views):
+            lanes.extend([lanes[-1]] * (len(manifest.views) - len(lanes)))
+        self._view_runtime = {
+            view.view_id: {
+                "role": view.role.value,
+                "segment_count": len(view.segments) if view.segments else 1,
+                "decode_backend": lanes[index],
+                "state": "registered",
+            }
+            for index, view in enumerate(manifest.views)
+        }
         storage = self.config.get("storage", {})
         if storage.get("run_output_mode") == "nas_direct":
             active_archive = storage.get("active_archive_path")
@@ -442,6 +540,7 @@ class EvidencePipeline:
             / cache_identity["cache_key"]
         )
         layout.create()
+        self._active_layout = layout
         write_json(layout.json_config / "cache_identity.json", cache_identity)
         if storage.get("sync_to_nas") and storage.get("run_output_mode") != "nas_direct":
             nas_root = initialize_nas_archive(self.config, manifest.experiment_id)
@@ -453,6 +552,13 @@ class EvidencePipeline:
         self._resource_monitor = ResourceMonitor(
             layout.json_config / "resource_telemetry.json",
             float(self.config.get("resource_limits", {}).get("telemetry_interval_seconds", 1.0)),
+            (
+                self._publisher.nas_root
+                / "JSON-Config-Files"
+                / "resource_telemetry_live.json"
+                if self._publisher is not None
+                else None
+            ),
         )
         self._resource_monitor.start()
         try:
@@ -490,6 +596,8 @@ class EvidencePipeline:
             if self._publisher is not None:
                 self._publisher.publish_directory("JSON-Config-Files")
 
+            for view in manifest.views:
+                self._view_runtime[view.view_id]["state"] = "coarse_running"
             self._status(
                 layout,
                 "candidate_coarse",
@@ -530,6 +638,11 @@ class EvidencePipeline:
             fine_windows = self._fine_windows(coarse_candidates, infos, transforms)
             fine_windows = {view.view_id: fine_windows[view.view_id] for view in fine_views}
             fine_manifest = manifest.model_copy(update={"views": fine_views})
+            selected_fine_ids = {view.view_id for view in fine_views}
+            for view in manifest.views:
+                self._view_runtime[view.view_id]["state"] = (
+                    "fine_running" if view.view_id in selected_fine_ids else "fine_not_selected"
+                )
             self._status(layout, "candidate_fine", 0.48, "候选窗 8 FPS 精扫并收紧动作边界")
             detection_paths = self._scan_all_views_concurrently(
                 fine_manifest,
@@ -572,6 +685,9 @@ class EvidencePipeline:
             analyze_experiment_groups(
                 layout, groups, segments, events, manifest.views, infos, transforms, self.config
             )
+            write_json(layout.json_config / "run_metrics_live.json", self._metrics(events, groups))
+            if self._publisher is not None:
+                self._publisher.publish_file(layout.json_config / "run_metrics_live.json")
             key_events = select_key_events(groups, segments, events, self.config)
 
             self._status(layout, "experiment_clips", 0.78, "按模型实验名归档第一/第三/并排三份有界视频")
@@ -606,6 +722,12 @@ class EvidencePipeline:
 
             self._status(layout, "mllm", 0.92, "调用豆包理解去重后的关键动作当前/下一步骤")
             analyze_key_materials(layout, key_events, self.config)
+            write_json(
+                layout.json_config / "run_metrics_live.json",
+                self._metrics(key_events, groups),
+            )
+            if self._publisher is not None:
+                self._publisher.publish_file(layout.json_config / "run_metrics_live.json")
             refresh_key_material_metadata(layout, key_events, groups, transforms)
             if self._publisher is not None:
                 self._publisher.publish_directory("Key-Materials")
@@ -630,6 +752,7 @@ class EvidencePipeline:
             # may contain multiple atomic segments but must count as one bounded
             # experiment in the user-facing output and boundary evaluation.
             self._run_sidecar_validation(layout, manifest, groups)
+            self._run_quality_acceptance(layout, groups, key_events)
             self._status(layout, "daily_report", 0.98, "从已验收证据生成实验室日报并执行一致性校验")
             generate_daily_report_archive(layout, summary, self._metrics(events, groups), self.config)
             if not self.config["archive"].get("keep_debug_candidates") and layout.work.exists():

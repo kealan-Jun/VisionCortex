@@ -7,6 +7,7 @@ import subprocess
 import threading
 import time
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
@@ -31,13 +32,53 @@ from .storage import (
 )
 
 
-app = FastAPI(title="VisionCortex Lab Evidence", version="0.2.0")
+@asynccontextmanager
+async def _lifespan(_: FastAPI):
+    _recover_orphaned_tasks()
+    yield
+
+
+app = FastAPI(
+    title="VisionCortex Lab Evidence",
+    version="0.2.0",
+    lifespan=_lifespan,
+)
 _web_root = Path(__file__).with_name("web")
 app.mount("/ui", StaticFiles(directory=_web_root), name="ui")
 _lock = threading.Lock()
 _runs: dict[str, dict[str, Any]] = {}
 _BENCHMARK_EXPERIMENT_ID = "exp_20260810_144014_e918b762"
 _BENCHMARK_ARCHIVE_NAME = "Six-View-Three-Hour-Experiment-2026-08-13"
+
+
+def _recover_orphaned_tasks() -> None:
+    """Make stale durable `running` states honest after a service restart."""
+
+    root = _archive_root()
+    if not root.is_dir():
+        return
+    status_paths = list(root.glob("*/JSON-Config-Files/pipeline_status.json"))
+    staging_root = root / ".VisionCortex-Run-Staging"
+    if staging_root.is_dir():
+        status_paths.extend(
+            staging_root.glob("*/*/JSON-Config-Files/pipeline_status.json")
+        )
+    for status_path in status_paths:
+        payload = _read_json(status_path, {}) or {}
+        if payload.get("stage") in {"completed", "failed", "interrupted"}:
+            continue
+        payload.update(
+            {
+                "stage": "interrupted",
+                "message": "服务重启时发现未完成任务；检测账本与模型结果缓存保留，可使用同一输入重新启动以续跑。",
+                "updated_at": datetime.now().astimezone().isoformat(),
+                "recovery": {
+                    "status": "orphaned_after_service_restart",
+                    "resumable": True,
+                },
+            }
+        )
+        _write_json_atomic(status_path, payload)
 
 
 @app.middleware("http")
@@ -167,6 +208,74 @@ def _read_json(path: Path, default: Any = None) -> Any:
         return json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError):
         return default
+
+
+def _run_snapshot_from_root(root: Path) -> dict[str, Any]:
+    json_root = root / "JSON-Config-Files"
+    status = _read_json(json_root / "pipeline_status.json", {}) or _read_json(
+        root / "run_status.json", {}
+    ) or {}
+    live_telemetry = _read_json(json_root / "resource_telemetry_live.json", {}) or {}
+    telemetry = _read_json(json_root / "resource_telemetry.json", {}) or {}
+    metrics = _read_json(json_root / "run_metrics.json", {}) or _read_json(
+        json_root / "run_metrics_live.json", {}
+    ) or {}
+    source_progress = _read_json(json_root / "source_progress.json", {}) or {}
+    if source_progress.get("views"):
+        status["views"] = source_progress["views"]
+    scans = {
+        phase: _read_json(json_root / f"scan_runtime_{phase}.json", {}) or {}
+        for phase in ("coarse", "fine")
+    }
+    return {
+        "status": status,
+        "live_telemetry": live_telemetry,
+        "telemetry_summary": {
+            "sample_count": telemetry.get("sample_count"),
+            "sampling_interval_seconds": telemetry.get("sampling_interval_seconds"),
+            "stage_summaries": telemetry.get("stage_summaries") or {},
+        },
+        "metrics": metrics,
+        "scan_runtime": scans,
+        "source_progress": source_progress,
+        "freshness": {
+            "status_updated_at": status.get("updated_at"),
+            "telemetry_updated_at": live_telemetry.get("updated_at"),
+        },
+        "sources": {
+            "status": "JSON-Config-Files/pipeline_status.json",
+            "telemetry_live": "JSON-Config-Files/resource_telemetry_live.json",
+            "telemetry_final": "JSON-Config-Files/resource_telemetry.json",
+            "metrics": "JSON-Config-Files/run_metrics.json",
+            "metrics_live": "JSON-Config-Files/run_metrics_live.json",
+            "scan_runtime_coarse": "JSON-Config-Files/scan_runtime_coarse.json",
+            "scan_runtime_fine": "JSON-Config-Files/scan_runtime_fine.json",
+            "source_progress": "JSON-Config-Files/source_progress.json",
+        },
+    }
+
+
+def _hydrate_run_snapshot(run: dict[str, Any]) -> dict[str, Any]:
+    for key in ("nas_staging", "output", "nas_output"):
+        value = run.get(key)
+        if not value:
+            continue
+        root = Path(value)
+        if root.is_dir():
+            return {**run, "observability": _run_snapshot_from_root(root)}
+    return run
+
+
+def _find_staging_run(settings: dict[str, Any], run_id: str) -> Path | None:
+    staging_root = Path(settings["storage"]["archive_root"]) / ".VisionCortex-Run-Staging"
+    if not staging_root.is_dir():
+        return None
+    matches = []
+    for path in staging_root.glob("*/*/JSON-Config-Files/pipeline_status.json"):
+        archive_run_root = path.parent.parent
+        if archive_run_root.name == run_id:
+            matches.append(archive_run_root)
+    return matches[0] if matches else None
 
 
 def _file_url(archive_name: str, relative: str | Path) -> str:
@@ -403,6 +512,9 @@ def archive_detail(archive_name: str) -> dict[str, Any]:
     package = _read_json(root / "JSON-Config-Files" / "evidence_package.json", {}) or {}
     metrics = _read_json(root / "JSON-Config-Files" / "run_metrics.json", {}) or {}
     acceptance = _read_json(root / "JSON-Config-Files" / "acceptance_report.json", {}) or {}
+    quality_acceptance = _read_json(
+        root / "JSON-Config-Files" / "quality_acceptance.json", {}
+    ) or {}
     benchmark = acceptance.get("preprocessing_full_run") or {}
     if benchmark.get("seconds") is not None:
         metrics["display_preprocessing_seconds"] = benchmark["seconds"]
@@ -482,6 +594,9 @@ def archive_detail(archive_name: str) -> dict[str, Any]:
         ),
         "metrics": _file_url(archive_name, "JSON-Config-Files/run_metrics.json"),
         "acceptance": _file_url(archive_name, "JSON-Config-Files/acceptance_report.json"),
+        "quality_acceptance": _file_url(
+            archive_name, "JSON-Config-Files/quality_acceptance.json"
+        ),
         "daily_report_json": _file_url(archive_name, daily_manifest["json"])
         if daily_manifest.get("json")
         else None,
@@ -505,6 +620,8 @@ def archive_detail(archive_name: str) -> dict[str, Any]:
         "experiments": experiments,
         "key_events": normalized_events,
         "metrics": metrics,
+        "quality_acceptance": quality_acceptance,
+        "observability": _run_snapshot_from_root(root),
         "daily_report": daily_report,
         "daily_report_manifest": daily_manifest,
         "links": links,
@@ -708,7 +825,10 @@ def create_run_from_paths(payload: dict[str, Any], background_tasks: BackgroundT
 @app.get("/api/runs")
 def list_runs() -> dict[str, Any]:
     with _lock:
-        runs = [{"run_id": run_id, **values} for run_id, values in _runs.items()]
+        runs = [
+            _hydrate_run_snapshot({"run_id": run_id, **values})
+            for run_id, values in _runs.items()
+        ]
     runs.sort(key=lambda item: str(item.get("run_id")), reverse=True)
     return {"runs": runs}
 
@@ -718,5 +838,17 @@ def get_run(run_id: str) -> dict[str, Any]:
     with _lock:
         state = dict(_runs.get(run_id, {}))
     if not state:
-        raise HTTPException(404, "run_id 不存在")
-    return {"run_id": run_id, **state}
+        root = _find_staging_run(_settings(), run_id)
+        if root is None:
+            raise HTTPException(404, "run_id 不存在")
+        snapshot = _run_snapshot_from_root(root)
+        status = snapshot.get("status") or {}
+        state = {
+            "state": status.get("stage", "interrupted"),
+            "progress": status.get("progress", 0.0),
+            "message": status.get("message"),
+            "nas_staging": str(root),
+            "observability": snapshot,
+            "recovered_from_durable_status": True,
+        }
+    return _hydrate_run_snapshot({"run_id": run_id, **state})

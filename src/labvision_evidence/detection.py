@@ -9,7 +9,7 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import cv2
 import numpy as np
@@ -121,6 +121,7 @@ class FramePacket:
 class ChunkEnd:
     view_id: str
     chunk_index: int
+    total_chunks: int
 
 
 @dataclass
@@ -134,21 +135,41 @@ class ProducerError:
     message: str
 
 
-def _read_checkpoint(path: Path) -> set[int]:
+def _read_checkpoint(path: Path, output_path: Path | None = None) -> set[int]:
     if not path.is_file():
         return set()
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-        return {int(item) for item in payload.get("completed_chunks", [])}
+        completed = {int(item) for item in payload.get("completed_chunks", [])}
+        if not completed:
+            return set()
+        if output_path is None or not output_path.is_file():
+            return set()
+        expected_size = payload.get("output_size_bytes")
+        if expected_size is not None and output_path.stat().st_size != int(expected_size):
+            return set()
+        if output_path.stat().st_size <= 0:
+            return set()
+        return completed
     except (json.JSONDecodeError, OSError, ValueError):
         return set()
 
 
-def _write_checkpoint(path: Path, completed: set[int]) -> None:
+def _write_checkpoint(path: Path, completed: set[int], output_path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp")
     temporary.write_text(
-        json.dumps({"completed_chunks": sorted(completed)}, ensure_ascii=False, indent=2), encoding="utf-8"
+        json.dumps(
+            {
+                "schema_version": "visioncortex-detection-checkpoint/2",
+                "completed_chunks": sorted(completed),
+                "output_path": str(output_path),
+                "output_size_bytes": output_path.stat().st_size if output_path.is_file() else 0,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
     )
     temporary.replace(path)
 
@@ -214,6 +235,13 @@ def _producer(
             activity("source_unit_started", chunk_index)
             if chunk_index in completed_chunks:
                 activity("source_unit_reused", chunk_index)
+                output_queue.put(
+                    ChunkEnd(
+                        view_id=view.view_id,
+                        chunk_index=chunk_index,
+                        total_chunks=len(work_units),
+                    )
+                )
                 if wave_barrier is not None:
                     wave_barrier.wait(
                         timeout=float(perf.get("segment_wave_timeout_seconds", 3600))
@@ -256,7 +284,13 @@ def _producer(
                 previous_gray = gray
                 while next_yolo_ms <= local_ms + 0.5:
                     next_yolo_ms += sample_period_ms
-            output_queue.put(ChunkEnd(view_id=view.view_id, chunk_index=chunk_index))
+            output_queue.put(
+                ChunkEnd(
+                    view_id=view.view_id,
+                    chunk_index=chunk_index,
+                    total_chunks=len(work_units),
+                )
+            )
             activity("source_unit_completed", chunk_index)
             if wave_barrier is not None:
                 wave_barrier.wait(timeout=float(perf.get("segment_wave_timeout_seconds", 3600)))
@@ -448,11 +482,23 @@ def scan_videos(
     phase: str = "fine",
     decode_backends: dict[str, str] | None = None,
     wave_barrier: threading.Barrier | None = None,
+    progress_callback: Callable[[str, int, int], None] | None = None,
 ) -> dict[str, Path]:
     work_dir.mkdir(parents=True, exist_ok=True)
     output_paths = {view.view_id: work_dir / f"{view.view_id}.detections.jsonl" for view in views}
     checkpoint_paths = {view.view_id: work_dir / f"{view.view_id}.checkpoint.json" for view in views}
-    completed = {view.view_id: _read_checkpoint(checkpoint_paths[view.view_id]) for view in views}
+    completed = {
+        view.view_id: _read_checkpoint(
+            checkpoint_paths[view.view_id], output_paths[view.view_id]
+        )
+        for view in views
+    }
+    for view in views:
+        output_path = output_paths[view.view_id]
+        if not completed[view.view_id] and output_path.is_file():
+            # A ledger without a matching durable checkpoint is not safe to
+            # append to: rerunning into it would duplicate frame evidence.
+            output_path.unlink()
 
     try:
         import torch
@@ -587,7 +633,17 @@ def scan_videos(
                     if isinstance(item, ChunkEnd):
                         writers[item.view_id].flush()
                         completed[item.view_id].add(item.chunk_index)
-                        _write_checkpoint(checkpoint_paths[item.view_id], completed[item.view_id])
+                        _write_checkpoint(
+                            checkpoint_paths[item.view_id],
+                            completed[item.view_id],
+                            output_paths[item.view_id],
+                        )
+                        if progress_callback is not None:
+                            progress_callback(
+                                item.view_id,
+                                len(completed[item.view_id]),
+                                item.total_chunks,
+                            )
                     elif isinstance(item, ProducerError):
                         errors.append(f"{item.view_id}: {item.message}")
                     elif isinstance(item, ProducerEnd):

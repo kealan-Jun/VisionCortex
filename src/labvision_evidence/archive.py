@@ -265,11 +265,21 @@ def analyze_experiment_groups(
     config: dict[str, Any],
 ) -> None:
     analyzer = ArkStepAnalyzer(config)
+    cache_root = layout.work / "mllm-cache" / "experiment-groups"
     by_view = {view.view_id: view for view in views}
     by_segment = {segment.segment_id: segment for segment in segments}
     max_pairs = max(2, int(config["mllm"].get("storyboard_pairs_per_group", 6)))
 
     def analyze(group: ExperimentGroup) -> tuple[ExperimentGroup, dict[str, Any]]:
+        cache_path = cache_root / f"{_safe_slug(group.group_id)}.json"
+        if cache_path.is_file():
+            try:
+                cached = json.loads(cache_path.read_text(encoding="utf-8-sig"))
+                if cached.get("status") == "completed":
+                    cached["cache_reused"] = True
+                    return group, cached
+            except (OSError, json.JSONDecodeError):
+                pass
         storyboard: list[tuple[str, Path]] = []
         storyboard_dir = layout.work / "group-storyboards" / group.group_id
         for index, global_ms in enumerate(_storyboard_times(group, events, max_pairs), 1):
@@ -296,7 +306,10 @@ def analyze_experiment_groups(
         atomic = [by_segment[item] for item in group.atomic_experiment_ids]
         event_ids = {event_id for segment in atomic for event_id in segment.event_ids}
         group_events = [event for event in events if event.event_id in event_ids]
-        return group, analyzer.analyze_group(group, atomic, group_events, storyboard)
+        result = analyzer.analyze_group(group, atomic, group_events, storyboard)
+        if result.get("status") == "completed":
+            write_json(cache_path, result)
+        return group, result
 
     workers = max(1, int(config["mllm"].get("group_workers", 2)))
     with ThreadPoolExecutor(max_workers=min(workers, max(1, len(groups)))) as executor:
@@ -831,14 +844,27 @@ def materialize_key_materials(
 def analyze_key_materials(layout: ArchiveLayout, events: Sequence[EvidenceEvent], config: dict[str, Any]) -> None:
     analyzer = ArkStepAnalyzer(config)
     accepted = [event for event in events if event.accepted]
+    cache_root = layout.work / "mllm-cache" / "key-materials"
 
     def analyze(event: EvidenceEvent) -> tuple[EvidenceEvent, dict[str, Any]]:
+        cache_path = cache_root / f"{_safe_slug(event.event_id)}.json"
+        if cache_path.is_file():
+            try:
+                cached = json.loads(cache_path.read_text(encoding="utf-8-sig"))
+                if cached.get("status") == "completed":
+                    cached["cache_reused"] = True
+                    return event, cached
+            except (OSError, json.JSONDecodeError):
+                pass
         images = [
             (view_id, layout.root / relative)
             for view_id, relative in event.key_frames.items()
             if view_id != "aligned_first_third"
         ]
-        return event, analyzer.analyze_event(event, images)
+        result = analyzer.analyze_event(event, images)
+        if result.get("status") == "completed":
+            write_json(cache_path, result)
+        return event, result
 
     workers = max(1, int(config["mllm"].get("workers", 4)))
     with ThreadPoolExecutor(max_workers=min(workers, max(1, len(accepted)))) as executor:

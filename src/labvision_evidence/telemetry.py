@@ -16,8 +16,15 @@ import psutil
 class ResourceMonitor:
     """Low-overhead CPU/RAM/GPU/NVDEC/NVENC telemetry sampled by stage."""
 
-    def __init__(self, destination: Path, interval_seconds: float = 1.0):
+    def __init__(
+        self,
+        destination: Path,
+        interval_seconds: float = 1.0,
+        live_mirror_destination: Path | None = None,
+    ):
         self.destination = destination
+        self.live_destination = destination.with_name(f"{destination.stem}_live.json")
+        self.live_mirror_destination = live_mirror_destination
         self.interval = max(0.25, interval_seconds)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -39,9 +46,37 @@ class ResourceMonitor:
         if self._thread:
             self._thread.join(timeout=max(2.0, self.interval * 2))
         report = self.report()
-        self.destination.parent.mkdir(parents=True, exist_ok=True)
-        self.destination.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._write_atomic(self.destination, report)
+        latest = self._samples[-1] if self._samples else None
+        self._write_atomic(
+            self.live_destination,
+            {
+                "schema_version": "visioncortex-resource-telemetry-live/1",
+                "status": "completed",
+                "sample_count": len(self._samples),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "latest": latest,
+            },
+        )
+        if self.live_mirror_destination is not None:
+            self._write_atomic(
+                self.live_mirror_destination,
+                {
+                    "schema_version": "visioncortex-resource-telemetry-live/1",
+                    "status": "completed",
+                    "sample_count": len(self._samples),
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "latest": latest,
+                },
+            )
         return report
+
+    @staticmethod
+    def _write_atomic(path: Path, payload: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.partial-{os.getpid()}-{threading.get_ident()}")
+        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temporary, path)
 
     @staticmethod
     def _gpu() -> dict[str, Any]:
@@ -127,7 +162,7 @@ class ResourceMonitor:
             process_write = max(
                 0, int(process_io["write_bytes"] - self._previous_process_io["write_bytes"])
             )
-            self._samples.append({
+            sample = {
                 "timestamp": datetime.now(timezone.utc).isoformat(), "stage": self._stage,
                 "cpu_percent": psutil.cpu_percent(interval=None), "memory_percent": memory.percent,
                 "memory_used_bytes": memory.used,
@@ -146,7 +181,18 @@ class ResourceMonitor:
                     "write_mib_per_second": round(process_write / elapsed / 1024**2, 4),
                     "sampled_process_count": process_io["process_count"],
                 },
-            })
+            }
+            self._samples.append(sample)
+            live_payload = {
+                "schema_version": "visioncortex-resource-telemetry-live/1",
+                "status": "running",
+                "sample_count": len(self._samples),
+                "updated_at": sample["timestamp"],
+                "latest": sample,
+            }
+            self._write_atomic(self.live_destination, live_payload)
+            if self.live_mirror_destination is not None:
+                self._write_atomic(self.live_mirror_destination, live_payload)
             self._previous_network = network
             self._previous_process_io = process_io
             self._previous_perf = now_perf

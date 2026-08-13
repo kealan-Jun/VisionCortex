@@ -66,3 +66,6 @@ storage:
   run_output_mode: nas_direct
   manifest_storage: nas
   require_nas_source_paths: true
+
+validation:
+  acceptance_baseline: ./configs/acceptance/six-view-three-hour-reviewed-baseline.json

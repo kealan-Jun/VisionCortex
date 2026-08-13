@@ -19,6 +19,7 @@ from .pipeline import EvidencePipeline, create_dry_run
 from .archive import ArchiveLayout, refresh_key_material_metadata, write_json, _artifact_json
 from .schemas import RunSummary
 from .storage import fixed_archive_staging_paths, prepare_from_nas_index, promote_fixed_archive
+from .validation import validate_experiment_and_material_quality
 
 
 app = typer.Typer(no_args_is_help=True, help="多视角化学实验视频证据流水线")
@@ -66,6 +67,30 @@ def validate_models_command(
     config: Annotated[Path | None, typer.Option("--config", "-c", exists=True, dir_okay=False)] = None,
 ) -> None:
     typer.echo(json.dumps(validate_models(load_config(config)), ensure_ascii=False, indent=2))
+
+
+@app.command("validate-archive-quality")
+def validate_archive_quality_command(
+    archive: Annotated[Path, typer.Option("--archive", "-a", exists=True, file_okay=False)],
+    baseline: Annotated[
+        Path | None, typer.Option("--baseline", "-b", exists=True, dir_okay=False)
+    ] = None,
+    write: Annotated[bool, typer.Option("--write/--no-write")] = True,
+) -> None:
+    """Evaluate an existing archive without re-decoding video or calling a model."""
+
+    package_path = archive / "JSON-Config-Files" / "evidence_package.json"
+    package = RunSummary.model_validate_json(package_path.read_text(encoding="utf-8-sig"))
+    baseline_payload = (
+        json.loads(baseline.read_text(encoding="utf-8-sig")) if baseline is not None else None
+    )
+    key_events = [event for event in package.events if event.key_frames or event.key_clips]
+    report = validate_experiment_and_material_quality(
+        package.experiment_groups, key_events, baseline_payload
+    )
+    if write:
+        write_json(archive / "JSON-Config-Files" / "quality_acceptance.json", report)
+    typer.echo(json.dumps(report, ensure_ascii=False, indent=2))
 
 
 @app.command("prepare-engine")
