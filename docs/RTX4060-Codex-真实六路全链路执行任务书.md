@@ -21,34 +21,38 @@
 
 目标分支：`codex/daily-reports`
 
-先在现有仓库执行只读检查：
+在 4060 Codex 当前已经打开的 VisionCortex 仓库中执行。不得假定仓库位于 `D:`，也不得另建仓库副本：
 
 ```powershell
-Set-Location -LiteralPath 'D:\VisionCortex'
+$ProjectRoot = & git rev-parse --show-toplevel 2>$null
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($ProjectRoot)) {
+    throw '当前目录不在 Git 仓库中；请报告实际仓库位置，禁止自行猜测路径或重复克隆。'
+}
+$ProjectRoot = $ProjectRoot.Trim()
+Set-Location -LiteralPath $ProjectRoot
+$OriginUrl = & git remote get-url origin 2>$null
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($OriginUrl)) {
+    throw '当前仓库没有可用的 origin 远端。'
+}
+$OriginUrl = $OriginUrl.Trim()
+if ($OriginUrl -notmatch 'github\.com[/:]kealan-Jun/VisionCortex(?:\.git)?$') {
+    throw "当前仓库不是 kealan-Jun/VisionCortex：$OriginUrl"
+}
 git status --short --branch
 git remote -v
+$Dirty = @(git status --porcelain)
+if ($Dirty.Count -gt 0) {
+    $Dirty
+    throw '工作树不干净；停止同步并报告，不得处理、覆盖或复制用户改动。'
+}
 ```
 
-若工作树干净：
+若 `git status --porcelain` 不为空，立即停止并把状态写入回传文档；不得 reset、stash、clean、覆盖、另建副本或处理用户改动。工作树干净时只同步 GitHub：
 
 ```powershell
 git fetch origin
 git switch codex/daily-reports
 git pull --ff-only origin codex/daily-reports
-$RunCommit = (git rev-parse HEAD).Trim()
-git status --short --branch
-Write-Host "RUN_COMMIT=$RunCommit"
-```
-
-若工作树不干净，不得 reset、stash、clean 或覆盖。改用新的干净运行目录：
-
-```powershell
-$Runner = 'D:\VisionCortex-FrozenRunner'
-if (Test-Path -LiteralPath $Runner) {
-    throw "Frozen runner already exists; do not overwrite it. Record this blocker."
-}
-git clone --branch codex/daily-reports --single-branch https://github.com/kealan-Jun/VisionCortex.git $Runner
-Set-Location -LiteralPath $Runner
 $RunCommit = (git rev-parse HEAD).Trim()
 git status --short --branch
 Write-Host "RUN_COMMIT=$RunCommit"
@@ -84,7 +88,8 @@ Get-ComputerInfo | Select-Object WindowsProductName,WindowsVersion,OsBuildNumber
 nvidia-smi
 Get-SmbConnection | Select-Object ServerName,ShareName,Dialect,NumOpens,Encrypted
 Get-NetAdapter | Where-Object Status -eq 'Up' | Select-Object Name,InterfaceDescription,LinkSpeed
-Get-PSDrive -Name D,Y | Select-Object Name,Used,Free,Root
+$ProjectDrive = ([System.IO.Path]::GetPathRoot($ProjectRoot)).TrimEnd('\').TrimEnd(':')
+Get-PSDrive -Name @($ProjectDrive,'Y') | Select-Object Name,Used,Free,Root
 ```
 
 检查 `ARK_API_KEY` 只能输出是否存在：
@@ -102,7 +107,7 @@ $key = $null
 不要启动 dry-run，不要运行 pytest。使用仓库原有正式脚本：
 
 ```powershell
-Set-Location -LiteralPath '<第1步确认的干净仓库绝对路径>'
+Set-Location -LiteralPath $ProjectRoot
 .\deployment\rtx4060\04-重跑固定六路基准.ps1
 ```
 
