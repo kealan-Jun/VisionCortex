@@ -35,7 +35,6 @@ def test_health_exposes_fixed_benchmark_and_cache_locations(monkeypatch, tmp_pat
         "storage": {
             "archive_root": str(tmp_path / "archive"),
             "index_csv": str(tmp_path / "index.csv"),
-            "local_input_root": str(tmp_path / "input"),
             "local_runtime_root": str(tmp_path / "runtime"),
             "local_cache_root": str(tmp_path / "cache"),
         },
@@ -49,4 +48,5 @@ def test_health_exposes_fixed_benchmark_and_cache_locations(monkeypatch, tmp_pat
     benchmark = response.json()["fixed_benchmark"]
     assert benchmark["experiment_id"] == "exp_20260810_144014_e918b762"
     assert benchmark["archive_name"] == "Six-View-Three-Hour-Experiment-2026-08-13"
+    assert "zero-copy" in benchmark["input_mode"]
     assert benchmark["local_cache_root"].endswith("cache")

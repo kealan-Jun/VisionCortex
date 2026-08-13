@@ -21,14 +21,32 @@ class ActionType(str, Enum):
     DEVICE_PANEL_OPERATION = "device_panel_operation"
 
 
+class VideoSegmentInput(BaseModel):
+    """One immutable recorder segment on a view's virtual timeline."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    video: Path
+    timestamps_csv: Path | None = None
+
+
 class ViewInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     view_id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9_.-]+$")
     role: ViewRole
-    video: Path
+    video: Path | None = None
     timestamps_csv: Path | None = None
+    segments: list[VideoSegmentInput] = Field(default_factory=list)
     calibration_hint_ms: float = 0.0
+
+    @model_validator(mode="after")
+    def validate_source(self) -> "ViewInput":
+        if self.video is None and not self.segments:
+            raise ValueError("view must provide either video or segments")
+        if self.video is not None and self.segments:
+            raise ValueError("view cannot provide both video and segments")
+        return self
 
 
 class RunManifest(BaseModel):
@@ -48,6 +66,20 @@ class RunManifest(BaseModel):
         return self
 
 
+class VideoSegmentInfo(BaseModel):
+    path: Path
+    timestamps_csv: Path | None = None
+    virtual_start_ms: float
+    virtual_end_ms: float
+    frame_start_index: int
+    duration_ms: float
+    fps: float
+    width: int
+    height: int
+    frame_count: int
+    size_bytes: int = 0
+
+
 class VideoInfo(BaseModel):
     path: Path
     duration_ms: float
@@ -56,6 +88,7 @@ class VideoInfo(BaseModel):
     height: int
     frame_count: int
     size_bytes: int = 0
+    segments: list[VideoSegmentInfo] = Field(default_factory=list)
 
 
 class TimestampPoint(BaseModel):

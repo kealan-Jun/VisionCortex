@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+import threading
 import time
 from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
@@ -51,8 +52,9 @@ from .schemas import (
     ViewInput,
     ViewRole,
 )
-from .video_io import check_disk_capacity, probe_video
+from .video_io import check_disk_capacity, probe_view, view_source_files, view_timestamp_files
 from .storage import IncrementalArchivePublisher, initialize_nas_archive
+from .telemetry import ResourceMonitor
 
 
 ProgressCallback = Callable[[str, float, str], None]
@@ -90,24 +92,29 @@ def build_cache_identity(config: dict[str, Any], manifest: RunManifest) -> dict[
 
     inputs = []
     for view in manifest.views:
-        video = Path(view.video).resolve()
-        clock = Path(view.timestamps_csv).resolve() if view.timestamps_csv else None
+        source_files = [path.resolve() for path in view_source_files(view)]
+        clock_files = [path.resolve() for path in view_timestamp_files(view)]
         inputs.append(
             {
                 "view_id": view.view_id,
                 "role": view.role.value,
-                "video": {
-                    "path": str(video),
-                    "size_bytes": video.stat().st_size if video.is_file() else None,
-                    "mtime_ns": video.stat().st_mtime_ns if video.is_file() else None,
-                },
-                "timestamps_csv": {
-                    "path": str(clock),
-                    "size_bytes": clock.stat().st_size if clock and clock.is_file() else None,
-                    "mtime_ns": clock.stat().st_mtime_ns if clock and clock.is_file() else None,
-                }
-                if clock
-                else None,
+                "input_mode": "segmented" if view.segments else "continuous_file",
+                "videos": [
+                    {
+                        "path": str(path),
+                        "size_bytes": path.stat().st_size if path.is_file() else None,
+                        "mtime_ns": path.stat().st_mtime_ns if path.is_file() else None,
+                    }
+                    for path in source_files
+                ],
+                "timestamps_csvs": [
+                    {
+                        "path": str(path),
+                        "size_bytes": path.stat().st_size if path.is_file() else None,
+                        "mtime_ns": path.stat().st_mtime_ns if path.is_file() else None,
+                    }
+                    for path in clock_files
+                ],
             }
         )
 
@@ -148,9 +155,13 @@ class EvidencePipeline:
         self._stage_metrics: list[dict[str, Any]] = []
         self._preprocessing_completed_seconds: float | None = None
         self._input_view_count = 0
+        self._input_mode = "unknown"
         self._publisher: IncrementalArchivePublisher | None = None
+        self._resource_monitor: ResourceMonitor | None = None
 
     def _status(self, layout: ArchiveLayout, stage: str, progress: float, message: str) -> None:
+        if self._resource_monitor is not None:
+            self._resource_monitor.set_stage(stage)
         now_perf = time.perf_counter()
         now_iso = datetime.now(timezone.utc).isoformat()
         if self._active_stage is not None and stage != self._active_stage:
@@ -180,6 +191,19 @@ class EvidencePipeline:
                 "elapsed_seconds": round(now_perf - self._run_started_perf, 6) if self._run_started_perf else 0.0,
             },
         )
+        if self.config.get("storage", {}).get("run_output_mode") == "nas_direct":
+            write_json(
+                layout.json_config / "pipeline_status.json",
+                {
+                    "stage": stage,
+                    "progress": progress,
+                    "message": message,
+                    "updated_at": now_iso,
+                    "elapsed_seconds": round(now_perf - self._run_started_perf, 6)
+                    if self._run_started_perf
+                    else 0.0,
+                },
+            )
         if self._publisher is not None:
             self._publisher.publish_status(
                 {
@@ -290,6 +314,13 @@ class EvidencePipeline:
                 ),
                 "bounded_streaming": True,
                 "gpu_batching": True,
+                "input_mode": self._input_mode,
+                "source_copy_bytes": 0 if self._input_mode == "segmented_virtual_timeline" else None,
+                "runtime_evidence": {
+                    "resource_telemetry": "JSON-Config-Files/resource_telemetry.json",
+                    "coarse_scan": "JSON-Config-Files/scan_runtime_coarse.json",
+                    "fine_scan": "JSON-Config-Files/scan_runtime_fine.json",
+                },
             },
         }
 
@@ -319,6 +350,11 @@ class EvidencePipeline:
             "phase": phase,
         }
         perf = self.config["performance"]
+        requested_sources = int(perf.get("source_workers", len(manifest.views)))
+        if requested_sources < len(manifest.views):
+            raise ValueError(
+                f"source_workers={requested_sources} cannot keep {len(manifest.views)} views active"
+            )
         lanes = list(
             perf.get("coarse_decode_lanes" if phase == "coarse" else "fine_decode_lanes", [])
         )
@@ -329,6 +365,17 @@ class EvidencePipeline:
         kwargs["decode_backends"] = {
             view.view_id: lanes[index] for index, view in enumerate(manifest.views)
         }
+        if (
+            phase == "coarse"
+            and perf.get("synchronized_segment_waves")
+            and all(view.segments for view in manifest.views)
+        ):
+            segment_counts = {view.view_id: len(view.segments) for view in manifest.views}
+            if len(set(segment_counts.values())) != 1:
+                raise ValueError(
+                    f"synchronized segment waves require equal segment counts: {segment_counts}"
+                )
+            kwargs["wave_barrier"] = threading.Barrier(len(manifest.views))
         if not self.config["performance"].get("concurrent_role_scanners", True) or len(groups) == 1:
             result = {}
             for group in groups:
@@ -344,6 +391,29 @@ class EvidencePipeline:
                 result.update(future.result())
         return result
 
+    @staticmethod
+    def _archive_scan_runtime(layout: ArchiveLayout, work_dir: Path, phase: str) -> None:
+        role_reports = []
+        for path in sorted(work_dir.glob(f"runtime_{phase}_*.json")):
+            role_reports.append(json.loads(path.read_text(encoding="utf-8")))
+        source_activity = []
+        for path in sorted(work_dir.glob(f"source_activity_{phase}_*.jsonl")):
+            with path.open("r", encoding="utf-8") as handle:
+                source_activity.extend(
+                    json.loads(line) for line in handle if line.strip()
+                )
+        write_json(
+            layout.json_config / f"scan_runtime_{phase}.json",
+            {
+                "schema_version": "visioncortex-scan-runtime/1",
+                "phase": phase,
+                "role_reports": role_reports,
+                "source_activity": sorted(
+                    source_activity, key=lambda item: float(item.get("timestamp", 0.0))
+                ),
+            },
+        )
+
     def run(self, manifest: RunManifest) -> Path:
         self._run_started_perf = time.perf_counter()
         self._run_started_iso = datetime.now(timezone.utc).isoformat()
@@ -351,8 +421,20 @@ class EvidencePipeline:
         self._stage_metrics = []
         self._preprocessing_completed_seconds = None
         self._input_view_count = len(manifest.views)
-        output_root = Path(self.config["project"]["output_root"]).resolve()
-        layout = ArchiveLayout(output_root / manifest.experiment_id)
+        self._input_mode = (
+            "segmented_virtual_timeline"
+            if all(view.segments for view in manifest.views)
+            else "continuous_file"
+        )
+        storage = self.config.get("storage", {})
+        if storage.get("run_output_mode") == "nas_direct":
+            active_archive = storage.get("active_archive_path")
+            if not active_archive:
+                raise ValueError("nas_direct output requires storage.active_archive_path")
+            layout = ArchiveLayout(Path(active_archive).resolve())
+        else:
+            output_root = Path(self.config["project"]["output_root"]).resolve()
+            layout = ArchiveLayout(output_root / manifest.experiment_id)
         cache_identity = build_cache_identity(self.config, manifest)
         layout.work = (
             Path(self.config["storage"]["local_cache_root"]).resolve()
@@ -361,24 +443,31 @@ class EvidencePipeline:
         )
         layout.create()
         write_json(layout.json_config / "cache_identity.json", cache_identity)
-        if self.config.get("storage", {}).get("sync_to_nas"):
+        if storage.get("sync_to_nas") and storage.get("run_output_mode") != "nas_direct":
             nas_root = initialize_nas_archive(self.config, manifest.experiment_id)
             self._publisher = IncrementalArchivePublisher(layout.root, nas_root)
         else:
             self._publisher = None
         lock_path = layout.root / "run.lock"
         self._acquire_lock(lock_path)
+        self._resource_monitor = ResourceMonitor(
+            layout.json_config / "resource_telemetry.json",
+            float(self.config.get("resource_limits", {}).get("telemetry_interval_seconds", 1.0)),
+        )
+        self._resource_monitor.start()
         try:
             self._status(layout, "preflight", 0.02, "检查输入、模型、视频与磁盘")
             for view in manifest.views:
-                if not view.video.is_file():
-                    raise FileNotFoundError(f"视频不存在: {view.video}")
-                if view.timestamps_csv and not view.timestamps_csv.is_file():
-                    raise FileNotFoundError(f"时间戳 CSV 不存在: {view.timestamps_csv}")
+                for source in view_source_files(view):
+                    if not source.is_file():
+                        raise FileNotFoundError(f"视频不存在: {source}")
+                for clock in view_timestamp_files(view):
+                    if not clock.is_file():
+                        raise FileNotFoundError(f"时间戳 CSV 不存在: {clock}")
             model_report = validate_models(self.config)
             write_json(layout.json_config / "model_runtime_preflight.json", model_report)
             with ThreadPoolExecutor(max_workers=min(6, len(manifest.views))) as executor:
-                probed = list(executor.map(lambda view: (view.view_id, probe_video(view.video)), manifest.views))
+                probed = list(executor.map(lambda view: (view.view_id, probe_view(view)), manifest.views))
             infos = dict(probed)
             disk_report = check_disk_capacity(layout.root, list(infos.values()))
             write_json(layout.json_config / "video_probe.json", {key: value.model_dump(mode="json") for key, value in infos.items()})
@@ -417,6 +506,7 @@ class EvidencePipeline:
                 keyframes_only=bool(self.config["performance"]["coarse_keyframes_only"]),
                 phase="coarse",
             )
+            self._archive_scan_runtime(layout, layout.work / "detections-coarse", "coarse")
             coarse_views = [view for view in manifest.views if view.role == ViewRole.FIRST_PERSON]
             coarse_config = json.loads(json.dumps(self.config))
             coarse_config["segmentation"]["event_merge_gap_seconds"] = max(
@@ -450,6 +540,7 @@ class EvidencePipeline:
                 sample_fps=float(self.config["performance"]["detection_fps"]),
                 phase="fine",
             )
+            self._archive_scan_runtime(layout, layout.work / "detections-fine", "fine")
             candidates = generate_candidates(fine_views, detection_paths, self.config)
             if self.config["archive"].get("keep_debug_candidates"):
                 write_json(
@@ -586,6 +677,10 @@ class EvidencePipeline:
                 self._publisher.publish_directory("JSON-Config-Files")
             raise
         finally:
+            if self._resource_monitor is not None:
+                self._resource_monitor.stop()
+                if self._publisher is not None:
+                    self._publisher.publish_file(layout.json_config / "resource_telemetry.json")
             try:
                 lock_path.unlink(missing_ok=True)
             except OSError:

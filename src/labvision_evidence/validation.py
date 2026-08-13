@@ -18,7 +18,8 @@ def validate_against_sidecars(
 ) -> dict[str, Any] | None:
     annotations: dict[str, dict[str, Any]] = {}
     for view in views:
-        sidecar = view.video.parent / sidecar_name
+        source = view.video if view.video is not None else view.segments[0].video
+        sidecar = source.parent / sidecar_name
         if sidecar.is_file():
             annotations[view.view_id] = json.loads(sidecar.read_text(encoding="utf-8-sig"))
     if not annotations:

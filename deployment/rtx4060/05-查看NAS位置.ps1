@@ -1,16 +1,16 @@
 $ErrorActionPreference = 'Stop'
 $Index = 'Y:\experiment_record_index.csv'
 $Archive = 'Y:\VisionCortexExperimentArchive\Six-View-Three-Hour-Experiment-2026-08-13'
-$Continuous = Join-Path $Archive 'Original-Experiment-Videos\Normalized-Continuous'
 $ExperimentId = 'exp_20260810_144014_e918b762'
 
-foreach ($path in @($Index, $Archive, $Continuous)) {
+foreach ($path in @($Index, $Archive)) {
     if (-not (Test-Path -LiteralPath $path)) { throw "NAS path is missing: $path" }
 }
 
 Write-Host "Index CSV: $Index"
 Write-Host "Fixed formal archive: $Archive"
-Write-Host "Six continuous videos and clock CSV files: $Continuous"
+Write-Host 'Original inputs: the rgb_file / frames_file 15-minute NAS segments below.'
+Write-Host 'No 82-88 GB local continuous-video copy is required.'
 Write-Host ''
 Import-Csv -LiteralPath $Index |
     Where-Object { $_.experiment_id -eq $ExperimentId } |
@@ -27,6 +27,6 @@ Import-Csv -LiteralPath $Index |
     Format-Table -AutoSize -Wrap
 
 Write-Host 'Local runtime directories:'
-Write-Host '  Input retention: D:\VisionCortexLocal\Input'
-Write-Host '  Runtime ledgers: D:\VisionCortexLocal\Runtime'
+Write-Host '  Runtime control/logs only: D:\VisionCortexLocal\Runtime'
 Write-Host '  YOLO/checkpoint cache: D:\VisionCortexLocal\Cache'
+Write-Host "  Formal output: $Archive"

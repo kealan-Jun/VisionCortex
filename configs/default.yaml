@@ -48,6 +48,8 @@ performance:
   yolo_inference_workers: 2
   materialization_workers: 2
   io_workers: 4
+  synchronized_segment_waves: false
+  segment_wave_timeout_seconds: 3600
 
 alignment:
   reference_view: first_person
@@ -124,6 +126,9 @@ storage:
   local_cache_root: D:/VisionCortexLocal/Cache
   local_staging_root: ./outputs
   sync_to_nas: false
+  run_output_mode: local
+  manifest_storage: local
+  require_nas_source_paths: false
 
 validation:
   use_sidecar_annotations: true

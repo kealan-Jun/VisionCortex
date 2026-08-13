@@ -4,6 +4,7 @@ import json
 import math
 import shutil
 import subprocess
+import tempfile
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any
@@ -11,7 +12,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from .schemas import VideoInfo
+from .schemas import VideoInfo, VideoSegmentInfo, ViewInput
 
 
 def _run(command: list[str], timeout: float | None = None) -> subprocess.CompletedProcess[bytes]:
@@ -68,6 +69,70 @@ def probe_video(path: Path) -> VideoInfo:
         height=height,
         frame_count=frames,
         size_bytes=path.stat().st_size,
+    )
+
+
+def view_source_files(view: ViewInput) -> list[Path]:
+    if view.segments:
+        return [segment.video for segment in view.segments]
+    assert view.video is not None
+    return [view.video]
+
+
+def view_timestamp_files(view: ViewInput) -> list[Path]:
+    if view.segments:
+        return [segment.timestamps_csv for segment in view.segments if segment.timestamps_csv]
+    return [view.timestamps_csv] if view.timestamps_csv else []
+
+
+def probe_view(view: ViewInput) -> VideoInfo:
+    """Probe a single file or build a zero-copy virtual timeline from segments."""
+
+    if not view.segments:
+        assert view.video is not None
+        return probe_video(view.video)
+    probed = [probe_video(segment.video) for segment in view.segments]
+    first = probed[0]
+    virtual_start_ms = 0.0
+    frame_start = 0
+    segment_infos: list[VideoSegmentInfo] = []
+    for source, media in zip(view.segments, probed, strict=True):
+        if (media.width, media.height) != (first.width, first.height):
+            raise ValueError(
+                f"segment resolution changed in {view.view_id}: "
+                f"{media.path} is {media.width}x{media.height}, expected {first.width}x{first.height}"
+            )
+        if abs(media.fps - first.fps) > 0.05:
+            raise ValueError(
+                f"segment frame rate changed in {view.view_id}: "
+                f"{media.path} is {media.fps}, expected {first.fps}"
+            )
+        segment_infos.append(
+            VideoSegmentInfo(
+                path=media.path,
+                timestamps_csv=source.timestamps_csv,
+                virtual_start_ms=virtual_start_ms,
+                virtual_end_ms=virtual_start_ms + media.duration_ms,
+                frame_start_index=frame_start,
+                duration_ms=media.duration_ms,
+                fps=media.fps,
+                width=media.width,
+                height=media.height,
+                frame_count=media.frame_count,
+                size_bytes=media.size_bytes,
+            )
+        )
+        virtual_start_ms += media.duration_ms
+        frame_start += media.frame_count
+    return VideoInfo(
+        path=first.path,
+        duration_ms=virtual_start_ms,
+        fps=first.fps,
+        width=first.width,
+        height=first.height,
+        frame_count=frame_start,
+        size_bytes=sum(item.size_bytes for item in segment_infos),
+        segments=segment_infos,
     )
 
 
@@ -228,6 +293,51 @@ def iter_sampled_frames(
     yield from _opencv_frame_iterator(path, info, start_ms, end_ms, sample_fps, max_width)
 
 
+def iter_view_sampled_frames(
+    view: ViewInput,
+    info: VideoInfo,
+    start_ms: float,
+    end_ms: float,
+    sample_fps: float,
+    max_width: int,
+    hwaccel: str | None = "cuda",
+    keyframes_only: bool = False,
+    decoder_threads: int | None = None,
+) -> Iterator[tuple[int, float, np.ndarray]]:
+    if not info.segments:
+        assert view.video is not None
+        yield from iter_sampled_frames(
+            view.video, info, start_ms, end_ms, sample_fps, max_width, hwaccel,
+            keyframes_only, decoder_threads,
+        )
+        return
+    for segment in info.segments:
+        overlap_start = max(start_ms, segment.virtual_start_ms)
+        overlap_end = min(end_ms, segment.virtual_end_ms)
+        if overlap_end <= overlap_start:
+            continue
+        source_info = VideoInfo(
+            path=segment.path,
+            duration_ms=segment.duration_ms,
+            fps=segment.fps,
+            width=segment.width,
+            height=segment.height,
+            frame_count=segment.frame_count,
+            size_bytes=segment.size_bytes,
+        )
+        segment_start = overlap_start - segment.virtual_start_ms
+        segment_end = overlap_end - segment.virtual_start_ms
+        for frame_index, source_ms, frame in iter_sampled_frames(
+            segment.path, source_info, segment_start, segment_end, sample_fps, max_width,
+            hwaccel, keyframes_only, decoder_threads,
+        ):
+            yield (
+                segment.frame_start_index + frame_index,
+                segment.virtual_start_ms + source_ms,
+                frame,
+            )
+
+
 def read_frame_at(path: Path, local_ms: float) -> np.ndarray | None:
     capture = cv2.VideoCapture(str(path))
     if not capture.isOpened():
@@ -236,6 +346,16 @@ def read_frame_at(path: Path, local_ms: float) -> np.ndarray | None:
     ok, frame = capture.read()
     capture.release()
     return frame if ok else None
+
+
+def read_view_frame_at(view: ViewInput, info: VideoInfo, local_ms: float) -> np.ndarray | None:
+    if not info.segments:
+        assert view.video is not None
+        return read_frame_at(view.video, local_ms)
+    for segment in info.segments:
+        if segment.virtual_start_ms <= local_ms <= segment.virtual_end_ms:
+            return read_frame_at(segment.path, local_ms - segment.virtual_start_ms)
+    return None
 
 
 def motion_signature(path: Path, local_times_ms: Sequence[float]) -> np.ndarray:
@@ -269,6 +389,29 @@ def motion_signature(path: Path, local_times_ms: Sequence[float]) -> np.ndarray:
     finally:
         capture.release()
     return np.asarray(values, dtype=np.float32)
+
+
+def view_motion_signature(
+    view: ViewInput, info: VideoInfo, local_times_ms: Sequence[float]
+) -> np.ndarray:
+    if not info.segments:
+        assert view.video is not None
+        return motion_signature(view.video, local_times_ms)
+    values = np.zeros(len(local_times_ms), dtype=np.float32)
+    grouped: dict[int, list[tuple[int, float]]] = {}
+    for index, local_ms in enumerate(local_times_ms):
+        for segment_index, segment in enumerate(info.segments):
+            if segment.virtual_start_ms <= local_ms <= segment.virtual_end_ms:
+                grouped.setdefault(segment_index, []).append(
+                    (index, local_ms - segment.virtual_start_ms)
+                )
+                break
+    for segment_index, requests in grouped.items():
+        segment = info.segments[segment_index]
+        signature = motion_signature(segment.path, [item[1] for item in requests])
+        for (output_index, _), value in zip(requests, signature, strict=True):
+            values[output_index] = value
+    return values
 
 
 def _encoder_available(name: str) -> bool:
@@ -319,6 +462,69 @@ def extract_clip(
         result = _run(command)
     if result.returncode != 0:
         raise RuntimeError(result.stderr.decode("utf-8", errors="replace")[-2000:])
+
+
+def extract_view_clip(
+    view: ViewInput,
+    info: VideoInfo,
+    destination: Path,
+    start_ms: float,
+    duration_ms: float,
+    preferred_encoder: str = "h264_nvenc",
+) -> None:
+    """Export one continuous clip, joining only the source segments it intersects."""
+
+    if not info.segments:
+        assert view.video is not None
+        extract_clip(view.video, destination, start_ms, duration_ms, preferred_encoder)
+        return
+    end_ms = min(info.duration_ms, start_ms + duration_ms)
+    overlaps = [
+        segment for segment in info.segments
+        if segment.virtual_end_ms > start_ms and segment.virtual_start_ms < end_ms
+    ]
+    if not overlaps:
+        raise ValueError(f"clip window is outside {view.view_id}: {start_ms}..{end_ms}")
+    if len(overlaps) == 1:
+        segment = overlaps[0]
+        extract_clip(
+            segment.path,
+            destination,
+            max(0.0, start_ms - segment.virtual_start_ms),
+            end_ms - start_ms,
+            preferred_encoder,
+        )
+        return
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="visioncortex-clip-") as temporary:
+        temporary_root = Path(temporary)
+        parts: list[Path] = []
+        for index, segment in enumerate(overlaps):
+            overlap_start = max(start_ms, segment.virtual_start_ms)
+            overlap_end = min(end_ms, segment.virtual_end_ms)
+            part = temporary_root / f"part-{index:03d}.mp4"
+            extract_clip(
+                segment.path,
+                part,
+                overlap_start - segment.virtual_start_ms,
+                overlap_end - overlap_start,
+                preferred_encoder,
+            )
+            parts.append(part)
+        concat_list = temporary_root / "parts.txt"
+        concat_list.write_text(
+            "\n".join("file '" + str(path).replace("'", "'\\''") + "'" for path in parts) + "\n",
+            encoding="utf-8",
+        )
+        result = _run(
+            [
+                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "concat",
+                "-safe", "0", "-i", str(concat_list), "-c", "copy", "-movflags",
+                "+faststart", str(destination),
+            ]
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.decode("utf-8", errors="replace")[-2000:])
 
 
 def create_grid_video(clips: Sequence[tuple[str, Path]], destination: Path) -> None:

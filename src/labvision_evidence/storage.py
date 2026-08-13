@@ -5,15 +5,13 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PureWindowsPath
 from typing import Any, Callable
 
 import yaml
 
-from .schemas import RunManifest, ViewInput, ViewRole
+from .schemas import RunManifest, VideoSegmentInput, ViewInput, ViewRole
 
 
 ARCHIVE_DIRECTORIES = (
@@ -235,60 +233,6 @@ def describe_index_experiment(index_csv: Path, experiment_id: str) -> dict[str, 
     }
 
 
-def _concat_videos(paths: list[Path], destination: Path) -> None:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    list_path = destination.with_suffix(".concat.txt")
-    lines = ["file '" + str(path.resolve()).replace("'", "'\\''") + "'" for path in paths]
-    list_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    try:
-        command = [
-            "ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0",
-            "-i", str(list_path), "-map", "0:v:0", "-an", "-c", "copy", "-movflags", "+faststart",
-            str(destination),
-        ]
-        result = subprocess.run(command, capture_output=True, check=False)
-        if result.returncode != 0:
-            raise RuntimeError(result.stderr.decode("utf-8", errors="replace")[-2000:])
-    finally:
-        list_path.unlink(missing_ok=True)
-
-
-def _merge_clock_csvs(paths: list[Path], destination: Path) -> None:
-    """Append segment CSVs while making frame indexes monotonically increasing."""
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    output_rows: list[dict[str, str]] = []
-    fields: list[str] = []
-    frame_offset = 0
-    for path in paths:
-        with path.open("r", encoding="utf-8-sig", newline="") as handle:
-            rows = list(csv.DictReader(handle))
-            if not rows:
-                continue
-            if not fields:
-                fields = list(rows[0])
-            frame_field = next(
-                (name for name in fields if name.lower() in {"frame", "frame_index", "rgb_frame_index"}),
-                None,
-            )
-            if frame_field:
-                values = []
-                for row in rows:
-                    try:
-                        original = int(float(row[frame_field]))
-                    except (TypeError, ValueError):
-                        original = len(values)
-                    values.append(original)
-                    row[frame_field] = str(original + frame_offset)
-                frame_offset += max(values, default=-1) + 1
-            output_rows.extend(rows)
-    if not fields or not output_rows:
-        raise RuntimeError(f"No timestamp rows found in: {paths}")
-    with destination.open("w", encoding="utf-8-sig", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields)
-        writer.writeheader()
-        writer.writerows(output_rows)
-
-
 def prepare_from_nas_index(
     config: dict[str, Any],
     experiment_id: str,
@@ -299,51 +243,68 @@ def prepare_from_nas_index(
     index_csv = Path(storage["index_csv"])
     description = describe_index_experiment(index_csv, experiment_id)
     rows = read_index_experiment(index_csv, experiment_id)
-    input_root = Path(storage["local_input_root"]) / experiment_id
-    input_root.mkdir(parents=True, exist_ok=True)
+    active_archive = storage.get("active_archive_path")
+    if active_archive and storage.get("manifest_storage", "nas") == "nas":
+        manifest_root = Path(active_archive) / "JSON-Config-Files" / "Input-Manifests"
+    else:
+        manifest_root = Path(storage["local_runtime_root"]) / "input-manifests" / experiment_id
+    manifest_root.mkdir(parents=True, exist_ok=True)
     overrides = KNOWN_ROLE_OVERRIDES.get(experiment_id, {})
 
     def prepare(row: dict[str, str]) -> ViewInput:
         camera_key = str(row["camera_key"])
-        progress(f"Copying and concatenating {camera_key}")
-        view_root = input_root / camera_key
+        progress(f"Registering NAS segments without copying: {camera_key}")
         videos = [_resolve_nas_path(item, index_csv) for item in _parts(row.get("rgb_file"))]
         clocks = [_resolve_nas_path(item, index_csv) for item in _parts(row.get("frames_file"))]
         missing = [str(item) for item in videos + clocks if not item.is_file()]
         if missing:
             raise FileNotFoundError(f"NAS source missing for {camera_key}: {missing[:4]}")
-        video_destination = view_root / "video.mp4"
-        clock_destination = view_root / "clock.csv"
-        if not video_destination.is_file():
-            _concat_videos(videos, video_destination)
-        if not clock_destination.is_file():
-            _merge_clock_csvs(clocks, clock_destination)
+        if clocks and len(clocks) != len(videos):
+            raise ValueError(
+                f"NAS segment/clock count mismatch for {camera_key}: "
+                f"{len(videos)} videos, {len(clocks)} clock CSVs"
+            )
+        if storage.get("require_nas_source_paths"):
+            expected_drive = index_csv.drive.upper()
+            off_nas = [str(item) for item in videos + clocks if item.drive.upper() != expected_drive]
+            if off_nas:
+                raise ValueError(f"Source path escaped NAS drive {expected_drive}: {off_nas[:4]}")
         role = overrides.get(camera_key)
         if role is None:
             role = ViewRole.FIRST_PERSON if row.get("camera_view") == "first" else ViewRole.THIRD_PERSON
         return ViewInput(
             view_id=camera_key,
             role=role,
-            video=video_destination,
-            timestamps_csv=clock_destination,
+            segments=[
+                VideoSegmentInput(
+                    video=video,
+                    timestamps_csv=clocks[index] if clocks else None,
+                )
+                for index, video in enumerate(videos)
+            ],
         )
 
-    worker_count = min(int(config["performance"].get("io_workers", 4)), len(rows))
-    with ThreadPoolExecutor(max_workers=max(1, worker_count), thread_name_prefix="nas-stage") as executor:
-        views = list(executor.map(prepare, rows))
+    views = [prepare(row) for row in rows]
+    segment_counts = {view.view_id: len(view.segments) for view in views}
+    if config["performance"].get("synchronized_segment_waves") and len(set(segment_counts.values())) != 1:
+        raise ValueError(f"Synchronized segment waves require equal segment counts: {segment_counts}")
     manifest = RunManifest(experiment_id=experiment_id, views=views)
-    manifest_path = input_root / "manifest.yaml"
+    manifest_path = manifest_root / "manifest.yaml"
     manifest_path.write_text(
         yaml.safe_dump(manifest.model_dump(mode="json"), allow_unicode=True, sort_keys=False),
         encoding="utf-8",
     )
     ingest = {
         **description,
-        "local_input_root": str(input_root),
+        "input_mode": "nas_segmented_virtual_timeline",
+        "copied_source_bytes": 0,
+        "continuous_source_copies_created": 0,
+        "manifest_root": str(manifest_root),
         "manifest": str(manifest_path),
+        "segment_counts": segment_counts,
         "role_overrides": {key: value.value for key, value in overrides.items()},
     }
-    (input_root / "nas_ingest.json").write_text(
+    (manifest_root / "nas_ingest.json").write_text(
         json.dumps(ingest, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     return manifest, manifest_path, ingest

@@ -87,8 +87,13 @@ def load_manifest(path: Path) -> RunManifest:
     manifest = RunManifest.model_validate(raw)
     base = path.parent.resolve()
     for view in manifest.views:
-        if not view.video.is_absolute():
+        if view.video is not None and not view.video.is_absolute():
             view.video = (base / view.video).resolve()
         if view.timestamps_csv and not view.timestamps_csv.is_absolute():
             view.timestamps_csv = (base / view.timestamps_csv).resolve()
+        for segment in view.segments:
+            if not segment.video.is_absolute():
+                segment.video = (base / segment.video).resolve()
+            if segment.timestamps_csv and not segment.timestamps_csv.is_absolute():
+                segment.timestamps_csv = (base / segment.timestamps_csv).resolve()
     return manifest

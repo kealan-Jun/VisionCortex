@@ -10,7 +10,7 @@ from typing import Iterable, Sequence
 import numpy as np
 
 from .schemas import AlignmentTransform, TimestampPoint, VideoInfo, ViewInput
-from .video_io import motion_signature
+from .video_io import view_motion_signature
 
 
 FRAME_COLUMNS = ("video_frame_index", "frame_index", "frame", "frame_id", "index", "seq")
@@ -169,8 +169,8 @@ def _normalized_correlation(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def visual_anchor_calibration(
-    reference_video: Path,
-    target_video: Path,
+    reference_view: ViewInput,
+    target_view: ViewInput,
     reference_transform: AlignmentTransform,
     target_transform: AlignmentTransform,
     reference_info: VideoInfo,
@@ -198,8 +198,8 @@ def visual_anchor_calibration(
         extended_globals = center + np.arange(-half_count - max_lag, half_count + max_lag + 1) * 1000.0 / fps
         ref_times = [reference_transform.to_local(float(value)) for value in reference_globals]
         target_times = [target_transform.to_local(float(value)) for value in extended_globals]
-        ref_signal = motion_signature(reference_video, ref_times)
-        target_signal = motion_signature(target_video, target_times)
+        ref_signal = view_motion_signature(reference_view, reference_info, ref_times)
+        target_signal = view_motion_signature(target_view, target_info, target_times)
         scores = [
             _normalized_correlation(ref_signal, target_signal[lag : lag + len(ref_signal)])
             for lag in range(max_lag * 2 + 1)
@@ -254,11 +254,75 @@ def build_alignments(
     )
     series: dict[str, list[TimestampPoint]] = {}
     for view in views:
-        series[view.view_id] = (
-            read_timestamp_csv(view.timestamps_csv, infos[view.view_id].fps)
-            if view.timestamps_csv
-            else synthetic_timestamps(infos[view.view_id], sample_fps=align_cfg["aligned_timestamps_fps"])
-        )
+        info = infos[view.view_id]
+        if view.segments and info.segments:
+            points: list[TimestampPoint] = []
+            segment_series: list[list[TimestampPoint] | None] = []
+            for segment in info.segments:
+                if segment.timestamps_csv:
+                    segment_series.append(
+                        read_timestamp_csv(segment.timestamps_csv, segment.fps)
+                    )
+                else:
+                    segment_series.append(None)
+            source_origins = [
+                point.source_ms
+                for source_points in segment_series
+                if source_points
+                for point in source_points[:1]
+                if point.source_ms is not None
+            ]
+            base_source_ms = source_origins[0] if source_origins else None
+            previous_start_ms = -1.0
+            for segment, source_points in zip(info.segments, segment_series, strict=True):
+                if source_points and base_source_ms is not None and source_points[0].source_ms is not None:
+                    clock_start_ms = source_points[0].source_ms - base_source_ms
+                    # Reject corrupt clock jumps but preserve real recorder gaps/overlaps.
+                    if (
+                        clock_start_ms >= previous_start_ms
+                        and abs(clock_start_ms - segment.virtual_start_ms) <= 300_000.0
+                    ):
+                        segment.virtual_start_ms = max(0.0, clock_start_ms)
+                        segment.virtual_end_ms = segment.virtual_start_ms + segment.duration_ms
+                previous_start_ms = segment.virtual_start_ms
+                if source_points:
+                    origin = source_points[0].local_ms
+                    points.extend(
+                        TimestampPoint(
+                            frame_index=segment.frame_start_index + point.frame_index,
+                            local_ms=segment.virtual_start_ms + point.local_ms - origin,
+                            source_ms=point.source_ms,
+                        )
+                        for point in source_points
+                    )
+                else:
+                    points.extend(
+                        TimestampPoint(
+                            frame_index=segment.frame_start_index + point.frame_index,
+                            local_ms=segment.virtual_start_ms + point.local_ms,
+                            source_ms=point.source_ms,
+                        )
+                        for point in synthetic_timestamps(
+                            VideoInfo(
+                                path=segment.path,
+                                duration_ms=segment.duration_ms,
+                                fps=segment.fps,
+                                width=segment.width,
+                                height=segment.height,
+                                frame_count=segment.frame_count,
+                                size_bytes=segment.size_bytes,
+                            ),
+                            sample_fps=align_cfg["aligned_timestamps_fps"],
+                        )
+                    )
+            info.duration_ms = max(segment.virtual_end_ms for segment in info.segments)
+            series[view.view_id] = points
+        else:
+            series[view.view_id] = (
+                read_timestamp_csv(view.timestamps_csv, info.fps)
+                if view.timestamps_csv
+                else synthetic_timestamps(info, sample_fps=align_cfg["aligned_timestamps_fps"])
+            )
     ref_transform = AlignmentTransform(
         view_id=reference.view_id,
         reference_view_id=reference.view_id,
@@ -291,8 +355,8 @@ def build_alignments(
             csv_rmse_ms=None if not math.isfinite(rmse) else rmse,
         )
         correction, visual_confidence, details = visual_anchor_calibration(
-            reference.video,
-            view.video,
+            reference,
+            view,
             ref_transform,
             transform,
             infos[reference.view_id],

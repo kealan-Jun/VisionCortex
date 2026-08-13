@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -21,6 +23,9 @@ class ResourceMonitor:
         self._thread: threading.Thread | None = None
         self._stage = "not_started"
         self._samples: list[dict[str, Any]] = []
+        self._previous_network = psutil.net_io_counters()
+        self._previous_process_io = self._process_tree_io()
+        self._previous_perf = time.perf_counter()
 
     def set_stage(self, stage: str) -> None:
         self._stage = stage
@@ -62,15 +67,89 @@ class ResourceMonitor:
                 parsed[key] = None
         return parsed
 
+    @staticmethod
+    def _process_tree_io() -> dict[str, int]:
+        read_bytes = 0
+        write_bytes = 0
+        process_count = 0
+        try:
+            root = psutil.Process()
+            processes = [root, *root.children(recursive=True)]
+        except (psutil.Error, OSError):
+            processes = []
+        for process in processes:
+            try:
+                counters = process.io_counters()
+                read_bytes += int(counters.read_bytes)
+                write_bytes += int(counters.write_bytes)
+                process_count += 1
+            except (psutil.Error, OSError, AttributeError):
+                continue
+        return {
+            "read_bytes": read_bytes,
+            "write_bytes": write_bytes,
+            "process_count": process_count,
+        }
+
+    @staticmethod
+    def _smb_connections() -> list[dict[str, Any]]:
+        if os.name != "nt" or not shutil.which("powershell"):
+            return []
+        command = (
+            "Get-SmbConnection -ErrorAction SilentlyContinue | "
+            "Select-Object ServerName,ShareName,Dialect,NumOpens,Encrypted | ConvertTo-Json -Compress"
+        )
+        try:
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", command],
+                capture_output=True, check=False, text=True, timeout=8,
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                return []
+            payload = json.loads(result.stdout)
+            return payload if isinstance(payload, list) else [payload]
+        except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+            return []
+
     def _run(self) -> None:
         psutil.cpu_percent(interval=None)
         while not self._stop.wait(self.interval):
+            now_perf = time.perf_counter()
+            elapsed = max(1e-6, now_perf - self._previous_perf)
             memory = psutil.virtual_memory()
+            network = psutil.net_io_counters()
+            process_io = self._process_tree_io()
+            network_received = max(0, int(network.bytes_recv - self._previous_network.bytes_recv))
+            network_sent = max(0, int(network.bytes_sent - self._previous_network.bytes_sent))
+            process_read = max(
+                0, int(process_io["read_bytes"] - self._previous_process_io["read_bytes"])
+            )
+            process_write = max(
+                0, int(process_io["write_bytes"] - self._previous_process_io["write_bytes"])
+            )
             self._samples.append({
                 "timestamp": datetime.now(timezone.utc).isoformat(), "stage": self._stage,
                 "cpu_percent": psutil.cpu_percent(interval=None), "memory_percent": memory.percent,
-                "memory_used_bytes": memory.used, "gpu": self._gpu(),
+                "memory_used_bytes": memory.used,
+                "gpu": self._gpu(),
+                "host_network": {
+                    "received_bytes_delta": network_received,
+                    "sent_bytes_delta": network_sent,
+                    "received_mib_per_second": round(network_received / elapsed / 1024**2, 4),
+                    "sent_mib_per_second": round(network_sent / elapsed / 1024**2, 4),
+                    "scope": "host_all_network_interfaces",
+                },
+                "pipeline_process_tree_io": {
+                    "read_bytes_delta": process_read,
+                    "write_bytes_delta": process_write,
+                    "read_mib_per_second": round(process_read / elapsed / 1024**2, 4),
+                    "write_mib_per_second": round(process_write / elapsed / 1024**2, 4),
+                    "sampled_process_count": process_io["process_count"],
+                },
             })
+            self._previous_network = network
+            self._previous_process_io = process_io
+            self._previous_perf = now_perf
 
     def report(self) -> dict[str, Any]:
         def stats(values: list[float]) -> dict[str, float] | None:
@@ -100,5 +179,35 @@ class ResourceMonitor:
                     sample["gpu"][gpu_name] for sample in samples
                     if sample["gpu"].get(gpu_name) is not None
                 ])
+            for output_name, section, field in (
+                ("host_network_receive_mib_s", "host_network", "received_mib_per_second"),
+                ("host_network_send_mib_s", "host_network", "sent_mib_per_second"),
+                ("pipeline_read_mib_s", "pipeline_process_tree_io", "read_mib_per_second"),
+                ("pipeline_write_mib_s", "pipeline_process_tree_io", "write_mib_per_second"),
+            ):
+                summary[output_name] = stats([sample[section][field] for sample in samples])
+            summary["host_network_received_bytes"] = sum(
+                sample["host_network"]["received_bytes_delta"] for sample in samples
+            )
+            summary["host_network_sent_bytes"] = sum(
+                sample["host_network"]["sent_bytes_delta"] for sample in samples
+            )
+            summary["pipeline_read_bytes"] = sum(
+                sample["pipeline_process_tree_io"]["read_bytes_delta"] for sample in samples
+            )
+            summary["pipeline_write_bytes"] = sum(
+                sample["pipeline_process_tree_io"]["write_bytes_delta"] for sample in samples
+            )
             summaries[stage] = summary
-        return {"sample_count": len(self._samples), "stage_summaries": summaries, "samples": self._samples}
+        return {
+            "schema_version": "visioncortex-resource-telemetry/2",
+            "sample_count": len(self._samples),
+            "sampling_interval_seconds": self.interval,
+            "network_scope_note": (
+                "Host NIC counters include unrelated host traffic; pipeline process-tree I/O is "
+                "reported separately and includes local and NAS file I/O."
+            ),
+            "smb_connections": self._smb_connections(),
+            "stage_summaries": summaries,
+            "samples": self._samples,
+        }

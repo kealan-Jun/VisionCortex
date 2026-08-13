@@ -22,6 +22,8 @@ performance:
   detection_fps: 10.0
   image_size: 640
   fine_batch_size: 16
+  synchronized_segment_waves: true
+  segment_wave_timeout_seconds: 3600
   coarse_decode_lanes: [cuda, cuda, cuda, cuda, cpu, cpu]
   fine_decode_lanes: [cuda, cuda, cuda, cuda, cpu, cpu]
   source_workers: 6
@@ -54,8 +56,13 @@ resource_limits:
 storage:
   index_csv: Y:/experiment_record_index.csv
   archive_root: Y:/VisionCortexExperimentArchive
+  # The NAS recorder's 15-minute segments are the original input. They are
+  # indexed as a virtual timeline and are never copied into one 82-88 GB file.
   local_input_root: D:/VisionCortexLocal/Input
   local_runtime_root: D:/VisionCortexLocal/Runtime
   local_cache_root: D:/VisionCortexLocal/Cache
   local_staging_root: D:/VisionCortexLocal/Runtime/outputs
   sync_to_nas: true
+  run_output_mode: nas_direct
+  manifest_storage: nas
+  require_nas_source_paths: true

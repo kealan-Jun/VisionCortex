@@ -135,7 +135,8 @@ def run_fixed_benchmark_command(
         encoding="utf-8",
     )
     typer.echo(
-        f"input_views={len(manifest.views)} local_input={ingest['local_input_root']} "
+        f"input_views={len(manifest.views)} input_mode={ingest['input_mode']} "
+        f"source_copy_bytes={ingest['copied_source_bytes']} manifest={ingest['manifest']} "
         f"nas_staging={nas_root} fixed_output={fixed_root}"
     )
     result = EvidencePipeline(settings, _progress).run(manifest)

@@ -1,5 +1,11 @@
 # LabVision Evidence
 
+RTX 4060 真实六路运行节点必须先阅读
+[`docs/RTX4060-Codex-真实六路全链路执行任务书.md`](docs/RTX4060-Codex-真实六路全链路执行任务书.md)，
+并在运行结束后填写
+[`docs/RTX4060-真实六路运行回传模板.md`](docs/RTX4060-真实六路运行回传模板.md)。
+运行节点只同步冻结提交并执行真实全链路，不修改代码、不运行开发测试。
+
 > 冻结基线：六路、多视角、3 小时湿实验视频的时间对齐、有界实验筛选、五类关键素材和细粒度步骤理解流水线。RTX 4060 部署、固定 NAS 基准、缓存目录与开发协作方式见 [RTX4060-交接与运行说明.md](RTX4060-交接与运行说明.md)。
 
 固定基准不会重复创建实验目录：`labvision run-fixed-benchmark --config configs/rtx4060-laptop-production.yaml` 复用 `Y:\VisionCortexExperimentArchive\Six-View-Three-Hour-Experiment-2026-08-13`。其他用户上传任务仍按实际上传路数动态创建独立档案。

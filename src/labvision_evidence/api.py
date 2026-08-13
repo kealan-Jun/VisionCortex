@@ -277,8 +277,25 @@ def _execute_fixed_benchmark(
                 "manifest": str(manifest_path),
                 "source_count": len(manifest.views),
                 "input_reused": all(
-                    Path(view.video).is_file()
-                    and (view.timestamps_csv is None or Path(view.timestamps_csv).is_file())
+                    (
+                        all(
+                            segment.video.is_file()
+                            and (
+                                segment.timestamps_csv is None
+                                or segment.timestamps_csv.is_file()
+                            )
+                            for segment in view.segments
+                        )
+                        if view.segments
+                        else bool(
+                            view.video
+                            and Path(view.video).is_file()
+                            and (
+                                view.timestamps_csv is None
+                                or Path(view.timestamps_csv).is_file()
+                            )
+                        )
+                    )
                     for view in manifest.views
                 ),
                 "ingest_details": ingest,
@@ -339,7 +356,7 @@ def health() -> dict[str, Any]:
             "experiment_id": _BENCHMARK_EXPERIMENT_ID,
             "archive_name": _BENCHMARK_ARCHIVE_NAME,
             "index_csv": str(settings["storage"]["index_csv"]),
-            "local_input_root": str(settings["storage"]["local_input_root"]),
+            "input_mode": "NAS 15-minute segments / zero-copy virtual timeline",
             "local_runtime_root": str(settings["storage"]["local_runtime_root"]),
             "local_cache_root": str(settings["storage"]["local_cache_root"]),
         },

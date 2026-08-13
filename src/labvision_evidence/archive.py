@@ -26,7 +26,12 @@ from .schemas import (
     VideoInfo,
     ViewInput,
 )
-from .video_io import create_grid_video, extract_clip, read_frame_at, write_annotated_frame
+from .video_io import (
+    create_grid_video,
+    extract_view_clip,
+    read_view_frame_at,
+    write_annotated_frame,
+)
 
 
 ACTION_SLUGS = {
@@ -155,7 +160,9 @@ def materialize_experiment_clips(
                 raise ValueError(f"{group.group_id}/{view_id} 全局边界映射后不在视频范围内")
             base = f"{role_label}_{_safe_slug(view_id)}"
             destination = videos_dir / f"{base}.mp4"
-            extract_clip(view.video, destination, local_start, local_end - local_start, encoder)
+            extract_view_clip(
+                view, infos[view_id], destination, local_start, local_end - local_start, encoder
+            )
             relative = _relative(destination, layout.root)
             group.videos[role_label.lower()] = relative
             role_paths[role_label] = (view_id, destination)
@@ -273,7 +280,7 @@ def analyze_experiment_groups(
                 local_ms = transforms[view_id].to_local(global_ms)
                 if not 0.0 <= local_ms <= infos[view_id].duration_ms:
                     continue
-                frame = read_frame_at(by_view[view_id].video, local_ms)
+                frame = read_view_frame_at(by_view[view_id], infos[view_id], local_ms)
                 if frame is None:
                     continue
                 path = storyboard_dir / f"{index:02d}_{role_label}_{_safe_slug(view_id)}.jpg"
@@ -738,7 +745,7 @@ def materialize_key_materials(
             if not 0.0 <= local_key_ms <= infos[view_id].duration_ms:
                 event.uncertainty.append(f"{view_id} 关键时间超出视频范围")
                 continue
-            frame = read_frame_at(view.video, local_key_ms)
+            frame = read_view_frame_at(view, infos[view_id], local_key_ms)
             if frame is None:
                 event.uncertainty.append(f"{view_id} 关键帧解码失败")
                 continue
@@ -766,7 +773,9 @@ def materialize_key_materials(
             local_end = min(infos[view_id].duration_ms, transform.to_local(clip_end_global))
             if local_end > local_start:
                 clip_path = clip_dir / f"{base}.mp4"
-                extract_clip(view.video, clip_path, local_start, local_end - local_start, encoder)
+                extract_view_clip(
+                    view, infos[view_id], clip_path, local_start, local_end - local_start, encoder
+                )
                 relative_clip = _relative(clip_path, layout.root)
                 event.key_clips[view_id] = relative_clip
                 clip_paths[role_label] = clip_path

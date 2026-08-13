@@ -5,6 +5,7 @@ import json
 import math
 import queue
 import threading
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -14,7 +15,7 @@ import cv2
 import numpy as np
 
 from .schemas import AlignmentTransform, BoxEvidence, FrameEvidence, VideoInfo, ViewInput, ViewRole
-from .video_io import iter_sampled_frames
+from .video_io import iter_view_sampled_frames
 
 
 def _iou(a: Sequence[float], b: Sequence[float]) -> float:
@@ -165,29 +166,62 @@ def _producer(
     decode_backend: str,
     motion_probe_fps: float,
     motion_signature_size: tuple[int, int],
+    wave_barrier: threading.Barrier | None,
 ) -> None:
     perf = config["performance"]
     chunk_ms = float(perf["chunk_seconds"]) * 1000.0
     spans = windows if windows is not None else [(0.0, info.duration_ms)]
-    work_units: list[tuple[float, float]] = []
-    for span_start, span_end in spans:
-        cursor = max(0.0, span_start)
-        bounded_end = min(info.duration_ms, span_end)
-        while cursor < bounded_end:
-            unit_end = min(bounded_end, cursor + chunk_ms)
-            work_units.append((cursor, unit_end))
-            cursor = unit_end
+    if windows is None and info.segments and perf.get("synchronized_segment_waves"):
+        work_units = [
+            (segment.virtual_start_ms, segment.virtual_end_ms) for segment in info.segments
+        ]
+    else:
+        work_units: list[tuple[float, float]] = []
+        for span_start, span_end in spans:
+            cursor = max(0.0, span_start)
+            bounded_end = min(info.duration_ms, span_end)
+            while cursor < bounded_end:
+                unit_end = min(bounded_end, cursor + chunk_ms)
+                work_units.append((cursor, unit_end))
+                cursor = unit_end
     previous_gray: np.ndarray | None = None
     previous_signature: np.ndarray | None = None
     decode_fps = max(sample_fps, motion_probe_fps)
     sample_period_ms = 1000.0 / max(sample_fps, 1e-9)
+    activity_path = output_queue.activity_path if hasattr(output_queue, "activity_path") else None
+
+    def activity(event: str, chunk_index: int | None = None) -> None:
+        if activity_path is None:
+            return
+        payload = {
+            "timestamp": time.time(),
+            "event": event,
+            "view_id": view.view_id,
+            "role": view.role.value,
+            "decode_backend": decode_backend,
+            "chunk_index": chunk_index,
+            "segment_path": (
+                str(info.segments[chunk_index].path)
+                if chunk_index is not None and info.segments and chunk_index < len(info.segments)
+                else None
+            ),
+        }
+        with output_queue.activity_lock:
+            with activity_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
     try:
         for chunk_index, (start_ms, end_ms) in enumerate(work_units):
+            activity("source_unit_started", chunk_index)
             if chunk_index in completed_chunks:
+                activity("source_unit_reused", chunk_index)
+                if wave_barrier is not None:
+                    wave_barrier.wait(
+                        timeout=float(perf.get("segment_wave_timeout_seconds", 3600))
+                    )
                 continue
             next_yolo_ms = start_ms
-            for frame_index, local_ms, frame in iter_sampled_frames(
-                view.video,
+            for frame_index, local_ms, frame in iter_view_sampled_frames(
+                view,
                 info,
                 start_ms,
                 end_ms,
@@ -223,9 +257,18 @@ def _producer(
                 while next_yolo_ms <= local_ms + 0.5:
                     next_yolo_ms += sample_period_ms
             output_queue.put(ChunkEnd(view_id=view.view_id, chunk_index=chunk_index))
+            activity("source_unit_completed", chunk_index)
+            if wave_barrier is not None:
+                wave_barrier.wait(timeout=float(perf.get("segment_wave_timeout_seconds", 3600)))
     except Exception as exc:  # producer errors must cross the thread boundary
+        if wave_barrier is not None:
+            try:
+                wave_barrier.abort()
+            except threading.BrokenBarrierError:
+                pass
         output_queue.put(ProducerError(view_id=view.view_id, message=f"{type(exc).__name__}: {exc}"))
     finally:
+        activity("source_worker_ended")
         output_queue.put(ProducerEnd(view_id=view.view_id))
 
 
@@ -404,6 +447,7 @@ def scan_videos(
     keyframes_only: bool = False,
     phase: str = "fine",
     decode_backends: dict[str, str] | None = None,
+    wave_barrier: threading.Barrier | None = None,
 ) -> dict[str, Path]:
     work_dir.mkdir(parents=True, exist_ok=True)
     output_paths = {view.view_id: work_dir / f"{view.view_id}.detections.jsonl" for view in views}
@@ -454,10 +498,10 @@ def scan_videos(
                 )
                 for view in role_views
             },
+            "active_source_workers": len(role_views),
+            "synchronized_segment_waves": wave_barrier is not None,
         }
-        (work_dir / f"runtime_{phase}_{role.value}.json").write_text(
-            json.dumps(runtime_report, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        runtime_path = work_dir / f"runtime_{phase}_{role.value}.json"
         trackers = {
             view.view_id: ByteSortTracker(max_age_ms=max(1750.0, 1500.0 / effective_fps))
             for view in role_views
@@ -472,6 +516,8 @@ def scan_videos(
             )
         )
         frame_queue: queue.Queue[Any] = queue.Queue(maxsize=max(1, queue_depth))
+        frame_queue.activity_path = work_dir / f"source_activity_{phase}_{role.value}.jsonl"
+        frame_queue.activity_lock = threading.Lock()
         threads = [
             threading.Thread(
                 target=_producer,
@@ -491,6 +537,7 @@ def scan_videos(
                     ),
                     probe_fps,
                     signature_size,
+                    wave_barrier,
                 ),
                 name=f"decode-{view.view_id}",
                 daemon=True,
@@ -503,10 +550,13 @@ def scan_videos(
         ended: set[str] = set()
         batch: list[FramePacket] = []
         errors: list[str] = []
+        batch_sizes: list[int] = []
+        max_queue_size = 0
 
         def flush() -> None:
             if not batch:
                 return
+            batch_sizes.append(len(batch))
             inferred = scanner.infer(batch)
             for packet, boxes in zip(batch, inferred, strict=True):
                 tracked = trackers[packet.view.view_id].update(boxes, packet.local_ms)
@@ -527,6 +577,7 @@ def scan_videos(
         try:
             while len(ended) < len(role_views):
                 item = frame_queue.get()
+                max_queue_size = max(max_queue_size, frame_queue.qsize())
                 if isinstance(item, FramePacket):
                     batch.append(item)
                     if len(batch) >= scanner.batch_size:
@@ -549,6 +600,28 @@ def scan_videos(
                 thread.join(timeout=5.0)
             for writer in writers.values():
                 writer.close()
+            runtime_report.update(
+                {
+                    "completed_source_workers": len(ended),
+                    "inference_call_count": len(batch_sizes),
+                    "inference_frame_count": sum(batch_sizes),
+                    "actual_batch_size_min": min(batch_sizes) if batch_sizes else 0,
+                    "actual_batch_size_max": max(batch_sizes) if batch_sizes else 0,
+                    "actual_batch_size_mean": (
+                        round(sum(batch_sizes) / len(batch_sizes), 4) if batch_sizes else 0.0
+                    ),
+                    "requested_batch_fill_ratio": (
+                        round(sum(batch_sizes) / len(batch_sizes) / phase_batch_size, 4)
+                        if batch_sizes
+                        else 0.0
+                    ),
+                    "max_observed_queue_depth": max_queue_size,
+                    "configured_queue_depth": queue_depth,
+                }
+            )
+            runtime_path.write_text(
+                json.dumps(runtime_report, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
             scanner.close()
     return output_paths
 
