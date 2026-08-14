@@ -38,3 +38,52 @@ def test_scan_runtime_classifies_decode_starvation(tmp_path):
     assert diagnosis["actual_batch_size_mean"] == 2.0
     assert diagnosis["effective_batch_capacity_mean"] == 8.0
     assert diagnosis["batch_fill_ratio"] == 0.25
+
+
+def test_scan_runtime_aggregates_progressive_passes(tmp_path):
+    layout = ArchiveLayout(tmp_path / "archive")
+    layout.create()
+    work = tmp_path / "scan"
+    for name, role, frames in (
+        ("pass-00-primary", "first_person", 80),
+        ("pass-01-supplemental", "third_person", 40),
+    ):
+        pass_dir = work / name
+        pass_dir.mkdir(parents=True)
+        (pass_dir / f"runtime_fine_{role}.json").write_text(
+            json.dumps(
+                {
+                    "role": role,
+                    "role_total_seconds": 10.0,
+                    "queue_wait_seconds": 2.0,
+                    "inference_seconds": 6.0,
+                    "tracking_and_ledger_seconds": 1.0,
+                    "inference_call_count": 10,
+                    "inference_frame_count": frames,
+                    "final_effective_batch_size": 8,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (pass_dir / "scheduler_fine.json").write_text(
+            json.dumps({"mode": "sequential_role_residency", "active_view_ids": [role]}),
+            encoding="utf-8",
+        )
+
+    progressive = {"enabled": True, "passes": [{"pass_index": 0}, {"pass_index": 1}]}
+    EvidencePipeline._archive_scan_runtime(
+        layout, work, "fine", progressive_report=progressive
+    )
+
+    report = json.loads(
+        (layout.json_config / "scan_runtime_fine.json").read_text(encoding="utf-8")
+    )
+    assert len(report["role_reports"]) == 2
+    assert {item["scan_pass"] for item in report["role_reports"]} == {
+        "pass-00-primary",
+        "pass-01-supplemental",
+    }
+    assert report["scheduler"]["mode"] == "progressive_cross_view"
+    assert len(report["scheduler"]["passes"]) == 2
+    assert report["progressive_cross_view"] == progressive
+    assert report["bottleneck_diagnosis"]["inference_frame_count"] == 120

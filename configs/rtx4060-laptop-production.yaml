@@ -18,7 +18,7 @@ performance:
   coarse_batch_size: 32
   coarse_keyframes_only: false
   # Boundary discovery needs one wearable view and one independent static
-  # sentinel. All six views still join the bounded 10 FPS fine scan.
+  # sentinel. All six views remain eligible for bounded 10 FPS progressive scan.
   coarse_first_person_views: 1
   coarse_third_person_views: 1
   coarse_refinement_association_margin_seconds: 30.0
@@ -40,7 +40,7 @@ performance:
   coarse_reuse_motion_probe: true
   motion_probe_first_person_views: 1
   # The validated wearable stream is only 8.22 GiB. It discovers windows;
-  # every first/third-person view still joins the bounded YOLO scans.
+  # third-person views join bounded YOLO only while a cross-view gap remains.
   motion_probe_third_person_views: 0
   motion_probe_percentile: 85.0
   motion_probe_burst_merge_gap_seconds: 45.0
@@ -69,6 +69,17 @@ performance:
   fine_first_person_decode_workers: 2
   fine_third_person_decode_workers: 2
   fine_decode_prefetch_frames: 12
+  # Scan the wearable view and best coarse-ranked static view first. A remaining
+  # static view is decoded only for aligned candidate windows that contain a
+  # reliable first-person start anchor but still lack valid dual-role evidence.
+  fine_progressive_cross_view: true
+  fine_initial_third_person_views: 1
+  # Never encode validation-set camera IDs in the product profile. Empty means
+  # every upload is ranked from its own coarse evidence and manifest order.
+  fine_preferred_third_person_views: []
+  # Fine decode padding remains wide for recall, while pass/fail evidence is
+  # associated to its actual boundary with only a small clock-tolerance margin.
+  fine_progressive_audit_margin_seconds: 5.0
   synchronized_segment_waves: true
   segment_wave_timeout_seconds: 3600
   coarse_decode_lanes: [cuda, cuda, cuda, cuda, cpu, cpu]
@@ -100,8 +111,9 @@ performance:
   # Validate the 180 source paths once, concurrently, then reuse that snapshot.
   source_stat_workers: 24
   source_stat_cache_ttl_seconds: 120
-  # All five fixed third-person views join bounded fine windows. This both
-  # fills the shared third-person TRT batches and guarantees cross-view audit.
+  # Keep all five fixed views eligible as the ordered supplemental pool. The
+  # progressive scheduler stops as soon as every demanded window has valid
+  # first/third-person evidence; unresolved windows eventually reach all five.
   fine_min_third_person_views: 5
 
 alignment:

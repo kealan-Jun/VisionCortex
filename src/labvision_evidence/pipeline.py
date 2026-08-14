@@ -41,7 +41,12 @@ from .archive import (
     write_aligned_csv,
     write_json,
 )
-from .grouping import build_experiment_groups, normalize_experiment_segments, select_key_events
+from .grouping import (
+    build_experiment_groups,
+    is_experiment_start_anchor,
+    normalize_experiment_segments,
+    select_key_events,
+)
 from .detection import scan_videos, validate_models
 from .daily_reports import generate_daily_report_archive
 from .schemas import (
@@ -722,6 +727,7 @@ class EvidencePipeline:
         image_size=None,
         keyframes_only=False,
         phase="fine",
+        decode_backends: dict[str, str] | None = None,
     ):
         groups = [
             [view for view in manifest.views if view.role == ViewRole.FIRST_PERSON],
@@ -757,8 +763,14 @@ class EvidencePipeline:
         if len(lanes) < len(manifest.views):
             lanes.extend([lanes[-1]] * (len(manifest.views) - len(lanes)))
         concurrent_roles = bool(perf.get("concurrent_role_scanners", True)) and len(groups) > 1
-        kwargs["decode_backends"] = {
+        default_decode_backends = {
             view.view_id: lanes[index] for index, view in enumerate(manifest.views)
+        }
+        kwargs["decode_backends"] = {
+            view.view_id: (decode_backends or default_decode_backends).get(
+                view.view_id, default_decode_backends[view.view_id]
+            )
+            for view in manifest.views
         }
         if (
             phase == "coarse"
@@ -791,6 +803,8 @@ class EvidencePipeline:
                     "mode": "concurrent_roles" if concurrent_roles else "sequential_role_residency",
                     "role_order": [group[0].role.value for group in groups],
                     "configured_decode_lanes": lanes,
+                    "active_view_ids": [view.view_id for view in manifest.views],
+                    "decode_backends": kwargs["decode_backends"],
                     "reason": (
                         "configured concurrent role scanners"
                         if concurrent_roles
@@ -868,6 +882,310 @@ class EvidencePipeline:
         return first[:first_limit] + third[:third_limit]
 
     @staticmethod
+    def _progressive_fine_view_order(
+        fine_views: list[ViewInput],
+        fine_view_report: dict[str, dict[str, Any]],
+        initial_third_person_views: int,
+        preferred_third_person_views: list[str] | None = None,
+    ) -> tuple[list[ViewInput], list[ViewInput]]:
+        """Return the initial views and ordered third-person fallback pool.
+
+        An optional caller-provided preference may rank known deployment views.
+        Otherwise each upload is ranked only by its own coarse anchor activity,
+        with stable manifest order as the deterministic final tie-breaker.
+        """
+
+        positions = {view.view_id: index for index, view in enumerate(fine_views)}
+        preferred_positions = {
+            view_id: index
+            for index, view_id in enumerate(preferred_third_person_views or [])
+        }
+        first = [view for view in fine_views if view.role == ViewRole.FIRST_PERSON]
+        third = sorted(
+            (view for view in fine_views if view.role == ViewRole.THIRD_PERSON),
+            key=lambda view: (
+                0 if view.view_id in preferred_positions else 1,
+                preferred_positions.get(view.view_id, len(preferred_positions)),
+                -int(fine_view_report.get(view.view_id, {}).get("active_anchor_frames", 0)),
+                -int(fine_view_report.get(view.view_id, {}).get("anchor_frames", 0)),
+                positions[view.view_id],
+            ),
+        )
+        initial_count = min(len(third), max(1, int(initial_third_person_views)))
+        return first + third[:initial_count], third[initial_count:]
+
+    def _progressive_target_status(
+        self,
+        boundary_candidates: list[ActionCandidate],
+        events: list[EvidenceEvent],
+    ) -> list[dict[str, Any]]:
+        """Classify which recalled windows still need another third-person view.
+
+        A supplemental scan is demanded only by reliable first-person evidence.
+        A window is covered only by an accepted, boundary-eligible event with
+        both roles. This deliberately prevents a partial liquid hypothesis such
+        as DEV-011 EVT-000444 from suppressing a needed supplemental scan.
+        """
+
+        audit_margin_ms = (
+            float(
+                self.config["performance"].get(
+                    "fine_progressive_audit_margin_seconds", 5.0
+                )
+            )
+            * 1000.0
+        )
+        results = []
+        for candidate in boundary_candidates:
+            # Decode padding maximizes recall and may overlap adjacent experiments.
+            # It must not be reused as the evidence-association window, otherwise
+            # one event can falsely mark two nearby candidates as cross-view covered.
+            window_start = candidate.global_start_ms - audit_margin_ms
+            window_end = candidate.global_end_ms + audit_margin_ms
+            relevant = []
+            for event in events:
+                # The candidate/action ledger has already applied temporal and
+                # physical-action construction. A first-person anchor rejected
+                # only for missing cross-view support is exactly the condition
+                # that must trigger a supplemental view.
+                if event.action_type == ActionType.LIQUID_MOVEMENT:
+                    required = set(
+                        self.config["segmentation"].get(
+                            "liquid_start_anchor_required_objects", ["pipette"]
+                        )
+                    )
+                    reliable_start_signal = event.accepted and (
+                        not required or bool(set(event.objects) & required)
+                    )
+                else:
+                    reliable_start_signal = is_experiment_start_anchor(
+                        event, self.config
+                    )
+                if not reliable_start_signal:
+                    continue
+                midpoint = (event.global_start_ms + event.global_end_ms) / 2.0
+                if window_start <= midpoint <= window_end:
+                    relevant.append(event)
+            first_signal = [
+                event for event in relevant if ViewRole.FIRST_PERSON in event.supporting_roles
+            ]
+            cross_view = [
+                event
+                for event in first_signal
+                if event.accepted
+                and {ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON}.issubset(
+                    set(event.supporting_roles)
+                )
+            ]
+            if cross_view:
+                status = "cross_view_covered"
+            elif first_signal:
+                status = "needs_third_person_supplement"
+            else:
+                status = "no_reliable_first_person_activity"
+            results.append(
+                {
+                    "candidate_id": candidate.candidate_id,
+                    "global_start_ms": candidate.global_start_ms,
+                    "global_end_ms": candidate.global_end_ms,
+                    "audit_window_start_ms": window_start,
+                    "audit_window_end_ms": window_end,
+                    "status": status,
+                    "first_person_anchor_event_ids": [
+                        event.event_id for event in first_signal
+                    ],
+                    "cross_view_anchor_event_ids": [event.event_id for event in cross_view],
+                }
+            )
+        return results
+
+    def _run_progressive_fine_scan(
+        self,
+        manifest: RunManifest,
+        fine_views: list[ViewInput],
+        fine_view_report: dict[str, dict[str, Any]],
+        boundary_candidates: list[ActionCandidate],
+        fine_windows: dict[str, list[tuple[float, float]]],
+        infos,
+        transforms,
+        work_dir: Path,
+    ) -> tuple[dict[str, Path], list[ViewInput], list[ActionCandidate], dict[str, Any]]:
+        """Scan one third-person view first, then fill only evidence gaps."""
+
+        perf = self.config["performance"]
+        initial_views, supplemental_views = self._progressive_fine_view_order(
+            fine_views,
+            fine_view_report,
+            int(perf.get("fine_initial_third_person_views", 1)),
+            list(perf.get("fine_preferred_third_person_views") or []),
+        )
+        if not any(view.role == ViewRole.THIRD_PERSON for view in initial_views):
+            raise ValueError("progressive fine scan requires at least one third-person view")
+
+        lanes = list(perf.get("fine_decode_lanes") or [])
+        if not lanes:
+            lanes = ["cuda" if perf.get("ffmpeg_hwaccel") else "cpu"] * len(
+                manifest.views
+            )
+        if len(lanes) < len(manifest.views):
+            lanes.extend([lanes[-1]] * (len(manifest.views) - len(lanes)))
+        full_decode_backends = {
+            view.view_id: lanes[index] for index, view in enumerate(manifest.views)
+        }
+
+        scanned: dict[str, ViewInput] = {}
+        detection_paths: dict[str, Path] = {}
+        actual_windows: dict[str, list[tuple[float, float]]] = {}
+        pass_reports: list[dict[str, Any]] = []
+
+        def execute_pass(
+            pass_index: int,
+            pass_kind: str,
+            pass_views: list[ViewInput],
+            pass_candidates: list[ActionCandidate],
+        ) -> list[dict[str, Any]]:
+            pass_name = f"pass-{pass_index:02d}-{pass_kind}"
+            if pass_kind == "primary":
+                pass_windows = {
+                    view.view_id: fine_windows[view.view_id] for view in pass_views
+                }
+            else:
+                all_pass_windows = self._fine_windows(
+                    pass_candidates, infos, transforms
+                )
+                pass_windows = {
+                    view.view_id: all_pass_windows[view.view_id] for view in pass_views
+                }
+            pass_manifest = manifest.model_copy(update={"views": pass_views})
+            result = self._scan_all_views_concurrently(
+                pass_manifest,
+                infos,
+                transforms,
+                work_dir / pass_name,
+                windows=pass_windows,
+                sample_fps=float(perf["detection_fps"]),
+                phase="fine",
+                decode_backends={
+                    view.view_id: full_decode_backends[view.view_id] for view in pass_views
+                },
+            )
+            for view in pass_views:
+                scanned[view.view_id] = view
+                detection_paths[view.view_id] = result[view.view_id]
+                actual_windows[view.view_id] = pass_windows[view.view_id]
+            scanned_views = [
+                view for view in fine_views if view.view_id in scanned
+            ]
+            current_candidates = generate_candidates(
+                scanned_views, detection_paths, self.config
+            )
+            current_events, _ = audit_candidates(
+                current_candidates, transforms, self.config
+            )
+            liquid_context_rejections = refine_liquid_events_with_context(
+                current_events, detection_paths
+            )
+            target_status = self._progressive_target_status(
+                boundary_candidates, current_events
+            )
+            pass_reports.append(
+                {
+                    "pass_index": pass_index,
+                    "pass_kind": pass_kind,
+                    "view_ids": [view.view_id for view in pass_views],
+                    "target_candidate_ids": [
+                        candidate.candidate_id for candidate in pass_candidates
+                    ],
+                    "decode_backends": {
+                        view.view_id: full_decode_backends[view.view_id]
+                        for view in pass_views
+                    },
+                    "coverage": self._window_coverage(pass_windows, infos),
+                    "candidate_count_after_pass": len(current_candidates),
+                    "liquid_context_rejection_count": len(
+                        liquid_context_rejections
+                    ),
+                    "liquid_context_rejected_event_ids": [
+                        item["event_id"] for item in liquid_context_rejections
+                    ],
+                    "target_status_after_pass": target_status,
+                }
+            )
+            return target_status
+
+        target_status = execute_pass(
+            0, "primary", initial_views, boundary_candidates
+        )
+        unresolved_ids = {
+            item["candidate_id"]
+            for item in target_status
+            if item["status"] == "needs_third_person_supplement"
+        }
+        for pass_index, view in enumerate(supplemental_views, 1):
+            if not unresolved_ids:
+                break
+            pass_candidates = [
+                candidate
+                for candidate in boundary_candidates
+                if candidate.candidate_id in unresolved_ids
+            ]
+            target_status = execute_pass(
+                pass_index, "supplemental", [view], pass_candidates
+            )
+            unresolved_ids = {
+                item["candidate_id"]
+                for item in target_status
+                if item["status"] == "needs_third_person_supplement"
+            }
+
+        scanned_views = [view for view in fine_views if view.view_id in scanned]
+        final_candidates = generate_candidates(scanned_views, detection_paths, self.config)
+        all_coverage = self._window_coverage(fine_windows, infos)
+        actual_coverage = self._window_coverage(actual_windows, infos)
+        all_seconds = sum(float(item["selected_seconds"]) for item in all_coverage.values())
+        actual_seconds = sum(
+            float(item["selected_seconds"]) for item in actual_coverage.values()
+        )
+        sample_fps = float(perf["detection_fps"])
+        report = {
+            "schema_version": "visioncortex-progressive-fine-scan/1",
+            "enabled": True,
+            "selection_rule": (
+                "scan first-person plus the highest-ranked third-person view; "
+                "scan each remaining third-person view only for recalled windows "
+                "with a reliable first-person start anchor but no valid dual-role anchor"
+            ),
+            "eligible_view_ids": [view.view_id for view in fine_views],
+            "initial_view_ids": [view.view_id for view in initial_views],
+            "preferred_third_person_views": list(
+                perf.get("fine_preferred_third_person_views") or []
+            ),
+            "supplemental_priority": [view.view_id for view in supplemental_views],
+            "scanned_view_ids": [view.view_id for view in scanned_views],
+            "not_scanned_view_ids": [
+                view.view_id for view in fine_views if view.view_id not in scanned
+            ],
+            "passes": pass_reports,
+            "final_target_status": target_status,
+            "unresolved_candidate_ids": sorted(unresolved_ids),
+            "stopping_reason": (
+                "all_demanded_windows_have_dual_role_anchor"
+                if not unresolved_ids
+                else "all_eligible_third_person_views_exhausted"
+            ),
+            "all_view_selected_seconds": round(all_seconds, 3),
+            "actual_selected_seconds": round(actual_seconds, 3),
+            "avoided_selected_seconds": round(max(0.0, all_seconds - actual_seconds), 3),
+            "all_view_estimated_frames": int(round(all_seconds * sample_fps)),
+            "actual_estimated_frames": int(round(actual_seconds * sample_fps)),
+            "avoided_estimated_frames": int(
+                round(max(0.0, all_seconds - actual_seconds) * sample_fps)
+            ),
+            "actual_coverage": actual_coverage,
+        }
+        return detection_paths, scanned_views, final_candidates, report
+
+    @staticmethod
     def _window_coverage(
         windows: dict[str, list[tuple[float, float]]], infos
     ) -> dict[str, dict[str, float | int]]:
@@ -934,16 +1252,28 @@ class EvidencePipeline:
         }
 
     @staticmethod
-    def _archive_scan_runtime(layout: ArchiveLayout, work_dir: Path, phase: str) -> None:
+    def _archive_scan_runtime(
+        layout: ArchiveLayout,
+        work_dir: Path,
+        phase: str,
+        progressive_report: dict[str, Any] | None = None,
+    ) -> None:
         role_reports = []
-        for path in sorted(work_dir.glob(f"runtime_{phase}_*.json")):
-            role_reports.append(json.loads(path.read_text(encoding="utf-8")))
+        for path in sorted(work_dir.rglob(f"runtime_{phase}_*.json")):
+            report = json.loads(path.read_text(encoding="utf-8"))
+            report["scan_pass"] = str(path.parent.relative_to(work_dir)).replace("\\", "/")
+            role_reports.append(report)
         source_activity = []
-        for path in sorted(work_dir.glob(f"source_activity_{phase}_*.jsonl")):
+        for path in sorted(work_dir.rglob(f"source_activity_{phase}_*.jsonl")):
             with path.open("r", encoding="utf-8") as handle:
-                source_activity.extend(
-                    json.loads(line) for line in handle if line.strip()
-                )
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    item = json.loads(line)
+                    item["scan_pass"] = str(path.parent.relative_to(work_dir)).replace(
+                        "\\", "/"
+                    )
+                    source_activity.append(item)
         computed_units = sum(
             item.get("event") == "source_unit_completed" for item in source_activity
         )
@@ -953,12 +1283,29 @@ class EvidencePipeline:
         started_units = sum(
             item.get("event") == "source_unit_started" for item in source_activity
         )
-        scheduler_path = work_dir / f"scheduler_{phase}.json"
-        scheduler = (
-            json.loads(scheduler_path.read_text(encoding="utf-8"))
-            if scheduler_path.is_file()
-            else None
-        )
+        scheduler_reports = []
+        for path in sorted(work_dir.rglob(f"scheduler_{phase}.json")):
+            report = json.loads(path.read_text(encoding="utf-8"))
+            report["scan_pass"] = str(path.parent.relative_to(work_dir)).replace("\\", "/")
+            scheduler_reports.append(report)
+        if progressive_report is not None:
+            scheduler = {
+                "schema_version": "visioncortex-role-scheduler/2",
+                "phase": phase,
+                "mode": "progressive_cross_view",
+                "passes": scheduler_reports,
+            }
+        elif len(scheduler_reports) == 1:
+            scheduler = scheduler_reports[0]
+        elif scheduler_reports:
+            scheduler = {
+                "schema_version": "visioncortex-role-scheduler/2",
+                "phase": phase,
+                "mode": "progressive_cross_view",
+                "passes": scheduler_reports,
+            }
+        else:
+            scheduler = None
         inference_calls = sum(int(item.get("inference_call_count", 0)) for item in role_reports)
         inference_frames = sum(int(item.get("inference_frame_count", 0)) for item in role_reports)
         queue_wait_seconds = sum(float(item.get("queue_wait_seconds", 0.0)) for item in role_reports)
@@ -1022,6 +1369,7 @@ class EvidencePipeline:
                 },
                 "role_reports": role_reports,
                 "scheduler": scheduler,
+                "progressive_cross_view": progressive_report,
                 "bottleneck_diagnosis": bottleneck_diagnosis,
                 "source_activity": sorted(
                     source_activity, key=lambda item: float(item.get("timestamp", 0.0))
@@ -1572,6 +1920,38 @@ class EvidencePipeline:
             fine_views, fine_view_report = select_fine_scan_views(
                 manifest.views, coarse_paths, boundary_candidates, self.config
             )
+            progressive_enabled = bool(
+                self.config["performance"].get("fine_progressive_cross_view", False)
+            )
+            if progressive_enabled:
+                initial_fine_views, supplemental_fine_views = (
+                    self._progressive_fine_view_order(
+                        fine_views,
+                        fine_view_report,
+                        int(
+                            self.config["performance"].get(
+                                "fine_initial_third_person_views", 1
+                            )
+                        ),
+                        list(
+                            self.config["performance"].get(
+                                "fine_preferred_third_person_views"
+                            )
+                            or []
+                        ),
+                    )
+                )
+                initial_fine_ids = {view.view_id for view in initial_fine_views}
+                supplemental_rank = {
+                    view.view_id: rank
+                    for rank, view in enumerate(supplemental_fine_views, 1)
+                }
+                for view in fine_views:
+                    item = fine_view_report[view.view_id]
+                    item["progressive_initial"] = view.view_id in initial_fine_ids
+                    item["progressive_supplemental_rank"] = supplemental_rank.get(
+                        view.view_id
+                    )
             write_json(layout.json_config / "fine_view_selection.json", fine_view_report)
             coarse_artifacts = [
                 layout.json_config / "coarse_boundary_refinement.json",
@@ -1588,48 +1968,115 @@ class EvidencePipeline:
             fine_windows = {view.view_id: fine_windows[view.view_id] for view in fine_views}
             fine_coverage = self._window_coverage(fine_windows, infos)
             fine_sample_fps = float(self.config["performance"]["detection_fps"])
-            write_json(
-                layout.json_config / "fine_scan_windows.json",
-                {
-                    "schema_version": "visioncortex-fine-scan-windows/1",
-                    "selected_view_ids": [view.view_id for view in fine_views],
-                    "sample_fps": fine_sample_fps,
-                    "image_size": int(self.config["performance"]["image_size"]),
-                    "padding_seconds": float(
-                        self.config["performance"]["fine_window_padding_seconds"]
-                    ),
-                    "merge_gap_seconds": float(
-                        self.config["performance"].get(
-                            "fine_window_merge_gap_seconds", 0.0
-                        )
-                    ),
-                    "coverage": fine_coverage,
-                    "estimated_sampled_frames": int(
-                        round(
-                            sum(float(item["selected_seconds"]) for item in fine_coverage.values())
-                            * fine_sample_fps
-                        )
-                    ),
-                },
-            )
-            fine_manifest = manifest.model_copy(update={"views": fine_views})
-            selected_fine_ids = {view.view_id for view in fine_views}
+            fine_window_report = {
+                "schema_version": "visioncortex-fine-scan-windows/2",
+                "strategy": (
+                    "progressive_cross_view" if progressive_enabled else "all_selected_views"
+                ),
+                "eligible_view_ids": [view.view_id for view in fine_views],
+                "selected_view_ids": [view.view_id for view in fine_views],
+                "sample_fps": fine_sample_fps,
+                "image_size": int(self.config["performance"]["image_size"]),
+                "padding_seconds": float(
+                    self.config["performance"]["fine_window_padding_seconds"]
+                ),
+                "merge_gap_seconds": float(
+                    self.config["performance"].get(
+                        "fine_window_merge_gap_seconds", 0.0
+                    )
+                ),
+                "coverage": fine_coverage,
+                "estimated_sampled_frames": int(
+                    round(
+                        sum(float(item["selected_seconds"]) for item in fine_coverage.values())
+                        * fine_sample_fps
+                    )
+                ),
+            }
+            write_json(layout.json_config / "fine_scan_windows.json", fine_window_report)
+            eligible_fine_ids = {view.view_id for view in fine_views}
             for view in manifest.views:
                 self._view_runtime[view.view_id]["state"] = (
-                    "fine_running" if view.view_id in selected_fine_ids else "fine_not_selected"
+                    "fine_pending" if view.view_id in eligible_fine_ids else "fine_not_selected"
                 )
-            self._status(layout, "candidate_fine", 0.48, "候选窗 8 FPS 精扫并收紧动作边界")
-            detection_paths = self._scan_all_views_concurrently(
-                fine_manifest,
-                infos,
-                transforms,
-                layout.work / "detections-fine",
-                windows=fine_windows,
-                sample_fps=float(self.config["performance"]["detection_fps"]),
-                phase="fine",
+            progressive_report = None
+            self._status(
+                layout,
+                "candidate_fine",
+                0.48,
+                (
+                    "渐进精扫：先核验主双视角，缺失窗口按对齐时间戳补扫"
+                    if progressive_enabled
+                    else "候选窗精扫并收紧动作边界"
+                ),
             )
-            self._archive_scan_runtime(layout, layout.work / "detections-fine", "fine")
-            candidates = generate_candidates(fine_views, detection_paths, self.config)
+            fine_work_dir = layout.work / "detections-fine"
+            if progressive_enabled:
+                detection_paths, scanned_fine_views, candidates, progressive_report = (
+                    self._run_progressive_fine_scan(
+                        manifest,
+                        fine_views,
+                        fine_view_report,
+                        boundary_candidates,
+                        fine_windows,
+                        infos,
+                        transforms,
+                        fine_work_dir,
+                    )
+                )
+                write_json(
+                    layout.json_config / "progressive_fine_scan.json",
+                    progressive_report,
+                )
+                fine_window_report.update(
+                    {
+                        "selected_view_ids": progressive_report["scanned_view_ids"],
+                        "coverage": progressive_report["actual_coverage"],
+                        "estimated_sampled_frames": progressive_report[
+                            "actual_estimated_frames"
+                        ],
+                        "full_pool_coverage": fine_coverage,
+                        "full_pool_estimated_sampled_frames": progressive_report[
+                            "all_view_estimated_frames"
+                        ],
+                        "avoided_selected_seconds": progressive_report[
+                            "avoided_selected_seconds"
+                        ],
+                        "avoided_estimated_frames": progressive_report[
+                            "avoided_estimated_frames"
+                        ],
+                    }
+                )
+                write_json(
+                    layout.json_config / "fine_scan_windows.json", fine_window_report
+                )
+            else:
+                fine_manifest = manifest.model_copy(update={"views": fine_views})
+                detection_paths = self._scan_all_views_concurrently(
+                    fine_manifest,
+                    infos,
+                    transforms,
+                    fine_work_dir,
+                    windows=fine_windows,
+                    sample_fps=fine_sample_fps,
+                    phase="fine",
+                )
+                scanned_fine_views = fine_views
+                candidates = generate_candidates(
+                    scanned_fine_views, detection_paths, self.config
+                )
+            scanned_fine_ids = {view.view_id for view in scanned_fine_views}
+            for view in fine_views:
+                if view.view_id not in scanned_fine_ids:
+                    self._view_runtime[view.view_id]["state"] = (
+                        "fine_not_scanned_no_remaining_evidence_gap"
+                    )
+            self._archive_scan_runtime(
+                layout,
+                fine_work_dir,
+                "fine",
+                progressive_report=progressive_report,
+            )
             if self.config["archive"].get("keep_debug_candidates"):
                 write_json(
                     layout.json_config / "candidate_layer.json",
@@ -1639,6 +2086,9 @@ class EvidencePipeline:
                 layout.json_config / "scan_runtime_fine.json",
                 layout.json_config / "fine_scan_windows.json",
             ]
+            progressive_path = layout.json_config / "progressive_fine_scan.json"
+            if progressive_path.exists():
+                fine_artifacts.append(progressive_path)
             candidate_layer = layout.json_config / "candidate_layer.json"
             if candidate_layer.exists():
                 fine_artifacts.append(candidate_layer)

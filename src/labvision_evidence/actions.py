@@ -457,7 +457,7 @@ def refine_motion_candidates_with_coarse(
                     }
                 ],
                 uncertainty=[
-                    "Boundary tightened by coarse YOLO evidence; bounded all-view fine scan remains mandatory."
+                    "Boundary tightened by coarse YOLO evidence; bounded fine scan and progressive cross-view audit remain mandatory."
                 ],
             )
         )
