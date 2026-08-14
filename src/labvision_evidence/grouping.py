@@ -4,6 +4,7 @@ from collections import Counter
 from typing import Any, Sequence
 
 from .schemas import (
+    ActionCandidate,
     ActionType,
     EvidenceEvent,
     ExperimentGroup,
@@ -57,6 +58,29 @@ def is_experiment_start_anchor(
     )
 
 
+def select_formal_experiment_start_events(
+    events: Sequence[EvidenceEvent], config: dict[str, Any]
+) -> list[EvidenceEvent]:
+    """Select events allowed to open a formal dual-view experiment.
+
+    A confident single-view prelude remains useful audit evidence, but it must
+    not pull the delivered clip ahead of the first corroborated first/third-
+    person operation. If no canonical action anchor exists, the earliest
+    accepted dual-role event is the conservative fallback.
+    """
+
+    required_roles = {ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON}
+    dual_role = [
+        event
+        for event in events
+        if event.accepted and required_roles.issubset(set(event.supporting_roles))
+    ]
+    anchored = [
+        event for event in dual_role if is_experiment_start_anchor(event, config)
+    ]
+    return anchored or dual_role
+
+
 def normalize_experiment_segments(
     segments: Sequence[ExperimentSegment],
     events: Sequence[EvidenceEvent],
@@ -91,9 +115,7 @@ def normalize_experiment_segments(
             _segment_events(segment, by_event),
             key=lambda item: item.global_start_ms,
         )
-        anchors = [
-            event for event in core_events if is_experiment_start_anchor(event, config)
-        ]
+        anchors = select_formal_experiment_start_events(core_events, config)
         if not anchors:
             return segment
         bounded_start = max(
@@ -278,6 +300,167 @@ def _segment_events(
     segment: ExperimentSegment, by_event: dict[str, EvidenceEvent]
 ) -> list[EvidenceEvent]:
     return [by_event[event_id] for event_id in segment.event_ids if event_id in by_event]
+
+
+def prepare_formal_experiment_segments(
+    segments: Sequence[ExperimentSegment],
+    events: Sequence[EvidenceEvent],
+    views: Sequence[ViewInput],
+    coarse_windows: Sequence[ActionCandidate],
+    config: dict[str, Any],
+) -> tuple[list[ExperimentSegment], list[dict[str, Any]]]:
+    """Promote only dual-view experiments and conservatively attach FP tails.
+
+    Standalone single-role activity is retained in the event/audit ledger but
+    quarantined from formal clips. A following first-person-only cleanup tail
+    may extend the preceding dual-view segment only inside the same recalled
+    coarse boundary with tight temporal and physical continuity.
+    """
+
+    by_event = {event.event_id: event for event in events}
+    roles = {view.view_id: view.role for view in views}
+    required_roles = {ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON}
+    segmentation = config["segmentation"]
+    maximum_gap_ms = (
+        float(segmentation.get("boundary_context_max_gap_seconds", 10.0)) * 1000.0
+    )
+    maximum_extension_ms = (
+        float(segmentation.get("boundary_context_max_extension_seconds", 90.0))
+        * 1000.0
+    )
+    cleanup_objects = {
+        "brush",
+        "cleaning_tool",
+        "sink",
+        "wash_bottle",
+        "waste_container",
+    }
+    actor_objects = {"hand", "gloved_hand", "lab_coat"}
+
+    def segment_roles(segment: ExperimentSegment) -> set[ViewRole]:
+        return {
+            roles[view_id]
+            for view_id in segment.participating_views
+            if view_id in roles
+        }
+
+    def boundary_ids(segment: ExperimentSegment) -> set[str]:
+        midpoint = (segment.global_start_ms + segment.global_end_ms) / 2.0
+        return {
+            window.candidate_id
+            for window in coarse_windows
+            if window.global_start_ms <= midpoint <= window.global_end_ms
+        }
+
+    def event_objects(segment: ExperimentSegment) -> set[str]:
+        return {
+            obj
+            for event in _segment_events(segment, by_event)
+            for obj in event.objects
+            if obj not in actor_objects
+        }
+
+    promoted: list[ExperimentSegment] = []
+    receipts: list[dict[str, Any]] = []
+    previous_input_attachable = False
+    for segment in sorted(
+        segments, key=lambda item: (item.global_start_ms, item.global_end_ms)
+    ):
+        current_roles = segment_roles(segment)
+        if required_roles.issubset(current_roles):
+            promoted.append(segment)
+            previous_input_attachable = True
+            receipts.append(
+                {
+                    "segment_id": segment.segment_id,
+                    "decision": "promoted_dual_view",
+                    "roles": sorted(role.value for role in current_roles),
+                }
+            )
+            continue
+
+        previous = promoted[-1] if promoted and previous_input_attachable else None
+        gap_ms = (
+            segment.global_start_ms - previous.global_end_ms if previous else None
+        )
+        extension_ms = (
+            segment.global_end_ms - previous.global_end_ms if previous else None
+        )
+        shared_boundaries = (
+            boundary_ids(previous) & boundary_ids(segment) if previous else set()
+        )
+        previous_objects = event_objects(previous) if previous else set()
+        tail_objects = event_objects(segment)
+        shared_objects = previous_objects & tail_objects
+        cleanup_evidence = tail_objects & cleanup_objects
+        eligible_tail = bool(
+            previous
+            and current_roles == {ViewRole.FIRST_PERSON}
+            and gap_ms is not None
+            and -maximum_gap_ms <= gap_ms <= maximum_gap_ms
+            and extension_ms is not None
+            and extension_ms <= maximum_extension_ms
+            and shared_boundaries
+            and (shared_objects or cleanup_evidence)
+        )
+        if eligible_tail:
+            merged_event_ids = list(
+                dict.fromkeys([*previous.event_ids, *segment.event_ids])
+            )
+            merged_micro = sorted(
+                [*previous.micro_segments, *segment.micro_segments],
+                key=lambda item: float(item.get("start_global_ms", 0.0)),
+            )
+            merged_views = sorted(
+                set(previous.participating_views) | set(segment.participating_views)
+            )
+            promoted[-1] = previous.model_copy(
+                update={
+                    "global_end_ms": max(
+                        previous.global_end_ms, segment.global_end_ms
+                    ),
+                    "event_ids": merged_event_ids,
+                    "participating_views": merged_views,
+                    "rejected_views": {
+                        key: value
+                        for key, value in previous.rejected_views.items()
+                        if key not in merged_views
+                    },
+                    "micro_segments": merged_micro,
+                }
+            )
+            receipts.append(
+                {
+                    "segment_id": segment.segment_id,
+                    "decision": "attached_first_person_tail",
+                    "attached_to_segment_id": previous.segment_id,
+                    "gap_ms": gap_ms,
+                    "extension_ms": extension_ms,
+                    "shared_boundary_ids": sorted(shared_boundaries),
+                    "shared_objects": sorted(shared_objects),
+                    "cleanup_objects": sorted(cleanup_evidence),
+                }
+            )
+            previous_input_attachable = True
+            continue
+
+        receipts.append(
+            {
+                "segment_id": segment.segment_id,
+                "decision": "quarantined_missing_dual_view",
+                "roles": sorted(role.value for role in current_roles),
+                "global_start_ms": segment.global_start_ms,
+                "global_end_ms": segment.global_end_ms,
+                "event_ids": segment.event_ids,
+                "candidate_tail_gap_ms": gap_ms,
+                "shared_boundary_ids": sorted(shared_boundaries),
+                "shared_objects": sorted(shared_objects),
+                "cleanup_objects": sorted(cleanup_evidence),
+            }
+        )
+        previous_input_attachable = False
+
+    return promoted, receipts
 
 
 def _continuity_evidence(

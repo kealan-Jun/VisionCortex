@@ -45,6 +45,7 @@ from .grouping import (
     build_experiment_groups,
     is_experiment_start_anchor,
     normalize_experiment_segments,
+    prepare_formal_experiment_segments,
     select_key_events,
 )
 from .detection import scan_videos, validate_models
@@ -2100,8 +2101,15 @@ class EvidencePipeline:
             raw_segments = build_experiment_segments(
                 events, manifest.views, self.config, coarse_windows=boundary_candidates
             )
-            segments = normalize_experiment_segments(
+            normalized_segments = normalize_experiment_segments(
                 raw_segments, events, manifest.views, self.config
+            )
+            segments, formal_segment_receipts = prepare_formal_experiment_segments(
+                normalized_segments,
+                events,
+                manifest.views,
+                boundary_candidates,
+                self.config,
             )
             groups = build_experiment_groups(segments, events, manifest.views, self.config)
             self._preprocessing_completed_seconds = round(time.perf_counter() - self._run_started_perf, 6)
@@ -2113,7 +2121,12 @@ class EvidencePipeline:
                     "raw_segments": [
                         segment.model_dump(mode="json") for segment in raw_segments
                     ],
+                    "normalized_segments": [
+                        segment.model_dump(mode="json")
+                        for segment in normalized_segments
+                    ],
                     "segments": [segment.model_dump(mode="json") for segment in segments],
+                    "formal_segment_receipts": formal_segment_receipts,
                     "experiment_groups": [group.model_dump(mode="json") for group in groups],
                 },
             )

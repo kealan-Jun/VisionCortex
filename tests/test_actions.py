@@ -1,7 +1,11 @@
 from pathlib import Path
 
 from labvision_evidence.actions import audit_candidates, build_experiment_segments
-from labvision_evidence.grouping import build_experiment_groups, normalize_experiment_segments
+from labvision_evidence.grouping import (
+    build_experiment_groups,
+    normalize_experiment_segments,
+    prepare_formal_experiment_segments,
+)
 from labvision_evidence.schemas import (
     ActionCandidate,
     ActionType,
@@ -516,3 +520,229 @@ def test_incomplete_liquid_hypothesis_cannot_pull_start_before_direct_contact(
     )
     assert complete_segments[0].global_start_ms == 98_000
     assert complete_segments[0].event_ids == ["LIQUID-WITH-PIPETTE", "DIRECT-CONTACT"]
+
+
+def test_single_role_prelude_cannot_open_dual_view_experiment(default_config):
+    views = [
+        ViewInput(view_id="fp01", role=ViewRole.FIRST_PERSON, video=Path("a.mp4")),
+        ViewInput(view_id="tp01", role=ViewRole.THIRD_PERSON, video=Path("b.mp4")),
+    ]
+    prelude = EvidenceEvent(
+        event_id="TP-PRELUDE",
+        action_type=ActionType.DEVICE_PANEL_OPERATION,
+        global_start_ms=100_000,
+        global_end_ms=100_200,
+        key_global_ms=100_100,
+        objects=["balance", "hand"],
+        confidence=0.88,
+        accepted=True,
+        audit_reason="strong third-person-only prelude",
+        supporting_views=["tp01"],
+        supporting_roles=[ViewRole.THIRD_PERSON],
+        candidates=[],
+    )
+    core = prelude.model_copy(
+        update={
+            "event_id": "DUAL-CORE",
+            "global_start_ms": 110_000,
+            "global_end_ms": 112_000,
+            "key_global_ms": 111_000,
+            "supporting_views": ["fp01", "tp01"],
+            "supporting_roles": [ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON],
+            "audit_reason": "cross-view balance operation",
+            "candidates": [
+                ActionCandidate(
+                    candidate_id=f"CORE-{view_id}",
+                    action_type=ActionType.DEVICE_PANEL_OPERATION,
+                    view_id=view_id,
+                    role=role,
+                    local_start_ms=110_000,
+                    local_end_ms=112_000,
+                    global_start_ms=110_000,
+                    global_end_ms=112_000,
+                    key_global_ms=111_000,
+                    objects=["balance", "hand"],
+                    confidence=0.88,
+                )
+                for view_id, role in (
+                    ("fp01", ViewRole.FIRST_PERSON),
+                    ("tp01", ViewRole.THIRD_PERSON),
+                )
+            ],
+        }
+    )
+    coarse = ActionCandidate(
+        candidate_id="COARSE",
+        action_type=ActionType.OBJECT_MOVEMENT,
+        view_id="fp01",
+        role=ViewRole.FIRST_PERSON,
+        local_start_ms=90_000,
+        local_end_ms=130_000,
+        global_start_ms=90_000,
+        global_end_ms=130_000,
+        key_global_ms=110_000,
+        objects=["balance"],
+        confidence=0.9,
+    )
+
+    segments = build_experiment_segments(
+        [prelude, core], views, default_config, coarse_windows=[coarse]
+    )
+    normalized = normalize_experiment_segments(
+        segments, [prelude, core], views, default_config
+    )
+
+    assert len(normalized) == 1
+    assert normalized[0].global_start_ms == 108_000
+    assert normalized[0].event_ids == ["DUAL-CORE"]
+
+
+def test_formal_promotion_quarantines_leading_third_person_only_segment(
+    default_config,
+):
+    views = [
+        ViewInput(view_id="fp01", role=ViewRole.FIRST_PERSON, video=Path("a.mp4")),
+        ViewInput(view_id="tp01", role=ViewRole.THIRD_PERSON, video=Path("b.mp4")),
+    ]
+    third_only = EvidenceEvent(
+        event_id="LEADING-TP",
+        action_type=ActionType.HAND_OBJECT_CONTACT,
+        global_start_ms=233_800,
+        global_end_ms=246_900,
+        key_global_ms=240_000,
+        objects=["hand", "spatula"],
+        confidence=0.83,
+        accepted=True,
+        audit_reason="strong third-person-only context",
+        supporting_views=["tp01"],
+        supporting_roles=[ViewRole.THIRD_PERSON],
+        candidates=[],
+    )
+    dual = third_only.model_copy(
+        update={
+            "event_id": "DUAL-EXPERIMENT",
+            "global_start_ms": 301_100,
+            "global_end_ms": 420_900,
+            "key_global_ms": 350_000,
+            "objects": ["pipette", "tube"],
+            "supporting_views": ["fp01", "tp01"],
+            "supporting_roles": [ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON],
+        }
+    )
+    segments = [
+        ExperimentSegment(
+            segment_id="EXP-LEADING",
+            global_start_ms=233_800,
+            global_end_ms=249_900,
+            event_ids=["LEADING-TP"],
+            participating_views=["tp01"],
+        ),
+        ExperimentSegment(
+            segment_id="EXP-DUAL",
+            global_start_ms=299_100,
+            global_end_ms=423_900,
+            event_ids=["DUAL-EXPERIMENT"],
+            participating_views=["fp01", "tp01"],
+        ),
+    ]
+    coarse = ActionCandidate(
+        candidate_id="COARSE",
+        action_type=ActionType.OBJECT_MOVEMENT,
+        view_id="fp01",
+        role=ViewRole.FIRST_PERSON,
+        local_start_ms=290_000,
+        local_end_ms=440_000,
+        global_start_ms=290_000,
+        global_end_ms=440_000,
+        key_global_ms=365_000,
+        objects=["tube"],
+        confidence=0.9,
+    )
+
+    formal, receipts = prepare_formal_experiment_segments(
+        segments, [third_only, dual], views, [coarse], default_config
+    )
+    groups = build_experiment_groups(formal, [third_only, dual], views, default_config)
+
+    assert [segment.segment_id for segment in formal] == ["EXP-DUAL"]
+    assert receipts[0]["decision"] == "quarantined_missing_dual_view"
+    assert receipts[1]["decision"] == "promoted_dual_view"
+    assert len(groups) == 1
+    assert groups[0].group_id == "GROUP-0001"
+
+
+def test_formal_promotion_attaches_connected_first_person_cleanup_tail(
+    default_config,
+):
+    views = [
+        ViewInput(view_id="fp01", role=ViewRole.FIRST_PERSON, video=Path("a.mp4")),
+        ViewInput(view_id="tp01", role=ViewRole.THIRD_PERSON, video=Path("b.mp4")),
+    ]
+    core = EvidenceEvent(
+        event_id="CORE",
+        action_type=ActionType.HAND_OBJECT_CONTACT,
+        global_start_ms=100_000,
+        global_end_ms=110_000,
+        key_global_ms=105_000,
+        objects=["pipette", "tube"],
+        confidence=0.9,
+        accepted=True,
+        audit_reason="cross-view core",
+        supporting_views=["fp01", "tp01"],
+        supporting_roles=[ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON],
+        candidates=[],
+    )
+    tail = EvidenceEvent(
+        event_id="CLEANUP-TAIL",
+        action_type=ActionType.OBJECT_MOVEMENT,
+        global_start_ms=114_000,
+        global_end_ms=118_000,
+        key_global_ms=116_000,
+        objects=["cleaning_tool"],
+        confidence=0.82,
+        accepted=True,
+        audit_reason="first-person cleanup tail",
+        supporting_views=["fp01"],
+        supporting_roles=[ViewRole.FIRST_PERSON],
+        candidates=[],
+    )
+    segments = [
+        ExperimentSegment(
+            segment_id="EXP-CORE",
+            global_start_ms=98_000,
+            global_end_ms=113_000,
+            event_ids=["CORE"],
+            participating_views=["fp01", "tp01"],
+        ),
+        ExperimentSegment(
+            segment_id="EXP-TAIL",
+            global_start_ms=114_000,
+            global_end_ms=121_000,
+            event_ids=["CLEANUP-TAIL"],
+            participating_views=["fp01"],
+        ),
+    ]
+    coarse = ActionCandidate(
+        candidate_id="COARSE",
+        action_type=ActionType.OBJECT_MOVEMENT,
+        view_id="fp01",
+        role=ViewRole.FIRST_PERSON,
+        local_start_ms=90_000,
+        local_end_ms=150_000,
+        global_start_ms=90_000,
+        global_end_ms=150_000,
+        key_global_ms=120_000,
+        objects=["tube"],
+        confidence=0.9,
+    )
+
+    formal, receipts = prepare_formal_experiment_segments(
+        segments, [core, tail], views, [coarse], default_config
+    )
+
+    assert len(formal) == 1
+    assert formal[0].segment_id == "EXP-CORE"
+    assert formal[0].global_end_ms == 121_000
+    assert formal[0].event_ids == ["CORE", "CLEANUP-TAIL"]
+    assert receipts[-1]["decision"] == "attached_first_person_tail"
+    assert receipts[-1]["cleanup_objects"] == ["cleaning_tool"]

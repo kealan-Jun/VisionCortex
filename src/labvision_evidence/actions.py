@@ -12,7 +12,7 @@ from typing import Any, Iterable, Sequence
 import numpy as np
 
 from .detection import iter_frame_evidence
-from .grouping import is_experiment_start_anchor
+from .grouping import select_formal_experiment_start_events
 from .schemas import (
     ActionCandidate,
     ActionType,
@@ -979,9 +979,7 @@ def build_experiment_segments(
         # Single-view liquid hypotheses and movement of fixed equipment may be
         # useful context, but are too noisy to pull the experiment boundary
         # earlier by themselves.
-        start_anchors = [
-            event for event in group if is_experiment_start_anchor(event, config)
-        ]
+        start_anchors = select_formal_experiment_start_events(group, config)
         raw_start = min(
             event.global_start_ms for event in (start_anchors or group)
         )
