@@ -25,6 +25,13 @@ performance:
   coarse_refinement_min_candidates: 2
   coarse_refinement_min_span_seconds: 30.0
   fine_batch_size: 16
+  # A lone first-person source otherwise starves TensorRT between FFmpeg
+  # bursts. Decode two adjacent bounded chunks concurrently, but consume them
+  # in timestamp order so tracking and boundary semantics remain unchanged.
+  fine_chunk_seconds: 120
+  fine_first_person_decode_workers: 2
+  fine_third_person_decode_workers: 1
+  fine_decode_prefetch_frames: 12
   image_size: 960
   coarse_detection_fps: 0.125
   coarse_image_size: 512

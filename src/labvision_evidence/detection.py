@@ -136,6 +136,16 @@ class ProducerError:
     message: str
 
 
+@dataclass
+class _DecodedUnitEnd:
+    pass
+
+
+@dataclass
+class _DecodedUnitError:
+    message: str
+
+
 def _read_checkpoint(path: Path, output_path: Path | None = None) -> set[int]:
     if not path.is_file():
         return set()
@@ -198,9 +208,10 @@ def _producer(
     motion_probe_fps: float,
     motion_signature_size: tuple[int, int],
     wave_barrier: threading.Barrier | None,
+    phase: str = "fine",
 ) -> None:
     perf = config["performance"]
-    chunk_ms = float(perf["chunk_seconds"]) * 1000.0
+    chunk_ms = float(perf.get(f"{phase}_chunk_seconds", perf["chunk_seconds"])) * 1000.0
     spans = windows if windows is not None else [(0.0, info.duration_ms)]
     if (
         windows is None
@@ -319,6 +330,24 @@ def _producer(
         and wave_barrier is None
         and parallel_probe_workers > 1
     )
+    ordered_decode_workers = max(
+        1,
+        int(
+            perf.get(
+                "fine_first_person_decode_workers"
+                if view.role == ViewRole.FIRST_PERSON
+                else "fine_third_person_decode_workers",
+                1,
+            )
+        ),
+    )
+    ordered_decode = (
+        phase == "fine"
+        and windows is not None
+        and wave_barrier is None
+        and ordered_decode_workers > 1
+        and bool(work_units)
+    )
     try:
         if parallel_probe:
             futures: dict[int, Any] = {}
@@ -333,10 +362,94 @@ def _producer(
                 for chunk_index, (start_ms, _end_ms) in enumerate(work_units):
                     if chunk_index in completed_chunks:
                         activity("source_unit_reused", chunk_index)
-                        finish_unit(chunk_index, len(work_units))
+                        output_queue.put(
+                            ChunkEnd(
+                                view_id=view.view_id,
+                                chunk_index=chunk_index,
+                                total_chunks=len(work_units),
+                            )
+                        )
                         continue
                     emit_frames(futures[chunk_index].result(), start_ms)
                     finish_unit(chunk_index, len(work_units))
+            return
+
+        if ordered_decode:
+            prefetch_frames = max(
+                1, int(perf.get("fine_decode_prefetch_frames", 12))
+            )
+            stop_event = threading.Event()
+            unit_queues: dict[int, queue.Queue[Any]] = {}
+
+            def put_until_stopped(target: queue.Queue[Any], item: Any) -> bool:
+                while not stop_event.is_set():
+                    try:
+                        target.put(item, timeout=0.1)
+                        return True
+                    except queue.Full:
+                        continue
+                return False
+
+            def decode_unit(
+                chunk_index: int,
+                start_ms: float,
+                end_ms: float,
+                target: queue.Queue[Any],
+            ) -> None:
+                activity("source_unit_started", chunk_index)
+                try:
+                    for decoded in iter_decoded_frames(start_ms, end_ms):
+                        if not put_until_stopped(target, decoded):
+                            return
+                except Exception as exc:
+                    put_until_stopped(
+                        target,
+                        _DecodedUnitError(f"{type(exc).__name__}: {exc}"),
+                    )
+                finally:
+                    put_until_stopped(target, _DecodedUnitEnd())
+
+            def ordered_frames(target: queue.Queue[Any]):
+                while True:
+                    item = target.get()
+                    if isinstance(item, _DecodedUnitEnd):
+                        return
+                    if isinstance(item, _DecodedUnitError):
+                        raise RuntimeError(item.message)
+                    yield item
+
+            executor = ThreadPoolExecutor(
+                max_workers=min(ordered_decode_workers, len(work_units)),
+                thread_name_prefix=f"fine-prefetch-{view.view_id}",
+            )
+            try:
+                futures: dict[int, Any] = {}
+                for chunk_index, (start_ms, end_ms) in enumerate(work_units):
+                    if chunk_index in completed_chunks:
+                        continue
+                    target: queue.Queue[Any] = queue.Queue(maxsize=prefetch_frames)
+                    unit_queues[chunk_index] = target
+                    futures[chunk_index] = executor.submit(
+                        decode_unit,
+                        chunk_index,
+                        start_ms,
+                        end_ms,
+                        target,
+                    )
+                for chunk_index, (start_ms, _end_ms) in enumerate(work_units):
+                    if chunk_index in completed_chunks:
+                        activity("source_unit_reused", chunk_index)
+                        finish_unit(chunk_index, len(work_units))
+                        continue
+                    emit_frames(ordered_frames(unit_queues[chunk_index]), start_ms)
+                    futures[chunk_index].result()
+                    finish_unit(chunk_index, len(work_units))
+            except Exception:
+                stop_event.set()
+                raise
+            finally:
+                stop_event.set()
+                executor.shutdown(wait=True, cancel_futures=True)
             return
 
         for chunk_index, (start_ms, end_ms) in enumerate(work_units):
@@ -703,6 +816,24 @@ def scan_videos(
             "motion_probe_segment_workers": int(
                 config["performance"].get("motion_probe_segment_workers", 1)
             ),
+            "ordered_source_decode_workers": (
+                int(
+                    config["performance"].get(
+                        "fine_first_person_decode_workers"
+                        if role == ViewRole.FIRST_PERSON
+                        else "fine_third_person_decode_workers",
+                        1,
+                    )
+                )
+                if phase == "fine"
+                else 1
+            ),
+            "phase_chunk_seconds": float(
+                config["performance"].get(
+                    f"{phase}_chunk_seconds",
+                    config["performance"]["chunk_seconds"],
+                )
+            ),
             "sparse_decode_strategy": str(
                 config["performance"].get("motion_probe_sparse_strategy", "indexed_seek")
             ),
@@ -757,6 +888,7 @@ def scan_videos(
                     probe_fps,
                     signature_size,
                     wave_barrier,
+                    phase,
                 ),
                 name=f"decode-{view.view_id}",
                 daemon=True,

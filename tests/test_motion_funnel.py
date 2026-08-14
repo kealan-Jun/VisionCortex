@@ -1,6 +1,7 @@
 import json
 import io
 import queue
+import threading
 import time
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from labvision_evidence.detection import (
     ChunkEnd,
     FramePacket,
     ProducerEnd,
+    ProducerError,
     RoleScanner,
     _engine_build_batch,
     _producer,
@@ -392,6 +394,128 @@ def test_parallel_motion_probe_preserves_segment_order(monkeypatch, default_conf
         2_000.0,
     ]
     assert [item.chunk_index for item in items if isinstance(item, ChunkEnd)] == [0, 1, 2]
+
+
+def test_fine_prefetch_decodes_concurrently_but_emits_in_time_order(
+    monkeypatch, default_config
+):
+    view = ViewInput(
+        view_id="fp",
+        role=ViewRole.FIRST_PERSON,
+        video=Path("first-person.mp4"),
+    )
+    info = VideoInfo(
+        path=Path("first-person.mp4"),
+        duration_ms=4_000.0,
+        fps=30.0,
+        width=8,
+        height=8,
+        frame_count=120,
+        size_bytes=100,
+    )
+    started = []
+    lock = threading.Lock()
+
+    def fake_frames(_view, _info, start_ms, *_args, **_kwargs):
+        with lock:
+            started.append(start_ms)
+        # Later chunks become ready first; the producer must still emit the
+        # evidence stream in ascending local time for ByteTrack continuity.
+        time.sleep((4_000.0 - start_ms) / 100_000.0)
+        yield int(start_ms / 1_000.0), start_ms, np.zeros((8, 8, 3), dtype=np.uint8)
+
+    monkeypatch.setattr("labvision_evidence.detection.iter_view_sampled_frames", fake_frames)
+    default_config["performance"]["fine_chunk_seconds"] = 1
+    default_config["performance"]["fine_first_person_decode_workers"] = 2
+    default_config["performance"]["fine_decode_prefetch_frames"] = 1
+    output: queue.Queue = queue.Queue()
+
+    _producer(
+        view,
+        info,
+        output,
+        set(),
+        default_config,
+        [(0.0, 4_000.0)],
+        1.0,
+        8,
+        False,
+        "cpu",
+        1.0,
+        (8, 8),
+        None,
+        "fine",
+    )
+
+    items = []
+    while not output.empty():
+        items.append(output.get())
+    assert len(started) == 4
+    assert [item.local_ms for item in items if isinstance(item, FramePacket)] == [
+        0.0,
+        1_000.0,
+        2_000.0,
+        3_000.0,
+    ]
+    assert [item.chunk_index for item in items if isinstance(item, ChunkEnd)] == [
+        0,
+        1,
+        2,
+        3,
+    ]
+
+
+def test_fine_prefetch_stops_other_decoders_after_failure(monkeypatch, default_config):
+    view = ViewInput(
+        view_id="fp",
+        role=ViewRole.FIRST_PERSON,
+        video=Path("first-person.mp4"),
+    )
+    info = VideoInfo(
+        path=Path("first-person.mp4"),
+        duration_ms=3_000.0,
+        fps=30.0,
+        width=8,
+        height=8,
+        frame_count=90,
+        size_bytes=100,
+    )
+
+    def fake_frames(_view, _info, start_ms, *_args, **_kwargs):
+        if start_ms == 1_000.0:
+            raise RuntimeError("decode unit failed")
+        yield int(start_ms / 1_000.0), start_ms, np.zeros((8, 8, 3), dtype=np.uint8)
+
+    monkeypatch.setattr("labvision_evidence.detection.iter_view_sampled_frames", fake_frames)
+    default_config["performance"]["fine_chunk_seconds"] = 1
+    default_config["performance"]["fine_first_person_decode_workers"] = 2
+    default_config["performance"]["fine_decode_prefetch_frames"] = 1
+    output: queue.Queue = queue.Queue()
+
+    _producer(
+        view,
+        info,
+        output,
+        set(),
+        default_config,
+        [(0.0, 3_000.0)],
+        1.0,
+        8,
+        False,
+        "cpu",
+        1.0,
+        (8, 8),
+        None,
+        "fine",
+    )
+
+    items = []
+    while not output.empty():
+        items.append(output.get())
+    errors = [item for item in items if isinstance(item, ProducerError)]
+    assert len(errors) == 1
+    assert "decode unit failed" in errors[0].message
+    assert isinstance(items[-1], ProducerEnd)
 
 
 def test_sequential_sparse_strategy_bypasses_random_indexed_seeks(monkeypatch, tmp_path):
