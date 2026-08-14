@@ -54,6 +54,34 @@ def test_only_views_with_valid_evidence_participate(default_config):
     assert "empty01" in segments[0].rejected_views
 
 
+def test_strong_single_role_action_is_accepted_with_paired_media_policy(default_config):
+    transforms = {
+        "fp01": AlignmentTransform(
+            view_id="fp01",
+            reference_view_id="fp01",
+            confidence=0.95,
+            state="aligned",
+        ),
+        "tp01": AlignmentTransform(
+            view_id="tp01",
+            reference_view_id="fp01",
+            confidence=0.90,
+            state="aligned",
+        ),
+    }
+
+    events, rejected = audit_candidates(
+        [_candidate("fp01", ViewRole.FIRST_PERSON, 10_000)],
+        transforms,
+        default_config,
+    )
+
+    assert len(events) == 1
+    assert events[0].accepted is True
+    assert events[0].supporting_roles == [ViewRole.FIRST_PERSON]
+    assert rejected == []
+
+
 def test_single_view_tail_extends_only_an_existing_cross_view_boundary(default_config):
     views = [
         ViewInput(view_id="fp01", role=ViewRole.FIRST_PERSON, video=Path("a.mp4")),

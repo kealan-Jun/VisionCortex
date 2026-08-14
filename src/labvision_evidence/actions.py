@@ -789,7 +789,9 @@ def audit_candidates(
             }
         )
         accepted = bool(aligned_views) and (both_roles or len(views) >= 2 or single_view_strong)
-        if bool(seg_cfg.get("require_both_roles")):
+        if bool(seg_cfg.get("require_both_roles")) and not bool(
+            seg_cfg.get("allow_strong_single_role_actions", False)
+        ):
             accepted = accepted and both_roles
         uncertainty: list[str] = []
         if not both_roles:

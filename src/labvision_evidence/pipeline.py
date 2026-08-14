@@ -858,6 +858,56 @@ class EvidencePipeline:
             if scheduler_path.is_file()
             else None
         )
+        inference_calls = sum(int(item.get("inference_call_count", 0)) for item in role_reports)
+        inference_frames = sum(int(item.get("inference_frame_count", 0)) for item in role_reports)
+        queue_wait_seconds = sum(float(item.get("queue_wait_seconds", 0.0)) for item in role_reports)
+        inference_seconds = sum(float(item.get("inference_seconds", 0.0)) for item in role_reports)
+        postprocess_seconds = sum(
+            float(item.get("tracking_and_ledger_seconds", 0.0)) for item in role_reports
+        )
+        role_seconds = [float(item.get("role_total_seconds", 0.0)) for item in role_reports]
+        observed_seconds = sum(role_seconds)
+        actual_batch_mean = inference_frames / inference_calls if inference_calls else 0.0
+        effective_batch_slots = sum(
+            int(item.get("inference_call_count", 0))
+            * int(item.get("final_effective_batch_size", 0))
+            for item in role_reports
+        )
+        batch_fill_ratio = inference_frames / effective_batch_slots if effective_batch_slots else 0.0
+        effective_batch_capacity = (
+            effective_batch_slots / inference_calls if inference_calls else 0.0
+        )
+        queue_wait_ratio = queue_wait_seconds / observed_seconds if observed_seconds else 0.0
+        inference_ratio = inference_seconds / observed_seconds if observed_seconds else 0.0
+        postprocess_ratio = postprocess_seconds / observed_seconds if observed_seconds else 0.0
+        if batch_fill_ratio < 0.60 and queue_wait_ratio >= 0.25:
+            bottleneck = "decode_or_source_starved"
+            next_action = "increase ordered decode supply before adding YOLO contexts"
+        elif inference_ratio >= 0.65:
+            bottleneck = "gpu_inference_bound"
+            next_action = "reduce selected frames/windows or benchmark a faster engine"
+        elif postprocess_ratio >= 0.40:
+            bottleneck = "cpu_postprocess_bound"
+            next_action = "parallelize tracking and ledger serialization"
+        else:
+            bottleneck = "mixed_or_balanced"
+            next_action = "use per-role telemetry before changing concurrency"
+        bottleneck_diagnosis = {
+            "classification": bottleneck,
+            "next_action": next_action,
+            "observed_role_seconds": round(observed_seconds, 6),
+            "queue_wait_seconds": round(queue_wait_seconds, 6),
+            "inference_seconds": round(inference_seconds, 6),
+            "tracking_and_ledger_seconds": round(postprocess_seconds, 6),
+            "queue_wait_ratio": round(queue_wait_ratio, 6),
+            "inference_ratio": round(inference_ratio, 6),
+            "tracking_and_ledger_ratio": round(postprocess_ratio, 6),
+            "inference_call_count": inference_calls,
+            "inference_frame_count": inference_frames,
+            "actual_batch_size_mean": round(actual_batch_mean, 4),
+            "effective_batch_capacity_mean": round(effective_batch_capacity, 4),
+            "batch_fill_ratio": round(batch_fill_ratio, 6),
+        }
         write_json(
             layout.json_config / f"scan_runtime_{phase}.json",
             {
@@ -871,6 +921,7 @@ class EvidencePipeline:
                 },
                 "role_reports": role_reports,
                 "scheduler": scheduler,
+                "bottleneck_diagnosis": bottleneck_diagnosis,
                 "source_activity": sorted(
                     source_activity, key=lambda item: float(item.get("timestamp", 0.0))
                 ),
@@ -1289,6 +1340,32 @@ class EvidencePipeline:
             self._complete_stage(layout, "candidate_coarse", coarse_artifacts)
             fine_windows = self._fine_windows(boundary_candidates, infos, transforms)
             fine_windows = {view.view_id: fine_windows[view.view_id] for view in fine_views}
+            fine_coverage = self._window_coverage(fine_windows, infos)
+            fine_sample_fps = float(self.config["performance"]["detection_fps"])
+            write_json(
+                layout.json_config / "fine_scan_windows.json",
+                {
+                    "schema_version": "visioncortex-fine-scan-windows/1",
+                    "selected_view_ids": [view.view_id for view in fine_views],
+                    "sample_fps": fine_sample_fps,
+                    "image_size": int(self.config["performance"]["image_size"]),
+                    "padding_seconds": float(
+                        self.config["performance"]["fine_window_padding_seconds"]
+                    ),
+                    "merge_gap_seconds": float(
+                        self.config["performance"].get(
+                            "fine_window_merge_gap_seconds", 0.0
+                        )
+                    ),
+                    "coverage": fine_coverage,
+                    "estimated_sampled_frames": int(
+                        round(
+                            sum(float(item["selected_seconds"]) for item in fine_coverage.values())
+                            * fine_sample_fps
+                        )
+                    ),
+                },
+            )
             fine_manifest = manifest.model_copy(update={"views": fine_views})
             selected_fine_ids = {view.view_id for view in fine_views}
             for view in manifest.views:
@@ -1312,7 +1389,10 @@ class EvidencePipeline:
                     layout.json_config / "candidate_layer.json",
                     [candidate.model_dump(mode="json") for candidate in candidates],
                 )
-            fine_artifacts = [layout.json_config / "scan_runtime_fine.json"]
+            fine_artifacts = [
+                layout.json_config / "scan_runtime_fine.json",
+                layout.json_config / "fine_scan_windows.json",
+            ]
             candidate_layer = layout.json_config / "candidate_layer.json"
             if candidate_layer.exists():
                 fine_artifacts.append(candidate_layer)
@@ -1555,6 +1635,15 @@ class EvidencePipeline:
             if padding_seconds is None
             else padding_seconds
         ) * 1000.0
+        merge_gap = max(
+            0.0,
+            float(
+                self.config["performance"].get(
+                    "fine_window_merge_gap_seconds", 0.0
+                )
+            )
+            * 1000.0,
+        )
         grouped: dict[str, list[tuple[float, float]]] = {view_id: [] for view_id in infos}
         for candidate in candidates:
             global_start = candidate.global_start_ms - padding
@@ -1568,7 +1657,7 @@ class EvidencePipeline:
         for view_id, windows in grouped.items():
             result: list[list[float]] = []
             for start, end in sorted(windows):
-                if result and start <= result[-1][1] + padding:
+                if result and start <= result[-1][1] + merge_gap:
                     result[-1][1] = max(result[-1][1], end)
                 else:
                     result.append([start, end])

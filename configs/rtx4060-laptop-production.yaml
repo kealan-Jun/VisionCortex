@@ -59,6 +59,7 @@ performance:
   detection_fps: 10.0
   image_size: 640
   fine_batch_size: 16
+  fine_window_merge_gap_seconds: 0.0
   synchronized_segment_waves: true
   segment_wave_timeout_seconds: 3600
   coarse_decode_lanes: [cuda, cuda, cuda, cuda, cpu, cpu]

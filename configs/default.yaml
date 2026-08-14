@@ -31,6 +31,10 @@ performance:
   coarse_keyframes_only: true
   detection_fps: 8.0
   fine_window_padding_seconds: 75.0
+  # Candidate windows already receive padding on both sides. Only merge the
+  # padded intervals when they overlap; reusing the padding as a second merge
+  # gap silently scans idle time between otherwise independent experiments.
+  fine_window_merge_gap_seconds: 0.0
   motion_burst_percentile: 90.0
   motion_burst_merge_gap_seconds: 16.0
   motion_burst_min_observations: 2
@@ -122,6 +126,10 @@ segmentation:
   contact_distance_norm: 0.035
   liquid_motion_threshold: 6.0
   require_both_roles: true
+  # A physical action can be visually conclusive in only one role because of
+  # occlusion. Delivery still requires aligned first/third-person media; this
+  # switch only separates action acceptance from media-pair completeness.
+  allow_strong_single_role_actions: true
 
 continuity:
   # Temporal proximity alone is insufficient: a shared third-person view and
