@@ -711,6 +711,71 @@ def _encoder_available(name: str) -> bool:
     return result.returncode == 0 and name.encode() in result.stdout
 
 
+@lru_cache(maxsize=8)
+def _encoder_usable(name: str) -> bool:
+    """Probe the complete encoder path, including the installed GPU driver.
+
+    ``ffmpeg -encoders`` only proves that the FFmpeg binary was compiled with an
+    encoder.  NVENC can still fail at runtime when the binary requires a newer
+    NVENC API than the NVIDIA driver provides.  A one-frame encode catches that
+    incompatibility before a multi-hour pipeline reaches materialization.
+    """
+
+    if not _encoder_available(name):
+        return False
+    result = _run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=64x64:d=0.04",
+            "-frames:v",
+            "1",
+            "-c:v",
+            name,
+            "-f",
+            "null",
+            "-",
+        ],
+        timeout=20.0,
+    )
+    return result.returncode == 0
+
+
+def select_video_encoder(preferred_encoder: str = "h264_nvenc") -> str:
+    if _encoder_usable(preferred_encoder):
+        return preferred_encoder
+    if preferred_encoder != "libx264" and _encoder_usable("libx264"):
+        return "libx264"
+    raise RuntimeError(
+        f"No usable video encoder is available (preferred={preferred_encoder!r}, "
+        "fallback='libx264')"
+    )
+
+
+def video_encoder_preflight(preferred_encoder: str = "h264_nvenc") -> dict[str, Any]:
+    preferred_listed = _encoder_available(preferred_encoder)
+    preferred_usable = _encoder_usable(preferred_encoder)
+    selected = select_video_encoder(preferred_encoder)
+    return {
+        "requested_encoder": preferred_encoder,
+        "requested_encoder_listed": preferred_listed,
+        "requested_encoder_usable": preferred_usable,
+        "selected_encoder": selected,
+        "software_fallback_active": selected != preferred_encoder,
+        "probe": "one_frame_lavfi_encode",
+        "reason": (
+            None
+            if selected == preferred_encoder
+            else "preferred encoder is unavailable or incompatible with the active driver"
+        ),
+    }
+
+
 def extract_clip(
     source: Path,
     destination: Path,
@@ -719,7 +784,7 @@ def extract_clip(
     preferred_encoder: str = "h264_nvenc",
 ) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
-    encoder = preferred_encoder if _encoder_available(preferred_encoder) else "libx264"
+    encoder = select_video_encoder(preferred_encoder)
     command = [
         "ffmpeg",
         "-y",
@@ -819,7 +884,11 @@ def extract_view_clip(
             raise RuntimeError(result.stderr.decode("utf-8", errors="replace")[-2000:])
 
 
-def create_grid_video(clips: Sequence[tuple[str, Path]], destination: Path) -> None:
+def create_grid_video(
+    clips: Sequence[tuple[str, Path]],
+    destination: Path,
+    preferred_encoder: str = "h264_nvenc",
+) -> None:
     if not clips:
         return
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -834,7 +903,7 @@ def create_grid_video(clips: Sequence[tuple[str, Path]], destination: Path) -> N
     layout = "|".join(f"{(i % columns) * 640}_{(i // columns) * 360}" for i in range(len(clips)))
     inputs = "".join(f"[v{i}]" for i in range(len(clips)))
     filters.append(f"{inputs}xstack=inputs={len(clips)}:layout={layout}:fill=black[vout]")
-    encoder = "h264_nvenc" if _encoder_available("h264_nvenc") else "libx264"
+    encoder = select_video_encoder(preferred_encoder)
     command += [
         "-filter_complex",
         ";".join(filters),
@@ -850,6 +919,10 @@ def create_grid_video(clips: Sequence[tuple[str, Path]], destination: Path) -> N
         str(destination),
     ]
     result = _run(command)
+    if result.returncode != 0 and encoder != "libx264":
+        command[command.index(encoder)] = "libx264"
+        command[command.index("p4")] = "veryfast"
+        result = _run(command)
     if result.returncode != 0:
         raise RuntimeError(result.stderr.decode("utf-8", errors="replace")[-2000:])
 

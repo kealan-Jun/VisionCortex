@@ -41,7 +41,7 @@ from .archive import (
     write_aligned_csv,
     write_json,
 )
-from .grouping import build_experiment_groups, select_key_events
+from .grouping import build_experiment_groups, normalize_experiment_segments, select_key_events
 from .detection import scan_videos, validate_models
 from .daily_reports import generate_daily_report_archive
 from .schemas import (
@@ -56,7 +56,13 @@ from .schemas import (
     ViewInput,
     ViewRole,
 )
-from .video_io import check_disk_capacity, probe_views, view_source_files, view_timestamp_files
+from .video_io import (
+    check_disk_capacity,
+    probe_views,
+    video_encoder_preflight,
+    view_source_files,
+    view_timestamp_files,
+)
 from .storage import (
     IncrementalArchivePublisher,
     initialize_nas_archive,
@@ -440,6 +446,49 @@ class EvidencePipeline:
             ),
         )
         write_json(layout.json_config / "quality_acceptance.json", report)
+        return report
+
+    def _run_boundary_precheck(
+        self,
+        layout: ArchiveLayout,
+        groups: list[ExperimentGroup],
+    ) -> dict[str, Any]:
+        validation = self.config.get("validation", {})
+        full_report = validate_experiment_and_material_quality(
+            groups,
+            [],
+            self._acceptance_baseline(),
+            boundary_match_iou=float(validation.get("boundary_match_iou", 0.50)),
+            max_start_error_seconds=float(validation.get("max_start_error_seconds", 8.0)),
+            max_end_error_seconds=float(validation.get("max_end_error_seconds", 8.0)),
+            minimum_cross_view_event_rate=float(
+                validation.get("minimum_cross_view_event_rate", 0.25)
+            ),
+        )
+        boundary = full_report["experiment_boundaries"]
+        evaluated = bool(boundary["evaluated"])
+        passed = bool(boundary["passed"]) if evaluated else True
+        report = {
+            "schema_version": "visioncortex-boundary-precheck/1",
+            "status": "passed" if passed else "failed",
+            "evaluated": evaluated,
+            "passed": passed,
+            "baseline": full_report["baseline"],
+            "thresholds": full_report["thresholds"],
+            "experiment_boundaries": boundary,
+            "gate_position": "before_experiment_and_key_material_model_calls",
+        }
+        path = layout.json_config / "boundary_precheck.json"
+        write_json(path, report)
+        if (
+            evaluated
+            and not passed
+            and bool(validation.get("fail_before_model_on_boundary_regression", True))
+        ):
+            raise RuntimeError(
+                "Bounded experiment quality precheck failed before model calls; "
+                f"see {path}"
+            )
         return report
 
     def _metrics(self, events, groups=()) -> dict[str, Any]:
@@ -942,6 +991,9 @@ class EvidencePipeline:
             preflight_breakdown["source_validation"] = source_validation
             preflight_step_started = time.perf_counter()
             model_report = validate_models(self.config)
+            model_report["video_encoder"] = video_encoder_preflight(
+                str(self.config["performance"].get("ffmpeg_video_encoder", "h264_nvenc"))
+            )
             preflight_breakdown["model_validation_seconds"] = round(
                 time.perf_counter() - preflight_step_started,
                 6,
@@ -1272,6 +1324,9 @@ class EvidencePipeline:
             segments = build_experiment_segments(
                 events, manifest.views, self.config, coarse_windows=boundary_candidates
             )
+            segments = normalize_experiment_segments(
+                segments, events, manifest.views, self.config
+            )
             groups = build_experiment_groups(segments, events, manifest.views, self.config)
             self._preprocessing_completed_seconds = round(time.perf_counter() - self._run_started_perf, 6)
             write_json(
@@ -1283,10 +1338,14 @@ class EvidencePipeline:
                     "experiment_groups": [group.model_dump(mode="json") for group in groups],
                 },
             )
+            self._run_boundary_precheck(layout, groups)
             self._complete_stage(
                 layout,
                 "candidate_audit",
-                [layout.json_config / "audit_layer.json"],
+                [
+                    layout.json_config / "audit_layer.json",
+                    layout.json_config / "boundary_precheck.json",
+                ],
             )
 
             self._status(layout, "experiment_understanding", 0.72, "用完整有界双视角故事板命名实验并核验连续性")

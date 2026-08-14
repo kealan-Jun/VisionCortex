@@ -88,6 +88,75 @@ def test_health_exposes_fixed_benchmark_and_cache_locations(monkeypatch, tmp_pat
     assert benchmark["local_cache_root"].endswith("cache")
 
 
+def test_archived_quality_fallback_uses_evidence_without_fabricating_accuracy():
+    events = [
+        {
+            "event_id": "event-001",
+            "action_type": "liquid_transfer",
+            "cross_view_associations": [{"both_views_support_action": True}],
+            "aligned_frame_url": "/frame-001.jpg",
+            "aligned_clip_url": "/clip-001.mp4",
+        },
+        {
+            "event_id": "event-002",
+            "action_type": "hand_object_contact",
+            "cross_view_associations": [{"both_views_support_action": False}],
+            "aligned_frame_url": "/frame-002.jpg",
+            "aligned_clip_url": "/clip-002.mp4",
+        },
+    ]
+    evidence_eval = {
+        "passed": True,
+        "checks": [
+            {"check": "cross_view_or_explicit_uncertainty", "passed": True},
+            {"check": "cross_view_or_explicit_uncertainty", "passed": True},
+        ],
+    }
+
+    quality = api._derive_archived_quality_summary(
+        {"experiment_groups": [{"group_id": "group-001"}]},
+        events,
+        evidence_eval,
+    )
+
+    assert quality["status"] == "evidence_package_passed_no_boundary_ground_truth"
+    assert quality["experiment_boundaries"]["evaluated"] is False
+    assert "precision" not in quality["experiment_boundaries"]
+    assert "recall" not in quality["experiment_boundaries"]
+    assert quality["key_materials"]["cross_view_supported_count"] == 1
+    assert quality["key_materials"]["cross_view_supported_rate"] == 0.5
+    assert quality["key_materials"]["dual_view_material_count"] == 2
+    assert quality["key_materials"]["dual_view_material_rate"] == 1.0
+    assert quality["key_materials"]["missing_dual_view_material_count"] == 0
+    assert quality["key_materials"]["cross_view_or_explicit_uncertainty_count"] == 2
+
+
+def test_archive_performance_display_separates_cold_start_from_reuse_run():
+    metrics = {
+        "total_duration_seconds": 572.15617,
+        "preprocessing_sla": {"actual_seconds": 81.237808},
+    }
+    acceptance = {
+        "preprocessing_full_run": {
+            "seconds": 694.056768,
+            "includes": "preflight + alignment + full coarse + bounded fine + audit",
+        },
+        "clean_package_run": {
+            "seconds": 572.15617,
+            "note": "reused validated CV ledgers; regenerated media/package",
+        },
+    }
+
+    api._attach_archive_performance_display(metrics, acceptance)
+
+    display = metrics["preprocessing_display"]
+    assert metrics["display_preprocessing_source"] == "full_cold_start_benchmark"
+    assert display["full_cold_start"]["seconds"] == 694.056768
+    assert display["current_run"]["preprocessing_seconds"] == 81.237808
+    assert display["current_run"]["total_seconds"] == 572.15617
+    assert display["current_run"]["reused_validated_cv_ledgers"] is True
+
+
 def test_run_snapshot_uses_durable_live_observability(tmp_path):
     root = tmp_path / "archive"
     json_root = root / "JSON-Config-Files"

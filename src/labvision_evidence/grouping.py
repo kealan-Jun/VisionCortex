@@ -3,7 +3,14 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any, Sequence
 
-from .schemas import EvidenceEvent, ExperimentGroup, ExperimentSegment, ViewInput, ViewRole
+from .schemas import (
+    ActionType,
+    EvidenceEvent,
+    ExperimentGroup,
+    ExperimentSegment,
+    ViewInput,
+    ViewRole,
+)
 
 
 CONTINUITY_OBJECTS = {
@@ -17,6 +24,159 @@ CONTINUITY_OBJECTS = {
     "tube_rack",
     "magnetic_stir_bar",
 }
+
+FIXED_EQUIPMENT_OBJECTS = {
+    "balance",
+    "magnetic_stirrer",
+    "computer",
+}
+
+
+def normalize_experiment_segments(
+    segments: Sequence[ExperimentSegment],
+    events: Sequence[EvidenceEvent],
+    views: Sequence[ViewInput],
+    config: dict[str, Any],
+) -> list[ExperimentSegment]:
+    """Collapse duplicate overlapping windows and suppress equipment-only preludes.
+
+    Coarse activity windows can overlap and independently collect the same fine
+    action chain.  Those windows are one atomic experiment, not a continuous
+    chain.  A very short fixed-equipment movement immediately before a much
+    richer experiment is retained as contextual evidence in the event ledger,
+    but is not promoted as a standalone bounded experiment.
+    """
+
+    by_event = {event.event_id: event for event in events}
+    segmentation = config["segmentation"]
+    post_roll_ms = float(segmentation["experiment_post_roll_seconds"]) * 1000.0
+    bridge_confidence = float(segmentation.get("boundary_context_bridge_confidence", 0.50))
+    extension_confidence = float(segmentation.get("boundary_context_min_confidence", 0.65))
+    maximum_gap_ms = float(segmentation.get("boundary_context_max_gap_seconds", 10.0)) * 1000.0
+    cleanup_objects = {
+        "brush",
+        "cleaning_tool",
+        "sink",
+        "wash_bottle",
+        "waste_container",
+    }
+
+    def trim_unrelated_tail(segment: ExperimentSegment) -> ExperimentSegment:
+        core_events = _segment_events(segment, by_event)
+        if not core_events:
+            return segment
+        raw_end = max(event.global_end_ms for event in core_events)
+        direct_end = raw_end + post_roll_ms
+        if segment.global_end_ms <= direct_end:
+            return segment
+        connected_objects = {obj for event in core_events for obj in event.objects}
+        cursor = raw_end
+        supported_end = raw_end
+        limit = max(raw_end, segment.global_end_ms - post_roll_ms)
+        core_ids = {event.event_id for event in core_events}
+        for context in sorted(events, key=lambda item: item.global_start_ms):
+            if context.event_id in core_ids or context.global_end_ms <= cursor:
+                continue
+            if context.global_start_ms > limit:
+                break
+            if context.global_start_ms > cursor + maximum_gap_ms:
+                break
+            physically_connected = bool(
+                set(context.objects) & (connected_objects | cleanup_objects)
+            ) or context.action_type in {
+                ActionType.CONTAINER_STATE_CHANGE,
+                ActionType.DEVICE_PANEL_OPERATION,
+            }
+            if (
+                context.confidence < bridge_confidence
+                or not context.objects
+                or not physically_connected
+            ):
+                continue
+            cursor = min(limit, max(cursor, context.global_end_ms))
+            connected_objects.update(context.objects)
+            if context.confidence >= extension_confidence:
+                supported_end = max(supported_end, cursor)
+        return segment.model_copy(
+            update={"global_end_ms": min(segment.global_end_ms, supported_end + post_roll_ms)}
+        )
+
+    ordered = sorted(
+        (trim_unrelated_tail(segment) for segment in segments),
+        key=lambda item: (item.global_start_ms, item.global_end_ms),
+    )
+    if not ordered:
+        return []
+    roles = {view.view_id: view.role for view in views}
+
+    def has_shared_dual_view(left: ExperimentSegment, right: ExperimentSegment) -> bool:
+        shared = set(left.participating_views) & set(right.participating_views)
+        return any(roles.get(view_id) == ViewRole.FIRST_PERSON for view_id in shared) and any(
+            roles.get(view_id) == ViewRole.THIRD_PERSON for view_id in shared
+        )
+
+    consolidated: list[ExperimentSegment] = []
+    for segment in ordered:
+        if (
+            consolidated
+            and segment.global_start_ms <= consolidated[-1].global_end_ms
+            and has_shared_dual_view(consolidated[-1], segment)
+        ):
+            left = consolidated[-1]
+            merged_events = list(dict.fromkeys([*left.event_ids, *segment.event_ids]))
+            merged_micro = sorted(
+                [*left.micro_segments, *segment.micro_segments],
+                key=lambda item: float(item.get("start_global_ms", 0.0)),
+            )
+            consolidated[-1] = left.model_copy(
+                update={
+                    "global_start_ms": min(left.global_start_ms, segment.global_start_ms),
+                    "global_end_ms": max(left.global_end_ms, segment.global_end_ms),
+                    "event_ids": merged_events,
+                    "participating_views": sorted(
+                        set(left.participating_views) | set(segment.participating_views)
+                    ),
+                    "rejected_views": {
+                        key: value
+                        for key, value in left.rejected_views.items()
+                        if key in segment.rejected_views
+                    },
+                    "micro_segments": merged_micro,
+                }
+            )
+        else:
+            consolidated.append(segment)
+
+    cfg = config["continuity"]
+    max_gap_ms = float(cfg.get("preparation_bridge_max_gap_seconds", 20.0)) * 1000.0
+    max_duration_ms = float(cfg.get("preparation_segment_max_seconds", 20.0)) * 1000.0
+    following_min_ms = float(cfg.get("preparation_following_min_seconds", 30.0)) * 1000.0
+    max_events = int(cfg.get("preparation_segment_max_events", 2))
+    filtered: list[ExperimentSegment] = []
+    for index, segment in enumerate(consolidated):
+        following = consolidated[index + 1] if index + 1 < len(consolidated) else None
+        segment_events = _segment_events(segment, by_event)
+        following_events = _segment_events(following, by_event) if following else []
+        segment_objects = {obj for event in segment_events for obj in event.objects}
+        following_objects = {obj for event in following_events for obj in event.objects}
+        equipment_only_prelude = bool(segment_events) and all(
+            event.action_type == ActionType.OBJECT_MOVEMENT
+            and set(event.objects) <= FIXED_EQUIPMENT_OBJECTS
+            for event in segment_events
+        )
+        suppress = bool(
+            following
+            and has_shared_dual_view(segment, following)
+            and 0.0 <= following.global_start_ms - segment.global_end_ms <= max_gap_ms
+            and segment.global_end_ms - segment.global_start_ms <= max_duration_ms
+            and following.global_end_ms - following.global_start_ms >= following_min_ms
+            and len(segment_events) <= max_events
+            and equipment_only_prelude
+            and bool(segment_objects & following_objects & FIXED_EQUIPMENT_OBJECTS)
+        )
+        if not suppress:
+            filtered.append(segment)
+    return filtered
 
 
 def _segment_events(

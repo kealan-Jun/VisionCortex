@@ -368,6 +368,7 @@ def materialize_experiment_clips(
                 (f"Third-Person {role_paths['Third-Person'][0]}", role_paths["Third-Person"][1]),
             ],
             aligned,
+            encoder,
         )
         group.videos["aligned_first_third"] = _relative(aligned, layout.root)
         aligned_json = json_dir / "Aligned_First+Third.json"
@@ -1133,6 +1134,7 @@ def materialize_key_materials(
                 (group.third_person_view, clip_paths["Third-Person"]),
             ],
             aligned_clip,
+            encoder,
         )
         aligned_clip_relative = _relative(aligned_clip, layout.root)
         event.key_clips["aligned_first_third"] = aligned_clip_relative
@@ -1337,6 +1339,9 @@ def evidence_package_eval(
     transforms: dict[str, AlignmentTransform],
 ) -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
+    group_by_event = {
+        event_id: group for group in groups for event_id in group.key_event_ids
+    }
     for group in groups:
         checks.append(
             {
@@ -1365,8 +1370,38 @@ def evidence_package_eval(
                 }
             )
     for event in key_events:
-        checks.append({"check": "three_key_frames_present", "id": event.event_id, "passed": len(event.key_frames) == 3})
-        checks.append({"check": "three_key_clips_present", "id": event.event_id, "passed": len(event.key_clips) == 3})
+        group = group_by_event.get(event.event_id)
+        expected_keys = (
+            {group.first_person_view, group.third_person_view, "aligned_first_third"}
+            if group is not None
+            else set()
+        )
+        frame_keys = set(event.key_frames)
+        clip_keys = set(event.key_clips)
+        frame_media_complete = bool(expected_keys) and frame_keys == expected_keys and all(
+            (root / event.key_frames[key]).is_file()
+            and (root / event.key_frames[key]).stat().st_size > 0
+            for key in expected_keys
+        )
+        clip_media_complete = bool(expected_keys) and clip_keys == expected_keys and all(
+            (root / event.key_clips[key]).is_file()
+            and (root / event.key_clips[key]).stat().st_size > 0
+            for key in expected_keys
+        )
+        checks.append(
+            {
+                "check": "aligned_dual_view_key_frames_exist",
+                "id": event.event_id,
+                "passed": frame_media_complete,
+            }
+        )
+        checks.append(
+            {
+                "check": "aligned_dual_view_key_clips_exist",
+                "id": event.event_id,
+                "passed": clip_media_complete,
+            }
+        )
         checks.append(
             {
                 "check": "cross_view_or_explicit_uncertainty",
@@ -1383,6 +1418,16 @@ def evidence_package_eval(
         "experiment_group_count": len(groups),
         "key_event_count": len(key_events),
         "cross_view_event_count": sum(len(event.supporting_views) > 1 for event in key_events),
+        "dual_view_material_count": sum(
+            all(
+                check["passed"]
+                for check in checks
+                if check["id"] == event.event_id
+                and check["check"]
+                in {"aligned_dual_view_key_frames_exist", "aligned_dual_view_key_clips_exist"}
+            )
+            for event in key_events
+        ),
     }
 
 

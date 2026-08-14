@@ -1,3 +1,11 @@
+const brandLogo = window.VisionCortexBrandLogoDataUrl;
+if (brandLogo) {
+  const logo = document.querySelector("#product-logo");
+  const favicon = document.querySelector("#product-favicon");
+  if (logo) logo.src = brandLogo;
+  if (favicon) favicon.href = brandLogo;
+}
+
 const ICONS = {
   dashboard: '<svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>',
   flask: '<svg viewBox="0 0 24 24"><path d="M9 3h6M10 3v6l-5 9a2 2 0 0 0 1.8 3h10.4a2 2 0 0 0 1.8-3l-5-9V3M7.5 15h9"/></svg>',
@@ -32,6 +40,7 @@ const state = {
   archiveCache: new Map(),
   search: "",
   refreshingTasks: false,
+  materialFilters: { archive: null, group: null, action: "all", support: "all", query: "" },
 };
 
 const main = document.querySelector("#main-content");
@@ -641,12 +650,25 @@ async function loadArchive(name) {
 
 function resultHeader(data, tab) {
   const tokens = data.metrics?.tokens?.run_total || {};
-  const preprocessing = data.metrics?.display_preprocessing_seconds;
+  const performance = data.metrics?.preprocessing_display || {};
+  const fullColdStart = performance.full_cold_start || {};
+  const preprocessing = fullColdStart.measured ? fullColdStart.seconds : data.metrics?.display_preprocessing_seconds;
   const endToEnd = data.metrics?.web_end_to_end?.total_duration_seconds ?? data.metrics?.fixed_benchmark_end_to_end?.total_duration_seconds;
   const quality = data.quality_acceptance || {};
   const boundary = quality.experiment_boundaries || {};
   const materials = quality.key_materials || {};
-  return `<div class="result-header"><header class="page-hero compact"><div><p class="eyebrow">EVIDENCE ARCHIVE</p><h1>${esc(data.name)}</h1><p>第一人称与第三人称统一时间轴产出；仅保留通过有界审计的真实实验片段。</p></div><div class="hero-actions"><button class="secondary-button" type="button" data-copy-path="${esc(data.path)}">${icon("copy")}复制归档路径</button><button class="primary-button" type="button" data-open-folder="${esc(data.name)}">${icon("folder")}在资源管理器打开</button></div></header><div class="current-work"><span class="current-icon">${icon("folder")}</span><div><small>${archiveLabel()}位置（资源管理器直接粘贴）</small><h2 class="archive-path">${esc(data.path)}</h2><p>存储位置：${esc(data.network_path || data.path)} · 原视频、实验片段、关键素材、模型 JSON、耗时与 Token 均在此目录。</p></div><span class="badge">${archiveShortLabel()}</span></div><section class="status-grid">${statusCard("flask","有界实验",number(data.experiments.length),boundary.evaluated ? `边界通过率 ${percent(boundary.boundary_pass_rate)}` : "尚无人工/审阅基线")}${statusCard("image","关键事件",number(data.key_events.length),`跨视角支持 ${percent(materials.cross_view_supported_rate)}`)}${statusCard("clock","完整预处理",duration(preprocessing),"不含模型理解")}${statusCard("token","总 Token",number(tokens.total_tokens),endToEnd != null ? `端到端 ${duration(endToEnd)}` : `${number(tokens.input_tokens)} 输入 + ${number(tokens.output_tokens)} 输出`)}</section><nav class="result-tabs"><a class="result-tab ${tab==="experiments"?"active":""}" href="#/archive/${encodeURIComponent(data.name)}/experiments">实验片段与步骤理解</a><a class="result-tab ${tab==="materials"?"active":""}" href="#/archive/${encodeURIComponent(data.name)}/materials">关键素材与当前/下一步</a><a class="result-tab ${tab==="reports"?"active":""}" href="#/archive/${encodeURIComponent(data.name)}/reports">实验室日报</a><a class="result-tab ${tab==="metrics"?"active":""}" href="#/archive/${encodeURIComponent(data.name)}/metrics">耗时、Token、验收与资源</a></nav></div>`;
+  const boundaryNote = boundary.evaluated
+    ? `边界通过率 ${percent(boundary.boundary_pass_rate)}`
+    : boundary.evidence_package_eval_passed
+      ? `${number(boundary.structural_group_count ?? data.experiments.length)} 组结构/媒体已验收；无人工边界基线`
+      : "未提供人工边界基线，不推算准确率";
+  const explicitCount = materials.cross_view_or_explicit_uncertainty_count;
+  const materialNote = materials.event_count
+    ? `${number(materials.dual_view_material_count)}/${number(materials.event_count)} 双视角成套；${number(materials.cross_view_supported_count)} 项双侧共同佐证${explicitCount != null ? `；${number(explicitCount)} 项均有可审计关联` : ""}`
+    : "暂无关键事件";
+  const preprocessingLabel = fullColdStart.measured ? "历史完整冷启动预处理" : "本次预处理";
+  const preprocessingNote = fullColdStart.measured ? "独立全量基准；不含模型理解" : "不含模型理解";
+  return `<div class="result-header"><header class="page-hero compact"><div><p class="eyebrow">EVIDENCE ARCHIVE</p><h1>${esc(data.name)}</h1><p>第一人称与第三人称统一时间轴产出；仅保留通过有界审计的真实实验片段。</p></div><div class="hero-actions"><button class="secondary-button" type="button" data-copy-path="${esc(data.path)}">${icon("copy")}复制归档路径</button><button class="primary-button" type="button" data-open-folder="${esc(data.name)}">${icon("folder")}在资源管理器打开</button></div></header><div class="current-work"><span class="current-icon">${icon("folder")}</span><div><small>${archiveLabel()}位置（资源管理器直接粘贴）</small><h2 class="archive-path">${esc(data.path)}</h2><p>存储位置：${esc(data.network_path || data.path)} · 原视频、实验片段、关键素材、模型 JSON、耗时与 Token 均在此目录。</p></div><span class="badge">${archiveShortLabel()}</span></div><section class="status-grid">${statusCard("flask","有界实验",number(data.experiments.length),boundaryNote)}${statusCard("image","关键事件",number(data.key_events.length),materialNote)}${statusCard("clock",preprocessingLabel,duration(preprocessing),preprocessingNote)}${statusCard("token","总 Token",number(tokens.total_tokens),endToEnd != null ? `端到端 ${duration(endToEnd)}` : `${number(tokens.input_tokens)} 输入 + ${number(tokens.output_tokens)} 输出`)}</section><nav class="result-tabs"><a class="result-tab ${tab==="experiments"?"active":""}" href="#/archive/${encodeURIComponent(data.name)}/experiments">实验片段与步骤理解</a><a class="result-tab ${tab==="materials"?"active":""}" href="#/archive/${encodeURIComponent(data.name)}/materials">关键素材与当前/下一步</a><a class="result-tab ${tab==="reports"?"active":""}" href="#/archive/${encodeURIComponent(data.name)}/reports">实验室日报</a><a class="result-tab ${tab==="metrics"?"active":""}" href="#/archive/${encodeURIComponent(data.name)}/metrics">耗时、Token、验收与资源</a></nav></div>`;
 }
 
 function experimentCard(experiment) {
@@ -658,7 +680,84 @@ function materialCard(event) {
   const facts = event.decision?.observed_facts || [];
   const next = mllm.next_step || event.decision?.supported_inferences?.[0] || "没有足够证据支持下一步";
   const cross = event.cross_view_associations?.[0];
-  return `<article class="material-card"><header><div><h2>${esc(event.event_id)} · ${esc(ACTION_LABELS[event.action_type] || event.action_type)}</h2><div class="timecode">${timecode(Number(event.start_us)/1000)} → ${timecode(Number(event.end_us)/1000)} · 峰值 ${timecode(Number(event.peak_timestamp_us)/1000)}</div></div><span class="badge">${esc(event.decision?.status || "unknown")}</span></header><div class="video-understanding"><div><div class="video-frame">${event.aligned_frame_url ? `<img loading="lazy" src="${esc(event.aligned_frame_url)}" alt="${esc(event.event_id)} 对齐关键帧"/>` : ""}</div>${event.aligned_clip_url ? `<div class="video-frame" style="margin-top:8px"><video controls preload="none" src="${esc(event.aligned_clip_url)}"></video></div>` : ""}</div><div class="understanding-panel"><div><strong>当前步骤</strong><p>${esc(mllm.current_step || facts[0] || "未知")}</p></div><div><strong>下一步骤</strong><p>${esc(next)}</p></div><div><strong>跨视角支持</strong><p>${esc(cross ? `${cross.consistency} · ${cross.both_views_support_action ? "第一/第三人称共同支持" : "仅部分视角支持"}` : "未建立跨视角关联")}</p></div><div><strong>对象</strong><p>${esc(Object.entries(event.objects || {}).map(([key,value])=>`${key}: ${value}`).join("；") || "未明确")}</p></div>${facts.length ? `<div><strong>可观察事实</strong><ul class="fact-list">${facts.slice(0,3).map((fact)=>`<li>${esc(fact)}</li>`).join("")}</ul></div>` : ""}<div class="usage-box">Token：${number(mllm.usage?.input_tokens)} 输入 + ${number(mllm.usage?.output_tokens)} 输出 = ${number(mllm.usage?.total_tokens)}</div></div></div></article>`;
+  const dualView = eventHasDualViewSupport(event);
+  return `<article class="material-card"><header><div><h2>${esc(event.event_id)} · ${esc(ACTION_LABELS[event.action_type] || event.action_type)}</h2><div class="timecode">${timecode(Number(event.start_us)/1000)} → ${timecode(Number(event.end_us)/1000)} · 峰值 ${timecode(Number(event.peak_timestamp_us)/1000)}</div></div><div class="material-badges"><span class="badge">双视角成套</span><span class="badge ${dualView ? "trusted" : "uncertain"}">${dualView ? "双侧共同佐证" : "双视角对齐 · 单侧动作清晰"}</span></div></header><div class="video-understanding"><div><div class="video-frame">${event.aligned_frame_url ? `<img loading="lazy" src="${esc(event.aligned_frame_url)}" alt="${esc(event.event_id)} 第一/第三人称并排对齐关键帧"/>` : ""}</div>${event.aligned_clip_url ? `<div class="video-frame" style="margin-top:8px"><video controls preload="none" src="${esc(event.aligned_clip_url)}"></video></div>` : ""}</div><div class="understanding-panel"><div><strong>当前步骤</strong><p>${esc(mllm.current_step || facts[0] || "未知")}</p></div><div><strong>下一步骤</strong><p>${esc(next)}</p></div><div><strong>双视角证据强度</strong><p>${esc(cross ? `${cross.consistency} · ${dualView ? "第一/第三人称均能共同佐证该动作" : "第一/第三人称素材均已对齐归档，但该动作只在其中一侧清晰可见"}` : "双视角素材已归档，但未建立动作级关联")}</p></div><div><strong>对象</strong><p>${esc(Object.entries(event.objects || {}).map(([key,value])=>`${key}: ${value}`).join("；") || "未明确")}</p></div>${facts.length ? `<div><strong>可观察事实</strong><ul class="fact-list">${facts.slice(0,3).map((fact)=>`<li>${esc(fact)}</li>`).join("")}</ul></div>` : ""}<div class="usage-box">Token：${number(mllm.usage?.input_tokens)} 输入 + ${number(mllm.usage?.output_tokens)} 输出 = ${number(mllm.usage?.total_tokens)}</div></div></div></article>`;
+}
+
+function eventHasDualViewSupport(event) {
+  return (event.cross_view_associations || []).some((association) => association.both_views_support_action === true);
+}
+
+function eventHasAlignedDualViewMaterial(event) {
+  return event.dual_view_material_ready === true || Boolean(event.aligned_frame_url && event.aligned_clip_url);
+}
+
+function ensureMaterialFilters(data) {
+  if (state.materialFilters.archive === data.name) return;
+  state.materialFilters = {
+    archive: data.name,
+    group: data.experiment_groups?.[0]?.group_id || "all",
+    action: "all",
+    support: "all",
+    query: "",
+  };
+}
+
+function filteredMaterialEvents(data) {
+  const filters = state.materialFilters;
+  const query = filters.query.trim().toLocaleLowerCase("zh-CN");
+  return data.key_events.filter((event) => {
+    if (!eventHasAlignedDualViewMaterial(event)) return false;
+    if (filters.group !== "all" && event.experiment_group?.group_id !== filters.group) return false;
+    if (filters.action !== "all" && event.action_type !== filters.action) return false;
+    if (filters.support === "dual" && !eventHasDualViewSupport(event)) return false;
+    if (filters.support === "partial" && eventHasDualViewSupport(event)) return false;
+    if (!query) return true;
+    const mllm = event.provenance?.mllm || {};
+    const haystack = [
+      event.event_id,
+      ACTION_LABELS[event.action_type] || event.action_type,
+      event.experiment_group?.name,
+      mllm.current_step,
+      mllm.next_step,
+      JSON.stringify(event.objects || {}),
+      ...(event.decision?.observed_facts || []),
+    ].join(" ").toLocaleLowerCase("zh-CN");
+    return haystack.includes(query);
+  });
+}
+
+function materialResults(data) {
+  const events = filteredMaterialEvents(data);
+  const formalTotal = data.key_events.filter(eventHasAlignedDualViewMaterial).length;
+  const groupMap = new Map((data.experiment_groups || []).map((group,index) => [group.group_id, { ...group, index }]));
+  const grouped = new Map();
+  for (const event of events) {
+    const groupId = event.experiment_group?.group_id || "ungrouped";
+    if (!grouped.has(groupId)) grouped.set(groupId, []);
+    grouped.get(groupId).push(event);
+  }
+  const sections = [...grouped.entries()].sort(([left],[right]) => (groupMap.get(left)?.index ?? 999) - (groupMap.get(right)?.index ?? 999));
+  if (!sections.length) return `<div class="empty-state"><strong>没有符合条件的关键素材</strong><p>可放宽实验、动作类型、跨视角状态或关键词筛选。</p></div>`;
+  return `<div class="material-result-summary"><strong>显示 ${number(events.length)} / ${number(formalTotal)} 个双视角关键事件</strong><span>默认按实验分组；视频仅在需要播放时加载。</span></div>${sections.map(([groupId,items])=>{ const group = groupMap.get(groupId) || items[0].experiment_group || {}; const index = group.index == null ? "—" : String(group.index + 1).padStart(2,"0"); return `<section class="material-group"><header><span class="material-group-index">${index}</span><div><h2>${esc(group.name || groupId)}</h2><p>${timecode(group.start_ms)} → ${timecode(group.end_ms)} · ${group.continuity_type === "continuous" ? "连续实验" : "独立实验"}</p></div><span class="badge">${number(items.length)} 个事件</span></header><div class="material-grid">${items.map(materialCard).join("")}</div></section>`; }).join("")}`;
+}
+
+function materialsView(data) {
+  ensureMaterialFilters(data);
+  const filters = state.materialFilters;
+  const formalEvents = data.key_events.filter(eventHasAlignedDualViewMaterial);
+  const quarantinedCount = data.key_events.length - formalEvents.length;
+  const actionTypes = [...new Set(formalEvents.map((event)=>event.action_type).filter(Boolean))];
+  const actionCounts = Object.fromEntries(actionTypes.map((type)=>[type,formalEvents.filter((event)=>event.action_type===type).length]));
+  return `<section class="material-workspace"><header class="material-toolbar-heading"><div><p class="eyebrow">DUAL-VIEW KEY MATERIAL EVIDENCE</p><h2>按实验查阅双视角关键素材</h2><p>正式素材必须同时包含第一人称、第三人称及其并排对齐帧/片段；缺少任一视角的候选不会进入正式素材库。</p></div><span class="badge">${number(formalEvents.length)} 个双视角事件</span></header>${quarantinedCount ? `<div class="freshness-warning"><strong>${number(quarantinedCount)} 个候选缺少成套双视角素材，已从正式关键素材库隔离。</strong></div>` : ""}<div class="material-filter-bar"><label><span>实验片段</span><select id="material-group-filter"><option value="all" ${filters.group==="all"?"selected":""}>全部实验（${number(formalEvents.length)}）</option>${(data.experiment_groups||[]).map((group,index)=>`<option value="${esc(group.group_id)}" ${filters.group===group.group_id?"selected":""}>${String(index+1).padStart(2,"0")} · ${esc(group.name)}（${number(group.key_event_count)}）</option>`).join("")}</select></label><label><span>动作类型</span><select id="material-action-filter"><option value="all">全部五类动作</option>${actionTypes.map((type)=>`<option value="${esc(type)}" ${filters.action===type?"selected":""}>${esc(ACTION_LABELS[type]||type)}（${number(actionCounts[type])}）</option>`).join("")}</select></label><label><span>双视角证据强度</span><select id="material-support-filter"><option value="all">全部双视角事件</option><option value="dual" ${filters.support==="dual"?"selected":""}>双侧共同佐证动作</option><option value="partial" ${filters.support==="partial"?"selected":""}>双视角已对齐 · 单侧动作清晰</option></select></label><label class="material-query"><span>搜索步骤、对象或事件 ID</span><input id="material-query" value="${esc(filters.query)}" placeholder="例如：移液器、开盖、EVT-000010" /></label></div><div id="material-results">${materialResults(data)}</div></section>`;
+}
+
+function bindMaterialFilters(data) {
+  const rerender = () => { document.querySelector("#material-results").innerHTML = materialResults(data); };
+  document.querySelector("#material-group-filter")?.addEventListener("change", (event)=>{ state.materialFilters.group=event.target.value; rerender(); });
+  document.querySelector("#material-action-filter")?.addEventListener("change", (event)=>{ state.materialFilters.action=event.target.value; rerender(); });
+  document.querySelector("#material-support-filter")?.addEventListener("change", (event)=>{ state.materialFilters.support=event.target.value; rerender(); });
+  document.querySelector("#material-query")?.addEventListener("input", (event)=>{ state.materialFilters.query=event.target.value; rerender(); });
 }
 
 function dailyReportView(data) {
@@ -695,7 +794,33 @@ function metricsView(data) {
   const boundary = quality.experiment_boundaries || {};
   const materials = quality.key_materials || {};
   const summaries = data.observability?.telemetry_summary?.stage_summaries || {};
-  return `<section class="panel"><header class="panel-heading"><div><h2>阶段耗时</h2><p>完整预处理基准为 ${duration(metrics.display_preprocessing_seconds)}，明确不包含模型理解；当前运行流水线耗时 ${duration(metrics.total_duration_seconds)}${endToEnd?.total_duration_seconds != null ? `，端到端 ${duration(endToEnd.total_duration_seconds)}` : ""}。</p></div></header><table class="metric-table"><thead><tr><th>阶段</th><th>说明</th><th>耗时</th></tr></thead><tbody>${extraRows}${stages.map((stage)=>`<tr><td>${esc(stage.stage)}</td><td>${esc(STAGE_LABELS[stage.stage] || stage.stage)}</td><td>${duration(stage.duration_seconds)}</td></tr>`).join("")}</tbody></table></section><section class="panel"><header class="panel-heading"><div><h2>Token 用量</h2><p>CV、FFmpeg 与 TensorRT 不消耗模型 Token；断点复用的模型结果不重复计入本次实际消耗。</p></div></header><table class="metric-table"><thead><tr><th>阶段</th><th>执行 / 复用</th><th>输入 Token</th><th>输出 Token</th><th>总 Token</th></tr></thead><tbody><tr><td>实验片段步骤理解</td><td>${number(tokens.experiment_groups?.executed_call_count ?? tokens.experiment_groups?.call_count)} / ${number(tokens.experiment_groups?.reused_call_count)}</td><td>${number(tokens.experiment_groups?.input_tokens)}</td><td>${number(tokens.experiment_groups?.output_tokens)}</td><td>${number(tokens.experiment_groups?.total_tokens)}</td></tr><tr><td>关键素材理解</td><td>${number(tokens.key_materials?.executed_call_count ?? tokens.key_materials?.call_count)} / ${number(tokens.key_materials?.reused_call_count)}</td><td>${number(tokens.key_materials?.input_tokens)}</td><td>${number(tokens.key_materials?.output_tokens)}</td><td>${number(tokens.key_materials?.total_tokens)}</td></tr><tr><td><strong>全任务</strong></td><td>—</td><td><strong>${number(tokens.run_total?.input_tokens)}</strong></td><td><strong>${number(tokens.run_total?.output_tokens)}</strong></td><td><strong>${number(tokens.run_total?.total_tokens)}</strong></td></tr></tbody></table></section><section class="panel"><header class="panel-heading"><div><h2>质量验收</h2><p>边界基线仅参与评估，不参与推理；没有基线时明确显示 structural_only。</p></div></header><table class="metric-table"><tbody><tr><td>总体状态</td><td>${esc(quality.status || "历史档案未生成")}</td></tr><tr><td>实验检出 Precision / Recall</td><td>${percent(boundary.precision)} / ${percent(boundary.recall)}</td></tr><tr><td>边界通过率 / 连续性准确率</td><td>${percent(boundary.boundary_pass_rate)} / ${percent(boundary.continuity_accuracy)}</td></tr><tr><td>关键素材五类覆盖</td><td>${esc((materials.missing_action_types || []).length ? `缺少 ${(materials.missing_action_types || []).join("、")}` : "完整")}</td></tr><tr><td>跨视角关键事件</td><td>${number(materials.cross_view_supported_count)} / ${number(materials.event_count)}（${percent(materials.cross_view_supported_rate)}）</td></tr></tbody></table></section><section class="panel"><header class="panel-heading"><div><h2>资源遥测（按阶段）</h2><p>来源：resource_telemetry.json；主机网络包含其他流量，进程树 I/O 单独列出。</p></div></header><table class="metric-table"><thead><tr><th>阶段</th><th>GPU mean/max</th><th>NVDEC mean/max</th><th>CPU mean/max</th><th>网络接收 mean/max</th></tr></thead><tbody>${Object.entries(summaries).map(([stage,item])=>`<tr><td>${esc(STAGE_LABELS[stage]||stage)}</td><td>${metricStat(item.gpu_compute_percent)}/${metricStat(item.gpu_compute_percent,"max","%")}</td><td>${metricStat(item.nvdec_percent)}/${metricStat(item.nvdec_percent,"max","%")}</td><td>${metricStat(item.cpu_percent)}/${metricStat(item.cpu_percent,"max","%")}</td><td>${metricStat(item.host_network_receive_mib_s,"mean"," MiB/s")}/${metricStat(item.host_network_receive_mib_s,"max"," MiB/s")}</td></tr>`).join("")}</tbody></table></section><section class="panel"><header class="panel-heading"><div><h2>模型理解与验收文件</h2><p>这些链接直接指向当前 NAS 档案中的正式文件。</p></div></header><div class="result-links" style="padding:20px">${Object.entries({experiment_understanding:"实验级步骤理解 JSON",key_material_understanding:"关键素材模型理解 JSON",metrics:"耗时与 Token JSON",acceptance:"人工验收汇总 JSON",quality_acceptance:"自动质量验收 JSON"}).map(([key,label])=>data.links[key]?`<a target="_blank" href="${esc(data.links[key])}">${icon("file")}${label}</a>`:"").join("")}</div></section>`;
+  const performance = metrics.preprocessing_display || {};
+  const fullColdStart = performance.full_cold_start || {};
+  const currentRun = performance.current_run || {};
+  const statusLabel = quality.status === "evidence_package_passed_no_boundary_ground_truth"
+    ? "证据包结构与媒体已验收；没有人工边界真值"
+    : quality.status || "未生成质量账本";
+  const boundaryAccuracy = boundary.evaluated
+    ? `${percent(boundary.precision)} / ${percent(boundary.recall)}`
+    : "未评估（历史档案无人工边界基线）";
+  const boundaryContinuity = boundary.evaluated
+    ? `${percent(boundary.boundary_pass_rate)} / ${percent(boundary.continuity_accuracy)}`
+    : "未评估；不使用结构验收冒充准确率";
+  const performanceSummary = fullColdStart.measured
+    ? `历史完整冷启动预处理 ${duration(fullColdStart.seconds)}；本次归档运行 ${duration(currentRun.total_seconds)}，其中预处理 ${duration(currentRun.preprocessing_seconds)}。`
+    : `本次运行预处理 ${duration(currentRun.preprocessing_seconds ?? metrics.display_preprocessing_seconds)}；流水线 ${duration(currentRun.total_seconds ?? metrics.total_duration_seconds)}。`;
+  const reuseNote = currentRun.reused_validated_cv_ledgers
+    ? "本次归档运行复用了已验收 CV 检测账本，因此不能当作冷启动速度。"
+    : "本次运行未标记为复用已验收 CV 检测账本。";
+  const links = {
+    experiment_understanding: "实验级步骤理解 JSON",
+    key_material_understanding: "关键素材模型理解 JSON",
+    metrics: "耗时与 Token JSON",
+    acceptance: "验收汇总 JSON",
+    quality_acceptance: "自动质量验收 JSON",
+    evidence_package_eval: "证据包结构/媒体验收 JSON",
+  };
+  return `<section class="panel"><header class="panel-heading"><div><h2>耗时口径</h2><p>${performanceSummary} ${reuseNote}</p></div></header><div class="performance-compare"><article><small>历史完整冷启动预处理</small><strong>${duration(fullColdStart.seconds)}</strong><span>${esc(fullColdStart.includes || "预检 + 对齐 + 全量粗扫 + 有界精扫 + 边界审计；不含模型理解")}</span></article><article><small>当前归档运行总耗时</small><strong>${duration(currentRun.total_seconds ?? metrics.total_duration_seconds)}</strong><span>${currentRun.reused_validated_cv_ledgers ? "复用已验收 CV 账本，重新生成理解/媒体/证据包" : "以本次运行账本为准"}</span></article><article><small>当前运行预处理</small><strong>${duration(currentRun.preprocessing_seconds)}</strong><span>${currentRun.reused_validated_cv_ledgers ? "不是冷启动基准" : "当前运行实际值"}</span></article></div><table class="metric-table"><thead><tr><th>阶段</th><th>说明</th><th>耗时</th></tr></thead><tbody>${extraRows}${stages.map((stage)=>`<tr><td>${esc(stage.stage)}</td><td>${esc(STAGE_LABELS[stage.stage] || stage.stage)}</td><td>${duration(stage.duration_seconds)}</td></tr>`).join("")}</tbody></table></section><section class="panel"><header class="panel-heading"><div><h2>Token 用量</h2><p>CV、FFmpeg 与 TensorRT 不消耗模型 Token；断点复用的模型结果不重复计入本次实际消耗。</p></div></header><table class="metric-table"><thead><tr><th>阶段</th><th>执行 / 复用</th><th>输入 Token</th><th>输出 Token</th><th>总 Token</th></tr></thead><tbody><tr><td>实验片段步骤理解</td><td>${number(tokens.experiment_groups?.executed_call_count ?? tokens.experiment_groups?.call_count)} / ${number(tokens.experiment_groups?.reused_call_count)}</td><td>${number(tokens.experiment_groups?.input_tokens)}</td><td>${number(tokens.experiment_groups?.output_tokens)}</td><td>${number(tokens.experiment_groups?.total_tokens)}</td></tr><tr><td>关键素材理解</td><td>${number(tokens.key_materials?.executed_call_count ?? tokens.key_materials?.call_count)} / ${number(tokens.key_materials?.reused_call_count)}</td><td>${number(tokens.key_materials?.input_tokens)}</td><td>${number(tokens.key_materials?.output_tokens)}</td><td>${number(tokens.key_materials?.total_tokens)}</td></tr><tr><td><strong>全任务</strong></td><td>—</td><td><strong>${number(tokens.run_total?.input_tokens)}</strong></td><td><strong>${number(tokens.run_total?.output_tokens)}</strong></td><td><strong>${number(tokens.run_total?.total_tokens)}</strong></td></tr></tbody></table></section><section class="panel"><header class="panel-heading"><div><h2>质量验收</h2><p>${esc(quality.display_note || "边界基线只参与评估，不参与推理；没有基线时不猜测准确率。")}</p></div></header><table class="metric-table"><tbody><tr><td>总体状态</td><td>${esc(statusLabel)}</td></tr><tr><td>实验检出 Precision / Recall</td><td>${boundaryAccuracy}</td></tr><tr><td>边界通过率 / 连续性准确率</td><td>${boundaryContinuity}</td></tr><tr><td>证据包结构与媒体</td><td>${boundary.evidence_package_eval_passed || materials.evidence_package_eval_passed ? "通过自动验收" : "未通过或无验收记录"}</td></tr><tr><td>关键素材五类覆盖</td><td>${esc((materials.missing_action_types || []).length ? `缺少 ${(materials.missing_action_types || []).join("、")}` : "完整")}</td></tr><tr><td>第一/第三人称成套素材</td><td>${number(materials.dual_view_material_count)} / ${number(materials.event_count)}（${percent(materials.dual_view_material_rate)}）</td></tr><tr><td>双侧共同佐证动作</td><td>${number(materials.cross_view_supported_count)} / ${number(materials.event_count)}（${percent(materials.cross_view_supported_rate)}）</td></tr><tr><td>双视角关联可审计</td><td>${number(materials.cross_view_or_explicit_uncertainty_count)} / ${number(materials.event_count)}</td></tr></tbody></table></section><section class="panel"><header class="panel-heading"><div><h2>资源遥测（按阶段）</h2><p>来源：resource_telemetry.json；主机网络包含其他流量，进程树 I/O 单独列出。</p></div></header><table class="metric-table"><thead><tr><th>阶段</th><th>GPU mean/max</th><th>NVDEC mean/max</th><th>CPU mean/max</th><th>网络接收 mean/max</th></tr></thead><tbody>${Object.entries(summaries).map(([stage,item])=>`<tr><td>${esc(STAGE_LABELS[stage]||stage)}</td><td>${metricStat(item.gpu_compute_percent)}/${metricStat(item.gpu_compute_percent,"max","%")}</td><td>${metricStat(item.nvdec_percent)}/${metricStat(item.nvdec_percent,"max","%")}</td><td>${metricStat(item.cpu_percent)}/${metricStat(item.cpu_percent,"max","%")}</td><td>${metricStat(item.host_network_receive_mib_s,"mean"," MiB/s")}/${metricStat(item.host_network_receive_mib_s,"max"," MiB/s")}</td></tr>`).join("")}</tbody></table></section><section class="panel"><header class="panel-heading"><div><h2>模型理解与验收文件</h2><p>这些链接直接指向当前 NAS 档案中的正式文件；历史档案没有的文件不会显示为可点击链接。</p></div></header><div class="result-links" style="padding:20px">${Object.entries(links).map(([key,label])=>data.links[key]?`<a target="_blank" href="${esc(data.links[key])}">${icon("file")}${label}</a>`:"").join("")}</div></section>`;
 }
 
 async function renderArchive(name, tab = "experiments") {
@@ -703,8 +828,9 @@ async function renderArchive(name, tab = "experiments") {
   main.innerHTML = `<div class="page-loading"><span class="spinner"></span><strong>正在读取${archiveLabel()}</strong></div>`;
   try {
     const data = await loadArchive(name);
-    main.innerHTML = `<div class="page">${resultHeader(data,tab)}${tab === "materials" ? `<section class="material-grid">${data.key_events.map(materialCard).join("")}</section>` : tab === "reports" ? dailyReportView(data) : tab === "metrics" ? metricsView(data) : `<section class="step-list">${data.experiments.map(experimentCard).join("")}</section>`}</div>`;
+    main.innerHTML = `<div class="page">${resultHeader(data,tab)}${tab === "materials" ? materialsView(data) : tab === "reports" ? dailyReportView(data) : tab === "metrics" ? metricsView(data) : `<section class="step-list">${data.experiments.map(experimentCard).join("")}</section>`}</div>`;
     bindArchiveActions();
+    if (tab === "materials") bindMaterialFilters(data);
   } catch (error) {
     main.innerHTML = `<div class="empty-state"><strong>无法读取该实验档案</strong><p>${esc(error.message)}</p><a class="secondary-button" href="#/experiments">返回实验记录</a></div>`;
   }

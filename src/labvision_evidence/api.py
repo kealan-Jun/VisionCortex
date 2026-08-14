@@ -51,6 +51,13 @@ _lock = threading.Lock()
 _runs: dict[str, dict[str, Any]] = {}
 _BENCHMARK_EXPERIMENT_ID = "exp_20260810_144014_e918b762"
 _BENCHMARK_ARCHIVE_NAME = "Six-View-Three-Hour-Experiment-2026-08-13"
+_PHYSICAL_ACTION_TYPES = (
+    "hand_object_contact",
+    "object_movement",
+    "liquid_transfer",
+    "container_state_change",
+    "device_panel_operation",
+)
 
 
 def _recover_orphaned_tasks() -> None:
@@ -599,24 +606,128 @@ def list_archives() -> dict[str, Any]:
     return {"archive_root": str(root), "archives": archives}
 
 
+def _event_has_cross_view_support(event: dict[str, Any]) -> bool:
+    return any(
+        association.get("both_views_support_action") is True
+        for association in event.get("cross_view_associations", [])
+    )
+
+
+def _event_has_aligned_dual_view_material(event: dict[str, Any]) -> bool:
+    if event.get("aligned_frame_url") and event.get("aligned_clip_url"):
+        return True
+    frame_roles = {item.get("view_role") for item in event.get("key_frames", [])}
+    clip_roles = {item.get("view_role") for item in event.get("key_clips", [])}
+    return "aligned_first_third" in frame_roles and "aligned_first_third" in clip_roles
+
+
+def _derive_archived_quality_summary(
+    package: dict[str, Any],
+    key_events: list[dict[str, Any]],
+    evidence_eval: dict[str, Any],
+) -> dict[str, Any]:
+    """Expose verified legacy evidence without inventing boundary accuracy metrics."""
+
+    action_types = sorted(
+        {
+            str(event.get("action_type"))
+            for event in key_events
+            if event.get("action_type")
+        }
+    )
+    cross_view_supported_count = sum(
+        1 for event in key_events if _event_has_cross_view_support(event)
+    )
+    dual_view_material_count = sum(
+        1 for event in key_events if _event_has_aligned_dual_view_material(event)
+    )
+    event_count = len(key_events)
+    evidence_checks = [
+        check
+        for check in evidence_eval.get("checks", [])
+        if check.get("check") == "cross_view_or_explicit_uncertainty"
+    ]
+    explicit_evidence_count = sum(check.get("passed") is True for check in evidence_checks)
+    evaluation_passed = evidence_eval.get("passed") is True
+    return {
+        "schema_version": "visioncortex-archive-quality-display/1",
+        "status": (
+            "evidence_package_passed_no_boundary_ground_truth"
+            if evaluation_passed
+            else "structural_evidence_only"
+        ),
+        "source": "derived_from_archived_evidence",
+        "display_note": (
+            "历史档案没有人工边界基线；系统仅展示可从证据包复算的结构、媒体与跨视角结果，"
+            "不虚构 Precision、Recall 或边界通过率。"
+        ),
+        "experiment_boundaries": {
+            "evaluated": False,
+            "reason": "no_reviewed_boundary_ground_truth_in_archive",
+            "structural_group_count": len(package.get("experiment_groups", [])),
+            "evidence_package_eval_passed": evaluation_passed,
+        },
+        "key_materials": {
+            "event_count": event_count,
+            "cross_view_supported_count": cross_view_supported_count,
+            "cross_view_supported_rate": (
+                cross_view_supported_count / event_count if event_count else None
+            ),
+            "dual_view_material_count": dual_view_material_count,
+            "dual_view_material_rate": (
+                dual_view_material_count / event_count if event_count else None
+            ),
+            "missing_dual_view_material_count": event_count - dual_view_material_count,
+            "cross_view_or_explicit_uncertainty_count": explicit_evidence_count,
+            "evidence_package_eval_passed": evaluation_passed,
+            "action_types_present": action_types,
+            "missing_action_types": sorted(set(_PHYSICAL_ACTION_TYPES) - set(action_types)),
+            "source": "event_cross_view_associations + evidence_package_eval.json",
+        },
+    }
+
+
+def _attach_archive_performance_display(
+    metrics: dict[str, Any], acceptance: dict[str, Any]
+) -> None:
+    benchmark = acceptance.get("preprocessing_full_run") or {}
+    clean_run = acceptance.get("clean_package_run") or {}
+    current_preprocessing = (metrics.get("preprocessing_sla") or {}).get("actual_seconds")
+    if benchmark.get("seconds") is not None:
+        metrics["display_preprocessing_seconds"] = benchmark["seconds"]
+        metrics["display_preprocessing_source"] = "full_cold_start_benchmark"
+    else:
+        metrics["display_preprocessing_seconds"] = current_preprocessing
+        metrics["display_preprocessing_source"] = "current_run"
+    reuse_note = str(clean_run.get("note") or "")
+    metrics["preprocessing_display"] = {
+        "full_cold_start": {
+            "seconds": benchmark.get("seconds"),
+            "includes": benchmark.get("includes"),
+            "measured": benchmark.get("seconds") is not None,
+            "source": "acceptance_report.preprocessing_full_run",
+        },
+        "current_run": {
+            "total_seconds": metrics.get("total_duration_seconds"),
+            "preprocessing_seconds": current_preprocessing,
+            "reuse_note": reuse_note or None,
+            "reused_validated_cv_ledgers": "reused validated cv ledgers" in reuse_note.lower(),
+            "source": "run_metrics + acceptance_report.clean_package_run",
+        },
+    }
+
+
 @app.get("/api/archives/{archive_name}")
 def archive_detail(archive_name: str) -> dict[str, Any]:
     root = _resolve_archive(archive_name)
     package = _read_json(root / "JSON-Config-Files" / "evidence_package.json", {}) or {}
     metrics = _read_json(root / "JSON-Config-Files" / "run_metrics.json", {}) or {}
     acceptance = _read_json(root / "JSON-Config-Files" / "acceptance_report.json", {}) or {}
-    quality_acceptance = _read_json(
-        root / "JSON-Config-Files" / "quality_acceptance.json", {}
-    ) or {}
-    benchmark = acceptance.get("preprocessing_full_run") or {}
-    if benchmark.get("seconds") is not None:
-        metrics["display_preprocessing_seconds"] = benchmark["seconds"]
-        metrics["display_preprocessing_source"] = "full_run_benchmark"
-    else:
-        metrics["display_preprocessing_seconds"] = (metrics.get("preprocessing_sla") or {}).get(
-            "actual_seconds"
-        )
-        metrics["display_preprocessing_source"] = "current_run"
+    quality_path = root / "JSON-Config-Files" / "quality_acceptance.json"
+    quality_acceptance = _read_json(quality_path, {}) or {}
+    evidence_eval_path = root / "JSON-Config-Files" / "evidence_package_eval.json"
+    evidence_eval = _read_json(evidence_eval_path, {}) or {}
+    _attach_archive_performance_display(metrics, acceptance)
     key_events = _read_json(
         root / "Key-Materials" / "Key-Materials-Model-Understanding.json", []
     ) or []
@@ -628,8 +739,14 @@ def archive_detail(archive_name: str) -> dict[str, Any]:
         if daily_manifest.get("json")
         else {}
     ) or {}
+    package_groups = package.get("experiment_groups", [])
     group_by_folder = {
-        str(group.get("archive_folder")): group for group in package.get("experiment_groups", [])
+        str(group.get("archive_folder")): group for group in package_groups
+    }
+    group_by_id = {
+        str(group.get("group_id")): group
+        for group in package_groups
+        if group.get("group_id")
     }
     experiments = []
     experiment_root = root / "Experiment-Clips"
@@ -657,6 +774,7 @@ def archive_detail(archive_name: str) -> dict[str, Any]:
             )
     normalized_events = []
     for event in key_events:
+        group = group_by_id.get(str(event.get("parent_event_id")), {})
         frame = next(
             (
                 item for item in event.get("key_frames", [])
@@ -676,8 +794,37 @@ def archive_detail(archive_name: str) -> dict[str, Any]:
                 **event,
                 "aligned_frame_url": _file_url(archive_name, frame["path"]) if frame else None,
                 "aligned_clip_url": _file_url(archive_name, clip["path"]) if clip else None,
+                "dual_view_material_ready": bool(frame and clip),
+                "experiment_group": {
+                    "group_id": group.get("group_id") or event.get("parent_event_id"),
+                    "name": group.get("experiment_name") or event.get("parent_event_id"),
+                    "folder": group.get("archive_folder"),
+                    "continuity_type": group.get("continuity_type"),
+                    "start_ms": group.get("global_start_ms"),
+                    "end_ms": group.get("global_end_ms"),
+                },
             }
         )
+    if not quality_acceptance:
+        quality_acceptance = _derive_archived_quality_summary(
+            package, normalized_events, evidence_eval
+        )
+    else:
+        quality_acceptance.setdefault("source", "quality_acceptance.json")
+    key_quality = quality_acceptance.setdefault("key_materials", {})
+    dual_view_material_count = sum(
+        1 for event in normalized_events if event["dual_view_material_ready"]
+    )
+    key_quality.setdefault("event_count", len(normalized_events))
+    key_quality.setdefault("dual_view_material_count", dual_view_material_count)
+    key_quality.setdefault(
+        "dual_view_material_rate",
+        dual_view_material_count / len(normalized_events) if normalized_events else None,
+    )
+    key_quality.setdefault(
+        "missing_dual_view_material_count",
+        len(normalized_events) - dual_view_material_count,
+    )
     links = {
         "experiment_understanding": _file_url(
             archive_name, "JSON-Config-Files/Experiment-Groups-Step-Level-Analysis.json"
@@ -689,7 +836,10 @@ def archive_detail(archive_name: str) -> dict[str, Any]:
         "acceptance": _file_url(archive_name, "JSON-Config-Files/acceptance_report.json"),
         "quality_acceptance": _file_url(
             archive_name, "JSON-Config-Files/quality_acceptance.json"
-        ),
+        ) if quality_path.is_file() else None,
+        "evidence_package_eval": _file_url(
+            archive_name, "JSON-Config-Files/evidence_package_eval.json"
+        ) if evidence_eval_path.is_file() else None,
         "daily_report_json": _file_url(archive_name, daily_manifest["json"])
         if daily_manifest.get("json")
         else None,
@@ -711,6 +861,18 @@ def archive_detail(archive_name: str) -> dict[str, Any]:
         "path": str(_archive_root() / archive_name),
         "network_path": str(root),
         "experiments": experiments,
+        "experiment_groups": [
+            {
+                "group_id": group.get("group_id"),
+                "name": group.get("experiment_name") or group.get("archive_folder"),
+                "folder": group.get("archive_folder"),
+                "continuity_type": group.get("continuity_type"),
+                "start_ms": group.get("global_start_ms"),
+                "end_ms": group.get("global_end_ms"),
+                "key_event_count": len(group.get("key_event_ids", [])),
+            }
+            for group in package_groups
+        ],
         "key_events": normalized_events,
         "metrics": metrics,
         "quality_acceptance": quality_acceptance,

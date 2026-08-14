@@ -54,6 +54,11 @@ def test_real_pipeline_preflight_calls_imported_video_probe(tmp_path, monkeypatc
 
     monkeypatch.setattr(pipeline_module, "ResourceMonitor", _NoopResourceMonitor)
     monkeypatch.setattr(pipeline_module, "validate_models", lambda _config: {})
+    monkeypatch.setattr(
+        pipeline_module,
+        "video_encoder_preflight",
+        lambda _encoder: {"selected_encoder": "libx264"},
+    )
     monkeypatch.setattr(pipeline_module, "probe_views", stop_at_video_probe)
 
     with pytest.raises(_ReachedVideoProbe, match="preflight reached video probe"):

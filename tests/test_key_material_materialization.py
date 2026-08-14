@@ -114,7 +114,7 @@ def test_key_material_roles_export_concurrently_and_write_runtime(monkeypatch, t
     monkeypatch.setattr(
         archive,
         "create_grid_video",
-        lambda clips, destination: destination.write_bytes(b"aligned-clip"),
+        lambda clips, destination, encoder: destination.write_bytes(b"aligned-clip"),
     )
 
     archive.materialize_key_materials(

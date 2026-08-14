@@ -65,6 +65,61 @@ def test_encoder_capability_is_probed_once(monkeypatch):
     assert len(calls) == 1
 
 
+def test_encoder_runtime_probe_rejects_nvenc_driver_mismatch(monkeypatch):
+    calls = []
+
+    def fake_run(command, timeout=None):
+        calls.append((command, timeout))
+        if "-encoders" in command:
+            return SimpleNamespace(returncode=0, stdout=b"h264_nvenc libx264", stderr=b"")
+        encoder = command[command.index("-c:v") + 1]
+        if encoder == "h264_nvenc":
+            return SimpleNamespace(
+                returncode=1,
+                stdout=b"",
+                stderr=b"Driver does not support the required nvenc API version 13.0",
+            )
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    video_io._encoder_available.cache_clear()
+    video_io._encoder_usable.cache_clear()
+    monkeypatch.setattr(video_io, "_run", fake_run)
+
+    report = video_io.video_encoder_preflight("h264_nvenc")
+
+    assert report["requested_encoder_listed"] is True
+    assert report["requested_encoder_usable"] is False
+    assert report["selected_encoder"] == "libx264"
+    assert report["software_fallback_active"] is True
+    assert sum("-encoders" in command for command, _ in calls) == 2
+
+
+def test_grid_video_retries_software_encoder_after_runtime_nvenc_failure(
+    monkeypatch, tmp_path
+):
+    encoders = []
+
+    monkeypatch.setattr(video_io, "select_video_encoder", lambda _preferred: "h264_nvenc")
+
+    def fake_run(command, timeout=None):
+        del timeout
+        encoder = command[command.index("-c:v") + 1]
+        encoders.append(encoder)
+        return SimpleNamespace(
+            returncode=1 if encoder == "h264_nvenc" else 0,
+            stdout=b"",
+            stderr=b"nvenc mismatch" if encoder == "h264_nvenc" else b"",
+        )
+
+    monkeypatch.setattr(video_io, "_run", fake_run)
+    video_io.create_grid_video(
+        [("first", tmp_path / "first.mp4"), ("third", tmp_path / "third.mp4")],
+        tmp_path / "aligned.mp4",
+    )
+
+    assert encoders == ["h264_nvenc", "libx264"]
+
+
 def test_frame_reader_reuses_decoder_for_same_segment(monkeypatch):
     opened = []
 

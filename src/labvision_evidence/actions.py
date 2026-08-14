@@ -1044,6 +1044,14 @@ def build_experiment_segments(
                         raw_end + maximum_extension_ms,
                         boundary_window.global_end_ms,
                     )
+                    connected_objects = {obj for item in group for obj in item.objects}
+                    cleanup_objects = {
+                        "brush",
+                        "cleaning_tool",
+                        "sink",
+                        "wash_bottle",
+                        "waste_container",
+                    }
                     for context in sorted(events, key=lambda item: item.global_start_ms):
                         if context.global_end_ms <= cursor:
                             continue
@@ -1051,9 +1059,20 @@ def build_experiment_segments(
                             break
                         if context.global_start_ms > cursor + maximum_gap_ms:
                             break
-                        if context.confidence < bridge_confidence or not context.objects:
+                        physically_connected = bool(
+                            set(context.objects) & (connected_objects | cleanup_objects)
+                        ) or context.action_type in {
+                            ActionType.CONTAINER_STATE_CHANGE,
+                            ActionType.DEVICE_PANEL_OPERATION,
+                        }
+                        if (
+                            context.confidence < bridge_confidence
+                            or not context.objects
+                            or not physically_connected
+                        ):
                             continue
                         cursor = min(limit, max(cursor, context.global_end_ms))
+                        connected_objects.update(context.objects)
                         if context.confidence >= extension_confidence:
                             supported_end = max(supported_end, cursor)
                     raw_end = supported_end

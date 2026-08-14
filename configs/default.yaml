@@ -129,6 +129,10 @@ continuity:
   max_gap_seconds: 300.0
   require_shared_third_view: false
   minimum_shared_objects: 1
+  preparation_bridge_max_gap_seconds: 20.0
+  preparation_segment_max_seconds: 20.0
+  preparation_segment_max_events: 2
+  preparation_following_min_seconds: 30.0
 
 key_materials:
   # Only collapse near-identical evidence. Repeated transfers, contacts and
@@ -189,4 +193,7 @@ validation:
   boundary_match_iou: 0.50
   max_start_error_seconds: 8.0
   max_end_error_seconds: 8.0
-  minimum_cross_view_event_rate: 1.0
+  # Physical action support may be visually clear in only one view. Formal
+  # delivery still requires synchronized first/third media for every event.
+  minimum_cross_view_event_rate: 0.0
+  fail_before_model_on_boundary_regression: true
