@@ -19,6 +19,11 @@ performance:
   tensor_rt: auto
   batch_size: 16
   coarse_batch_size: 16
+  coarse_first_person_views: 1
+  coarse_third_person_views: 1
+  coarse_refinement_association_margin_seconds: 30.0
+  coarse_refinement_min_candidates: 2
+  coarse_refinement_min_span_seconds: 30.0
   fine_batch_size: 16
   image_size: 960
   coarse_detection_fps: 0.125
@@ -44,6 +49,8 @@ performance:
   motion_probe_fps: 0.5
   motion_probe_max_width: 96
   motion_probe_keyframes_only: true
+  motion_probe_run_yolo: false
+  coarse_reuse_motion_probe: false
   motion_probe_first_person_views: 1
   motion_probe_third_person_views: 1
   motion_probe_percentile: 85.0
@@ -70,6 +77,8 @@ performance:
   segment_wave_timeout_seconds: 3600
   preflight_probe_workers: 12
   preflight_prefer_clock_metadata: true
+  source_stat_workers: 24
+  source_stat_cache_ttl_seconds: 120
 
 alignment:
   reference_view: first_person

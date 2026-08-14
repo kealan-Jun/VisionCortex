@@ -17,6 +17,7 @@ import cv2
 import numpy as np
 
 from .schemas import VideoInfo, VideoSegmentInfo, ViewInput
+from .storage import read_source_file_edges
 
 
 def _run(command: list[str], timeout: float | None = None) -> subprocess.CompletedProcess[bytes]:
@@ -148,15 +149,10 @@ def probe_view(view: ViewInput) -> VideoInfo:
 def _clock_metadata_video_info(video: Path, clock: Path | None) -> VideoInfo | None:
     """Build exact RGB media timing from a recorder CSV without scanning the MP4."""
 
-    if clock is None or not clock.is_file():
+    if clock is None:
         return None
     try:
-        with clock.open("rb") as handle:
-            head = handle.read(512 * 1024)
-            handle.seek(0, 2)
-            size = handle.tell()
-            handle.seek(max(0, size - 512 * 1024))
-            tail = handle.read()
+        head, tail, size = read_source_file_edges(clock)
         head_lines = head.decode("utf-8-sig", errors="replace").splitlines()
         tail_lines = tail.decode("utf-8", errors="replace").splitlines()
         if len(head_lines) < 2:
@@ -172,9 +168,9 @@ def _clock_metadata_video_info(video: Path, clock: Path | None) -> VideoInfo | N
         if not required.issubset(indexes):
             return None
 
-        def rgb_rows(lines: Sequence[str]) -> list[list[str]]:
-            rows = []
-            for line in lines:
+        def rgb_endpoint(lines: Sequence[str], *, reverse: bool = False) -> list[str] | None:
+            candidates = reversed(lines) if reverse else iter(lines)
+            for line in candidates:
                 values = next(csv.reader([line]), [])
                 if len(values) <= max(indexes.values()):
                     continue
@@ -182,14 +178,16 @@ def _clock_metadata_video_info(video: Path, clock: Path | None) -> VideoInfo | N
                     continue
                 if not values[indexes["rgb_video_frame_index"]].strip():
                     continue
-                rows.append(values)
-            return rows
-
-        first_rows = rgb_rows(head_lines[1:])
-        last_rows = rgb_rows(tail_lines[1:] if size > len(tail) else tail_lines)
-        if not first_rows or not last_rows:
+                return values
             return None
-        first, last = first_rows[0], last_rows[-1]
+
+        first = rgb_endpoint(head_lines[1:])
+        last = rgb_endpoint(
+            tail_lines[1:] if size > len(tail) else tail_lines,
+            reverse=True,
+        )
+        if first is None or last is None:
+            return None
 
         def number(row: list[str], name: str) -> float:
             return float(row[indexes[name]])

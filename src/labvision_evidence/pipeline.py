@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat as stat_module
 import threading
 import time
 from copy import deepcopy
@@ -24,6 +25,7 @@ from .actions import (
     generate_motion_burst_candidates,
     generate_motion_safety_candidates,
     fuse_motion_probe_candidates,
+    refine_motion_candidates_with_coarse,
     refine_liquid_events_with_context,
     select_fine_scan_views,
 )
@@ -55,7 +57,12 @@ from .schemas import (
     ViewRole,
 )
 from .video_io import check_disk_capacity, probe_views, view_source_files, view_timestamp_files
-from .storage import IncrementalArchivePublisher, initialize_nas_archive
+from .storage import (
+    IncrementalArchivePublisher,
+    initialize_nas_archive,
+    snapshot_source_paths,
+    source_cache_diagnostics,
+)
 from .telemetry import ResourceMonitor
 from .validation import validate_experiment_and_material_quality
 
@@ -87,16 +94,45 @@ def build_cache_identity(config: dict[str, Any], manifest: RunManifest) -> dict[
     models = {}
     for role in ("first_person", "third_person"):
         path = Path(config["models"][role]).resolve()
+        try:
+            model_stat = path.stat()
+        except OSError:
+            model_stat = None
+        if model_stat is not None and not stat_module.S_ISREG(model_stat.st_mode):
+            model_stat = None
         models[role] = {
             "path": str(path),
-            "size_bytes": path.stat().st_size if path.is_file() else None,
-            "sha256": _sha256_file(path) if path.is_file() else None,
+            "size_bytes": model_stat.st_size if model_stat is not None else None,
+            "sha256": _sha256_file(path) if model_stat is not None else None,
         }
 
+    def absolute(path: Path) -> Path:
+        return Path(os.path.abspath(str(path)))
+
+    files_by_view = {
+        view.view_id: {
+            "videos": [absolute(path) for path in view_source_files(view)],
+            "timestamps_csvs": [absolute(path) for path in view_timestamp_files(view)],
+        }
+        for view in manifest.views
+    }
+    all_source_paths = [
+        path
+        for files in files_by_view.values()
+        for file_type in ("videos", "timestamps_csvs")
+        for path in files[file_type]
+    ]
+    source_snapshots, source_snapshot_report = snapshot_source_paths(
+        all_source_paths,
+        workers=int(config["performance"].get("source_stat_workers", 24)),
+        max_age_seconds=float(
+            config["performance"].get("source_stat_cache_ttl_seconds", 120.0)
+        ),
+    )
     inputs = []
     for view in manifest.views:
-        source_files = [path.resolve() for path in view_source_files(view)]
-        clock_files = [path.resolve() for path in view_timestamp_files(view)]
+        source_files = files_by_view[view.view_id]["videos"]
+        clock_files = files_by_view[view.view_id]["timestamps_csvs"]
         inputs.append(
             {
                 "view_id": view.view_id,
@@ -105,16 +141,16 @@ def build_cache_identity(config: dict[str, Any], manifest: RunManifest) -> dict[
                 "videos": [
                     {
                         "path": str(path),
-                        "size_bytes": path.stat().st_size if path.is_file() else None,
-                        "mtime_ns": path.stat().st_mtime_ns if path.is_file() else None,
+                        "size_bytes": source_snapshots[path]["size_bytes"],
+                        "mtime_ns": source_snapshots[path]["mtime_ns"],
                     }
                     for path in source_files
                 ],
                 "timestamps_csvs": [
                     {
                         "path": str(path),
-                        "size_bytes": path.stat().st_size if path.is_file() else None,
-                        "mtime_ns": path.stat().st_mtime_ns if path.is_file() else None,
+                        "size_bytes": source_snapshots[path]["size_bytes"],
+                        "mtime_ns": source_snapshots[path]["mtime_ns"],
                     }
                     for path in clock_files
                 ],
@@ -143,6 +179,7 @@ def build_cache_identity(config: dict[str, Any], manifest: RunManifest) -> dict[
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
     payload["cache_key"] = hashlib.sha256(encoded).hexdigest()[:20]
+    payload["source_snapshot_report"] = source_snapshot_report
     return payload
 
 
@@ -156,6 +193,7 @@ class EvidencePipeline:
         self._active_stage_started = 0.0
         self._active_stage_started_iso = ""
         self._stage_metrics: list[dict[str, Any]] = []
+        self._startup_metrics: dict[str, Any] = {}
         self._preprocessing_completed_seconds: float | None = None
         self._input_view_count = 0
         self._input_mode = "unknown"
@@ -357,6 +395,7 @@ class EvidencePipeline:
                 ),
             },
             "stage_durations": list(self._stage_metrics),
+            "startup_durations": dict(self._startup_metrics),
             "tokens": {
                 "experiment_groups": experiment_groups,
                 "key_materials": key_materials,
@@ -491,6 +530,16 @@ class EvidencePipeline:
         third = [view for view in manifest.views if view.role == ViewRole.THIRD_PERSON]
         return first[:first_limit] + third[:third_limit]
 
+    def _coarse_scan_views(self, manifest: RunManifest) -> list[ViewInput]:
+        """Choose boundary sentinels; fine validation still uses required views."""
+
+        perf = self.config["performance"]
+        first_limit = max(1, int(perf.get("coarse_first_person_views", 1)))
+        third_limit = max(1, int(perf.get("coarse_third_person_views", 1)))
+        first = [view for view in manifest.views if view.role == ViewRole.FIRST_PERSON]
+        third = [view for view in manifest.views if view.role == ViewRole.THIRD_PERSON]
+        return first[:first_limit] + third[:third_limit]
+
     @staticmethod
     def _window_coverage(
         windows: dict[str, list[tuple[float, float]]], infos
@@ -512,12 +561,12 @@ class EvidencePipeline:
     @staticmethod
     def _input_volume_report(manifest: RunManifest, infos) -> dict[str, Any]:
         listed_video_paths = [
-            str(path.resolve())
+            os.path.abspath(path)
             for view in manifest.views
             for path in view_source_files(view)
         ]
         listed_clock_paths = [
-            str(path.resolve())
+            os.path.abspath(path)
             for view in manifest.views
             for path in view_timestamp_files(view)
         ]
@@ -600,6 +649,7 @@ class EvidencePipeline:
         self._run_started_iso = datetime.now(timezone.utc).isoformat()
         self._active_stage = None
         self._stage_metrics = []
+        self._startup_metrics = {}
         self._preprocessing_completed_seconds = None
         self._input_view_count = len(manifest.views)
         self._input_mode = (
@@ -632,7 +682,15 @@ class EvidencePipeline:
         else:
             output_root = Path(self.config["project"]["output_root"]).resolve()
             layout = ArchiveLayout(output_root / manifest.experiment_id)
+        cache_identity_started = time.perf_counter()
         cache_identity = build_cache_identity(self.config, manifest)
+        self._startup_metrics["cache_identity_seconds"] = round(
+            time.perf_counter() - cache_identity_started,
+            6,
+        )
+        self._startup_metrics["cache_identity_source_snapshot"] = cache_identity.get(
+            "source_snapshot_report", {}
+        )
         layout.work = (
             Path(self.config["storage"]["local_cache_root"]).resolve()
             / manifest.experiment_id
@@ -662,15 +720,47 @@ class EvidencePipeline:
         self._resource_monitor.start()
         try:
             self._status(layout, "preflight", 0.02, "检查输入、模型、视频与磁盘")
-            for view in manifest.views:
-                for source in view_source_files(view):
-                    if not source.is_file():
-                        raise FileNotFoundError(f"视频不存在: {source}")
-                for clock in view_timestamp_files(view):
-                    if not clock.is_file():
-                        raise FileNotFoundError(f"时间戳 CSV 不存在: {clock}")
+            preflight_breakdown: dict[str, Any] = {}
+            preflight_step_started = time.perf_counter()
+            source_paths = [
+                path
+                for view in manifest.views
+                for path in view_source_files(view) + view_timestamp_files(view)
+            ]
+            source_snapshots, source_validation = snapshot_source_paths(
+                source_paths,
+                workers=int(self.config["performance"].get("source_stat_workers", 24)),
+                max_age_seconds=float(
+                    self.config["performance"].get(
+                        "source_stat_cache_ttl_seconds", 120.0
+                    )
+                ),
+            )
+            missing_sources = [
+                str(path)
+                for path, snapshot in source_snapshots.items()
+                if not snapshot["is_file"]
+            ]
+            source_validation["cache_diagnostics"] = source_cache_diagnostics()
+            write_json(
+                layout.json_config / "source_validation.json",
+                source_validation,
+            )
+            if missing_sources:
+                raise FileNotFoundError(f"输入源文件不存在: {missing_sources[:4]}")
+            preflight_breakdown["source_validation_seconds"] = round(
+                time.perf_counter() - preflight_step_started,
+                6,
+            )
+            preflight_breakdown["source_validation"] = source_validation
+            preflight_step_started = time.perf_counter()
             model_report = validate_models(self.config)
+            preflight_breakdown["model_validation_seconds"] = round(
+                time.perf_counter() - preflight_step_started,
+                6,
+            )
             write_json(layout.json_config / "model_runtime_preflight.json", model_report)
+            preflight_step_started = time.perf_counter()
             infos = probe_views(
                 manifest.views,
                 workers=int(self.config["performance"].get("preflight_probe_workers", 12)),
@@ -680,21 +770,42 @@ class EvidencePipeline:
                     )
                 ),
             )
+            preflight_breakdown["video_probe_seconds"] = round(
+                time.perf_counter() - preflight_step_started,
+                6,
+            )
             write_json(
                 layout.json_config / "input_volume_report.json",
                 self._input_volume_report(manifest, infos),
             )
+            preflight_step_started = time.perf_counter()
             disk_report = check_disk_capacity(layout.root, list(infos.values()))
+            preflight_breakdown["disk_check_seconds"] = round(
+                time.perf_counter() - preflight_step_started,
+                6,
+            )
+            preflight_breakdown["source_cache_after_probe"] = source_cache_diagnostics()
+            write_json(
+                layout.json_config / "preflight_runtime.json",
+                preflight_breakdown,
+            )
             write_json(layout.json_config / "video_probe.json", {key: value.model_dump(mode="json") for key, value in infos.items()})
             if self._publisher is not None:
                 self._publisher.publish_directory("JSON-Config-Files")
 
             self._status(layout, "alignment", 0.08, "最近邻时间戳拟合与视觉锚点校准")
+            alignment_runtime: dict[str, Any] = {}
+            alignment_step_started = time.perf_counter()
             transforms, _ = build_alignments(manifest.views, infos, self.config)
+            alignment_runtime["fit_seconds"] = round(
+                time.perf_counter() - alignment_step_started,
+                6,
+            )
             write_json(
                 layout.json_config / "time_alignment.json",
                 [transform.model_dump(mode="json") for transform in transforms.values()],
             )
+            alignment_step_started = time.perf_counter()
             write_aligned_csv(
                 layout.json_config / "aligned_timestamps.csv",
                 manifest.views,
@@ -702,8 +813,24 @@ class EvidencePipeline:
                 transforms,
                 float(self.config["alignment"]["aligned_timestamps_fps"]),
             )
+            alignment_runtime["aligned_csv_seconds"] = round(
+                time.perf_counter() - alignment_step_started,
+                6,
+            )
+            alignment_runtime["source_cache_after_alignment"] = source_cache_diagnostics()
+            alignment_step_started = time.perf_counter()
             if self._publisher is not None:
                 self._publisher.publish_directory("JSON-Config-Files")
+            alignment_runtime["incremental_publish_seconds"] = round(
+                time.perf_counter() - alignment_step_started,
+                6,
+            )
+            write_json(
+                layout.json_config / "alignment_runtime.json",
+                alignment_runtime,
+            )
+            if self._publisher is not None:
+                self._publisher.publish_file(layout.json_config / "alignment_runtime.json")
 
             motion_probe_views = self._motion_probe_views(manifest)
             probe_manifest = manifest.model_copy(update={"views": motion_probe_views})
@@ -792,48 +919,102 @@ class EvidencePipeline:
                 },
             )
 
+            reuse_motion_probe = bool(
+                self.config["performance"].get("coarse_reuse_motion_probe", False)
+            ) and bool(self.config["performance"].get("motion_probe_run_yolo", False))
+            coarse_scan_views = (
+                motion_probe_views
+                if reuse_motion_probe
+                else self._coarse_scan_views(manifest)
+            )
+            coarse_scan_ids = {view.view_id for view in coarse_scan_views}
+            coarse_manifest = manifest.model_copy(update={"views": coarse_scan_views})
             for view in manifest.views:
-                self._view_runtime[view.view_id]["state"] = "coarse_running"
+                self._view_runtime[view.view_id]["state"] = (
+                    "coarse_running"
+                    if view.view_id in coarse_scan_ids
+                    else "coarse_sentinel_not_selected"
+                )
             self._status(
                 layout,
                 "candidate_coarse",
                 0.28,
                 f"候选窗口内 {self.config['performance']['coarse_detection_fps']} FPS YOLO粗筛",
             )
-            coarse_paths = self._scan_all_views_concurrently(
-                manifest,
-                infos,
-                transforms,
-                layout.work / "detections-coarse",
-                windows=motion_windows,
-                sample_fps=float(self.config["performance"]["coarse_detection_fps"]),
-                image_size=int(self.config["performance"]["coarse_image_size"]),
-                keyframes_only=bool(self.config["performance"]["coarse_keyframes_only"]),
-                phase="coarse",
-            )
-            self._archive_scan_runtime(layout, layout.work / "detections-coarse", "coarse")
-            coarse_views = [view for view in manifest.views if view.role == ViewRole.FIRST_PERSON]
+            if reuse_motion_probe:
+                coarse_paths = motion_paths
+                for view in manifest.views:
+                    self._view_runtime[view.view_id]["state"] = (
+                        "coarse_reused_motion_probe"
+                        if view.view_id in coarse_scan_ids
+                        else "coarse_sentinel_not_selected"
+                    )
+                write_json(
+                    layout.json_config / "coarse_reuse_motion_probe.json",
+                    {
+                        "schema_version": "visioncortex-coarse-reuse/1",
+                        "reused": True,
+                        "source_phase": "motion_probe",
+                        "source_view_ids": [view.view_id for view in coarse_scan_views],
+                        "sample_fps": float(
+                            self.config["performance"]["motion_probe_fps"]
+                        ),
+                        "additional_video_decode_bytes": 0,
+                    },
+                )
+            else:
+                coarse_paths = self._scan_all_views_concurrently(
+                    coarse_manifest,
+                    infos,
+                    transforms,
+                    layout.work / "detections-coarse",
+                    windows=motion_windows,
+                    sample_fps=float(self.config["performance"]["coarse_detection_fps"]),
+                    image_size=int(self.config["performance"]["coarse_image_size"]),
+                    keyframes_only=bool(self.config["performance"]["coarse_keyframes_only"]),
+                    phase="coarse",
+                )
+                self._archive_scan_runtime(
+                    layout, layout.work / "detections-coarse", "coarse"
+                )
+            coarse_views = [
+                view for view in coarse_scan_views if view.role == ViewRole.FIRST_PERSON
+            ]
             coarse_config = json.loads(json.dumps(self.config))
             coarse_config["segmentation"]["event_merge_gap_seconds"] = max(
                 float(coarse_config["segmentation"]["event_merge_gap_seconds"]),
-                1.5 / float(self.config["performance"]["coarse_detection_fps"]),
+                1.5
+                / float(
+                    self.config["performance"][
+                        "motion_probe_fps"
+                        if reuse_motion_probe
+                        else "coarse_detection_fps"
+                    ]
+                ),
             )
             coarse_config["segmentation"]["min_event_observations"] = 2
             coarse_candidates = generate_motion_burst_candidates(
                 coarse_views, coarse_paths, coarse_config
             )
             if not coarse_candidates:
-                fallback_views = [view for view in manifest.views if view.role == ViewRole.THIRD_PERSON]
+                fallback_views = [
+                    view for view in coarse_scan_views if view.role == ViewRole.THIRD_PERSON
+                ]
                 fallback_paths = {view.view_id: coarse_paths[view.view_id] for view in fallback_views}
                 coarse_candidates = generate_coarse_activity_candidates(
                     fallback_views, fallback_paths, coarse_config
                 )
-            # Coarse YOLO may refine a window but must never erase a motion
-            # window. Keeping both makes the funnel recall-first; overlapping
-            # ranges are merged by _fine_windows before the expensive scan.
-            boundary_candidates = sorted(
-                [*motion_candidates, *coarse_candidates],
-                key=lambda item: item.global_start_ms,
+            boundary_candidates, boundary_report = refine_motion_candidates_with_coarse(
+                motion_candidates,
+                coarse_candidates,
+                self.config,
+            )
+            boundary_report["coarse_scan_view_ids"] = [
+                view.view_id for view in coarse_scan_views
+            ]
+            write_json(
+                layout.json_config / "coarse_boundary_refinement.json",
+                boundary_report,
             )
             fine_views, fine_view_report = select_fine_scan_views(
                 manifest.views, coarse_paths, boundary_candidates, self.config

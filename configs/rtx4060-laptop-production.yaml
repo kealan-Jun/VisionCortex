@@ -17,28 +17,40 @@ performance:
   coarse_image_size: 416
   coarse_batch_size: 32
   coarse_keyframes_only: false
-  # One indexed frame every four seconds is enough to find multi-second lab
-  # activity; 90-second padding and bounded all-view scans protect recall.
-  motion_probe_fps: 0.25
-  motion_probe_max_width: 96
+  # Boundary discovery needs one wearable view and one independent static
+  # sentinel. All six views still join the bounded 10 FPS fine scan.
+  coarse_first_person_views: 1
+  coarse_third_person_views: 1
+  coarse_refinement_association_margin_seconds: 30.0
+  coarse_refinement_min_candidates: 2
+  coarse_refinement_min_span_seconds: 30.0
+  # The same indexed sentinel frames feed motion and first-person YOLO once.
+  # At one frame per 10 seconds the shortest reviewed 4.5-minute experiment
+  # still contributes about 27 observations, while a second NAS decode pass is
+  # eliminated. Unsupported motion windows remain recall guards.
+  motion_probe_fps: 0.1
+  motion_probe_max_width: 416
   motion_probe_keyframes_only: true
+  motion_probe_run_yolo: true
+  motion_probe_batch_size: 8
+  coarse_reuse_motion_probe: true
   motion_probe_first_person_views: 1
   # The validated wearable stream is only 8.22 GiB. It discovers windows;
   # every first/third-person view still joins the bounded YOLO scans.
   motion_probe_third_person_views: 0
   motion_probe_percentile: 85.0
-  motion_probe_burst_merge_gap_seconds: 20.0
+  motion_probe_burst_merge_gap_seconds: 45.0
   motion_probe_min_observations: 2
-  motion_probe_merge_gap_seconds: 20.0
+  motion_probe_merge_gap_seconds: 45.0
   motion_probe_min_views: 1
   motion_probe_primary_min_seconds: 45.0
   motion_probe_window_padding_seconds: 90.0
   motion_probe_fallback_peaks_per_hour: 8
   motion_probe_fallback_separation_seconds: 120.0
   motion_probe_fallback_window_seconds: 60.0
-  # Indexed seek is latency-bound; three segment readers overlap SMB latency
-  # without asking TensorRT or NVDEC to load extra model contexts.
-  motion_probe_segment_workers: 3
+  # Indexed seek is latency-bound. Six independent 15-minute segment readers
+  # overlap SMB latency while sharing one TensorRT model/context.
+  motion_probe_segment_workers: 6
   motion_signature_size: [64, 36]
   detection_fps: 10.0
   image_size: 640
@@ -61,6 +73,10 @@ performance:
   ffmpeg_video_encoder: h264_nvenc
   concurrent_role_scanners: true
   preflight_probe_workers: 12
+  # SMB metadata operations are latency-bound and transfer almost no payload.
+  # Validate the 180 source paths once, concurrently, then reuse that snapshot.
+  source_stat_workers: 24
+  source_stat_cache_ttl_seconds: 120
   # All five fixed third-person views join bounded fine windows. This both
   # fills the shared third-person TRT batches and guarantees cross-view audit.
   fine_min_third_person_views: 5

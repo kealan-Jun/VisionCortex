@@ -6,10 +6,14 @@ import json
 import os
 import re
 import shutil
+import stat as stat_module
 import threading
+import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import lru_cache
 from pathlib import Path, PureWindowsPath
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 import yaml
 
@@ -32,6 +36,154 @@ DERIVED_ARCHIVE_DIRECTORIES = (
     "Lab-Daily-Reports",
     "Professional-PDFs",
 )
+
+
+_SOURCE_STAT_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_SOURCE_STAT_LOCK = threading.Lock()
+
+
+def _source_cache_key(path: Path) -> str:
+    """Return a stable absolute key without resolving the path through SMB."""
+
+    return os.path.normcase(os.path.abspath(str(path)))
+
+
+def _source_stat(path: Path) -> dict[str, Any]:
+    try:
+        value = path.stat()
+    except OSError as exc:
+        return {
+            "is_file": False,
+            "size_bytes": None,
+            "mtime_ns": None,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    is_file = stat_module.S_ISREG(value.st_mode)
+    return {
+        "is_file": is_file,
+        "size_bytes": int(value.st_size) if is_file else None,
+        "mtime_ns": int(value.st_mtime_ns) if is_file else None,
+        "error": None if is_file else "path is not a regular file",
+    }
+
+
+def snapshot_source_paths(
+    paths: Sequence[Path],
+    *,
+    workers: int = 24,
+    max_age_seconds: float = 120.0,
+    refresh: bool = False,
+) -> tuple[dict[Path, dict[str, Any]], dict[str, Any]]:
+    """Stat high-latency source paths once, concurrently, and reuse briefly.
+
+    The cache lifetime only bridges ingest, cache identity and preflight inside
+    one run. It is intentionally short so a later upload or deletion is still
+    observed by a long-lived web process.
+    """
+
+    started = time.perf_counter()
+    ordered = list(dict.fromkeys(Path(path) for path in paths))
+    now = time.monotonic()
+    snapshots: dict[Path, dict[str, Any]] = {}
+    pending: list[Path] = []
+    cache_hits = 0
+    with _SOURCE_STAT_LOCK:
+        for path in ordered:
+            cached = _SOURCE_STAT_CACHE.get(_source_cache_key(path))
+            if (
+                not refresh
+                and cached is not None
+                and now - cached[0] <= max(0.0, float(max_age_seconds))
+            ):
+                snapshots[path] = dict(cached[1])
+                cache_hits += 1
+            else:
+                pending.append(path)
+
+    if pending:
+        with ThreadPoolExecutor(
+            max_workers=max(1, min(int(workers), len(pending))),
+            thread_name_prefix="source-stat",
+        ) as executor:
+            futures = {executor.submit(_source_stat, path): path for path in pending}
+            for future in as_completed(futures):
+                path = futures[future]
+                snapshot = future.result()
+                snapshots[path] = snapshot
+                with _SOURCE_STAT_LOCK:
+                    _SOURCE_STAT_CACHE[_source_cache_key(path)] = (
+                        time.monotonic(),
+                        dict(snapshot),
+                    )
+
+    ordered_snapshots = {path: snapshots[path] for path in ordered}
+    missing_count = sum(not item["is_file"] for item in ordered_snapshots.values())
+    report = {
+        "path_count": len(ordered),
+        "verified_file_count": len(ordered) - missing_count,
+        "missing_count": missing_count,
+        "cache_hit_count": cache_hits,
+        "fresh_stat_count": len(pending),
+        "workers": max(1, min(int(workers), max(1, len(pending)))),
+        "duration_seconds": round(time.perf_counter() - started, 6),
+        "cache_ttl_seconds": float(max_age_seconds),
+    }
+    return ordered_snapshots, report
+
+
+@lru_cache(maxsize=256)
+def _read_source_file_edges_cached(
+    path_text: str,
+    size_bytes: int,
+    mtime_ns: int,
+    window_bytes: int,
+) -> tuple[bytes, bytes, int]:
+    del mtime_ns  # part of the cache identity
+    path = Path(path_text)
+    with path.open("rb") as handle:
+        head = handle.read(window_bytes)
+        handle.seek(max(0, size_bytes - window_bytes))
+        tail = handle.read()
+    return head, tail, size_bytes
+
+
+def read_source_file_edges(
+    path: Path,
+    *,
+    window_bytes: int = 512 * 1024,
+) -> tuple[bytes, bytes, int]:
+    """Read and cache immutable CSV head/tail windows for preflight + alignment."""
+
+    snapshots, _ = snapshot_source_paths([path], workers=1)
+    snapshot = snapshots[Path(path)]
+    if not snapshot["is_file"]:
+        raise FileNotFoundError(f"source file does not exist: {path}")
+    return _read_source_file_edges_cached(
+        _source_cache_key(Path(path)),
+        int(snapshot["size_bytes"]),
+        int(snapshot["mtime_ns"]),
+        max(4096, int(window_bytes)),
+    )
+
+
+def source_cache_diagnostics() -> dict[str, int]:
+    edge_info = _read_source_file_edges_cached.cache_info()
+    with _SOURCE_STAT_LOCK:
+        stat_entries = len(_SOURCE_STAT_CACHE)
+    return {
+        "source_stat_entries": stat_entries,
+        "edge_cache_hits": edge_info.hits,
+        "edge_cache_misses": edge_info.misses,
+        "edge_cache_entries": edge_info.currsize,
+    }
+
+
+def clear_source_metadata_cache() -> None:
+    """Clear process-local metadata caches (primarily for isolated tests)."""
+
+    with _SOURCE_STAT_LOCK:
+        _SOURCE_STAT_CACHE.clear()
+    _read_source_file_edges_cached.cache_clear()
 
 
 def _sha256_file(path: Path) -> str:
@@ -273,15 +425,16 @@ def _parts(value: str | None) -> list[str]:
 
 
 def _resolve_nas_path(value: str, index_csv: Path) -> Path:
-    """Resolve stale Z: index entries through the index CSV's Y: share first."""
+    """Resolve stale Z: index entries through the index CSV's active drive.
+
+    Existence is validated once for the complete inventory later. Performing an
+    SMB metadata round trip here caused every source to be checked repeatedly.
+    """
+
     candidate = Path(value)
     pure = PureWindowsPath(value)
     if pure.drive.upper() == "Z:":
-        remapped = Path(index_csv.drive + "\\" + str(pure.relative_to(pure.anchor)))
-        if remapped.exists():
-            return remapped
-    if candidate.exists():
-        return candidate
+        return Path(index_csv.drive + "\\" + str(pure.relative_to(pure.anchor)))
     return candidate
 
 
@@ -293,8 +446,12 @@ def read_index_experiment(index_csv: Path, experiment_id: str) -> list[dict[str,
     return rows
 
 
-def describe_index_experiment(index_csv: Path, experiment_id: str) -> dict[str, Any]:
-    rows = read_index_experiment(index_csv, experiment_id)
+def describe_index_experiment(
+    index_csv: Path,
+    experiment_id: str,
+    rows: Sequence[dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    rows = list(rows) if rows is not None else read_index_experiment(index_csv, experiment_id)
     cameras = []
     for row in rows:
         rgb = _parts(row.get("rgb_file"))
@@ -333,8 +490,8 @@ def prepare_from_nas_index(
     progress = progress or (lambda _: None)
     storage = config["storage"]
     index_csv = Path(storage["index_csv"])
-    description = describe_index_experiment(index_csv, experiment_id)
     rows = read_index_experiment(index_csv, experiment_id)
+    description = describe_index_experiment(index_csv, experiment_id, rows)
     active_archive = storage.get("active_archive_path")
     if active_archive and storage.get("manifest_storage", "nas") == "nas":
         manifest_root = Path(active_archive) / "JSON-Config-Files" / "Input-Manifests"
@@ -348,9 +505,6 @@ def prepare_from_nas_index(
         progress(f"Registering NAS segments without copying: {camera_key}")
         videos = [_resolve_nas_path(item, index_csv) for item in _parts(row.get("rgb_file"))]
         clocks = [_resolve_nas_path(item, index_csv) for item in _parts(row.get("frames_file"))]
-        missing = [str(item) for item in videos + clocks if not item.is_file()]
-        if missing:
-            raise FileNotFoundError(f"NAS source missing for {camera_key}: {missing[:4]}")
         if clocks and len(clocks) != len(videos):
             raise ValueError(
                 f"NAS segment/clock count mismatch for {camera_key}: "
@@ -377,6 +531,30 @@ def prepare_from_nas_index(
         )
 
     views = [prepare(row) for row in rows]
+    source_paths = [
+        path
+        for view in views
+        for segment in view.segments
+        for path in (
+            [segment.video]
+            + ([segment.timestamps_csv] if segment.timestamps_csv is not None else [])
+        )
+    ]
+    progress(f"Validating {len(source_paths)} NAS source files concurrently")
+    source_snapshots, source_validation = snapshot_source_paths(
+        source_paths,
+        workers=int(config["performance"].get("source_stat_workers", 24)),
+        max_age_seconds=float(
+            config["performance"].get("source_stat_cache_ttl_seconds", 120.0)
+        ),
+    )
+    missing = [
+        str(path)
+        for path, snapshot in source_snapshots.items()
+        if not snapshot["is_file"]
+    ]
+    if missing:
+        raise FileNotFoundError(f"NAS source missing: {missing[:4]}")
     segment_counts = {view.view_id: len(view.segments) for view in views}
     if config["performance"].get("synchronized_segment_waves") and len(set(segment_counts.values())) != 1:
         raise ValueError(f"Synchronized segment waves require equal segment counts: {segment_counts}")
@@ -394,6 +572,7 @@ def prepare_from_nas_index(
         "manifest_root": str(manifest_root),
         "manifest": str(manifest_path),
         "segment_counts": segment_counts,
+        "source_validation": source_validation,
         "role_overrides": {key: value.value for key, value in overrides.items()},
     }
     (manifest_root / "nas_ingest.json").write_text(

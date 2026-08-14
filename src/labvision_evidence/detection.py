@@ -661,7 +661,9 @@ def scan_videos(
         role_views = [view for view in views if view.role == role]
         if not role_views:
             continue
-        motion_only = phase == "motion_probe"
+        motion_only = phase == "motion_probe" and not bool(
+            config["performance"].get("motion_probe_run_yolo", False)
+        )
         scanner = None if motion_only else RoleScanner(
             role, config, effective_image_size, phase_batch_size
         )
@@ -762,9 +764,10 @@ def scan_videos(
             if not pending_items:
                 return
             frames = [item for item in pending_items if isinstance(item, FramePacket)]
+            if phase == "motion_probe":
+                motion_sample_count += len(frames)
             if scanner is None:
                 inferred = [[] for _ in frames]
-                motion_sample_count += len(frames)
             else:
                 inferred = scanner.infer(frames) if frames else []
                 if frames:

@@ -11,6 +11,7 @@ from typing import Iterable, Sequence
 import numpy as np
 
 from .schemas import AlignmentTransform, TimestampPoint, VideoInfo, ViewInput
+from .storage import read_source_file_edges
 from .video_io import view_motion_signature
 
 
@@ -90,14 +91,7 @@ def _timestamp_point(row: dict[str, str], row_number: int, fps: float) -> Timest
 def read_timestamp_csv_endpoints(path: Path, fps: float) -> list[TimestampPoint]:
     """Read the first/last recorded RGB rows without scanning a multi-million-row CSV."""
 
-    if not path.is_file():
-        raise FileNotFoundError(f"时间戳 CSV 不存在: {path}")
-    with path.open("rb") as handle:
-        head = handle.read(512 * 1024)
-        handle.seek(0, 2)
-        size = handle.tell()
-        handle.seek(max(0, size - 512 * 1024))
-        tail = handle.read()
+    head, tail, size = read_source_file_edges(path)
     head_lines = head.decode("utf-8-sig", errors="replace").splitlines()
     tail_lines = tail.decode("utf-8", errors="replace").splitlines()
     if len(head_lines) < 2:
@@ -106,9 +100,12 @@ def read_timestamp_csv_endpoints(path: Path, fps: float) -> list[TimestampPoint]
     lowered = [item.strip().lower() for item in fieldnames]
     rgb_index = lowered.index("rgb_recorded") if "rgb_recorded" in lowered else None
 
-    def rows(lines: Sequence[str]) -> list[TimestampPoint]:
-        result = []
-        for row_number, line in enumerate(lines):
+    def endpoint(
+        lines: Sequence[str], *, reverse: bool = False
+    ) -> TimestampPoint | None:
+        indexes = range(len(lines) - 1, -1, -1) if reverse else range(len(lines))
+        for row_number in indexes:
+            line = lines[row_number]
             values = next(csv.reader([line]), [])
             if not values or values[0].strip().lower() == fieldnames[0].strip().lower():
                 continue
@@ -122,16 +119,19 @@ def read_timestamp_csv_endpoints(path: Path, fps: float) -> list[TimestampPoint]
                 for index, key in enumerate(fieldnames)
             }
             try:
-                result.append(_timestamp_point(row, row_number, fps))
+                return _timestamp_point(row, row_number, fps)
             except (TypeError, ValueError):
                 continue
-        return result
+        return None
 
-    first = rows(head_lines[1:])
-    last = rows(tail_lines[1:] if size > len(tail) else tail_lines)
-    if not first or not last:
+    first = endpoint(head_lines[1:])
+    last = endpoint(
+        tail_lines[1:] if size > len(tail) else tail_lines,
+        reverse=True,
+    )
+    if first is None or last is None:
         raise ValueError(f"时间戳 CSV 缺少可用RGB首尾记录: {path}")
-    endpoints = [first[0], last[-1]]
+    endpoints = [first, last]
     endpoints.sort(key=lambda point: point.local_ms)
     return endpoints
 

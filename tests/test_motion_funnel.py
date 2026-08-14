@@ -203,6 +203,83 @@ def test_inference_batch_crosses_chunk_boundary_without_losing_checkpoint(
     assert runtime["full_batch_flushes"] == 1
 
 
+def test_motion_probe_can_run_yolo_on_the_same_sampled_frames(
+    monkeypatch, tmp_path, default_config
+):
+    view = ViewInput(view_id="fp", role=ViewRole.FIRST_PERSON, video=Path("unused.mp4"))
+    info = VideoInfo(
+        path=Path("unused.mp4"),
+        duration_ms=2_000.0,
+        fps=30.0,
+        width=8,
+        height=8,
+        frame_count=60,
+        size_bytes=100,
+    )
+    transform = AlignmentTransform(
+        view_id="fp", reference_view_id="fp", state="aligned", confidence=1.0
+    )
+
+    class FakeScanner:
+        calls: list[int] = []
+
+        def __init__(self, *_args, **_kwargs):
+            self.model_path = Path("fake.engine")
+            self.batch_size = 4
+            self.engine_build_batch = 4
+            self.last_inference_batch_sizes = []
+
+        def infer(self, packets):
+            self.last_inference_batch_sizes = [len(packets)]
+            self.calls.append(len(packets))
+            return [[] for _ in packets]
+
+        def close(self):
+            pass
+
+    def fake_producer(view, _info, output, *_args):
+        frame = np.zeros((8, 8, 3), dtype=np.uint8)
+        gray = np.zeros((8, 8), dtype=np.uint8)
+        for index in range(4):
+            output.put(
+                FramePacket(
+                    view=view,
+                    frame_index=index,
+                    local_ms=float(index * 100),
+                    frame=frame,
+                    gray=gray,
+                    previous_gray=None,
+                    motion_score=float(index),
+                )
+            )
+        output.put(ChunkEnd(view_id=view.view_id, chunk_index=0, total_chunks=1))
+        output.put(ProducerEnd(view_id=view.view_id))
+
+    monkeypatch.setattr("labvision_evidence.detection.RoleScanner", FakeScanner)
+    monkeypatch.setattr("labvision_evidence.detection._producer", fake_producer)
+    default_config["performance"]["motion_probe_run_yolo"] = True
+    default_config["performance"]["motion_probe_batch_size"] = 4
+
+    scan_videos(
+        [view],
+        {"fp": info},
+        {"fp": transform},
+        tmp_path,
+        default_config,
+        phase="motion_probe",
+    )
+
+    runtime = json.loads(
+        (tmp_path / "runtime_motion_probe_first_person.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert FakeScanner.calls == [4]
+    assert runtime["backend"] != "motion_only"
+    assert runtime["motion_sample_count"] == 4
+    assert runtime["inference_frame_count"] == 4
+
+
 def test_parallel_motion_probe_preserves_segment_order(monkeypatch, default_config):
     view = ViewInput(
         view_id="fp",

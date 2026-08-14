@@ -51,6 +51,9 @@ def test_nas_ingest_registers_segments_without_copying(default_config, tmp_path)
     assert all(len(view.segments) == 2 for view in manifest.views)
     assert ingest["copied_source_bytes"] == 0
     assert ingest["continuous_source_copies_created"] == 0
+    assert ingest["source_validation"]["path_count"] == 8
+    assert ingest["source_validation"]["verified_file_count"] == 8
+    assert ingest["source_validation"]["missing_count"] == 0
     assert manifest_path.is_file()
     assert not (tmp_path / "runtime" / "Input" / "segmented" / "video.mp4").exists()
 

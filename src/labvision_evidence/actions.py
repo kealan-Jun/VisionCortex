@@ -379,6 +379,125 @@ def generate_motion_burst_candidates(
     return sorted(candidates, key=lambda candidate: candidate.global_start_ms)
 
 
+def refine_motion_candidates_with_coarse(
+    motion_candidates: Sequence[ActionCandidate],
+    coarse_candidates: Sequence[ActionCandidate],
+    config: dict[str, Any],
+) -> tuple[list[ActionCandidate], dict[str, Any]]:
+    """Conservatively tighten motion windows with bounded YOLO evidence.
+
+    Unsupported motion candidates are retained, and coarse candidates outside
+    every motion interval are appended. The coarse layer can therefore reduce
+    fine-scan work without becoming a recall gate.
+    """
+
+    perf = config["performance"]
+    association_margin_ms = float(
+        perf.get("coarse_refinement_association_margin_seconds", 30.0)
+    ) * 1000.0
+    minimum_candidates = max(1, int(perf.get("coarse_refinement_min_candidates", 2)))
+    minimum_span_ms = float(perf.get("coarse_refinement_min_span_seconds", 30.0)) * 1000.0
+    used_coarse_ids: set[str] = set()
+    refined: list[ActionCandidate] = []
+    decisions: list[dict[str, Any]] = []
+
+    for motion in sorted(motion_candidates, key=lambda item: item.global_start_ms):
+        association_start = motion.global_start_ms - association_margin_ms
+        association_end = motion.global_end_ms + association_margin_ms
+        matches = [
+            coarse
+            for coarse in coarse_candidates
+            if coarse.global_end_ms >= association_start
+            and coarse.global_start_ms <= association_end
+        ]
+        coarse_start = min(
+            (item.global_start_ms for item in matches), default=motion.global_start_ms
+        )
+        coarse_end = max(
+            (item.global_end_ms for item in matches), default=motion.global_end_ms
+        )
+        supported = (
+            len(matches) >= minimum_candidates
+            and coarse_end - coarse_start >= minimum_span_ms
+        )
+        if not supported:
+            refined.append(motion)
+            decisions.append(
+                {
+                    "motion_candidate_id": motion.candidate_id,
+                    "decision": "retained_motion_recall_guard",
+                    "coarse_candidate_ids": [item.candidate_id for item in matches],
+                }
+            )
+            continue
+
+        used_coarse_ids.update(item.candidate_id for item in matches)
+        best = max(matches, key=lambda item: item.confidence)
+        refined.append(
+            ActionCandidate(
+                candidate_id=f"REFINED-{motion.candidate_id}",
+                action_type=best.action_type,
+                view_id=best.view_id,
+                role=best.role,
+                local_start_ms=min(item.local_start_ms for item in matches),
+                local_end_ms=max(item.local_end_ms for item in matches),
+                global_start_ms=coarse_start,
+                global_end_ms=coarse_end,
+                key_global_ms=best.key_global_ms,
+                objects=sorted({name for item in matches for name in item.objects}),
+                confidence=max(item.confidence for item in matches),
+                evidence=[
+                    {
+                        "source": "coarse_yolo_refinement",
+                        "motion_candidate_id": motion.candidate_id,
+                        "coarse_candidate_ids": [item.candidate_id for item in matches],
+                        "original_global_start_ms": motion.global_start_ms,
+                        "original_global_end_ms": motion.global_end_ms,
+                    }
+                ],
+                uncertainty=[
+                    "Boundary tightened by coarse YOLO evidence; bounded all-view fine scan remains mandatory."
+                ],
+            )
+        )
+        decisions.append(
+            {
+                "motion_candidate_id": motion.candidate_id,
+                "decision": "refined_by_coarse_yolo",
+                "coarse_candidate_ids": [item.candidate_id for item in matches],
+                "original_duration_seconds": round(
+                    (motion.global_end_ms - motion.global_start_ms) / 1000.0, 3
+                ),
+                "refined_duration_seconds": round((coarse_end - coarse_start) / 1000.0, 3),
+            }
+        )
+
+    unmatched = [
+        item for item in coarse_candidates if item.candidate_id not in used_coarse_ids
+    ]
+    refined.extend(unmatched)
+    refined.sort(key=lambda item: item.global_start_ms)
+    return refined, {
+        "schema_version": "visioncortex-coarse-boundary-refinement/1",
+        "motion_candidate_count": len(motion_candidates),
+        "coarse_candidate_count": len(coarse_candidates),
+        "refined_motion_count": sum(
+            item["decision"] == "refined_by_coarse_yolo" for item in decisions
+        ),
+        "retained_motion_count": sum(
+            item["decision"] == "retained_motion_recall_guard" for item in decisions
+        ),
+        "unmatched_coarse_candidate_count": len(unmatched),
+        "output_candidate_count": len(refined),
+        "settings": {
+            "association_margin_seconds": association_margin_ms / 1000.0,
+            "minimum_candidates": minimum_candidates,
+            "minimum_span_seconds": minimum_span_ms / 1000.0,
+        },
+        "decisions": decisions,
+    }
+
+
 def fuse_motion_probe_candidates(
     candidates: Sequence[ActionCandidate], config: dict[str, Any]
 ) -> list[ActionCandidate]:
@@ -542,7 +661,18 @@ def select_fine_scan_views(
                 "reason": "first_person primary boundary sensor",
             }
             continue
-        frames = list(iter_frame_evidence(detection_paths[view.view_id]))
+        detection_path = detection_paths.get(view.view_id)
+        if detection_path is None:
+            report[view.view_id] = {
+                "selected": False,
+                "reason": "not scanned during sentinel coarse stage",
+                "anchor_frames": 0,
+                "active_anchor_frames": 0,
+                "anchor_classes": [],
+                "motion_threshold": None,
+            }
+            continue
+        frames = list(iter_frame_evidence(detection_path))
         all_motion = np.asarray([frame.motion_score for frame in frames], dtype=np.float64)
         motion_threshold = max(
             float(np.percentile(all_motion, 80.0)) if len(all_motion) else 0.0,

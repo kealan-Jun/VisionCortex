@@ -385,27 +385,8 @@ def _execute_fixed_benchmark(
                 ),
                 "manifest": str(manifest_path),
                 "source_count": len(manifest.views),
-                "input_reused": all(
-                    (
-                        all(
-                            segment.video.is_file()
-                            and (
-                                segment.timestamps_csv is None
-                                or segment.timestamps_csv.is_file()
-                            )
-                            for segment in view.segments
-                        )
-                        if view.segments
-                        else bool(
-                            view.video
-                            and Path(view.video).is_file()
-                            and (
-                                view.timestamps_csv is None
-                                or Path(view.timestamps_csv).is_file()
-                            )
-                        )
-                    )
-                    for view in manifest.views
+                "input_reused": bool(
+                    ingest.get("source_validation", {}).get("missing_count") == 0
                 ),
                 "ingest_details": ingest,
             }
