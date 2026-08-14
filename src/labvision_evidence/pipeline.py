@@ -477,6 +477,7 @@ class EvidencePipeline:
             lanes = ["cuda" if perf.get("ffmpeg_hwaccel") else "cpu"] * len(manifest.views)
         if len(lanes) < len(manifest.views):
             lanes.extend([lanes[-1]] * (len(manifest.views) - len(lanes)))
+        concurrent_roles = bool(perf.get("concurrent_role_scanners", True)) and len(groups) > 1
         kwargs["decode_backends"] = {
             view.view_id: lanes[index] for index, view in enumerate(manifest.views)
         }
@@ -484,6 +485,7 @@ class EvidencePipeline:
             phase == "coarse"
             and windows is None
             and perf.get("synchronized_segment_waves")
+            and concurrent_roles
             and all(view.segments for view in manifest.views)
         ):
             segment_counts = {view.view_id: len(view.segments) for view in manifest.views}
@@ -501,10 +503,55 @@ class EvidencePipeline:
                     "state": f"{phase}_running",
                 }
             )
-        if not self.config["performance"].get("concurrent_role_scanners", True) or len(groups) == 1:
+        work_dir.mkdir(parents=True, exist_ok=True)
+        (work_dir / f"scheduler_{phase}.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "visioncortex-role-scheduler/1",
+                    "phase": phase,
+                    "mode": "concurrent_roles" if concurrent_roles else "sequential_role_residency",
+                    "role_order": [group[0].role.value for group in groups],
+                    "configured_decode_lanes": lanes,
+                    "reason": (
+                        "configured concurrent role scanners"
+                        if concurrent_roles
+                        else "one TensorRT role model resident at a time to preserve batch capacity"
+                    ),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        if not concurrent_roles:
             result = {}
             for group in groups:
-                result.update(scan_videos(group, infos, transforms, work_dir, self.config, **kwargs))
+                group_kwargs = dict(kwargs)
+                group_kwargs["decode_backends"] = {
+                    view.view_id: lanes[index] for index, view in enumerate(group)
+                }
+                if (
+                    phase == "coarse"
+                    and windows is None
+                    and perf.get("synchronized_segment_waves")
+                    and all(view.segments for view in group)
+                    and len(group) > 1
+                ):
+                    group_kwargs["wave_barrier"] = threading.Barrier(len(group))
+                for view in group:
+                    self._view_runtime[view.view_id]["decode_backend"] = group_kwargs[
+                        "decode_backends"
+                    ][view.view_id]
+                result.update(
+                    scan_videos(
+                        group,
+                        infos,
+                        transforms,
+                        work_dir,
+                        self.config,
+                        **group_kwargs,
+                    )
+                )
             for view in manifest.views:
                 self._view_runtime[view.view_id]["state"] = f"{phase}_completed"
             return result
@@ -626,6 +673,12 @@ class EvidencePipeline:
         started_units = sum(
             item.get("event") == "source_unit_started" for item in source_activity
         )
+        scheduler_path = work_dir / f"scheduler_{phase}.json"
+        scheduler = (
+            json.loads(scheduler_path.read_text(encoding="utf-8"))
+            if scheduler_path.is_file()
+            else None
+        )
         write_json(
             layout.json_config / f"scan_runtime_{phase}.json",
             {
@@ -638,6 +691,7 @@ class EvidencePipeline:
                     "reused": reused_units,
                 },
                 "role_reports": role_reports,
+                "scheduler": scheduler,
                 "source_activity": sorted(
                     source_activity, key=lambda item: float(item.get("timestamp", 0.0))
                 ),

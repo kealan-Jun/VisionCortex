@@ -538,6 +538,8 @@ class RoleScanner:
             self.requested_batch_size,
             self.engine_build_batch or self.requested_batch_size,
         )
+        self.initial_batch_size = self.batch_size
+        self.batch_contractions: list[dict[str, int]] = []
         self.last_inference_batch_sizes: list[int] = []
         self.image_size = int(image_size or config["performance"]["image_size"])
 
@@ -596,7 +598,11 @@ class RoleScanner:
             except RuntimeError as exc:
                 if "out of memory" not in str(exc).lower() or batch_size <= 1:
                     raise
+                previous_batch_size = batch_size
                 batch_size = max(1, batch_size // 2)
+                self.batch_contractions.append(
+                    {"from_batch_size": previous_batch_size, "to_batch_size": batch_size}
+                )
                 try:
                     import torch
 
@@ -678,6 +684,11 @@ def scan_videos(
             ),
             "requested_batch_size": phase_batch_size,
             "effective_batch_size": scanner.batch_size if scanner is not None else 0,
+            "initial_effective_batch_size": (
+                getattr(scanner, "initial_batch_size", scanner.batch_size)
+                if scanner is not None
+                else 0
+            ),
             "engine_build_batch": scanner.engine_build_batch if scanner is not None else None,
             "image_size": effective_image_size,
             "yolo_sample_fps": effective_fps,
@@ -874,6 +885,19 @@ def scan_videos(
                         round(sum(batch_sizes) / len(batch_sizes) / scanner.batch_size, 4)
                         if batch_sizes and scanner is not None
                         else 0.0
+                    ),
+                    "final_effective_batch_size": (
+                        scanner.batch_size if scanner is not None else 0
+                    ),
+                    "oom_batch_contraction_count": (
+                        len(getattr(scanner, "batch_contractions", []))
+                        if scanner is not None
+                        else 0
+                    ),
+                    "oom_batch_contractions": (
+                        list(getattr(scanner, "batch_contractions", []))
+                        if scanner is not None
+                        else []
                     ),
                     "max_observed_queue_depth": max_queue_size,
                     "configured_queue_depth": queue_depth,

@@ -64,14 +64,17 @@ performance:
   # current batch. At 416/640 width this remains a small RAM allocation.
   decode_queue_depth: 32
   cpu_decode_threads: 8
-  yolo_inference_workers: 2
+  # The real 8 GiB run proved that two resident TRT engines silently contract
+  # both build-batch-8 contexts to batch 1. Keep one role model resident: the
+  # first-person pass unloads before five third-person sources form batch 8.
+  yolo_inference_workers: 1
   inference_batch_wait_ms: 25
   materialization_workers: 2
   io_workers: 4
   max_gpu_memory_fraction: 0.88
   ffmpeg_hwaccel: cuda
   ffmpeg_video_encoder: h264_nvenc
-  concurrent_role_scanners: true
+  concurrent_role_scanners: false
   preflight_probe_workers: 12
   # SMB metadata operations are latency-bound and transfer almost no payload.
   # Validate the 180 source paths once, concurrently, then reuse that snapshot.

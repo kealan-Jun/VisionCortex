@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from labvision_evidence.actions import (
@@ -94,3 +95,58 @@ def test_sentinel_coarse_scan_keeps_all_views_for_fine_quality_fallback(default_
     assert report["tp1"]["selected"] is True
     assert report["tp2"]["selected"] is True
 
+
+def test_sequential_role_residency_reuses_all_decode_lanes(
+    monkeypatch, tmp_path, default_config
+):
+    views = [
+        ViewInput(view_id="fp", role=ViewRole.FIRST_PERSON, video=Path("fp.mp4")),
+        *[
+            ViewInput(
+                view_id=f"tp{index}",
+                role=ViewRole.THIRD_PERSON,
+                video=Path(f"tp{index}.mp4"),
+            )
+            for index in range(5)
+        ],
+    ]
+    manifest = RunManifest(experiment_id="scheduler", views=views)
+    default_config["performance"]["source_workers"] = 6
+    default_config["performance"]["concurrent_role_scanners"] = False
+    default_config["performance"]["fine_decode_lanes"] = [
+        "cuda",
+        "cuda",
+        "cuda",
+        "cuda",
+        "cpu",
+        "cpu",
+    ]
+    calls = []
+
+    def fake_scan(group, _infos, _transforms, _work_dir, _config, **kwargs):
+        calls.append(
+            ([view.view_id for view in group], dict(kwargs["decode_backends"]))
+        )
+        return {view.view_id: tmp_path / f"{view.view_id}.jsonl" for view in group}
+
+    monkeypatch.setattr("labvision_evidence.pipeline.scan_videos", fake_scan)
+    pipeline = EvidencePipeline(default_config)
+    pipeline._scan_all_views_concurrently(
+        manifest,
+        infos={},
+        transforms={},
+        work_dir=tmp_path,
+        phase="fine",
+    )
+
+    assert calls[0] == (["fp"], {"fp": "cuda"})
+    assert calls[1][0] == ["tp0", "tp1", "tp2", "tp3", "tp4"]
+    assert calls[1][1] == {
+        "tp0": "cuda",
+        "tp1": "cuda",
+        "tp2": "cuda",
+        "tp3": "cuda",
+        "tp4": "cpu",
+    }
+    scheduler = json.loads((tmp_path / "scheduler_fine.json").read_text(encoding="utf-8"))
+    assert scheduler["mode"] == "sequential_role_residency"

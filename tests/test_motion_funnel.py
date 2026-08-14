@@ -11,6 +11,7 @@ from labvision_evidence.detection import (
     ChunkEnd,
     FramePacket,
     ProducerEnd,
+    RoleScanner,
     _engine_build_batch,
     _producer,
     _tensorrt_plan_and_metadata,
@@ -278,6 +279,49 @@ def test_motion_probe_can_run_yolo_on_the_same_sampled_frames(
     assert runtime["backend"] != "motion_only"
     assert runtime["motion_sample_count"] == 4
     assert runtime["inference_frame_count"] == 4
+
+
+def test_role_scanner_records_oom_batch_contraction(default_config):
+    class Prediction:
+        boxes = None
+
+    class FakeModel:
+        def predict(self, *, source, **_kwargs):
+            if len(source) > 4:
+                raise RuntimeError("CUDA out of memory")
+            return [Prediction() for _ in source]
+
+    scanner = RoleScanner.__new__(RoleScanner)
+    scanner.config = default_config
+    scanner.model = FakeModel()
+    scanner.names = {}
+    scanner.batch_size = 8
+    scanner.initial_batch_size = 8
+    scanner.batch_contractions = []
+    scanner.last_inference_batch_sizes = []
+    scanner.image_size = 640
+    frame = np.zeros((8, 8, 3), dtype=np.uint8)
+    gray = np.zeros((8, 8), dtype=np.uint8)
+    view = ViewInput(view_id="fp", role=ViewRole.FIRST_PERSON, video=Path("fp.mp4"))
+    packets = [
+        FramePacket(
+            view=view,
+            frame_index=index,
+            local_ms=float(index),
+            frame=frame,
+            gray=gray,
+            previous_gray=None,
+            motion_score=0.0,
+        )
+        for index in range(8)
+    ]
+
+    assert scanner.infer(packets) == [[] for _ in packets]
+    assert scanner.batch_size == 4
+    assert scanner.last_inference_batch_sizes == [4, 4]
+    assert scanner.batch_contractions == [
+        {"from_batch_size": 8, "to_batch_size": 4}
+    ]
 
 
 def test_parallel_motion_probe_preserves_segment_order(monkeypatch, default_config):
