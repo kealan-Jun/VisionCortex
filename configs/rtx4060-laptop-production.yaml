@@ -31,10 +31,10 @@ performance:
   motion_probe_fps: 0.1
   motion_probe_max_width: 416
   motion_probe_keyframes_only: true
-  # The real cold run showed 10-second random SMB seeks leaving NVDEC idle and
-  # taking about 11 minutes. Stream each 15-minute shard once instead; FFmpeg
-  # keeps only keyframes, samples at 0.1 FPS and can use the configured decoder.
-  motion_probe_sparse_strategy: sequential_keyframes
+  # Wi-Fi favored sequential reads in an earlier run, while the wired host may
+  # make indexed GOP seeks much cheaper. Benchmark a short real NAS interval on
+  # every cold input instead of freezing either transport-specific assumption.
+  motion_probe_sparse_strategy: auto
   motion_probe_run_yolo: true
   motion_probe_batch_size: 8
   coarse_reuse_motion_probe: true
@@ -52,9 +52,13 @@ performance:
   motion_probe_fallback_peaks_per_hour: 8
   motion_probe_fallback_separation_seconds: 120.0
   motion_probe_fallback_window_seconds: 60.0
-  # Indexed seek is latency-bound. Six independent 15-minute segment readers
-  # overlap SMB latency while sharing one TensorRT model/context.
-  motion_probe_segment_workers: 6
+  # Auto-selection replaces this compatibility fallback with the strategy-
+  # specific worker count below. Sequential reads stay single-file; indexed
+  # seeks overlap a small bounded number of SMB round trips.
+  motion_probe_segment_workers: 1
+  motion_probe_sparse_benchmark_seconds: 60.0
+  motion_probe_indexed_segment_workers: 3
+  motion_probe_sequential_segment_workers: 1
   motion_signature_size: [64, 36]
   detection_fps: 10.0
   image_size: 640

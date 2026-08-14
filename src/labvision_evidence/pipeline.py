@@ -57,6 +57,7 @@ from .schemas import (
     ViewRole,
 )
 from .video_io import (
+    benchmark_sparse_decode_strategy,
     check_disk_capacity,
     create_grid_video,
     extract_view_clip,
@@ -1286,6 +1287,107 @@ class EvidencePipeline:
                 layout,
                 "motion_probe",
                 0.12,
+                "Selecting and running the fastest real-source sparse motion probe",
+            )
+            sparse_strategy_path = layout.json_config / "motion_probe_sparse_strategy.json"
+            configured_sparse_strategy = str(
+                self.config["performance"].get(
+                    "motion_probe_sparse_strategy", "indexed_seek"
+                )
+            )
+            if configured_sparse_strategy == "auto":
+                sentinel = motion_probe_views[0]
+                sparse_report = benchmark_sparse_decode_strategy(
+                    sentinel,
+                    infos[sentinel.view_id],
+                    sample_fps=float(self.config["performance"]["motion_probe_fps"]),
+                    max_width=int(
+                        self.config["performance"].get("motion_probe_max_width", 96)
+                    ),
+                    hwaccel=(
+                        str(self.config["performance"].get("ffmpeg_hwaccel"))
+                        if self.config["performance"].get("ffmpeg_hwaccel")
+                        else None
+                    ),
+                    decoder_threads=int(
+                        self.config["performance"].get("cpu_decode_threads", 0)
+                    ),
+                    cuda_scale=bool(
+                        self.config["performance"].get("ffmpeg_cuda_scale", False)
+                    ),
+                    benchmark_seconds=float(
+                        self.config["performance"].get(
+                            "motion_probe_sparse_benchmark_seconds", 60.0
+                        )
+                    ),
+                )
+                selected_sparse_strategy = str(sparse_report["selected_strategy"])
+            else:
+                if configured_sparse_strategy not in {
+                    "indexed_seek",
+                    "sequential_keyframes",
+                }:
+                    raise ValueError(
+                        "motion_probe_sparse_strategy must be auto, indexed_seek, "
+                        "or sequential_keyframes"
+                    )
+                selected_sparse_strategy = configured_sparse_strategy
+                sparse_report = {
+                    "schema_version": "visioncortex-sparse-decode-benchmark/1",
+                    "selected_strategy": selected_sparse_strategy,
+                    "configured_strategy": configured_sparse_strategy,
+                    "benchmark_skipped": True,
+                }
+            self.config["performance"][
+                "motion_probe_sparse_strategy"
+            ] = selected_sparse_strategy
+            if configured_sparse_strategy == "auto":
+                worker_key = (
+                    "motion_probe_indexed_segment_workers"
+                    if selected_sparse_strategy == "indexed_seek"
+                    else "motion_probe_sequential_segment_workers"
+                )
+                selected_segment_workers = max(
+                    1,
+                    int(
+                        self.config["performance"].get(
+                            worker_key,
+                            self.config["performance"].get(
+                                "motion_probe_segment_workers", 1
+                            ),
+                        )
+                    ),
+                )
+            else:
+                selected_segment_workers = max(
+                    1,
+                    int(
+                        self.config["performance"].get(
+                            "motion_probe_segment_workers", 1
+                        )
+                    ),
+                )
+            self.config["performance"][
+                "motion_probe_segment_workers"
+            ] = selected_segment_workers
+            sparse_report["selected_segment_workers"] = selected_segment_workers
+            sparse_report["selection_reason"] = (
+                "short real-source benchmark"
+                if configured_sparse_strategy == "auto"
+                else "explicit configuration"
+            )
+            write_json(sparse_strategy_path, sparse_report)
+            selected_probe_ids = {view.view_id for view in motion_probe_views}
+            for view in manifest.views:
+                self._view_runtime[view.view_id]["state"] = (
+                    "motion_probe_running"
+                    if view.view_id in selected_probe_ids
+                    else "motion_probe_sentinel_not_selected"
+                )
+            self._status(
+                layout,
+                "motion_probe",
+                0.12,
                 "哨兵视角低分辨率运动探针；此阶段CUDA计算低占用属于预期",
             )
             motion_paths = self._scan_all_views_concurrently(
@@ -1365,6 +1467,7 @@ class EvidencePipeline:
                 [
                     layout.json_config / "scan_runtime_motion_probe.json",
                     layout.json_config / "motion_probe_windows.json",
+                    sparse_strategy_path,
                 ],
             )
 

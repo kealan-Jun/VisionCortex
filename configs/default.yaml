@@ -70,6 +70,9 @@ performance:
   motion_probe_fallback_separation_seconds: 120.0
   motion_probe_fallback_window_seconds: 60.0
   motion_probe_segment_workers: 1
+  motion_probe_sparse_benchmark_seconds: 60.0
+  motion_probe_indexed_segment_workers: 3
+  motion_probe_sequential_segment_workers: 1
   motion_signature_size: [64, 36]
   coarse_decode_lanes: [cuda, cuda, cuda, cuda, cuda, cuda]
   fine_decode_lanes: [cuda, cuda, cuda, cuda, cuda, cuda]

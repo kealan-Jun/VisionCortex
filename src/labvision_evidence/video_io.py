@@ -6,6 +6,7 @@ import math
 import shutil
 import subprocess
 import tempfile
+import time
 from collections import OrderedDict
 from collections.abc import Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -571,6 +572,91 @@ def iter_view_sampled_frames(
                 segment.virtual_start_ms + source_ms,
                 frame,
             )
+
+
+def benchmark_sparse_decode_strategy(
+    view: ViewInput,
+    info: VideoInfo,
+    *,
+    sample_fps: float,
+    max_width: int,
+    hwaccel: str | None,
+    decoder_threads: int | None,
+    cuda_scale: bool,
+    benchmark_seconds: float,
+) -> dict[str, Any]:
+    """Choose a sparse decoder from a short read of the active storage path."""
+
+    duration_ms = min(
+        float(info.duration_ms),
+        max(10.0, float(benchmark_seconds)) * 1000.0,
+    )
+    if duration_ms <= 0.0:
+        raise ValueError(f"view has no benchmarkable duration: {view.view_id}")
+    expected_frames = max(1, int(math.floor(duration_ms * sample_fps / 1000.0)))
+    reports: list[dict[str, Any]] = []
+    for strategy in ("indexed_seek", "sequential_keyframes"):
+        started = time.perf_counter()
+        frame_count = 0
+        error: str | None = None
+        try:
+            for _frame_index, _local_ms, _frame in iter_view_sampled_frames(
+                view,
+                info,
+                0.0,
+                duration_ms,
+                sample_fps,
+                max_width,
+                hwaccel,
+                True,
+                decoder_threads,
+                strategy,
+                cuda_scale,
+            ):
+                frame_count += 1
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+        elapsed_seconds = time.perf_counter() - started
+        sample_ratio = min(1.0, frame_count / expected_frames)
+        usable = error is None and frame_count > 0 and sample_ratio >= 0.50
+        # Penalize strategies that return too few samples. A fast but sparse
+        # decoder is not a valid motion sentinel.
+        score_seconds = (
+            elapsed_seconds / max(sample_ratio, 0.01) if usable else None
+        )
+        reports.append(
+            {
+                "strategy": strategy,
+                "usable": usable,
+                "elapsed_seconds": round(elapsed_seconds, 6),
+                "frame_count": frame_count,
+                "expected_frames": expected_frames,
+                "sample_ratio": round(sample_ratio, 6),
+                "score_seconds": (
+                    round(score_seconds, 6) if score_seconds is not None else None
+                ),
+                "error": error,
+            }
+        )
+    usable_reports = [item for item in reports if item["usable"]]
+    if not usable_reports:
+        raise RuntimeError(
+            f"no sparse decode strategy is usable for {view.view_id}: {reports}"
+        )
+    selected = min(
+        usable_reports,
+        key=lambda item: float(item["score_seconds"]),
+    )
+    return {
+        "schema_version": "visioncortex-sparse-decode-benchmark/1",
+        "view_id": view.view_id,
+        "source_mode": "segmented_virtual_timeline" if info.segments else "continuous_file",
+        "benchmark_seconds": round(duration_ms / 1000.0, 3),
+        "sample_fps": sample_fps,
+        "max_width": max_width,
+        "selected_strategy": selected["strategy"],
+        "strategies": reports,
+    }
 
 
 def read_frame_at(path: Path, local_ms: float) -> np.ndarray | None:
