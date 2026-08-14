@@ -85,6 +85,8 @@ performance:
   ffmpeg_video_encoder: h264_nvenc
   concurrent_role_scanners: false
   preflight_probe_workers: 12
+  media_pipeline_preflight_enabled: true
+  media_pipeline_preflight_seconds: 1.0
   # SMB metadata operations are latency-bound and transfer almost no payload.
   # Validate the 180 source paths once, concurrently, then reuse that snapshot.
   source_stat_workers: 24

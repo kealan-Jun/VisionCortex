@@ -58,6 +58,9 @@ from .schemas import (
 )
 from .video_io import (
     check_disk_capacity,
+    create_grid_video,
+    extract_view_clip,
+    probe_video,
     probe_views,
     video_encoder_preflight,
     view_source_files,
@@ -78,6 +81,102 @@ ProgressCallback = Callable[[str, float, str], None]
 
 def _noop_progress(stage: str, progress: float, message: str) -> None:
     del stage, progress, message
+
+
+def run_media_pipeline_preflight(
+    manifest: RunManifest,
+    infos: dict[str, Any],
+    work_root: Path,
+    preferred_encoder: str,
+    duration_seconds: float,
+) -> dict[str, Any]:
+    """Exercise source decode and paired delivery encoding before long scans."""
+
+    first = next(
+        (view for view in manifest.views if view.role == ViewRole.FIRST_PERSON),
+        None,
+    )
+    third = next(
+        (view for view in manifest.views if view.role == ViewRole.THIRD_PERSON),
+        None,
+    )
+    if first is None or third is None:
+        raise ValueError("media pipeline preflight requires first- and third-person views")
+    requested_ms = max(200.0, float(duration_seconds) * 1000.0)
+    smoke_root = work_root / "media-pipeline-preflight"
+    smoke_root.mkdir(parents=True, exist_ok=True)
+    clips: list[tuple[str, Path]] = []
+    clip_reports: list[dict[str, Any]] = []
+    started = time.perf_counter()
+    try:
+        for label, view in (("First-Person", first), ("Third-Person", third)):
+            info = infos[view.view_id]
+            duration_ms = min(requested_ms, float(info.duration_ms))
+            if duration_ms <= 0.0:
+                raise ValueError(f"view has no probeable duration: {view.view_id}")
+            start_ms = min(1000.0, max(0.0, float(info.duration_ms) - duration_ms))
+            destination = smoke_root / f"{label}.mp4"
+            clip_started = time.perf_counter()
+            extract_view_clip(
+                view,
+                info,
+                destination,
+                start_ms,
+                duration_ms,
+                preferred_encoder,
+            )
+            rendered = probe_video(destination)
+            if rendered.duration_ms <= 0.0 or rendered.width <= 0 or rendered.height <= 0:
+                raise RuntimeError(f"encoded smoke clip is invalid: {destination}")
+            clips.append((label, destination))
+            clip_reports.append(
+                {
+                    "view_id": view.view_id,
+                    "role": view.role.value,
+                    "source_start_ms": round(start_ms, 3),
+                    "requested_duration_ms": round(duration_ms, 3),
+                    "encoded_duration_ms": round(rendered.duration_ms, 3),
+                    "width": rendered.width,
+                    "height": rendered.height,
+                    "bytes": destination.stat().st_size,
+                    "elapsed_seconds": round(time.perf_counter() - clip_started, 6),
+                }
+            )
+        aligned = smoke_root / "Aligned_First+Third.mp4"
+        grid_started = time.perf_counter()
+        create_grid_video(clips, aligned, preferred_encoder)
+        rendered_grid = probe_video(aligned)
+        if (
+            rendered_grid.duration_ms <= 0.0
+            or rendered_grid.width <= 0
+            or rendered_grid.height <= 0
+        ):
+            raise RuntimeError(f"encoded aligned smoke clip is invalid: {aligned}")
+        report = {
+            "schema_version": "visioncortex-media-pipeline-preflight/1",
+            "status": "passed",
+            "source_mode": (
+                "segmented_virtual_timeline"
+                if all(view.segments for view in manifest.views)
+                else "continuous_file"
+            ),
+            "selected_encoder": preferred_encoder,
+            "views": clip_reports,
+            "aligned_output": {
+                "encoded_duration_ms": round(rendered_grid.duration_ms, 3),
+                "width": rendered_grid.width,
+                "height": rendered_grid.height,
+                "bytes": aligned.stat().st_size,
+                "elapsed_seconds": round(time.perf_counter() - grid_started, 6),
+            },
+            "elapsed_seconds": round(time.perf_counter() - started, 6),
+            "temporary_artifacts_retained": False,
+        }
+        shutil.rmtree(smoke_root)
+        return report
+    except Exception:
+        # Retain the tiny local smoke directory on failure for incident review.
+        raise
 
 
 def _key_material_selection_report(
@@ -1074,6 +1173,48 @@ class EvidencePipeline:
                 time.perf_counter() - preflight_step_started,
                 6,
             )
+            media_preflight_path = layout.json_config / "media_pipeline_preflight.json"
+            if bool(
+                self.config["performance"].get(
+                    "media_pipeline_preflight_enabled", True
+                )
+            ):
+                preflight_step_started = time.perf_counter()
+                smoke_root = layout.work / "media-pipeline-preflight"
+                try:
+                    media_preflight = run_media_pipeline_preflight(
+                        manifest,
+                        infos,
+                        layout.work,
+                        str(model_report["video_encoder"]["selected_encoder"]),
+                        float(
+                            self.config["performance"].get(
+                                "media_pipeline_preflight_seconds", 1.0
+                            )
+                        ),
+                    )
+                except Exception as exc:
+                    write_json(
+                        media_preflight_path,
+                        {
+                            "schema_version": "visioncortex-media-pipeline-preflight/1",
+                            "status": "failed",
+                            "error": f"{type(exc).__name__}: {exc}",
+                            "temporary_artifacts_retained": smoke_root.exists(),
+                            "temporary_artifact_path": str(smoke_root),
+                            "elapsed_seconds": round(
+                                time.perf_counter() - preflight_step_started, 6
+                            ),
+                        },
+                    )
+                    raise RuntimeError(
+                        "media pipeline preflight failed before long-running scans"
+                    ) from exc
+                write_json(media_preflight_path, media_preflight)
+                preflight_breakdown["media_pipeline_preflight_seconds"] = round(
+                    time.perf_counter() - preflight_step_started,
+                    6,
+                )
             preflight_breakdown["source_cache_after_probe"] = source_cache_diagnostics()
             write_json(
                 layout.json_config / "preflight_runtime.json",
@@ -1089,6 +1230,7 @@ class EvidencePipeline:
                     layout.json_config / "input_volume_report.json",
                     layout.json_config / "preflight_runtime.json",
                     layout.json_config / "video_probe.json",
+                    *([media_preflight_path] if media_preflight_path.exists() else []),
                 ],
             )
 

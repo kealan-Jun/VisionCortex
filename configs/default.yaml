@@ -83,6 +83,11 @@ performance:
   segment_wave_timeout_seconds: 3600
   preflight_probe_workers: 12
   preflight_prefer_clock_metadata: true
+  # Exercise the real source decode, selected encoder and aligned grid path
+  # before long scans or paid model calls. The temporary clips stay local and
+  # are removed after a successful probe.
+  media_pipeline_preflight_enabled: true
+  media_pipeline_preflight_seconds: 1.0
   source_stat_workers: 24
   source_stat_cache_ttl_seconds: 120
 
