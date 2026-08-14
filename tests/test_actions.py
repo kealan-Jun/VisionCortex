@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from labvision_evidence.actions import audit_candidates, build_experiment_segments
-from labvision_evidence.grouping import normalize_experiment_segments
+from labvision_evidence.grouping import build_experiment_groups, normalize_experiment_segments
 from labvision_evidence.schemas import (
     ActionCandidate,
     ActionType,
@@ -277,3 +277,242 @@ def test_overlapping_windows_collapse_and_short_equipment_prelude_is_suppressed(
     assert [segment.segment_id for segment in normalized] == ["EXP-1", "EXP-WEIGH"]
     assert normalized[0].event_ids == ["CORE-1", "CORE-2"]
     assert normalized[0].global_end_ms == 123_000
+
+
+def test_short_dual_view_fragments_with_carried_objects_form_one_atomic_experiment(
+    default_config,
+):
+    views = [
+        ViewInput(view_id="fp01", role=ViewRole.FIRST_PERSON, video=Path("a.mp4")),
+        ViewInput(view_id="tp01", role=ViewRole.THIRD_PERSON, video=Path("b.mp4")),
+    ]
+
+    def evidence(event_id, action, start, end, objects):
+        return EvidenceEvent(
+            event_id=event_id,
+            action_type=action,
+            global_start_ms=start,
+            global_end_ms=end,
+            key_global_ms=(start + end) / 2,
+            objects=objects,
+            confidence=0.8,
+            accepted=True,
+            audit_reason="cross-view evidence",
+            supporting_views=["fp01", "tp01"],
+            supporting_roles=[ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON],
+            candidates=[],
+        )
+
+    events = [
+        evidence(
+            "TRANSFER",
+            ActionType.LIQUID_MOVEMENT,
+            2_000,
+            47_000,
+            ["pipette", "sample_bottle", "tube", "tube_rack"],
+        ),
+        evidence(
+            "CONTACT",
+            ActionType.HAND_OBJECT_CONTACT,
+            63_600,
+            97_000,
+            ["gloved_hand", "sample_bottle", "tube", "tube_rack"],
+        ),
+    ]
+    segments = [
+        ExperimentSegment(
+            segment_id="EXP-1",
+            global_start_ms=0,
+            global_end_ms=50_000,
+            event_ids=["TRANSFER"],
+            participating_views=["fp01", "tp01"],
+        ),
+        ExperimentSegment(
+            segment_id="EXP-2",
+            global_start_ms=61_600,
+            global_end_ms=100_000,
+            event_ids=["CONTACT"],
+            participating_views=["fp01", "tp01"],
+        ),
+    ]
+
+    normalized = normalize_experiment_segments(segments, events, views, default_config)
+    groups = build_experiment_groups(normalized, events, views, default_config)
+
+    assert len(normalized) == 1
+    assert normalized[0].event_ids == ["TRANSFER", "CONTACT"]
+    assert len(groups) == 1
+    assert groups[0].continuity_type == "independent"
+    assert groups[0].atomic_experiment_ids == ["EXP-1"]
+
+
+def test_explicit_state_transition_remains_a_continuous_two_atomic_chain(
+    default_config,
+):
+    views = [
+        ViewInput(view_id="fp01", role=ViewRole.FIRST_PERSON, video=Path("a.mp4")),
+        ViewInput(view_id="tp01", role=ViewRole.THIRD_PERSON, video=Path("b.mp4")),
+    ]
+
+    def evidence(event_id, action, start, end):
+        return EvidenceEvent(
+            event_id=event_id,
+            action_type=action,
+            global_start_ms=start,
+            global_end_ms=end,
+            key_global_ms=(start + end) / 2,
+            objects=["sample_bottle", "tube"],
+            confidence=0.9,
+            accepted=True,
+            audit_reason="cross-view evidence",
+            supporting_views=["fp01", "tp01"],
+            supporting_roles=[ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON],
+            candidates=[],
+        )
+
+    events = [
+        evidence("STATE", ActionType.CONTAINER_STATE_CHANGE, 10_000, 20_000),
+        evidence("TRANSFER", ActionType.LIQUID_MOVEMENT, 34_600, 45_000),
+    ]
+    segments = [
+        ExperimentSegment(
+            segment_id="EXP-1",
+            global_start_ms=8_000,
+            global_end_ms=23_000,
+            event_ids=["STATE"],
+            participating_views=["fp01", "tp01"],
+        ),
+        ExperimentSegment(
+            segment_id="EXP-2",
+            global_start_ms=34_600,
+            global_end_ms=48_000,
+            event_ids=["TRANSFER"],
+            participating_views=["fp01", "tp01"],
+        ),
+    ]
+
+    normalized = normalize_experiment_segments(segments, events, views, default_config)
+    groups = build_experiment_groups(normalized, events, views, default_config)
+
+    assert [segment.segment_id for segment in normalized] == ["EXP-1", "EXP-2"]
+    assert len(groups) == 1
+    assert groups[0].continuity_type == "continuous"
+    assert groups[0].atomic_experiment_ids == ["EXP-1", "EXP-2"]
+
+
+def test_incomplete_liquid_hypothesis_cannot_pull_start_before_direct_contact(
+    default_config,
+):
+    views = [
+        ViewInput(view_id="fp01", role=ViewRole.FIRST_PERSON, video=Path("a.mp4")),
+        ViewInput(view_id="tp01", role=ViewRole.THIRD_PERSON, video=Path("b.mp4")),
+    ]
+
+    def evidence(event_id, action, start, end, objects):
+        candidates = [
+            ActionCandidate(
+                candidate_id=f"{event_id}-{view_id}",
+                action_type=action,
+                view_id=view_id,
+                role=role,
+                local_start_ms=start,
+                local_end_ms=end,
+                global_start_ms=start,
+                global_end_ms=end,
+                key_global_ms=(start + end) / 2,
+                objects=objects,
+                confidence=0.8,
+            )
+            for view_id, role in (
+                ("fp01", ViewRole.FIRST_PERSON),
+                ("tp01", ViewRole.THIRD_PERSON),
+            )
+        ]
+        return EvidenceEvent(
+            event_id=event_id,
+            action_type=action,
+            global_start_ms=start,
+            global_end_ms=end,
+            key_global_ms=(start + end) / 2,
+            objects=objects,
+            confidence=0.8,
+            accepted=True,
+            audit_reason="cross-view evidence",
+            supporting_views=["fp01", "tp01"],
+            supporting_roles=[ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON],
+            candidates=candidates,
+        )
+
+    liquid = evidence(
+        "LIQUID-TIP-ONLY",
+        ActionType.LIQUID_MOVEMENT,
+        100_000,
+        101_800,
+        ["spearhead", "sample_bottle", "tube"],
+    )
+    contact = evidence(
+        "DIRECT-CONTACT",
+        ActionType.HAND_OBJECT_CONTACT,
+        110_900,
+        113_900,
+        ["gloved_hand", "tube"],
+    )
+    coarse_window = ActionCandidate(
+        candidate_id="COARSE",
+        action_type=ActionType.OBJECT_MOVEMENT,
+        view_id="fp01",
+        role=ViewRole.FIRST_PERSON,
+        local_start_ms=90_000,
+        local_end_ms=120_000,
+        global_start_ms=90_000,
+        global_end_ms=120_000,
+        key_global_ms=105_000,
+        objects=["tube"],
+        confidence=0.9,
+    )
+
+    segments = build_experiment_segments(
+        [liquid, contact],
+        views,
+        default_config,
+        coarse_windows=[coarse_window],
+    )
+
+    assert len(segments) == 1
+    assert segments[0].global_start_ms == 108_900
+    assert segments[0].event_ids == ["DIRECT-CONTACT"]
+
+    legacy_segment = ExperimentSegment(
+        segment_id="EXP-LEGACY",
+        global_start_ms=98_000,
+        global_end_ms=116_900,
+        event_ids=["LIQUID-TIP-ONLY", "DIRECT-CONTACT"],
+        participating_views=["fp01", "tp01"],
+        micro_segments=[
+            {"evidence_event_id": "LIQUID-TIP-ONLY", "start_global_ms": 100_000},
+            {"evidence_event_id": "DIRECT-CONTACT", "start_global_ms": 110_900},
+        ],
+    )
+    replayed = normalize_experiment_segments(
+        [legacy_segment], [liquid, contact], views, default_config
+    )
+    assert replayed[0].global_start_ms == 108_900
+    assert replayed[0].event_ids == ["DIRECT-CONTACT"]
+    assert [
+        item["evidence_event_id"] for item in replayed[0].micro_segments
+    ] == ["DIRECT-CONTACT"]
+
+    complete_liquid = liquid.model_copy(
+        update={
+            "event_id": "LIQUID-WITH-PIPETTE",
+            "objects": ["pipette", "spearhead", "sample_bottle", "tube"],
+        }
+    )
+    complete_segments = build_experiment_segments(
+        [complete_liquid, contact],
+        views,
+        default_config,
+        coarse_windows=[coarse_window],
+    )
+    assert complete_segments[0].global_start_ms == 98_000
+    assert complete_segments[0].event_ids == ["LIQUID-WITH-PIPETTE", "DIRECT-CONTACT"]

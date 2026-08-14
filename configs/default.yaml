@@ -131,6 +131,11 @@ segmentation:
   boundary_context_min_confidence: 0.65
   boundary_context_max_gap_seconds: 10.0
   boundary_context_max_extension_seconds: 90.0
+  # A liquid-motion hypothesis may remain useful evidence, but only a complete
+  # transfer tool is strong enough to establish the start of an experiment.
+  # This prevents isolated pipette-tip/vessel motion from pulling the boundary
+  # earlier than the first directly observed physical interaction.
+  liquid_start_anchor_required_objects: [pipette]
   key_clip_pre_seconds: 2.0
   key_clip_post_seconds: 3.0
   event_merge_gap_seconds: 1.25
@@ -157,6 +162,11 @@ continuity:
   preparation_segment_max_seconds: 20.0
   preparation_segment_max_events: 2
   preparation_following_min_seconds: 30.0
+  # Adjacent motion envelopes can split one atomic operation around a short
+  # pause. Merge only when dual-view evidence and at least two carried physical
+  # objects agree, and neither side contains an explicit state/equipment step.
+  atomic_fragment_merge_max_gap_seconds: 20.0
+  atomic_fragment_min_shared_objects: 2
 
 key_materials:
   # Only collapse near-identical evidence. Repeated transfers, contacts and

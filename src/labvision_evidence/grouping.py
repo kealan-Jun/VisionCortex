@@ -32,6 +32,31 @@ FIXED_EQUIPMENT_OBJECTS = {
 }
 
 
+def is_experiment_start_anchor(
+    event: EvidenceEvent, config: dict[str, Any]
+) -> bool:
+    """Return whether accepted evidence is strong enough to open a clip."""
+
+    if event.action_type in {
+        ActionType.HAND_OBJECT_CONTACT,
+        ActionType.CONTAINER_STATE_CHANGE,
+        ActionType.DEVICE_PANEL_OPERATION,
+    }:
+        return True
+    if event.action_type == ActionType.LIQUID_MOVEMENT:
+        required = set(
+            config["segmentation"].get(
+                "liquid_start_anchor_required_objects", ["pipette"]
+            )
+        )
+        return len(event.supporting_views) > 1 and (
+            not required or bool(set(event.objects) & required)
+        )
+    return event.action_type == ActionType.OBJECT_MOVEMENT and not bool(
+        set(event.objects) & FIXED_EQUIPMENT_OBJECTS
+    )
+
+
 def normalize_experiment_segments(
     segments: Sequence[ExperimentSegment],
     events: Sequence[EvidenceEvent],
@@ -60,6 +85,40 @@ def normalize_experiment_segments(
         "wash_bottle",
         "waste_container",
     }
+
+    def trim_unrelated_head(segment: ExperimentSegment) -> ExperimentSegment:
+        core_events = sorted(
+            _segment_events(segment, by_event),
+            key=lambda item: item.global_start_ms,
+        )
+        anchors = [
+            event for event in core_events if is_experiment_start_anchor(event, config)
+        ]
+        if not anchors:
+            return segment
+        bounded_start = max(
+            0.0,
+            min(event.global_start_ms for event in anchors)
+            - float(segmentation["experiment_pre_roll_seconds"]) * 1000.0,
+        )
+        if bounded_start <= segment.global_start_ms:
+            return segment
+        retained_ids = {
+            event.event_id for event in core_events if event.global_end_ms >= bounded_start
+        }
+        return segment.model_copy(
+            update={
+                "global_start_ms": bounded_start,
+                "event_ids": [
+                    event_id for event_id in segment.event_ids if event_id in retained_ids
+                ],
+                "micro_segments": [
+                    item
+                    for item in segment.micro_segments
+                    if item.get("evidence_event_id") in retained_ids
+                ],
+            }
+        )
 
     def trim_unrelated_tail(segment: ExperimentSegment) -> ExperimentSegment:
         core_events = _segment_events(segment, by_event)
@@ -102,12 +161,13 @@ def normalize_experiment_segments(
         )
 
     ordered = sorted(
-        (trim_unrelated_tail(segment) for segment in segments),
+        (trim_unrelated_tail(trim_unrelated_head(segment)) for segment in segments),
         key=lambda item: (item.global_start_ms, item.global_end_ms),
     )
     if not ordered:
         return []
     roles = {view.view_id: view.role for view in views}
+    continuity_cfg = config["continuity"]
 
     def has_shared_dual_view(left: ExperimentSegment, right: ExperimentSegment) -> bool:
         shared = set(left.participating_views) & set(right.participating_views)
@@ -115,14 +175,49 @@ def normalize_experiment_segments(
             roles.get(view_id) == ViewRole.THIRD_PERSON for view_id in shared
         )
 
+    def is_same_atomic_fragment(
+        left: ExperimentSegment, right: ExperimentSegment
+    ) -> bool:
+        gap_ms = right.global_start_ms - left.global_end_ms
+        maximum_gap_ms = float(
+            continuity_cfg.get("atomic_fragment_merge_max_gap_seconds", 20.0)
+        ) * 1000.0
+        if gap_ms < 0.0 or gap_ms > maximum_gap_ms:
+            return False
+        left_events = _segment_events(left, by_event)
+        right_events = _segment_events(right, by_event)
+        blocking_actions = {
+            ActionType.CONTAINER_STATE_CHANGE,
+            ActionType.DEVICE_PANEL_OPERATION,
+        }
+        if any(
+            event.action_type in blocking_actions
+            or bool(set(event.objects) & FIXED_EQUIPMENT_OBJECTS)
+            for event in [*left_events, *right_events]
+        ):
+            return False
+        left_objects = {
+            obj for event in left_events for obj in event.objects
+        } & CONTINUITY_OBJECTS
+        right_objects = {
+            obj for event in right_events for obj in event.objects
+        } & CONTINUITY_OBJECTS
+        minimum_shared_objects = max(
+            1,
+            int(continuity_cfg.get("atomic_fragment_min_shared_objects", 2)),
+        )
+        return (
+            has_shared_dual_view(left, right)
+            and len(left_objects & right_objects) >= minimum_shared_objects
+        )
+
     consolidated: list[ExperimentSegment] = []
     for segment in ordered:
-        if (
-            consolidated
-            and segment.global_start_ms <= consolidated[-1].global_end_ms
-            and has_shared_dual_view(consolidated[-1], segment)
+        left = consolidated[-1] if consolidated else None
+        if left is not None and has_shared_dual_view(left, segment) and (
+            segment.global_start_ms <= left.global_end_ms
+            or is_same_atomic_fragment(left, segment)
         ):
-            left = consolidated[-1]
             merged_events = list(dict.fromkeys([*left.event_ids, *segment.event_ids]))
             merged_micro = sorted(
                 [*left.micro_segments, *segment.micro_segments],
@@ -147,7 +242,7 @@ def normalize_experiment_segments(
         else:
             consolidated.append(segment)
 
-    cfg = config["continuity"]
+    cfg = continuity_cfg
     max_gap_ms = float(cfg.get("preparation_bridge_max_gap_seconds", 20.0)) * 1000.0
     max_duration_ms = float(cfg.get("preparation_segment_max_seconds", 20.0)) * 1000.0
     following_min_ms = float(cfg.get("preparation_following_min_seconds", 30.0)) * 1000.0

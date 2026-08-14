@@ -12,6 +12,7 @@ from typing import Any, Iterable, Sequence
 import numpy as np
 
 from .detection import iter_frame_evidence
+from .grouping import is_experiment_start_anchor
 from .schemas import (
     ActionCandidate,
     ActionType,
@@ -489,6 +490,9 @@ def refine_motion_candidates_with_coarse(
         ),
         "unmatched_coarse_candidate_count": len(unmatched),
         "output_candidate_count": len(refined),
+        "output_candidates": [
+            item.model_dump(mode="json") for item in refined
+        ],
         "settings": {
             "association_margin_seconds": association_margin_ms / 1000.0,
             "minimum_candidates": minimum_candidates,
@@ -975,24 +979,18 @@ def build_experiment_segments(
         # Single-view liquid hypotheses and movement of fixed equipment may be
         # useful context, but are too noisy to pull the experiment boundary
         # earlier by themselves.
-        start_anchors = []
-        for event in group:
-            if event.action_type in {
-                ActionType.HAND_OBJECT_CONTACT,
-                ActionType.CONTAINER_STATE_CHANGE,
-                ActionType.DEVICE_PANEL_OPERATION,
-            }:
-                start_anchors.append(event)
-            elif event.action_type == ActionType.LIQUID_MOVEMENT and len(event.supporting_views) > 1:
-                start_anchors.append(event)
-            elif event.action_type == ActionType.OBJECT_MOVEMENT and not (
-                set(event.objects) & {"balance", "magnetic_stirrer", "computer"}
-            ):
-                start_anchors.append(event)
+        start_anchors = [
+            event for event in group if is_experiment_start_anchor(event, config)
+        ]
         raw_start = min(
             event.global_start_ms for event in (start_anchors or group)
         )
-        raw_end = max(event.global_end_ms for event in group)
+        start = max(0.0, raw_start - float(cfg["experiment_pre_roll_seconds"]) * 1000.0)
+        # Accepted recall evidence may precede the first reliable operation
+        # anchor. Keep it in the global audit ledger, but do not attach an event
+        # that ends before the bounded clip starts to this experiment.
+        bounded_group = [event for event in group if event.global_end_ms >= start]
+        raw_end = max(event.global_end_ms for event in bounded_group)
         # Cross-view agreement remains mandatory for accepted evidence and key
         # materials. Once that core exists, however, a continuous tail of
         # strong single-view physical actions may legitimately mark cleanup or
@@ -1046,7 +1044,9 @@ def build_experiment_segments(
                         raw_end + maximum_extension_ms,
                         boundary_window.global_end_ms,
                     )
-                    connected_objects = {obj for item in group for obj in item.objects}
+                    connected_objects = {
+                        obj for item in bounded_group for obj in item.objects
+                    }
                     cleanup_objects = {
                         "brush",
                         "cleaning_tool",
@@ -1078,7 +1078,6 @@ def build_experiment_segments(
                         if context.confidence >= extension_confidence:
                             supported_end = max(supported_end, cursor)
                     raw_end = supported_end
-        start = max(0.0, raw_start - float(cfg["experiment_pre_roll_seconds"]) * 1000.0)
         end = raw_end + float(cfg["experiment_post_roll_seconds"]) * 1000.0
         minimum = float(cfg["min_experiment_seconds"]) * 1000.0
         if end - start < minimum:
@@ -1086,7 +1085,7 @@ def build_experiment_segments(
             start, end = max(0.0, start - padding), end + padding
         candidate_counts = defaultdict(int)
         direct_evidence_ms = defaultdict(float)
-        for event in group:
+        for event in bounded_group:
             for view_id in event.supporting_views:
                 candidate_counts[view_id] += 1
                 direct_evidence_ms[view_id] += max(
@@ -1115,7 +1114,7 @@ def build_experiment_segments(
         if not participating:
             continue
         micro_segments = []
-        for position, event in enumerate(group):
+        for position, event in enumerate(bounded_group):
             micro_segments.append(
                 {
                     "micro_segment_id": f"MICRO-{index:04d}-{position + 1:04d}",
@@ -1127,7 +1126,11 @@ def build_experiment_segments(
                     "view_alignment_state": "aligned"
                     if all(event.supporting_views)
                     else "uncertain",
-                    "next_event_id": group[position + 1].event_id if position + 1 < len(group) else None,
+                    "next_event_id": (
+                        bounded_group[position + 1].event_id
+                        if position + 1 < len(bounded_group)
+                        else None
+                    ),
                     "uncertainty": event.uncertainty,
                 }
             )
@@ -1136,7 +1139,7 @@ def build_experiment_segments(
                 segment_id=f"EXP-{index:04d}",
                 global_start_ms=start,
                 global_end_ms=end,
-                event_ids=[event.event_id for event in group],
+                event_ids=[event.event_id for event in bounded_group],
                 participating_views=participating,
                 rejected_views=rejected_views,
                 micro_segments=micro_segments,

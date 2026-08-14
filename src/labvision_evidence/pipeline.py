@@ -1647,11 +1647,11 @@ class EvidencePipeline:
             self._status(layout, "candidate_audit", 0.68, "持续性、动作密度与跨视角一致性审计")
             events, rejected = audit_candidates(candidates, transforms, self.config)
             rejected.extend(refine_liquid_events_with_context(events, detection_paths))
-            segments = build_experiment_segments(
+            raw_segments = build_experiment_segments(
                 events, manifest.views, self.config, coarse_windows=boundary_candidates
             )
             segments = normalize_experiment_segments(
-                segments, events, manifest.views, self.config
+                raw_segments, events, manifest.views, self.config
             )
             groups = build_experiment_groups(segments, events, manifest.views, self.config)
             self._preprocessing_completed_seconds = round(time.perf_counter() - self._run_started_perf, 6)
@@ -1660,6 +1660,9 @@ class EvidencePipeline:
                 {
                     "events": [event.model_dump(mode="json") for event in events],
                     "rejected": rejected,
+                    "raw_segments": [
+                        segment.model_dump(mode="json") for segment in raw_segments
+                    ],
                     "segments": [segment.model_dump(mode="json") for segment in segments],
                     "experiment_groups": [group.model_dump(mode="json") for group in groups],
                 },
