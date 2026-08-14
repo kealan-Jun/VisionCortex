@@ -21,7 +21,7 @@
 
 仓库：`https://github.com/kealan-Jun/VisionCortex.git`
 
-目标分支：`codex/acceptance-observability`
+目标分支：`codex/post-run-throughput`
 
 在 4060 Codex 当前已经打开的 VisionCortex 仓库中执行。不得假定仓库位于 `D:`，也不得另建仓库副本：
 
@@ -53,8 +53,8 @@ if ($Dirty.Count -gt 0) {
 
 ```powershell
 git fetch origin
-git switch codex/acceptance-observability
-git pull --ff-only origin codex/acceptance-observability
+git switch codex/post-run-throughput
+git pull --ff-only origin codex/post-run-throughput
 $RunCommit = (git rev-parse HEAD).Trim()
 git status --short --branch
 Write-Host "RUN_COMMIT=$RunCommit"

@@ -705,9 +705,9 @@ class EvidencePipeline:
             if self._publisher is not None:
                 self._publisher.publish_directory("JSON-Config-Files")
 
-            probe_views = self._motion_probe_views(manifest)
-            probe_manifest = manifest.model_copy(update={"views": probe_views})
-            selected_probe_ids = {view.view_id for view in probe_views}
+            motion_probe_views = self._motion_probe_views(manifest)
+            probe_manifest = manifest.model_copy(update={"views": motion_probe_views})
+            selected_probe_ids = {view.view_id for view in motion_probe_views}
             for view in manifest.views:
                 self._view_runtime[view.view_id]["state"] = (
                     "motion_probe_running"
@@ -754,7 +754,7 @@ class EvidencePipeline:
                 )
             )
             raw_motion_candidates = generate_motion_burst_candidates(
-                probe_views, motion_paths, probe_config
+                motion_probe_views, motion_paths, probe_config
             )
             motion_candidates = fuse_motion_probe_candidates(
                 raw_motion_candidates, probe_config
@@ -763,7 +763,7 @@ class EvidencePipeline:
             if not motion_candidates:
                 safety_fallback_used = True
                 motion_candidates = generate_motion_safety_candidates(
-                    probe_views, motion_paths, probe_config
+                    motion_probe_views, motion_paths, probe_config
                 )
             if not motion_candidates:
                 raise RuntimeError("输入视频没有产生任何可读运动帧，无法建立实验候选窗口")
@@ -781,7 +781,7 @@ class EvidencePipeline:
                 layout.json_config / "motion_probe_windows.json",
                 {
                     "schema_version": "visioncortex-motion-probe/1",
-                    "sentinel_views": [view.view_id for view in probe_views],
+                    "sentinel_views": [view.view_id for view in motion_probe_views],
                     "raw_candidate_count": len(raw_motion_candidates),
                     "fused_candidate_count": len(motion_candidates),
                     "safety_fallback_used": safety_fallback_used,
