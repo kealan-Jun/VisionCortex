@@ -31,6 +31,7 @@ const state = {
   activeRun: null,
   archiveCache: new Map(),
   search: "",
+  refreshingTasks: false,
 };
 
 const main = document.querySelector("#main-content");
@@ -81,11 +82,13 @@ const ACTION_LABELS = {
 };
 const STAGE_LABELS = {
   reserving: "锁定固定基准归档",
+  original_ingest: "原视频安全留存",
   nas_ingest: "读取索引并准备六路输入",
   queued: "排队等待",
   running: "正在启动",
   preflight: "视频探测与预检",
   alignment: "多路时间戳对齐",
+  motion_probe: "低成本运动探针",
   candidate_coarse: "低成本粗扫",
   candidate_fine: "疑似区间精扫",
   candidate_audit: "有界片段审计",
@@ -99,6 +102,58 @@ const STAGE_LABELS = {
   failed: "分析失败",
   interrupted: "服务重启后待续跑",
 };
+
+const GUIDED_PIPELINE = [
+  {
+    id: "originals", number: "01", title: "原视频安全留存",
+    stages: ["reserving", "original_ingest", "nas_ingest"], completedBy: ["original_ingest"],
+    folder: "Original-Experiment-Videos",
+    doing: "校验上传文件与时钟 CSV，并把原始输入登记到本次实验档案。",
+    outcome: "可追溯的原视频、CSV、来源角色和文件校验信息。",
+  },
+  {
+    id: "alignment", number: "02", title: "预检与多路时间对齐",
+    stages: ["preflight", "alignment"], completedBy: ["alignment"],
+    folder: "JSON-Config-Files",
+    doing: "检查视频可读性、模型和存储，再用 CSV 最近邻与视觉锚点统一六路时间轴。",
+    outcome: "每一路的时间变换、置信度与对齐时间戳账本。",
+  },
+  {
+    id: "discovery", number: "03", title: "发现真实有界实验",
+    stages: ["motion_probe", "candidate_coarse", "candidate_fine", "candidate_audit"], completedBy: ["candidate_audit"],
+    folder: "JSON-Config-Files",
+    doing: "运动探针缩小范围，YOLO 粗扫和精扫收紧边界，再审计跨视角连续性。",
+    outcome: "仅保留第一/第三人称时间一致、边界可信的真实实验候选。",
+  },
+  {
+    id: "clips", number: "04", title: "实验命名、理解与片段归档",
+    stages: ["experiment_understanding", "experiment_clips"], completedBy: ["experiment_clips"],
+    folder: "Experiment-Clips",
+    doing: "判断独立实验或连续实验，细分当前/下一步骤，并按模型实验名生成三份视频。",
+    outcome: "每个实验的第一人称、第三人称、并排 MP4 及对应步骤 JSON。",
+  },
+  {
+    id: "materials", number: "05", title: "关键素材与细粒度步骤理解",
+    stages: ["key_materials", "mllm"], completedBy: ["mllm"],
+    folder: "Key-Materials",
+    doing: "提取五类物理动作的对齐关键帧、片段和时间戳，并理解当前与下一步骤。",
+    outcome: "跨视角关键帧/关键片段，以及统一事件 JSON 和模型证据。",
+  },
+  {
+    id: "evidence", number: "06", title: "证据包与质量验收",
+    stages: ["package"], completedBy: ["package"],
+    folder: "JSON-Config-Files",
+    doing: "汇总边界、跨视角支持、五类覆盖、耗时与 Token，并执行自动验收。",
+    outcome: "可审计的证据包、质量结论、阶段耗时与输入/输出 Token 账本。",
+  },
+  {
+    id: "reports", number: "07", title: "日报、PDF 与正式归档",
+    stages: ["daily_report", "completed"], completedBy: ["daily_report", "completed"],
+    folder: "Lab-Daily-Reports / Professional-PDFs",
+    doing: "基于已验收证据填充固定日报模板，生成并校验 PDF，最后提升为正式档案。",
+    outcome: "实验室日报、专业 PDF 和完整 NAS 正式归档。",
+  },
+];
 
 async function api(url, options) {
   const response = await fetch(url, options);
@@ -167,6 +222,21 @@ async function loadAll() {
   if (results[1].status === "fulfilled") state.archives = results[1].value.archives || [];
   if (results[2].status === "fulfilled") state.runs = results[2].value.runs || [];
   updateServiceChrome();
+}
+
+async function refreshTaskSnapshots() {
+  if (state.refreshingTasks || (routeParts()[0] || "home") !== "tasks") return;
+  state.refreshingTasks = true;
+  try {
+    const payload = await api("/api/runs");
+    state.runs = payload.runs || [];
+    updateServiceChrome();
+    renderTasks();
+  } catch {
+    // Keep the last durable snapshot visible; the freshness warning explains stale data.
+  } finally {
+    state.refreshingTasks = false;
+  }
 }
 
 function filteredArchives() {
@@ -389,7 +459,7 @@ function xhrUpload(formData, progress) {
 }
 
 function renderStages(activeStage, progressValue) {
-  const stages = ["preflight","alignment","candidate_coarse","candidate_fine","candidate_audit","experiment_understanding","experiment_clips","key_materials","mllm","package","daily_report"];
+  const stages = ["original_ingest","preflight","alignment","motion_probe","candidate_coarse","candidate_fine","candidate_audit","experiment_understanding","experiment_clips","key_materials","mllm","package","daily_report"];
   const activeIndex = stages.indexOf(activeStage);
   const element = document.querySelector("#run-stages");
   if (!element) return;
@@ -426,7 +496,8 @@ async function submitRun() {
   formData.append("view_specs_json", JSON.stringify(specs));
   document.querySelector("#upload-progress").classList.remove("hidden");
   document.querySelector("#start-run").disabled = true;
-  setProgress(0, "正在同时写入本地运行区与 NAS 原视频留存区");
+  const nasOnly = state.health?.web_upload_retention_mode === "nas_only";
+  setProgress(0, nasOnly ? "正在写入 NAS 原视频留存区并校验文件" : "正在写入本地运行区与 NAS 原视频留存区");
   try {
     const created = await xhrUpload(formData, (value) => setProgress(value * .15, `正在上传并留存 ${review.videos} 路原视频`));
     const archiveName = new URL(created.archive_url, location.origin).searchParams.get("archive") || review.title;
@@ -466,7 +537,71 @@ async function pollRun(runId, archiveName) {
 function renderTasks() {
   setChrome("tasks");
   const runs = state.runs;
-  main.innerHTML = `<div class="page"><header class="page-hero compact"><div><p class="eyebrow">LIVE OPERATIONS</p><h1>任务进度</h1><p>六路推进、GPU/NVDEC/CPU、NAS 吞吐、阶段耗时与 Token 都来自正式运行账本；页面显示数据更新时间。</p></div><div class="hero-actions"><a class="primary-button" href="#/new">${icon("plus")}新建实验</a></div></header><section class="status-grid">${statusCard("activity","当前任务",number(runs.length),"含可恢复持久状态")}${statusCard("gauge","正在处理",number(runs.filter((run)=>!["completed","failed","interrupted"].includes(run.state)).length),"后台自动执行")}${statusCard("check","已完成",number(runs.filter((run)=>run.state==="completed").length),"已进入正式档案")}${statusCard("file","中断/失败",number(runs.filter((run)=>["failed","interrupted"].includes(run.state)).length),"保留断点与诊断")}</section>${runs.length ? runs.map(runObservabilityCard).join("") : `<section class="panel"><div class="empty-state"><strong>当前没有运行任务</strong><p>从“新建实验”上传视频后，任务会立即出现在这里。</p></div></section>`}</div>`;
+  main.innerHTML = `<div class="page"><header class="page-hero compact"><div><p class="eyebrow">GUIDED ARCHIVE PIPELINE</p><h1>任务进度与自动归档</h1><p>从原视频留存到日报 PDF，每完成一个环节就写入 NAS 并生成阶段回执。这里说明当前在做什么、已归档什么以及下一步会得到什么。</p></div><div class="hero-actions"><a class="primary-button" href="#/new">${icon("plus")}新建实验</a></div></header><section class="status-grid">${statusCard("activity","当前任务",number(runs.length),"含可恢复持久状态")}${statusCard("gauge","正在处理",number(runs.filter((run)=>!["completed","failed","interrupted"].includes(run.state)).length),"页面每 4 秒自动刷新")}${statusCard("check","已完成",number(runs.filter((run)=>run.state==="completed").length),"已进入正式档案")}${statusCard("file","中断/失败",number(runs.filter((run)=>["failed","interrupted"].includes(run.state)).length),"已完成产出仍保留在 NAS")}</section>${runs.length ? runs.map(runObservabilityCard).join("") : `<section class="panel"><div class="empty-state"><strong>当前没有运行任务</strong><p>从“新建实验”上传视频后，任务会立即出现在这里，并按七个环节逐项归档。</p></div></section>`}</div>`;
+  bindArchiveActions();
+}
+
+function normalizedViews(status) {
+  const views = status?.views || {};
+  if (Array.isArray(views)) return views.map((item,index)=>[item.view_id || `view-${index+1}`, item]);
+  return Object.entries(views);
+}
+
+function newestFreshness(snapshot) {
+  const candidates = [
+    snapshot?.freshness?.telemetry_updated_at,
+    snapshot?.freshness?.source_progress_updated_at,
+    snapshot?.freshness?.status_updated_at,
+  ].filter(Boolean).map((value)=>new Date(value)).filter((value)=>!Number.isNaN(value.getTime()));
+  if (!candidates.length) return { value: null, age: null, stale: false };
+  const value = new Date(Math.max(...candidates.map((item)=>item.getTime())));
+  const age = Math.max(0, (Date.now() - value.getTime()) / 1000);
+  return { value, age, stale: age > 20 };
+}
+
+function elapsedForRun(run, status) {
+  let value = Number(status?.elapsed_seconds || 0);
+  const updated = status?.updated_at ? new Date(status.updated_at) : null;
+  if (!["completed","failed","interrupted"].includes(run.state) && updated && !Number.isNaN(updated.getTime())) {
+    value += Math.max(0, (Date.now() - updated.getTime()) / 1000);
+  }
+  return value;
+}
+
+function guidedStageState(run, definition, receipts, index) {
+  const status = run.observability?.status || {};
+  const current = status.stage || run.state;
+  const failed = status.failed_stage || (run.state === "failed" ? current : null);
+  const completedReceipt = definition.completedBy.map((stage)=>receipts.get(stage)).find(Boolean);
+  if (run.state === "completed" || completedReceipt) return { state: "done", receipt: completedReceipt };
+  if (["failed","interrupted"].includes(run.state) && definition.stages.includes(failed)) return { state: run.state, receipt: null };
+  if (definition.stages.includes(current)) return { state: "active", receipt: null };
+  const currentIndex = GUIDED_PIPELINE.findIndex((item)=>item.stages.includes(current));
+  if (currentIndex > index) return { state: "done-unreceipted", receipt: null };
+  return { state: "waiting", receipt: null };
+}
+
+function guidedPipelineView(run) {
+  const snapshot = run.observability || {};
+  const receipts = new Map((snapshot.stage_receipts || []).map((item)=>[item.stage,item]));
+  const rows = GUIDED_PIPELINE.map((definition,index)=>({ definition, ...guidedStageState(run,definition,receipts,index) }));
+  const active = rows.find((item)=>["active","failed","interrupted"].includes(item.state)) || rows.find((item)=>item.state === "waiting") || rows.at(-1);
+  const activeIndex = rows.indexOf(active);
+  const next = rows.slice(activeIndex+1).find((item)=>item.state === "waiting");
+  const status = snapshot.status || {};
+  const stateLabel = { active:"正在进行", done:"已归档", "done-unreceipted":"已通过", waiting:"等待中", failed:"本环节失败", interrupted:"等待续跑" };
+  const cards = rows.map(({definition,state:stageState,receipt})=>{
+    const artifacts = (receipt?.artifacts || []).filter((item)=>item.available).map((item)=>item.name).filter(Boolean);
+    const detail = stageState === "done"
+      ? `${receipt?.stage_duration_seconds != null ? `耗时 ${duration(receipt.stage_duration_seconds)} · ` : ""}${artifacts.length ? `已确认 ${artifacts.slice(0,3).join("、")}` : "阶段回执已写入 NAS"}`
+      : stageState === "active" ? definition.doing
+      : stageState === "failed" ? `失败位置：${STAGE_LABELS[status.failed_stage] || status.failed_stage || run.error || "本环节"}`
+      : stageState === "interrupted" ? "已完成产出保留，可从持久账本续跑。"
+      : stageState === "done-unreceipted" ? "后续阶段已开始；该历史运行没有独立阶段回执。"
+      : `完成后：${definition.outcome}`;
+    return `<article class="journey-step ${stageState}"><span class="journey-number">${definition.number}</span><div class="journey-copy"><header><strong>${esc(definition.title)}</strong><span>${esc(stateLabel[stageState])}</span></header><p>${esc(detail)}</p><small>${icon("folder")} 归档到 ${esc(definition.folder)}</small></div></article>`;
+  }).join("");
+  return `<section class="current-guide ${active.state}"><div><span class="guide-kicker">${esc(stateLabel[active.state])} · 环节 ${esc(active.definition.number)}/07</span><h3>${esc(active.definition.title)}</h3><p>${esc(status.message || active.definition.doing)}</p></div><aside><small>${next ? "完成后进入" : "最终结果"}</small><strong>${esc(next?.definition.title || "完整 NAS 正式档案")}</strong><span>${esc(next?.definition.outcome || active.definition.outcome)}</span></aside></section><div class="pipeline-journey">${cards}</div>`;
 }
 
 function runObservabilityCard(run) {
@@ -476,11 +611,19 @@ function runObservabilityCard(run) {
   const gpu = live.gpu || {};
   const network = live.host_network || {};
   const processIo = live.pipeline_process_tree_io || {};
-  const views = Object.entries(status.views || {});
+  const views = normalizedViews(status);
   const metrics = snapshot.metrics || {};
   const tokens = metrics.tokens?.run_total || {};
-  const freshness = snapshot.freshness?.telemetry_updated_at || snapshot.freshness?.status_updated_at;
-  return `<section class="panel live-run-card"><header class="panel-heading"><div><h2>${esc(run.experiment_id || run.run_id)}</h2><p>${esc(run.run_id)} · ${esc(run.nas_staging || run.nas_output || "运行目录待登记")}</p></div><span class="queue-status ${esc(run.state)}"><i></i>${esc(STAGE_LABELS[run.state] || run.state)}</span></header><div class="live-metric-grid"><article><small>总体进度</small><strong>${Math.round(Number(run.progress ?? status.progress ?? 0)*100)}%</strong><span>${duration(status.elapsed_seconds)} 已用</span></article><article><small>GPU / NVDEC</small><strong>${gpu["utilization.gpu"] ?? "—"}% / ${gpu["utilization.decoder"] ?? "—"}%</strong><span>${gpu["memory.used"] ?? "—"} MiB 显存</span></article><article><small>CPU / 内存</small><strong>${live.cpu_percent ?? "—"}% / ${live.memory_percent ?? "—"}%</strong><span>主机实时采样</span></article><article><small>NAS/网络读取</small><strong>${network.received_mib_per_second ?? "—"} MiB/s</strong><span>进程树读 ${processIo.read_mib_per_second ?? "—"} MiB/s</span></article><article><small>模型 Token</small><strong>${number(tokens.total_tokens)}</strong><span>${number(tokens.input_tokens)} 输入 + ${number(tokens.output_tokens)} 输出</span></article><article><small>数据新鲜度</small><strong>${freshness ? formatDate(freshness) : "待采样"}</strong><span>${esc(snapshot.sources?.telemetry_live || "正式遥测账本")}</span></article></div>${views.length ? `<div class="view-runtime-grid">${views.map(([viewId,item])=>`<article><span class="view-state-dot"></span><div><strong>${esc(viewId)}</strong><small>${esc(item.role)} · ${esc(item.decode_backend)} · ${esc(item.state)} · ${item.total_units ? `${number(item.completed_units)}/${number(item.total_units)} 单元` : `${number(item.segment_count)} 分片`}</small></div></article>`).join("")}</div>` : `<div class="empty-state compact-empty">等待视角运行账本</div>`}</section>`;
+  const freshness = newestFreshness(snapshot);
+  const current = status.stage || run.state;
+  const archivePath = run.nas_staging || run.nas_output || "运行目录待登记";
+  const gpuCompute = gpu["utilization.gpu"] ?? gpu.utilization_percent ?? "—";
+  const nvdec = gpu["utilization.decoder"] ?? gpu.decoder_percent ?? "—";
+  const memory = gpu["memory.used"] ?? gpu.memory_used_mib ?? "—";
+  const freshnessNote = freshness.stale && !["completed","failed","interrupted"].includes(run.state)
+    ? `<div class="freshness-warning">状态数据已 ${duration(freshness.age)} 未更新：NAS 遥测可能延迟，不能据此判定任务停止；页面仍会继续刷新。</div>` : "";
+  const archiveLink = run.state === "completed" ? `<a class="secondary-button" href="#/archive/${encodeURIComponent(run.experiment_id || "")}/experiments">查看正式档案</a>` : "";
+  return `<section class="panel live-run-card"><header class="panel-heading"><div><h2>${esc(run.experiment_id || run.run_id)}</h2><p>${esc(run.run_id)} · ${esc(archivePath)}</p></div><div class="run-heading-actions"><button class="secondary-button" type="button" data-copy-path="${esc(archivePath)}">${icon("copy")}复制当前归档路径</button>${archiveLink}<span class="queue-status ${esc(run.state)}"><i></i>${esc(STAGE_LABELS[current] || current)}</span></div></header>${freshnessNote}${guidedPipelineView(run)}<details class="technical-observability" ${!["completed"].includes(run.state) ? "open" : ""}><summary>查看实时性能、逐视角进度与 Token</summary><div class="live-metric-grid"><article><small>总体进度</small><strong>${Math.round(Number(run.progress ?? status.progress ?? 0)*100)}%</strong><span>${duration(elapsedForRun(run,status))} 已用</span></article><article><small>GPU / NVDEC</small><strong>${gpuCompute}% / ${nvdec}%</strong><span>${memory} MiB 显存</span></article><article><small>CPU / 内存</small><strong>${live.cpu_percent ?? "—"}% / ${live.memory_percent ?? "—"}%</strong><span>主机实时采样</span></article><article><small>NAS/网络读取</small><strong>${network.received_mib_per_second ?? "—"} MiB/s</strong><span>进程树读 ${processIo.read_mib_per_second ?? "—"} MiB/s</span></article><article><small>模型 Token</small><strong>${number(tokens.total_tokens)}</strong><span>${number(tokens.input_tokens)} 输入 + ${number(tokens.output_tokens)} 输出</span></article><article><small>最近更新</small><strong>${freshness.value ? formatDate(freshness.value) : "待采样"}</strong><span>${freshness.age == null ? "正式运行账本" : `${duration(freshness.age)} 前`}</span></article></div>${views.length ? `<div class="view-runtime-grid">${views.map(([viewId,item])=>{ const done=item.completed_units ?? item.completed_work_units; const total=item.total_units ?? item.total_work_units; return `<article><span class="view-state-dot ${item.state === "completed" ? "completed" : ""}"></span><div><strong>${esc(viewId)}</strong><small>${esc(item.role || "待识别角色")} · ${esc(item.decode_backend || "待分配解码")} · ${esc(item.state || "waiting")} · ${total ? `${number(done)}/${number(total)} 单元` : `${number(item.segment_count)} 分片`}</small></div></article>`; }).join("")}</div>` : `<div class="empty-state compact-empty">等待逐视角运行账本；输入仍已纳入任务。</div>`}</details></section>`;
 }
 
 function renderOperations() {
@@ -546,7 +689,8 @@ function metricsView(data) {
   const stages = metrics.stage_durations || [];
   const webIngest = metrics.web_ingest || metrics.nas_index_ingest;
   const endToEnd = metrics.web_end_to_end || metrics.fixed_benchmark_end_to_end;
-  const extraRows = `${webIngest?.duration_seconds != null ? `<tr><td>input_ingest</td><td>${metrics.web_ingest ? "浏览器上传并双份留存" : "NAS 索引输入准备/复用"}</td><td>${duration(webIngest.duration_seconds)}</td></tr>` : ""}${endToEnd?.total_duration_seconds != null ? `<tr><td>end_to_end</td><td>请求进入至最终 NAS 归档完成</td><td>${duration(endToEnd.total_duration_seconds)}</td></tr>` : ""}`;
+  const retention = webIngest?.retention_mode === "nas_only" ? "浏览器上传并直接留存 NAS（本地不复制）" : "浏览器上传并留存本地与 NAS";
+  const extraRows = `${webIngest?.duration_seconds != null ? `<tr><td>input_ingest</td><td>${metrics.web_ingest ? retention : "NAS 索引输入准备/复用"}</td><td>${duration(webIngest.duration_seconds)}</td></tr>` : ""}${endToEnd?.total_duration_seconds != null ? `<tr><td>end_to_end</td><td>请求进入至最终 NAS 归档完成</td><td>${duration(endToEnd.total_duration_seconds)}</td></tr>` : ""}`;
   const quality = data.quality_acceptance || {};
   const boundary = quality.experiment_boundaries || {};
   const materials = quality.key_materials || {};
@@ -610,6 +754,7 @@ document.querySelector("#refresh-button").addEventListener("click", async () => 
   toast("NAS 档案与任务状态已刷新。" );
 });
 window.addEventListener("hashchange", router);
+window.setInterval(refreshTaskSnapshots, 4000);
 
 hydrateIcons();
 const legacyArchive = new URLSearchParams(location.search).get("archive");

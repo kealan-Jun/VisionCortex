@@ -77,6 +77,10 @@ performance:
   io_workers: 4
   max_gpu_memory_fraction: 0.88
   ffmpeg_hwaccel: cuda
+  # Resize CUDA-decoded frames before downloading them to host BGR memory.
+  # The iterator automatically falls back to the existing decode path if the
+  # installed FFmpeg build cannot negotiate the CUDA filter graph.
+  ffmpeg_cuda_scale: true
   ffmpeg_video_encoder: h264_nvenc
   concurrent_role_scanners: false
   preflight_probe_workers: 12

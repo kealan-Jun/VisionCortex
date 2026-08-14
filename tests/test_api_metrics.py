@@ -124,6 +124,22 @@ def test_run_snapshot_uses_durable_live_observability(tmp_path):
     (json_root / "run_metrics_live.json").write_text(
         json.dumps({"tokens": {"total_tokens": 4321}}), encoding="utf-8"
     )
+    receipt_root = json_root / "Stage-Receipts"
+    receipt_root.mkdir()
+    artifact = root / "Experiment-Clips"
+    artifact.mkdir()
+    (receipt_root / "experiment_clips.json").write_text(
+        json.dumps(
+            {
+                "stage": "experiment_clips",
+                "status": "completed",
+                "completed_at": "receipt-time",
+                "stage_duration_seconds": 12.5,
+                "artifacts": ["Experiment-Clips"],
+            }
+        ),
+        encoding="utf-8",
+    )
 
     snapshot = api._run_snapshot_from_root(root)
 
@@ -131,6 +147,32 @@ def test_run_snapshot_uses_durable_live_observability(tmp_path):
     assert snapshot["live_telemetry"]["gpu"]["utilization_percent"] == 91.0
     assert snapshot["metrics"]["tokens"]["total_tokens"] == 4321
     assert snapshot["freshness"]["telemetry_updated_at"] == "telemetry-time"
+    assert snapshot["stage_receipts"][0]["stage"] == "experiment_clips"
+    assert snapshot["stage_receipts"][0]["artifacts"][0]["available"] is True
+    assert next(
+        item for item in snapshot["archive_areas"] if item["name"] == "Experiment-Clips"
+    )["available"] is True
+
+
+def test_completed_run_hydrates_from_formal_archive_before_staging(tmp_path):
+    staging = tmp_path / "staging"
+    formal = tmp_path / "formal"
+    for root, stage in ((staging, "candidate_fine"), (formal, "completed")):
+        json_root = root / "JSON-Config-Files"
+        json_root.mkdir(parents=True)
+        (json_root / "pipeline_status.json").write_text(
+            json.dumps({"stage": stage}), encoding="utf-8"
+        )
+
+    hydrated = api._hydrate_run_snapshot(
+        {
+            "state": "completed",
+            "nas_staging": str(staging),
+            "nas_output": str(formal),
+        }
+    )
+
+    assert hydrated["observability"]["status"]["stage"] == "completed"
 
 
 def test_service_restart_marks_orphaned_task_resumable(monkeypatch, tmp_path):

@@ -322,12 +322,21 @@ def _ffmpeg_frame_iterator(
     hwaccel: str | None,
     keyframes_only: bool,
     decoder_threads: int | None,
+    cuda_scale: bool = False,
 ) -> Iterator[tuple[int, float, np.ndarray]]:
     width, height = _scaled_size(info.width, info.height, max_width)
-    filter_graph = f"fps={sample_fps:.8f},scale={width}:{height}"
+    use_cuda_scale = bool(cuda_scale and hwaccel == "cuda")
+    filter_graph = (
+        f"fps={sample_fps:.8f},scale_cuda={width}:{height}:format=nv12,"
+        "hwdownload,format=nv12,format=bgr24"
+        if use_cuda_scale
+        else f"fps={sample_fps:.8f},scale={width}:{height}"
+    )
     command = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
     if hwaccel:
         command += ["-hwaccel", hwaccel]
+        if use_cuda_scale:
+            command += ["-hwaccel_output_format", "cuda"]
     elif decoder_threads:
         command += ["-threads", str(max(1, decoder_threads))]
     if keyframes_only:
@@ -463,6 +472,7 @@ def iter_sampled_frames(
     keyframes_only: bool = False,
     decoder_threads: int | None = None,
     sparse_strategy: str = "indexed_seek",
+    cuda_scale: bool = False,
 ) -> Iterator[tuple[int, float, np.ndarray]]:
     if sparse_strategy not in {"indexed_seek", "sequential_keyframes"}:
         raise ValueError(f"unsupported sparse decode strategy: {sparse_strategy}")
@@ -480,15 +490,35 @@ def iter_sampled_frames(
         try:
             yield from _ffmpeg_frame_iterator(
                 path, info, start_ms, end_ms, sample_fps, max_width, hwaccel, keyframes_only,
-                decoder_threads,
+                decoder_threads, cuda_scale,
             )
             return
         except RuntimeError:
             if hwaccel:
+                if cuda_scale:
+                    try:
+                        # Some Windows FFmpeg/CUDA combinations decode on the
+                        # GPU but do not expose scale_cuda. Preserve hardware
+                        # decode before falling all the way back to CPU.
+                        yield from _ffmpeg_frame_iterator(
+                            path,
+                            info,
+                            start_ms,
+                            end_ms,
+                            sample_fps,
+                            max_width,
+                            hwaccel,
+                            keyframes_only,
+                            decoder_threads,
+                            False,
+                        )
+                        return
+                    except RuntimeError:
+                        pass
                 try:
                     yield from _ffmpeg_frame_iterator(
                         path, info, start_ms, end_ms, sample_fps, max_width, None, keyframes_only,
-                        decoder_threads,
+                        decoder_threads, False,
                     )
                     return
                 except RuntimeError:
@@ -507,12 +537,13 @@ def iter_view_sampled_frames(
     keyframes_only: bool = False,
     decoder_threads: int | None = None,
     sparse_strategy: str = "indexed_seek",
+    cuda_scale: bool = False,
 ) -> Iterator[tuple[int, float, np.ndarray]]:
     if not info.segments:
         assert view.video is not None
         yield from iter_sampled_frames(
             view.video, info, start_ms, end_ms, sample_fps, max_width, hwaccel,
-            keyframes_only, decoder_threads, sparse_strategy,
+            keyframes_only, decoder_threads, sparse_strategy, cuda_scale,
         )
         return
     for segment in info.segments:
@@ -533,7 +564,7 @@ def iter_view_sampled_frames(
         segment_end = overlap_end - segment.virtual_start_ms
         for frame_index, source_ms, frame in iter_sampled_frames(
             segment.path, source_info, segment_start, segment_end, sample_fps, max_width,
-            hwaccel, keyframes_only, decoder_threads, sparse_strategy,
+            hwaccel, keyframes_only, decoder_threads, sparse_strategy, cuda_scale,
         ):
             yield (
                 segment.frame_start_index + frame_index,

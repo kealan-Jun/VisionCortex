@@ -262,6 +262,7 @@ def _producer(
             keyframes_only,
             int(perf.get("cpu_decode_threads", 0)) if decode_backend == "cpu" else None,
             str(perf.get("motion_probe_sparse_strategy", "indexed_seek")),
+            bool(perf.get("ffmpeg_cuda_scale", False)) and decode_backend == "cuda",
         )
 
     def decoded_frames(start_ms: float, end_ms: float) -> list[tuple[int, float, np.ndarray]]:
@@ -670,12 +671,15 @@ def scan_videos(
         role_views = [view for view in views if view.role == role]
         if not role_views:
             continue
+        role_started = time.perf_counter()
         motion_only = phase == "motion_probe" and not bool(
             config["performance"].get("motion_probe_run_yolo", False)
         )
+        model_load_started = time.perf_counter()
         scanner = None if motion_only else RoleScanner(
             role, config, effective_image_size, phase_batch_size
         )
+        model_load_seconds = time.perf_counter() - model_load_started
         runtime_report = {
             "phase": phase,
             "role": role.value,
@@ -702,6 +706,9 @@ def scan_videos(
             "sparse_decode_strategy": str(
                 config["performance"].get("motion_probe_sparse_strategy", "indexed_seek")
             ),
+            "ffmpeg_cuda_scale": bool(
+                config["performance"].get("ffmpeg_cuda_scale", False)
+            ),
             "decode_backends": {
                 view.view_id: (decode_backends or {}).get(
                     view.view_id,
@@ -711,6 +718,7 @@ def scan_videos(
             },
             "active_source_workers": len(role_views),
             "synchronized_segment_waves": wave_barrier is not None,
+            "model_load_seconds": round(model_load_seconds, 6),
         }
         runtime_path = work_dir / f"runtime_{phase}_{role.value}.json"
         trackers = {
@@ -770,6 +778,9 @@ def scan_videos(
         control_only_flushes = 0
         batch_started_at: float | None = None
         received_ends: set[str] = set()
+        queue_wait_seconds = 0.0
+        inference_seconds = 0.0
+        postprocess_seconds = 0.0
         batch_wait_seconds = max(
             0.001,
             float(config["performance"].get("inference_batch_wait_ms", 25.0)) / 1000.0,
@@ -778,6 +789,7 @@ def scan_videos(
         def flush_pending(reason: str) -> None:
             nonlocal pending_frame_count, motion_sample_count, batch_started_at
             nonlocal microbatch_timeout_flushes, full_batch_flushes, control_only_flushes
+            nonlocal inference_seconds, postprocess_seconds
             if not pending_items:
                 return
             frames = [item for item in pending_items if isinstance(item, FramePacket)]
@@ -786,7 +798,9 @@ def scan_videos(
             if scanner is None:
                 inferred = [[] for _ in frames]
             else:
+                inference_started = time.perf_counter()
                 inferred = scanner.infer(frames) if frames else []
+                inference_seconds += time.perf_counter() - inference_started
                 if frames:
                     batch_sizes.extend(scanner.last_inference_batch_sizes)
             if reason == "full_batch":
@@ -796,6 +810,7 @@ def scan_videos(
             elif not frames:
                 control_only_flushes += 1
             inferred_iter = iter(inferred)
+            postprocess_started = time.perf_counter()
             for item in pending_items:
                 if isinstance(item, FramePacket):
                     boxes = next(inferred_iter)
@@ -834,6 +849,7 @@ def scan_videos(
                     errors.append(f"{item.view_id}: {item.message}")
                 elif isinstance(item, ProducerEnd):
                     ended.add(item.view_id)
+            postprocess_seconds += time.perf_counter() - postprocess_started
             pending_items.clear()
             pending_frame_count = 0
             batch_started_at = None
@@ -844,8 +860,11 @@ def scan_videos(
                 if scanner is not None and pending_frame_count and batch_started_at is not None:
                     timeout = max(0.0, batch_wait_seconds - (time.perf_counter() - batch_started_at))
                 try:
+                    queue_wait_started = time.perf_counter()
                     item = frame_queue.get(timeout=timeout)
+                    queue_wait_seconds += time.perf_counter() - queue_wait_started
                 except queue.Empty:
+                    queue_wait_seconds += time.perf_counter() - queue_wait_started
                     flush_pending("timeout")
                     continue
                 max_queue_size = max(max_queue_size, frame_queue.qsize())
@@ -911,6 +930,10 @@ def scan_videos(
                     "full_batch_flushes": full_batch_flushes,
                     "microbatch_timeout_flushes": microbatch_timeout_flushes,
                     "control_only_flushes": control_only_flushes,
+                    "queue_wait_seconds": round(queue_wait_seconds, 6),
+                    "inference_seconds": round(inference_seconds, 6),
+                    "tracking_and_ledger_seconds": round(postprocess_seconds, 6),
+                    "role_total_seconds": round(time.perf_counter() - role_started, 6),
                 }
             )
             runtime_path.write_text(
@@ -940,3 +963,30 @@ def nearest_frame_evidence(path: Path, global_ms: float, tolerance_ms: float = 1
         if frame.global_ms > global_ms + tolerance_ms:
             break
     return best if best_distance <= tolerance_ms else None
+
+
+def nearest_frame_evidence_many(
+    path: Path,
+    global_timestamps_ms: Sequence[float],
+    tolerance_ms: float = 1500.0,
+) -> dict[float, FrameEvidence | None]:
+    """Resolve sorted timestamp queries with one sequential ledger pass."""
+
+    queries = sorted({float(value) for value in global_timestamps_ms})
+    results: dict[float, FrameEvidence | None] = {value: None for value in queries}
+    if not queries:
+        return results
+    frames = (frame for frame in iter_frame_evidence(path) if frame.global_ms is not None)
+    previous: FrameEvidence | None = None
+    current = next(frames, None)
+    for query in queries:
+        while current is not None and float(current.global_ms) < query:
+            previous = current
+            current = next(frames, None)
+        candidates = [frame for frame in (previous, current) if frame is not None]
+        if not candidates:
+            continue
+        nearest = min(candidates, key=lambda frame: abs(float(frame.global_ms) - query))
+        if abs(float(nearest.global_ms) - query) <= tolerance_ms:
+            results[query] = nearest
+    return results

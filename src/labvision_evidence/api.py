@@ -226,6 +226,56 @@ def _read_json(path: Path, default: Any = None) -> Any:
         return default
 
 
+def _stage_receipts_from_root(root: Path) -> list[dict[str, Any]]:
+    """Return durable stage receipts without recursively walking NAS outputs."""
+
+    receipt_root = root / "JSON-Config-Files" / "Stage-Receipts"
+    if not receipt_root.is_dir():
+        return []
+    receipts: list[dict[str, Any]] = []
+    for path in sorted(receipt_root.glob("*.json")):
+        payload = _read_json(path, {}) or {}
+        if not payload.get("stage"):
+            continue
+        artifacts = []
+        for raw in payload.get("artifacts") or []:
+            artifact_path = Path(str(raw))
+            resolved = artifact_path if artifact_path.is_absolute() else root / artifact_path
+            artifacts.append(
+                {
+                    "path": str(raw),
+                    "name": artifact_path.name,
+                    "available": resolved.exists(),
+                }
+            )
+        receipts.append(
+            {
+                "stage": payload["stage"],
+                "status": payload.get("status", "completed"),
+                "completed_at": payload.get("completed_at"),
+                "run_elapsed_seconds": payload.get("run_elapsed_seconds"),
+                "stage_duration_seconds": payload.get("stage_duration_seconds"),
+                "archive_mode": payload.get("archive_mode"),
+                "artifacts": artifacts,
+                "receipt": f"JSON-Config-Files/Stage-Receipts/{path.name}",
+            }
+        )
+    return receipts
+
+
+def _archive_areas_from_root(root: Path) -> list[dict[str, Any]]:
+    """Expose the stable archive contract used by both staging and final output."""
+
+    return [
+        {
+            "name": name,
+            "path": str(root / name),
+            "available": (root / name).is_dir(),
+        }
+        for name in ARCHIVE_DIRECTORIES
+    ]
+
+
 def _run_snapshot_from_root(root: Path) -> dict[str, Any]:
     json_root = root / "JSON-Config-Files"
     status = _read_json(json_root / "pipeline_status.json", {}) or _read_json(
@@ -254,9 +304,12 @@ def _run_snapshot_from_root(root: Path) -> dict[str, Any]:
         "metrics": metrics,
         "scan_runtime": scans,
         "source_progress": source_progress,
+        "stage_receipts": _stage_receipts_from_root(root),
+        "archive_areas": _archive_areas_from_root(root),
         "freshness": {
             "status_updated_at": status.get("updated_at"),
             "telemetry_updated_at": live_telemetry.get("updated_at"),
+            "source_progress_updated_at": source_progress.get("updated_at"),
         },
         "sources": {
             "status": "JSON-Config-Files/pipeline_status.json",
@@ -267,12 +320,18 @@ def _run_snapshot_from_root(root: Path) -> dict[str, Any]:
             "scan_runtime_coarse": "JSON-Config-Files/scan_runtime_coarse.json",
             "scan_runtime_fine": "JSON-Config-Files/scan_runtime_fine.json",
             "source_progress": "JSON-Config-Files/source_progress.json",
+            "stage_receipts": "JSON-Config-Files/Stage-Receipts/*.json",
         },
     }
 
 
 def _hydrate_run_snapshot(run: dict[str, Any]) -> dict[str, Any]:
-    for key in ("nas_staging", "output", "nas_output"):
+    keys = (
+        ("nas_output", "output", "nas_staging")
+        if run.get("state") == "completed"
+        else ("nas_staging", "output", "nas_output")
+    )
+    for key in keys:
         value = run.get(key)
         if not value:
             continue
@@ -485,6 +544,9 @@ def health() -> dict[str, Any]:
         "status": "ok",
         "storage_mode": storage_mode,
         "archive_label": "NAS 正式归档" if storage_mode == "nas" else "本地开发归档",
+        "web_upload_retention_mode": settings["storage"].get(
+            "web_upload_retention_mode", "local_and_nas"
+        ),
         "minimum_capacity": "6 views x 3 hours",
         "view_count_policy": "dynamic",
         "minimum_cross_view_sources": 2,
@@ -816,6 +878,29 @@ async def create_run(
     }
     record_path = nas_root / "JSON-Config-Files" / "original_upload_manifest.json"
     record_path.write_text(json.dumps(upload_record, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_json_atomic(
+        nas_root
+        / "JSON-Config-Files"
+        / "Stage-Receipts"
+        / "original_ingest.json",
+        {
+            "schema_version": "visioncortex-stage-receipt/1",
+            "stage": "original_ingest",
+            "status": "completed",
+            "completed_at": ingest_ended_at,
+            "run_elapsed_seconds": ingest["duration_seconds"],
+            "stage_duration_seconds": ingest["duration_seconds"],
+            "archive_mode": settings["storage"].get("run_output_mode", "local"),
+            "archive_root": str(nas_root),
+            "retention_mode": retention_mode,
+            "source_copy_bytes": ingest["local_write_bytes"],
+            "artifacts": [
+                "Original-Experiment-Videos",
+                "JSON-Config-Files/original_upload_manifest.json",
+            ],
+            "token_ledger": "JSON-Config-Files/run_metrics.json",
+        },
+    )
     _update(
         run_id,
         state="queued",

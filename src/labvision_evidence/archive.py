@@ -15,7 +15,7 @@ import numpy as np
 from openpyxl import Workbook
 
 from .alignment import iter_aligned_rows
-from .detection import nearest_frame_evidence
+from .detection import nearest_frame_evidence_many
 from .mllm import ArkStepAnalyzer, EVENT_SYSTEM_PROMPT, GROUP_SYSTEM_PROMPT
 from .schemas import (
     AlignmentTransform,
@@ -959,6 +959,17 @@ def materialize_key_materials(
     group_by_event = {event_id: group for group in groups for event_id in group.key_event_ids}
     runtime_records: list[dict[str, Any]] = []
     stage_started = time.perf_counter()
+    accepted_timestamps = [
+        event.key_global_ms
+        for event in events
+        if event.accepted and event.event_id in group_by_event
+    ]
+    lookup_started = time.perf_counter()
+    nearest_by_view = {
+        view_id: nearest_frame_evidence_many(path, accepted_timestamps)
+        for view_id, path in detection_paths.items()
+    }
+    lookup_seconds = time.perf_counter() - lookup_started
     for event in events:
         if not event.accepted or event.event_id not in group_by_event:
             continue
@@ -1007,7 +1018,7 @@ def materialize_key_materials(
             if frame is None:
                 raise RuntimeError(f"{event.event_id}/{view_id} key frame decode failed")
             frame_seconds = time.perf_counter() - frame_started
-            nearest = nearest_frame_evidence(detection_paths[view_id], event.key_global_ms)
+            nearest = nearest_by_view[view_id].get(float(event.key_global_ms))
             boxes = [box.model_dump() for box in nearest.detections] if nearest else []
             base = role_label
             frame_path = frame_dir / f"{base}.jpg"
@@ -1153,6 +1164,8 @@ def materialize_key_materials(
             "schema_version": "visioncortex-key-materialization-runtime/1",
             "workers": workers,
             "total_duration_seconds": round(time.perf_counter() - stage_started, 6),
+            "detection_ledger_lookup_seconds": round(lookup_seconds, 6),
+            "detection_ledger_passes": len(nearest_by_view),
             "accepted_event_count": sum(
                 bool(event.accepted and event.event_id in group_by_event) for event in events
             ),

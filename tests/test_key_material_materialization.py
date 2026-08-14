@@ -95,7 +95,11 @@ def test_key_material_roles_export_concurrently_and_write_runtime(monkeypatch, t
             concurrency["active"] -= 1
 
     monkeypatch.setattr(archive, "ViewFrameReader", FakeReader)
-    monkeypatch.setattr(archive, "nearest_frame_evidence", lambda *args: None)
+    monkeypatch.setattr(
+        archive,
+        "nearest_frame_evidence_many",
+        lambda path, timestamps: {float(timestamp): None for timestamp in timestamps},
+    )
     monkeypatch.setattr(
         archive,
         "write_annotated_frame",

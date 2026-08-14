@@ -1,4 +1,5 @@
 import json
+import io
 import queue
 import time
 from pathlib import Path
@@ -16,12 +17,14 @@ from labvision_evidence.detection import (
     _engine_build_batch,
     _producer,
     _tensorrt_plan_and_metadata,
+    nearest_frame_evidence_many,
     scan_videos,
 )
 from labvision_evidence.schemas import (
     ActionCandidate,
     ActionType,
     AlignmentTransform,
+    FrameEvidence,
     TimestampPoint,
     VideoInfo,
     VideoSegmentInfo,
@@ -474,3 +477,86 @@ def test_short_microbatch_does_not_permanently_contract_engine_capacity(monkeypa
     assert scanner.last_inference_batch_sizes == [1]
     assert scanner.batch_size == 8
     assert scanner.batch_contractions == []
+
+
+def test_ffmpeg_cuda_scale_resizes_before_host_download(monkeypatch, tmp_path):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"placeholder")
+    info = VideoInfo(
+        path=source,
+        duration_ms=1_000,
+        fps=30,
+        width=1920,
+        height=1080,
+        frame_count=30,
+    )
+    commands = []
+
+    class FakeProcess:
+        def __init__(self):
+            self.stdout = io.BytesIO(b"")
+            self.stderr = io.BytesIO(b"")
+            self.returncode = 0
+
+        def wait(self):
+            return self.returncode
+
+    def fake_popen(command, **kwargs):
+        commands.append(command)
+        return FakeProcess()
+
+    monkeypatch.setattr(video_io.subprocess, "Popen", fake_popen)
+
+    list(
+        video_io._ffmpeg_frame_iterator(
+            source,
+            info,
+            0.0,
+            1_000.0,
+            10.0,
+            640,
+            "cuda",
+            False,
+            None,
+            True,
+        )
+    )
+
+    command = commands[0]
+    assert command[command.index("-hwaccel_output_format") + 1] == "cuda"
+    filter_graph = command[command.index("-vf") + 1]
+    assert "scale_cuda=640:360" in filter_graph
+    assert "hwdownload" in filter_graph
+    assert filter_graph.index("scale_cuda") < filter_graph.index("hwdownload")
+
+
+def test_nearest_frame_evidence_many_resolves_all_queries_in_one_pass(tmp_path):
+    ledger = tmp_path / "detections.jsonl"
+    frames = [
+        FrameEvidence(
+            view_id="fp",
+            role=ViewRole.FIRST_PERSON,
+            frame_index=index,
+            local_ms=global_ms,
+            global_ms=global_ms,
+            width=640,
+            height=360,
+        )
+        for index, global_ms in enumerate((100.0, 200.0, 400.0))
+    ]
+    ledger.write_text(
+        "\n".join(frame.model_dump_json() for frame in frames) + "\n",
+        encoding="utf-8",
+    )
+
+    results = nearest_frame_evidence_many(
+        ledger,
+        [90.0, 250.0, 390.0, 1_000.0, 90.0],
+        tolerance_ms=100.0,
+    )
+
+    assert results[90.0].global_ms == 100.0
+    assert results[250.0].global_ms == 200.0
+    assert results[390.0].global_ms == 400.0
+    assert results[1_000.0] is None
+    assert len(results) == 4

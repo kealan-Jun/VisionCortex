@@ -36,6 +36,7 @@ performance:
   motion_burst_min_observations: 2
   max_gpu_memory_fraction: 0.92
   ffmpeg_hwaccel: cuda
+  ffmpeg_cuda_scale: false
   ffmpeg_video_encoder: h264_nvenc
   workers: 2
   decode_workers: 6
