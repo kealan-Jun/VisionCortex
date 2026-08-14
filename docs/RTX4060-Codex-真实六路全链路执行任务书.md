@@ -13,13 +13,15 @@
 - 删除、reset、clean、覆盖或移动现场已有文件；
 - 在文档、日志或终端输出中打印 `ARK_API_KEY`。
 
-唯一允许新增的人工文件是本次运行回传文档，保存到正式 NAS 归档的 `JSON-Config-Files`。
+运行记录只追加到 NAS 单一协作文档，不再为每次心跳或回传新建人工文档：
+
+`Y:\VisionCortexExperimentArchive\.VisionCortex-Collaboration\Six-View-Three-Hour-Experiment-2026-08-13.md`
 
 ## 1. 先同步 GitHub 冻结版本
 
 仓库：`https://github.com/kealan-Jun/VisionCortex.git`
 
-目标分支：`codex/daily-reports`
+目标分支：`codex/acceptance-observability`
 
 在 4060 Codex 当前已经打开的 VisionCortex 仓库中执行。不得假定仓库位于 `D:`，也不得另建仓库副本：
 
@@ -51,8 +53,8 @@ if ($Dirty.Count -gt 0) {
 
 ```powershell
 git fetch origin
-git switch codex/daily-reports
-git pull --ff-only origin codex/daily-reports
+git switch codex/acceptance-observability
+git pull --ff-only origin codex/acceptance-observability
 $RunCommit = (git rev-parse HEAD).Trim()
 git status --short --branch
 Write-Host "RUN_COMMIT=$RunCommit"
@@ -76,6 +78,7 @@ Write-Host "RUN_COMMIT=$RunCommit"
 - 必须使用 `nas_segmented_virtual_timeline`；
 - `copied_source_bytes` 必须为 `0`；
 - `continuous_source_copies_created` 必须为 `0`；
+- 本轮检测 `reused` work units 必须为 `0`，不得把旧 checkpoint 当冷启动成绩；
 - 不得创建每路三小时的本地 `video.mp4`；
 - 最终有界实验片段仍必须是连续可播放 MP4；跨分片时只拼接命中的短区间。
 
@@ -115,11 +118,13 @@ Set-Location -LiteralPath $ProjectRoot
 
 - `JSON-Config-Files\pipeline_status.json`
 - `JSON-Config-Files\resource_telemetry.json`
+- `JSON-Config-Files\scan_runtime_motion_probe.json`
 - `JSON-Config-Files\scan_runtime_coarse.json`
 - `JSON-Config-Files\scan_runtime_fine.json`
+- `JSON-Config-Files\motion_probe_windows.json`
 - `JSON-Config-Files\run_metrics.json`
 
-必须让任务自然完成或自然失败。不得因为 GPU 利用率短时不高而擅自改并发。
+必须让任务自然完成或自然失败。运动探针只对哨兵视角做低成本稀疏跳读，此阶段 GPU Compute 低属于设计预期；候选粗扫与有界精扫必须显示第一/第三角色推理通道并发、六路来源活跃和实际 TensorRT batch 填充率。不得因为单个阶段 GPU 利用率短时不高而擅自改并发。
 
 ## 5. 必须核验的结果
 
@@ -135,11 +140,13 @@ Set-Location -LiteralPath $ProjectRoot
 - `run_metrics.json` 有总耗时、阶段耗时、实验理解 Token、关键素材 Token 和总 Token；
 - 性能账本能证明粗扫六路同时活跃，解码后端为 4 路 CUDA/NVDEC + 2 路 CPU；
 - TensorRT 两个角色均实际加载 `.engine`。
+- `scan_runtime_motion_probe/coarse/fine.json` 均明确报告 `cold_start=true`、`computed` 与 `reused`；
+- `input_volume_report.json` 明确报告唯一 MP4 数量、82.13 GiB 左右的实际输入体积及不存在重复路径。
 
-## 6. 回传文档
+## 6. 单一协作日志回传
 
-复制 `docs\RTX4060-真实六路运行回传模板.md`，填写为：
+收到任务后先在单一协作文档追加 `ACK`；运行阶段变化时和每 5 分钟追加 `HEARTBEAT`；结束时追加 `COMPLETED` 或 `INCIDENT`。不得创建新的 handoff 文档。
 
-`Y:\VisionCortexExperimentArchive\Six-View-Three-Hour-Experiment-2026-08-13\JSON-Config-Files\RTX4060-Full-Run-Handoff-<YYYYMMDD-HHMMSS>.md`
+每条记录至少包含：`run_id`、阶段与阶段耗时、六路 work-unit 进度、computed/reused、GPU Compute、显存、NVDEC、NVENC、温度、功耗、CPU、内存、NAS 收发吞吐、队列深度、batch 填充率和对应 NAS 证据路径。取不到就写 `unavailable`，不得猜测。
 
-禁止在报告中写密钥。所有结论必须引用 NAS 中的 JSON、文件路径、时间戳或命令输出。即使运行失败也必须生成报告，准确写明失败阶段、错误、已完成产物和未完成项。
+禁止写密钥。所有结论必须引用 NAS 中的 JSON、文件路径、时间戳或命令输出。即使运行失败也必须追加记录，准确写明失败阶段、错误、已完成产物和未完成项。

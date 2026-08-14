@@ -39,7 +39,23 @@ performance:
   checkpoint_every_chunks: 1
   frame_queue_size: 64
   decode_queue_depth: 64
-  motion_probe_fps: 0.125
+  # Motion discovery is deliberately separate from YOLO. One first-person
+  # and one third-person sentinel discover multi-minute activity windows.
+  motion_probe_fps: 0.5
+  motion_probe_max_width: 96
+  motion_probe_keyframes_only: true
+  motion_probe_first_person_views: 1
+  motion_probe_third_person_views: 1
+  motion_probe_percentile: 85.0
+  motion_probe_burst_merge_gap_seconds: 20.0
+  motion_probe_min_observations: 2
+  motion_probe_merge_gap_seconds: 20.0
+  motion_probe_min_views: 2
+  motion_probe_primary_min_seconds: 45.0
+  motion_probe_window_padding_seconds: 90.0
+  motion_probe_fallback_peaks_per_hour: 8
+  motion_probe_fallback_separation_seconds: 120.0
+  motion_probe_fallback_window_seconds: 60.0
   motion_signature_size: [64, 36]
   coarse_decode_lanes: [cuda, cuda, cuda, cuda, cuda, cuda]
   fine_decode_lanes: [cuda, cuda, cuda, cuda, cuda, cuda]
@@ -50,6 +66,8 @@ performance:
   io_workers: 4
   synchronized_segment_waves: false
   segment_wave_timeout_seconds: 3600
+  preflight_probe_workers: 12
+  preflight_prefer_clock_metadata: true
 
 alignment:
   reference_view: first_person
@@ -61,7 +79,14 @@ alignment:
   cross_view_event_tolerance_ms: 750.0
   visual_anchor_count: 3
   visual_anchor_duration_seconds: 10.0
+  visual_audit_csv_confidence_threshold: 0.80
+  visual_audit_search_seconds: 1.0
+  visual_audit_anchor_count: 2
+  visual_audit_duration_seconds: 2.0
+  visual_audit_fps: 1.0
   aligned_timestamps_fps: 2.0
+  max_csv_points_per_view: 30000
+  csv_segment_endpoints_only: true
 
 segmentation:
   min_experiment_seconds: 5.0
@@ -78,7 +103,7 @@ segmentation:
   movement_threshold_norm: 0.025
   contact_distance_norm: 0.035
   liquid_motion_threshold: 6.0
-  require_both_roles: false
+  require_both_roles: true
 
 continuity:
   # Temporal proximity alone is insufficient: a shared third-person view and
@@ -98,12 +123,13 @@ mllm:
   model: doubao-seed-2-1-pro-260628
   api_key_env: ARK_API_KEY
   timeout_seconds: 180
-  max_retries: 3
+  max_retries: 5
+  retry_max_seconds: 30
   max_output_tokens: 4096
   max_images_per_event: 8
   storyboard_pairs_per_group: 4
-  group_workers: 2
-  workers: 4
+  group_workers: 4
+  workers: 8
   response_language: zh-CN
 
 archive:
@@ -137,4 +163,4 @@ validation:
   boundary_match_iou: 0.50
   max_start_error_seconds: 8.0
   max_end_error_seconds: 8.0
-  minimum_cross_view_event_rate: 0.25
+  minimum_cross_view_event_rate: 1.0

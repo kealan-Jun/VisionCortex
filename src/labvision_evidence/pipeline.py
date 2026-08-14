@@ -22,6 +22,8 @@ from .actions import (
     generate_candidates,
     generate_coarse_activity_candidates,
     generate_motion_burst_candidates,
+    generate_motion_safety_candidates,
+    fuse_motion_probe_candidates,
     refine_liquid_events_with_context,
     select_fine_scan_views,
 )
@@ -52,7 +54,7 @@ from .schemas import (
     ViewInput,
     ViewRole,
 )
-from .video_io import check_disk_capacity, probe_view, view_source_files, view_timestamp_files
+from .video_io import check_disk_capacity, probe_views, view_source_files, view_timestamp_files
 from .storage import IncrementalArchivePublisher, initialize_nas_archive
 from .telemetry import ResourceMonitor
 from .validation import validate_experiment_and_material_quality
@@ -425,7 +427,12 @@ class EvidencePipeline:
                 f"source_workers={requested_sources} cannot keep {len(manifest.views)} views active"
             )
         lanes = list(
-            perf.get("coarse_decode_lanes" if phase == "coarse" else "fine_decode_lanes", [])
+            perf.get(
+                "coarse_decode_lanes"
+                if phase in {"motion_probe", "coarse"}
+                else "fine_decode_lanes",
+                [],
+            )
         )
         if not lanes:
             lanes = ["cuda" if perf.get("ffmpeg_hwaccel") else "cpu"] * len(manifest.views)
@@ -436,6 +443,7 @@ class EvidencePipeline:
         }
         if (
             phase == "coarse"
+            and windows is None
             and perf.get("synchronized_segment_waves")
             and all(view.segments for view in manifest.views)
         ):
@@ -473,6 +481,82 @@ class EvidencePipeline:
             self._view_runtime[view.view_id]["state"] = f"{phase}_completed"
         return result
 
+    def _motion_probe_views(self, manifest: RunManifest) -> list[ViewInput]:
+        """Choose sentinel views; bounded YOLO scans still use all eligible views."""
+
+        perf = self.config["performance"]
+        first_limit = max(1, int(perf.get("motion_probe_first_person_views", 1)))
+        third_limit = max(0, int(perf.get("motion_probe_third_person_views", 1)))
+        first = [view for view in manifest.views if view.role == ViewRole.FIRST_PERSON]
+        third = [view for view in manifest.views if view.role == ViewRole.THIRD_PERSON]
+        return first[:first_limit] + third[:third_limit]
+
+    @staticmethod
+    def _window_coverage(
+        windows: dict[str, list[tuple[float, float]]], infos
+    ) -> dict[str, dict[str, float | int]]:
+        report: dict[str, dict[str, float | int]] = {}
+        for view_id, view_windows in windows.items():
+            seconds = sum(max(0.0, end - start) for start, end in view_windows) / 1000.0
+            duration_seconds = infos[view_id].duration_ms / 1000.0
+            report[view_id] = {
+                "window_count": len(view_windows),
+                "selected_seconds": round(seconds, 3),
+                "source_seconds": round(duration_seconds, 3),
+                "coverage_ratio": (
+                    round(seconds / duration_seconds, 6) if duration_seconds > 0 else 0.0
+                ),
+            }
+        return report
+
+    @staticmethod
+    def _input_volume_report(manifest: RunManifest, infos) -> dict[str, Any]:
+        listed_video_paths = [
+            str(path.resolve())
+            for view in manifest.views
+            for path in view_source_files(view)
+        ]
+        listed_clock_paths = [
+            str(path.resolve())
+            for view in manifest.views
+            for path in view_timestamp_files(view)
+        ]
+        views = []
+        for view in manifest.views:
+            info = infos[view.view_id]
+            duration_seconds = info.duration_ms / 1000.0
+            views.append(
+                {
+                    "view_id": view.view_id,
+                    "role": view.role.value,
+                    "segment_count": len(view.segments) if view.segments else 1,
+                    "width": info.width,
+                    "height": info.height,
+                    "fps": info.fps,
+                    "duration_seconds": round(duration_seconds, 3),
+                    "video_bytes": info.size_bytes,
+                    "video_gib": round(info.size_bytes / 1024**3, 3),
+                    "estimated_video_mbps": (
+                        round(info.size_bytes * 8.0 / duration_seconds / 1_000_000.0, 3)
+                        if duration_seconds > 0
+                        else 0.0
+                    ),
+                }
+            )
+        total_video_bytes = sum(int(item["video_bytes"]) for item in views)
+        return {
+            "schema_version": "visioncortex-input-volume/1",
+            "listed_video_path_count": len(listed_video_paths),
+            "unique_video_path_count": len(set(listed_video_paths)),
+            "duplicate_video_path_count": len(listed_video_paths) - len(set(listed_video_paths)),
+            "listed_clock_path_count": len(listed_clock_paths),
+            "unique_clock_path_count": len(set(listed_clock_paths)),
+            "total_video_bytes": total_video_bytes,
+            "total_video_gib": round(total_video_bytes / 1024**3, 3),
+            "total_video_gb_decimal": round(total_video_bytes / 1_000_000_000.0, 3),
+            "views": views,
+        }
+
     @staticmethod
     def _archive_scan_runtime(layout: ArchiveLayout, work_dir: Path, phase: str) -> None:
         role_reports = []
@@ -484,11 +568,26 @@ class EvidencePipeline:
                 source_activity.extend(
                     json.loads(line) for line in handle if line.strip()
                 )
+        computed_units = sum(
+            item.get("event") == "source_unit_completed" for item in source_activity
+        )
+        reused_units = sum(
+            item.get("event") == "source_unit_reused" for item in source_activity
+        )
+        started_units = sum(
+            item.get("event") == "source_unit_started" for item in source_activity
+        )
         write_json(
             layout.json_config / f"scan_runtime_{phase}.json",
             {
                 "schema_version": "visioncortex-scan-runtime/1",
                 "phase": phase,
+                "cold_start": reused_units == 0,
+                "work_units": {
+                    "started": started_units,
+                    "computed": computed_units,
+                    "reused": reused_units,
+                },
                 "role_reports": role_reports,
                 "source_activity": sorted(
                     source_activity, key=lambda item: float(item.get("timestamp", 0.0))
@@ -572,9 +671,19 @@ class EvidencePipeline:
                         raise FileNotFoundError(f"时间戳 CSV 不存在: {clock}")
             model_report = validate_models(self.config)
             write_json(layout.json_config / "model_runtime_preflight.json", model_report)
-            with ThreadPoolExecutor(max_workers=min(6, len(manifest.views))) as executor:
-                probed = list(executor.map(lambda view: (view.view_id, probe_view(view)), manifest.views))
-            infos = dict(probed)
+            infos = probe_views(
+                manifest.views,
+                workers=int(self.config["performance"].get("preflight_probe_workers", 12)),
+                prefer_clock_metadata=bool(
+                    self.config["performance"].get(
+                        "preflight_prefer_clock_metadata", True
+                    )
+                ),
+            )
+            write_json(
+                layout.json_config / "input_volume_report.json",
+                self._input_volume_report(manifest, infos),
+            )
             disk_report = check_disk_capacity(layout.root, list(infos.values()))
             write_json(layout.json_config / "video_probe.json", {key: value.model_dump(mode="json") for key, value in infos.items()})
             if self._publisher is not None:
@@ -596,19 +705,107 @@ class EvidencePipeline:
             if self._publisher is not None:
                 self._publisher.publish_directory("JSON-Config-Files")
 
+            probe_views = self._motion_probe_views(manifest)
+            probe_manifest = manifest.model_copy(update={"views": probe_views})
+            selected_probe_ids = {view.view_id for view in probe_views}
+            for view in manifest.views:
+                self._view_runtime[view.view_id]["state"] = (
+                    "motion_probe_running"
+                    if view.view_id in selected_probe_ids
+                    else "motion_probe_sentinel_not_selected"
+                )
+            self._status(
+                layout,
+                "motion_probe",
+                0.12,
+                "哨兵视角低分辨率运动探针；此阶段CUDA计算低占用属于预期",
+            )
+            motion_paths = self._scan_all_views_concurrently(
+                probe_manifest,
+                infos,
+                transforms,
+                layout.work / "motion-probe",
+                sample_fps=float(self.config["performance"]["motion_probe_fps"]),
+                image_size=int(self.config["performance"].get("motion_probe_max_width", 96)),
+                keyframes_only=bool(
+                    self.config["performance"].get("motion_probe_keyframes_only", True)
+                ),
+                phase="motion_probe",
+            )
+            self._archive_scan_runtime(layout, layout.work / "motion-probe", "motion_probe")
+            probe_config = json.loads(json.dumps(self.config))
+            probe_config["performance"]["motion_probe_require_objects"] = False
+            probe_config["performance"]["motion_burst_percentile"] = float(
+                self.config["performance"].get(
+                    "motion_probe_percentile",
+                    self.config["performance"]["motion_burst_percentile"],
+                )
+            )
+            probe_config["performance"]["motion_burst_merge_gap_seconds"] = float(
+                self.config["performance"].get(
+                    "motion_probe_burst_merge_gap_seconds",
+                    self.config["performance"]["motion_burst_merge_gap_seconds"],
+                )
+            )
+            probe_config["performance"]["motion_burst_min_observations"] = int(
+                self.config["performance"].get(
+                    "motion_probe_min_observations",
+                    self.config["performance"]["motion_burst_min_observations"],
+                )
+            )
+            raw_motion_candidates = generate_motion_burst_candidates(
+                probe_views, motion_paths, probe_config
+            )
+            motion_candidates = fuse_motion_probe_candidates(
+                raw_motion_candidates, probe_config
+            )
+            safety_fallback_used = False
+            if not motion_candidates:
+                safety_fallback_used = True
+                motion_candidates = generate_motion_safety_candidates(
+                    probe_views, motion_paths, probe_config
+                )
+            if not motion_candidates:
+                raise RuntimeError("输入视频没有产生任何可读运动帧，无法建立实验候选窗口")
+            motion_windows = self._fine_windows(
+                motion_candidates,
+                infos,
+                transforms,
+                padding_seconds=float(
+                    self.config["performance"].get(
+                        "motion_probe_window_padding_seconds", 90.0
+                    )
+                ),
+            )
+            write_json(
+                layout.json_config / "motion_probe_windows.json",
+                {
+                    "schema_version": "visioncortex-motion-probe/1",
+                    "sentinel_views": [view.view_id for view in probe_views],
+                    "raw_candidate_count": len(raw_motion_candidates),
+                    "fused_candidate_count": len(motion_candidates),
+                    "safety_fallback_used": safety_fallback_used,
+                    "coverage": self._window_coverage(motion_windows, infos),
+                    "candidates": [
+                        item.model_dump(mode="json") for item in motion_candidates
+                    ],
+                },
+            )
+
             for view in manifest.views:
                 self._view_runtime[view.view_id]["state"] = "coarse_running"
             self._status(
                 layout,
                 "candidate_coarse",
-                0.16,
-                f"{self.config['performance']['coarse_detection_fps']} FPS 全量粗筛：并行解码、YOLO GPU 批推理和 ByteSORT 跟踪",
+                0.28,
+                f"候选窗口内 {self.config['performance']['coarse_detection_fps']} FPS YOLO粗筛",
             )
             coarse_paths = self._scan_all_views_concurrently(
                 manifest,
                 infos,
                 transforms,
                 layout.work / "detections-coarse",
+                windows=motion_windows,
                 sample_fps=float(self.config["performance"]["coarse_detection_fps"]),
                 image_size=int(self.config["performance"]["coarse_image_size"]),
                 keyframes_only=bool(self.config["performance"]["coarse_keyframes_only"]),
@@ -631,11 +828,18 @@ class EvidencePipeline:
                 coarse_candidates = generate_coarse_activity_candidates(
                     fallback_views, fallback_paths, coarse_config
                 )
+            # Coarse YOLO may refine a window but must never erase a motion
+            # window. Keeping both makes the funnel recall-first; overlapping
+            # ranges are merged by _fine_windows before the expensive scan.
+            boundary_candidates = sorted(
+                [*motion_candidates, *coarse_candidates],
+                key=lambda item: item.global_start_ms,
+            )
             fine_views, fine_view_report = select_fine_scan_views(
-                manifest.views, coarse_paths, coarse_candidates, self.config
+                manifest.views, coarse_paths, boundary_candidates, self.config
             )
             write_json(layout.json_config / "fine_view_selection.json", fine_view_report)
-            fine_windows = self._fine_windows(coarse_candidates, infos, transforms)
+            fine_windows = self._fine_windows(boundary_candidates, infos, transforms)
             fine_windows = {view.view_id: fine_windows[view.view_id] for view in fine_views}
             fine_manifest = manifest.model_copy(update={"views": fine_views})
             selected_fine_ids = {view.view_id for view in fine_views}
@@ -665,7 +869,7 @@ class EvidencePipeline:
             events, rejected = audit_candidates(candidates, transforms, self.config)
             rejected.extend(refine_liquid_events_with_context(events, detection_paths))
             segments = build_experiment_segments(
-                events, manifest.views, self.config, coarse_windows=coarse_candidates
+                events, manifest.views, self.config, coarse_windows=boundary_candidates
             )
             groups = build_experiment_groups(segments, events, manifest.views, self.config)
             self._preprocessing_completed_seconds = round(time.perf_counter() - self._run_started_perf, 6)
@@ -819,8 +1023,18 @@ class EvidencePipeline:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             handle.write(json.dumps({"pid": os.getpid(), "started_at": datetime.now(timezone.utc).isoformat()}))
 
-    def _fine_windows(self, candidates, infos, transforms) -> dict[str, list[tuple[float, float]]]:
-        padding = float(self.config["performance"]["fine_window_padding_seconds"]) * 1000.0
+    def _fine_windows(
+        self,
+        candidates,
+        infos,
+        transforms,
+        padding_seconds: float | None = None,
+    ) -> dict[str, list[tuple[float, float]]]:
+        padding = float(
+            self.config["performance"]["fine_window_padding_seconds"]
+            if padding_seconds is None
+            else padding_seconds
+        ) * 1000.0
         grouped: dict[str, list[tuple[float, float]]] = {view_id: [] for view_id in infos}
         for candidate in candidates:
             global_start = candidate.global_start_ms - padding

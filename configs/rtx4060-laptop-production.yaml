@@ -17,7 +17,25 @@ performance:
   coarse_image_size: 416
   coarse_batch_size: 32
   coarse_keyframes_only: false
-  motion_probe_fps: 4.0
+  # One indexed frame every four seconds is enough to find multi-second lab
+  # activity; 90-second padding and bounded all-view scans protect recall.
+  motion_probe_fps: 0.25
+  motion_probe_max_width: 96
+  motion_probe_keyframes_only: true
+  motion_probe_first_person_views: 1
+  # The validated wearable stream is only 8.22 GiB. It discovers windows;
+  # every first/third-person view still joins the bounded YOLO scans.
+  motion_probe_third_person_views: 0
+  motion_probe_percentile: 85.0
+  motion_probe_burst_merge_gap_seconds: 20.0
+  motion_probe_min_observations: 2
+  motion_probe_merge_gap_seconds: 20.0
+  motion_probe_min_views: 1
+  motion_probe_primary_min_seconds: 45.0
+  motion_probe_window_padding_seconds: 90.0
+  motion_probe_fallback_peaks_per_hour: 8
+  motion_probe_fallback_separation_seconds: 120.0
+  motion_probe_fallback_window_seconds: 60.0
   motion_signature_size: [64, 36]
   detection_fps: 10.0
   image_size: 640
@@ -27,7 +45,9 @@ performance:
   coarse_decode_lanes: [cuda, cuda, cuda, cuda, cpu, cpu]
   fine_decode_lanes: [cuda, cuda, cuda, cuda, cpu, cpu]
   source_workers: 6
-  decode_queue_depth: 4
+  # Two full TensorRT batches can be decoded ahead while the GPU executes the
+  # current batch. At 416/640 width this remains a small RAM allocation.
+  decode_queue_depth: 32
   cpu_decode_threads: 8
   yolo_inference_workers: 2
   materialization_workers: 2
@@ -36,11 +56,23 @@ performance:
   ffmpeg_hwaccel: cuda
   ffmpeg_video_encoder: h264_nvenc
   concurrent_role_scanners: true
+  preflight_probe_workers: 12
+  # All five fixed third-person views join bounded fine windows. This both
+  # fills the shared third-person TRT batches and guarantees cross-view audit.
+  fine_min_third_person_views: 5
+
+alignment:
+  max_csv_points_per_view: 30000
 
 mllm:
   model: doubao-seed-2-1-pro-260628
-  group_workers: 2
-  workers: 4
+  # Group and key-material understanding are network/API-bound and run after
+  # GPU preprocessing, so they can use a wider bounded pool without consuming
+  # additional TensorRT contexts.
+  group_workers: 5
+  workers: 8
+  max_retries: 5
+  retry_max_seconds: 30
 
 resource_limits:
   gpu_memory_normal_fraction: 0.70

@@ -308,11 +308,12 @@ def generate_coarse_activity_candidates(
 def generate_motion_burst_candidates(
     views: Sequence[ViewInput], detection_paths: dict[str, Path], config: dict[str, Any]
 ) -> list[ActionCandidate]:
-    """Adaptive per-view motion bursts gated by laboratory object presence."""
+    """Adaptive per-view motion bursts, optionally gated by detected lab objects."""
     perf = config["performance"]
     percentile = float(perf["motion_burst_percentile"])
     merge_gap_ms = float(perf["motion_burst_merge_gap_seconds"]) * 1000.0
     min_observations = int(perf["motion_burst_min_observations"])
+    require_objects = bool(perf.get("motion_probe_require_objects", True))
     candidates: list[ActionCandidate] = []
     for view in views:
         frames = list(iter_frame_evidence(detection_paths[view.view_id]))
@@ -329,7 +330,7 @@ def generate_motion_burst_candidates(
                     if box.class_name not in HAND_CLASSES | NON_ACTION_CLASSES | {"paper"}
                 }
             )
-            if frame.motion_score >= threshold and objects:
+            if frame.motion_score >= threshold and (objects or not require_objects):
                 active.append((frame, objects))
         runs: list[list[tuple[FrameEvidence, list[str]]]] = []
         current: list[tuple[FrameEvidence, list[str]]] = []
@@ -376,6 +377,147 @@ def generate_motion_burst_candidates(
                 )
             )
     return sorted(candidates, key=lambda candidate: candidate.global_start_ms)
+
+
+def fuse_motion_probe_candidates(
+    candidates: Sequence[ActionCandidate], config: dict[str, Any]
+) -> list[ActionCandidate]:
+    """Fuse sentinel-view motion into recall-first global windows.
+
+    Cross-view agreement is preferred. A sustained first-person burst is kept
+    by itself so a temporarily occluded third-person sentinel cannot erase a
+    real experiment.
+    """
+
+    if not candidates:
+        return []
+    perf = config["performance"]
+    merge_gap_ms = float(perf.get("motion_probe_merge_gap_seconds", 20.0)) * 1000.0
+    minimum_views = max(1, int(perf.get("motion_probe_min_views", 2)))
+    primary_min_ms = float(perf.get("motion_probe_primary_min_seconds", 45.0)) * 1000.0
+    clusters: list[list[ActionCandidate]] = []
+    current: list[ActionCandidate] = []
+    current_end = -1.0
+    for candidate in sorted(candidates, key=lambda item: item.global_start_ms):
+        if current and candidate.global_start_ms > current_end + merge_gap_ms:
+            clusters.append(current)
+            current = []
+            current_end = -1.0
+        current.append(candidate)
+        current_end = max(current_end, candidate.global_end_ms)
+    if current:
+        clusters.append(current)
+
+    fused: list[ActionCandidate] = []
+    for cluster_index, cluster in enumerate(clusters, start=1):
+        views = sorted({item.view_id for item in cluster})
+        sustained_primary = any(
+            item.role == ViewRole.FIRST_PERSON
+            and item.global_end_ms - item.global_start_ms >= primary_min_ms
+            for item in cluster
+        )
+        if len(views) < minimum_views and not sustained_primary:
+            continue
+        best = max(cluster, key=lambda item: item.confidence)
+        start_ms = min(item.global_start_ms for item in cluster)
+        end_ms = max(item.global_end_ms for item in cluster)
+        fused.append(
+            ActionCandidate(
+                candidate_id=f"MOTION-FUSED-{cluster_index:06d}",
+                action_type=ActionType.OBJECT_MOVEMENT,
+                view_id=best.view_id,
+                role=best.role,
+                local_start_ms=best.local_start_ms,
+                local_end_ms=best.local_end_ms,
+                global_start_ms=start_ms,
+                global_end_ms=end_ms,
+                key_global_ms=best.key_global_ms,
+                objects=sorted({obj for item in cluster for obj in item.objects}),
+                confidence=min(
+                    1.0,
+                    max(item.confidence for item in cluster)
+                    + 0.05 * max(0, len(views) - 1),
+                ),
+                evidence=[
+                    {
+                        "source_candidate_id": item.candidate_id,
+                        "view_id": item.view_id,
+                        "role": item.role.value,
+                        "global_start_ms": item.global_start_ms,
+                        "global_end_ms": item.global_end_ms,
+                        "confidence": item.confidence,
+                    }
+                    for item in cluster
+                ],
+                uncertainty=[
+                    "Motion sentinel candidate only; YOLO coarse and bounded fine scans must verify it."
+                ],
+            )
+        )
+    # A silent or obstructed secondary sentinel must not force a full-timeline
+    # YOLO fallback. Keep the original motion windows as a recall-first fallback.
+    return fused or list(sorted(candidates, key=lambda item: item.global_start_ms))
+
+
+def generate_motion_safety_candidates(
+    views: Sequence[ViewInput], detection_paths: dict[str, Path], config: dict[str, Any]
+) -> list[ActionCandidate]:
+    """Select separated motion peaks when adaptive thresholding returns nothing."""
+
+    perf = config["performance"]
+    peaks_per_hour = max(1, int(perf.get("motion_probe_fallback_peaks_per_hour", 8)))
+    separation_ms = float(perf.get("motion_probe_fallback_separation_seconds", 120.0)) * 1000.0
+    half_window_ms = float(perf.get("motion_probe_fallback_window_seconds", 60.0)) * 500.0
+    candidates: list[ActionCandidate] = []
+    for view in views:
+        frames = [
+            frame
+            for frame in iter_frame_evidence(detection_paths[view.view_id])
+            if frame.global_ms is not None
+        ]
+        if not frames:
+            continue
+        duration_hours = max(1.0, (frames[-1].local_ms - frames[0].local_ms) / 3_600_000.0)
+        target = max(1, math.ceil(duration_hours * peaks_per_hour))
+        selected: list[FrameEvidence] = []
+        for frame in sorted(frames, key=lambda item: item.motion_score, reverse=True):
+            assert frame.global_ms is not None
+            if any(
+                abs(frame.global_ms - (item.global_ms or 0.0)) < separation_ms
+                for item in selected
+            ):
+                continue
+            selected.append(frame)
+            if len(selected) >= target:
+                break
+        for frame in sorted(selected, key=lambda item: item.global_ms or 0.0):
+            assert frame.global_ms is not None
+            candidates.append(
+                ActionCandidate(
+                    candidate_id=f"MOTION-SAFETY-{view.view_id}-{len(candidates) + 1:06d}",
+                    action_type=ActionType.OBJECT_MOVEMENT,
+                    view_id=view.view_id,
+                    role=view.role,
+                    local_start_ms=max(0.0, frame.local_ms - half_window_ms),
+                    local_end_ms=frame.local_ms + half_window_ms,
+                    global_start_ms=max(0.0, frame.global_ms - half_window_ms),
+                    global_end_ms=frame.global_ms + half_window_ms,
+                    key_global_ms=frame.global_ms,
+                    objects=[],
+                    confidence=max(0.35, min(0.70, 0.35 + frame.motion_score / 100.0)),
+                    evidence=[
+                        {
+                            "frame_index": frame.frame_index,
+                            "motion_score": frame.motion_score,
+                            "fallback": "separated_motion_peak",
+                        }
+                    ],
+                    uncertainty=[
+                        "Adaptive motion threshold was empty; bounded YOLO verification is mandatory."
+                    ],
+                )
+            )
+    return sorted(candidates, key=lambda item: item.global_start_ms)
 
 
 def select_fine_scan_views(
@@ -434,6 +576,30 @@ def select_fine_scan_views(
             "anchor_classes": sorted(anchors),
             "motion_threshold": motion_threshold,
         }
+    minimum_third_views = max(
+        1, int(config["performance"].get("fine_min_third_person_views", 1))
+    )
+    selected_third = [view for view in selected if view.role == ViewRole.THIRD_PERSON]
+    if len(selected_third) < minimum_third_views:
+        unselected_third = [
+            view
+            for view in views
+            if view.role == ViewRole.THIRD_PERSON and view not in selected
+        ]
+        ranked = sorted(
+            unselected_third,
+            key=lambda view: (
+                int(report[view.view_id].get("active_anchor_frames", 0)),
+                int(report[view.view_id].get("anchor_frames", 0)),
+            ),
+            reverse=True,
+        )
+        for view in ranked[: minimum_third_views - len(selected_third)]:
+            selected.append(view)
+            report[view.view_id]["selected"] = True
+            report[view.view_id]["reason"] = (
+                "cross-view quality fallback: best available third-person boundary sensor"
+            )
     return selected, report
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import random
 import re
 import time
 from pathlib import Path
@@ -187,7 +188,22 @@ class ArkAnalyzer:
                 ):
                     break
                 if attempt + 1 < int(self.config["max_retries"]):
-                    time.sleep(min(8.0, 2.0**attempt))
+                    retry_after = None
+                    if isinstance(exc, httpx.HTTPStatusError):
+                        try:
+                            retry_after = float(exc.response.headers.get("retry-after", ""))
+                        except ValueError:
+                            retry_after = None
+                    delay = (
+                        retry_after
+                        if retry_after is not None
+                        else min(
+                            float(self.config.get("retry_max_seconds", 30.0)),
+                            2.0**attempt,
+                        )
+                        + random.uniform(0.0, 0.75)
+                    )
+                    time.sleep(max(0.0, delay))
         return {
             "status": "failed",
             "error": f"{type(last_error).__name__}: {last_error}",

@@ -330,6 +330,66 @@ def _select_model_path(role: ViewRole, config: dict[str, Any]) -> Path:
     return Path(models[role_name])
 
 
+def _tensorrt_plan_and_metadata(path: Path) -> tuple[bytes, dict[str, Any], str]:
+    """Return a raw TensorRT plan from either a raw or Ultralytics-wrapped engine."""
+
+    payload = path.read_bytes()
+    if len(payload) < 5:
+        return payload, {}, "raw"
+    metadata_size = int.from_bytes(payload[:4], byteorder="little", signed=False)
+    if metadata_size <= 0 or metadata_size > min(len(payload) - 4, 1024 * 1024):
+        return payload, {}, "raw"
+    try:
+        metadata = json.loads(payload[4 : 4 + metadata_size].decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return payload, {}, "raw"
+    plan = payload[4 + metadata_size :]
+    if not plan:
+        return payload, {}, "raw"
+    return plan, metadata if isinstance(metadata, dict) else {}, "ultralytics"
+
+
+def _metadata_batch(metadata: dict[str, Any]) -> int | None:
+    containers = [metadata]
+    for key in ("args", "export", "engine"):
+        nested = metadata.get(key)
+        if isinstance(nested, dict):
+            containers.append(nested)
+    for container in containers:
+        for key in ("batch", "batch_size", "max_batch_size"):
+            value = container.get(key)
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                continue
+            if parsed > 0:
+                return parsed
+    return None
+
+
+def _profile_batch(engine: Any) -> int | None:
+    """Read the maximum explicit batch from the first TensorRT input profile."""
+
+    try:
+        tensor_names = [engine.get_tensor_name(index) for index in range(engine.num_io_tensors)]
+        input_name = next(
+            name
+            for name in tensor_names
+            if str(engine.get_tensor_mode(name)).upper().endswith("INPUT")
+        )
+        _minimum, _optimum, maximum = engine.get_tensor_profile_shape(input_name, 0)
+        return int(maximum[0]) if maximum and int(maximum[0]) > 0 else None
+    except (AttributeError, RuntimeError, StopIteration, TypeError, ValueError):
+        return None
+
+
+def _engine_build_batch(path: Path) -> int | None:
+    if path.suffix.lower() != ".engine" or not path.is_file():
+        return None
+    _plan, metadata, _container = _tensorrt_plan_and_metadata(path)
+    return _metadata_batch(metadata)
+
+
 def validate_models(config: dict[str, Any]) -> dict[str, Any]:
     from ultralytics import YOLO
 
@@ -366,14 +426,18 @@ def validate_models(config: dict[str, Any]) -> dict[str, Any]:
                 raise FileNotFoundError(
                     f"TensorRT engine missing for {role.value}: {engine_path}"
                 )
-            engine = trt_runtime.deserialize_cuda_engine(engine_path.read_bytes())
+            plan, metadata, container = _tensorrt_plan_and_metadata(engine_path)
+            engine = trt_runtime.deserialize_cuda_engine(plan)
             if engine is None:
                 raise RuntimeError(f"TensorRT engine cannot be deserialized: {engine_path}")
+            build_batch = _metadata_batch(metadata) or _profile_batch(engine)
             runtime["roles"][role.value] = {
                 "backend": "TensorRT",
                 "engine": str(engine_path),
                 "bytes": engine_path.stat().st_size,
                 "deserialized": True,
+                "container": container,
+                "build_batch": build_batch,
             }
     else:
         for role in ViewRole:
@@ -405,7 +469,12 @@ class RoleScanner:
         expected = int(config["models"]["expected_class_count"])
         if len(self.names) != expected:
             raise ValueError(f"{self.model_path} 不是 {expected} 类模型")
-        self.batch_size = int(batch_size or config["performance"]["batch_size"])
+        self.requested_batch_size = int(batch_size or config["performance"]["batch_size"])
+        self.engine_build_batch = _engine_build_batch(self.model_path)
+        self.batch_size = min(
+            self.requested_batch_size,
+            self.engine_build_batch or self.requested_batch_size,
+        )
         self.image_size = int(image_size or config["performance"]["image_size"])
 
     def close(self) -> None:
@@ -516,24 +585,31 @@ def scan_videos(
             f"{phase}_batch_size", config["performance"].get("batch_size", 16)
         )
     )
-    probe_fps = (
-        float(config["performance"].get("motion_probe_fps", effective_fps))
-        if phase == "coarse"
-        else effective_fps
-    )
+    # Motion discovery is a separate, cheap stage. Coarse/fine scans must not
+    # decode extra frames that are discarded before YOLO.
+    probe_fps = effective_fps
     signature = config["performance"].get("motion_signature_size", [64, 36])
     signature_size = (int(signature[0]), int(signature[1]))
     for role in ViewRole:
         role_views = [view for view in views if view.role == role]
         if not role_views:
             continue
-        scanner = RoleScanner(role, config, effective_image_size, phase_batch_size)
+        motion_only = phase == "motion_probe"
+        scanner = None if motion_only else RoleScanner(
+            role, config, effective_image_size, phase_batch_size
+        )
         runtime_report = {
             "phase": phase,
             "role": role.value,
-            "model_path": str(scanner.model_path),
-            "backend": "TensorRT" if scanner.model_path.suffix.lower() == ".engine" else "PyTorch",
+            "model_path": str(scanner.model_path) if scanner is not None else None,
+            "backend": (
+                "motion_only"
+                if scanner is None
+                else "TensorRT" if scanner.model_path.suffix.lower() == ".engine" else "PyTorch"
+            ),
             "requested_batch_size": phase_batch_size,
+            "effective_batch_size": scanner.batch_size if scanner is not None else 0,
+            "engine_build_batch": scanner.engine_build_batch if scanner is not None else None,
             "image_size": effective_image_size,
             "yolo_sample_fps": effective_fps,
             "motion_probe_fps": probe_fps,
@@ -551,7 +627,7 @@ def scan_videos(
         trackers = {
             view.view_id: ByteSortTracker(max_age_ms=max(1750.0, 1500.0 / effective_fps))
             for view in role_views
-        }
+        } if scanner is not None else {}
         writers = {
             view.view_id: output_paths[view.view_id].open("a", encoding="utf-8", buffering=1024 * 1024)
             for view in role_views
@@ -597,15 +673,25 @@ def scan_videos(
         batch: list[FramePacket] = []
         errors: list[str] = []
         batch_sizes: list[int] = []
+        motion_sample_count = 0
         max_queue_size = 0
 
         def flush() -> None:
+            nonlocal motion_sample_count
             if not batch:
                 return
-            batch_sizes.append(len(batch))
-            inferred = scanner.infer(batch)
+            if scanner is None:
+                inferred = [[] for _ in batch]
+                motion_sample_count += len(batch)
+            else:
+                batch_sizes.append(len(batch))
+                inferred = scanner.infer(batch)
             for packet, boxes in zip(batch, inferred, strict=True):
-                tracked = trackers[packet.view.view_id].update(boxes, packet.local_ms)
+                tracked = (
+                    trackers[packet.view.view_id].update(boxes, packet.local_ms)
+                    if scanner is not None
+                    else []
+                )
                 evidence = FrameEvidence(
                     view_id=packet.view.view_id,
                     role=packet.view.role,
@@ -626,7 +712,7 @@ def scan_videos(
                 max_queue_size = max(max_queue_size, frame_queue.qsize())
                 if isinstance(item, FramePacket):
                     batch.append(item)
-                    if len(batch) >= scanner.batch_size:
+                    if scanner is None or len(batch) >= scanner.batch_size:
                         flush()
                 else:
                     flush()
@@ -661,6 +747,7 @@ def scan_videos(
                     "completed_source_workers": len(ended),
                     "inference_call_count": len(batch_sizes),
                     "inference_frame_count": sum(batch_sizes),
+                    "motion_sample_count": motion_sample_count,
                     "actual_batch_size_min": min(batch_sizes) if batch_sizes else 0,
                     "actual_batch_size_max": max(batch_sizes) if batch_sizes else 0,
                     "actual_batch_size_mean": (
@@ -671,6 +758,11 @@ def scan_videos(
                         if batch_sizes
                         else 0.0
                     ),
+                    "effective_batch_fill_ratio": (
+                        round(sum(batch_sizes) / len(batch_sizes) / scanner.batch_size, 4)
+                        if batch_sizes and scanner is not None
+                        else 0.0
+                    ),
                     "max_observed_queue_depth": max_queue_size,
                     "configured_queue_depth": queue_depth,
                 }
@@ -678,7 +770,8 @@ def scan_videos(
             runtime_path.write_text(
                 json.dumps(runtime_report, ensure_ascii=False, indent=2), encoding="utf-8"
             )
-            scanner.close()
+            if scanner is not None:
+                scanner.close()
     return output_paths
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import math
 from bisect import bisect_left
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -13,11 +14,22 @@ from .schemas import AlignmentTransform, TimestampPoint, VideoInfo, ViewInput
 from .video_io import view_motion_signature
 
 
-FRAME_COLUMNS = ("video_frame_index", "frame_index", "frame", "frame_id", "index", "seq")
+FRAME_COLUMNS = (
+    "rgb_video_frame_index",
+    "video_frame_index",
+    "frame_index",
+    "frame",
+    "frame_id",
+    "index",
+    "seq",
+)
 LOCAL_US_COLUMNS = ("local_time_us", "local_timestamp_us", "video_timestamp_us", "pts_us")
 LOCAL_MS_COLUMNS = ("local_timestamp_ms", "video_timestamp_ms", "pts_ms", "timestamp_ms")
 LOCAL_S_COLUMNS = ("local_timestamp_s", "video_timestamp_s", "pts_time", "timestamp_s", "time_s")
-SOURCE_US_COLUMNS = ("frame_system_timestamp_us", "global_timestamp_us", "wallclock_us", "epoch_us")
+# Prefer the clock-synchronised global timestamp. frame_system_timestamp_us is
+# the sender's raw system clock and can carry a per-device offset even when the
+# recorder reports clock_sync_valid=1.
+SOURCE_US_COLUMNS = ("global_timestamp_us", "frame_system_timestamp_us", "wallclock_us", "epoch_us")
 SOURCE_MS_COLUMNS = ("global_timestamp_ms", "wallclock_ms", "epoch_ms", "capture_timestamp_ms")
 SOURCE_COLUMNS = ("global_timestamp", "wallclock", "capture_timestamp", "datetime", "iso_time")
 
@@ -39,6 +51,91 @@ def _parse_datetime_ms(value: str) -> float:
         return float(value)
 
 
+def _timestamp_point(row: dict[str, str], row_number: int, fps: float) -> TimestampPoint:
+    _, frame_text = _first(row, FRAME_COLUMNS)
+    frame_index = int(float(frame_text)) if frame_text is not None else row_number
+    local_name, local_text = _first(row, LOCAL_US_COLUMNS)
+    _source_name, source_text = _first(row, SOURCE_US_COLUMNS)
+    if local_text is not None:
+        local_ms = float(local_text) / 1000.0
+    else:
+        local_name, local_text = _first(row, LOCAL_MS_COLUMNS)
+        if local_text is not None:
+            local_ms = float(local_text)
+        else:
+            local_name, local_text = _first(row, LOCAL_S_COLUMNS)
+            local_ms = (
+                float(local_text) * 1000.0
+                if local_text is not None
+                else frame_index * 1000.0 / max(fps, 1e-9)
+            )
+    if source_text is not None:
+        source_ms = float(source_text) / 1000.0
+    else:
+        _source_name, source_text = _first(row, SOURCE_MS_COLUMNS)
+        if source_text is not None:
+            source_ms = float(source_text)
+        else:
+            _source_name, source_text = _first(row, SOURCE_COLUMNS)
+            source_ms = _parse_datetime_ms(source_text) if source_text is not None else None
+    if source_ms is None and local_name == "timestamp_ms" and abs(local_ms) > 10_000_000_000:
+        source_ms = local_ms
+        local_ms = frame_index * 1000.0 / max(fps, 1e-9)
+    if source_ms is None and local_name == "timestamp_s" and abs(local_ms) > 10_000_000_000:
+        source_ms = local_ms
+        local_ms = frame_index * 1000.0 / max(fps, 1e-9)
+    return TimestampPoint(frame_index=frame_index, local_ms=local_ms, source_ms=source_ms)
+
+
+def read_timestamp_csv_endpoints(path: Path, fps: float) -> list[TimestampPoint]:
+    """Read the first/last recorded RGB rows without scanning a multi-million-row CSV."""
+
+    if not path.is_file():
+        raise FileNotFoundError(f"时间戳 CSV 不存在: {path}")
+    with path.open("rb") as handle:
+        head = handle.read(512 * 1024)
+        handle.seek(0, 2)
+        size = handle.tell()
+        handle.seek(max(0, size - 512 * 1024))
+        tail = handle.read()
+    head_lines = head.decode("utf-8-sig", errors="replace").splitlines()
+    tail_lines = tail.decode("utf-8", errors="replace").splitlines()
+    if len(head_lines) < 2:
+        raise ValueError(f"时间戳 CSV 至少需要两行: {path}")
+    fieldnames = next(csv.reader([head_lines[0]]))
+    lowered = [item.strip().lower() for item in fieldnames]
+    rgb_index = lowered.index("rgb_recorded") if "rgb_recorded" in lowered else None
+
+    def rows(lines: Sequence[str]) -> list[TimestampPoint]:
+        result = []
+        for row_number, line in enumerate(lines):
+            values = next(csv.reader([line]), [])
+            if not values or values[0].strip().lower() == fieldnames[0].strip().lower():
+                continue
+            if rgb_index is not None and (
+                rgb_index >= len(values)
+                or values[rgb_index].strip().lower() not in {"1", "true", "yes"}
+            ):
+                continue
+            row = {
+                key: values[index] if index < len(values) else ""
+                for index, key in enumerate(fieldnames)
+            }
+            try:
+                result.append(_timestamp_point(row, row_number, fps))
+            except (TypeError, ValueError):
+                continue
+        return result
+
+    first = rows(head_lines[1:])
+    last = rows(tail_lines[1:] if size > len(tail) else tail_lines)
+    if not first or not last:
+        raise ValueError(f"时间戳 CSV 缺少可用RGB首尾记录: {path}")
+    endpoints = [first[0], last[-1]]
+    endpoints.sort(key=lambda point: point.local_ms)
+    return endpoints
+
+
 def read_timestamp_csv(path: Path, fps: float, max_points: int = 50_000) -> list[TimestampPoint]:
     if not path.is_file():
         raise FileNotFoundError(f"时间戳 CSV 不存在: {path}")
@@ -52,40 +149,31 @@ def read_timestamp_csv(path: Path, fps: float, max_points: int = 50_000) -> list
             dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
         except csv.Error:
             dialect = csv.excel
-        reader = csv.DictReader(handle, dialect=dialect)
+        reader = csv.reader(handle, dialect=dialect)
+        fieldnames = next(reader, None)
+        if not fieldnames:
+            raise ValueError(f"时间戳 CSV 缺少表头: {path}")
+        lowered_fields = [item.strip().lower() for item in fieldnames]
+        rgb_recorded_index = (
+            lowered_fields.index("rgb_recorded") if "rgb_recorded" in lowered_fields else None
+        )
         points: list[TimestampPoint] = []
-        for row_number, row in enumerate(reader):
+        for row_number, values in enumerate(reader):
+            if (
+                rgb_recorded_index is not None
+                and (
+                    rgb_recorded_index >= len(values)
+                    or values[rgb_recorded_index].strip().lower() not in {"1", "true", "yes"}
+                )
+            ):
+                continue
             if row_number % stride and row_number + 1 < row_count:
                 continue
-            _, frame_text = _first(row, FRAME_COLUMNS)
-            frame_index = int(float(frame_text)) if frame_text is not None else row_number
-            local_name, local_text = _first(row, LOCAL_US_COLUMNS)
-            source_name, source_text = _first(row, SOURCE_US_COLUMNS)
-            if local_text is not None:
-                local_ms = float(local_text) / 1000.0
-            else:
-                local_name, local_text = _first(row, LOCAL_MS_COLUMNS)
-                if local_text is not None:
-                    local_ms = float(local_text)
-                else:
-                    local_name, local_text = _first(row, LOCAL_S_COLUMNS)
-                    local_ms = float(local_text) * 1000.0 if local_text is not None else frame_index * 1000.0 / max(fps, 1e-9)
-            if source_text is not None:
-                source_ms = float(source_text) / 1000.0
-            else:
-                source_name, source_text = _first(row, SOURCE_MS_COLUMNS)
-                if source_text is not None:
-                    source_ms = float(source_text)
-                else:
-                    source_name, source_text = _first(row, SOURCE_COLUMNS)
-                    source_ms = _parse_datetime_ms(source_text) if source_text is not None else None
-            if source_ms is None and local_name == "timestamp_ms" and abs(local_ms) > 10_000_000_000:
-                source_ms = local_ms
-                local_ms = frame_index * 1000.0 / max(fps, 1e-9)
-            if source_ms is None and local_name == "timestamp_s" and abs(local_ms) > 10_000_000_000:
-                source_ms = local_ms
-                local_ms = frame_index * 1000.0 / max(fps, 1e-9)
-            points.append(TimestampPoint(frame_index=frame_index, local_ms=local_ms, source_ms=source_ms))
+            row = {
+                key: values[index] if index < len(values) else ""
+                for index, key in enumerate(fieldnames)
+            }
+            points.append(_timestamp_point(row, row_number, fps))
     if len(points) < 2:
         raise ValueError(f"时间戳 CSV 至少需要两行: {path}")
     points.sort(key=lambda point: point.local_ms)
@@ -159,6 +247,46 @@ def _robust_affine(pairs: Sequence[tuple[float, float]], max_drift_ppm: float) -
     return float(scale), float(offset), rmse
 
 
+def _absolute_clock_transform(
+    reference: Sequence[TimestampPoint],
+    target: Sequence[TimestampPoint],
+    max_drift_ppm: float,
+) -> tuple[float, float, float, int] | None:
+    """Map target local time to reference local time through recorder clocks.
+
+    Segment endpoints from different cameras do not have to occur within the
+    nearest-neighbour tolerance (one recorder can close a segment seconds later).
+    Both CSVs nevertheless carry the same absolute system clock. Fitting each
+    local timeline against that clock avoids a dense multi-million-row read and
+    is more accurate than pairing non-simultaneous segment boundaries.
+    """
+
+    def fit(points: Sequence[TimestampPoint]) -> tuple[float, float, float, int] | None:
+        usable = [point for point in points if point.source_ms is not None]
+        if len(usable) < 2:
+            return None
+        origin_local = usable[0].local_ms
+        origin_source = float(usable[0].source_ms)
+        pairs = [
+            (point.local_ms - origin_local, float(point.source_ms) - origin_source)
+            for point in usable
+        ]
+        scale, relative_offset, rmse = _robust_affine(pairs, max_drift_ppm)
+        intercept = origin_source + relative_offset - scale * origin_local
+        return scale, intercept, rmse, len(usable)
+
+    reference_fit = fit(reference)
+    target_fit = fit(target)
+    if reference_fit is None or target_fit is None:
+        return None
+    reference_scale, reference_intercept, reference_rmse, reference_count = reference_fit
+    target_scale, target_intercept, target_rmse, target_count = target_fit
+    scale = target_scale / max(reference_scale, 1e-12)
+    offset = (target_intercept - reference_intercept) / max(reference_scale, 1e-12)
+    rmse = math.sqrt(reference_rmse**2 + target_rmse**2)
+    return scale, offset, rmse, min(reference_count, target_count)
+
+
 def _normalized_correlation(a: np.ndarray, b: np.ndarray) -> float:
     if len(a) != len(b) or len(a) < 3:
         return -1.0
@@ -188,7 +316,22 @@ def visual_anchor_calibration(
     margin_ms = (anchor_duration_seconds / 2.0 + search_seconds + 1.0) * 1000.0
     if overlap_end - overlap_start <= margin_ms * 2:
         return 0.0, 0.0, []
-    centers = np.linspace(overlap_start + margin_ms, overlap_end - margin_ms, anchor_count)
+    # Recorder MP4s are split every 15 minutes. Seeking to an arbitrary point in a
+    # long-GOP segment can make FFmpeg decode hundreds of megabytes before it
+    # reaches the requested frame, especially over SMB. Prefer points immediately
+    # after well-separated segment boundaries: this still audits offset/drift at
+    # multiple positions on the global timeline while keeping every decode local.
+    boundary_centers: list[float] = []
+    if reference_info.segments:
+        for segment in reference_info.segments:
+            candidate = reference_transform.to_global(segment.virtual_start_ms) + margin_ms
+            if overlap_start + margin_ms <= candidate <= overlap_end - margin_ms:
+                boundary_centers.append(candidate)
+    if len(boundary_centers) >= anchor_count:
+        indexes = np.linspace(0, len(boundary_centers) - 1, anchor_count).round().astype(int)
+        centers = np.asarray([boundary_centers[index] for index in indexes], dtype=np.float64)
+    else:
+        centers = np.linspace(overlap_start + margin_ms, overlap_end - margin_ms, anchor_count)
     half_count = max(2, int(round(anchor_duration_seconds * fps / 2.0)))
     max_lag = max(1, int(round(search_seconds * fps)))
     corrections: list[tuple[float, float, float]] = []
@@ -252,16 +395,51 @@ def build_alignments(
         (view for view in views if view.view_id == align_cfg["reference_view"]),
         next(view for view in views if view.role.value == align_cfg["reference_view"]),
     )
+    endpoint_cache: dict[Path, list[TimestampPoint]] = {}
+    if bool(align_cfg.get("csv_segment_endpoints_only", True)):
+        endpoint_jobs: dict[Path, float] = {}
+        for view in views:
+            info = infos[view.view_id]
+            for segment in info.segments:
+                if segment.timestamps_csv:
+                    endpoint_jobs[segment.timestamps_csv] = segment.fps
+        if endpoint_jobs:
+            with ThreadPoolExecutor(
+                max_workers=max(
+                    1,
+                    min(
+                        int(align_cfg.get("csv_read_workers", 12)),
+                        len(endpoint_jobs),
+                    ),
+                ),
+                thread_name_prefix="clock-endpoints",
+            ) as executor:
+                futures = {
+                    executor.submit(read_timestamp_csv_endpoints, path, fps): path
+                    for path, fps in endpoint_jobs.items()
+                }
+                for future in as_completed(futures):
+                    endpoint_cache[futures[future]] = future.result()
+
     series: dict[str, list[TimestampPoint]] = {}
     for view in views:
         info = infos[view.view_id]
         if view.segments and info.segments:
             points: list[TimestampPoint] = []
             segment_series: list[list[TimestampPoint] | None] = []
+            max_view_points = max(2_000, int(align_cfg.get("max_csv_points_per_view", 30_000)))
+            points_per_segment = max(512, math.ceil(max_view_points / len(info.segments)))
             for segment in info.segments:
                 if segment.timestamps_csv:
                     segment_series.append(
-                        read_timestamp_csv(segment.timestamps_csv, segment.fps)
+                        endpoint_cache.get(segment.timestamps_csv)
+                        or read_timestamp_csv_endpoints(segment.timestamps_csv, segment.fps)
+                        if bool(align_cfg.get("csv_segment_endpoints_only", True))
+                        else read_timestamp_csv(
+                            segment.timestamps_csv,
+                            segment.fps,
+                            max_points=points_per_segment,
+                        )
                     )
                 else:
                     segment_series.append(None)
@@ -319,7 +497,11 @@ def build_alignments(
             series[view.view_id] = points
         else:
             series[view.view_id] = (
-                read_timestamp_csv(view.timestamps_csv, info.fps)
+                read_timestamp_csv(
+                    view.timestamps_csv,
+                    info.fps,
+                    max_points=max(2_000, int(align_cfg.get("max_csv_points_per_view", 30_000))),
+                )
                 if view.timestamps_csv
                 else synthetic_timestamps(info, sample_fps=align_cfg["aligned_timestamps_fps"])
             )
@@ -343,6 +525,15 @@ def build_alignments(
             series[reference.view_id], series[view.view_id], float(align_cfg["nearest_tolerance_ms"])
         )
         scale, offset, rmse = _robust_affine(pairs, float(align_cfg["max_drift_ppm"]))
+        if bool(align_cfg.get("csv_segment_endpoints_only", True)):
+            absolute_fit = _absolute_clock_transform(
+                series[reference.view_id],
+                series[view.view_id],
+                float(align_cfg["max_drift_ppm"]),
+            )
+            if absolute_fit is not None:
+                scale, offset, rmse, absolute_count = absolute_fit
+                pairs = [(0.0, 0.0)] * absolute_count
         offset += view.calibration_hint_ms
         ratio = len(pairs) / max(1, min(len(series[reference.view_id]), len(series[view.view_id])))
         transform = AlignmentTransform(
@@ -354,24 +545,52 @@ def build_alignments(
             csv_match_ratio=ratio,
             csv_rmse_ms=None if not math.isfinite(rmse) else rmse,
         )
-        correction, visual_confidence, details = visual_anchor_calibration(
-            reference,
-            view,
-            ref_transform,
-            transform,
-            infos[reference.view_id],
-            infos[view.view_id],
-            float(align_cfg["visual_anchor_search_seconds"]),
-            int(align_cfg["visual_anchor_count"]),
-            float(align_cfg["visual_anchor_duration_seconds"]),
-            float(align_cfg["visual_anchor_fps"]),
+        csv_score = min(1.0, ratio / max(float(align_cfg["minimum_match_ratio"]), 1e-9))
+        rmse_score = math.exp(
+            -(
+                (transform.csv_rmse_ms or 500.0)
+                / max(float(align_cfg["nearest_tolerance_ms"]), 1.0)
+            )
         )
+        csv_confidence = 0.75 * csv_score + 0.25 * rmse_score
+        use_short_visual_audit = csv_confidence >= float(
+            align_cfg.get("visual_audit_csv_confidence_threshold", 0.80)
+        )
+        if use_short_visual_audit:
+            # Do not open the same large SMB MP4s a second time merely to audit a
+            # CSV solution that is already strong. The bounded all-view YOLO/fine
+            # scan later in the pipeline supplies the visual cross-view evidence
+            # on the exact candidate windows. This turns visual calibration into
+            # reuse of mandatory work instead of a separate full-input seek pass.
+            correction, visual_confidence = 0.0, 0.0
+            details = [
+                {
+                    "deferred": True,
+                    "reason": "high_confidence_csv_reuses_bounded_cross_view_scan",
+                    "csv_confidence": csv_confidence,
+                }
+            ]
+        else:
+            correction, visual_confidence, details = visual_anchor_calibration(
+                reference,
+                view,
+                ref_transform,
+                transform,
+                infos[reference.view_id],
+                infos[view.view_id],
+                float(align_cfg["visual_anchor_search_seconds"]),
+                int(align_cfg["visual_anchor_count"]),
+                float(align_cfg["visual_anchor_duration_seconds"]),
+                float(align_cfg["visual_anchor_fps"]),
+            )
         transform.visual_correction_ms = correction
         transform.visual_confidence = visual_confidence
         transform.anchor_details = details
-        csv_score = min(1.0, ratio / max(float(align_cfg["minimum_match_ratio"]), 1e-9))
-        rmse_score = math.exp(-((transform.csv_rmse_ms or 500.0) / max(float(align_cfg["nearest_tolerance_ms"]), 1.0)))
-        transform.confidence = float(0.65 * csv_score + 0.20 * rmse_score + 0.15 * visual_confidence)
+        transform.confidence = float(
+            0.75 * csv_score + 0.25 * rmse_score
+            if use_short_visual_audit
+            else 0.65 * csv_score + 0.20 * rmse_score + 0.15 * visual_confidence
+        )
         if transform.confidence >= 0.65:
             transform.state = "aligned"
         elif pairs or details:

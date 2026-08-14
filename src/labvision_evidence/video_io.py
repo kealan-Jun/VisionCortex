@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import csv
 import json
 import math
 import shutil
 import subprocess
 import tempfile
 from collections.abc import Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -85,13 +87,7 @@ def view_timestamp_files(view: ViewInput) -> list[Path]:
     return [view.timestamps_csv] if view.timestamps_csv else []
 
 
-def probe_view(view: ViewInput) -> VideoInfo:
-    """Probe a single file or build a zero-copy virtual timeline from segments."""
-
-    if not view.segments:
-        assert view.video is not None
-        return probe_video(view.video)
-    probed = [probe_video(segment.video) for segment in view.segments]
+def _build_segmented_view_info(view: ViewInput, probed: Sequence[VideoInfo]) -> VideoInfo:
     first = probed[0]
     virtual_start_ms = 0.0
     frame_start = 0
@@ -134,6 +130,158 @@ def probe_view(view: ViewInput) -> VideoInfo:
         size_bytes=sum(item.size_bytes for item in segment_infos),
         segments=segment_infos,
     )
+
+
+def probe_view(view: ViewInput) -> VideoInfo:
+    """Probe a single file or build a zero-copy virtual timeline from segments."""
+
+    if not view.segments:
+        assert view.video is not None
+        return probe_video(view.video)
+    return _build_segmented_view_info(
+        view, [probe_video(segment.video) for segment in view.segments]
+    )
+
+
+def _clock_metadata_video_info(video: Path, clock: Path | None) -> VideoInfo | None:
+    """Build exact RGB media timing from a recorder CSV without scanning the MP4."""
+
+    if clock is None or not clock.is_file():
+        return None
+    try:
+        with clock.open("rb") as handle:
+            head = handle.read(512 * 1024)
+            handle.seek(0, 2)
+            size = handle.tell()
+            handle.seek(max(0, size - 512 * 1024))
+            tail = handle.read()
+        head_lines = head.decode("utf-8-sig", errors="replace").splitlines()
+        tail_lines = tail.decode("utf-8", errors="replace").splitlines()
+        if len(head_lines) < 2:
+            return None
+        fieldnames = next(csv.reader([head_lines[0]]))
+        indexes = {name.strip(): index for index, name in enumerate(fieldnames)}
+        required = {
+            "rgb_video_frame_index",
+            "rgb_recorded",
+            "width",
+            "height",
+        }
+        if not required.issubset(indexes):
+            return None
+
+        def rgb_rows(lines: Sequence[str]) -> list[list[str]]:
+            rows = []
+            for line in lines:
+                values = next(csv.reader([line]), [])
+                if len(values) <= max(indexes.values()):
+                    continue
+                if values[indexes["rgb_recorded"]].strip().lower() not in {"1", "true", "yes"}:
+                    continue
+                if not values[indexes["rgb_video_frame_index"]].strip():
+                    continue
+                rows.append(values)
+            return rows
+
+        first_rows = rgb_rows(head_lines[1:])
+        last_rows = rgb_rows(tail_lines[1:] if size > len(tail) else tail_lines)
+        if not first_rows or not last_rows:
+            return None
+        first, last = first_rows[0], last_rows[-1]
+
+        def number(row: list[str], name: str) -> float:
+            return float(row[indexes[name]])
+
+        first_index = int(number(first, "rgb_video_frame_index"))
+        last_index = int(number(last, "rgb_video_frame_index"))
+        frame_count = last_index - first_index + 1
+        clock_name = next(
+            (
+                name
+                for name in ("global_timestamp_us", "rgb_system_timestamp_us", "local_time_us")
+                if name in indexes
+                and first[indexes[name]].strip()
+                and last[indexes[name]].strip()
+            ),
+            None,
+        )
+        elapsed_seconds = (
+            max(0.0, (number(last, clock_name) - number(first, clock_name)) / 1_000_000.0)
+            if clock_name is not None
+            else 0.0
+        )
+        fps_index = indexes.get("rgb_actual_fps")
+        fps_values = [
+            float(row[fps_index])
+            for row in (first, last)
+            if fps_index is not None and row[fps_index].strip()
+        ]
+        fps = fps_values[-1] if fps_values else 0.0
+        if fps <= 0 and elapsed_seconds > 0 and frame_count > 1:
+            fps = (frame_count - 1) / elapsed_seconds
+        if fps <= 0 or frame_count <= 1:
+            return None
+        nearest_integer_fps = round(fps)
+        if nearest_integer_fps > 0 and abs(fps - nearest_integer_fps) <= 0.2:
+            fps = float(nearest_integer_fps)
+        duration_seconds = frame_count / fps
+        return VideoInfo(
+            path=video,
+            duration_ms=duration_seconds * 1000.0,
+            fps=fps,
+            width=int(number(first, "width")),
+            height=int(number(first, "height")),
+            frame_count=frame_count,
+            size_bytes=video.stat().st_size,
+        )
+    except (OSError, UnicodeError, csv.Error, ValueError, IndexError):
+        return None
+
+
+def probe_views(
+    views: Sequence[ViewInput],
+    workers: int = 12,
+    prefer_clock_metadata: bool = True,
+) -> dict[str, VideoInfo]:
+    """Probe recorder segments concurrently instead of 15 serial ffprobes per view."""
+
+    jobs: list[tuple[str, int, Path, Path | None]] = []
+    for view in views:
+        if view.segments:
+            jobs.extend(
+                (view.view_id, index, segment.video, segment.timestamps_csv)
+                for index, segment in enumerate(view.segments)
+            )
+        else:
+            assert view.video is not None
+            jobs.append((view.view_id, 0, view.video, view.timestamps_csv))
+
+    def inspect(video: Path, clock: Path | None) -> VideoInfo:
+        if prefer_clock_metadata:
+            from_clock = _clock_metadata_video_info(video, clock)
+            if from_clock is not None:
+                return from_clock
+        return probe_video(video)
+
+    probed: dict[str, dict[int, VideoInfo]] = {view.view_id: {} for view in views}
+    with ThreadPoolExecutor(
+        max_workers=max(1, min(int(workers), len(jobs))),
+        thread_name_prefix="ffprobe",
+    ) as executor:
+        futures = {
+            executor.submit(inspect, path, clock): (view_id, index)
+            for view_id, index, path, clock in jobs
+        }
+        for future in as_completed(futures):
+            view_id, index = futures[future]
+            probed[view_id][index] = future.result()
+    result: dict[str, VideoInfo] = {}
+    for view in views:
+        ordered = [probed[view.view_id][index] for index in sorted(probed[view.view_id])]
+        result[view.view_id] = (
+            _build_segmented_view_info(view, ordered) if view.segments else ordered[0]
+        )
+    return result
 
 
 def estimate_disk_need(infos: Sequence[VideoInfo]) -> int:
@@ -262,6 +410,48 @@ def _opencv_frame_iterator(
         capture.release()
 
 
+def _opencv_indexed_seek_iterator(
+    path: Path,
+    info: VideoInfo,
+    start_ms: float,
+    end_ms: float,
+    sample_fps: float,
+    max_width: int,
+) -> Iterator[tuple[int, float, np.ndarray]]:
+    """Read sparse probe frames through the MP4 seek index.
+
+    Sequential keyframe demux still transfers almost the whole compressed file
+    from NAS. For a low-rate motion probe, explicit indexed seeks fetch only the
+    nearby GOPs and are substantially faster on the validated SMB recorder data.
+    """
+
+    capture = cv2.VideoCapture(str(path))
+    if not capture.isOpened():
+        raise RuntimeError(f"无法打开视频: {path}")
+    requested_ms = max(0.0, start_ms)
+    period_ms = 1000.0 / max(sample_fps, 1e-9)
+    yielded = 0
+    try:
+        while requested_ms < end_ms:
+            capture.set(cv2.CAP_PROP_POS_MSEC, requested_ms)
+            ok, frame = capture.read()
+            if ok:
+                if info.width > max_width:
+                    width, height = _scaled_size(info.width, info.height, max_width)
+                    frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
+                yield (
+                    int(round(requested_ms * info.fps / 1000.0)),
+                    requested_ms,
+                    frame,
+                )
+                yielded += 1
+            requested_ms += period_ms
+    finally:
+        capture.release()
+    if yielded == 0:
+        raise RuntimeError(f"稀疏索引抽帧未返回图像: {path}")
+
+
 def iter_sampled_frames(
     path: Path,
     info: VideoInfo,
@@ -273,6 +463,16 @@ def iter_sampled_frames(
     keyframes_only: bool = False,
     decoder_threads: int | None = None,
 ) -> Iterator[tuple[int, float, np.ndarray]]:
+    if keyframes_only and sample_fps <= 1.0:
+        try:
+            yield from _opencv_indexed_seek_iterator(
+                path, info, start_ms, end_ms, sample_fps, max_width
+            )
+            return
+        except RuntimeError:
+            # Preserve the sequential FFmpeg path as a compatibility fallback
+            # for containers whose seek index is unavailable or damaged.
+            pass
     if shutil.which("ffmpeg"):
         try:
             yield from _ffmpeg_frame_iterator(
