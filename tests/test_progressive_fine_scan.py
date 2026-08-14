@@ -97,6 +97,10 @@ def test_rtx4060_profile_does_not_hardcode_validation_camera_ids():
 
     assert config["performance"]["fine_progressive_cross_view"] is True
     assert config["performance"]["fine_preferred_third_person_views"] == []
+    assert config["performance"]["motion_probe_sequential_segment_workers"] == 4
+    assert config["performance"]["fine_first_person_decode_workers"] == 4
+    assert config["performance"]["fine_third_person_decode_workers"] == 4
+    assert config["performance"]["fine_decode_prefetch_frames"] == 32
 
 
 def test_progressive_gap_ignores_incomplete_liquid_start_anchor(default_config):

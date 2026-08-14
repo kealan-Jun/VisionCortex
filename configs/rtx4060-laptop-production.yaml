@@ -53,12 +53,15 @@ performance:
   motion_probe_fallback_separation_seconds: 120.0
   motion_probe_fallback_window_seconds: 60.0
   # Auto-selection replaces this compatibility fallback with the strategy-
-  # specific worker count below. Sequential reads stay single-file; indexed
-  # seeks overlap a small bounded number of SMB round trips.
+  # specific worker count below. Independent 15-minute NAS segments may decode
+  # concurrently even when each individual segment uses sequential keyframes.
   motion_probe_segment_workers: 1
   motion_probe_sparse_benchmark_seconds: 60.0
   motion_probe_indexed_segment_workers: 3
-  motion_probe_sequential_segment_workers: 1
+  # DEV-014 showed motion was decode/source-starved (GPU p95 4%, NVDEC p95 10%,
+  # 584/603 s queue wait). Four bounded segment readers use the wired NAS and
+  # decoder headroom while chronological emission preserves the motion timeline.
+  motion_probe_sequential_segment_workers: 4
   motion_signature_size: [64, 36]
   detection_fps: 10.0
   image_size: 640
@@ -66,9 +69,12 @@ performance:
   fine_window_merge_gap_seconds: 0.0
   fine_chunk_seconds: 120
   fine_active_decode_slots: 6
-  fine_first_person_decode_workers: 2
-  fine_third_person_decode_workers: 2
-  fine_decode_prefetch_frames: 12
+  # TRT batches were already 99.7% full, yet queue wait exceeded inference time
+  # and GPU compute p95 was only 38%. Increase ordered decode supply per active
+  # view; this does not add model contexts or change sampled frames/evidence.
+  fine_first_person_decode_workers: 4
+  fine_third_person_decode_workers: 4
+  fine_decode_prefetch_frames: 32
   # Scan the wearable view and best coarse-ranked static view first. A remaining
   # static view is decoded only for aligned candidate windows that contain a
   # reliable first-person start anchor but still lack valid dual-role evidence.
