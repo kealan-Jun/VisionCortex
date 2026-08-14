@@ -261,6 +261,7 @@ def _producer(
             "cuda" if decode_backend == "cuda" else None,
             keyframes_only,
             int(perf.get("cpu_decode_threads", 0)) if decode_backend == "cpu" else None,
+            str(perf.get("motion_probe_sparse_strategy", "indexed_seek")),
         )
 
     def decoded_frames(start_ms: float, end_ms: float) -> list[tuple[int, float, np.ndarray]]:
@@ -556,6 +557,8 @@ class RoleScanner:
 
     def infer(self, packets: Sequence[FramePacket]) -> list[list[BoxEvidence]]:
         perf, model_cfg = self.config["performance"], self.config["models"]
+        # A short queue flush is not a memory-pressure signal. Keep the engine
+        # capacity unchanged unless inference actually raises CUDA OOM.
         batch_size = min(self.batch_size, len(packets))
         while True:
             try:
@@ -592,7 +595,6 @@ class RoleScanner:
                                     )
                                 )
                         results.append(boxes)
-                self.batch_size = batch_size
                 self.last_inference_batch_sizes = actual_batch_sizes
                 return results
             except RuntimeError as exc:
@@ -600,6 +602,7 @@ class RoleScanner:
                     raise
                 previous_batch_size = batch_size
                 batch_size = max(1, batch_size // 2)
+                self.batch_size = min(self.batch_size, batch_size)
                 self.batch_contractions.append(
                     {"from_batch_size": previous_batch_size, "to_batch_size": batch_size}
                 )
@@ -695,6 +698,9 @@ def scan_videos(
             "motion_probe_fps": probe_fps,
             "motion_probe_segment_workers": int(
                 config["performance"].get("motion_probe_segment_workers", 1)
+            ),
+            "sparse_decode_strategy": str(
+                config["performance"].get("motion_probe_sparse_strategy", "indexed_seek")
             ),
             "decode_backends": {
                 view.view_id: (decode_backends or {}).get(

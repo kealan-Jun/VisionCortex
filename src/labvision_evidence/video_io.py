@@ -462,8 +462,11 @@ def iter_sampled_frames(
     hwaccel: str | None = "cuda",
     keyframes_only: bool = False,
     decoder_threads: int | None = None,
+    sparse_strategy: str = "indexed_seek",
 ) -> Iterator[tuple[int, float, np.ndarray]]:
-    if keyframes_only and sample_fps <= 1.0:
+    if sparse_strategy not in {"indexed_seek", "sequential_keyframes"}:
+        raise ValueError(f"unsupported sparse decode strategy: {sparse_strategy}")
+    if keyframes_only and sample_fps <= 1.0 and sparse_strategy == "indexed_seek":
         try:
             yield from _opencv_indexed_seek_iterator(
                 path, info, start_ms, end_ms, sample_fps, max_width
@@ -503,12 +506,13 @@ def iter_view_sampled_frames(
     hwaccel: str | None = "cuda",
     keyframes_only: bool = False,
     decoder_threads: int | None = None,
+    sparse_strategy: str = "indexed_seek",
 ) -> Iterator[tuple[int, float, np.ndarray]]:
     if not info.segments:
         assert view.video is not None
         yield from iter_sampled_frames(
             view.video, info, start_ms, end_ms, sample_fps, max_width, hwaccel,
-            keyframes_only, decoder_threads,
+            keyframes_only, decoder_threads, sparse_strategy,
         )
         return
     for segment in info.segments:
@@ -529,7 +533,7 @@ def iter_view_sampled_frames(
         segment_end = overlap_end - segment.virtual_start_ms
         for frame_index, source_ms, frame in iter_sampled_frames(
             segment.path, source_info, segment_start, segment_end, sample_fps, max_width,
-            hwaccel, keyframes_only, decoder_threads,
+            hwaccel, keyframes_only, decoder_threads, sparse_strategy,
         ):
             yield (
                 segment.frame_start_index + frame_index,

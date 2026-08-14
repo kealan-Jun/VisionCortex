@@ -955,11 +955,14 @@ def materialize_key_materials(
     before = float(config["segmentation"]["key_clip_pre_seconds"]) * 1000.0
     after = float(config["segmentation"]["key_clip_post_seconds"]) * 1000.0
     encoder = config["performance"]["ffmpeg_video_encoder"]
+    workers = max(1, min(2, int(config["performance"].get("materialization_workers", 2))))
     group_by_event = {event_id: group for group in groups for event_id in group.key_event_ids}
-    frame_reader = ViewFrameReader(max_open=2)
+    runtime_records: list[dict[str, Any]] = []
+    stage_started = time.perf_counter()
     for event in events:
         if not event.accepted or event.event_id not in group_by_event:
             continue
+        event_started = time.perf_counter()
         group = group_by_event[event.event_id]
         folder = group.archive_folder or _safe_folder_name(group.group_id)
         event_folder_value = (
@@ -976,62 +979,124 @@ def materialize_key_materials(
         clip_dir.mkdir(parents=True, exist_ok=True)
         frame_paths: dict[str, Path] = {}
         clip_paths: dict[str, Path] = {}
-        # Materialize the same global instant from every participating camera,
-        # not only the camera that originally triggered the CV event.
-        for role_label, view_id in (
-            ("First-Person", group.first_person_view),
-            ("Third-Person", group.third_person_view),
-        ):
+
+        def extract_role(role_label: str, view_id: str) -> dict[str, Any]:
+            role_started = time.perf_counter()
             view = by_view[view_id]
             transform = transforms[view_id]
             local_key_ms = transform.to_local(event.key_global_ms)
             if not 0.0 <= local_key_ms <= infos[view_id].duration_ms:
-                event.uncertainty.append(f"{view_id} 关键时间超出视频范围")
-                continue
-            frame = frame_reader.read(view, infos[view_id], local_key_ms)
+                raise ValueError(
+                    f"{event.event_id}/{view_id} key timestamp is outside the source video"
+                )
+            frame_started = time.perf_counter()
+            frame = None
+            used_offset_ms = 0.0
+            frame_reader = ViewFrameReader(max_open=1)
+            try:
+                for offset_ms in (0.0, -100.0, 100.0, -250.0, 250.0):
+                    candidate_ms = local_key_ms + offset_ms
+                    if not 0.0 <= candidate_ms <= infos[view_id].duration_ms:
+                        continue
+                    frame = frame_reader.read(view, infos[view_id], candidate_ms)
+                    if frame is not None:
+                        used_offset_ms = offset_ms
+                        break
+            finally:
+                frame_reader.close()
             if frame is None:
-                event.uncertainty.append(f"{view_id} 关键帧解码失败")
-                continue
+                raise RuntimeError(f"{event.event_id}/{view_id} key frame decode failed")
+            frame_seconds = time.perf_counter() - frame_started
             nearest = nearest_frame_evidence(detection_paths[view_id], event.key_global_ms)
             boxes = [box.model_dump() for box in nearest.detections] if nearest else []
             base = role_label
             frame_path = frame_dir / f"{base}.jpg"
             write_annotated_frame(frame, boxes, frame_path)
-            relative_frame = _relative(frame_path, layout.root)
-            event.key_frames[view_id] = relative_frame
-            frame_paths[role_label] = frame_path
-            write_json(
-                frame_dir / f"{base}.json",
-                _artifact_json(
-                    group, event, "key_frame", relative_frame, view_id, transforms
-                ),
-            )
-            if publisher is not None:
-                publisher.publish_file(frame_path)
-                publisher.publish_file(frame_dir / f"{base}.json")
-
             clip_start_global = max(event.global_start_ms - before, 0.0)
             clip_end_global = event.global_end_ms + after
             local_start = max(0.0, transform.to_local(clip_start_global))
             local_end = min(infos[view_id].duration_ms, transform.to_local(clip_end_global))
-            if local_end > local_start:
-                clip_path = clip_dir / f"{base}.mp4"
-                extract_view_clip(
-                    view, infos[view_id], clip_path, local_start, local_end - local_start, encoder
+            if local_end <= local_start:
+                raise ValueError(
+                    f"{event.event_id}/{view_id} key clip boundary is outside the source video"
                 )
-                relative_clip = _relative(clip_path, layout.root)
-                event.key_clips[view_id] = relative_clip
-                clip_paths[role_label] = clip_path
-                write_json(
-                    clip_dir / f"{base}.json",
-                    _artifact_json(
-                        group, event, "key_clip", relative_clip, view_id, transforms
-                    ),
-                )
-                if publisher is not None:
-                    publisher.publish_file(clip_path)
-                    publisher.publish_file(clip_dir / f"{base}.json")
+            clip_path = clip_dir / f"{base}.mp4"
+            clip_started = time.perf_counter()
+            extract_view_clip(
+                view, infos[view_id], clip_path, local_start, local_end - local_start, encoder
+            )
+            clip_seconds = time.perf_counter() - clip_started
+            return {
+                "event_id": event.event_id,
+                "role_label": role_label,
+                "view_id": view_id,
+                "frame_path": frame_path,
+                "clip_path": clip_path,
+                "frame_decode_offset_ms": used_offset_ms,
+                "frame_duration_seconds": round(frame_seconds, 6),
+                "clip_duration_seconds": round(clip_seconds, 6),
+                "duration_seconds": round(time.perf_counter() - role_started, 6),
+                "clip_source_duration_seconds": round((local_end - local_start) / 1000.0, 6),
+                "frame_output_bytes": frame_path.stat().st_size,
+                "clip_output_bytes": clip_path.stat().st_size,
+            }
 
+        role_results: dict[str, dict[str, Any]] = {}
+        with ThreadPoolExecutor(
+            max_workers=workers,
+            thread_name_prefix="key-material-media",
+        ) as executor:
+            futures = {
+                role_label: executor.submit(extract_role, role_label, view_id)
+                for role_label, view_id in (
+                    ("First-Person", group.first_person_view),
+                    ("Third-Person", group.third_person_view),
+                )
+            }
+            for role_label, future in futures.items():
+                role_results[role_label] = future.result()
+
+        # Keep archive mutation and incremental publication ordered. Readers
+        # never see a sidecar before the corresponding media is complete.
+        for role_label, view_id in (
+            ("First-Person", group.first_person_view),
+            ("Third-Person", group.third_person_view),
+        ):
+            result = role_results[role_label]
+            frame_path = Path(result["frame_path"])
+            clip_path = Path(result["clip_path"])
+            relative_frame = _relative(frame_path, layout.root)
+            relative_clip = _relative(clip_path, layout.root)
+            event.key_frames[view_id] = relative_frame
+            event.key_clips[view_id] = relative_clip
+            frame_paths[role_label] = frame_path
+            clip_paths[role_label] = clip_path
+            if result["frame_decode_offset_ms"]:
+                event.uncertainty.append(
+                    f"{view_id} key frame decode offset {result['frame_decode_offset_ms']:+.0f} ms"
+                )
+            frame_json = frame_dir / f"{role_label}.json"
+            clip_json = clip_dir / f"{role_label}.json"
+            write_json(
+                frame_json,
+                _artifact_json(group, event, "key_frame", relative_frame, view_id, transforms),
+            )
+            write_json(
+                clip_json,
+                _artifact_json(group, event, "key_clip", relative_clip, view_id, transforms),
+            )
+            if publisher is not None:
+                for artifact in (frame_path, frame_json, clip_path, clip_json):
+                    publisher.publish_file(artifact)
+            runtime_records.append(
+                {
+                    key: value
+                    for key, value in result.items()
+                    if key not in {"frame_path", "clip_path"}
+                }
+            )
+
+        aligned_started = time.perf_counter()
         aligned_frame = frame_dir / "Aligned_First+Third.jpg"
         _write_aligned_frame(
             frame_paths["First-Person"],
@@ -1069,7 +1134,33 @@ def materialize_key_materials(
         if publisher is not None:
             publisher.publish_file(aligned_clip)
             publisher.publish_file(clip_dir / "Aligned_First+Third.json")
-    frame_reader.close()
+        runtime_records.append(
+            {
+                "event_id": event.event_id,
+                "role_label": "Aligned-First-Third",
+                "view_id": "aligned_first_third",
+                "duration_seconds": round(time.perf_counter() - aligned_started, 6),
+                "frame_output_bytes": aligned_frame.stat().st_size,
+                "clip_output_bytes": aligned_clip.stat().st_size,
+                "event_wall_duration_seconds": round(time.perf_counter() - event_started, 6),
+            }
+        )
+
+    runtime_path = layout.json_config / "key_material_materialization_runtime.json"
+    write_json(
+        runtime_path,
+        {
+            "schema_version": "visioncortex-key-materialization-runtime/1",
+            "workers": workers,
+            "total_duration_seconds": round(time.perf_counter() - stage_started, 6),
+            "accepted_event_count": sum(
+                bool(event.accepted and event.event_id in group_by_event) for event in events
+            ),
+            "records": runtime_records,
+        },
+    )
+    if publisher is not None:
+        publisher.publish_file(runtime_path)
 
 
 def analyze_key_materials(layout: ArchiveLayout, events: Sequence[EvidenceEvent], config: dict[str, Any]) -> None:

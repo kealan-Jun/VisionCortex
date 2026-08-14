@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import subprocess
 import threading
 import time
+import unicodedata
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -91,9 +93,23 @@ async def record_web_ingest_start(request: Request, call_next):
     return await call_next(request)
 
 
-def _safe_file_name(value: str) -> str:
-    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "-", value).strip(" .-")
-    return cleaned[:180] or "file"
+def _safe_file_name(value: str, fallback_stem: str = "file") -> str:
+    original = Path(value).name
+    suffix = Path(original).suffix
+    stem = original[: -len(suffix)] if suffix else original
+    ascii_stem = (
+        unicodedata.normalize("NFKD", stem).encode("ascii", "ignore").decode("ascii")
+    )
+    ascii_suffix = (
+        unicodedata.normalize("NFKD", suffix).encode("ascii", "ignore").decode("ascii")
+    )
+    cleaned_stem = (
+        re.sub(r"[^A-Za-z0-9_.-]+", "-", ascii_stem).strip(" .-")
+        or re.sub(r"[^A-Za-z0-9_.-]+", "-", fallback_stem).strip(" .-")
+        or "file"
+    )
+    cleaned_suffix = re.sub(r"[^A-Za-z0-9.]", "", ascii_suffix).lower()
+    return f"{cleaned_stem[:160]}{cleaned_suffix[:20]}"
 
 
 def _settings() -> dict[str, Any]:
@@ -291,30 +307,64 @@ def _resolve_archive(archive_name: str) -> Path:
 
 
 async def _save_upload_to_local_and_nas(
-    upload: UploadFile, local_destination: Path, nas_destination: Path
+    upload: UploadFile,
+    local_destination: Path,
+    nas_destination: Path,
+    *,
+    retain_local_copy: bool = True,
 ) -> dict[str, Any]:
-    local_destination.parent.mkdir(parents=True, exist_ok=True)
+    started = time.perf_counter()
+    if retain_local_copy:
+        local_destination.parent.mkdir(parents=True, exist_ok=True)
     nas_destination.parent.mkdir(parents=True, exist_ok=True)
-    local_partial = local_destination.with_name(f".{local_destination.name}.partial-{uuid.uuid4().hex[:8]}")
+    local_partial = local_destination.with_name(
+        f".{local_destination.name}.partial-{uuid.uuid4().hex[:8]}"
+    )
     nas_partial = nas_destination.with_name(f".{nas_destination.name}.partial-{uuid.uuid4().hex[:8]}")
     total = 0
-    with local_partial.open("wb") as local_handle, nas_partial.open("wb") as nas_handle:
-        while block := await upload.read(8 * 1024 * 1024):
-            local_handle.write(block)
-            nas_handle.write(block)
-            total += len(block)
-        local_handle.flush()
-        nas_handle.flush()
-        os.fsync(local_handle.fileno())
-        os.fsync(nas_handle.fileno())
-    os.replace(local_partial, local_destination)
-    os.replace(nas_partial, nas_destination)
-    await upload.close()
+    digest = hashlib.sha256()
+    local_handle = None
+    try:
+        local_handle = local_partial.open("wb") if retain_local_copy else None
+        with nas_partial.open("wb") as nas_handle:
+            while block := await upload.read(8 * 1024 * 1024):
+                if local_handle is not None:
+                    local_handle.write(block)
+                nas_handle.write(block)
+                total += len(block)
+                digest.update(block)
+            if local_handle is not None:
+                local_handle.flush()
+                os.fsync(local_handle.fileno())
+            nas_handle.flush()
+            os.fsync(nas_handle.fileno())
+        if local_handle is not None:
+            local_handle.close()
+            local_handle = None
+            os.replace(local_partial, local_destination)
+        os.replace(nas_partial, nas_destination)
+    finally:
+        if local_handle is not None:
+            local_handle.close()
+        for partial in (local_partial, nas_partial):
+            if partial.exists():
+                partial.unlink()
+        await upload.close()
+    duration_seconds = max(time.perf_counter() - started, 1e-9)
     return {
         "filename": upload.filename,
         "bytes": total,
-        "local_path": str(local_destination),
+        "local_path": str(local_destination) if retain_local_copy else None,
         "nas_path": str(nas_destination),
+        "analysis_path": str(local_destination if retain_local_copy else nas_destination),
+        "retention_mode": "local_and_nas" if retain_local_copy else "nas_only",
+        "local_write_bytes": total if retain_local_copy else 0,
+        "nas_write_bytes": total,
+        "sha256": digest.hexdigest(),
+        "duration_seconds": round(duration_seconds, 6),
+        "effective_source_throughput_mib_s": round(
+            total / duration_seconds / (1024 * 1024), 3
+        ),
     }
 
 
@@ -648,30 +698,58 @@ async def create_run(
     settings["storage"]["active_archive_path"] = str(nas_root)
     run_id = uuid.uuid4().hex[:12]
     local_root = Path(settings["storage"]["local_input_root"]) / archive_name / run_id
+    retention_mode = str(
+        settings["storage"].get("web_upload_retention_mode", "local_and_nas")
+    ).lower()
+    if retention_mode not in {"local_and_nas", "nas_only"}:
+        raise HTTPException(500, f"Unsupported web_upload_retention_mode: {retention_mode}")
+    retain_local_copy = retention_mode == "local_and_nas"
     saved_videos: list[Path] = []
     saved_csvs: list[Path] = []
     upload_ledger: list[dict[str, Any]] = []
     try:
         for index, upload in enumerate(videos):
             spec = next((item for item in specs if int(item.get("video_index", -1)) == index), {})
-            view_id = _safe_file_name(str(spec.get("view_id") or f"view-{index + 1:02d}"))
-            filename = _safe_file_name(upload.filename or f"video-{index + 1:02d}.mp4")
+            view_id = _safe_file_name(
+                str(spec.get("view_id") or f"view-{index + 1:02d}"),
+                f"view-{index + 1:02d}",
+            )
+            filename = _safe_file_name(
+                upload.filename or f"video-{index + 1:02d}.mp4",
+                f"video-{index + 1:02d}",
+            )
             local_destination = local_root / view_id / filename
             nas_destination = nas_root / "Original-Experiment-Videos" / view_id / filename
             upload_ledger.append(
-                await _save_upload_to_local_and_nas(upload, local_destination, nas_destination)
+                await _save_upload_to_local_and_nas(
+                    upload,
+                    local_destination,
+                    nas_destination,
+                    retain_local_copy=retain_local_copy,
+                )
             )
-            saved_videos.append(local_destination)
+            saved_videos.append(Path(upload_ledger[-1]["analysis_path"]))
         for index, upload in enumerate(timestamp_csvs or []):
             spec = next((item for item in specs if int(item.get("csv_index", -1)) == index), {})
-            view_id = _safe_file_name(str(spec.get("view_id") or f"view-{index + 1:02d}"))
-            filename = _safe_file_name(upload.filename or f"timestamps-{index + 1:02d}.csv")
+            view_id = _safe_file_name(
+                str(spec.get("view_id") or f"view-{index + 1:02d}"),
+                f"view-{index + 1:02d}",
+            )
+            filename = _safe_file_name(
+                upload.filename or f"timestamps-{index + 1:02d}.csv",
+                f"timestamps-{index + 1:02d}",
+            )
             local_destination = local_root / view_id / filename
             nas_destination = nas_root / "Original-Experiment-Videos" / view_id / filename
             upload_ledger.append(
-                await _save_upload_to_local_and_nas(upload, local_destination, nas_destination)
+                await _save_upload_to_local_and_nas(
+                    upload,
+                    local_destination,
+                    nas_destination,
+                    retain_local_copy=retain_local_copy,
+                )
             )
-            saved_csvs.append(local_destination)
+            saved_csvs.append(Path(upload_ledger[-1]["analysis_path"]))
         view_inputs = []
         for position, spec in enumerate(specs):
             video_index = int(spec.get("video_index", position))
@@ -688,7 +766,11 @@ async def create_run(
         manifest = RunManifest(experiment_id=archive_name, views=view_inputs)
     except (KeyError, IndexError, TypeError, ValueError) as exc:
         raise HTTPException(400, f"视角映射无效: {exc}") from exc
-    manifest_path = local_root / "manifest.yaml"
+    manifest_path = (
+        nas_root / "JSON-Config-Files" / "input_manifest.yaml"
+        if not retain_local_copy
+        else local_root / "manifest.yaml"
+    )
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(
         yaml.safe_dump(manifest.model_dump(mode="json"), allow_unicode=True, sort_keys=False),
@@ -716,8 +798,19 @@ async def create_run(
         "video_count": len(saved_videos),
         "timestamp_csv_count": len(saved_csvs),
         "total_bytes": sum(int(item["bytes"]) for item in upload_ledger),
-        "destinations": ["local_input", "nas_original_experiment_videos"],
+        "local_write_bytes": sum(int(item["local_write_bytes"]) for item in upload_ledger),
+        "nas_write_bytes": sum(int(item["nas_write_bytes"]) for item in upload_ledger),
+        "retention_mode": retention_mode,
+        "destinations": (
+            ["local_input", "nas_original_experiment_videos"]
+            if retain_local_copy
+            else ["nas_original_experiment_videos"]
+        ),
     }
+    ingest["effective_source_throughput_mib_s"] = round(
+        ingest["total_bytes"] / max(ingest["duration_seconds"], 1e-9) / (1024 * 1024),
+        3,
+    )
     upload_record["web_ingest"] = {
         key: value for key, value in ingest.items() if key != "request_started_perf"
     }

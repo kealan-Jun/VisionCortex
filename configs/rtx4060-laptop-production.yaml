@@ -31,6 +31,10 @@ performance:
   motion_probe_fps: 0.1
   motion_probe_max_width: 416
   motion_probe_keyframes_only: true
+  # The real cold run showed 10-second random SMB seeks leaving NVDEC idle and
+  # taking about 11 minutes. Stream each 15-minute shard once instead; FFmpeg
+  # keeps only keyframes, samples at 0.1 FPS and can use the configured decoder.
+  motion_probe_sparse_strategy: sequential_keyframes
   motion_probe_run_yolo: true
   motion_probe_batch_size: 8
   coarse_reuse_motion_probe: true
@@ -121,6 +125,10 @@ storage:
   run_output_mode: nas_direct
   manifest_storage: nas
   require_nas_source_paths: true
+  # Keep the browser's original upload only in the formal NAS archive. The
+  # multipart parser may still use a temporary spool file while receiving it,
+  # but no second persistent local source copy is created.
+  web_upload_retention_mode: nas_only
 
 validation:
   acceptance_baseline: ./configs/acceptance/six-view-three-hour-reviewed-baseline.json

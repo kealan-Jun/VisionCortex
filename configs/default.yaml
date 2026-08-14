@@ -49,6 +49,7 @@ performance:
   motion_probe_fps: 0.5
   motion_probe_max_width: 96
   motion_probe_keyframes_only: true
+  motion_probe_sparse_strategy: indexed_seek
   motion_probe_run_yolo: false
   coarse_reuse_motion_probe: false
   motion_probe_first_person_views: 1
@@ -176,6 +177,9 @@ storage:
   run_output_mode: local
   manifest_storage: local
   require_nas_source_paths: false
+  # Web multipart uploads are durably retained in both places by default.
+  # Production NAS-direct profiles can opt out of the persistent local copy.
+  web_upload_retention_mode: local_and_nas
 
 validation:
   use_sidecar_annotations: true

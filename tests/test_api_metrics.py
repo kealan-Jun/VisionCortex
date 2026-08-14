@@ -1,10 +1,46 @@
+import asyncio
+import hashlib
+import io
 import json
 import time
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from starlette.datastructures import UploadFile
 
 from labvision_evidence import api
+
+
+def test_nas_only_upload_does_not_create_persistent_local_copy(tmp_path):
+    payload = b"video-payload" * 1024
+    upload = UploadFile(file=io.BytesIO(payload), filename="实验视频.mp4")
+    local_path = tmp_path / "local" / "video.mp4"
+    nas_path = tmp_path / "nas" / "video.mp4"
+
+    result = asyncio.run(
+        api._save_upload_to_local_and_nas(
+            upload,
+            local_path,
+            nas_path,
+            retain_local_copy=False,
+        )
+    )
+
+    assert nas_path.read_bytes() == payload
+    assert not local_path.exists()
+    assert result["analysis_path"] == str(nas_path)
+    assert result["local_path"] is None
+    assert result["local_write_bytes"] == 0
+    assert result["nas_write_bytes"] == len(payload)
+    assert result["sha256"] == hashlib.sha256(payload).hexdigest()
+    assert result["retention_mode"] == "nas_only"
+    assert result["effective_source_throughput_mib_s"] > 0
+
+
+def test_safe_file_name_is_ascii_and_preserves_extension():
+    assert api._safe_file_name("实验视频.mp4") == "file.mp4"
+    assert api._safe_file_name("实验视频.mp4", "video-01") == "video-01.mp4"
+    assert api._safe_file_name("cam 01_称量.MP4") == "cam-01_.mp4"
 
 
 def test_web_end_to_end_metrics_preserve_pipeline_metrics(tmp_path):

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
+from labvision_evidence import video_io
 from labvision_evidence.actions import fuse_motion_probe_candidates
 from labvision_evidence.alignment import _absolute_clock_transform
 from labvision_evidence.detection import (
@@ -388,3 +389,88 @@ def test_parallel_motion_probe_preserves_segment_order(monkeypatch, default_conf
         2_000.0,
     ]
     assert [item.chunk_index for item in items if isinstance(item, ChunkEnd)] == [0, 1, 2]
+
+
+def test_sequential_sparse_strategy_bypasses_random_indexed_seeks(monkeypatch, tmp_path):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"placeholder")
+    info = VideoInfo(
+        path=source,
+        duration_ms=60_000,
+        fps=30,
+        width=1280,
+        height=720,
+        frame_count=1800,
+    )
+    indexed_calls = []
+    ffmpeg_calls = []
+
+    def fake_indexed(*args, **kwargs):
+        indexed_calls.append(True)
+        yield from ()
+
+    def fake_ffmpeg(*args, **kwargs):
+        ffmpeg_calls.append(args)
+        yield 0, 0.0, np.zeros((36, 64, 3), dtype=np.uint8)
+
+    monkeypatch.setattr(video_io, "_opencv_indexed_seek_iterator", fake_indexed)
+    monkeypatch.setattr(video_io, "_ffmpeg_frame_iterator", fake_ffmpeg)
+    monkeypatch.setattr(video_io.shutil, "which", lambda name: "ffmpeg")
+
+    frames = list(
+        video_io.iter_sampled_frames(
+            source,
+            info,
+            0.0,
+            60_000.0,
+            0.1,
+            416,
+            "cuda",
+            True,
+            None,
+            "sequential_keyframes",
+        )
+    )
+
+    assert len(frames) == 1
+    assert not indexed_calls
+    assert len(ffmpeg_calls) == 1
+
+
+def test_short_microbatch_does_not_permanently_contract_engine_capacity(monkeypatch, default_config):
+    scanner = RoleScanner.__new__(RoleScanner)
+    scanner.role = ViewRole.FIRST_PERSON
+    scanner.config = default_config
+    scanner.model_path = Path("model.engine")
+    scanner.names = {0: "hand"}
+    scanner.requested_batch_size = 8
+    scanner.engine_build_batch = 8
+    scanner.batch_size = 8
+    scanner.initial_batch_size = 8
+    scanner.batch_contractions = []
+    scanner.last_inference_batch_sizes = []
+    scanner.image_size = 416
+
+    class EmptyPrediction:
+        boxes = None
+
+    class FakeModel:
+        def predict(self, source, **kwargs):
+            return [EmptyPrediction() for _ in source]
+
+    scanner.model = FakeModel()
+    packet = FramePacket(
+        view=ViewInput(view_id="fp", role=ViewRole.FIRST_PERSON, video=Path("fp.mp4")),
+        frame_index=0,
+        local_ms=0.0,
+        frame=np.zeros((8, 8, 3), dtype=np.uint8),
+        gray=np.zeros((8, 8), dtype=np.uint8),
+        previous_gray=None,
+        motion_score=0.0,
+    )
+
+    scanner.infer([packet])
+
+    assert scanner.last_inference_batch_sizes == [1]
+    assert scanner.batch_size == 8
+    assert scanner.batch_contractions == []

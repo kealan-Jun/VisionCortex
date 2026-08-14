@@ -1351,7 +1351,14 @@ class EvidencePipeline:
                 self.config,
                 publisher=self._publisher,
             )
-            self._complete_stage(layout, "key_materials", [layout.key_materials])
+            self._complete_stage(
+                layout,
+                "key_materials",
+                [
+                    layout.key_materials,
+                    layout.json_config / "key_material_materialization_runtime.json",
+                ],
+            )
 
             self._status(layout, "mllm", 0.92, "调用豆包理解去重后的关键动作当前/下一步骤")
             analyze_key_materials(layout, key_events, self.config)
