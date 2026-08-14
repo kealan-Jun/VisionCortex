@@ -6,8 +6,10 @@ import math
 import shutil
 import subprocess
 import tempfile
+from collections import OrderedDict
 from collections.abc import Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -558,6 +560,62 @@ def read_view_frame_at(view: ViewInput, info: VideoInfo, local_ms: float) -> np.
     return None
 
 
+class ViewFrameReader:
+    """Reuse a small LRU set of decoder handles for nearby storyboard/key frames."""
+
+    def __init__(self, max_open: int = 2):
+        self.max_open = max(1, int(max_open))
+        self._captures: OrderedDict[Path, cv2.VideoCapture] = OrderedDict()
+
+    @staticmethod
+    def _source(view: ViewInput, info: VideoInfo, local_ms: float) -> tuple[Path, float] | None:
+        if not info.segments:
+            assert view.video is not None
+            return view.video, local_ms
+        for segment in info.segments:
+            if segment.virtual_start_ms <= local_ms <= segment.virtual_end_ms:
+                return segment.path, local_ms - segment.virtual_start_ms
+        return None
+
+    def read(self, view: ViewInput, info: VideoInfo, local_ms: float) -> np.ndarray | None:
+        source = self._source(view, info, local_ms)
+        if source is None:
+            return None
+        path, source_ms = source
+        capture = self._captures.pop(path, None)
+        if capture is None or not capture.isOpened():
+            if capture is not None:
+                capture.release()
+            capture = cv2.VideoCapture(str(path))
+            if not capture.isOpened():
+                capture.release()
+                return None
+        self._captures[path] = capture
+        while len(self._captures) > self.max_open:
+            _old_path, old_capture = self._captures.popitem(last=False)
+            old_capture.release()
+        capture.set(cv2.CAP_PROP_POS_MSEC, max(0.0, source_ms))
+        ok, frame = capture.read()
+        return frame if ok else None
+
+    def close(self) -> None:
+        captures = getattr(self, "_captures", None)
+        if captures is None:
+            return
+        for capture in captures.values():
+            capture.release()
+        captures.clear()
+
+    def __enter__(self) -> "ViewFrameReader":
+        return self
+
+    def __exit__(self, *_args: Any) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        self.close()
+
+
 def motion_signature(path: Path, local_times_ms: Sequence[float]) -> np.ndarray:
     values: list[float] = []
     previous: np.ndarray | None = None
@@ -614,6 +672,7 @@ def view_motion_signature(
     return values
 
 
+@lru_cache(maxsize=8)
 def _encoder_available(name: str) -> bool:
     result = _run(["ffmpeg", "-hide_banner", "-encoders"])
     return result.returncode == 0 and name.encode() in result.stdout

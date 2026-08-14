@@ -36,6 +36,9 @@ performance:
   motion_probe_fallback_peaks_per_hour: 8
   motion_probe_fallback_separation_seconds: 120.0
   motion_probe_fallback_window_seconds: 60.0
+  # Indexed seek is latency-bound; three segment readers overlap SMB latency
+  # without asking TensorRT or NVDEC to load extra model contexts.
+  motion_probe_segment_workers: 3
   motion_signature_size: [64, 36]
   detection_fps: 10.0
   image_size: 640
@@ -50,6 +53,7 @@ performance:
   decode_queue_depth: 32
   cpu_decode_threads: 8
   yolo_inference_workers: 2
+  inference_batch_wait_ms: 25
   materialization_workers: 2
   io_workers: 4
   max_gpu_memory_fraction: 0.88

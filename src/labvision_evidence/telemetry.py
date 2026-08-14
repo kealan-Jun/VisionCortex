@@ -13,6 +13,68 @@ from typing import Any
 import psutil
 
 
+class _NvmlSampler:
+    def __init__(self) -> None:
+        import pynvml
+
+        self.module = pynvml
+        pynvml.nvmlInit()
+        self.handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+
+    @classmethod
+    def create(cls) -> "_NvmlSampler | None":
+        try:
+            return cls()
+        except Exception:
+            # GPU telemetry is optional.  pynvml raises its own exception
+            # hierarchy when the package exists but the driver is unavailable.
+            return None
+
+    def sample(self) -> dict[str, Any]:
+        nvml = self.module
+
+        def value(call, scale: float = 1.0) -> float | None:
+            try:
+                return float(call()) / scale
+            except Exception:  # NVML raises different driver-specific subclasses.
+                return None
+
+        utilization = None
+        try:
+            utilization = nvml.nvmlDeviceGetUtilizationRates(self.handle)
+        except Exception:
+            pass
+        memory = None
+        try:
+            memory = nvml.nvmlDeviceGetMemoryInfo(self.handle)
+        except Exception:
+            pass
+        decoder = value(lambda: nvml.nvmlDeviceGetDecoderUtilization(self.handle)[0])
+        encoder = value(lambda: nvml.nvmlDeviceGetEncoderUtilization(self.handle)[0])
+        return {
+            "utilization.gpu": float(utilization.gpu) if utilization is not None else None,
+            "utilization.decoder": decoder,
+            "utilization.encoder": encoder,
+            "memory.used": float(memory.used) / 1024**2 if memory is not None else None,
+            "memory.total": float(memory.total) / 1024**2 if memory is not None else None,
+            "temperature.gpu": value(
+                lambda: nvml.nvmlDeviceGetTemperature(
+                    self.handle, nvml.NVML_TEMPERATURE_GPU
+                )
+            ),
+            "power.draw": value(lambda: nvml.nvmlDeviceGetPowerUsage(self.handle), 1000.0),
+            "clocks.sm": value(
+                lambda: nvml.nvmlDeviceGetClockInfo(self.handle, nvml.NVML_CLOCK_SM)
+            ),
+        }
+
+    def close(self) -> None:
+        try:
+            self.module.nvmlShutdown()
+        except Exception:
+            pass
+
+
 class ResourceMonitor:
     """Low-overhead CPU/RAM/GPU/NVDEC/NVENC telemetry sampled by stage."""
 
@@ -33,6 +95,7 @@ class ResourceMonitor:
         self._previous_network = psutil.net_io_counters()
         self._previous_process_io = self._process_tree_io()
         self._previous_perf = time.perf_counter()
+        self._nvml = _NvmlSampler.create()
 
     def set_stage(self, stage: str) -> None:
         self._stage = stage
@@ -69,6 +132,9 @@ class ResourceMonitor:
                     "latest": latest,
                 },
             )
+        if self._nvml is not None:
+            self._nvml.close()
+            self._nvml = None
         return report
 
     @staticmethod
@@ -79,7 +145,7 @@ class ResourceMonitor:
         os.replace(temporary, path)
 
     @staticmethod
-    def _gpu() -> dict[str, Any]:
+    def _gpu_nvidia_smi() -> dict[str, Any]:
         if not shutil.which("nvidia-smi"):
             return {}
         fields = ["utilization.gpu", "utilization.decoder", "utilization.encoder", "memory.used",
@@ -101,6 +167,13 @@ class ResourceMonitor:
             except ValueError:
                 parsed[key] = None
         return parsed
+
+    def _gpu(self) -> dict[str, Any]:
+        if self._nvml is not None:
+            values = self._nvml.sample()
+            if any(value is not None for value in values.values()):
+                return values
+        return self._gpu_nvidia_smi()
 
     @staticmethod
     def _process_tree_io() -> dict[str, int]:
@@ -249,6 +322,7 @@ class ResourceMonitor:
             "schema_version": "visioncortex-resource-telemetry/2",
             "sample_count": len(self._samples),
             "sampling_interval_seconds": self.interval,
+            "gpu_telemetry_backend": "nvml" if self._nvml is not None else "nvidia-smi",
             "network_scope_note": (
                 "Host NIC counters include unrelated host traffic; pipeline process-tree I/O is "
                 "reported separately and includes local and NAS file I/O."

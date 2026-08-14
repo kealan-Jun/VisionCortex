@@ -6,7 +6,8 @@ import math
 import queue
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -146,8 +147,17 @@ def _read_checkpoint(path: Path, output_path: Path | None = None) -> set[int]:
         if output_path is None or not output_path.is_file():
             return set()
         expected_size = payload.get("output_size_bytes")
-        if expected_size is not None and output_path.stat().st_size != int(expected_size):
-            return set()
+        if expected_size is not None:
+            expected = int(expected_size)
+            actual = output_path.stat().st_size
+            if actual < expected:
+                return set()
+            if actual > expected:
+                # Frames beyond the last committed ChunkEnd are uncheckpointed.
+                # Roll only that partial tail back instead of discarding every
+                # previously durable work unit.
+                with output_path.open("r+b") as handle:
+                    handle.truncate(expected)
         if output_path.stat().st_size <= 0:
             return set()
         return completed
@@ -192,7 +202,14 @@ def _producer(
     perf = config["performance"]
     chunk_ms = float(perf["chunk_seconds"]) * 1000.0
     spans = windows if windows is not None else [(0.0, info.duration_ms)]
-    if windows is None and info.segments and perf.get("synchronized_segment_waves"):
+    if (
+        windows is None
+        and info.segments
+        and (
+            perf.get("synchronized_segment_waves")
+            or (keyframes_only and int(perf.get("motion_probe_segment_workers", 1)) > 1)
+        )
+    ):
         work_units = [
             (segment.virtual_start_ms, segment.virtual_end_ms) for segment in info.segments
         ]
@@ -230,7 +247,96 @@ def _producer(
         with output_queue.activity_lock:
             with activity_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+    def iter_decoded_frames(
+        start_ms: float, end_ms: float
+    ) -> Iterable[tuple[int, float, np.ndarray]]:
+        return iter_view_sampled_frames(
+            view,
+            info,
+            start_ms,
+            end_ms,
+            decode_fps,
+            max_width,
+            "cuda" if decode_backend == "cuda" else None,
+            keyframes_only,
+            int(perf.get("cpu_decode_threads", 0)) if decode_backend == "cpu" else None,
+        )
+
+    def decoded_frames(start_ms: float, end_ms: float) -> list[tuple[int, float, np.ndarray]]:
+        return list(iter_decoded_frames(start_ms, end_ms))
+
+    def emit_frames(frames: Iterable[tuple[int, float, np.ndarray]], start_ms: float) -> None:
+        nonlocal previous_gray, previous_signature
+        next_yolo_ms = start_ms
+        for frame_index, local_ms, frame in frames:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            signature = cv2.resize(gray, motion_signature_size, interpolation=cv2.INTER_AREA)
+            motion = (
+                float(cv2.absdiff(signature, previous_signature).mean())
+                if previous_signature is not None
+                else 0.0
+            )
+            previous_signature = signature
+            if local_ms + 0.5 < next_yolo_ms:
+                previous_gray = gray
+                continue
+            output_queue.put(
+                FramePacket(
+                    view=view,
+                    frame_index=frame_index,
+                    local_ms=local_ms,
+                    frame=frame,
+                    gray=gray,
+                    previous_gray=previous_gray,
+                    motion_score=motion,
+                )
+            )
+            previous_gray = gray
+            while next_yolo_ms <= local_ms + 0.5:
+                next_yolo_ms += sample_period_ms
+
+    def finish_unit(chunk_index: int, total_chunks: int) -> None:
+        output_queue.put(
+            ChunkEnd(
+                view_id=view.view_id,
+                chunk_index=chunk_index,
+                total_chunks=total_chunks,
+            )
+        )
+        activity("source_unit_completed", chunk_index)
+
+    parallel_probe_workers = max(
+        1,
+        int(perf.get("motion_probe_segment_workers", 1)),
+    )
+    parallel_probe = (
+        keyframes_only
+        and bool(info.segments)
+        and windows is None
+        and wave_barrier is None
+        and parallel_probe_workers > 1
+    )
     try:
+        if parallel_probe:
+            futures: dict[int, Any] = {}
+            with ThreadPoolExecutor(
+                max_workers=min(parallel_probe_workers, len(work_units)),
+                thread_name_prefix=f"probe-segment-{view.view_id}",
+            ) as executor:
+                for chunk_index, (start_ms, end_ms) in enumerate(work_units):
+                    activity("source_unit_started", chunk_index)
+                    if chunk_index not in completed_chunks:
+                        futures[chunk_index] = executor.submit(decoded_frames, start_ms, end_ms)
+                for chunk_index, (start_ms, _end_ms) in enumerate(work_units):
+                    if chunk_index in completed_chunks:
+                        activity("source_unit_reused", chunk_index)
+                        finish_unit(chunk_index, len(work_units))
+                        continue
+                    emit_frames(futures[chunk_index].result(), start_ms)
+                    finish_unit(chunk_index, len(work_units))
+            return
+
         for chunk_index, (start_ms, end_ms) in enumerate(work_units):
             activity("source_unit_started", chunk_index)
             if chunk_index in completed_chunks:
@@ -247,51 +353,8 @@ def _producer(
                         timeout=float(perf.get("segment_wave_timeout_seconds", 3600))
                     )
                 continue
-            next_yolo_ms = start_ms
-            for frame_index, local_ms, frame in iter_view_sampled_frames(
-                view,
-                info,
-                start_ms,
-                end_ms,
-                decode_fps,
-                max_width,
-                "cuda" if decode_backend == "cuda" else None,
-                keyframes_only,
-                int(perf.get("cpu_decode_threads", 0)) if decode_backend == "cpu" else None,
-            ):
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                signature = cv2.resize(gray, motion_signature_size, interpolation=cv2.INTER_AREA)
-                motion = (
-                    float(cv2.absdiff(signature, previous_signature).mean())
-                    if previous_signature is not None
-                    else 0.0
-                )
-                previous_signature = signature
-                if local_ms + 0.5 < next_yolo_ms:
-                    previous_gray = gray
-                    continue
-                output_queue.put(
-                    FramePacket(
-                        view=view,
-                        frame_index=frame_index,
-                        local_ms=local_ms,
-                        frame=frame,
-                        gray=gray,
-                        previous_gray=previous_gray,
-                        motion_score=motion,
-                    )
-                )
-                previous_gray = gray
-                while next_yolo_ms <= local_ms + 0.5:
-                    next_yolo_ms += sample_period_ms
-            output_queue.put(
-                ChunkEnd(
-                    view_id=view.view_id,
-                    chunk_index=chunk_index,
-                    total_chunks=len(work_units),
-                )
-            )
-            activity("source_unit_completed", chunk_index)
+            emit_frames(iter_decoded_frames(start_ms, end_ms), start_ms)
+            finish_unit(chunk_index, len(work_units))
             if wave_barrier is not None:
                 wave_barrier.wait(timeout=float(perf.get("segment_wave_timeout_seconds", 3600)))
     except Exception as exc:  # producer errors must cross the thread boundary
@@ -475,6 +538,7 @@ class RoleScanner:
             self.requested_batch_size,
             self.engine_build_batch or self.requested_batch_size,
         )
+        self.last_inference_batch_sizes: list[int] = []
         self.image_size = int(image_size or config["performance"]["image_size"])
 
     def close(self) -> None:
@@ -494,8 +558,10 @@ class RoleScanner:
         while True:
             try:
                 results: list[list[BoxEvidence]] = []
+                actual_batch_sizes: list[int] = []
                 for start in range(0, len(packets), batch_size):
                     sub_batch = packets[start : start + batch_size]
+                    actual_batch_sizes.append(len(sub_batch))
                     predictions = self.model.predict(
                         source=[packet.frame for packet in sub_batch],
                         imgsz=self.image_size,
@@ -525,6 +591,7 @@ class RoleScanner:
                                 )
                         results.append(boxes)
                 self.batch_size = batch_size
+                self.last_inference_batch_sizes = actual_batch_sizes
                 return results
             except RuntimeError as exc:
                 if "out of memory" not in str(exc).lower() or batch_size <= 1:
@@ -613,6 +680,9 @@ def scan_videos(
             "image_size": effective_image_size,
             "yolo_sample_fps": effective_fps,
             "motion_probe_fps": probe_fps,
+            "motion_probe_segment_workers": int(
+                config["performance"].get("motion_probe_segment_workers", 1)
+            ),
             "decode_backends": {
                 view.view_id: (decode_backends or {}).get(
                     view.view_id,
@@ -670,71 +740,110 @@ def scan_videos(
             thread.start()
 
         ended: set[str] = set()
-        batch: list[FramePacket] = []
+        pending_items: list[Any] = []
+        pending_frame_count = 0
         errors: list[str] = []
         batch_sizes: list[int] = []
         motion_sample_count = 0
         max_queue_size = 0
+        microbatch_timeout_flushes = 0
+        full_batch_flushes = 0
+        control_only_flushes = 0
+        batch_started_at: float | None = None
+        received_ends: set[str] = set()
+        batch_wait_seconds = max(
+            0.001,
+            float(config["performance"].get("inference_batch_wait_ms", 25.0)) / 1000.0,
+        )
 
-        def flush() -> None:
-            nonlocal motion_sample_count
-            if not batch:
+        def flush_pending(reason: str) -> None:
+            nonlocal pending_frame_count, motion_sample_count, batch_started_at
+            nonlocal microbatch_timeout_flushes, full_batch_flushes, control_only_flushes
+            if not pending_items:
                 return
+            frames = [item for item in pending_items if isinstance(item, FramePacket)]
             if scanner is None:
-                inferred = [[] for _ in batch]
-                motion_sample_count += len(batch)
+                inferred = [[] for _ in frames]
+                motion_sample_count += len(frames)
             else:
-                batch_sizes.append(len(batch))
-                inferred = scanner.infer(batch)
-            for packet, boxes in zip(batch, inferred, strict=True):
-                tracked = (
-                    trackers[packet.view.view_id].update(boxes, packet.local_ms)
-                    if scanner is not None
-                    else []
-                )
-                evidence = FrameEvidence(
-                    view_id=packet.view.view_id,
-                    role=packet.view.role,
-                    frame_index=packet.frame_index,
-                    local_ms=packet.local_ms,
-                    global_ms=transforms[packet.view.view_id].to_global(packet.local_ms),
-                    width=packet.frame.shape[1],
-                    height=packet.frame.shape[0],
-                    motion_score=packet.motion_score,
-                    detections=tracked,
-                )
-                writers[packet.view.view_id].write(evidence.model_dump_json() + "\n")
-            batch.clear()
+                inferred = scanner.infer(frames) if frames else []
+                if frames:
+                    batch_sizes.extend(scanner.last_inference_batch_sizes)
+            if reason == "full_batch":
+                full_batch_flushes += 1
+            elif reason == "timeout":
+                microbatch_timeout_flushes += 1
+            elif not frames:
+                control_only_flushes += 1
+            inferred_iter = iter(inferred)
+            for item in pending_items:
+                if isinstance(item, FramePacket):
+                    boxes = next(inferred_iter)
+                    tracked = (
+                        trackers[item.view.view_id].update(boxes, item.local_ms)
+                        if scanner is not None
+                        else []
+                    )
+                    evidence = FrameEvidence(
+                        view_id=item.view.view_id,
+                        role=item.view.role,
+                        frame_index=item.frame_index,
+                        local_ms=item.local_ms,
+                        global_ms=transforms[item.view.view_id].to_global(item.local_ms),
+                        width=item.frame.shape[1],
+                        height=item.frame.shape[0],
+                        motion_score=item.motion_score,
+                        detections=tracked,
+                    )
+                    writers[item.view.view_id].write(evidence.model_dump_json() + "\n")
+                elif isinstance(item, ChunkEnd):
+                    writers[item.view_id].flush()
+                    completed[item.view_id].add(item.chunk_index)
+                    _write_checkpoint(
+                        checkpoint_paths[item.view_id],
+                        completed[item.view_id],
+                        output_paths[item.view_id],
+                    )
+                    if progress_callback is not None:
+                        progress_callback(
+                            item.view_id,
+                            len(completed[item.view_id]),
+                            item.total_chunks,
+                        )
+                elif isinstance(item, ProducerError):
+                    errors.append(f"{item.view_id}: {item.message}")
+                elif isinstance(item, ProducerEnd):
+                    ended.add(item.view_id)
+            pending_items.clear()
+            pending_frame_count = 0
+            batch_started_at = None
 
         try:
-            while len(ended) < len(role_views):
-                item = frame_queue.get()
+            while len(received_ends) < len(role_views):
+                timeout = None
+                if scanner is not None and pending_frame_count and batch_started_at is not None:
+                    timeout = max(0.0, batch_wait_seconds - (time.perf_counter() - batch_started_at))
+                try:
+                    item = frame_queue.get(timeout=timeout)
+                except queue.Empty:
+                    flush_pending("timeout")
+                    continue
                 max_queue_size = max(max_queue_size, frame_queue.qsize())
+                pending_items.append(item)
                 if isinstance(item, FramePacket):
-                    batch.append(item)
-                    if scanner is None or len(batch) >= scanner.batch_size:
-                        flush()
+                    pending_frame_count += 1
+                    if batch_started_at is None:
+                        batch_started_at = time.perf_counter()
+                    if scanner is None:
+                        flush_pending("motion_frame")
+                    elif pending_frame_count >= scanner.batch_size:
+                        flush_pending("full_batch")
                 else:
-                    flush()
-                    if isinstance(item, ChunkEnd):
-                        writers[item.view_id].flush()
-                        completed[item.view_id].add(item.chunk_index)
-                        _write_checkpoint(
-                            checkpoint_paths[item.view_id],
-                            completed[item.view_id],
-                            output_paths[item.view_id],
-                        )
-                        if progress_callback is not None:
-                            progress_callback(
-                                item.view_id,
-                                len(completed[item.view_id]),
-                                item.total_chunks,
-                            )
-                    elif isinstance(item, ProducerError):
-                        errors.append(f"{item.view_id}: {item.message}")
-                    elif isinstance(item, ProducerEnd):
-                        ended.add(item.view_id)
-            flush()
+                    if isinstance(item, ProducerEnd):
+                        received_ends.add(item.view_id)
+                    if pending_frame_count == 0:
+                        flush_pending("control_only")
+            flush_pending("producer_end")
             if errors:
                 raise RuntimeError("；".join(errors))
         finally:
@@ -765,6 +874,10 @@ def scan_videos(
                     ),
                     "max_observed_queue_depth": max_queue_size,
                     "configured_queue_depth": queue_depth,
+                    "inference_batch_wait_ms": round(batch_wait_seconds * 1000.0, 3),
+                    "full_batch_flushes": full_batch_flushes,
+                    "microbatch_timeout_flushes": microbatch_timeout_flushes,
+                    "control_only_flushes": control_only_flushes,
                 }
             )
             runtime_path.write_text(

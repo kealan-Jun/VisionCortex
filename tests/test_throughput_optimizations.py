@@ -1,0 +1,157 @@
+import json
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import numpy as np
+
+from labvision_evidence import storage, video_io
+from labvision_evidence.mllm import ArkAnalyzer
+from labvision_evidence.schemas import VideoInfo, ViewInput, ViewRole
+from labvision_evidence.storage import IncrementalArchivePublisher
+from labvision_evidence.telemetry import _NvmlSampler
+from labvision_evidence.video_io import ViewFrameReader
+
+
+def test_mllm_reuses_one_http_connection_pool(monkeypatch, default_config):
+    clients = []
+
+    class FakeResponse:
+        is_error = False
+
+        def json(self):
+            return {
+                "choices": [{"message": {"content": json.dumps({"confidence": 0.9})}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
+            }
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            self.posts = 0
+            self.closed = False
+            clients.append(self)
+
+        def post(self, *_args, **_kwargs):
+            self.posts += 1
+            return FakeResponse()
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setenv("ARK_API_KEY", "configured-for-test")
+    monkeypatch.setattr("labvision_evidence.mllm.httpx.Client", FakeClient)
+    analyzer = ArkAnalyzer(default_config)
+    first = analyzer._call("system", {"event": 1}, [])
+    second = analyzer._call("system", {"event": 2}, [])
+    analyzer.close()
+
+    assert first["status"] == second["status"] == "completed"
+    assert len(clients) == 1
+    assert clients[0].posts == 2
+    assert clients[0].closed is True
+
+
+def test_encoder_capability_is_probed_once(monkeypatch):
+    calls = []
+
+    def fake_run(command, timeout=None):
+        calls.append((command, timeout))
+        return SimpleNamespace(returncode=0, stdout=b"h264_nvenc", stderr=b"")
+
+    video_io._encoder_available.cache_clear()
+    monkeypatch.setattr(video_io, "_run", fake_run)
+    assert video_io._encoder_available("h264_nvenc") is True
+    assert video_io._encoder_available("h264_nvenc") is True
+    assert len(calls) == 1
+
+
+def test_frame_reader_reuses_decoder_for_same_segment(monkeypatch):
+    opened = []
+
+    class FakeCapture:
+        def __init__(self, path):
+            self.path = path
+            self.released = False
+            opened.append(self)
+
+        def isOpened(self):
+            return not self.released
+
+        def set(self, *_args):
+            return True
+
+        def read(self):
+            return True, np.zeros((8, 8, 3), dtype=np.uint8)
+
+        def release(self):
+            self.released = True
+
+    monkeypatch.setattr(video_io.cv2, "VideoCapture", FakeCapture)
+    path = Path("same.mp4")
+    view = ViewInput(view_id="fp", role=ViewRole.FIRST_PERSON, video=path)
+    info = VideoInfo(
+        path=path,
+        duration_ms=10_000.0,
+        fps=30.0,
+        width=8,
+        height=8,
+        frame_count=300,
+        size_bytes=100,
+    )
+    with ViewFrameReader(max_open=2) as reader:
+        assert reader.read(view, info, 1_000.0) is not None
+        assert reader.read(view, info, 2_000.0) is not None
+    assert len(opened) == 1
+    assert opened[0].released is True
+
+
+def test_nvml_sampler_uses_persistent_driver_handle(monkeypatch):
+    calls = {"init": 0, "shutdown": 0}
+    fake = SimpleNamespace(
+        NVML_TEMPERATURE_GPU=0,
+        NVML_CLOCK_SM=1,
+        nvmlInit=lambda: calls.__setitem__("init", calls["init"] + 1),
+        nvmlShutdown=lambda: calls.__setitem__("shutdown", calls["shutdown"] + 1),
+        nvmlDeviceGetHandleByIndex=lambda _index: "gpu0",
+        nvmlDeviceGetUtilizationRates=lambda _handle: SimpleNamespace(gpu=87),
+        nvmlDeviceGetMemoryInfo=lambda _handle: SimpleNamespace(
+            used=4 * 1024**3, total=8 * 1024**3
+        ),
+        nvmlDeviceGetDecoderUtilization=lambda _handle: (63, 1_000),
+        nvmlDeviceGetEncoderUtilization=lambda _handle: (11, 1_000),
+        nvmlDeviceGetTemperature=lambda _handle, _sensor: 72,
+        nvmlDeviceGetPowerUsage=lambda _handle: 101_500,
+        nvmlDeviceGetClockInfo=lambda _handle, _clock: 2_100,
+    )
+    monkeypatch.setitem(sys.modules, "pynvml", fake)
+    sampler = _NvmlSampler.create()
+    assert sampler is not None
+    sample = sampler.sample()
+    sampler.close()
+    assert sample["utilization.gpu"] == 87.0
+    assert sample["utilization.decoder"] == 63.0
+    assert sample["memory.used"] == 4096.0
+    assert sample["power.draw"] == 101.5
+    assert calls == {"init": 1, "shutdown": 1}
+
+
+def test_publisher_ledger_skips_rehashing_verified_file(monkeypatch, tmp_path):
+    local = tmp_path / "local"
+    nas = tmp_path / "nas"
+    source = local / "JSON-Config-Files" / "result.json"
+    source.parent.mkdir(parents=True)
+    source.write_text('{"passed":true}', encoding="utf-8")
+    hash_calls = []
+    original = storage._sha256_file
+
+    def counted(path):
+        hash_calls.append(path)
+        return original(path)
+
+    monkeypatch.setattr(storage, "_sha256_file", counted)
+    publisher = IncrementalArchivePublisher(local, nas)
+    publisher.publish_file(source)
+    first_count = len(hash_calls)
+    publisher.publish_file(source)
+    assert first_count > 0
+    assert len(hash_calls) == first_count

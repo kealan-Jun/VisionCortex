@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import threading
 import uuid
 from pathlib import Path, PureWindowsPath
 from typing import Any, Callable
@@ -185,15 +186,38 @@ class IncrementalArchivePublisher:
     def __init__(self, local_root: Path, nas_root: Path):
         self.local_root = local_root.resolve()
         self.nas_root = nas_root
+        self._verified: dict[str, tuple[int, int, int, int]] = {}
+        self._verified_lock = threading.Lock()
 
     def publish_file(self, source: Path) -> Path:
         source = source.resolve()
         relative = source.relative_to(self.local_root)
         destination = self.nas_root / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
-        source_size = source.stat().st_size
+        source_stat = source.stat()
+        source_size = source_stat.st_size
+        ledger_key = relative.as_posix()
+        if destination.is_file():
+            destination_stat = destination.stat()
+            with self._verified_lock:
+                verified = self._verified.get(ledger_key)
+            if verified == (
+                source_size,
+                source_stat.st_mtime_ns,
+                destination_stat.st_size,
+                destination_stat.st_mtime_ns,
+            ):
+                return destination
         if destination.is_file() and destination.stat().st_size == source_size:
             if _sha256_file(destination) == _sha256_file(source):
+                destination_stat = destination.stat()
+                with self._verified_lock:
+                    self._verified[ledger_key] = (
+                        source_size,
+                        source_stat.st_mtime_ns,
+                        destination_stat.st_size,
+                        destination_stat.st_mtime_ns,
+                    )
                 return destination
         temporary = destination.with_name(f".{destination.name}.partial-{uuid.uuid4().hex[:8]}")
         try:
@@ -201,6 +225,14 @@ class IncrementalArchivePublisher:
             if temporary.stat().st_size != source_size or _sha256_file(temporary) != _sha256_file(source):
                 raise IOError(f"NAS published file verification failed: {destination}")
             os.replace(temporary, destination)
+            destination_stat = destination.stat()
+            with self._verified_lock:
+                self._verified[ledger_key] = (
+                    source_size,
+                    source_stat.st_mtime_ns,
+                    destination_stat.st_size,
+                    destination_stat.st_mtime_ns,
+                )
         except Exception:
             temporary.unlink(missing_ok=True)
             raise

@@ -15,6 +15,19 @@ def test_detection_checkpoint_requires_matching_nonempty_ledger(tmp_path):
     assert _read_checkpoint(checkpoint, ledger) == set()
 
 
+def test_detection_checkpoint_truncates_only_uncommitted_tail(tmp_path):
+    checkpoint = tmp_path / "view.checkpoint.json"
+    ledger = tmp_path / "view.detections.jsonl"
+    ledger.write_text('{"frame":1}\n', encoding="utf-8")
+    _write_checkpoint(checkpoint, {0}, ledger)
+    committed = ledger.read_bytes()
+    with ledger.open("ab") as handle:
+        handle.write(b'{"partial":true}\n')
+
+    assert _read_checkpoint(checkpoint, ledger) == {0}
+    assert ledger.read_bytes() == committed
+
+
 def test_incremental_publisher_reuses_identical_destination(tmp_path):
     local = tmp_path / "local"
     nas = tmp_path / "nas"

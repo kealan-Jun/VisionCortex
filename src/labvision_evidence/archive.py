@@ -27,9 +27,9 @@ from .schemas import (
     ViewInput,
 )
 from .video_io import (
+    ViewFrameReader,
     create_grid_video,
     extract_view_clip,
-    read_view_frame_at,
     write_annotated_frame,
 )
 
@@ -282,27 +282,28 @@ def analyze_experiment_groups(
                 pass
         storyboard: list[tuple[str, Path]] = []
         storyboard_dir = layout.work / "group-storyboards" / group.group_id
-        for index, global_ms in enumerate(_storyboard_times(group, events, max_pairs), 1):
-            for role_label, view_id in (
-                ("first_person", group.first_person_view),
-                ("third_person", group.third_person_view),
-            ):
-                local_ms = transforms[view_id].to_local(global_ms)
-                if not 0.0 <= local_ms <= infos[view_id].duration_ms:
-                    continue
-                frame = read_view_frame_at(by_view[view_id], infos[view_id], local_ms)
-                if frame is None:
-                    continue
-                path = storyboard_dir / f"{index:02d}_{role_label}_{_safe_slug(view_id)}.jpg"
-                path.parent.mkdir(parents=True, exist_ok=True)
-                if not cv2.imwrite(str(path), frame, [cv2.IMWRITE_JPEG_QUALITY, 88]):
-                    continue
-                storyboard.append(
-                    (
-                        f"t={global_ms:.3f}ms; role={role_label}; view_id={view_id}",
-                        path,
+        with ViewFrameReader(max_open=2) as frame_reader:
+            for index, global_ms in enumerate(_storyboard_times(group, events, max_pairs), 1):
+                for role_label, view_id in (
+                    ("first_person", group.first_person_view),
+                    ("third_person", group.third_person_view),
+                ):
+                    local_ms = transforms[view_id].to_local(global_ms)
+                    if not 0.0 <= local_ms <= infos[view_id].duration_ms:
+                        continue
+                    frame = frame_reader.read(by_view[view_id], infos[view_id], local_ms)
+                    if frame is None:
+                        continue
+                    path = storyboard_dir / f"{index:02d}_{role_label}_{_safe_slug(view_id)}.jpg"
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    if not cv2.imwrite(str(path), frame, [cv2.IMWRITE_JPEG_QUALITY, 88]):
+                        continue
+                    storyboard.append(
+                        (
+                            f"t={global_ms:.3f}ms; role={role_label}; view_id={view_id}",
+                            path,
+                        )
                     )
-                )
         atomic = [by_segment[item] for item in group.atomic_experiment_ids]
         event_ids = {event_id for segment in atomic for event_id in segment.event_ids}
         group_events = [event for event in events if event.event_id in event_ids]
@@ -312,34 +313,39 @@ def analyze_experiment_groups(
         return group, result
 
     workers = max(1, int(config["mllm"].get("group_workers", 2)))
-    with ThreadPoolExecutor(max_workers=min(workers, max(1, len(groups)))) as executor:
-        futures = [executor.submit(analyze, group) for group in groups]
-        for future in as_completed(futures):
-            group, result = future.result()
-            group.model_understanding = result
-            if result.get("status") == "completed":
-                group.experiment_name = str(result.get("experiment_name") or group.experiment_name)
-                group.experiment_name_en = _safe_slug(
-                    str(result.get("experiment_name_en") or group.experiment_name_en)
-                )
-                confirmed = result.get("continuity_type_confirmed")
-                # Rule-based continuous chains may be split only by an explicit
-                # model conflict; rule-based independent groups never merge here.
-                if confirmed == "continuous" and group.continuity_type == "continuous":
-                    group.continuity_reason += "；模型确认连续"
-                elif confirmed not in {group.continuity_type, "uncertain", None}:
-                    result.setdefault("uncertainties", []).append(
-                        "模型连续性判断与物理规则冲突，归档采用物理规则并保留冲突"
+    try:
+        with ThreadPoolExecutor(max_workers=min(workers, max(1, len(groups)))) as executor:
+            futures = [executor.submit(analyze, group) for group in groups]
+            for future in as_completed(futures):
+                group, result = future.result()
+                group.model_understanding = result
+                if result.get("status") == "completed":
+                    group.experiment_name = str(
+                        result.get("experiment_name") or group.experiment_name
                     )
-            index = int(group.group_id.rsplit("-", 1)[-1])
-            group.archive_folder = _safe_folder_name(
-                f"{index:03d}_{group.experiment_name}_{group.experiment_name_en}"
-            )
-            for segment_id in group.atomic_experiment_ids:
-                segment = by_segment[segment_id]
-                segment.experiment_name = group.experiment_name
-                segment.experiment_name_en = group.experiment_name_en
-                segment.semantic_understanding = result
+                    group.experiment_name_en = _safe_slug(
+                        str(result.get("experiment_name_en") or group.experiment_name_en)
+                    )
+                    confirmed = result.get("continuity_type_confirmed")
+                    # Rule-based continuous chains may be split only by an explicit
+                    # model conflict; rule-based independent groups never merge here.
+                    if confirmed == "continuous" and group.continuity_type == "continuous":
+                        group.continuity_reason += "；模型确认连续"
+                    elif confirmed not in {group.continuity_type, "uncertain", None}:
+                        result.setdefault("uncertainties", []).append(
+                            "模型连续性判断与物理规则冲突，归档采用物理规则并保留冲突"
+                        )
+                index = int(group.group_id.rsplit("-", 1)[-1])
+                group.archive_folder = _safe_folder_name(
+                    f"{index:03d}_{group.experiment_name}_{group.experiment_name_en}"
+                )
+                for segment_id in group.atomic_experiment_ids:
+                    segment = by_segment[segment_id]
+                    segment.experiment_name = group.experiment_name
+                    segment.experiment_name_en = group.experiment_name_en
+                    segment.semantic_understanding = result
+    finally:
+        analyzer.close()
 
 
 def _write_aligned_frame(left: Path, right: Path, destination: Path, labels: tuple[str, str]) -> None:
@@ -732,6 +738,7 @@ def materialize_key_materials(
     after = float(config["segmentation"]["key_clip_post_seconds"]) * 1000.0
     encoder = config["performance"]["ffmpeg_video_encoder"]
     group_by_event = {event_id: group for group in groups for event_id in group.key_event_ids}
+    frame_reader = ViewFrameReader(max_open=2)
     for event in events:
         if not event.accepted or event.event_id not in group_by_event:
             continue
@@ -758,7 +765,7 @@ def materialize_key_materials(
             if not 0.0 <= local_key_ms <= infos[view_id].duration_ms:
                 event.uncertainty.append(f"{view_id} 关键时间超出视频范围")
                 continue
-            frame = read_view_frame_at(view, infos[view_id], local_key_ms)
+            frame = frame_reader.read(view, infos[view_id], local_key_ms)
             if frame is None:
                 event.uncertainty.append(f"{view_id} 关键帧解码失败")
                 continue
@@ -839,6 +846,7 @@ def materialize_key_materials(
         if publisher is not None:
             publisher.publish_file(aligned_clip)
             publisher.publish_file(clip_dir / "Aligned_First+Third.json")
+    frame_reader.close()
 
 
 def analyze_key_materials(layout: ArchiveLayout, events: Sequence[EvidenceEvent], config: dict[str, Any]) -> None:
@@ -867,11 +875,14 @@ def analyze_key_materials(layout: ArchiveLayout, events: Sequence[EvidenceEvent]
         return event, result
 
     workers = max(1, int(config["mllm"].get("workers", 4)))
-    with ThreadPoolExecutor(max_workers=min(workers, max(1, len(accepted)))) as executor:
-        futures = [executor.submit(analyze, event) for event in accepted]
-        for future in as_completed(futures):
-            event, result = future.result()
-            event.model_understanding = result
+    try:
+        with ThreadPoolExecutor(max_workers=min(workers, max(1, len(accepted)))) as executor:
+            futures = [executor.submit(analyze, event) for event in accepted]
+            for future in as_completed(futures):
+                event, result = future.result()
+                event.model_understanding = result
+    finally:
+        analyzer.close()
 
 
 def refresh_key_material_metadata(

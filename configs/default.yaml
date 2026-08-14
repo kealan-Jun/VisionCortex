@@ -56,12 +56,14 @@ performance:
   motion_probe_fallback_peaks_per_hour: 8
   motion_probe_fallback_separation_seconds: 120.0
   motion_probe_fallback_window_seconds: 60.0
+  motion_probe_segment_workers: 1
   motion_signature_size: [64, 36]
   coarse_decode_lanes: [cuda, cuda, cuda, cuda, cuda, cuda]
   fine_decode_lanes: [cuda, cuda, cuda, cuda, cuda, cuda]
   cpu_decode_threads: 8
   source_workers: 6
   yolo_inference_workers: 2
+  inference_batch_wait_ms: 25
   materialization_workers: 2
   io_workers: 4
   synchronized_segment_waves: false
@@ -125,6 +127,8 @@ mllm:
   timeout_seconds: 180
   max_retries: 5
   retry_max_seconds: 30
+  keepalive_expiry_seconds: 60
+  http2: false
   max_output_tokens: 4096
   max_images_per_event: 8
   storyboard_pairs_per_group: 4

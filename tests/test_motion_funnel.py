@@ -1,14 +1,28 @@
 import json
+import queue
+import time
 from pathlib import Path
+
+import numpy as np
 
 from labvision_evidence.actions import fuse_motion_probe_candidates
 from labvision_evidence.alignment import _absolute_clock_transform
-from labvision_evidence.detection import _engine_build_batch, _tensorrt_plan_and_metadata
+from labvision_evidence.detection import (
+    ChunkEnd,
+    FramePacket,
+    ProducerEnd,
+    _engine_build_batch,
+    _producer,
+    _tensorrt_plan_and_metadata,
+    scan_videos,
+)
 from labvision_evidence.schemas import (
     ActionCandidate,
     ActionType,
+    AlignmentTransform,
     TimestampPoint,
     VideoInfo,
+    VideoSegmentInfo,
     VideoSegmentInput,
     ViewInput,
     ViewRole,
@@ -110,3 +124,146 @@ def test_absolute_clock_fit_does_not_require_simultaneous_segment_boundaries():
     assert abs(scale - 1.0) < 1e-6
     assert abs(offset - 75.0) < 0.01
     assert rmse < 0.01
+
+
+def test_inference_batch_crosses_chunk_boundary_without_losing_checkpoint(
+    monkeypatch, tmp_path, default_config
+):
+    view = ViewInput(view_id="tp", role=ViewRole.THIRD_PERSON, video=Path("unused.mp4"))
+    info = VideoInfo(
+        path=Path("unused.mp4"),
+        duration_ms=2_000.0,
+        fps=30.0,
+        width=8,
+        height=8,
+        frame_count=60,
+        size_bytes=100,
+    )
+    transform = AlignmentTransform(
+        view_id="tp", reference_view_id="tp", state="aligned", confidence=1.0
+    )
+
+    class FakeScanner:
+        calls: list[int] = []
+
+        def __init__(self, *_args, **_kwargs):
+            self.model_path = Path("fake.engine")
+            self.batch_size = 4
+            self.engine_build_batch = 4
+            self.last_inference_batch_sizes = []
+
+        def infer(self, packets):
+            self.last_inference_batch_sizes = [len(packets)]
+            self.calls.append(len(packets))
+            return [[] for _ in packets]
+
+        def close(self):
+            pass
+
+    def fake_producer(view, _info, output, *_args):
+        frame = np.zeros((8, 8, 3), dtype=np.uint8)
+        gray = np.zeros((8, 8), dtype=np.uint8)
+        for chunk in range(2):
+            for offset in range(2):
+                output.put(
+                    FramePacket(
+                        view=view,
+                        frame_index=chunk * 2 + offset,
+                        local_ms=float(chunk * 1_000 + offset * 100),
+                        frame=frame,
+                        gray=gray,
+                        previous_gray=None,
+                        motion_score=0.0,
+                    )
+                )
+            output.put(ChunkEnd(view_id=view.view_id, chunk_index=chunk, total_chunks=2))
+        output.put(ProducerEnd(view_id=view.view_id))
+
+    monkeypatch.setattr("labvision_evidence.detection.RoleScanner", FakeScanner)
+    monkeypatch.setattr("labvision_evidence.detection._producer", fake_producer)
+    default_config["performance"]["coarse_batch_size"] = 4
+    default_config["performance"]["inference_batch_wait_ms"] = 100
+    paths = scan_videos(
+        [view],
+        {"tp": info},
+        {"tp": transform},
+        tmp_path,
+        default_config,
+        phase="coarse",
+    )
+
+    assert FakeScanner.calls == [4]
+    assert len(paths["tp"].read_text(encoding="utf-8").splitlines()) == 4
+    checkpoint = json.loads((tmp_path / "tp.checkpoint.json").read_text(encoding="utf-8"))
+    assert checkpoint["completed_chunks"] == [0, 1]
+    runtime = json.loads(
+        (tmp_path / "runtime_coarse_third_person.json").read_text(encoding="utf-8")
+    )
+    assert runtime["effective_batch_fill_ratio"] == 1.0
+    assert runtime["full_batch_flushes"] == 1
+
+
+def test_parallel_motion_probe_preserves_segment_order(monkeypatch, default_config):
+    view = ViewInput(
+        view_id="fp",
+        role=ViewRole.FIRST_PERSON,
+        segments=[VideoSegmentInput(video=Path(f"segment-{index}.mp4")) for index in range(3)],
+    )
+    segments = [
+        VideoSegmentInfo(
+            path=item.video,
+            virtual_start_ms=index * 1_000.0,
+            virtual_end_ms=(index + 1) * 1_000.0,
+            frame_start_index=index * 30,
+            duration_ms=1_000.0,
+            fps=30.0,
+            width=8,
+            height=8,
+            frame_count=30,
+            size_bytes=100,
+        )
+        for index, item in enumerate(view.segments)
+    ]
+    info = VideoInfo(
+        path=segments[0].path,
+        duration_ms=3_000.0,
+        fps=30.0,
+        width=8,
+        height=8,
+        frame_count=90,
+        size_bytes=300,
+        segments=segments,
+    )
+
+    def fake_frames(_view, _info, start_ms, *_args, **_kwargs):
+        time.sleep((2_000.0 - start_ms) / 100_000.0)
+        yield int(start_ms / 1_000.0), start_ms, np.zeros((8, 8, 3), dtype=np.uint8)
+
+    monkeypatch.setattr("labvision_evidence.detection.iter_view_sampled_frames", fake_frames)
+    default_config["performance"]["motion_probe_segment_workers"] = 3
+    default_config["performance"]["synchronized_segment_waves"] = False
+    output: queue.Queue = queue.Queue()
+    _producer(
+        view,
+        info,
+        output,
+        set(),
+        default_config,
+        None,
+        0.25,
+        96,
+        True,
+        "cpu",
+        0.25,
+        (64, 36),
+        None,
+    )
+    items = []
+    while not output.empty():
+        items.append(output.get())
+    assert [item.local_ms for item in items if isinstance(item, FramePacket)] == [
+        0.0,
+        1_000.0,
+        2_000.0,
+    ]
+    assert [item.chunk_index for item in items if isinstance(item, ChunkEnd)] == [0, 1, 2]

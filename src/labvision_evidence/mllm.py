@@ -115,6 +115,23 @@ class ArkAnalyzer:
         self.config = config["mllm"]
         self.api_key = os.getenv(str(self.config["api_key_env"]))
         self.enabled = bool(self.config["enabled"])
+        pool_size = max(
+            2,
+            int(self.config.get("workers", 4)),
+            int(self.config.get("group_workers", 2)),
+        )
+        self.client = httpx.Client(
+            timeout=float(self.config["timeout_seconds"]),
+            limits=httpx.Limits(
+                max_connections=pool_size,
+                max_keepalive_connections=pool_size,
+                keepalive_expiry=float(self.config.get("keepalive_expiry_seconds", 60.0)),
+            ),
+            http2=bool(self.config.get("http2", False)),
+        )
+
+    def close(self) -> None:
+        self.client.close()
 
     @property
     def available(self) -> bool:
@@ -158,16 +175,15 @@ class ArkAnalyzer:
         started = time.perf_counter()
         for attempt in range(int(self.config["max_retries"])):
             try:
-                with httpx.Client(timeout=float(self.config["timeout_seconds"])) as client:
-                    response = client.post(url, headers=headers, json=request)
-                    if response.is_error:
-                        body = response.text[:1000]
-                        raise httpx.HTTPStatusError(
-                            f"{response.status_code} from Ark Responses API: {body}",
-                            request=response.request,
-                            response=response,
-                        )
-                    payload = response.json()
+                response = self.client.post(url, headers=headers, json=request)
+                if response.is_error:
+                    body = response.text[:1000]
+                    raise httpx.HTTPStatusError(
+                        f"{response.status_code} from Ark Responses API: {body}",
+                        request=response.request,
+                        response=response,
+                    )
+                payload = response.json()
                 result = _parse_json(_extract_text(payload))
                 result.update(
                     {
