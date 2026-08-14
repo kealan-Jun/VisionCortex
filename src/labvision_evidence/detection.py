@@ -296,6 +296,27 @@ def _select_model_path(role: ViewRole, config: dict[str, Any]) -> Path:
     return Path(models[role_name])
 
 
+def _read_tensorrt_plan(engine_path: Path) -> tuple[bytes, dict[str, Any] | None]:
+    """Return the serialized plan from raw or Ultralytics-wrapped engines."""
+
+    payload = engine_path.read_bytes()
+    if len(payload) < 4:
+        raise RuntimeError(f"TensorRT engine is truncated: {engine_path}")
+    metadata_length = int.from_bytes(payload[:4], byteorder="little")
+    if metadata_length <= 0 or metadata_length > len(payload) - 4:
+        return payload, None
+    try:
+        metadata = json.loads(payload[4 : 4 + metadata_length].decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return payload, None
+    if not isinstance(metadata, dict):
+        return payload, None
+    plan = payload[4 + metadata_length :]
+    if not plan:
+        raise RuntimeError(f"TensorRT engine plan is empty: {engine_path}")
+    return plan, metadata
+
+
 def validate_models(config: dict[str, Any]) -> dict[str, Any]:
     from ultralytics import YOLO
 
@@ -332,7 +353,8 @@ def validate_models(config: dict[str, Any]) -> dict[str, Any]:
                 raise FileNotFoundError(
                     f"TensorRT engine missing for {role.value}: {engine_path}"
                 )
-            engine = trt_runtime.deserialize_cuda_engine(engine_path.read_bytes())
+            plan, engine_metadata = _read_tensorrt_plan(engine_path)
+            engine = trt_runtime.deserialize_cuda_engine(plan)
             if engine is None:
                 raise RuntimeError(f"TensorRT engine cannot be deserialized: {engine_path}")
             runtime["roles"][role.value] = {
@@ -340,6 +362,8 @@ def validate_models(config: dict[str, Any]) -> dict[str, Any]:
                 "engine": str(engine_path),
                 "bytes": engine_path.stat().st_size,
                 "deserialized": True,
+                "container": "ultralytics" if engine_metadata is not None else "raw",
+                "build_batch": engine_metadata.get("batch") if engine_metadata else None,
             }
     else:
         for role in ViewRole:
