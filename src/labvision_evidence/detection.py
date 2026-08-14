@@ -395,7 +395,18 @@ class RoleScanner:
         expected = int(config["models"]["expected_class_count"])
         if len(self.names) != expected:
             raise ValueError(f"{self.model_path} 不是 {expected} 类模型")
-        self.batch_size = int(batch_size or config["performance"]["batch_size"])
+        self.requested_batch_size = int(batch_size or config["performance"]["batch_size"])
+        self.engine_build_batch: int | None = None
+        if self.model_path.suffix.lower() == ".engine":
+            _, engine_metadata = _read_tensorrt_plan(self.model_path)
+            if engine_metadata is not None and engine_metadata.get("batch") is not None:
+                build_batch = int(engine_metadata["batch"])
+                if build_batch > 0:
+                    self.engine_build_batch = build_batch
+        self.batch_size = min(
+            self.requested_batch_size,
+            self.engine_build_batch or self.requested_batch_size,
+        )
         self.image_size = int(image_size or config["performance"]["image_size"])
 
     def close(self) -> None:
@@ -512,6 +523,8 @@ def scan_videos(
             "model_path": str(scanner.model_path),
             "backend": "TensorRT" if scanner.model_path.suffix.lower() == ".engine" else "PyTorch",
             "requested_batch_size": phase_batch_size,
+            "effective_batch_size": scanner.batch_size,
+            "engine_build_batch": scanner.engine_build_batch,
             "image_size": effective_image_size,
             "yolo_sample_fps": effective_fps,
             "motion_probe_fps": probe_fps,
@@ -636,6 +649,11 @@ def scan_videos(
                     ),
                     "requested_batch_fill_ratio": (
                         round(sum(batch_sizes) / len(batch_sizes) / phase_batch_size, 4)
+                        if batch_sizes
+                        else 0.0
+                    ),
+                    "effective_batch_fill_ratio": (
+                        round(sum(batch_sizes) / len(batch_sizes) / scanner.batch_size, 4)
                         if batch_sizes
                         else 0.0
                     ),
