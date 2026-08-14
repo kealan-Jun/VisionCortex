@@ -807,7 +807,8 @@ class EvidencePipeline:
             for group in groups:
                 group_kwargs = dict(kwargs)
                 group_kwargs["decode_backends"] = {
-                    view.view_id: lanes[index] for index, view in enumerate(group)
+                    view.view_id: kwargs["decode_backends"][view.view_id]
+                    for view in group
                 }
                 if (
                     phase == "coarse"

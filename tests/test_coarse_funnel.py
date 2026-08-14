@@ -96,7 +96,7 @@ def test_sentinel_coarse_scan_keeps_all_views_for_fine_quality_fallback(default_
     assert report["tp2"]["selected"] is True
 
 
-def test_sequential_role_residency_reuses_all_decode_lanes(
+def test_sequential_role_residency_preserves_original_decode_lanes(
     monkeypatch, tmp_path, default_config
 ):
     views = [
@@ -145,7 +145,7 @@ def test_sequential_role_residency_reuses_all_decode_lanes(
         "tp0": "cuda",
         "tp1": "cuda",
         "tp2": "cuda",
-        "tp3": "cuda",
+        "tp3": "cpu",
         "tp4": "cpu",
     }
     scheduler = json.loads((tmp_path / "scheduler_fine.json").read_text(encoding="utf-8"))

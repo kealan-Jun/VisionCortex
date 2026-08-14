@@ -210,6 +210,95 @@ def test_inference_batch_crosses_chunk_boundary_without_losing_checkpoint(
     assert runtime["full_batch_flushes"] == 1
 
 
+def test_fine_scan_uses_six_decode_slots_without_multiplying_every_source(
+    monkeypatch, tmp_path, default_config
+):
+    views = [
+        ViewInput(view_id="fp", role=ViewRole.FIRST_PERSON, video=Path("fp.mp4")),
+        *[
+            ViewInput(
+                view_id=f"tp{index}",
+                role=ViewRole.THIRD_PERSON,
+                video=Path(f"tp{index}.mp4"),
+            )
+            for index in range(5)
+        ],
+    ]
+    infos = {
+        view.view_id: VideoInfo(
+            path=view.video,
+            duration_ms=2_000.0,
+            fps=30.0,
+            width=8,
+            height=8,
+            frame_count=60,
+            size_bytes=100,
+        )
+        for view in views
+    }
+    transforms = {
+        view.view_id: AlignmentTransform(
+            view_id=view.view_id,
+            reference_view_id="fp",
+            state="aligned",
+            confidence=1.0,
+        )
+        for view in views
+    }
+    decode_workers = {}
+
+    class FakeScanner:
+        def __init__(self, *_args, **_kwargs):
+            self.model_path = Path("fake.engine")
+            self.batch_size = 8
+            self.engine_build_batch = 8
+            self.batch_contractions = []
+
+        def infer(self, packets):
+            return [[] for _ in packets]
+
+        def close(self):
+            pass
+
+    def fake_producer(view, _info, output, *_args):
+        decode_workers[view.view_id] = _args[-1]
+        output.put(ProducerEnd(view_id=view.view_id))
+
+    monkeypatch.setattr("labvision_evidence.detection.RoleScanner", FakeScanner)
+    monkeypatch.setattr("labvision_evidence.detection._producer", fake_producer)
+    default_config["performance"]["fine_active_decode_slots"] = 6
+    default_config["performance"]["fine_first_person_decode_workers"] = 2
+    default_config["performance"]["fine_third_person_decode_workers"] = 2
+
+    scan_videos(
+        views,
+        infos,
+        transforms,
+        tmp_path,
+        default_config,
+        windows={view.view_id: [(0.0, 1_000.0)] for view in views},
+        phase="fine",
+    )
+
+    assert decode_workers == {
+        "fp": 2,
+        "tp0": 2,
+        "tp1": 1,
+        "tp2": 1,
+        "tp3": 1,
+        "tp4": 1,
+    }
+    first_runtime = json.loads(
+        (tmp_path / "runtime_fine_first_person.json").read_text(encoding="utf-8")
+    )
+    third_runtime = json.loads(
+        (tmp_path / "runtime_fine_third_person.json").read_text(encoding="utf-8")
+    )
+    assert first_runtime["total_ordered_source_decode_workers"] == 2
+    assert third_runtime["active_decode_slot_budget"] == 6
+    assert third_runtime["total_ordered_source_decode_workers"] == 6
+
+
 def test_motion_probe_can_run_yolo_on_the_same_sampled_frames(
     monkeypatch, tmp_path, default_config
 ):

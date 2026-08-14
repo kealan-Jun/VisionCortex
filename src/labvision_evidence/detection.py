@@ -209,6 +209,7 @@ def _producer(
     motion_signature_size: tuple[int, int],
     wave_barrier: threading.Barrier | None,
     phase: str = "fine",
+    decode_worker_override: int | None = None,
 ) -> None:
     perf = config["performance"]
     chunk_ms = float(perf.get(f"{phase}_chunk_seconds", perf["chunk_seconds"])) * 1000.0
@@ -330,7 +331,7 @@ def _producer(
         and wave_barrier is None
         and parallel_probe_workers > 1
     )
-    ordered_decode_workers = max(
+    configured_decode_workers = max(
         1,
         int(
             perf.get(
@@ -339,6 +340,14 @@ def _producer(
                 else "fine_third_person_decode_workers",
                 1,
             )
+        ),
+    )
+    ordered_decode_workers = max(
+        1,
+        int(
+            configured_decode_workers
+            if decode_worker_override is None
+            else decode_worker_override
         ),
     )
     ordered_decode = (
@@ -784,6 +793,30 @@ def scan_videos(
         role_views = [view for view in views if view.role == role]
         if not role_views:
             continue
+        role_decode_slot_budget = max(
+            len(role_views),
+            int(config["performance"].get("fine_active_decode_slots", len(role_views))),
+        )
+        maximum_per_source = max(
+            1,
+            int(
+                config["performance"].get(
+                    "fine_first_person_decode_workers"
+                    if role == ViewRole.FIRST_PERSON
+                    else "fine_third_person_decode_workers",
+                    1,
+                )
+            ),
+        )
+        source_decode_workers = {view.view_id: 1 for view in role_views}
+        remaining_decode_slots = max(0, role_decode_slot_budget - len(role_views))
+        if phase == "fine":
+            for view in role_views:
+                if remaining_decode_slots <= 0:
+                    break
+                added = min(maximum_per_source - 1, remaining_decode_slots)
+                source_decode_workers[view.view_id] += added
+                remaining_decode_slots -= added
         role_started = time.perf_counter()
         motion_only = phase == "motion_probe" and not bool(
             config["performance"].get("motion_probe_run_yolo", False)
@@ -816,17 +849,18 @@ def scan_videos(
             "motion_probe_segment_workers": int(
                 config["performance"].get("motion_probe_segment_workers", 1)
             ),
+            "active_decode_slot_budget": (
+                role_decode_slot_budget if phase == "fine" else len(role_views)
+            ),
             "ordered_source_decode_workers": (
-                int(
-                    config["performance"].get(
-                        "fine_first_person_decode_workers"
-                        if role == ViewRole.FIRST_PERSON
-                        else "fine_third_person_decode_workers",
-                        1,
-                    )
-                )
+                source_decode_workers
                 if phase == "fine"
-                else 1
+                else {view.view_id: 1 for view in role_views}
+            ),
+            "total_ordered_source_decode_workers": (
+                sum(source_decode_workers.values())
+                if phase == "fine"
+                else len(role_views)
             ),
             "phase_chunk_seconds": float(
                 config["performance"].get(
@@ -889,6 +923,7 @@ def scan_videos(
                     signature_size,
                     wave_barrier,
                     phase,
+                    source_decode_workers[view.view_id],
                 ),
                 name=f"decode-{view.view_id}",
                 daemon=True,
