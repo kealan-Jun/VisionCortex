@@ -21,7 +21,7 @@
 
 仓库：`https://github.com/kealan-Jun/VisionCortex.git`
 
-目标分支：`codex/post-run-throughput`
+目标分支：`codex/post-dev008-adaptive-throughput`
 
 在 4060 Codex 当前已经打开的 VisionCortex 仓库中执行。不得假定仓库位于 `D:`，也不得另建仓库副本：
 
@@ -53,8 +53,8 @@ if ($Dirty.Count -gt 0) {
 
 ```powershell
 git fetch origin
-git switch codex/post-run-throughput
-git pull --ff-only origin codex/post-run-throughput
+git switch codex/post-dev008-adaptive-throughput
+git pull --ff-only origin codex/post-dev008-adaptive-throughput
 $RunCommit = (git rev-parse HEAD).Trim()
 git status --short --branch
 Write-Host "RUN_COMMIT=$RunCommit"
@@ -107,16 +107,25 @@ $key = $null
 
 ## 4. 执行真实六路三小时全链路
 
-不要启动 dry-run，不要运行 pytest。使用仓库原有正式脚本：
+不要启动 dry-run，不要运行 pytest。先确认 Web 服务已作为隐藏后台进程启动，再用正式脚本提交一次：
 
 ```powershell
 Set-Location -LiteralPath $ProjectRoot
+.\deployment\rtx4060\03-停止Web.ps1
+.\deployment\rtx4060\02-启动Web.ps1 -NoBrowser
 .\deployment\rtx4060\04-重跑固定六路基准.ps1
 ```
+
+只有在第 3 节确认没有旧固定基准进程后，才允许执行 `03` 停止旧 Web。新 Web 健康检查必须报告 `fixed_benchmark.submission_protocol_version=1`，否则禁止提交。
+
+`04` 脚本必须在 30 秒内返回 `SUBMITTED_RUN_ID`、`STATUS_URL`、`NAS_STAGING` 和 `SUBMISSION_RECEIPT`。它只是短生命周期客户端，不拥有流水线进程；真实任务由此前已启动的 Web 服务持有。若 Web 不健康、协议版本错误、返回信息不完整或脚本超时，视为未成功提交并立即报告，禁止退回前台 CLI、禁止自行重试。提交成功后不得关闭或重启 Web 服务，也不得再次 POST。
+
+持续监控只允许读取返回的 `STATUS_URL` 与对应 NAS staging。不要让任何带超时的命令持续等待流水线，也不要把客户端命令退出码误当作流水线最终退出码。最终状态以状态 API 和 `JSON-Config-Files\pipeline_status.json` 为准。
 
 运行期间不要改参数。持续观察正式 NAS staging 中的：
 
 - `JSON-Config-Files\pipeline_status.json`
+- `JSON-Config-Files\run_submission.json`
 - `JSON-Config-Files\resource_telemetry.json`
 - `JSON-Config-Files\scan_runtime_motion_probe.json`
 - `JSON-Config-Files\scan_runtime_coarse.json`

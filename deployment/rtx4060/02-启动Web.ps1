@@ -38,6 +38,9 @@ if ($existing) {
     }
     catch { throw "Port $Port is occupied by a service that is not a healthy VisionCortex instance." }
     if ($existingHealth.status -ne 'ok') { throw "Port $Port does not expose a healthy VisionCortex instance." }
+    if ($existingHealth.fixed_benchmark.submission_protocol_version -ne 1) {
+        throw "Port $Port hosts an older VisionCortex Web process. Run 03-停止Web.ps1, then start Web again before submitting a benchmark."
+    }
     Write-Host "Port $Port already hosts VisionCortex; opening the Web UI."
 }
 else {
@@ -49,7 +52,10 @@ else {
     for ($attempt = 0; $attempt -lt 60; $attempt++) {
         try {
             $health = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/health" -TimeoutSec 2
-            if ($health.status -eq 'ok') { $ready = $true; break }
+            if ($health.status -eq 'ok' -and $health.fixed_benchmark.submission_protocol_version -eq 1) {
+                $ready = $true
+                break
+            }
         }
         catch { Start-Sleep -Milliseconds 500 }
     }

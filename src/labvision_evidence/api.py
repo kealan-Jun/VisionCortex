@@ -51,6 +51,7 @@ _lock = threading.Lock()
 _runs: dict[str, dict[str, Any]] = {}
 _BENCHMARK_EXPERIMENT_ID = "exp_20260810_144014_e918b762"
 _BENCHMARK_ARCHIVE_NAME = "Six-View-Three-Hour-Experiment-2026-08-13"
+_BENCHMARK_SUBMISSION_PROTOCOL_VERSION = 1
 _PHYSICAL_ACTION_TYPES = (
     "hand_object_contact",
     "object_movement",
@@ -171,6 +172,38 @@ def _reserve_fixed_benchmark(settings: dict[str, Any], run_id: str) -> Path:
 def _update(run_id: str, **values: Any) -> None:
     with _lock:
         _runs.setdefault(run_id, {}).update(values)
+
+
+def _write_fixed_benchmark_submission_receipt(
+    nas_root: Path,
+    run_id: str,
+    request_received_at: str,
+) -> Path:
+    """Persist the asynchronous ownership contract before starting a long run."""
+
+    receipt_path = nas_root / "JSON-Config-Files" / "run_submission.json"
+    _write_json_atomic(
+        receipt_path,
+        {
+            "schema_version": "1.0",
+            "run_id": run_id,
+            "task": "fixed_six_view_three_hour_benchmark",
+            "state": "queued",
+            "submitted_at": request_received_at,
+            "execution": {
+                "owner": "visioncortex_web_service",
+                "server_pid": os.getpid(),
+                "client_process_independent": True,
+                "requires_web_service_alive": True,
+            },
+            "monitoring": {
+                "status_url": f"/api/runs/{run_id}",
+                "nas_staging": str(nas_root),
+                "durable_status": "JSON-Config-Files/pipeline_status.json",
+            },
+        },
+    )
+    return receipt_path
 
 
 def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
@@ -564,6 +597,7 @@ def health() -> dict[str, Any]:
         "fixed_benchmark": {
             "experiment_id": _BENCHMARK_EXPERIMENT_ID,
             "archive_name": _BENCHMARK_ARCHIVE_NAME,
+            "submission_protocol_version": _BENCHMARK_SUBMISSION_PROTOCOL_VERSION,
             "index_csv": str(settings["storage"]["index_csv"]),
             "input_mode": "NAS 15-minute segments / zero-copy virtual timeline",
             "local_runtime_root": str(settings["storage"]["local_runtime_root"]),
@@ -1107,6 +1141,11 @@ def create_fixed_benchmark_run(background_tasks: BackgroundTasks) -> dict[str, A
         nas_output=str(_archive_root(settings) / _BENCHMARK_ARCHIVE_NAME),
         nas_staging=str(nas_root),
     )
+    submission_receipt = _write_fixed_benchmark_submission_receipt(
+        nas_root,
+        run_id,
+        request_received_at,
+    )
     background_tasks.add_task(_execute_fixed_benchmark, run_id, settings, nas_root, timing)
     return {
         "run_id": run_id,
@@ -1117,6 +1156,10 @@ def create_fixed_benchmark_run(background_tasks: BackgroundTasks) -> dict[str, A
         "archive_url": f"/#/archive/{quote(_BENCHMARK_ARCHIVE_NAME)}/experiments",
         "reused_archive": True,
         "source_count": 6,
+        "execution_owner": "visioncortex_web_service",
+        "client_process_independent": True,
+        "submission_protocol_version": _BENCHMARK_SUBMISSION_PROTOCOL_VERSION,
+        "submission_receipt": str(submission_receipt),
     }
 
 

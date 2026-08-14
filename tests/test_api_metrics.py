@@ -84,8 +84,47 @@ def test_health_exposes_fixed_benchmark_and_cache_locations(monkeypatch, tmp_pat
     benchmark = response.json()["fixed_benchmark"]
     assert benchmark["experiment_id"] == "exp_20260810_144014_e918b762"
     assert benchmark["archive_name"] == "Six-View-Three-Hour-Experiment-2026-08-13"
+    assert benchmark["submission_protocol_version"] == 1
     assert "zero-copy" in benchmark["input_mode"]
     assert benchmark["local_cache_root"].endswith("cache")
+
+
+def test_fixed_benchmark_submission_is_owned_by_web_service(monkeypatch, tmp_path):
+    settings = {
+        "storage": {
+            "archive_root": str(tmp_path / "archive"),
+            "index_csv": str(tmp_path / "index.csv"),
+            "local_runtime_root": str(tmp_path / "runtime"),
+        }
+    }
+    staging = tmp_path / "staging" / "run-001"
+    staging.mkdir(parents=True)
+    queued = []
+
+    class TaskCollector:
+        def add_task(self, function, *args):
+            queued.append((function, args))
+
+    monkeypatch.setattr(api, "_settings", lambda: settings)
+    monkeypatch.setattr(api, "_reserve_fixed_benchmark", lambda *_: staging)
+    monkeypatch.setattr(api, "_update", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(api.uuid, "uuid4", lambda: type("FixedUUID", (), {"hex": "a" * 32})())
+
+    response = api.create_fixed_benchmark_run(TaskCollector())
+
+    assert response["run_id"] == "benchmark-aaaaaaaaaa"
+    assert response["execution_owner"] == "visioncortex_web_service"
+    assert response["client_process_independent"] is True
+    assert response["submission_protocol_version"] == 1
+    assert response["submission_receipt"].endswith("run_submission.json")
+    assert len(queued) == 1
+    assert queued[0][0] is api._execute_fixed_benchmark
+    receipt = json.loads(Path(response["submission_receipt"]).read_text(encoding="utf-8"))
+    assert receipt["run_id"] == response["run_id"]
+    assert receipt["execution"]["owner"] == "visioncortex_web_service"
+    assert receipt["execution"]["client_process_independent"] is True
+    assert receipt["execution"]["requires_web_service_alive"] is True
+    assert receipt["monitoring"]["status_url"] == f"/api/runs/{response['run_id']}"
 
 
 def test_archived_quality_fallback_uses_evidence_without_fabricating_accuracy():
