@@ -1,9 +1,18 @@
 import csv
+import json
 from pathlib import Path
 
 import pytest
 
-from labvision_evidence.storage import prepare_from_nas_index
+from labvision_evidence.storage import prepare_from_nas_index, safe_archive_name
+
+
+def test_archive_components_are_ascii_only_and_deterministic():
+    assert safe_archive_name("固体称量与移液连续实验") == safe_archive_name(
+        "固体称量与移液连续实验"
+    )
+    assert safe_archive_name("固体称量与移液连续实验").isascii()
+    assert safe_archive_name("Wet Lab 实验 01") == "Wet-Lab-01"
 
 
 def test_nas_ingest_registers_segments_without_copying(default_config, tmp_path):
@@ -39,7 +48,8 @@ def test_nas_ingest_registers_segments_without_copying(default_config, tmp_path)
         {
             "index_csv": str(index_csv),
             "local_runtime_root": str(tmp_path / "runtime"),
-            "manifest_storage": "local",
+            "active_archive_path": str(tmp_path / "archive"),
+            "manifest_storage": "nas",
             "require_nas_source_paths": False,
         }
     )
@@ -56,6 +66,24 @@ def test_nas_ingest_registers_segments_without_copying(default_config, tmp_path)
     assert ingest["source_validation"]["missing_count"] == 0
     assert manifest_path.is_file()
     assert not (tmp_path / "runtime" / "Input" / "segmented" / "video.mp4").exists()
+    original_root = tmp_path / "archive" / "Original-Experiment-Videos"
+    original_index = json.loads(
+        (original_root / "Original-Video-Index.json").read_text(encoding="utf-8")
+    )
+    assert original_index["retention_mode"] == "nas_zero_copy_segment_references"
+    assert original_index["source_copy_bytes"] == 0
+    assert len(original_index["views"]) == 2
+    assert all(item["segment_count"] == 2 for item in original_index["views"])
+    assert (original_root / "fp.ffconcat").read_text(encoding="utf-8").count("file '") == 2
+    assert (original_root / "tp.ffconcat").read_text(encoding="utf-8").count("file '") == 2
+    assert (original_root / "README.txt").is_file()
+    assert (
+        tmp_path
+        / "archive"
+        / "JSON-Config-Files"
+        / "Stage-Receipts"
+        / "original_ingest.json"
+    ).is_file()
 
 
 def test_segment_wave_count_mismatch_is_rejected(default_config, tmp_path):

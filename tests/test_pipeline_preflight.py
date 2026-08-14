@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from labvision_evidence import pipeline as pipeline_module
@@ -60,3 +62,9 @@ def test_real_pipeline_preflight_calls_imported_video_probe(tmp_path, monkeypatc
     assert len(calls) == 1
     assert [view.view_id for view in calls[0][0]] == ["fp01", "tp01"]
     assert "probe_views" not in EvidencePipeline.run.__code__.co_varnames
+    status_paths = list((tmp_path / "output").rglob("run_status.json"))
+    assert len(status_paths) == 1
+    status = json.loads(status_paths[0].read_text(encoding="utf-8"))
+    assert status["stage"] == "failed"
+    assert status["failed_stage"] == "preflight"
+    assert "preflight" not in status["completed_stages"]

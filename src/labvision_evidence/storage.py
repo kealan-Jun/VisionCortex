@@ -37,6 +37,8 @@ DERIVED_ARCHIVE_DIRECTORIES = (
     "Professional-PDFs",
 )
 
+ORIGINAL_REFERENCE_NAMES = {"Original-Video-Index.json", "README.txt"}
+
 
 _SOURCE_STAT_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _SOURCE_STAT_LOCK = threading.Lock()
@@ -206,9 +208,58 @@ def _directory_manifest(root: Path) -> list[dict[str, Any]]:
 
 
 def safe_archive_name(value: str) -> str:
-    """Keep readable Unicode names while excluding Windows-invalid characters."""
-    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "-", value).strip(" .-")
-    return cleaned[:160] or f"Experiment-{uuid.uuid4().hex[:8]}"
+    """Return a deterministic ASCII-only component for SMB/tool compatibility."""
+
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip(" .-_")
+    if cleaned:
+        return cleaned[:120]
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:10]
+    return f"Experiment-{digest}"
+
+
+def _atomic_write_text(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.partial-{uuid.uuid4().hex[:8]}")
+    temporary.write_text(value, encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def _original_reference_files(root: Path) -> list[Path]:
+    if not root.is_dir():
+        return []
+    return sorted(
+        path
+        for path in root.iterdir()
+        if path.is_file()
+        and (path.name in ORIGINAL_REFERENCE_NAMES or path.suffix.lower() == ".ffconcat")
+    )
+
+
+def _publish_original_references(staging_root: Path, fixed_root: Path) -> list[str]:
+    """Merge zero-copy source references without touching retained source media."""
+
+    source_root = staging_root / "Original-Experiment-Videos"
+    destination_root = fixed_root / "Original-Experiment-Videos"
+    published: list[str] = []
+    for source in _original_reference_files(source_root):
+        destination_root.mkdir(parents=True, exist_ok=True)
+        destination = destination_root / source.name
+        temporary = destination.with_name(
+            f".{destination.name}.partial-{uuid.uuid4().hex[:8]}"
+        )
+        try:
+            shutil.copy2(source, temporary)
+            if (
+                temporary.stat().st_size != source.stat().st_size
+                or _sha256_file(temporary) != _sha256_file(source)
+            ):
+                raise IOError(f"Original reference verification failed: {destination}")
+            os.replace(temporary, destination)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
+        published.append(destination.relative_to(fixed_root).as_posix())
+    return published
 
 
 def initialize_nas_archive(config: dict[str, Any], experiment_name: str) -> Path:
@@ -310,12 +361,16 @@ def promote_fixed_archive(
                 os.replace(backup, destination)
         raise
 
+    promoted_original_references = _publish_original_references(staging_root, fixed_root)
+
     receipt = {
         "schema_version": "visioncortex-fixed-archive-promotion/1",
         "fixed_root": str(fixed_root),
         "staging_root": str(staging_root),
         "history_root": str(history_root),
         "promoted_directories": list(DERIVED_ARCHIVE_DIRECTORIES),
+        "promoted_original_references": promoted_original_references,
+        "original_media_preserved": True,
         "previous_package_retained": any(item[3] for item in moved),
         "verification": {
             "algorithm": "sha256",
@@ -575,9 +630,129 @@ def prepare_from_nas_index(
         "source_validation": source_validation,
         "role_overrides": {key: value.value for key, value in overrides.items()},
     }
-    (manifest_root / "nas_ingest.json").write_text(
-        json.dumps(ingest, ensure_ascii=False, indent=2), encoding="utf-8"
+    _atomic_write_text(
+        manifest_root / "nas_ingest.json",
+        json.dumps(ingest, ensure_ascii=False, indent=2),
     )
+    if active_archive:
+        original_root = Path(active_archive) / "Original-Experiment-Videos"
+    else:
+        original_root = manifest_root / "Original-Video-References"
+    original_root.mkdir(parents=True, exist_ok=True)
+    view_records: list[dict[str, Any]] = []
+    playlist_paths: list[Path] = []
+    total_video_bytes = 0
+    total_clock_bytes = 0
+    for view in views:
+        playlist_path = original_root / f"{safe_archive_name(view.view_id)}.ffconcat"
+        playlist_lines = ["ffconcat version 1.0"]
+        segment_records: list[dict[str, Any]] = []
+        for ordinal, segment in enumerate(view.segments, 1):
+            video_snapshot = source_snapshots[segment.video]
+            video_bytes = int(video_snapshot.get("size_bytes") or 0)
+            total_video_bytes += video_bytes
+            clock_snapshot = (
+                source_snapshots.get(segment.timestamps_csv)
+                if segment.timestamps_csv is not None
+                else None
+            )
+            clock_bytes = int((clock_snapshot or {}).get("size_bytes") or 0)
+            total_clock_bytes += clock_bytes
+            playlist_value = str(segment.video).replace("\\", "/").replace("'", "'\\''")
+            playlist_lines.append(f"file '{playlist_value}'")
+            segment_records.append(
+                {
+                    "ordinal": ordinal,
+                    "video_path": str(segment.video),
+                    "video_size_bytes": video_bytes,
+                    "video_mtime_ns": video_snapshot.get("mtime_ns"),
+                    "timestamps_csv": str(segment.timestamps_csv)
+                    if segment.timestamps_csv is not None
+                    else None,
+                    "timestamps_size_bytes": clock_bytes,
+                    "timestamps_mtime_ns": (clock_snapshot or {}).get("mtime_ns"),
+                }
+            )
+        _atomic_write_text(playlist_path, "\n".join(playlist_lines) + "\n")
+        playlist_paths.append(playlist_path)
+        view_records.append(
+            {
+                "view_id": view.view_id,
+                "role": view.role.value,
+                "segment_count": len(segment_records),
+                "playlist": playlist_path.name,
+                "segments": segment_records,
+            }
+        )
+    original_index_path = original_root / "Original-Video-Index.json"
+    original_index = {
+        "schema_version": "visioncortex-original-video-index/1",
+        "experiment_id": experiment_id,
+        "retention_mode": "nas_zero_copy_segment_references",
+        "source_of_truth": "NAS paths recorded in this index and the experiment record index",
+        "experiment_record_index": str(index_csv),
+        "source_copy_bytes": 0,
+        "continuous_video_copies_created": 0,
+        "total_video_bytes": total_video_bytes,
+        "total_clock_bytes": total_clock_bytes,
+        "views": view_records,
+    }
+    _atomic_write_text(
+        original_index_path,
+        json.dumps(original_index, ensure_ascii=False, indent=2),
+    )
+    readme_path = original_root / "README.txt"
+    _atomic_write_text(
+        readme_path,
+        "VisionCortex 原视频零复制留存\n"
+        "\n"
+        "原始 15 分钟 MP4 分片及对应时钟 CSV 继续保存在 NAS 原路径，"
+        "本目录不复制、不拼接原视频。\n"
+        "Original-Video-Index.json 记录六路来源、角色、分片顺序、字节数与时钟文件。\n"
+        "每个 .ffconcat 文件按原顺序引用一路视频分片，可供 FFmpeg 连续读取。\n",
+    )
+    ingest["original_retention"] = {
+        "mode": original_index["retention_mode"],
+        "root": str(original_root),
+        "index": str(original_index_path),
+        "playlists": [str(path) for path in playlist_paths],
+        "readme": str(readme_path),
+        "source_copy_bytes": 0,
+    }
+    _atomic_write_text(
+        manifest_root / "nas_ingest.json",
+        json.dumps(ingest, ensure_ascii=False, indent=2),
+    )
+    if active_archive:
+        receipt_path = (
+            Path(active_archive)
+            / "JSON-Config-Files"
+            / "Stage-Receipts"
+            / "original_ingest.json"
+        )
+        _atomic_write_text(
+            receipt_path,
+            json.dumps(
+                {
+                    "schema_version": "visioncortex-stage-receipt/1",
+                    "stage": "original_ingest",
+                    "status": "completed",
+                    "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "archive_root": str(Path(active_archive)),
+                    "retention_mode": original_index["retention_mode"],
+                    "source_copy_bytes": 0,
+                    "artifacts": [
+                        str(original_index_path),
+                        *(str(path) for path in playlist_paths),
+                        str(readme_path),
+                        str(manifest_path),
+                        str(manifest_root / "nas_ingest.json"),
+                    ],
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+        )
     return manifest, manifest_path, ingest
 
 

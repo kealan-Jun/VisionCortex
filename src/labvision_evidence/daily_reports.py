@@ -178,6 +178,13 @@ def build_daily_report(
         group_change_objects = Counter(
             str(name) for item in group_changes for name in item.get("object_names") or []
         )
+        group_action_counts = Counter(
+            str(item["action_type"]) for item in key_events
+        )
+        duration_seconds = max(
+            0.0, (group.global_end_ms - group.global_start_ms) / 1000.0
+        )
+        sparse_threshold = max(3, min(12, round(duration_seconds / 30.0)))
         timeline.append(
             {
                 "group_id": group.group_id,
@@ -190,7 +197,7 @@ def build_daily_report(
                 "end_global_ms": group.global_end_ms,
                 "start_timecode": _clock(group.global_start_ms),
                 "end_timecode": _clock(group.global_end_ms),
-                "duration_seconds": round((group.global_end_ms - group.global_start_ms) / 1000, 6),
+                "duration_seconds": round(duration_seconds, 6),
                 "participating_views": group.participating_views,
                 "overall_summary": understanding.get("overall_summary"),
                 "model_status": understanding.get("status"),
@@ -199,6 +206,17 @@ def build_daily_report(
                 "model_usage": understanding.get("usage") or {},
                 "steps": steps,
                 "key_events": key_events,
+                "key_action_summary": [
+                    {
+                        "action_type": action_type,
+                        "action_label": label,
+                        "event_count": group_action_counts.get(action_type, 0),
+                    }
+                    for action_type, label in ACTION_LABELS.items()
+                ],
+                "key_material_low_recall_warning": duration_seconds >= 60.0
+                and len(key_events) < sparse_threshold,
+                "key_material_low_recall_threshold": sparse_threshold,
                 "physical_change_count": len(group_changes),
                 "physical_change_summary": [
                     {"change_type": name, "count": count}
@@ -302,8 +320,9 @@ def build_daily_report(
             "evidence_package": "JSON-Config-Files/evidence_package.json",
             "evidence_package_eval": "JSON-Config-Files/evidence_package_eval.json",
             "run_metrics": "JSON-Config-Files/run_metrics.json",
-            "experiment_understanding": "JSON-Config-Files/Experiment-Groups-Step-Level-Analysis.json",
-            "key_material_understanding": "Key-Materials/Key-Materials-Model-Understanding.json",
+            "experiment_understanding": "JSON-Config-Files/experiment_group_understanding.json",
+            "key_material_selection": "JSON-Config-Files/key_material_selection.json",
+            "key_material_understanding": "JSON-Config-Files/key_material_model_understanding.json",
         },
     }
     return report

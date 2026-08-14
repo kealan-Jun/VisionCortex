@@ -74,6 +74,71 @@ def _noop_progress(stage: str, progress: float, message: str) -> None:
     del stage, progress, message
 
 
+def _key_material_selection_report(
+    groups: list[ExperimentGroup],
+    segments: list[ExperimentSegment],
+    events: list[EvidenceEvent],
+) -> dict[str, Any]:
+    """Expose material recall and suspiciously sparse experiment coverage."""
+
+    by_segment = {segment.segment_id: segment for segment in segments}
+    by_event = {event.event_id: event for event in events}
+    records: list[dict[str, Any]] = []
+    for group in groups:
+        candidate_ids = {
+            event_id
+            for segment_id in group.atomic_experiment_ids
+            for event_id in by_segment[segment_id].event_ids
+            if event_id in by_event and by_event[event_id].accepted
+        }
+        selected = [
+            by_event[event_id]
+            for event_id in group.key_event_ids
+            if event_id in by_event
+        ]
+        counts: dict[str, int] = {}
+        for event in selected:
+            counts[event.action_type.value] = counts.get(event.action_type.value, 0) + 1
+        duration_seconds = max(
+            0.0, (group.global_end_ms - group.global_start_ms) / 1000.0
+        )
+        # This is a warning, not a fabricated quota. It makes sparse evidence
+        # visible without inventing events or weakening cross-view acceptance.
+        sparse_threshold = max(3, min(12, round(duration_seconds / 30.0)))
+        records.append(
+            {
+                "group_id": group.group_id,
+                "experiment_name": group.experiment_name,
+                "duration_seconds": round(duration_seconds, 3),
+                "accepted_physical_events": len(candidate_ids),
+                "selected_key_materials": len(selected),
+                "selection_rate": round(len(selected) / len(candidate_ids), 4)
+                if candidate_ids
+                else 0.0,
+                "action_type_counts": counts,
+                "low_recall_warning": duration_seconds >= 60.0
+                and len(selected) < sparse_threshold,
+                "low_recall_threshold": sparse_threshold,
+            }
+        )
+    return {
+        "schema_version": "visioncortex-key-material-selection/1",
+        "selection_rule": "cross-view accepted physical actions; duplicate only near-identical time/object evidence",
+        "groups": records,
+        "totals": {
+            "accepted_physical_events": sum(
+                record["accepted_physical_events"] for record in records
+            ),
+            "selected_key_materials": sum(
+                record["selected_key_materials"] for record in records
+            ),
+            "groups_with_low_recall_warning": sum(
+                bool(record["low_recall_warning"]) for record in records
+            ),
+        },
+    }
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -242,6 +307,7 @@ class EvidencePipeline:
             self._stage_metrics.append(
                 {
                     "stage": self._active_stage,
+                    "status": "failed" if stage == "failed" else "completed",
                     "started_at": self._active_stage_started_iso,
                     "ended_at": now_iso,
                     "duration_seconds": round(now_perf - self._active_stage_started, 6),
@@ -266,7 +332,19 @@ class EvidencePipeline:
             "input_view_count": self._input_view_count,
             "input_mode": self._input_mode,
             "views": self._view_runtime,
-            "completed_stages": [item["stage"] for item in self._stage_metrics],
+            "completed_stages": [
+                item["stage"]
+                for item in self._stage_metrics
+                if item.get("status", "completed") == "completed"
+            ],
+            "failed_stage": next(
+                (
+                    item["stage"]
+                    for item in reversed(self._stage_metrics)
+                    if item.get("status") == "failed"
+                ),
+                None,
+            ),
         }
         write_json(
             layout.root / "run_status.json",
@@ -276,6 +354,58 @@ class EvidencePipeline:
             write_json(layout.json_config / "pipeline_status.json", status_payload)
         if self._publisher is not None:
             self._publisher.publish_status(status_payload)
+
+    def _complete_stage(
+        self,
+        layout: ArchiveLayout,
+        stage: str,
+        artifacts: list[Path] | tuple[Path, ...] = (),
+    ) -> Path:
+        """Publish a durable, atomic NAS receipt only after a stage succeeds."""
+
+        completed_at = datetime.now(timezone.utc).isoformat()
+        elapsed_seconds = round(time.perf_counter() - self._run_started_perf, 6)
+        stage_duration = None
+        if self._active_stage == stage:
+            stage_duration = round(time.perf_counter() - self._active_stage_started, 6)
+        else:
+            stage_duration = next(
+                (
+                    item["duration_seconds"]
+                    for item in reversed(self._stage_metrics)
+                    if item["stage"] == stage
+                ),
+                None,
+            )
+        relative_artifacts: list[str] = []
+        for artifact in artifacts:
+            artifact = Path(artifact)
+            if not artifact.exists():
+                raise FileNotFoundError(f"Completed stage artifact is missing: {artifact}")
+            relative = artifact.resolve().relative_to(layout.root.resolve())
+            relative_artifacts.append(relative.as_posix())
+            if self._publisher is not None:
+                if artifact.is_dir():
+                    self._publisher.publish_directory(relative)
+                else:
+                    self._publisher.publish_file(artifact)
+        receipt = {
+            "schema_version": "visioncortex-stage-receipt/1",
+            "stage": stage,
+            "status": "completed",
+            "completed_at": completed_at,
+            "run_elapsed_seconds": elapsed_seconds,
+            "stage_duration_seconds": stage_duration,
+            "archive_mode": self.config.get("storage", {}).get("run_output_mode", "local"),
+            "archive_root": str(layout.root),
+            "artifacts": relative_artifacts,
+            "token_ledger": "JSON-Config-Files/run_metrics.json",
+        }
+        receipt_path = layout.json_config / "Stage-Receipts" / f"{stage}.json"
+        write_json(receipt_path, receipt)
+        if self._publisher is not None:
+            self._publisher.publish_file(receipt_path)
+        return receipt_path
 
     def _acceptance_baseline(self) -> dict[str, Any] | None:
         configured = self.config.get("validation", {}).get("acceptance_baseline")
@@ -732,7 +862,10 @@ class EvidencePipeline:
             active_archive = storage.get("active_archive_path")
             if not active_archive:
                 raise ValueError("nas_direct output requires storage.active_archive_path")
-            layout = ArchiveLayout(Path(active_archive).resolve())
+            # Keep a mapped-drive path mapped. Path.resolve() expands Y: into a
+            # longer UNC path on Windows and can push otherwise valid artifact
+            # names beyond MAX_PATH when LongPathsEnabled is disabled.
+            layout = ArchiveLayout(Path(os.path.abspath(str(active_archive))))
         else:
             output_root = Path(self.config["project"]["output_root"]).resolve()
             layout = ArchiveLayout(output_root / manifest.experiment_id)
@@ -844,8 +977,17 @@ class EvidencePipeline:
                 preflight_breakdown,
             )
             write_json(layout.json_config / "video_probe.json", {key: value.model_dump(mode="json") for key, value in infos.items()})
-            if self._publisher is not None:
-                self._publisher.publish_directory("JSON-Config-Files")
+            self._complete_stage(
+                layout,
+                "preflight",
+                [
+                    layout.json_config / "source_validation.json",
+                    layout.json_config / "model_runtime_preflight.json",
+                    layout.json_config / "input_volume_report.json",
+                    layout.json_config / "preflight_runtime.json",
+                    layout.json_config / "video_probe.json",
+                ],
+            )
 
             self._status(layout, "alignment", 0.08, "最近邻时间戳拟合与视觉锚点校准")
             alignment_runtime: dict[str, Any] = {}
@@ -872,19 +1014,19 @@ class EvidencePipeline:
                 6,
             )
             alignment_runtime["source_cache_after_alignment"] = source_cache_diagnostics()
-            alignment_step_started = time.perf_counter()
-            if self._publisher is not None:
-                self._publisher.publish_directory("JSON-Config-Files")
-            alignment_runtime["incremental_publish_seconds"] = round(
-                time.perf_counter() - alignment_step_started,
-                6,
-            )
             write_json(
                 layout.json_config / "alignment_runtime.json",
                 alignment_runtime,
             )
-            if self._publisher is not None:
-                self._publisher.publish_file(layout.json_config / "alignment_runtime.json")
+            self._complete_stage(
+                layout,
+                "alignment",
+                [
+                    layout.json_config / "time_alignment.json",
+                    layout.json_config / "aligned_timestamps.csv",
+                    layout.json_config / "alignment_runtime.json",
+                ],
+            )
 
             motion_probe_views = self._motion_probe_views(manifest)
             probe_manifest = manifest.model_copy(update={"views": motion_probe_views})
@@ -971,6 +1113,14 @@ class EvidencePipeline:
                         item.model_dump(mode="json") for item in motion_candidates
                     ],
                 },
+            )
+            self._complete_stage(
+                layout,
+                "motion_probe",
+                [
+                    layout.json_config / "scan_runtime_motion_probe.json",
+                    layout.json_config / "motion_probe_windows.json",
+                ],
             )
 
             reuse_motion_probe = bool(
@@ -1074,6 +1224,17 @@ class EvidencePipeline:
                 manifest.views, coarse_paths, boundary_candidates, self.config
             )
             write_json(layout.json_config / "fine_view_selection.json", fine_view_report)
+            coarse_artifacts = [
+                layout.json_config / "coarse_boundary_refinement.json",
+                layout.json_config / "fine_view_selection.json",
+            ]
+            coarse_runtime = layout.json_config / "scan_runtime_coarse.json"
+            if coarse_runtime.exists():
+                coarse_artifacts.append(coarse_runtime)
+            reuse_report = layout.json_config / "coarse_reuse_motion_probe.json"
+            if reuse_report.exists():
+                coarse_artifacts.append(reuse_report)
+            self._complete_stage(layout, "candidate_coarse", coarse_artifacts)
             fine_windows = self._fine_windows(boundary_candidates, infos, transforms)
             fine_windows = {view.view_id: fine_windows[view.view_id] for view in fine_views}
             fine_manifest = manifest.model_copy(update={"views": fine_views})
@@ -1099,6 +1260,11 @@ class EvidencePipeline:
                     layout.json_config / "candidate_layer.json",
                     [candidate.model_dump(mode="json") for candidate in candidates],
                 )
+            fine_artifacts = [layout.json_config / "scan_runtime_fine.json"]
+            candidate_layer = layout.json_config / "candidate_layer.json"
+            if candidate_layer.exists():
+                fine_artifacts.append(candidate_layer)
+            self._complete_stage(layout, "candidate_fine", fine_artifacts)
 
             self._status(layout, "candidate_audit", 0.68, "持续性、动作密度与跨视角一致性审计")
             events, rejected = audit_candidates(candidates, transforms, self.config)
@@ -1117,17 +1283,40 @@ class EvidencePipeline:
                     "experiment_groups": [group.model_dump(mode="json") for group in groups],
                 },
             )
-            if self._publisher is not None:
-                self._publisher.publish_directory("JSON-Config-Files")
+            self._complete_stage(
+                layout,
+                "candidate_audit",
+                [layout.json_config / "audit_layer.json"],
+            )
 
             self._status(layout, "experiment_understanding", 0.72, "用完整有界双视角故事板命名实验并核验连续性")
             analyze_experiment_groups(
                 layout, groups, segments, events, manifest.views, infos, transforms, self.config
             )
+            group_understanding_path = layout.json_config / "experiment_group_understanding.json"
+            write_json(
+                group_understanding_path,
+                {
+                    "schema_version": "visioncortex-experiment-group-understanding/1",
+                    "groups": [group.model_dump(mode="json") for group in groups],
+                },
+            )
             write_json(layout.json_config / "run_metrics_live.json", self._metrics(events, groups))
-            if self._publisher is not None:
-                self._publisher.publish_file(layout.json_config / "run_metrics_live.json")
             key_events = select_key_events(groups, segments, events, self.config)
+            key_selection_path = layout.json_config / "key_material_selection.json"
+            write_json(
+                key_selection_path,
+                _key_material_selection_report(groups, segments, events),
+            )
+            self._complete_stage(
+                layout,
+                "experiment_understanding",
+                [
+                    group_understanding_path,
+                    key_selection_path,
+                    layout.json_config / "run_metrics_live.json",
+                ],
+            )
 
             self._status(layout, "experiment_clips", 0.78, "按模型实验名归档第一/第三/并排三份有界视频")
             materialize_experiment_clips(
@@ -1141,8 +1330,14 @@ class EvidencePipeline:
                 self.config,
                 publisher=self._publisher,
             )
-            if self._publisher is not None:
-                self._publisher.publish_directory("Experiment-Clips")
+            self._complete_stage(
+                layout,
+                "experiment_clips",
+                [
+                    layout.experiment_clips,
+                    layout.json_config / "experiment_clip_materialization_runtime.json",
+                ],
+            )
 
             self._status(layout, "key_materials", 0.84, "按实验组提取去重后的五类对齐关键素材")
             materialize_key_materials(
@@ -1156,20 +1351,36 @@ class EvidencePipeline:
                 self.config,
                 publisher=self._publisher,
             )
-            if self._publisher is not None:
-                self._publisher.publish_directory("Key-Materials")
+            self._complete_stage(layout, "key_materials", [layout.key_materials])
 
             self._status(layout, "mllm", 0.92, "调用豆包理解去重后的关键动作当前/下一步骤")
             analyze_key_materials(layout, key_events, self.config)
+            key_understanding_path = (
+                layout.json_config / "key_material_model_understanding.json"
+            )
+            write_json(
+                key_understanding_path,
+                {
+                    "schema_version": "visioncortex-key-material-understanding/1",
+                    "events": [
+                        event.model_dump(mode="json") for event in key_events
+                    ],
+                },
+            )
             write_json(
                 layout.json_config / "run_metrics_live.json",
                 self._metrics(key_events, groups),
             )
-            if self._publisher is not None:
-                self._publisher.publish_file(layout.json_config / "run_metrics_live.json")
             refresh_key_material_metadata(layout, key_events, groups, transforms)
-            if self._publisher is not None:
-                self._publisher.publish_directory("Key-Materials")
+            self._complete_stage(
+                layout,
+                "mllm",
+                [
+                    layout.key_materials,
+                    key_understanding_path,
+                    layout.json_config / "run_metrics_live.json",
+                ],
+            )
             physical_changes = build_physical_change_log(events)
 
             self._status(layout, "package", 0.96, "归档证据包并执行 evidence-package-eval")
@@ -1192,8 +1403,14 @@ class EvidencePipeline:
             # experiment in the user-facing output and boundary evaluation.
             self._run_sidecar_validation(layout, manifest, groups)
             self._run_quality_acceptance(layout, groups, key_events)
+            self._complete_stage(layout, "package", [layout.json_config])
             self._status(layout, "daily_report", 0.98, "从已验收证据生成实验室日报并执行一致性校验")
             generate_daily_report_archive(layout, summary, self._metrics(events, groups), self.config)
+            self._complete_stage(
+                layout,
+                "daily_report",
+                [layout.daily_reports, layout.professional_pdfs],
+            )
             if not self.config["archive"].get("keep_debug_candidates") and layout.work.exists():
                 shutil.rmtree(layout.work)
             self._status(layout, "completed", 1.0, "处理完成")
@@ -1219,15 +1436,17 @@ class EvidencePipeline:
             # Refresh the report with the closed daily_report stage duration and
             # final provider-reported token ledger. This remains deterministic.
             generate_daily_report_archive(layout, summary, run_metrics, self.config)
-            if self._publisher is not None:
-                for directory in (
-                    "Experiment-Clips",
-                    "Key-Materials",
-                    "JSON-Config-Files",
-                    "Lab-Daily-Reports",
-                    "Professional-PDFs",
-                ):
-                    self._publisher.publish_directory(directory)
+            self._complete_stage(
+                layout,
+                "completed",
+                [
+                    layout.experiment_clips,
+                    layout.key_materials,
+                    layout.json_config,
+                    layout.daily_reports,
+                    layout.professional_pdfs,
+                ],
+            )
             return layout.root
         except Exception as exc:
             self._status(layout, "failed", 1.0, f"{type(exc).__name__}: {exc}")
@@ -1397,7 +1616,7 @@ def create_dry_run(output: Path, config: dict[str, Any]) -> Path:
         continuity_reason="dry-run 独立实验",
         experiment_name="移液操作实验",
         experiment_name_en="Pipetting-Operation-Experiment",
-        archive_folder="001_移液操作实验_Pipetting-Operation-Experiment",
+        archive_folder="001_Pipetting-Operation-Experiment",
         key_event_ids=[event.event_id],
         videos={
             "first-person": "dry-run://fp01/experiment-clip",

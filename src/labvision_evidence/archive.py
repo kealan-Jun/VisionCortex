@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import re
+import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -14,7 +16,7 @@ from openpyxl import Workbook
 
 from .alignment import iter_aligned_rows
 from .detection import nearest_frame_evidence
-from .mllm import ArkStepAnalyzer
+from .mllm import ArkStepAnalyzer, EVENT_SYSTEM_PROMPT, GROUP_SYSTEM_PROMPT
 from .schemas import (
     AlignmentTransform,
     EvidenceEvent,
@@ -60,6 +62,85 @@ def write_json(path: Path, payload: Any) -> None:
     temporary.replace(path)
 
 
+def _semantic_fingerprint(
+    kind: str,
+    config: dict[str, Any],
+    prompt: str,
+    evidence: dict[str, Any],
+    images: Sequence[tuple[str, Path]],
+) -> str:
+    """Fingerprint exactly the evidence that can change an MLLM answer.
+
+    Run ids, cache identities and archive folder names are deliberately absent.
+    A failed run can therefore resume on the same machine without paying for an
+    identical request, while any boundary, CV event, prompt, model or image
+    change forces a new call.
+    """
+
+    digest = hashlib.sha256()
+    header = {
+        "schema": "visioncortex-semantic-cache/1",
+        "kind": kind,
+        "model": str(config["mllm"]["model"]),
+        "base_url": str(config["mllm"].get("base_url") or ""),
+        "response_language": str(config["mllm"].get("response_language") or ""),
+        "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+        "evidence": evidence,
+        "image_order": [label for label, _ in images],
+    }
+    digest.update(
+        json.dumps(header, ensure_ascii=False, sort_keys=True, default=_json_default).encode(
+            "utf-8"
+        )
+    )
+    for label, image_path in images:
+        digest.update(b"\0label\0")
+        digest.update(label.encode("utf-8"))
+        digest.update(b"\0image\0")
+        digest.update(image_path.read_bytes())
+    return digest.hexdigest()
+
+
+def _semantic_cache_path(
+    config: dict[str, Any], kind: str, fingerprint: str
+) -> Path:
+    return (
+        Path(str(config["storage"]["local_cache_root"]))
+        / "semantic-results-v1"
+        / _safe_slug(str(config["mllm"]["model"]))
+        / kind
+        / f"{fingerprint}.json"
+    )
+
+
+def _read_semantic_cache(path: Path, fingerprint: str) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    try:
+        cached = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if (
+        cached.get("status") != "completed"
+        or cached.get("input_fingerprint") != fingerprint
+        or cached.get("semantic_cache_schema") != "visioncortex-semantic-cache/1"
+    ):
+        return None
+    cached["cache_reused"] = True
+    return cached
+
+
+def _write_semantic_cache(
+    path: Path, fingerprint: str, result: dict[str, Any]
+) -> dict[str, Any]:
+    persisted = dict(result)
+    persisted["input_fingerprint"] = fingerprint
+    persisted["semantic_cache_schema"] = "visioncortex-semantic-cache/1"
+    persisted["cache_reused"] = False
+    write_json(path, persisted)
+    return persisted
+
+
 def _relative(path: Path, root: Path) -> str:
     return path.resolve().relative_to(root.resolve()).as_posix()
 
@@ -77,8 +158,51 @@ def _safe_slug(value: str) -> str:
 
 
 def _safe_folder_name(value: str) -> str:
-    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "-", value).strip(" .-")
-    return cleaned[:120] or "待命名实验"
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip(" .-_")
+    if cleaned:
+        return cleaned[:120]
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:8]
+    return f"Unnamed-Experiment-{digest}"
+
+
+def _bounded_component(value: str, maximum_chars: int) -> str:
+    cleaned = _safe_folder_name(value)
+    maximum_chars = max(12, int(maximum_chars))
+    if len(cleaned) <= maximum_chars:
+        return cleaned
+    digest = hashlib.sha256(cleaned.encode("utf-8")).hexdigest()[:8]
+    prefix = cleaned[: max(1, maximum_chars - len(digest) - 1)].rstrip(" .-_")
+    return f"{prefix}-{digest}"
+
+
+def _component_budget(parent: Path, reserved_tail_chars: int, maximum_chars: int = 72) -> int:
+    # 235 leaves headroom below classic Windows MAX_PATH for FFmpeg/OpenCV
+    # temporary suffixes when LongPathsEnabled is disabled.
+    return max(
+        12,
+        min(maximum_chars, 235 - len(str(parent)) - int(reserved_tail_chars) - 1),
+    )
+
+
+def _group_folder_name(
+    layout: "ArchiveLayout",
+    index: int,
+    experiment_name: str,
+    experiment_name_en: str,
+) -> str:
+    del experiment_name  # Chinese display name stays in JSON/report content only.
+    desired = f"{index:03d}_{_safe_slug(experiment_name_en)}"
+    budget = _group_folder_budget(layout)
+    return _bounded_component(desired, budget)
+
+
+def _group_folder_budget(layout: "ArchiveLayout") -> int:
+    return min(
+        _component_budget(layout.experiment_clips, 28),
+        # event folder (up to 40) + separators + the longest aligned sidecar
+        _component_budget(layout.key_frames, 72),
+        _component_budget(layout.key_clips, 72),
+    )
 
 
 class ArchiveLayout:
@@ -90,6 +214,7 @@ class ArchiveLayout:
         self.key_clips = self.key_materials / "Key-Clips"
         self.key_frames = self.key_materials / "Key-Frames"
         self.daily_reports = root / "Lab-Daily-Reports"
+        self.original_videos = root / "Original-Experiment-Videos"
         self.professional_pdfs = root / "Professional-PDFs"
         self.work = root / ".work"
 
@@ -100,6 +225,7 @@ class ArchiveLayout:
             self.key_clips,
             self.key_frames,
             self.daily_reports,
+            self.original_videos,
             self.professional_pdfs,
             self.work,
         ):
@@ -138,15 +264,62 @@ def materialize_experiment_clips(
     by_view = {view.view_id: view for view in views}
     by_segment = {segment.segment_id: segment for segment in segments}
     encoder = config["performance"]["ffmpeg_video_encoder"]
+    workers = max(1, min(2, int(config["performance"].get("materialization_workers", 2))))
+    runtime_records: list[dict[str, Any]] = []
     for index, group in enumerate(groups, 1):
-        folder_name = group.archive_folder or _safe_folder_name(
-            f"{index:03d}_{group.experiment_name}_{group.experiment_name_en}"
+        folder_name = _group_folder_name(
+            layout,
+            index,
+            group.experiment_name,
+            group.experiment_name_en,
         )
         group.archive_folder = folder_name
         group_root = layout.experiment_clips / folder_name
         videos_dir = group_root
         json_dir = group_root
         group_root.mkdir(parents=True, exist_ok=True)
+        extraction_jobs = []
+
+        def extract_role(role_label: str, view_id: str) -> dict[str, Any]:
+            started = time.perf_counter()
+            view = by_view[view_id]
+            transform = transforms[view_id]
+            local_start = max(0.0, transform.to_local(group.global_start_ms))
+            local_end = min(
+                infos[view_id].duration_ms,
+                transform.to_local(group.global_end_ms),
+            )
+            if local_end <= local_start:
+                raise ValueError(
+                    f"{group.group_id}/{view_id} global boundary is outside the source video"
+                )
+            destination = videos_dir / f"{role_label}.mp4"
+            extract_view_clip(
+                view,
+                infos[view_id],
+                destination,
+                local_start,
+                local_end - local_start,
+                encoder,
+            )
+            return {
+                "group_id": group.group_id,
+                "role_label": role_label,
+                "view_id": view_id,
+                "duration_seconds": round(time.perf_counter() - started, 6),
+                "output_bytes": destination.stat().st_size,
+            }
+
+        with ThreadPoolExecutor(
+            max_workers=workers,
+            thread_name_prefix="experiment-media",
+        ) as executor:
+            for role_label, view_id in (
+                ("First-Person", group.first_person_view),
+                ("Third-Person", group.third_person_view),
+            ):
+                extraction_jobs.append(executor.submit(extract_role, role_label, view_id))
+            runtime_records.extend(job.result() for job in extraction_jobs)
         role_paths: dict[str, tuple[str, Path]] = {}
         for role_label, view_id in (
             ("First-Person", group.first_person_view),
@@ -158,11 +331,10 @@ def materialize_experiment_clips(
             local_end = min(infos[view_id].duration_ms, transform.to_local(group.global_end_ms))
             if local_end <= local_start:
                 raise ValueError(f"{group.group_id}/{view_id} 全局边界映射后不在视频范围内")
-            base = f"{role_label}_{_safe_slug(view_id)}"
+            base = role_label
             destination = videos_dir / f"{base}.mp4"
-            extract_view_clip(
-                view, infos[view_id], destination, local_start, local_end - local_start, encoder
-            )
+            # Both role clips were exported concurrently above. Metadata and
+            # publication remain ordered and atomic for a stable archive.
             relative = _relative(destination, layout.root)
             group.videos[role_label.lower()] = relative
             role_paths[role_label] = (view_id, destination)
@@ -231,6 +403,18 @@ def materialize_experiment_clips(
             }
             segment.aligned_multiview_clip = group.videos["aligned_first_third"]
 
+    runtime_path = layout.json_config / "experiment_clip_materialization_runtime.json"
+    write_json(
+        runtime_path,
+        {
+            "schema_version": "visioncortex-materialization-runtime/1",
+            "workers": workers,
+            "records": runtime_records,
+        },
+    )
+    if publisher is not None:
+        publisher.publish_file(runtime_path)
+
 
 def _storyboard_times(group: ExperimentGroup, events: Sequence[EvidenceEvent], limit: int) -> list[float]:
     if limit < 2:
@@ -271,15 +455,6 @@ def analyze_experiment_groups(
     max_pairs = max(2, int(config["mllm"].get("storyboard_pairs_per_group", 6)))
 
     def analyze(group: ExperimentGroup) -> tuple[ExperimentGroup, dict[str, Any]]:
-        cache_path = cache_root / f"{_safe_slug(group.group_id)}.json"
-        if cache_path.is_file():
-            try:
-                cached = json.loads(cache_path.read_text(encoding="utf-8-sig"))
-                if cached.get("status") == "completed":
-                    cached["cache_reused"] = True
-                    return group, cached
-            except (OSError, json.JSONDecodeError):
-                pass
         storyboard: list[tuple[str, Path]] = []
         storyboard_dir = layout.work / "group-storyboards" / group.group_id
         with ViewFrameReader(max_open=2) as frame_reader:
@@ -307,9 +482,49 @@ def analyze_experiment_groups(
         atomic = [by_segment[item] for item in group.atomic_experiment_ids]
         event_ids = {event_id for segment in atomic for event_id in segment.event_ids}
         group_events = [event for event in events if event.event_id in event_ids]
+        semantic_evidence = {
+            "continuity_type": group.continuity_type,
+            "continuity_reason": group.continuity_reason,
+            "global_start_ms": group.global_start_ms,
+            "global_end_ms": group.global_end_ms,
+            "first_person_view": group.first_person_view,
+            "third_person_view": group.third_person_view,
+            "atomic_boundaries": [
+                segment.model_dump(
+                    mode="json",
+                    exclude={"semantic_understanding", "clips", "aligned_multiview_clip"},
+                )
+                for segment in atomic
+            ],
+            "cv_events": [
+                event.model_dump(
+                    mode="json",
+                    exclude={"model_understanding", "key_frames", "key_clips"},
+                )
+                for event in group_events
+                if event.accepted
+            ],
+        }
+        fingerprint = _semantic_fingerprint(
+            "experiment-group",
+            config,
+            GROUP_SYSTEM_PROMPT,
+            semantic_evidence,
+            storyboard,
+        )
+        persistent_cache_path = _semantic_cache_path(
+            config, "experiment-groups", fingerprint
+        )
+        run_cache_path = cache_root / f"{fingerprint}.json"
+        cached = _read_semantic_cache(persistent_cache_path, fingerprint)
+        if cached is None:
+            cached = _read_semantic_cache(run_cache_path, fingerprint)
+        if cached is not None:
+            return group, cached
         result = analyzer.analyze_group(group, atomic, group_events, storyboard)
         if result.get("status") == "completed":
-            write_json(cache_path, result)
+            result = _write_semantic_cache(persistent_cache_path, fingerprint, result)
+            write_json(run_cache_path, result)
         return group, result
 
     workers = max(1, int(config["mllm"].get("group_workers", 2)))
@@ -336,8 +551,11 @@ def analyze_experiment_groups(
                             "模型连续性判断与物理规则冲突，归档采用物理规则并保留冲突"
                         )
                 index = int(group.group_id.rsplit("-", 1)[-1])
-                group.archive_folder = _safe_folder_name(
-                    f"{index:03d}_{group.experiment_name}_{group.experiment_name_en}"
+                group.archive_folder = _group_folder_name(
+                    layout,
+                    index,
+                    group.experiment_name,
+                    group.experiment_name_en,
                 )
                 for segment_id in group.atomic_experiment_ids:
                     segment = by_segment[segment_id]
@@ -744,9 +962,14 @@ def materialize_key_materials(
             continue
         group = group_by_event[event.event_id]
         folder = group.archive_folder or _safe_folder_name(group.group_id)
-        event_folder = _safe_folder_name(
+        event_folder_value = (
             f"{event.event_id}_{event.action_type.value}_{_time_slug(event.key_global_ms)}"
         )
+        event_budget = min(
+            _component_budget(layout.key_frames / folder, 26, maximum_chars=40),
+            _component_budget(layout.key_clips / folder, 26, maximum_chars=40),
+        )
+        event_folder = _bounded_component(event_folder_value, event_budget)
         frame_dir = layout.key_frames / folder / event_folder
         clip_dir = layout.key_clips / folder / event_folder
         frame_dir.mkdir(parents=True, exist_ok=True)
@@ -771,7 +994,7 @@ def materialize_key_materials(
                 continue
             nearest = nearest_frame_evidence(detection_paths[view_id], event.key_global_ms)
             boxes = [box.model_dump() for box in nearest.detections] if nearest else []
-            base = f"{role_label}_{_safe_slug(view_id)}"
+            base = role_label
             frame_path = frame_dir / f"{base}.jpg"
             write_annotated_frame(frame, boxes, frame_path)
             relative_frame = _relative(frame_path, layout.root)
@@ -855,23 +1078,35 @@ def analyze_key_materials(layout: ArchiveLayout, events: Sequence[EvidenceEvent]
     cache_root = layout.work / "mllm-cache" / "key-materials"
 
     def analyze(event: EvidenceEvent) -> tuple[EvidenceEvent, dict[str, Any]]:
-        cache_path = cache_root / f"{_safe_slug(event.event_id)}.json"
-        if cache_path.is_file():
-            try:
-                cached = json.loads(cache_path.read_text(encoding="utf-8-sig"))
-                if cached.get("status") == "completed":
-                    cached["cache_reused"] = True
-                    return event, cached
-            except (OSError, json.JSONDecodeError):
-                pass
         images = [
             (view_id, layout.root / relative)
             for view_id, relative in event.key_frames.items()
             if view_id != "aligned_first_third"
         ]
+        semantic_evidence = event.model_dump(
+            mode="json",
+            exclude={"model_understanding", "key_frames", "key_clips"},
+        )
+        fingerprint = _semantic_fingerprint(
+            "key-material",
+            config,
+            EVENT_SYSTEM_PROMPT,
+            semantic_evidence,
+            images,
+        )
+        persistent_cache_path = _semantic_cache_path(
+            config, "key-materials", fingerprint
+        )
+        run_cache_path = cache_root / f"{fingerprint}.json"
+        cached = _read_semantic_cache(persistent_cache_path, fingerprint)
+        if cached is None:
+            cached = _read_semantic_cache(run_cache_path, fingerprint)
+        if cached is not None:
+            return event, cached
         result = analyzer.analyze_event(event, images)
         if result.get("status") == "completed":
-            write_json(cache_path, result)
+            result = _write_semantic_cache(persistent_cache_path, fingerprint, result)
+            write_json(run_cache_path, result)
         return event, result
 
     workers = max(1, int(config["mllm"].get("workers", 4)))

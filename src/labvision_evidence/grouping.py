@@ -138,7 +138,12 @@ def select_key_events(
     by_segment = {segment.segment_id: segment for segment in segments}
     by_event = {event.event_id: event for event in events}
     cfg = config["key_materials"]
+    # Deduplicate repeated evidence for the *same physical action*, not every
+    # occurrence of an action class within a broad time window. Pipetting,
+    # weighing and cap operations often repeat several times only seconds
+    # apart and each state transition is useful evidence.
     separation_ms = float(cfg["minimum_separation_seconds"]) * 1000.0
+    overlap_ratio = float(cfg.get("duplicate_interval_overlap_ratio", 0.50))
     max_per_type = int(cfg["max_per_action_type_per_atomic_experiment"])
     selected: list[EvidenceEvent] = []
     for group in groups:
@@ -160,8 +165,27 @@ def select_key_events(
                     (
                         existing
                         for existing in bucket
-                        if abs(existing.key_global_ms - event.key_global_ms) < separation_ms
-                        and bool(set(existing.objects) & set(event.objects))
+                        if bool(set(existing.objects) & set(event.objects))
+                        and (
+                            abs(existing.key_global_ms - event.key_global_ms)
+                            < separation_ms
+                            or (
+                                max(
+                                    0.0,
+                                    min(existing.global_end_ms, event.global_end_ms)
+                                    - max(existing.global_start_ms, event.global_start_ms),
+                                )
+                                / max(
+                                    1.0,
+                                    min(
+                                        existing.global_end_ms
+                                        - existing.global_start_ms,
+                                        event.global_end_ms - event.global_start_ms,
+                                    ),
+                                )
+                                >= overlap_ratio
+                            )
+                        )
                     ),
                     None,
                 )

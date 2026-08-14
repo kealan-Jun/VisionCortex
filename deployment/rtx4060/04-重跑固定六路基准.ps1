@@ -13,10 +13,16 @@ $env:VISIONCORTEX_COARSE_DECODE_LANES = 'cuda,cuda,cuda,cuda,cpu,cpu'
 $env:VISIONCORTEX_SOURCE_WORKERS = '6'
 $env:VISIONCORTEX_DECODE_QUEUE_DEPTH = '32'
 $env:VISIONCORTEX_CPU_DECODE_THREADS = '8'
-$env:VISIONCORTEX_YOLO_INFERENCE_WORKERS = '2'
+$env:VISIONCORTEX_YOLO_INFERENCE_WORKERS = '1'
 $env:VISIONCORTEX_MATERIALIZATION_WORKERS = '2'
 $env:VISIONCORTEX_IO_WORKERS = '4'
 $env:VISIONCORTEX_TENSORRT = 'required'
 
 Set-Location -LiteralPath $ProjectRoot
 & $Python -m labvision_evidence run-fixed-benchmark --config $Config
+$PipelineExitCode = $LASTEXITCODE
+if ($PipelineExitCode -ne 0) {
+    Write-Error "VisionCortex pipeline failed with exit code $PipelineExitCode."
+    exit $PipelineExitCode
+}
+exit 0

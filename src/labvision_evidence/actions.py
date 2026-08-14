@@ -991,6 +991,72 @@ def build_experiment_segments(
             event.global_start_ms for event in (start_anchors or group)
         )
         raw_end = max(event.global_end_ms for event in group)
+        # Cross-view agreement remains mandatory for accepted evidence and key
+        # materials. Once that core exists, however, a continuous tail of
+        # strong single-view physical actions may legitimately mark cleanup or
+        # the final device/container operation. Use it only to extend the end
+        # boundary inside the same coarse activity envelope; it never creates
+        # an event, material, or experiment by itself.
+        if coarse_windows:
+            midpoint = (raw_start + raw_end) / 2.0
+            matching_windows = [
+                window
+                for window in coarse_windows
+                if window.global_start_ms <= midpoint <= window.global_end_ms
+            ]
+            if matching_windows:
+                boundary_window = min(
+                    matching_windows,
+                    key=lambda window: abs(
+                        midpoint - (window.global_start_ms + window.global_end_ms) / 2.0
+                    ),
+                )
+                later_core_in_window = any(
+                    other is not group
+                    and min(item.global_start_ms for item in other) > raw_end
+                    and boundary_window.global_start_ms
+                    <= (min(item.global_start_ms for item in other) + max(item.global_end_ms for item in other)) / 2.0
+                    <= boundary_window.global_end_ms
+                    for other in groups
+                )
+                activation_gap_ms = float(
+                    cfg.get("boundary_context_activation_gap_seconds", 30.0)
+                ) * 1000.0
+                if (
+                    not later_core_in_window
+                    and boundary_window.global_end_ms - raw_end >= activation_gap_ms
+                ):
+                    bridge_confidence = float(
+                        cfg.get("boundary_context_bridge_confidence", 0.50)
+                    )
+                    extension_confidence = float(
+                        cfg.get("boundary_context_min_confidence", 0.65)
+                    )
+                    maximum_gap_ms = float(
+                        cfg.get("boundary_context_max_gap_seconds", 10.0)
+                    ) * 1000.0
+                    maximum_extension_ms = float(
+                        cfg.get("boundary_context_max_extension_seconds", 90.0)
+                    ) * 1000.0
+                    cursor = raw_end
+                    supported_end = raw_end
+                    limit = min(
+                        raw_end + maximum_extension_ms,
+                        boundary_window.global_end_ms,
+                    )
+                    for context in sorted(events, key=lambda item: item.global_start_ms):
+                        if context.global_end_ms <= cursor:
+                            continue
+                        if context.global_start_ms > limit:
+                            break
+                        if context.global_start_ms > cursor + maximum_gap_ms:
+                            break
+                        if context.confidence < bridge_confidence or not context.objects:
+                            continue
+                        cursor = min(limit, max(cursor, context.global_end_ms))
+                        if context.confidence >= extension_confidence:
+                            supported_end = max(supported_end, cursor)
+                    raw_end = supported_end
         start = max(0.0, raw_start - float(cfg["experiment_pre_roll_seconds"]) * 1000.0)
         end = raw_end + float(cfg["experiment_post_roll_seconds"]) * 1000.0
         minimum = float(cfg["min_experiment_seconds"]) * 1000.0
