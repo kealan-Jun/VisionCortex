@@ -469,7 +469,12 @@ def _selected_session_timestamps(
     sample_fps: float,
 ) -> list[float]:
     period_ms = 1000.0 / max(sample_fps, 1e-9)
-    frame_count = max(0, int(math.ceil((end_ms - start_ms) / period_ms - 1e-9)))
+    # The persistent FFmpeg path uses fps=...:round=near:eof_action=round.
+    # Mirror that positive-duration rounding exactly.  Using ceil here made a
+    # fractional endpoint (205.633333 s at 10 FPS) demand 2057 ledger rows even
+    # though FFmpeg correctly emits 2056, aborting an otherwise valid session.
+    scaled_frame_count = max(0.0, (end_ms - start_ms) / period_ms)
+    frame_count = int(math.floor(scaled_frame_count + 0.5))
     return [
         start_ms + index * period_ms
         for index in range(frame_count)
@@ -513,7 +518,11 @@ def _ffmpeg_multi_window_iterator(
         f"gte(t\\,{window_start / 1000.0:.6f})*lt(t\\,{window_end / 1000.0:.6f})"
         for window_start, window_end in relative
     )
-    filter_graph = f"setpts=PTS-STARTPTS,fps={sample_fps:.8f},select={select_expression}"
+    filter_graph = (
+        "setpts=PTS-STARTPTS,"
+        f"fps={sample_fps:.8f}:round=near:eof_action=round,"
+        f"select={select_expression}"
+    )
     filter_graph += (
         f",scale_cuda={width}:{height}:format=nv12,hwdownload,format=nv12,format=bgr24"
         if use_cuda_scale

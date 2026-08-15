@@ -19,7 +19,10 @@ from labvision_evidence.schemas import (
     ViewInput,
     ViewRole,
 )
-from labvision_evidence.video_io import plan_physical_segment_decode_sessions
+from labvision_evidence.video_io import (
+    _selected_session_timestamps,
+    plan_physical_segment_decode_sessions,
+)
 
 
 def test_physical_segment_sessions_collapse_repeated_references_without_widening():
@@ -81,6 +84,23 @@ def test_physical_segment_sessions_collapse_repeated_references_without_widening
     assert sessions[0].virtual_end_ms == 900_000.0
     assert sessions[0].selected_duration_ms == 45_000.0
     assert sessions[1].target_virtual_windows == ((900_000.0, 905_000.0),)
+
+
+def test_persistent_session_timestamp_count_matches_ffmpeg_round_near_endpoint():
+    """DEV-027: 205.633333 seconds at 10 FPS must be 2056, not ceil=2057."""
+
+    start_ms = 6_996_209.421143
+    end_ms = 7_201_842.754476
+    timestamps = _selected_session_timestamps(
+        start_ms,
+        end_ms,
+        [(start_ms, end_ms)],
+        sample_fps=10.0,
+    )
+
+    assert len(timestamps) == 2056
+    assert timestamps[0] == start_ms
+    assert timestamps[-1] == start_ms + 205_500.0
 
 
 def _candidate(
