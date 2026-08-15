@@ -1005,6 +1005,10 @@ class EvidencePipeline:
                             "global_start_ms": event.global_start_ms,
                             "global_end_ms": event.global_end_ms,
                             "key_global_ms": event.key_global_ms,
+                            "confidence": event.confidence,
+                            "accepted": event.accepted,
+                            "action_type": event.action_type.value,
+                            "objects": list(event.objects),
                         }
                         for event in first_signal
                     ],
@@ -1066,6 +1070,153 @@ class EvidencePipeline:
                     result.append([start, end])
             merged[view_id] = [(item[0], item[1]) for item in result]
         return merged
+
+    @staticmethod
+    def _progressive_scout_anchor_representatives(
+        target_status: list[dict[str, Any]],
+        candidate_ids: set[str],
+        *,
+        dedup_tolerance_seconds: float,
+        cluster_gap_seconds: float,
+        representatives_per_cluster: int,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Collapse repeated candidate references into sparse routing anchors.
+
+        This affects only the low-FPS view-ranking scout. Formal 10 FPS evidence
+        continues to use every aligned first-person action span.
+        """
+
+        occurrences: list[dict[str, Any]] = []
+        for item in target_status:
+            candidate_id = str(item["candidate_id"])
+            if candidate_id not in candidate_ids:
+                continue
+            for raw_anchor in item.get("first_person_anchor_windows") or []:
+                anchor = dict(raw_anchor)
+                anchor["candidate_ids"] = [candidate_id]
+                occurrences.append(anchor)
+
+        by_event: dict[str, dict[str, Any]] = {}
+        for index, anchor in enumerate(occurrences):
+            event_id = str(anchor.get("event_id") or f"anonymous-{index:06d}")
+            existing = by_event.get(event_id)
+            if existing is None:
+                anchor["event_id"] = event_id
+                by_event[event_id] = anchor
+                continue
+            existing["candidate_ids"] = sorted(
+                set(existing.get("candidate_ids") or [])
+                | set(anchor.get("candidate_ids") or [])
+            )
+
+        tolerance_ms = max(0.0, float(dedup_tolerance_seconds)) * 1000.0
+        peak_groups: list[list[dict[str, Any]]] = []
+        for anchor in sorted(
+            by_event.values(), key=lambda item: float(item["key_global_ms"])
+        ):
+            if (
+                peak_groups
+                and float(anchor["key_global_ms"])
+                - float(peak_groups[-1][-1]["key_global_ms"])
+                <= tolerance_ms
+            ):
+                peak_groups[-1].append(anchor)
+            else:
+                peak_groups.append([anchor])
+
+        unique_peaks: list[dict[str, Any]] = []
+        for group in peak_groups:
+            representative = max(
+                group,
+                key=lambda item: (
+                    float(item.get("confidence", 0.0)),
+                    -max(
+                        0.0,
+                        float(item.get("global_end_ms", 0.0))
+                        - float(item.get("global_start_ms", 0.0)),
+                    ),
+                    str(item.get("event_id", "")),
+                ),
+            ).copy()
+            representative["event_ids"] = sorted(
+                str(item["event_id"]) for item in group
+            )
+            representative["candidate_ids"] = sorted(
+                {
+                    candidate_id
+                    for item in group
+                    for candidate_id in item.get("candidate_ids") or []
+                }
+            )
+            unique_peaks.append(representative)
+
+        cluster_gap_ms = max(0.0, float(cluster_gap_seconds)) * 1000.0
+        clusters: list[list[dict[str, Any]]] = []
+        for anchor in unique_peaks:
+            if (
+                clusters
+                and float(anchor["key_global_ms"])
+                - float(clusters[-1][-1]["key_global_ms"])
+                <= cluster_gap_ms
+            ):
+                clusters[-1].append(anchor)
+            else:
+                clusters.append([anchor])
+
+        limit = max(1, int(representatives_per_cluster))
+        selected: list[dict[str, Any]] = []
+        cluster_reports: list[dict[str, Any]] = []
+        for cluster_index, cluster in enumerate(clusters, 1):
+            peak_values = [float(item["key_global_ms"]) for item in cluster]
+            median_peak = float(np.median(np.asarray(peak_values, dtype=np.float64)))
+            ranked = sorted(
+                cluster,
+                key=lambda item: (
+                    abs(float(item["key_global_ms"]) - median_peak),
+                    -float(item.get("confidence", 0.0)),
+                    str(item.get("event_id", "")),
+                ),
+            )
+            chosen = sorted(
+                ranked[: min(limit, len(ranked))],
+                key=lambda item: float(item["key_global_ms"]),
+            )
+            selected.extend(chosen)
+            cluster_reports.append(
+                {
+                    "cluster_index": cluster_index,
+                    "global_start_ms": min(peak_values),
+                    "global_end_ms": max(peak_values),
+                    "unique_peak_count": len(cluster),
+                    "candidate_ids": sorted(
+                        {
+                            candidate_id
+                            for item in cluster
+                            for candidate_id in item.get("candidate_ids") or []
+                        }
+                    ),
+                    "representative_event_ids": [
+                        str(item["event_id"]) for item in chosen
+                    ],
+                    "representative_peak_ms": [
+                        float(item["key_global_ms"]) for item in chosen
+                    ],
+                }
+            )
+
+        diagnostics = {
+            "candidate_count": len(candidate_ids),
+            "raw_anchor_occurrence_count": len(occurrences),
+            "unique_event_count": len(by_event),
+            "unique_peak_count": len(unique_peaks),
+            "dedup_tolerance_seconds": float(dedup_tolerance_seconds),
+            "cluster_gap_seconds": float(cluster_gap_seconds),
+            "cluster_count": len(clusters),
+            "representatives_per_cluster": limit,
+            "representative_count": len(selected),
+            "clusters": cluster_reports,
+        }
+        return selected, diagnostics
 
     def _run_progressive_fine_scan(
         self,
@@ -1236,13 +1387,36 @@ class EvidencePipeline:
         }
         if scout_enabled and unresolved_ids:
             scout_view_ids = [view.view_id for view in supplemental_views]
+            scout_anchors, scout_anchor_diagnostics = (
+                self._progressive_scout_anchor_representatives(
+                    target_status,
+                    unresolved_ids,
+                    dedup_tolerance_seconds=float(
+                        perf.get(
+                            "fine_scout_peak_dedup_tolerance_seconds", 0.25
+                        )
+                    ),
+                    cluster_gap_seconds=float(
+                        perf.get("fine_scout_peak_cluster_gap_seconds", 60.0)
+                    ),
+                    representatives_per_cluster=int(
+                        perf.get("fine_scout_representatives_per_cluster", 1)
+                    ),
+                )
+            )
+            scout_status = [
+                {
+                    "candidate_id": "SCOUT-REPRESENTATIVES",
+                    "first_person_anchor_windows": scout_anchors,
+                }
+            ]
             scout_windows = self._progressive_anchor_windows(
-                target_status,
+                scout_status,
                 scout_view_ids,
                 infos,
                 transforms,
                 0.0,
-                unresolved_ids,
+                None,
                 peak_radius_seconds=float(
                     perf.get("fine_scout_anchor_radius_seconds", 3.0)
                 ),
@@ -1323,7 +1497,16 @@ class EvidencePipeline:
                 "anchor_radius_seconds": float(
                     perf.get("fine_scout_anchor_radius_seconds", 3.0)
                 ),
+                "anchor_selection": scout_anchor_diagnostics,
                 "window_strategy": "aligned_first_person_peak_windows",
+                "pre_merge_window_count_per_view": len(scout_anchors),
+                "post_merge_window_count_by_view": {
+                    view_id: len(windows)
+                    for view_id, windows in scout_windows.items()
+                },
+                "total_post_merge_window_count": sum(
+                    len(windows) for windows in scout_windows.values()
+                ),
                 "coverage": scout_coverage,
                 "selected_seconds": round(scout_seconds, 3),
                 "estimated_frames": int(round(scout_seconds * scout_fps)),

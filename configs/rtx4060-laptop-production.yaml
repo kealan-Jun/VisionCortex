@@ -99,6 +99,13 @@ performance:
   # decode/source data. A +/-3 s peak-centred window per anchor preserves routing
   # evidence while avoiding a second decode of entire action spans.
   fine_scout_anchor_radius_seconds: 3.0
+  # DEV-021: 505 cross-candidate references contained 374 event IDs and 320
+  # peaks, which chained into 35 random-seek windows per TP. Deduplicate the
+  # same evidence, cluster upload-derived activity periods, and scout one real
+  # representative event per period. This controls seeks without camera IDs.
+  fine_scout_peak_dedup_tolerance_seconds: 0.25
+  fine_scout_peak_cluster_gap_seconds: 60.0
+  fine_scout_representatives_per_cluster: 1
   fine_progressive_anchor_padding_seconds: 10.0
   synchronized_segment_waves: true
   segment_wave_timeout_seconds: 3600

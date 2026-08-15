@@ -99,6 +99,8 @@ def test_rtx4060_profile_does_not_hardcode_validation_camera_ids():
     assert config["performance"]["fine_dynamic_cross_view_scout"] is True
     assert config["performance"]["fine_scout_fps"] == 1.0
     assert config["performance"]["fine_scout_anchor_radius_seconds"] == 3.0
+    assert config["performance"]["fine_scout_peak_cluster_gap_seconds"] == 60.0
+    assert config["performance"]["fine_scout_representatives_per_cluster"] == 1
     assert config["performance"]["fine_progressive_anchor_padding_seconds"] == 10.0
     assert config["performance"]["fine_preferred_third_person_views"] == []
     assert config["performance"]["motion_probe_sequential_segment_workers"] == 4
@@ -498,8 +500,87 @@ def test_dynamic_scout_ranks_all_third_person_views_then_scans_narrow_anchor_win
         report["dynamic_cross_view_scout"]["window_strategy"]
         == "aligned_first_person_peak_windows"
     )
+    assert report["dynamic_cross_view_scout"]["pre_merge_window_count_per_view"] == 1
+    assert report["dynamic_cross_view_scout"]["post_merge_window_count_by_view"] == {
+        "tp0": 1,
+        "tp1": 1,
+        "tp2": 1,
+    }
     assert report["dynamic_cross_view_scout"]["ranking"][0]["view_id"] == "tp2"
     assert report["supplemental_priority"] == ["tp2", "tp1", "tp0"]
     assert report["not_scanned_view_ids"] == ["tp0", "tp1"]
     assert report["stopping_reason"] == "all_demanded_windows_have_dual_role_anchor"
     assert report["scout_estimated_frames"] > 0
+
+
+def test_scout_anchor_selection_deduplicates_and_clusters_across_candidates():
+    statuses = [
+        {
+            "candidate_id": "C1",
+            "first_person_anchor_windows": [
+                {
+                    "event_id": "E1",
+                    "key_global_ms": 10_000.0,
+                    "global_start_ms": 9_000.0,
+                    "global_end_ms": 11_000.0,
+                    "confidence": 0.8,
+                },
+                {
+                    "event_id": "E2",
+                    "key_global_ms": 20_000.0,
+                    "global_start_ms": 19_000.0,
+                    "global_end_ms": 21_000.0,
+                    "confidence": 0.9,
+                },
+            ],
+        },
+        {
+            "candidate_id": "C2",
+            "first_person_anchor_windows": [
+                {
+                    "event_id": "E1",
+                    "key_global_ms": 10_000.0,
+                    "global_start_ms": 9_000.0,
+                    "global_end_ms": 11_000.0,
+                    "confidence": 0.8,
+                },
+                {
+                    "event_id": "E3",
+                    "key_global_ms": 20_100.0,
+                    "global_start_ms": 19_100.0,
+                    "global_end_ms": 21_100.0,
+                    "confidence": 0.7,
+                },
+            ],
+        },
+        {
+            "candidate_id": "C3",
+            "first_person_anchor_windows": [
+                {
+                    "event_id": "E4",
+                    "key_global_ms": 100_000.0,
+                    "global_start_ms": 99_000.0,
+                    "global_end_ms": 101_000.0,
+                    "confidence": 0.95,
+                }
+            ],
+        },
+    ]
+
+    selected, diagnostics = (
+        EvidencePipeline._progressive_scout_anchor_representatives(
+            statuses,
+            {"C1", "C2", "C3"},
+            dedup_tolerance_seconds=0.25,
+            cluster_gap_seconds=60.0,
+            representatives_per_cluster=1,
+        )
+    )
+
+    assert diagnostics["raw_anchor_occurrence_count"] == 5
+    assert diagnostics["unique_event_count"] == 4
+    assert diagnostics["unique_peak_count"] == 3
+    assert diagnostics["cluster_count"] == 2
+    assert diagnostics["representative_count"] == 2
+    assert [item["event_id"] for item in selected] == ["E2", "E4"]
+    assert diagnostics["clusters"][0]["candidate_ids"] == ["C1", "C2"]
