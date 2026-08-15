@@ -96,6 +96,9 @@ def test_rtx4060_profile_does_not_hardcode_validation_camera_ids():
     config = load_config(Path("configs/rtx4060-laptop-production.yaml"))
 
     assert config["performance"]["fine_progressive_cross_view"] is True
+    assert config["performance"]["fine_dynamic_cross_view_scout"] is True
+    assert config["performance"]["fine_scout_fps"] == 1.0
+    assert config["performance"]["fine_progressive_anchor_padding_seconds"] == 10.0
     assert config["performance"]["fine_preferred_third_person_views"] == []
     assert config["performance"]["motion_probe_sequential_segment_workers"] == 4
     assert config["performance"]["fine_first_person_decode_workers"] == 4
@@ -375,3 +378,120 @@ def test_progressive_scan_exhausts_all_views_when_gap_remains(
     assert [view.view_id for view in scanned] == ["fp", "tp0", "tp1", "tp2"]
     assert report["stopping_reason"] == "all_eligible_third_person_views_exhausted"
     assert report["unresolved_candidate_ids"] == ["WINDOW"]
+
+
+def test_dynamic_scout_ranks_all_third_person_views_then_scans_narrow_anchor_window(
+    monkeypatch, tmp_path, default_config
+):
+    views = [
+        ViewInput(view_id="fp", role=ViewRole.FIRST_PERSON, video=Path("fp.mp4")),
+        ViewInput(view_id="tp0", role=ViewRole.THIRD_PERSON, video=Path("tp0.mp4")),
+        ViewInput(view_id="tp1", role=ViewRole.THIRD_PERSON, video=Path("tp1.mp4")),
+        ViewInput(view_id="tp2", role=ViewRole.THIRD_PERSON, video=Path("tp2.mp4")),
+    ]
+    manifest = RunManifest(experiment_id="dynamic-scout", views=views)
+    infos = {
+        view.view_id: VideoInfo(
+            path=view.video,
+            duration_ms=100_000.0,
+            fps=30.0,
+            width=16,
+            height=16,
+            frame_count=3_000,
+        )
+        for view in views
+    }
+    transforms = {
+        view.view_id: AlignmentTransform(
+            view_id=view.view_id,
+            reference_view_id="fp",
+            state="aligned",
+            confidence=1.0,
+        )
+        for view in views
+    }
+    boundary = [_candidate("WINDOW")]
+    default_config["performance"].update(
+        {
+            "fine_window_padding_seconds": 75.0,
+            "fine_dynamic_cross_view_scout": True,
+            "fine_scout_fps": 1.0,
+            "fine_scout_image_size": 416,
+            "fine_progressive_anchor_padding_seconds": 1.0,
+            "fine_decode_lanes": ["cuda", "cuda", "cuda", "cpu"],
+            "detection_fps": 10.0,
+        }
+    )
+    pipeline = EvidencePipeline(default_config)
+    scan_calls = []
+
+    def fake_scan(pass_manifest, _infos, _transforms, pass_dir, **kwargs):
+        scan_calls.append(
+            {
+                "phase": kwargs["phase"],
+                "views": [view.view_id for view in pass_manifest.views],
+                "windows": kwargs["windows"],
+                "decode_backends": kwargs["decode_backends"],
+                "sample_fps": kwargs["sample_fps"],
+            }
+        )
+        return {
+            view.view_id: pass_dir / f"{view.view_id}.jsonl"
+            for view in pass_manifest.views
+        }
+
+    def fake_generate(scanned_views, _paths, _config):
+        return [
+            _candidate(f"CAND-{view.view_id}", view_id=view.view_id, role=view.role)
+            for view in scanned_views
+        ]
+
+    def fake_audit(candidates, _transforms, _config):
+        view_ids = {candidate.view_id for candidate in candidates}
+        roles = [ViewRole.FIRST_PERSON]
+        if "tp2" in view_ids:
+            roles.append(ViewRole.THIRD_PERSON)
+        return [_event("ANCHOR", roles)], []
+
+    def fake_select(_views, _paths, _candidates, _config):
+        report = {
+            "tp0": {"active_anchor_frames": 0, "anchor_frames": 1},
+            "tp1": {"active_anchor_frames": 2, "anchor_frames": 3},
+            "tp2": {"active_anchor_frames": 7, "anchor_frames": 8},
+        }
+        return list(_views), report
+
+    monkeypatch.setattr(pipeline, "_scan_all_views_concurrently", fake_scan)
+    monkeypatch.setattr("labvision_evidence.pipeline.generate_candidates", fake_generate)
+    monkeypatch.setattr("labvision_evidence.pipeline.audit_candidates", fake_audit)
+    monkeypatch.setattr("labvision_evidence.pipeline.select_fine_scan_views", fake_select)
+
+    paths, scanned, _, report = pipeline._run_progressive_fine_scan(
+        manifest,
+        views,
+        {view.view_id: {} for view in views},
+        boundary,
+        pipeline._fine_windows(boundary, infos, transforms),
+        infos,
+        transforms,
+        tmp_path,
+    )
+
+    assert [(call["phase"], call["views"]) for call in scan_calls] == [
+        ("fine", ["fp"]),
+        ("fine_scout", ["tp0", "tp1", "tp2"]),
+        ("fine", ["tp2"]),
+    ]
+    assert scan_calls[1]["sample_fps"] == 1.0
+    assert scan_calls[2]["decode_backends"] == {"tp2": "cpu"}
+    # The formal third-person pass is aligned to the 12-14 second FP event
+    # plus one second, rather than inheriting the 75-second coarse padding.
+    assert scan_calls[2]["windows"]["tp2"] == [(11_000.0, 15_000.0)]
+    assert [view.view_id for view in scanned] == ["fp", "tp2"]
+    assert set(paths) == {"fp", "tp2"}
+    assert report["dynamic_cross_view_scout"]["view_ids"] == ["tp0", "tp1", "tp2"]
+    assert report["dynamic_cross_view_scout"]["ranking"][0]["view_id"] == "tp2"
+    assert report["supplemental_priority"] == ["tp2", "tp1", "tp0"]
+    assert report["not_scanned_view_ids"] == ["tp0", "tp1"]
+    assert report["stopping_reason"] == "all_demanded_windows_have_dual_role_anchor"
+    assert report["scout_estimated_frames"] > 0

@@ -91,3 +91,51 @@ def test_scan_runtime_aggregates_progressive_passes(tmp_path):
     assert report["bottleneck_diagnosis"]["inference_frame_count"] == 120
     assert report["bottleneck_diagnosis"]["inference_frames_per_second"] == 10.0
     assert report["bottleneck_diagnosis"]["inference_milliseconds_per_call"] == 600.0
+
+
+def test_fine_runtime_does_not_absorb_nested_fine_scout_reports(tmp_path):
+    layout = ArchiveLayout(tmp_path / "archive")
+    layout.create()
+    work = tmp_path / "scan"
+    formal = work / "pass-00-primary"
+    scout = work / "scout"
+    formal.mkdir(parents=True)
+    scout.mkdir(parents=True)
+    (formal / "runtime_fine_first_person.json").write_text(
+        json.dumps(
+            {
+                "role": "first_person",
+                "inference_call_count": 2,
+                "inference_frame_count": 16,
+                "inference_seconds": 1.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (scout / "runtime_fine_scout_third_person.json").write_text(
+        json.dumps(
+            {
+                "role": "third_person",
+                "inference_call_count": 100,
+                "inference_frame_count": 800,
+                "inference_seconds": 50.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    EvidencePipeline._archive_scan_runtime(layout, work, "fine")
+    formal_report = json.loads(
+        (layout.json_config / "scan_runtime_fine.json").read_text(encoding="utf-8")
+    )
+    assert len(formal_report["role_reports"]) == 1
+    assert formal_report["bottleneck_diagnosis"]["inference_frame_count"] == 16
+
+    EvidencePipeline._archive_scan_runtime(layout, scout, "fine_scout")
+    scout_report = json.loads(
+        (layout.json_config / "scan_runtime_fine_scout.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert len(scout_report["role_reports"]) == 1
+    assert scout_report["bottleneck_diagnosis"]["inference_frame_count"] == 800

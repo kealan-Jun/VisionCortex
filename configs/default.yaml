@@ -42,6 +42,14 @@ performance:
   fine_preferred_third_person_views: []
   # Associate evidence with its recalled boundary, not the much wider decode padding.
   fine_progressive_audit_margin_seconds: 5.0
+  # Hardware profiles may scout all third-person views around precise first-
+  # person anchors before the full-FPS fallback order is chosen.
+  fine_dynamic_cross_view_scout: false
+  fine_scout_fps: 1.0
+  fine_scout_image_size: 416
+  fine_scout_batch_size: 8
+  fine_scout_keyframes_only: false
+  fine_progressive_anchor_padding_seconds: 10.0
   image_size: 960
   coarse_detection_fps: 0.125
   coarse_image_size: 512

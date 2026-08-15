@@ -331,7 +331,7 @@ def _run_snapshot_from_root(root: Path) -> dict[str, Any]:
         status["views"] = source_progress["views"]
     scans = {
         phase: _read_json(json_root / f"scan_runtime_{phase}.json", {}) or {}
-        for phase in ("coarse", "fine")
+        for phase in ("coarse", "fine_scout", "fine")
     }
     return {
         "root": str(root),
@@ -359,6 +359,9 @@ def _run_snapshot_from_root(root: Path) -> dict[str, Any]:
             "metrics": "JSON-Config-Files/run_metrics.json",
             "metrics_live": "JSON-Config-Files/run_metrics_live.json",
             "scan_runtime_coarse": "JSON-Config-Files/scan_runtime_coarse.json",
+            "scan_runtime_fine_scout": (
+                "JSON-Config-Files/scan_runtime_fine_scout.json"
+            ),
             "scan_runtime_fine": "JSON-Config-Files/scan_runtime_fine.json",
             "source_progress": "JSON-Config-Files/source_progress.json",
             "stage_receipts": "JSON-Config-Files/Stage-Receipts/*.json",

@@ -86,6 +86,16 @@ performance:
   # Fine decode padding remains wide for recall, while pass/fail evidence is
   # associated to its actual boundary with only a small clock-tolerance margin.
   fine_progressive_audit_margin_seconds: 5.0
+  # DEV-019 proved that manifest-order TP selection spent 61,218 frames on
+  # zero-yield views. First run full-FPS FP boundary detection, scout every TP
+  # at aligned FP anchors, then keep the quality-preserving 10 FPS fallback on
+  # narrow anchor windows in evidence-ranked order. Camera IDs remain dynamic.
+  fine_dynamic_cross_view_scout: true
+  fine_scout_fps: 1.0
+  fine_scout_image_size: 416
+  fine_scout_batch_size: 8
+  fine_scout_keyframes_only: false
+  fine_progressive_anchor_padding_seconds: 10.0
   synchronized_segment_waves: true
   segment_wave_timeout_seconds: 3600
   coarse_decode_lanes: [cuda, cuda, cuda, cuda, cpu, cpu]
