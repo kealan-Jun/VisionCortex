@@ -96,7 +96,9 @@ def test_rtx4060_profile_does_not_hardcode_validation_camera_ids():
     config = load_config(Path("configs/rtx4060-laptop-production.yaml"))
 
     assert config["performance"]["fine_progressive_cross_view"] is True
-    assert config["performance"]["fine_dynamic_cross_view_scout"] is True
+    assert config["performance"]["fine_dynamic_cross_view_scout"] is False
+    assert config["performance"]["fine_initial_third_person_views"] == 2
+    assert config["performance"]["fine_supplemental_view_batch_size"] == 2
     assert config["performance"]["fine_scout_fps"] == 1.0
     assert config["performance"]["fine_scout_anchor_radius_seconds"] == 3.0
     assert config["performance"]["fine_scout_peak_cluster_gap_seconds"] == 60.0
@@ -347,6 +349,7 @@ def test_progressive_scan_exhausts_all_views_when_gap_remains(
     }
     boundary = [_candidate("WINDOW")]
     default_config["performance"]["fine_window_padding_seconds"] = 1.0
+    default_config["performance"]["fine_supplemental_view_batch_size"] = 2
     pipeline = EvidencePipeline(default_config)
     calls = []
 
@@ -377,8 +380,10 @@ def test_progressive_scan_exhausts_all_views_when_gap_remains(
         tmp_path,
     )
 
-    assert calls == [["fp", "tp0"], ["tp1"], ["tp2"]]
+    assert calls == [["fp", "tp0"], ["tp1", "tp2"]]
     assert [view.view_id for view in scanned] == ["fp", "tp0", "tp1", "tp2"]
+    assert report["supplemental_view_batch_size"] == 2
+    assert report["supplemental_waves"] == [["tp1", "tp2"]]
     assert report["stopping_reason"] == "all_eligible_third_person_views_exhausted"
     assert report["unresolved_candidate_ids"] == ["WINDOW"]
 

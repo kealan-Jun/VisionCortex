@@ -79,18 +79,23 @@ performance:
   # static view is decoded only for aligned candidate windows that contain a
   # reliable first-person start anchor but still lack valid dual-role evidence.
   fine_progressive_cross_view: true
-  fine_initial_third_person_views: 1
+  # Feed two TP sources into the shared third-person TensorRT model per wave.
+  # This is source concurrency, not a second model/context.
+  fine_initial_third_person_views: 2
+  fine_supplemental_view_batch_size: 2
   # Never encode validation-set camera IDs in the product profile. Empty means
   # every upload is ranked from its own coarse evidence and manifest order.
   fine_preferred_third_person_views: []
   # Fine decode padding remains wide for recall, while pass/fail evidence is
   # associated to its actual boundary with only a small clock-tolerance margin.
   fine_progressive_audit_margin_seconds: 5.0
-  # DEV-019 proved that manifest-order TP selection spent 61,218 frames on
-  # zero-yield views. First run full-FPS FP boundary detection, scout every TP
-  # at aligned FP anchors, then keep the quality-preserving 10 FPS fallback on
-  # narrow anchor windows in evidence-ranked order. Camera IDs remain dynamic.
-  fine_dynamic_cross_view_scout: true
+  # A separate low-FPS ranking pass is optional in the generic pipeline, but
+  # segmented NAS cold starts pay nearly all of its time in file open/seek.
+  # DEV-022: a separate 1 FPS Scout decoded only 210 frames but paid 667 s of
+  # NAS open/seek wait, then all TP views were scanned again at 10 FPS. Use
+  # deterministic formal waves and stop as soon as every recalled window has
+  # valid dual-role evidence; camera IDs remain upload-driven.
+  fine_dynamic_cross_view_scout: false
   fine_scout_fps: 1.0
   fine_scout_image_size: 416
   fine_scout_batch_size: 8

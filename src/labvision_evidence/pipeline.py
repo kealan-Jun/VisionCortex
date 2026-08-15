@@ -1527,7 +1527,14 @@ class EvidencePipeline:
                     for view in supplemental_views
                 ],
             }
-        for pass_index, view in enumerate(supplemental_views, 1):
+        supplemental_batch_size = max(
+            1, int(perf.get("fine_supplemental_view_batch_size", 1))
+        )
+        supplemental_waves = [
+            supplemental_views[index : index + supplemental_batch_size]
+            for index in range(0, len(supplemental_views), supplemental_batch_size)
+        ]
+        for pass_index, pass_views in enumerate(supplemental_waves, 1):
             if not unresolved_ids:
                 break
             pass_candidates = [
@@ -1538,7 +1545,7 @@ class EvidencePipeline:
             target_status = execute_pass(
                 pass_index,
                 "supplemental",
-                [view],
+                pass_views,
                 pass_candidates,
                 target_status,
             )
@@ -1568,8 +1575,8 @@ class EvidencePipeline:
                 "with a low-FPS aligned scout; then exhaust required third-person views "
                 "at full FPS only inside narrow first-person anchor windows"
                 if scout_enabled
-                else "scan first-person plus the highest-ranked third-person view; "
-                "scan each remaining third-person view only for recalled windows "
+                else "scan first-person plus the configured initial third-person wave; "
+                "scan remaining third-person views in bounded shared-model waves only for recalled windows "
                 "with a reliable first-person start anchor but no valid dual-role anchor"
             ),
             "eligible_view_ids": [view.view_id for view in fine_views],
@@ -1578,6 +1585,10 @@ class EvidencePipeline:
                 perf.get("fine_preferred_third_person_views") or []
             ),
             "supplemental_priority": [view.view_id for view in supplemental_views],
+            "supplemental_view_batch_size": supplemental_batch_size,
+            "supplemental_waves": [
+                [view.view_id for view in wave] for wave in supplemental_waves
+            ],
             "dynamic_cross_view_scout": scout_summary,
             "scanned_view_ids": [view.view_id for view in scanned_views],
             "not_scanned_view_ids": [

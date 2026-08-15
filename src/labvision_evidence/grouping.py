@@ -336,6 +336,21 @@ def prepare_formal_experiment_segments(
         "waste_container",
     }
     actor_objects = {"hand", "gloved_hand", "lab_coat"}
+    continuity = config["continuity"]
+    bridge_step_gap_ms = (
+        float(
+            continuity.get(
+                "quarantined_atomic_bridge_max_step_gap_seconds", 60.0
+            )
+        )
+        * 1000.0
+    )
+    bridge_span_ms = (
+        float(
+            continuity.get("quarantined_atomic_bridge_max_span_seconds", 180.0)
+        )
+        * 1000.0
+    )
 
     def segment_roles(segment: ExperimentSegment) -> set[ViewRole]:
         return {
@@ -360,12 +375,177 @@ def prepare_formal_experiment_segments(
             if obj not in actor_objects
         }
 
+    def first_person_views(segment: ExperimentSegment) -> set[str]:
+        return {
+            view_id
+            for view_id in segment.participating_views
+            if roles.get(view_id) == ViewRole.FIRST_PERSON
+        }
+
+    def quarantined_atomic_bridge(
+        left: ExperimentSegment,
+        context: ExperimentSegment,
+        right: ExperimentSegment,
+    ) -> dict[str, Any] | None:
+        """Prove a graph-only bridge without promoting its single-view events."""
+
+        if not (
+            required_roles.issubset(segment_roles(left))
+            and segment_roles(context) == {ViewRole.FIRST_PERSON}
+            and required_roles.issubset(segment_roles(right))
+        ):
+            return None
+        left_gap_ms = context.global_start_ms - left.global_end_ms
+        right_gap_ms = right.global_start_ms - context.global_end_ms
+        outer_span_ms = right.global_end_ms - left.global_start_ms
+        if not (
+            0.0 <= left_gap_ms <= bridge_step_gap_ms
+            and 0.0 <= right_gap_ms <= bridge_step_gap_ms
+            and 0.0 < outer_span_ms <= bridge_span_ms
+        ):
+            return None
+        shared_first = (
+            first_person_views(left)
+            & first_person_views(context)
+            & first_person_views(right)
+        )
+        shared_boundaries = (
+            boundary_ids(left) & boundary_ids(context) & boundary_ids(right)
+        )
+        context_events = _segment_events(context, by_event)
+        if not shared_first or not shared_boundaries or not any(
+            event.accepted for event in context_events
+        ):
+            return None
+        shared_windows = [
+            window
+            for window in coarse_windows
+            if window.candidate_id in shared_boundaries
+        ]
+        context_guard_ms = maximum_gap_ms
+        coarse_context_start_ms = max(
+            window.global_start_ms for window in shared_windows
+        ) + context_guard_ms
+        coarse_context_end_ms = min(
+            window.global_end_ms for window in shared_windows
+        ) - context_guard_ms
+        if coarse_context_end_ms <= coarse_context_start_ms:
+            return None
+        return {
+            "shared_first_person_views": sorted(shared_first),
+            "shared_boundary_ids": sorted(shared_boundaries),
+            "left_gap_ms": left_gap_ms,
+            "right_gap_ms": right_gap_ms,
+            "outer_span_ms": outer_span_ms,
+            "coarse_context_start_ms": coarse_context_start_ms,
+            "coarse_context_end_ms": coarse_context_end_ms,
+            "coarse_context_guard_ms": context_guard_ms,
+            "semantic_object_bridge_proven": bool(
+                event_objects(left)
+                & event_objects(context)
+                & event_objects(right)
+            ),
+        }
+
+    def merge_dual_fragments(
+        left: ExperimentSegment,
+        right: ExperimentSegment,
+        bridge: dict[str, Any],
+    ) -> ExperimentSegment:
+        event_ids = list(dict.fromkeys([*left.event_ids, *right.event_ids]))
+        micro_segments = sorted(
+            [*left.micro_segments, *right.micro_segments],
+            key=lambda item: float(item.get("start_global_ms", 0.0)),
+        )
+        participating_views = sorted(
+            set(left.participating_views) | set(right.participating_views)
+        )
+        return left.model_copy(
+            update={
+                "global_start_ms": max(
+                    0.0,
+                    left.global_start_ms - maximum_extension_ms,
+                    min(
+                        left.global_start_ms,
+                        float(bridge["coarse_context_start_ms"]),
+                    ),
+                ),
+                "global_end_ms": min(
+                    right.global_end_ms + maximum_extension_ms,
+                    max(
+                        right.global_end_ms,
+                        float(bridge["coarse_context_end_ms"]),
+                    ),
+                ),
+                "event_ids": event_ids,
+                "participating_views": participating_views,
+                "rejected_views": {
+                    key: value
+                    for key, value in left.rejected_views.items()
+                    if key in right.rejected_views
+                },
+                "micro_segments": micro_segments,
+            }
+        )
+
     promoted: list[ExperimentSegment] = []
     receipts: list[dict[str, Any]] = []
     previous_input_attachable = False
-    for segment in sorted(
+    ordered_segments = sorted(
         segments, key=lambda item: (item.global_start_ms, item.global_end_ms)
-    ):
+    )
+    index = 0
+    while index < len(ordered_segments):
+        segment = ordered_segments[index]
+        if index + 2 < len(ordered_segments):
+            context = ordered_segments[index + 1]
+            right = ordered_segments[index + 2]
+            bridge = quarantined_atomic_bridge(segment, context, right)
+            if bridge is not None:
+                merged = merge_dual_fragments(segment, right, bridge)
+                context_event_ids = set(context.event_ids)
+                if context_event_ids & set(merged.event_ids):
+                    raise ValueError(
+                        "quarantined continuity events leaked into a formal segment"
+                    )
+                promoted.append(merged)
+                receipts.extend(
+                    [
+                        {
+                            "segment_id": segment.segment_id,
+                            "decision": "promoted_dual_view",
+                            "roles": sorted(
+                                role.value for role in segment_roles(segment)
+                            ),
+                        },
+                        {
+                            "segment_id": context.segment_id,
+                            "decision": "quarantined_continuity_bridge",
+                            "roles": sorted(
+                                role.value for role in segment_roles(context)
+                            ),
+                            "global_start_ms": context.global_start_ms,
+                            "global_end_ms": context.global_end_ms,
+                            "event_ids": list(context.event_ids),
+                            "bridged_left_segment_id": segment.segment_id,
+                            "bridged_right_segment_id": right.segment_id,
+                            **bridge,
+                        },
+                        {
+                            "segment_id": right.segment_id,
+                            "decision": "merged_dual_view_fragment",
+                            "merged_into_segment_id": segment.segment_id,
+                            "roles": sorted(
+                                role.value for role in segment_roles(right)
+                            ),
+                            **bridge,
+                        },
+                    ]
+                )
+                previous_input_attachable = True
+                index += 3
+                continue
+
         current_roles = segment_roles(segment)
         if required_roles.issubset(current_roles):
             promoted.append(segment)
@@ -377,6 +557,7 @@ def prepare_formal_experiment_segments(
                     "roles": sorted(role.value for role in current_roles),
                 }
             )
+            index += 1
             continue
 
         previous = promoted[-1] if promoted and previous_input_attachable else None
@@ -442,6 +623,7 @@ def prepare_formal_experiment_segments(
                 }
             )
             previous_input_attachable = True
+            index += 1
             continue
 
         receipts.append(
@@ -459,6 +641,7 @@ def prepare_formal_experiment_segments(
             }
         )
         previous_input_attachable = False
+        index += 1
 
     return promoted, receipts
 

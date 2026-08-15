@@ -607,6 +607,89 @@ def test_fine_prefetch_stops_other_decoders_after_failure(monkeypatch, default_c
     assert isinstance(items[-1], ProducerEnd)
 
 
+def test_source_activity_maps_window_units_to_virtual_segments(
+    monkeypatch, tmp_path, default_config
+):
+    view = ViewInput(
+        view_id="tp",
+        role=ViewRole.THIRD_PERSON,
+        segments=[
+            VideoSegmentInput(video=Path("segment-0.mp4")),
+            VideoSegmentInput(video=Path("segment-1.mp4")),
+        ],
+    )
+    segments = [
+        VideoSegmentInfo(
+            path=item.video,
+            virtual_start_ms=index * 1_000.0,
+            virtual_end_ms=(index + 1) * 1_000.0,
+            frame_start_index=index * 30,
+            duration_ms=1_000.0,
+            fps=30.0,
+            width=8,
+            height=8,
+            frame_count=30,
+            size_bytes=100,
+        )
+        for index, item in enumerate(view.segments)
+    ]
+    info = VideoInfo(
+        path=segments[0].path,
+        duration_ms=2_000.0,
+        fps=30.0,
+        width=8,
+        height=8,
+        frame_count=60,
+        size_bytes=200,
+        segments=segments,
+    )
+
+    def no_frames(*_args, **_kwargs):
+        yield from ()
+
+    monkeypatch.setattr(
+        "labvision_evidence.detection.iter_view_sampled_frames", no_frames
+    )
+    output: queue.Queue = queue.Queue()
+    output.activity_path = tmp_path / "source_activity.jsonl"
+    output.activity_lock = threading.Lock()
+    _producer(
+        view,
+        info,
+        output,
+        set(),
+        default_config,
+        [(100.0, 200.0), (800.0, 900.0)],
+        1.0,
+        8,
+        False,
+        "cpu",
+        1.0,
+        (8, 8),
+        None,
+        "fine_scout",
+    )
+
+    activity = [
+        json.loads(line)
+        for line in output.activity_path.read_text(encoding="utf-8").splitlines()
+        if line
+    ]
+    started = [item for item in activity if item["event"] == "source_unit_started"]
+    assert [item["segment_path"] for item in started] == [
+        "segment-0.mp4",
+        "segment-0.mp4",
+    ]
+    assert [item["segment_paths"] for item in started] == [
+        ["segment-0.mp4"],
+        ["segment-0.mp4"],
+    ]
+    assert [
+        (item["source_unit_start_ms"], item["source_unit_end_ms"])
+        for item in started
+    ] == [(100.0, 200.0), (800.0, 900.0)]
+
+
 def test_sequential_sparse_strategy_bypasses_random_indexed_seeks(monkeypatch, tmp_path):
     source = tmp_path / "source.mp4"
     source.write_bytes(b"placeholder")

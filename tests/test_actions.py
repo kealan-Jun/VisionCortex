@@ -746,3 +746,234 @@ def test_formal_promotion_attaches_connected_first_person_cleanup_tail(
     assert formal[0].event_ids == ["CORE", "CLEANUP-TAIL"]
     assert receipts[-1]["decision"] == "attached_first_person_tail"
     assert receipts[-1]["cleanup_objects"] == ["cleaning_tool"]
+
+
+def test_formal_promotion_uses_fp_only_context_as_graph_edge_without_event_leakage(
+    default_config,
+):
+    views = [
+        ViewInput(view_id="fp01", role=ViewRole.FIRST_PERSON, video=Path("fp.mp4")),
+        ViewInput(view_id="tp_left", role=ViewRole.THIRD_PERSON, video=Path("left.mp4")),
+        ViewInput(view_id="tp_right", role=ViewRole.THIRD_PERSON, video=Path("right.mp4")),
+    ]
+
+    def event(
+        event_id: str,
+        start_ms: float,
+        end_ms: float,
+        objects: list[str],
+        supporting_views: list[str],
+        supporting_roles: list[ViewRole],
+    ) -> EvidenceEvent:
+        return EvidenceEvent(
+            event_id=event_id,
+            action_type=ActionType.HAND_OBJECT_CONTACT,
+            global_start_ms=start_ms,
+            global_end_ms=end_ms,
+            key_global_ms=(start_ms + end_ms) / 2.0,
+            objects=objects,
+            confidence=0.9,
+            accepted=True,
+            audit_reason="test evidence",
+            supporting_views=supporting_views,
+            supporting_roles=supporting_roles,
+            candidates=[],
+        )
+
+    left_event = event(
+        "LEFT-DUAL",
+        309_000,
+        329_000,
+        ["paper", "gloved_hand"],
+        ["fp01", "tp_left"],
+        [ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON],
+    )
+    context_event = event(
+        "CONTEXT-FP-ONLY",
+        356_600,
+        358_100,
+        ["bottle_cap", "gloved_hand"],
+        ["fp01"],
+        [ViewRole.FIRST_PERSON],
+    )
+    right_event = event(
+        "RIGHT-DUAL",
+        410_700,
+        411_500,
+        ["sample_bottle", "gloved_hand"],
+        ["fp01", "tp_right"],
+        [ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON],
+    )
+    segments = [
+        ExperimentSegment(
+            segment_id="EXP-LEFT",
+            global_start_ms=307_200,
+            global_end_ms=332_400,
+            event_ids=[left_event.event_id],
+            participating_views=["fp01", "tp_left"],
+        ),
+        ExperimentSegment(
+            segment_id="EXP-CONTEXT",
+            global_start_ms=354_600,
+            global_end_ms=361_100,
+            event_ids=[context_event.event_id],
+            participating_views=["fp01"],
+        ),
+        ExperimentSegment(
+            segment_id="EXP-RIGHT",
+            global_start_ms=408_700,
+            global_end_ms=414_500,
+            event_ids=[right_event.event_id],
+            participating_views=["fp01", "tp_right"],
+        ),
+    ]
+    coarse = ActionCandidate(
+        candidate_id="MOTION-FUSED-000001",
+        action_type=ActionType.OBJECT_MOVEMENT,
+        view_id="fp01",
+        role=ViewRole.FIRST_PERSON,
+        local_start_ms=290_000,
+        local_end_ms=440_000,
+        global_start_ms=290_000,
+        global_end_ms=440_000,
+        key_global_ms=365_000,
+        objects=[],
+        confidence=0.9,
+    )
+
+    formal, receipts = prepare_formal_experiment_segments(
+        segments,
+        [left_event, context_event, right_event],
+        views,
+        [coarse],
+        default_config,
+    )
+    groups = build_experiment_groups(
+        formal,
+        [left_event, context_event, right_event],
+        views,
+        default_config,
+    )
+
+    assert len(formal) == 1
+    assert formal[0].segment_id == "EXP-LEFT"
+    # The quarantined event contributes no boundary. The shared independent
+    # motion envelope 290-440 s is contracted by the existing 10 s context
+    # guard, producing a bounded 300-430 s formal clip.
+    assert formal[0].global_start_ms == 300_000
+    assert formal[0].global_end_ms == 430_000
+    assert formal[0].event_ids == ["LEFT-DUAL", "RIGHT-DUAL"]
+    assert "CONTEXT-FP-ONLY" not in formal[0].event_ids
+    assert [item["decision"] for item in receipts] == [
+        "promoted_dual_view",
+        "quarantined_continuity_bridge",
+        "merged_dual_view_fragment",
+    ]
+    assert receipts[1]["semantic_object_bridge_proven"] is False
+    assert receipts[1]["shared_boundary_ids"] == ["MOTION-FUSED-000001"]
+    assert receipts[1]["coarse_context_start_ms"] == 300_000
+    assert receipts[1]["coarse_context_end_ms"] == 430_000
+    assert len(groups) == 1
+    assert groups[0].continuity_type == "independent"
+    assert groups[0].atomic_experiment_ids == ["EXP-LEFT"]
+
+
+def test_formal_promotion_does_not_bridge_across_different_coarse_boundaries(
+    default_config,
+):
+    views = [
+        ViewInput(view_id="fp", role=ViewRole.FIRST_PERSON, video=Path("fp.mp4")),
+        ViewInput(view_id="tp", role=ViewRole.THIRD_PERSON, video=Path("tp.mp4")),
+    ]
+    dual = EvidenceEvent(
+        event_id="LEFT",
+        action_type=ActionType.HAND_OBJECT_CONTACT,
+        global_start_ms=10_000,
+        global_end_ms=12_000,
+        key_global_ms=11_000,
+        objects=["paper"],
+        confidence=0.9,
+        accepted=True,
+        audit_reason="left",
+        supporting_views=["fp", "tp"],
+        supporting_roles=[ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON],
+        candidates=[],
+    )
+    context = dual.model_copy(
+        update={
+            "event_id": "CONTEXT",
+            "global_start_ms": 20_000,
+            "global_end_ms": 22_000,
+            "key_global_ms": 21_000,
+            "supporting_views": ["fp"],
+            "supporting_roles": [ViewRole.FIRST_PERSON],
+        }
+    )
+    right = dual.model_copy(
+        update={
+            "event_id": "RIGHT",
+            "global_start_ms": 30_000,
+            "global_end_ms": 32_000,
+            "key_global_ms": 31_000,
+        }
+    )
+    segments = [
+        ExperimentSegment(
+            segment_id="LEFT-SEG",
+            global_start_ms=9_000,
+            global_end_ms=13_000,
+            event_ids=["LEFT"],
+            participating_views=["fp", "tp"],
+        ),
+        ExperimentSegment(
+            segment_id="CONTEXT-SEG",
+            global_start_ms=19_000,
+            global_end_ms=23_000,
+            event_ids=["CONTEXT"],
+            participating_views=["fp"],
+        ),
+        ExperimentSegment(
+            segment_id="RIGHT-SEG",
+            global_start_ms=29_000,
+            global_end_ms=33_000,
+            event_ids=["RIGHT"],
+            participating_views=["fp", "tp"],
+        ),
+    ]
+    coarse = [
+        ActionCandidate(
+            candidate_id="LEFT-WINDOW",
+            action_type=ActionType.OBJECT_MOVEMENT,
+            view_id="fp",
+            role=ViewRole.FIRST_PERSON,
+            local_start_ms=0,
+            local_end_ms=24_000,
+            global_start_ms=0,
+            global_end_ms=24_000,
+            key_global_ms=12_000,
+            objects=[],
+            confidence=0.9,
+        ),
+        ActionCandidate(
+            candidate_id="RIGHT-WINDOW",
+            action_type=ActionType.OBJECT_MOVEMENT,
+            view_id="fp",
+            role=ViewRole.FIRST_PERSON,
+            local_start_ms=25_000,
+            local_end_ms=40_000,
+            global_start_ms=25_000,
+            global_end_ms=40_000,
+            key_global_ms=32_000,
+            objects=[],
+            confidence=0.9,
+        ),
+    ]
+
+    formal, receipts = prepare_formal_experiment_segments(
+        segments, [dual, context, right], views, coarse, default_config
+    )
+
+    assert [segment.segment_id for segment in formal] == ["LEFT-SEG", "RIGHT-SEG"]
+    assert "quarantined_continuity_bridge" not in {
+        item["decision"] for item in receipts
+    }

@@ -240,9 +240,28 @@ def _producer(
     sample_period_ms = 1000.0 / max(sample_fps, 1e-9)
     activity_path = output_queue.activity_path if hasattr(output_queue, "activity_path") else None
 
+    def source_unit_paths(chunk_index: int | None) -> list[str]:
+        if chunk_index is None or not 0 <= chunk_index < len(work_units):
+            return []
+        unit_start, unit_end = work_units[chunk_index]
+        if not info.segments:
+            return [str(view.video)] if view.video is not None else []
+        return [
+            str(segment.path)
+            for segment in info.segments
+            if min(unit_end, segment.virtual_end_ms)
+            > max(unit_start, segment.virtual_start_ms)
+        ]
+
     def activity(event: str, chunk_index: int | None = None) -> None:
         if activity_path is None:
             return
+        paths = source_unit_paths(chunk_index)
+        unit_window = (
+            work_units[chunk_index]
+            if chunk_index is not None and 0 <= chunk_index < len(work_units)
+            else None
+        )
         payload = {
             "timestamp": time.time(),
             "event": event,
@@ -250,11 +269,10 @@ def _producer(
             "role": view.role.value,
             "decode_backend": decode_backend,
             "chunk_index": chunk_index,
-            "segment_path": (
-                str(info.segments[chunk_index].path)
-                if chunk_index is not None and info.segments and chunk_index < len(info.segments)
-                else None
-            ),
+            "source_unit_start_ms": unit_window[0] if unit_window else None,
+            "source_unit_end_ms": unit_window[1] if unit_window else None,
+            "segment_path": paths[0] if len(paths) == 1 else None,
+            "segment_paths": paths,
         }
         with output_queue.activity_lock:
             with activity_path.open("a", encoding="utf-8") as handle:

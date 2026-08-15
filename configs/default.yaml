@@ -41,6 +41,7 @@ performance:
   # supplementation explicitly.
   fine_progressive_cross_view: false
   fine_initial_third_person_views: 1
+  fine_supplemental_view_batch_size: 1
   # Optional user/deployment hint only; keep empty for automatic upload-driven ranking.
   fine_preferred_third_person_views: []
   # Associate evidence with its recalled boundary, not the much wider decode padding.
@@ -193,6 +194,11 @@ continuity:
   # objects agree, and neither side contains an explicit state/equipment step.
   atomic_fragment_merge_max_gap_seconds: 20.0
   atomic_fragment_min_shared_objects: 2
+  # A brief FP-only observation may sit between two corroborated fragments of
+  # one recalled operation when the TP view is occluded. It may connect the
+  # audit graph, but its events must never enter the formal segment.
+  quarantined_atomic_bridge_max_step_gap_seconds: 60.0
+  quarantined_atomic_bridge_max_span_seconds: 180.0
 
 key_materials:
   # Only collapse near-identical evidence. Repeated transfers, contacts and
