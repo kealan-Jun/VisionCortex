@@ -1287,7 +1287,7 @@ class EvidencePipeline:
                     view.view_id: fine_windows[view.view_id] for view in pass_views
                 }
                 window_strategy = "coarse_candidate_windows"
-            elif scout_enabled and target_snapshot is not None:
+            elif target_snapshot is not None:
                 pass_windows = self._progressive_anchor_windows(
                     target_snapshot,
                     [view.view_id for view in pass_views],

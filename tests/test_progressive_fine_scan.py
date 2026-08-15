@@ -350,11 +350,14 @@ def test_progressive_scan_exhausts_all_views_when_gap_remains(
     boundary = [_candidate("WINDOW")]
     default_config["performance"]["fine_window_padding_seconds"] = 1.0
     default_config["performance"]["fine_supplemental_view_batch_size"] = 2
+    default_config["performance"]["fine_progressive_anchor_padding_seconds"] = 0.0
     pipeline = EvidencePipeline(default_config)
     calls = []
+    window_calls = []
 
-    def fake_scan(pass_manifest, _infos, _transforms, pass_dir, **_kwargs):
+    def fake_scan(pass_manifest, _infos, _transforms, pass_dir, **kwargs):
         calls.append([view.view_id for view in pass_manifest.views])
+        window_calls.append(kwargs["windows"])
         return {
             view.view_id: pass_dir / f"{view.view_id}.jsonl"
             for view in pass_manifest.views
@@ -381,9 +384,20 @@ def test_progressive_scan_exhausts_all_views_when_gap_remains(
     )
 
     assert calls == [["fp", "tp0"], ["tp1", "tp2"]]
+    assert window_calls[0] == {
+        "fp": [(9_000.0, 21_000.0)],
+        "tp0": [(9_000.0, 21_000.0)],
+    }
+    assert window_calls[1] == {
+        "tp1": [(12_000.0, 14_000.0)],
+        "tp2": [(12_000.0, 14_000.0)],
+    }
     assert [view.view_id for view in scanned] == ["fp", "tp0", "tp1", "tp2"]
     assert report["supplemental_view_batch_size"] == 2
     assert report["supplemental_waves"] == [["tp1", "tp2"]]
+    assert report["passes"][1]["window_strategy"] == (
+        "aligned_first_person_anchor_windows"
+    )
     assert report["stopping_reason"] == "all_eligible_third_person_views_exhausted"
     assert report["unresolved_candidate_ids"] == ["WINDOW"]
 
