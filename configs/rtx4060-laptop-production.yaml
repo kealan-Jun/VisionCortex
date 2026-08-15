@@ -79,9 +79,11 @@ performance:
   # static view is decoded only for aligned candidate windows that contain a
   # reliable first-person start anchor but still lack valid dual-role evidence.
   fine_progressive_cross_view: true
+  # Build recalled action anchors from the FP boundary sensor first. Every TP
+  # source then enters a narrow formal wave, so no TP repeats the broad pass.
+  fine_initial_third_person_views: 0
   # Feed two TP sources into the shared third-person TensorRT model per wave.
   # This is source concurrency, not a second model/context.
-  fine_initial_third_person_views: 2
   fine_supplemental_view_batch_size: 2
   # Never encode validation-set camera IDs in the product profile. Empty means
   # every upload is ranked from its own coarse evidence and manifest order.

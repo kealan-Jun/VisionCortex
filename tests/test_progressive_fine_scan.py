@@ -85,6 +85,12 @@ def test_progressive_order_uses_coarse_anchor_quality_then_manifest_order(defaul
     assert [view.view_id for view in initial] == ["fp", "tp1"]
     assert [view.view_id for view in supplemental] == ["tp2", "tp0"]
 
+    fp_only, all_third = EvidencePipeline._progressive_fine_view_order(
+        views, report, 0
+    )
+    assert [view.view_id for view in fp_only] == ["fp"]
+    assert [view.view_id for view in all_third] == ["tp1", "tp2", "tp0"]
+
     preferred, fallback = EvidencePipeline._progressive_fine_view_order(
         views, report, 1, ["tp0", "tp2"]
     )
@@ -97,7 +103,7 @@ def test_rtx4060_profile_does_not_hardcode_validation_camera_ids():
 
     assert config["performance"]["fine_progressive_cross_view"] is True
     assert config["performance"]["fine_dynamic_cross_view_scout"] is False
-    assert config["performance"]["fine_initial_third_person_views"] == 2
+    assert config["performance"]["fine_initial_third_person_views"] == 0
     assert config["performance"]["fine_supplemental_view_batch_size"] == 2
     assert config["performance"]["fine_scout_fps"] == 1.0
     assert config["performance"]["fine_scout_anchor_radius_seconds"] == 3.0

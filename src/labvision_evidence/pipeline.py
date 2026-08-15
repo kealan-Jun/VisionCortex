@@ -916,7 +916,7 @@ class EvidencePipeline:
                 positions[view.view_id],
             ),
         )
-        initial_count = min(len(third), max(1, int(initial_third_person_views)))
+        initial_count = min(len(third), max(0, int(initial_third_person_views)))
         return first + third[:initial_count], third[initial_count:]
 
     def _progressive_target_status(
