@@ -1,6 +1,9 @@
 project:
   output_root: ./outputs
   experiment_id_prefix: CHEM
+  # Development-only acceptance mode stops after bounded dual-view CV audit.
+  # The production pipeline and Web submissions always leave this disabled.
+  preprocessing_acceptance_only: false
 
 models:
   first_person: D:/LabModels/yolo/first_person/yolo26s_first_21_v1/best.pt

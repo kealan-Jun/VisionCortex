@@ -44,6 +44,7 @@ def test_cache_identity_ignores_run_specific_storage_paths(default_config, tmp_p
 
     original = build_cache_identity(default_config, manifest)
     default_config["project"]["output_root"] = str(tmp_path / "runs" / "new-run")
+    default_config["project"]["preprocessing_acceptance_only"] = True
     default_config["storage"]["active_archive_path"] = str(tmp_path / "staging" / "new-run")
     default_config["storage"]["archive_root"] = str(tmp_path / "other-nas")
     modified = build_cache_identity(default_config, manifest)

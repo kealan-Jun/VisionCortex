@@ -336,6 +336,10 @@ def build_cache_identity(config: dict[str, Any], manifest: RunManifest) -> dict[
 
     stable_config = deepcopy(config)
     stable_config.get("project", {}).pop("output_root", None)
+    # This switch changes only how far a run proceeds. Keeping it out of the
+    # CV cache identity lets a later authorized full pipeline reuse the exact
+    # accepted cold-start preprocessing ledgers without weakening provenance.
+    stable_config.get("project", {}).pop("preprocessing_acceptance_only", None)
     for key in (
         "active_archive_path",
         "archive_root",
@@ -2402,7 +2406,7 @@ class EvidencePipeline:
                     "experiment_groups": [group.model_dump(mode="json") for group in groups],
                 },
             )
-            self._run_boundary_precheck(layout, groups)
+            boundary_precheck = self._run_boundary_precheck(layout, groups)
             self._complete_stage(
                 layout,
                 "candidate_audit",
@@ -2411,6 +2415,86 @@ class EvidencePipeline:
                     layout.json_config / "boundary_precheck.json",
                 ],
             )
+
+            if bool(
+                self.config.get("project", {}).get(
+                    "preprocessing_acceptance_only", False
+                )
+            ):
+                self._status(
+                    layout,
+                    "preprocessing_acceptance",
+                    0.99,
+                    "验证有界双视角实验与关键事件选择，不调用模型或导出媒体",
+                )
+                key_events = select_key_events(groups, segments, events, self.config)
+                key_selection_path = (
+                    layout.json_config / "key_material_selection_preview.json"
+                )
+                selection_report = _key_material_selection_report(
+                    groups, segments, events
+                )
+                write_json(key_selection_path, selection_report)
+                acceptance_path = (
+                    layout.json_config / "preprocessing_acceptance.json"
+                )
+                write_json(
+                    acceptance_path,
+                    {
+                        "schema_version": (
+                            "visioncortex-preprocessing-acceptance/1"
+                        ),
+                        "status": (
+                            "passed" if boundary_precheck["passed"] else "failed"
+                        ),
+                        "run_mode": "preprocessing_acceptance_only",
+                        "formal_archive_promotion_allowed": False,
+                        "model_api_calls": 0,
+                        "token_usage": {
+                            "input_tokens": 0,
+                            "output_tokens": 0,
+                            "total_tokens": 0,
+                        },
+                        "preprocessing_seconds": (
+                            self._preprocessing_completed_seconds
+                        ),
+                        "experiment_group_count": len(groups),
+                        "selected_key_event_count": len(key_events),
+                        "experiment_groups": [
+                            group.model_dump(mode="json") for group in groups
+                        ],
+                        "selected_key_event_ids": [
+                            event.event_id for event in key_events
+                        ],
+                        "boundary_precheck": boundary_precheck,
+                        "key_material_selection_preview": selection_report,
+                        "limitations": [
+                            "No MLLM experiment naming or step understanding was run.",
+                            "No experiment clips, key frames, key clips, daily report, or PDF were materialized.",
+                            "This staging result must not replace the accepted fixed archive.",
+                        ],
+                    },
+                )
+                self._status(
+                    layout,
+                    "preprocessing_completed",
+                    1.0,
+                    "预处理性能与边界质量验收完成；正式归档未提升",
+                )
+                run_metrics = self._metrics(key_events, groups)
+                run_metrics["run_mode"] = "preprocessing_acceptance_only"
+                run_metrics["formal_archive_promotion_allowed"] = False
+                write_json(layout.json_config / "run_metrics.json", run_metrics)
+                self._complete_stage(
+                    layout,
+                    "preprocessing_acceptance",
+                    [
+                        acceptance_path,
+                        key_selection_path,
+                        layout.json_config / "run_metrics.json",
+                    ],
+                )
+                return layout.root
 
             self._status(layout, "experiment_understanding", 0.72, "用完整有界双视角故事板命名实验并核验连续性")
             analyze_experiment_groups(

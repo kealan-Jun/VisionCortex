@@ -136,6 +136,13 @@ def run_fixed_benchmark_command(
     config: Annotated[Path, typer.Option("--config", "-c", exists=True, dir_okay=False)] = Path(
         "configs/rtx4060-laptop-production.yaml"
     ),
+    preprocessing_only: Annotated[
+        bool,
+        typer.Option(
+            "--preprocessing-only/--full-pipeline",
+            help="Stop after bounded dual-view CV acceptance; do not call MLLM or promote the fixed archive.",
+        ),
+    ] = False,
 ) -> None:
     """Run the registered six-view benchmark and reuse its fixed NAS archive."""
 
@@ -143,6 +150,7 @@ def run_fixed_benchmark_command(
     archive_name = "Six-View-Three-Hour-Experiment-2026-08-13"
     settings = load_config(config)
     settings["storage"]["sync_to_nas"] = True
+    settings["project"]["preprocessing_acceptance_only"] = preprocessing_only
     run_id = f"cli-{datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:4]}"
     fixed_root, nas_root, history_root = fixed_archive_staging_paths(
         settings, archive_name, run_id
@@ -165,6 +173,13 @@ def run_fixed_benchmark_command(
         f"nas_staging={nas_root} fixed_output={fixed_root}"
     )
     result = EvidencePipeline(settings, _progress).run(manifest)
+    if preprocessing_only:
+        typer.echo(
+            f"{result} total_seconds={time.perf_counter() - started:.6f} "
+            "run_mode=preprocessing_acceptance_only token_calls=0 "
+            "fixed_archive_promotion=skipped"
+        )
+        return
     receipt = promote_fixed_archive(nas_root, fixed_root, history_root)
     typer.echo(
         f"{fixed_root} total_seconds={time.perf_counter() - started:.6f} "
