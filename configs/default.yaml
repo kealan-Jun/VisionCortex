@@ -52,6 +52,9 @@ performance:
   fine_scout_image_size: 416
   fine_scout_batch_size: 8
   fine_scout_keyframes_only: false
+  # Scout around the most informative instant instead of decoding the full
+  # action span. Formal 10 FPS evidence still uses the full aligned span.
+  fine_scout_anchor_radius_seconds: 3.0
   fine_progressive_anchor_padding_seconds: 10.0
   image_size: 960
   coarse_detection_fps: 0.125

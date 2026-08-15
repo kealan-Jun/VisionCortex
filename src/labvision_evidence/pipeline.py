@@ -1021,10 +1021,16 @@ class EvidencePipeline:
         transforms,
         padding_seconds: float,
         candidate_ids: set[str] | None = None,
+        peak_radius_seconds: float | None = None,
     ) -> dict[str, list[tuple[float, float]]]:
         """Build aligned narrow windows around reliable first-person events."""
 
         padding_ms = max(0.0, float(padding_seconds)) * 1000.0
+        peak_radius_ms = (
+            max(0.0, float(peak_radius_seconds)) * 1000.0
+            if peak_radius_seconds is not None
+            else None
+        )
         grouped: dict[str, list[tuple[float, float]]] = {
             view_id: [] for view_id in view_ids
         }
@@ -1032,8 +1038,13 @@ class EvidencePipeline:
             if candidate_ids is not None and item["candidate_id"] not in candidate_ids:
                 continue
             for anchor in item.get("first_person_anchor_windows") or []:
-                global_start = float(anchor["global_start_ms"]) - padding_ms
-                global_end = float(anchor["global_end_ms"]) + padding_ms
+                if peak_radius_ms is None:
+                    global_start = float(anchor["global_start_ms"]) - padding_ms
+                    global_end = float(anchor["global_end_ms"]) + padding_ms
+                else:
+                    peak_ms = float(anchor["key_global_ms"])
+                    global_start = peak_ms - peak_radius_ms
+                    global_end = peak_ms + peak_radius_ms
                 for view_id in view_ids:
                     local_start = max(
                         0.0, transforms[view_id].to_local(global_start)
@@ -1230,8 +1241,11 @@ class EvidencePipeline:
                 scout_view_ids,
                 infos,
                 transforms,
-                float(perf.get("fine_progressive_anchor_padding_seconds", 10.0)),
+                0.0,
                 unresolved_ids,
+                peak_radius_seconds=float(
+                    perf.get("fine_scout_anchor_radius_seconds", 3.0)
+                ),
             )
             scout_manifest = manifest.model_copy(update={"views": supplemental_views})
             scout_paths = self._scan_all_views_concurrently(
@@ -1306,7 +1320,10 @@ class EvidencePipeline:
                 "keyframes_only": bool(
                     perf.get("fine_scout_keyframes_only", False)
                 ),
-                "window_strategy": "aligned_first_person_anchor_windows",
+                "anchor_radius_seconds": float(
+                    perf.get("fine_scout_anchor_radius_seconds", 3.0)
+                ),
+                "window_strategy": "aligned_first_person_peak_windows",
                 "coverage": scout_coverage,
                 "selected_seconds": round(scout_seconds, 3),
                 "estimated_frames": int(round(scout_seconds * scout_fps)),

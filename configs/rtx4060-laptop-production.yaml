@@ -95,6 +95,10 @@ performance:
   fine_scout_image_size: 416
   fine_scout_batch_size: 8
   fine_scout_keyframes_only: false
+  # DEV-020: the 4,384-frame full-span scout spent 910.26 s waiting for
+  # decode/source data. A +/-3 s peak-centred window per anchor preserves routing
+  # evidence while avoiding a second decode of entire action spans.
+  fine_scout_anchor_radius_seconds: 3.0
   fine_progressive_anchor_padding_seconds: 10.0
   synchronized_segment_waves: true
   segment_wave_timeout_seconds: 3600

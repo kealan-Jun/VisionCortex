@@ -98,6 +98,7 @@ def test_rtx4060_profile_does_not_hardcode_validation_camera_ids():
     assert config["performance"]["fine_progressive_cross_view"] is True
     assert config["performance"]["fine_dynamic_cross_view_scout"] is True
     assert config["performance"]["fine_scout_fps"] == 1.0
+    assert config["performance"]["fine_scout_anchor_radius_seconds"] == 3.0
     assert config["performance"]["fine_progressive_anchor_padding_seconds"] == 10.0
     assert config["performance"]["fine_preferred_third_person_views"] == []
     assert config["performance"]["motion_probe_sequential_segment_workers"] == 4
@@ -417,6 +418,7 @@ def test_dynamic_scout_ranks_all_third_person_views_then_scans_narrow_anchor_win
             "fine_dynamic_cross_view_scout": True,
             "fine_scout_fps": 1.0,
             "fine_scout_image_size": 416,
+            "fine_scout_anchor_radius_seconds": 1.0,
             "fine_progressive_anchor_padding_seconds": 1.0,
             "fine_decode_lanes": ["cuda", "cuda", "cuda", "cpu"],
             "detection_fps": 10.0,
@@ -483,6 +485,7 @@ def test_dynamic_scout_ranks_all_third_person_views_then_scans_narrow_anchor_win
         ("fine", ["tp2"]),
     ]
     assert scan_calls[1]["sample_fps"] == 1.0
+    assert scan_calls[1]["windows"]["tp0"] == [(12_000.0, 14_000.0)]
     assert scan_calls[2]["decode_backends"] == {"tp2": "cpu"}
     # The formal third-person pass is aligned to the 12-14 second FP event
     # plus one second, rather than inheriting the 75-second coarse padding.
@@ -490,6 +493,11 @@ def test_dynamic_scout_ranks_all_third_person_views_then_scans_narrow_anchor_win
     assert [view.view_id for view in scanned] == ["fp", "tp2"]
     assert set(paths) == {"fp", "tp2"}
     assert report["dynamic_cross_view_scout"]["view_ids"] == ["tp0", "tp1", "tp2"]
+    assert report["dynamic_cross_view_scout"]["anchor_radius_seconds"] == 1.0
+    assert (
+        report["dynamic_cross_view_scout"]["window_strategy"]
+        == "aligned_first_person_peak_windows"
+    )
     assert report["dynamic_cross_view_scout"]["ranking"][0]["view_id"] == "tp2"
     assert report["supplemental_priority"] == ["tp2", "tp1", "tp0"]
     assert report["not_scanned_view_ids"] == ["tp0", "tp1"]
