@@ -48,7 +48,7 @@ from .grouping import (
     prepare_formal_experiment_segments,
     select_key_events,
 )
-from .detection import scan_videos, validate_models
+from .detection import iter_frame_evidence, scan_videos, validate_models
 from .daily_reports import generate_daily_report_archive
 from .schemas import (
     ActionCandidate,
@@ -57,6 +57,7 @@ from .schemas import (
     EvidenceEvent,
     ExperimentGroup,
     ExperimentSegment,
+    FrameEvidence,
     PhysicalChange,
     RunManifest,
     ViewInput,
@@ -248,6 +249,57 @@ def _key_material_selection_report(
                 bool(record["low_recall_warning"]) for record in records
             ),
         },
+    }
+
+
+def _merge_frame_evidence_ledgers(
+    existing_path: Path,
+    supplement_path: Path,
+    output_path: Path,
+    *,
+    track_id_namespace: int,
+) -> dict[str, Any]:
+    """Merge a bounded recall pass without duplicating sampled timestamps."""
+
+    frames: dict[tuple[int, int], FrameEvidence] = {}
+    existing_count = 0
+    supplement_count = 0
+    for frame in iter_frame_evidence(existing_path):
+        frames[(frame.frame_index, round(frame.local_ms * 1000.0))] = frame
+        existing_count += 1
+    offset = max(1, int(track_id_namespace)) * 1_000_000
+    for frame in iter_frame_evidence(supplement_path):
+        detections = [
+            detection.model_copy(
+                update={
+                    "track_id": (
+                        detection.track_id + offset
+                        if detection.track_id is not None
+                        else None
+                    )
+                }
+            )
+            for detection in frame.detections
+        ]
+        normalized = frame.model_copy(update={"detections": detections})
+        frames[(frame.frame_index, round(frame.local_ms * 1000.0))] = normalized
+        supplement_count += 1
+    ordered = sorted(
+        frames.values(), key=lambda item: (item.local_ms, item.frame_index)
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output_path.with_suffix(output_path.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8", buffering=1024 * 1024) as handle:
+        for frame in ordered:
+            handle.write(frame.model_dump_json() + "\n")
+    temporary.replace(output_path)
+    return {
+        "existing_frames": existing_count,
+        "supplement_frames": supplement_count,
+        "merged_frames": len(ordered),
+        "deduplicated_frames": existing_count + supplement_count - len(ordered),
+        "track_id_namespace": offset,
+        "output_path": str(output_path),
     }
 
 
@@ -1218,6 +1270,262 @@ class EvidencePipeline:
         }
         return selected, diagnostics
 
+    @staticmethod
+    def _merge_time_windows(
+        windows: list[tuple[float, float]],
+    ) -> list[tuple[float, float]]:
+        merged: list[list[float]] = []
+        for start, end in sorted(
+            (float(start), float(end))
+            for start, end in windows
+            if end > start
+        ):
+            if merged and start <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], end)
+            else:
+                merged.append([start, end])
+        return [(start, end) for start, end in merged]
+
+    @staticmethod
+    def _window_fully_covered(
+        start_ms: float,
+        end_ms: float,
+        coverage: list[tuple[float, float]],
+        tolerance_ms: float = 100.0,
+    ) -> bool:
+        return any(
+            covered_start <= start_ms + tolerance_ms
+            and covered_end >= end_ms - tolerance_ms
+            for covered_start, covered_end in coverage
+        )
+
+    def _group_local_recall_plan(
+        self,
+        groups: list[ExperimentGroup],
+        segments: list[ExperimentSegment],
+        events: list[EvidenceEvent],
+        candidates: list[ActionCandidate],
+        fine_views: list[ViewInput],
+        fine_view_report: dict[str, dict[str, Any]],
+        actual_windows: dict[str, list[tuple[float, float]]],
+        infos,
+        transforms,
+    ) -> dict[str, Any]:
+        """Find formal groups whose FP actions still have unscanned TP opportunities."""
+
+        perf = self.config["performance"]
+        minimum_unresolved = max(
+            1, int(perf.get("fine_group_recall_min_unresolved_anchors", 3))
+        )
+        padding_ms = max(
+            0.0, float(perf.get("fine_group_recall_padding_seconds", 0.0))
+        ) * 1000.0
+        by_segment = {segment.segment_id: segment for segment in segments}
+        third_views = [
+            view for view in fine_views if view.role == ViewRole.THIRD_PERSON
+        ]
+        positions = {view.view_id: index for index, view in enumerate(fine_views)}
+        reports: list[dict[str, Any]] = []
+        selected_plans: list[dict[str, Any]] = []
+
+        for group in groups:
+            event_ids = {
+                event_id
+                for segment_id in group.atomic_experiment_ids
+                if segment_id in by_segment
+                for event_id in by_segment[segment_id].event_ids
+            }
+            group_events = [
+                event
+                for event in events
+                if event.accepted and event.event_id in event_ids
+            ]
+            cross_view_events = [
+                event
+                for event in group_events
+                if {ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON}.issubset(
+                    set(event.supporting_roles)
+                )
+            ]
+            fp_candidates = [
+                candidate
+                for candidate in candidates
+                if candidate.role == ViewRole.FIRST_PERSON
+                and candidate.global_end_ms >= group.global_start_ms
+                and candidate.global_start_ms <= group.global_end_ms
+            ]
+
+            def candidate_supported(candidate: ActionCandidate) -> bool:
+                for event in cross_view_events:
+                    if event.action_type != candidate.action_type:
+                        continue
+                    if candidate.objects and event.objects and not (
+                        set(candidate.objects) & set(event.objects)
+                    ):
+                        continue
+                    overlap = min(
+                        event.global_end_ms, candidate.global_end_ms
+                    ) - max(event.global_start_ms, candidate.global_start_ms)
+                    if overlap >= 0.0 or abs(
+                        event.key_global_ms - candidate.key_global_ms
+                    ) <= 1500.0:
+                        return True
+                return False
+
+            unresolved = [
+                candidate
+                for candidate in fp_candidates
+                if not candidate_supported(candidate)
+            ]
+            base_report: dict[str, Any] = {
+                "group_id": group.group_id,
+                "global_start_ms": group.global_start_ms,
+                "global_end_ms": group.global_end_ms,
+                "first_person_candidate_count": len(fp_candidates),
+                "cross_view_event_count": len(cross_view_events),
+                "unresolved_anchor_count": len(unresolved),
+                "minimum_unresolved_anchors": minimum_unresolved,
+                "unresolved_candidate_ids": [
+                    candidate.candidate_id for candidate in unresolved
+                ],
+            }
+            if len(unresolved) < minimum_unresolved:
+                base_report["status"] = "complete_below_recall_trigger"
+                reports.append(base_report)
+                continue
+
+            choices: list[dict[str, Any]] = []
+            for view in third_views:
+                view_id = view.view_id
+                global_coverage = self._merge_time_windows(
+                    [
+                        (
+                            transforms[view_id].to_global(start),
+                            transforms[view_id].to_global(end),
+                        )
+                        for start, end in actual_windows.get(view_id, [])
+                    ]
+                )
+                missing = [
+                    candidate
+                    for candidate in unresolved
+                    if not self._window_fully_covered(
+                        candidate.global_start_ms,
+                        candidate.global_end_ms,
+                        global_coverage,
+                    )
+                ]
+                if not missing:
+                    continue
+                local_windows = self._merge_time_windows(
+                    [
+                        (
+                            max(
+                                0.0,
+                                transforms[view_id].to_local(
+                                    candidate.global_start_ms - padding_ms
+                                ),
+                            ),
+                            min(
+                                infos[view_id].duration_ms,
+                                transforms[view_id].to_local(
+                                    candidate.global_end_ms + padding_ms
+                                ),
+                            ),
+                        )
+                        for candidate in missing
+                    ]
+                )
+                local_support = sum(
+                    view_id in event.supporting_views for event in group_events
+                )
+                local_candidate_count = sum(
+                    candidate.view_id == view_id
+                    and candidate.global_end_ms >= group.global_start_ms
+                    and candidate.global_start_ms <= group.global_end_ms
+                    for candidate in candidates
+                )
+                covered_group_seconds = sum(
+                    max(
+                        0.0,
+                        min(end, transforms[view_id].to_local(group.global_end_ms))
+                        - max(
+                            start,
+                            transforms[view_id].to_local(group.global_start_ms),
+                        ),
+                    )
+                    for start, end in actual_windows.get(view_id, [])
+                ) / 1000.0
+                choices.append(
+                    {
+                        "view_id": view_id,
+                        "windows": local_windows,
+                        "missing_anchor_count": len(missing),
+                        "missing_candidate_ids": [
+                            candidate.candidate_id for candidate in missing
+                        ],
+                        "existing_group_event_support": local_support,
+                        "existing_group_candidate_count": local_candidate_count,
+                        "covered_group_seconds": round(
+                            covered_group_seconds, 6
+                        ),
+                        "evidence_yield_per_selected_second": round(
+                            local_support / max(covered_group_seconds, 1e-9), 9
+                        ),
+                        "coarse_active_anchor_frames": int(
+                            fine_view_report.get(view_id, {}).get(
+                                "active_anchor_frames", 0
+                            )
+                        ),
+                        "coarse_anchor_frames": int(
+                            fine_view_report.get(view_id, {}).get(
+                                "anchor_frames", 0
+                            )
+                        ),
+                        "manifest_position": positions[view_id],
+                    }
+                )
+            if not choices:
+                base_report["status"] = "complete_all_tp_windows_exhausted"
+                reports.append(base_report)
+                continue
+            choices.sort(
+                key=lambda item: (
+                    -int(item["existing_group_event_support"]),
+                    -int(item["existing_group_candidate_count"]),
+                    -float(item["evidence_yield_per_selected_second"]),
+                    -int(item["coarse_active_anchor_frames"]),
+                    -int(item["coarse_anchor_frames"]),
+                    int(item["manifest_position"]),
+                )
+            )
+            chosen = choices[0]
+            base_report.update(
+                {
+                    "status": "needs_group_local_recall",
+                    "ranked_view_choices": choices,
+                    "selected_view_id": chosen["view_id"],
+                    "selected_windows": chosen["windows"],
+                }
+            )
+            reports.append(base_report)
+            selected_plans.append(
+                {
+                    "group_id": group.group_id,
+                    "view_id": chosen["view_id"],
+                    "windows": chosen["windows"],
+                    "missing_anchor_count": chosen["missing_anchor_count"],
+                    "missing_candidate_ids": chosen["missing_candidate_ids"],
+                }
+            )
+        return {
+            "schema_version": "visioncortex-group-local-recall-plan/1",
+            "minimum_unresolved_anchors": minimum_unresolved,
+            "groups": reports,
+            "selected_plans": selected_plans,
+            "complete": not selected_plans,
+        }
+
     def _run_progressive_fine_scan(
         self,
         manifest: RunManifest,
@@ -1280,9 +1588,13 @@ class EvidencePipeline:
             pass_views: list[ViewInput],
             pass_candidates: list[ActionCandidate],
             target_snapshot: list[dict[str, Any]] | None = None,
+            explicit_windows: dict[str, list[tuple[float, float]]] | None = None,
         ) -> list[dict[str, Any]]:
             pass_name = f"pass-{pass_index:02d}-{pass_kind}"
-            if pass_kind == "primary":
+            if explicit_windows is not None:
+                pass_windows = explicit_windows
+                window_strategy = "formal_group_local_recall_windows"
+            elif pass_kind == "primary":
                 pass_windows = {
                     view.view_id: fine_windows[view.view_id] for view in pass_views
                 }
@@ -1332,10 +1644,36 @@ class EvidencePipeline:
                     view.view_id: full_decode_backends[view.view_id] for view in pass_views
                 },
             )
+            merge_reports: list[dict[str, Any]] = []
             for view in pass_views:
                 scanned[view.view_id] = view
-                detection_paths[view.view_id] = result[view.view_id]
-                actual_windows[view.view_id] = pass_windows[view.view_id]
+                existing_path = detection_paths.get(view.view_id)
+                if existing_path is None:
+                    detection_paths[view.view_id] = result[view.view_id]
+                else:
+                    merged_path = (
+                        work_dir
+                        / "merged-detections"
+                        / f"{pass_name}-{view.view_id}.jsonl"
+                    )
+                    merge_reports.append(
+                        {
+                            "view_id": view.view_id,
+                            **_merge_frame_evidence_ledgers(
+                                existing_path,
+                                result[view.view_id],
+                                merged_path,
+                                track_id_namespace=pass_index + 1,
+                            ),
+                        }
+                    )
+                    detection_paths[view.view_id] = merged_path
+                actual_windows[view.view_id] = self._merge_time_windows(
+                    [
+                        *actual_windows.get(view.view_id, []),
+                        *pass_windows[view.view_id],
+                    ]
+                )
             scanned_views = [
                 view for view in fine_views if view.view_id in scanned
             ]
@@ -1373,6 +1711,7 @@ class EvidencePipeline:
                         item["event_id"] for item in liquid_context_rejections
                     ],
                     "target_status_after_pass": target_status,
+                    "detection_ledger_merges": merge_reports,
                 }
             )
             return target_status
@@ -1555,8 +1894,210 @@ class EvidencePipeline:
                 if item["status"] == "needs_third_person_supplement"
             }
 
+        def formal_state() -> tuple[
+            list[ActionCandidate],
+            list[EvidenceEvent],
+            list[ExperimentSegment],
+            list[ExperimentGroup],
+            list[EvidenceEvent],
+        ]:
+            state_views = [view for view in fine_views if view.view_id in scanned]
+            state_candidates = generate_candidates(
+                state_views, detection_paths, self.config
+            )
+            state_events, _ = audit_candidates(
+                state_candidates, transforms, self.config
+            )
+            refine_liquid_events_with_context(state_events, detection_paths)
+            raw_state_segments = build_experiment_segments(
+                state_events,
+                manifest.views,
+                self.config,
+                coarse_windows=boundary_candidates,
+            )
+            normalized_state_segments = normalize_experiment_segments(
+                raw_state_segments, state_events, manifest.views, self.config
+            )
+            state_segments, _ = prepare_formal_experiment_segments(
+                normalized_state_segments,
+                state_events,
+                manifest.views,
+                boundary_candidates,
+                self.config,
+            )
+            state_groups = build_experiment_groups(
+                state_segments, state_events, manifest.views, self.config
+            )
+            state_key_events = select_key_events(
+                state_groups, state_segments, state_events, self.config
+            )
+            return (
+                state_candidates,
+                state_events,
+                state_segments,
+                state_groups,
+                state_key_events,
+            )
+
+        local_recall_rounds: list[dict[str, Any]] = []
+        local_recall_enabled = bool(
+            perf.get("fine_group_local_recall_enabled", False)
+        )
+        maximum_recall_rounds = max(
+            0, int(perf.get("fine_group_recall_max_rounds", 5))
+        )
+        local_recall_plan: dict[str, Any] = {
+            "schema_version": "visioncortex-group-local-recall-plan/1",
+            "groups": [],
+            "selected_plans": [],
+            "complete": True,
+        }
+        if local_recall_enabled:
+            for recall_round in range(1, maximum_recall_rounds + 1):
+                (
+                    recall_candidates,
+                    recall_events,
+                    recall_segments,
+                    recall_groups,
+                    recall_key_events,
+                ) = formal_state()
+                local_recall_plan = self._group_local_recall_plan(
+                    recall_groups,
+                    recall_segments,
+                    recall_events,
+                    recall_candidates,
+                    fine_views,
+                    fine_view_report,
+                    actual_windows,
+                    infos,
+                    transforms,
+                )
+                selected_plans = list(
+                    local_recall_plan.get("selected_plans") or []
+                )
+                if not selected_plans:
+                    break
+                selected_view_ids: list[str] = []
+                for item in selected_plans:
+                    view_id = str(item["view_id"])
+                    if view_id not in selected_view_ids:
+                        selected_view_ids.append(view_id)
+                    if len(selected_view_ids) >= supplemental_batch_size:
+                        break
+                windows_by_view: dict[str, list[tuple[float, float]]] = {}
+                group_ids_by_view: dict[str, list[str]] = {}
+                for item in selected_plans:
+                    view_id = str(item["view_id"])
+                    if view_id not in selected_view_ids:
+                        continue
+                    windows_by_view.setdefault(view_id, []).extend(
+                        (float(start), float(end))
+                        for start, end in item["windows"]
+                    )
+                    group_ids_by_view.setdefault(view_id, []).append(
+                        str(item["group_id"])
+                    )
+                for view_id, view_windows in list(windows_by_view.items()):
+                    windows_by_view[view_id] = self._merge_time_windows(
+                        view_windows
+                    )
+                recall_views = [
+                    view for view in fine_views if view.view_id in windows_by_view
+                ]
+                before_count = len(recall_key_events)
+                recall_pass_index = len(pass_reports)
+                execute_pass(
+                    recall_pass_index,
+                    f"group-recall-{recall_round:02d}",
+                    recall_views,
+                    [],
+                    explicit_windows=windows_by_view,
+                )
+                (
+                    _after_candidates,
+                    _after_events,
+                    _after_segments,
+                    _after_groups,
+                    after_key_events,
+                ) = formal_state()
+                local_recall_rounds.append(
+                    {
+                        "round": recall_round,
+                        "view_ids": [view.view_id for view in recall_views],
+                        "group_ids_by_view": group_ids_by_view,
+                        "windows_by_view": windows_by_view,
+                        "selected_seconds": round(
+                            sum(
+                                end - start
+                                for windows in windows_by_view.values()
+                                for start, end in windows
+                            )
+                            / 1000.0,
+                            6,
+                        ),
+                        "selected_key_events_before": before_count,
+                        "selected_key_events_after": len(after_key_events),
+                        "selected_key_event_gain": len(after_key_events)
+                        - before_count,
+                        "plan": local_recall_plan,
+                    }
+                )
+
+            (
+                final_recall_candidates,
+                final_recall_events,
+                final_recall_segments,
+                final_recall_groups,
+                final_recall_key_events,
+            ) = formal_state()
+            local_recall_plan = self._group_local_recall_plan(
+                final_recall_groups,
+                final_recall_segments,
+                final_recall_events,
+                final_recall_candidates,
+                fine_views,
+                fine_view_report,
+                actual_windows,
+                infos,
+                transforms,
+            )
+            local_recall_summary = {
+                "enabled": True,
+                "rounds": local_recall_rounds,
+                "round_count": len(local_recall_rounds),
+                "selected_key_event_count": len(final_recall_key_events),
+                "completeness_gate": local_recall_plan,
+                "stopping_reason": (
+                    "formal_groups_complete"
+                    if local_recall_plan.get("complete")
+                    else "maximum_group_recall_rounds_exhausted"
+                ),
+            }
+        else:
+            local_recall_summary = {
+                "enabled": False,
+                "rounds": [],
+                "round_count": 0,
+                "stopping_reason": "disabled",
+            }
+
         scanned_views = [view for view in fine_views if view.view_id in scanned]
         final_candidates = generate_candidates(scanned_views, detection_paths, self.config)
+        if local_recall_rounds:
+            final_target_events, _ = audit_candidates(
+                final_candidates, transforms, self.config
+            )
+            refine_liquid_events_with_context(
+                final_target_events, detection_paths
+            )
+            target_status = self._progressive_target_status(
+                boundary_candidates, final_target_events
+            )
+            unresolved_ids = {
+                item["candidate_id"]
+                for item in target_status
+                if item["status"] == "needs_third_person_supplement"
+            }
         all_coverage = self._window_coverage(fine_windows, infos)
         actual_coverage = self._window_coverage(actual_windows, infos)
         all_seconds = sum(float(item["selected_seconds"]) for item in all_coverage.values())
@@ -1568,7 +2109,7 @@ class EvidencePipeline:
         full_fine_frames = int(round(actual_seconds * sample_fps))
         all_view_frames = int(round(all_seconds * sample_fps))
         report = {
-            "schema_version": "visioncortex-progressive-fine-scan/2",
+            "schema_version": "visioncortex-progressive-fine-scan/3",
             "enabled": True,
             "selection_rule": (
                 "scan the first-person boundary sensor; rank every third-person view "
@@ -1590,6 +2131,7 @@ class EvidencePipeline:
                 [view.view_id for view in wave] for wave in supplemental_waves
             ],
             "dynamic_cross_view_scout": scout_summary,
+            "group_local_recall": local_recall_summary,
             "scanned_view_ids": [view.view_id for view in scanned_views],
             "not_scanned_view_ids": [
                 view.view_id for view in fine_views if view.view_id not in scanned

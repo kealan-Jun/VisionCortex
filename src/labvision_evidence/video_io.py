@@ -10,6 +10,7 @@ import time
 from collections import OrderedDict
 from collections.abc import Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,24 @@ import numpy as np
 
 from .schemas import VideoInfo, VideoSegmentInfo, ViewInput
 from .storage import read_source_file_edges
+
+
+@dataclass(frozen=True)
+class PhysicalSegmentDecodeSession:
+    """One physical media open serving several disjoint virtual-timeline windows."""
+
+    segment_index: int
+    path: Path
+    virtual_start_ms: float
+    virtual_end_ms: float
+    source_start_ms: float
+    source_end_ms: float
+    target_virtual_windows: tuple[tuple[float, float], ...]
+    target_source_windows: tuple[tuple[float, float], ...]
+
+    @property
+    def selected_duration_ms(self) -> float:
+        return sum(end - start for start, end in self.target_virtual_windows)
 
 
 def _run(command: list[str], timeout: float | None = None) -> subprocess.CompletedProcess[bytes]:
@@ -384,6 +403,182 @@ def _ffmpeg_frame_iterator(
         raise RuntimeError(f"FFmpeg 抽帧失败: {message}")
 
 
+def _merge_windows(
+    windows: Sequence[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    merged: list[list[float]] = []
+    for start, end in sorted(
+        (float(start), float(end)) for start, end in windows if end > start
+    ):
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return [(start, end) for start, end in merged]
+
+
+def plan_physical_segment_decode_sessions(
+    info: VideoInfo,
+    windows: Sequence[tuple[float, float]],
+) -> list[PhysicalSegmentDecodeSession]:
+    """Group target windows by recorder MP4 without widening the inference set."""
+
+    if not info.segments:
+        raise ValueError("physical segment sessions require segmented video info")
+    sessions: list[PhysicalSegmentDecodeSession] = []
+    for segment_index, segment in enumerate(info.segments):
+        virtual_windows = _merge_windows(
+            [
+                (
+                    max(float(start), segment.virtual_start_ms),
+                    min(float(end), segment.virtual_end_ms),
+                )
+                for start, end in windows
+                if min(float(end), segment.virtual_end_ms)
+                > max(float(start), segment.virtual_start_ms)
+            ]
+        )
+        if not virtual_windows:
+            continue
+        source_windows = tuple(
+            (
+                start - segment.virtual_start_ms,
+                end - segment.virtual_start_ms,
+            )
+            for start, end in virtual_windows
+        )
+        sessions.append(
+            PhysicalSegmentDecodeSession(
+                segment_index=segment_index,
+                path=segment.path,
+                virtual_start_ms=virtual_windows[0][0],
+                virtual_end_ms=virtual_windows[-1][1],
+                source_start_ms=source_windows[0][0],
+                source_end_ms=source_windows[-1][1],
+                target_virtual_windows=tuple(virtual_windows),
+                target_source_windows=source_windows,
+            )
+        )
+    return sessions
+
+
+def _selected_session_timestamps(
+    start_ms: float,
+    end_ms: float,
+    windows: Sequence[tuple[float, float]],
+    sample_fps: float,
+) -> list[float]:
+    period_ms = 1000.0 / max(sample_fps, 1e-9)
+    frame_count = max(0, int(math.ceil((end_ms - start_ms) / period_ms - 1e-9)))
+    return [
+        start_ms + index * period_ms
+        for index in range(frame_count)
+        if any(
+            window_start - 1e-6 <= start_ms + index * period_ms < window_end - 1e-6
+            for window_start, window_end in windows
+        )
+    ]
+
+
+def _ffmpeg_multi_window_iterator(
+    path: Path,
+    info: VideoInfo,
+    start_ms: float,
+    end_ms: float,
+    windows: Sequence[tuple[float, float]],
+    sample_fps: float,
+    max_width: int,
+    hwaccel: str | None,
+    decoder_threads: int | None,
+    cuda_scale: bool = False,
+) -> Iterator[tuple[int, float, np.ndarray]]:
+    """Decode one physical span once and emit only its requested 10 FPS windows."""
+
+    normalized = _merge_windows(
+        [
+            (max(start_ms, start), min(end_ms, end))
+            for start, end in windows
+            if min(end_ms, end) > max(start_ms, start)
+        ]
+    )
+    if not normalized:
+        return
+    width, height = _scaled_size(info.width, info.height, max_width)
+    use_cuda_scale = bool(cuda_scale and hwaccel == "cuda")
+    relative = [
+        (window_start - start_ms, window_end - start_ms)
+        for window_start, window_end in normalized
+    ]
+    select_expression = "+".join(
+        f"gte(t\\,{window_start / 1000.0:.6f})*lt(t\\,{window_end / 1000.0:.6f})"
+        for window_start, window_end in relative
+    )
+    filter_graph = f"setpts=PTS-STARTPTS,fps={sample_fps:.8f},select={select_expression}"
+    filter_graph += (
+        f",scale_cuda={width}:{height}:format=nv12,hwdownload,format=nv12,format=bgr24"
+        if use_cuda_scale
+        else f",scale={width}:{height}"
+    )
+    command = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
+    if hwaccel:
+        command += ["-hwaccel", hwaccel]
+        if use_cuda_scale:
+            command += ["-hwaccel_output_format", "cuda"]
+    elif decoder_threads:
+        command += ["-threads", str(max(1, decoder_threads))]
+    command += [
+        "-ss",
+        f"{start_ms / 1000.0:.6f}",
+        "-i",
+        str(path),
+        "-t",
+        f"{max(0.0, end_ms - start_ms) / 1000.0:.6f}",
+        "-vf",
+        filter_graph,
+        "-an",
+        "-sn",
+        "-vsync",
+        "0",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "bgr24",
+        "pipe:1",
+    ]
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert process.stdout is not None
+    expected_timestamps = _selected_session_timestamps(
+        start_ms, end_ms, normalized, sample_fps
+    )
+    frame_bytes = width * height * 3
+    emitted = 0
+    try:
+        while True:
+            raw = process.stdout.read(frame_bytes)
+            if len(raw) != frame_bytes:
+                break
+            if emitted >= len(expected_timestamps):
+                raise RuntimeError("persistent FFmpeg session emitted unexpected extra frames")
+            local_ms = expected_timestamps[emitted]
+            frame = np.frombuffer(raw, dtype=np.uint8).reshape((height, width, 3)).copy()
+            yield int(round(local_ms * info.fps / 1000.0)), local_ms, frame
+            emitted += 1
+    finally:
+        process.stdout.close()
+        process.wait()
+        stderr = process.stderr.read() if process.stderr is not None else b""
+        if process.stderr is not None:
+            process.stderr.close()
+    if process.returncode not in (0, None):
+        message = stderr.decode("utf-8", errors="replace")[-1500:]
+        raise RuntimeError(f"FFmpeg 持久分片抽帧失败: {message}")
+    if emitted != len(expected_timestamps):
+        raise RuntimeError(
+            "persistent FFmpeg session frame accounting mismatch: "
+            f"expected={len(expected_timestamps)} actual={emitted}"
+        )
+
+
 def _opencv_frame_iterator(
     path: Path,
     info: VideoInfo,
@@ -525,6 +720,119 @@ def iter_sampled_frames(
                 except RuntimeError:
                     pass
     yield from _opencv_frame_iterator(path, info, start_ms, end_ms, sample_fps, max_width)
+
+
+def iter_physical_segment_session_frames(
+    info: VideoInfo,
+    session: PhysicalSegmentDecodeSession,
+    sample_fps: float,
+    max_width: int,
+    hwaccel: str | None = "cuda",
+    decoder_threads: int | None = None,
+    cuda_scale: bool = False,
+    receipt: dict[str, Any] | None = None,
+) -> Iterator[tuple[int, float, np.ndarray]]:
+    """Serve disjoint target windows with one physical MP4 decoder session."""
+
+    segment = info.segments[session.segment_index]
+    source_info = VideoInfo(
+        path=segment.path,
+        duration_ms=segment.duration_ms,
+        fps=segment.fps,
+        width=segment.width,
+        height=segment.height,
+        frame_count=segment.frame_count,
+        size_bytes=segment.size_bytes,
+    )
+
+    def convert(
+        frames: Iterator[tuple[int, float, np.ndarray]],
+    ) -> Iterator[tuple[int, float, np.ndarray]]:
+        for frame_index, source_ms, frame in frames:
+            yield (
+                segment.frame_start_index + frame_index,
+                segment.virtual_start_ms + source_ms,
+                frame,
+            )
+
+    if shutil.which("ffmpeg"):
+        attempts = [(hwaccel, cuda_scale)]
+        if hwaccel and cuda_scale:
+            attempts.append((hwaccel, False))
+        if hwaccel:
+            attempts.append((None, False))
+        for attempt_hwaccel, attempt_cuda_scale in attempts:
+            emitted = False
+            try:
+                for item in convert(
+                    _ffmpeg_multi_window_iterator(
+                        segment.path,
+                        source_info,
+                        session.source_start_ms,
+                        session.source_end_ms,
+                        session.target_source_windows,
+                        sample_fps,
+                        max_width,
+                        attempt_hwaccel,
+                        decoder_threads,
+                        attempt_cuda_scale,
+                    )
+                ):
+                    emitted = True
+                    yield item
+                if receipt is not None:
+                    receipt.update(
+                        {
+                            "actual_decoder_session_mode": (
+                                "ffmpeg_persistent_physical_segment"
+                            ),
+                            "actual_hwaccel": attempt_hwaccel,
+                            "actual_cuda_scale": bool(attempt_cuda_scale),
+                            "fallback_reopened_windows": 0,
+                        }
+                    )
+                return
+            except RuntimeError as exc:
+                if receipt is not None:
+                    receipt.setdefault("attempt_errors", []).append(
+                        {
+                            "hwaccel": attempt_hwaccel,
+                            "cuda_scale": bool(attempt_cuda_scale),
+                            "error": f"{type(exc).__name__}: {exc}",
+                        }
+                    )
+                if emitted:
+                    raise
+                continue
+
+    # Compatibility fallback preserves exact windows even when the local FFmpeg
+    # build cannot run a multi-window filter. It may reopen the file and is
+    # explicitly visible in the runtime receipt as a fallback mode.
+    if receipt is not None:
+        receipt.update(
+            {
+                "actual_decoder_session_mode": "compatibility_per_window_fallback",
+                "actual_hwaccel": None,
+                "actual_cuda_scale": False,
+                "fallback_reopened_windows": len(session.target_source_windows),
+            }
+        )
+    for source_start, source_end in session.target_source_windows:
+        yield from convert(
+            iter_sampled_frames(
+                segment.path,
+                source_info,
+                source_start,
+                source_end,
+                sample_fps,
+                max_width,
+                None,
+                False,
+                decoder_threads,
+                "indexed_seek",
+                False,
+            )
+        )
 
 
 def iter_view_sampled_frames(

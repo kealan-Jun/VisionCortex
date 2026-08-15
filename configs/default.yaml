@@ -36,6 +36,11 @@ performance:
   fine_first_person_decode_workers: 2
   fine_third_person_decode_workers: 2
   fine_decode_prefetch_frames: 12
+  fine_persistent_segment_decode: false
+  fine_group_local_recall_enabled: false
+  fine_group_recall_min_unresolved_anchors: 3
+  fine_group_recall_padding_seconds: 0.0
+  fine_group_recall_max_rounds: 5
   # Optional workload-adaptive mode. The default remains the established all-
   # selected-view scan; hardware profiles may enable progressive cross-view
   # supplementation explicitly.

@@ -16,7 +16,12 @@ import cv2
 import numpy as np
 
 from .schemas import AlignmentTransform, BoxEvidence, FrameEvidence, VideoInfo, ViewInput, ViewRole
-from .video_io import iter_view_sampled_frames
+from .video_io import (
+    PhysicalSegmentDecodeSession,
+    iter_physical_segment_session_frames,
+    iter_view_sampled_frames,
+    plan_physical_segment_decode_sessions,
+)
 
 
 def _iou(a: Sequence[float], b: Sequence[float]) -> float:
@@ -214,7 +219,20 @@ def _producer(
     perf = config["performance"]
     chunk_ms = float(perf.get(f"{phase}_chunk_seconds", perf["chunk_seconds"])) * 1000.0
     spans = windows if windows is not None else [(0.0, info.duration_ms)]
-    if (
+    persistent_sessions: list[PhysicalSegmentDecodeSession] = []
+    persistent_segment_decode = bool(
+        phase == "fine"
+        and windows is not None
+        and info.segments
+        and perf.get("fine_persistent_segment_decode", False)
+    )
+    if persistent_segment_decode:
+        persistent_sessions = plan_physical_segment_decode_sessions(info, spans)
+        work_units = [
+            (session.virtual_start_ms, session.virtual_end_ms)
+            for session in persistent_sessions
+        ]
+    elif (
         windows is None
         and info.segments
         and (
@@ -239,10 +257,13 @@ def _producer(
     decode_fps = max(sample_fps, motion_probe_fps)
     sample_period_ms = 1000.0 / max(sample_fps, 1e-9)
     activity_path = output_queue.activity_path if hasattr(output_queue, "activity_path") else None
+    session_decode_receipts: dict[int, dict[str, Any]] = {}
 
     def source_unit_paths(chunk_index: int | None) -> list[str]:
         if chunk_index is None or not 0 <= chunk_index < len(work_units):
             return []
+        if persistent_sessions:
+            return [str(persistent_sessions[chunk_index].path)]
         unit_start, unit_end = work_units[chunk_index]
         if not info.segments:
             return [str(view.video)] if view.video is not None else []
@@ -273,14 +294,52 @@ def _producer(
             "source_unit_end_ms": unit_window[1] if unit_window else None,
             "segment_path": paths[0] if len(paths) == 1 else None,
             "segment_paths": paths,
+            "decoder_session_mode": (
+                "persistent_physical_segment"
+                if persistent_sessions
+                else "window_or_chunk"
+            ),
         }
+        if persistent_sessions and chunk_index is not None:
+            session = persistent_sessions[chunk_index]
+            payload.update(
+                {
+                    "target_window_count": len(session.target_virtual_windows),
+                    "target_windows_ms": [list(item) for item in session.target_virtual_windows],
+                    "selected_duration_ms": session.selected_duration_ms,
+                    "decode_session_span_ms": (
+                        session.virtual_end_ms - session.virtual_start_ms
+                    ),
+                    "avoided_physical_reopens": max(
+                        0, len(session.target_virtual_windows) - 1
+                    ),
+                    "decoder_receipt": session_decode_receipts.get(chunk_index),
+                }
+            )
         with output_queue.activity_lock:
             with activity_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
     def iter_decoded_frames(
-        start_ms: float, end_ms: float
+        start_ms: float, end_ms: float, chunk_index: int | None = None
     ) -> Iterable[tuple[int, float, np.ndarray]]:
+        if persistent_sessions:
+            if chunk_index is None:
+                raise ValueError("persistent decode requires a source unit index")
+            receipt = session_decode_receipts.setdefault(chunk_index, {})
+            return iter_physical_segment_session_frames(
+                info,
+                persistent_sessions[chunk_index],
+                decode_fps,
+                max_width,
+                "cuda" if decode_backend == "cuda" else None,
+                int(perf.get("cpu_decode_threads", 0))
+                if decode_backend == "cpu"
+                else None,
+                bool(perf.get("ffmpeg_cuda_scale", False))
+                and decode_backend == "cuda",
+                receipt,
+            )
         return iter_view_sampled_frames(
             view,
             info,
@@ -295,8 +354,10 @@ def _producer(
             bool(perf.get("ffmpeg_cuda_scale", False)) and decode_backend == "cuda",
         )
 
-    def decoded_frames(start_ms: float, end_ms: float) -> list[tuple[int, float, np.ndarray]]:
-        return list(iter_decoded_frames(start_ms, end_ms))
+    def decoded_frames(
+        start_ms: float, end_ms: float, chunk_index: int | None = None
+    ) -> list[tuple[int, float, np.ndarray]]:
+        return list(iter_decoded_frames(start_ms, end_ms, chunk_index))
 
     def emit_frames(frames: Iterable[tuple[int, float, np.ndarray]], start_ms: float) -> None:
         nonlocal previous_gray, previous_signature
@@ -385,7 +446,9 @@ def _producer(
                 for chunk_index, (start_ms, end_ms) in enumerate(work_units):
                     activity("source_unit_started", chunk_index)
                     if chunk_index not in completed_chunks:
-                        futures[chunk_index] = executor.submit(decoded_frames, start_ms, end_ms)
+                        futures[chunk_index] = executor.submit(
+                            decoded_frames, start_ms, end_ms, chunk_index
+                        )
                 for chunk_index, (start_ms, _end_ms) in enumerate(work_units):
                     if chunk_index in completed_chunks:
                         activity("source_unit_reused", chunk_index)
@@ -425,7 +488,7 @@ def _producer(
             ) -> None:
                 activity("source_unit_started", chunk_index)
                 try:
-                    for decoded in iter_decoded_frames(start_ms, end_ms):
+                    for decoded in iter_decoded_frames(start_ms, end_ms, chunk_index):
                         if not put_until_stopped(target, decoded):
                             return
                 except Exception as exc:
@@ -495,7 +558,7 @@ def _producer(
                         timeout=float(perf.get("segment_wave_timeout_seconds", 3600))
                     )
                 continue
-            emit_frames(iter_decoded_frames(start_ms, end_ms), start_ms)
+            emit_frames(iter_decoded_frames(start_ms, end_ms, chunk_index), start_ms)
             finish_unit(chunk_index, len(work_units))
             if wave_barrier is not None:
                 wave_barrier.wait(timeout=float(perf.get("segment_wave_timeout_seconds", 3600)))
@@ -891,6 +954,12 @@ def scan_videos(
             ),
             "ffmpeg_cuda_scale": bool(
                 config["performance"].get("ffmpeg_cuda_scale", False)
+            ),
+            "persistent_physical_segment_decode": bool(
+                phase == "fine"
+                and config["performance"].get(
+                    "fine_persistent_segment_decode", False
+                )
             ),
             "decode_backends": {
                 view.view_id: (decode_backends or {}).get(

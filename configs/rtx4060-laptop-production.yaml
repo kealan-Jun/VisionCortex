@@ -75,6 +75,17 @@ performance:
   fine_first_person_decode_workers: 4
   fine_third_person_decode_workers: 4
   fine_decode_prefetch_frames: 32
+  # DEV-026 found 79 physical references but only 30 unique recorder MP4s.
+  # Keep one decoder session per physical segment, decode its chronological
+  # envelope once, and emit only the original target-window timestamps to YOLO.
+  fine_persistent_segment_decode: true
+  # Candidate-level dual-view coverage can hide later actions inside an already
+  # bounded experiment. Re-open only an evidence-producing TP view whose formal
+  # group still has at least three uncorroborated FP action anchors.
+  fine_group_local_recall_enabled: true
+  fine_group_recall_min_unresolved_anchors: 3
+  fine_group_recall_padding_seconds: 0.0
+  fine_group_recall_max_rounds: 5
   # Scan the wearable view and best coarse-ranked static view first. A remaining
   # static view is decoded only for aligned candidate windows that contain a
   # reliable first-person start anchor but still lack valid dual-role evidence.
