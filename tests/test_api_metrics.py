@@ -283,6 +283,28 @@ def test_completed_run_hydrates_from_formal_archive_before_staging(tmp_path):
     assert hydrated["observability"]["status"]["stage"] == "completed"
 
 
+def test_completed_run_uses_explicit_current_observability_root(tmp_path):
+    historical = tmp_path / "historical"
+    current = tmp_path / "current"
+    for root, duration in ((historical, 572.156), (current, 4318.780)):
+        json_root = root / "JSON-Config-Files"
+        json_root.mkdir(parents=True)
+        (json_root / "run_metrics.json").write_text(
+            json.dumps({"total_duration_seconds": duration}), encoding="utf-8"
+        )
+
+    hydrated = api._hydrate_run_snapshot(
+        {
+            "state": "completed",
+            "nas_output": str(historical),
+            "observability_root": str(current),
+        }
+    )
+
+    assert hydrated["observability"]["root"] == str(current)
+    assert hydrated["observability"]["metrics"]["total_duration_seconds"] == 4318.780
+
+
 def test_service_restart_marks_orphaned_task_resumable(monkeypatch, tmp_path):
     archive_root = tmp_path / "archive"
     status_path = (

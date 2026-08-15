@@ -38,6 +38,8 @@ def test_scan_runtime_classifies_decode_starvation(tmp_path):
     assert diagnosis["actual_batch_size_mean"] == 2.0
     assert diagnosis["effective_batch_capacity_mean"] == 8.0
     assert diagnosis["batch_fill_ratio"] == 0.25
+    assert diagnosis["inference_frames_per_second"] == 10.0
+    assert diagnosis["inference_milliseconds_per_call"] == 200.0
 
 
 def test_scan_runtime_aggregates_progressive_passes(tmp_path):
@@ -87,3 +89,5 @@ def test_scan_runtime_aggregates_progressive_passes(tmp_path):
     assert len(report["scheduler"]["passes"]) == 2
     assert report["progressive_cross_view"] == progressive
     assert report["bottleneck_diagnosis"]["inference_frame_count"] == 120
+    assert report["bottleneck_diagnosis"]["inference_frames_per_second"] == 10.0
+    assert report["bottleneck_diagnosis"]["inference_milliseconds_per_call"] == 600.0

@@ -1,5 +1,6 @@
 import json
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,7 +10,7 @@ from labvision_evidence import storage, video_io
 from labvision_evidence.mllm import ArkAnalyzer
 from labvision_evidence.schemas import VideoInfo, ViewInput, ViewRole
 from labvision_evidence.storage import IncrementalArchivePublisher
-from labvision_evidence.telemetry import _NvmlSampler
+from labvision_evidence.telemetry import ResourceMonitor, _NvmlSampler
 from labvision_evidence.video_io import ViewFrameReader
 
 
@@ -188,6 +189,32 @@ def test_nvml_sampler_uses_persistent_driver_handle(monkeypatch):
     assert sample["memory.used"] == 4096.0
     assert sample["power.draw"] == 101.5
     assert calls == {"init": 1, "shutdown": 1}
+
+
+def test_resource_monitor_survives_one_sampling_failure(monkeypatch, tmp_path):
+    monitor = ResourceMonitor(tmp_path / "resource_telemetry.json", 0.25)
+    calls = {"gpu": 0}
+
+    def flaky_gpu():
+        calls["gpu"] += 1
+        if calls["gpu"] == 1:
+            raise RuntimeError("transient NVML failure")
+        return {}
+
+    monkeypatch.setattr(monitor, "_gpu", flaky_gpu)
+    monkeypatch.setattr(monitor, "_smb_connections", lambda: [])
+    monitor.start()
+    time.sleep(0.8)
+    report = monitor.stop()
+
+    assert report["sample_count"] >= 1
+    assert report["monitor_health"]["sampling_error_count"] >= 1
+    assert report["monitor_health"]["thread_ended_unexpectedly"] is False
+    assert report["monitor_health"]["thread_alive_after_stop"] is False
+    assert any(
+        item["component"] == "sample_loop"
+        for item in report["monitor_health"]["sampling_errors"]
+    )
 
 
 def test_publisher_ledger_skips_rehashing_verified_file(monkeypatch, tmp_path):

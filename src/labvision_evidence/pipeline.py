@@ -1329,6 +1329,12 @@ class EvidencePipeline:
         queue_wait_ratio = queue_wait_seconds / observed_seconds if observed_seconds else 0.0
         inference_ratio = inference_seconds / observed_seconds if observed_seconds else 0.0
         postprocess_ratio = postprocess_seconds / observed_seconds if observed_seconds else 0.0
+        inference_frames_per_second = (
+            inference_frames / inference_seconds if inference_seconds else 0.0
+        )
+        inference_milliseconds_per_call = (
+            inference_seconds * 1000.0 / inference_calls if inference_calls else 0.0
+        )
         if batch_fill_ratio < 0.60 and queue_wait_ratio >= 0.25:
             bottleneck = "decode_or_source_starved"
             next_action = "increase ordered decode supply before adding YOLO contexts"
@@ -1353,6 +1359,10 @@ class EvidencePipeline:
             "tracking_and_ledger_ratio": round(postprocess_ratio, 6),
             "inference_call_count": inference_calls,
             "inference_frame_count": inference_frames,
+            "inference_frames_per_second": round(inference_frames_per_second, 3),
+            "inference_milliseconds_per_call": round(
+                inference_milliseconds_per_call, 3
+            ),
             "actual_batch_size_mean": round(actual_batch_mean, 4),
             "effective_batch_capacity_mean": round(effective_batch_capacity, 4),
             "batch_fill_ratio": round(batch_fill_ratio, 6),

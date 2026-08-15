@@ -334,6 +334,7 @@ def _run_snapshot_from_root(root: Path) -> dict[str, Any]:
         for phase in ("coarse", "fine")
     }
     return {
+        "root": str(root),
         "status": status,
         "live_telemetry": live_telemetry,
         "telemetry_summary": {
@@ -367,9 +368,9 @@ def _run_snapshot_from_root(root: Path) -> dict[str, Any]:
 
 def _hydrate_run_snapshot(run: dict[str, Any]) -> dict[str, Any]:
     keys = (
-        ("nas_output", "output", "nas_staging")
+        ("observability_root", "nas_output", "output", "nas_staging")
         if run.get("state") == "completed"
-        else ("nas_staging", "output", "nas_output")
+        else ("observability_root", "nas_staging", "output", "nas_output")
     )
     for key in keys:
         value = run.get(key)
@@ -551,6 +552,7 @@ def _execute_fixed_benchmark(
             output=str(output),
             nas_output=str(fixed_root),
             nas_staging=str(nas_root),
+            observability_root=str(fixed_root),
             promotion=receipt,
             archive_url=f"/#/archive/{quote(_BENCHMARK_ARCHIVE_NAME)}/experiments",
         )

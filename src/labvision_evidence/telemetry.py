@@ -96,6 +96,8 @@ class ResourceMonitor:
         self._previous_process_io = self._process_tree_io()
         self._previous_perf = time.perf_counter()
         self._nvml = _NvmlSampler.create()
+        self._sampling_errors: list[dict[str, Any]] = []
+        self._thread_ended_unexpectedly = False
 
     def set_stage(self, stage: str) -> None:
         self._stage = stage
@@ -107,7 +109,7 @@ class ResourceMonitor:
     def stop(self) -> dict[str, Any]:
         self._stop.set()
         if self._thread:
-            self._thread.join(timeout=max(2.0, self.interval * 2))
+            self._thread.join(timeout=max(10.0, self.interval * 5))
         report = self.report()
         self._write_atomic(self.destination, report)
         latest = self._samples[-1] if self._samples else None
@@ -136,6 +138,32 @@ class ResourceMonitor:
             self._nvml.close()
             self._nvml = None
         return report
+
+    def _record_sampling_error(self, component: str, exc: Exception) -> None:
+        self._sampling_errors.append(
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "stage": self._stage,
+                "component": component,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        )
+        if len(self._sampling_errors) > 100:
+            del self._sampling_errors[:-100]
+
+    def _write_live_payload(self, payload: dict[str, Any]) -> None:
+        for component, destination in (
+            ("live_destination", self.live_destination),
+            ("live_mirror_destination", self.live_mirror_destination),
+        ):
+            if destination is None:
+                continue
+            try:
+                self._write_atomic(destination, payload)
+            except Exception as exc:
+                # Telemetry is evidence, but a transient SMB/live-file failure
+                # must not silently kill all later sampling or the pipeline.
+                self._record_sampling_error(component, exc)
 
     @staticmethod
     def _write_atomic(path: Path, payload: dict[str, Any]) -> None:
@@ -220,55 +248,87 @@ class ResourceMonitor:
             return []
 
     def _run(self) -> None:
-        psutil.cpu_percent(interval=None)
-        while not self._stop.wait(self.interval):
-            now_perf = time.perf_counter()
-            elapsed = max(1e-6, now_perf - self._previous_perf)
-            memory = psutil.virtual_memory()
-            network = psutil.net_io_counters()
-            process_io = self._process_tree_io()
-            network_received = max(0, int(network.bytes_recv - self._previous_network.bytes_recv))
-            network_sent = max(0, int(network.bytes_sent - self._previous_network.bytes_sent))
-            process_read = max(
-                0, int(process_io["read_bytes"] - self._previous_process_io["read_bytes"])
-            )
-            process_write = max(
-                0, int(process_io["write_bytes"] - self._previous_process_io["write_bytes"])
-            )
-            sample = {
-                "timestamp": datetime.now(timezone.utc).isoformat(), "stage": self._stage,
-                "cpu_percent": psutil.cpu_percent(interval=None), "memory_percent": memory.percent,
-                "memory_used_bytes": memory.used,
-                "gpu": self._gpu(),
-                "host_network": {
-                    "received_bytes_delta": network_received,
-                    "sent_bytes_delta": network_sent,
-                    "received_mib_per_second": round(network_received / elapsed / 1024**2, 4),
-                    "sent_mib_per_second": round(network_sent / elapsed / 1024**2, 4),
-                    "scope": "host_all_network_interfaces",
-                },
-                "pipeline_process_tree_io": {
-                    "read_bytes_delta": process_read,
-                    "write_bytes_delta": process_write,
-                    "read_mib_per_second": round(process_read / elapsed / 1024**2, 4),
-                    "write_mib_per_second": round(process_write / elapsed / 1024**2, 4),
-                    "sampled_process_count": process_io["process_count"],
-                },
-            }
-            self._samples.append(sample)
-            live_payload = {
-                "schema_version": "visioncortex-resource-telemetry-live/1",
-                "status": "running",
-                "sample_count": len(self._samples),
-                "updated_at": sample["timestamp"],
-                "latest": sample,
-            }
-            self._write_atomic(self.live_destination, live_payload)
-            if self.live_mirror_destination is not None:
-                self._write_atomic(self.live_mirror_destination, live_payload)
-            self._previous_network = network
-            self._previous_process_io = process_io
-            self._previous_perf = now_perf
+        try:
+            psutil.cpu_percent(interval=None)
+            while not self._stop.wait(self.interval):
+                try:
+                    now_perf = time.perf_counter()
+                    elapsed = max(1e-6, now_perf - self._previous_perf)
+                    memory = psutil.virtual_memory()
+                    network = psutil.net_io_counters()
+                    process_io = self._process_tree_io()
+                    network_received = max(
+                        0, int(network.bytes_recv - self._previous_network.bytes_recv)
+                    )
+                    network_sent = max(
+                        0, int(network.bytes_sent - self._previous_network.bytes_sent)
+                    )
+                    process_read = max(
+                        0,
+                        int(
+                            process_io["read_bytes"]
+                            - self._previous_process_io["read_bytes"]
+                        ),
+                    )
+                    process_write = max(
+                        0,
+                        int(
+                            process_io["write_bytes"]
+                            - self._previous_process_io["write_bytes"]
+                        ),
+                    )
+                    sample = {
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "stage": self._stage,
+                        "cpu_percent": psutil.cpu_percent(interval=None),
+                        "memory_percent": memory.percent,
+                        "memory_used_bytes": memory.used,
+                        "gpu": self._gpu(),
+                        "host_network": {
+                            "received_bytes_delta": network_received,
+                            "sent_bytes_delta": network_sent,
+                            "received_mib_per_second": round(
+                                network_received / elapsed / 1024**2, 4
+                            ),
+                            "sent_mib_per_second": round(
+                                network_sent / elapsed / 1024**2, 4
+                            ),
+                            "scope": "host_all_network_interfaces",
+                        },
+                        "pipeline_process_tree_io": {
+                            "read_bytes_delta": process_read,
+                            "write_bytes_delta": process_write,
+                            "read_mib_per_second": round(
+                                process_read / elapsed / 1024**2, 4
+                            ),
+                            "write_mib_per_second": round(
+                                process_write / elapsed / 1024**2, 4
+                            ),
+                            "sampled_process_count": process_io["process_count"],
+                        },
+                    }
+                    self._samples.append(sample)
+                    # Advance counters before publishing the live payload. A
+                    # failed NAS write must not inflate the next sample.
+                    self._previous_network = network
+                    self._previous_process_io = process_io
+                    self._previous_perf = now_perf
+                    self._write_live_payload(
+                        {
+                            "schema_version": "visioncortex-resource-telemetry-live/1",
+                            "status": "running",
+                            "sample_count": len(self._samples),
+                            "sampling_error_count": len(self._sampling_errors),
+                            "updated_at": sample["timestamp"],
+                            "latest": sample,
+                        }
+                    )
+                except Exception as exc:
+                    self._record_sampling_error("sample_loop", exc)
+        except BaseException as exc:
+            self._thread_ended_unexpectedly = True
+            if isinstance(exc, Exception):
+                self._record_sampling_error("monitor_thread", exc)
 
     def report(self) -> dict[str, Any]:
         def stats(values: list[float]) -> dict[str, float] | None:
@@ -286,6 +346,7 @@ class ResourceMonitor:
             "gpu_compute_percent": "utilization.gpu", "nvdec_percent": "utilization.decoder",
             "nvenc_percent": "utilization.encoder", "gpu_memory_used_mib": "memory.used",
             "gpu_temperature_c": "temperature.gpu", "gpu_power_w": "power.draw",
+            "gpu_sm_clock_mhz": "clocks.sm",
         }
         for stage, samples in grouped.items():
             summary: dict[str, Any] = {
@@ -328,6 +389,14 @@ class ResourceMonitor:
                 "reported separately and includes local and NAS file I/O."
             ),
             "smb_connections": self._smb_connections(),
+            "monitor_health": {
+                "sampling_error_count": len(self._sampling_errors),
+                "sampling_errors": list(self._sampling_errors),
+                "thread_ended_unexpectedly": self._thread_ended_unexpectedly,
+                "thread_alive_after_stop": bool(
+                    self._thread is not None and self._thread.is_alive()
+                ),
+            },
             "stage_summaries": summaries,
             "samples": self._samples,
         }
