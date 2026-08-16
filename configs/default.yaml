@@ -185,11 +185,12 @@ segmentation:
   allow_strong_single_role_actions: true
 
 continuity:
-  # Temporal proximity alone is insufficient: a shared third-person view and
-  # a shared container/sample object are also required.
+  # Temporal proximity alone is insufficient. Two carried container/sample
+  # identities must bridge adjacent atomic experiments; a lone generic object
+  # movement is too weak to merge otherwise independent experiments.
   max_gap_seconds: 300.0
   require_shared_third_view: false
-  minimum_shared_objects: 1
+  minimum_shared_objects: 2
   preparation_bridge_max_gap_seconds: 20.0
   preparation_segment_max_seconds: 20.0
   preparation_segment_max_events: 2

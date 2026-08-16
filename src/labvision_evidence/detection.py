@@ -214,6 +214,7 @@ def _producer(
     motion_signature_size: tuple[int, int],
     wave_barrier: threading.Barrier | None,
     phase: str = "fine",
+    alignment_transform: AlignmentTransform | None = None,
     decode_worker_override: int | None = None,
 ) -> None:
     perf = config["performance"]
@@ -256,6 +257,16 @@ def _producer(
     previous_signature: np.ndarray | None = None
     decode_fps = max(sample_fps, motion_probe_fps)
     sample_period_ms = 1000.0 / max(sample_fps, 1e-9)
+    transform = alignment_transform or AlignmentTransform(
+        view_id=view.view_id,
+        reference_view_id=view.view_id,
+        state="aligned",
+    )
+    if transform.scale <= 0.0:
+        raise ValueError(f"{view.view_id}: alignment scale must be positive")
+    global_decode_period_ms = 1000.0 / max(decode_fps, 1e-9)
+    local_decode_period_ms = global_decode_period_ms / transform.scale
+    local_grid_origin_ms = transform.to_local(0.0)
     activity_path = output_queue.activity_path if hasattr(output_queue, "activity_path") else None
     session_decode_receipts: dict[int, dict[str, Any]] = {}
 
@@ -302,6 +313,23 @@ def _producer(
         }
         if persistent_sessions and chunk_index is not None:
             session = persistent_sessions[chunk_index]
+            decoder_receipt = session_decode_receipts.get(chunk_index)
+            if decoder_receipt and decoder_receipt.get(
+                "aligned_session_start_virtual_ms"
+            ) is not None:
+                first_global_ms = transform.to_global(
+                    float(decoder_receipt["aligned_session_start_virtual_ms"])
+                )
+                phase_ms = first_global_ms % global_decode_period_ms
+                decoder_receipt.update(
+                    {
+                        "first_sample_global_ms": first_global_ms,
+                        "global_sampling_phase_ms": phase_ms,
+                        "global_sampling_phase_error_ms": min(
+                            phase_ms, global_decode_period_ms - phase_ms
+                        ),
+                    }
+                )
             payload.update(
                 {
                     "target_window_count": len(session.target_virtual_windows),
@@ -313,7 +341,7 @@ def _producer(
                     "avoided_physical_reopens": max(
                         0, len(session.target_virtual_windows) - 1
                     ),
-                    "decoder_receipt": session_decode_receipts.get(chunk_index),
+                    "decoder_receipt": decoder_receipt,
                 }
             )
         with output_queue.activity_lock:
@@ -327,6 +355,19 @@ def _producer(
             if chunk_index is None:
                 raise ValueError("persistent decode requires a source unit index")
             receipt = session_decode_receipts.setdefault(chunk_index, {})
+            receipt.update(
+                {
+                    "sampling_grid_mode": "aligned_global_timeline",
+                    "global_sampling_period_ms": global_decode_period_ms,
+                    "local_sampling_period_ms": local_decode_period_ms,
+                    "local_grid_origin_ms": local_grid_origin_ms,
+                    "alignment_scale": transform.scale,
+                    "alignment_offset_ms": transform.offset_ms,
+                    "visual_correction_ms": transform.visual_correction_ms,
+                    "tracker_state_policy": "per_view_pass_monotonic_timeline",
+                    "motion_reference_policy": "previous_emitted_frame",
+                }
+            )
             return iter_physical_segment_session_frames(
                 info,
                 persistent_sessions[chunk_index],
@@ -339,6 +380,8 @@ def _producer(
                 bool(perf.get("ffmpeg_cuda_scale", False))
                 and decode_backend == "cuda",
                 receipt,
+                local_grid_origin_ms,
+                local_decode_period_ms,
             )
         return iter_view_sampled_frames(
             view,
@@ -371,7 +414,7 @@ def _producer(
                 else 0.0
             )
             previous_signature = signature
-            if local_ms + 0.5 < next_yolo_ms:
+            if not persistent_sessions and local_ms + 0.5 < next_yolo_ms:
                 previous_gray = gray
                 continue
             output_queue.put(
@@ -386,8 +429,9 @@ def _producer(
                 )
             )
             previous_gray = gray
-            while next_yolo_ms <= local_ms + 0.5:
-                next_yolo_ms += sample_period_ms
+            if not persistent_sessions:
+                while next_yolo_ms <= local_ms + 0.5:
+                    next_yolo_ms += sample_period_ms
 
     def finish_unit(chunk_index: int, total_chunks: int) -> None:
         output_queue.put(
@@ -961,6 +1005,43 @@ def scan_videos(
                     "fine_persistent_segment_decode", False
                 )
             ),
+            "sampling_grid_by_view": {
+                view.view_id: {
+                    "mode": (
+                        "aligned_global_timeline"
+                        if phase == "fine"
+                        and config["performance"].get(
+                            "fine_persistent_segment_decode", False
+                        )
+                        and windows is not None
+                        and bool(infos[view.view_id].segments)
+                        else "decoder_default"
+                    ),
+                    "global_period_ms": 1000.0 / max(
+                        effective_fps,
+                        float(config["performance"].get("motion_probe_fps", 0.0)),
+                        1e-9,
+                    ),
+                    "local_period_ms": (
+                        1000.0
+                        / max(
+                            effective_fps,
+                            float(
+                                config["performance"].get("motion_probe_fps", 0.0)
+                            ),
+                            1e-9,
+                        )
+                        / transforms[view.view_id].scale
+                    ),
+                    "local_origin_ms": transforms[view.view_id].to_local(0.0),
+                    "alignment_scale": transforms[view.view_id].scale,
+                    "alignment_offset_ms": transforms[view.view_id].offset_ms,
+                    "visual_correction_ms": transforms[
+                        view.view_id
+                    ].visual_correction_ms,
+                }
+                for view in role_views
+            },
             "decode_backends": {
                 view.view_id: (decode_backends or {}).get(
                     view.view_id,
@@ -1010,6 +1091,7 @@ def scan_videos(
                     signature_size,
                     wave_barrier,
                     phase,
+                    transforms[view.view_id],
                     source_decode_workers[view.view_id],
                 ),
                 name=f"decode-{view.view_id}",

@@ -191,6 +191,7 @@ def _key_material_selection_report(
     groups: list[ExperimentGroup],
     segments: list[ExperimentSegment],
     events: list[EvidenceEvent],
+    decision_receipts: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Expose material recall and suspiciously sparse experiment coverage."""
 
@@ -235,8 +236,15 @@ def _key_material_selection_report(
             }
         )
     return {
-        "schema_version": "visioncortex-key-material-selection/1",
-        "selection_rule": "cross-view accepted physical actions; duplicate only near-identical time/object evidence",
+        "schema_version": "visioncortex-key-material-selection/2",
+        "selection_rule": (
+            "accepted formal physical actions; duplicate only when action/object "
+            "identity, positive interval overlap, and peak proximity all agree"
+        ),
+        "decision_receipt_complete": bool(decision_receipts is not None)
+        and len(decision_receipts)
+        == sum(record["accepted_physical_events"] for record in records),
+        "decision_receipts": list(decision_receipts or []),
         "groups": records,
         "totals": {
             "accepted_physical_events": sum(
@@ -1483,6 +1491,20 @@ class EvidencePipeline:
                             )
                         ),
                         "manifest_position": positions[view_id],
+                        "positive_recall_prior": bool(
+                            local_support
+                            or local_candidate_count
+                            or int(
+                                fine_view_report.get(view_id, {}).get(
+                                    "active_anchor_frames", 0
+                                )
+                            )
+                            or int(
+                                fine_view_report.get(view_id, {}).get(
+                                    "anchor_frames", 0
+                                )
+                            )
+                        ),
                     }
                 )
             if not choices:
@@ -1499,11 +1521,24 @@ class EvidencePipeline:
                     int(item["manifest_position"]),
                 )
             )
+            base_report["ranked_view_choices"] = choices
+            formal_dual_view_complete = bool(
+                group.first_person_view and group.third_person_view
+            )
+            if formal_dual_view_complete and not any(
+                bool(item["positive_recall_prior"]) for item in choices
+            ):
+                base_report["status"] = "complete_no_positive_recall_prior"
+                base_report["recall_guard_reason"] = (
+                    "formal group already has first/third evidence and every "
+                    "unscanned view has zero event, candidate, and coarse-anchor prior"
+                )
+                reports.append(base_report)
+                continue
             chosen = choices[0]
             base_report.update(
                 {
                     "status": "needs_group_local_recall",
-                    "ranked_view_choices": choices,
                     "selected_view_id": chosen["view_id"],
                     "selected_windows": chosen["windows"],
                 }
@@ -1894,6 +1929,14 @@ class EvidencePipeline:
                 if item["status"] == "needs_third_person_supplement"
             }
 
+        formal_state_cache: tuple[
+            list[ActionCandidate],
+            list[EvidenceEvent],
+            list[ExperimentSegment],
+            list[ExperimentGroup],
+            list[EvidenceEvent],
+        ] | None = None
+
         def formal_state() -> tuple[
             list[ActionCandidate],
             list[EvidenceEvent],
@@ -1901,6 +1944,9 @@ class EvidencePipeline:
             list[ExperimentGroup],
             list[EvidenceEvent],
         ]:
+            nonlocal formal_state_cache
+            if formal_state_cache is not None:
+                return formal_state_cache
             state_views = [view for view in fine_views if view.view_id in scanned]
             state_candidates = generate_candidates(
                 state_views, detection_paths, self.config
@@ -1931,13 +1977,14 @@ class EvidencePipeline:
             state_key_events = select_key_events(
                 state_groups, state_segments, state_events, self.config
             )
-            return (
+            formal_state_cache = (
                 state_candidates,
                 state_events,
                 state_segments,
                 state_groups,
                 state_key_events,
             )
+            return formal_state_cache
 
         local_recall_rounds: list[dict[str, Any]] = []
         local_recall_enabled = bool(
@@ -2013,6 +2060,7 @@ class EvidencePipeline:
                     [],
                     explicit_windows=windows_by_view,
                 )
+                formal_state_cache = None
                 (
                     _after_candidates,
                     _after_events,
@@ -2068,7 +2116,14 @@ class EvidencePipeline:
                 "selected_key_event_count": len(final_recall_key_events),
                 "completeness_gate": local_recall_plan,
                 "stopping_reason": (
-                    "formal_groups_complete"
+                    "no_positive_recall_prior"
+                    if local_recall_plan.get("complete")
+                    and any(
+                        item.get("status")
+                        == "complete_no_positive_recall_prior"
+                        for item in local_recall_plan.get("groups", [])
+                    )
+                    else "formal_groups_complete"
                     if local_recall_plan.get("complete")
                     else "maximum_group_recall_rounds_exhausted"
                 ),
@@ -3141,6 +3196,24 @@ class EvidencePipeline:
                 self.config,
             )
             groups = build_experiment_groups(segments, events, manifest.views, self.config)
+            selection_decisions: list[dict[str, Any]] = []
+            precheck_key_events = select_key_events(
+                groups,
+                segments,
+                events,
+                self.config,
+                decision_receipts=selection_decisions,
+            )
+            key_selection_path = (
+                layout.json_config / "key_material_selection_preview.json"
+            )
+            selection_report = _key_material_selection_report(
+                groups,
+                segments,
+                events,
+                selection_decisions,
+            )
+            write_json(key_selection_path, selection_report)
             self._preprocessing_completed_seconds = round(time.perf_counter() - self._run_started_perf, 6)
             write_json(
                 layout.json_config / "audit_layer.json",
@@ -3166,6 +3239,7 @@ class EvidencePipeline:
                 [
                     layout.json_config / "audit_layer.json",
                     layout.json_config / "boundary_precheck.json",
+                    key_selection_path,
                 ],
             )
 
@@ -3180,14 +3254,16 @@ class EvidencePipeline:
                     0.99,
                     "验证有界双视角实验与关键事件选择，不调用模型或导出媒体",
                 )
-                key_events = select_key_events(groups, segments, events, self.config)
-                key_selection_path = (
-                    layout.json_config / "key_material_selection_preview.json"
+                key_events = precheck_key_events
+                baseline = self._acceptance_baseline() or {}
+                minimum_key_events = baseline.get("minimum_selected_key_events")
+                key_event_gate_passed = (
+                    minimum_key_events is None
+                    or len(key_events) >= int(minimum_key_events)
                 )
-                selection_report = _key_material_selection_report(
-                    groups, segments, events
+                acceptance_passed = bool(boundary_precheck["passed"]) and bool(
+                    key_event_gate_passed
                 )
-                write_json(key_selection_path, selection_report)
                 acceptance_path = (
                     layout.json_config / "preprocessing_acceptance.json"
                 )
@@ -3198,7 +3274,7 @@ class EvidencePipeline:
                             "visioncortex-preprocessing-acceptance/1"
                         ),
                         "status": (
-                            "passed" if boundary_precheck["passed"] else "failed"
+                            "passed" if acceptance_passed else "failed"
                         ),
                         "run_mode": "preprocessing_acceptance_only",
                         "formal_archive_promotion_allowed": False,
@@ -3213,6 +3289,8 @@ class EvidencePipeline:
                         ),
                         "experiment_group_count": len(groups),
                         "selected_key_event_count": len(key_events),
+                        "minimum_selected_key_events": minimum_key_events,
+                        "key_event_gate_passed": key_event_gate_passed,
                         "experiment_groups": [
                             group.model_dump(mode="json") for group in groups
                         ],
@@ -3238,6 +3316,11 @@ class EvidencePipeline:
                 run_metrics["run_mode"] = "preprocessing_acceptance_only"
                 run_metrics["formal_archive_promotion_allowed"] = False
                 write_json(layout.json_config / "run_metrics.json", run_metrics)
+                if not acceptance_passed:
+                    raise RuntimeError(
+                        "Preprocessing acceptance failed after evidence selection; "
+                        f"see {acceptance_path}"
+                    )
                 self._complete_stage(
                     layout,
                     "preprocessing_acceptance",
@@ -3262,11 +3345,23 @@ class EvidencePipeline:
                 },
             )
             write_json(layout.json_config / "run_metrics_live.json", self._metrics(events, groups))
-            key_events = select_key_events(groups, segments, events, self.config)
+            final_selection_decisions: list[dict[str, Any]] = []
+            key_events = select_key_events(
+                groups,
+                segments,
+                events,
+                self.config,
+                decision_receipts=final_selection_decisions,
+            )
             key_selection_path = layout.json_config / "key_material_selection.json"
             write_json(
                 key_selection_path,
-                _key_material_selection_report(groups, segments, events),
+                _key_material_selection_report(
+                    groups,
+                    segments,
+                    events,
+                    final_selection_decisions,
+                ),
             )
             self._complete_stage(
                 layout,

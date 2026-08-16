@@ -404,6 +404,82 @@ def test_explicit_state_transition_remains_a_continuous_two_atomic_chain(
     assert groups[0].atomic_experiment_ids == ["EXP-1", "EXP-2"]
 
 
+def test_single_carried_object_does_not_join_independent_atomic_experiments(
+    default_config,
+):
+    views = [
+        ViewInput(view_id="fp01", role=ViewRole.FIRST_PERSON, video=Path("a.mp4")),
+        ViewInput(view_id="tp01", role=ViewRole.THIRD_PERSON, video=Path("b.mp4")),
+    ]
+
+    def event(event_id, start, end, objects):
+        return EvidenceEvent(
+            event_id=event_id,
+            action_type=ActionType.OBJECT_MOVEMENT,
+            global_start_ms=start,
+            global_end_ms=end,
+            key_global_ms=(start + end) / 2.0,
+            objects=objects,
+            confidence=0.9,
+            accepted=True,
+            audit_reason="cross-view evidence",
+            supporting_views=["fp01", "tp01"],
+            supporting_roles=[ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON],
+            candidates=[],
+        )
+
+    single_object_events = [
+        event("LEFT", 10_000, 20_000, ["tube"]),
+        event("RIGHT", 37_500, 45_000, ["tube"]),
+    ]
+    segments = [
+        ExperimentSegment(
+            segment_id="EXP-1",
+            global_start_ms=8_000,
+            global_end_ms=20_000,
+            event_ids=["LEFT"],
+            participating_views=["fp01", "tp01"],
+        ),
+        ExperimentSegment(
+            segment_id="EXP-2",
+            global_start_ms=37_500,
+            global_end_ms=48_000,
+            event_ids=["RIGHT"],
+            participating_views=["fp01", "tp01"],
+        ),
+    ]
+
+    groups = build_experiment_groups(
+        segments, single_object_events, views, default_config
+    )
+
+    assert len(groups) == 2
+    assert all(group.continuity_type == "independent" for group in groups)
+
+    two_object_events = [
+        event("LEFT", 10_000, 20_000, ["tube", "tube_rack"]),
+        event("RIGHT", 92_700, 100_000, ["tube", "tube_rack"]),
+    ]
+    two_object_segments = [
+        segments[0].model_copy(update={"event_ids": ["LEFT"]}),
+        segments[1].model_copy(
+            update={
+                "global_start_ms": 92_700,
+                "global_end_ms": 103_000,
+                "event_ids": ["RIGHT"],
+            }
+        ),
+    ]
+
+    groups = build_experiment_groups(
+        two_object_segments, two_object_events, views, default_config
+    )
+
+    assert len(groups) == 1
+    assert groups[0].continuity_type == "continuous"
+    assert len(groups[0].atomic_experiment_ids) == 2
+
+
 def test_incomplete_liquid_hypothesis_cannot_pull_start_before_direct_contact(
     default_config,
 ):

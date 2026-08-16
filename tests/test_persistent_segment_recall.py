@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from labvision_evidence.config import load_config
 from labvision_evidence.pipeline import (
     EvidencePipeline,
@@ -20,6 +22,7 @@ from labvision_evidence.schemas import (
     ViewRole,
 )
 from labvision_evidence.video_io import (
+    _aligned_grid_start_ms,
     _selected_session_timestamps,
     plan_physical_segment_decode_sessions,
 )
@@ -101,6 +104,23 @@ def test_persistent_session_timestamp_count_matches_ffmpeg_round_near_endpoint()
     assert len(timestamps) == 2056
     assert timestamps[0] == start_ms
     assert timestamps[-1] == start_ms + 205_500.0
+
+
+def test_persistent_sessions_share_one_alignment_anchored_global_sampling_grid():
+    transform = AlignmentTransform(
+        view_id="tp",
+        reference_view_id="fp",
+        scale=1.0,
+        offset_ms=34.159,
+        state="aligned",
+    )
+    local_origin_ms = transform.to_local(0.0)
+
+    first = _aligned_grid_start_ms(1_671_773.0, local_origin_ms, 100.0)
+    second = _aligned_grid_start_ms(1_800_642.0, local_origin_ms, 100.0)
+
+    assert transform.to_global(first) % 100.0 == pytest.approx(0.0, abs=1e-6)
+    assert transform.to_global(second) % 100.0 == pytest.approx(0.0, abs=1e-6)
 
 
 def _candidate(
@@ -256,6 +276,102 @@ def test_group_local_recall_selects_unscanned_evidence_producing_view(
     choices = plan["groups"][0]["ranked_view_choices"]
     assert [item["view_id"] for item in choices] == ["rk", "d12"]
     assert all(item["view_id"] != "b439" for item in choices)
+
+
+def test_group_local_recall_skips_zero_prior_views_for_complete_dual_view_group(
+    default_config,
+):
+    pipeline = EvidencePipeline(default_config)
+    views = [
+        ViewInput(view_id="fp", role=ViewRole.FIRST_PERSON, video=Path("fp.mp4")),
+        ViewInput(
+            view_id="b439", role=ViewRole.THIRD_PERSON, video=Path("b439.mp4")
+        ),
+        ViewInput(view_id="d12", role=ViewRole.THIRD_PERSON, video=Path("d12.mp4")),
+        ViewInput(view_id="rk", role=ViewRole.THIRD_PERSON, video=Path("rk.mp4")),
+    ]
+    infos = {
+        view.view_id: VideoInfo(
+            path=view.video,
+            duration_ms=500_000.0,
+            fps=30.0,
+            width=16,
+            height=16,
+            frame_count=15_000,
+        )
+        for view in views
+    }
+    transforms = {
+        view.view_id: AlignmentTransform(
+            view_id=view.view_id,
+            reference_view_id="fp",
+            state="aligned",
+            confidence=1.0,
+        )
+        for view in views
+    }
+    event = EvidenceEvent(
+        event_id="E-CROSS",
+        action_type=ActionType.HAND_OBJECT_CONTACT,
+        global_start_ms=300_000.0,
+        global_end_ms=310_000.0,
+        key_global_ms=305_000.0,
+        objects=["gloved_hand", "tube"],
+        confidence=0.9,
+        accepted=True,
+        audit_reason="test",
+        supporting_views=["fp", "b439"],
+        supporting_roles=[ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON],
+        candidates=[],
+    )
+    segment = ExperimentSegment(
+        segment_id="EXP-1",
+        global_start_ms=300_000.0,
+        global_end_ms=430_000.0,
+        event_ids=[event.event_id],
+        participating_views=["fp", "b439"],
+    )
+    group = ExperimentGroup(
+        group_id="G1",
+        continuity_type="independent",
+        atomic_experiment_ids=[segment.segment_id],
+        global_start_ms=300_000.0,
+        global_end_ms=430_000.0,
+        participating_views=["fp", "b439"],
+        first_person_view="fp",
+        third_person_view="b439",
+        continuity_reason="test",
+    )
+    unresolved = [
+        _candidate(
+            f"C-{index}",
+            330_000.0 + index * 10_000.0,
+            335_000.0 + index * 10_000.0,
+            ActionType.OBJECT_MOVEMENT,
+            ["tube"],
+        )
+        for index in range(3)
+    ]
+
+    plan = pipeline._group_local_recall_plan(
+        [group],
+        [segment],
+        [event],
+        unresolved,
+        views,
+        {view.view_id: {} for view in views},
+        {"fp": [(300_000.0, 430_000.0)], "b439": [(300_000.0, 430_000.0)]},
+        infos,
+        transforms,
+    )
+
+    assert plan["complete"] is True
+    assert plan["selected_plans"] == []
+    assert plan["groups"][0]["status"] == "complete_no_positive_recall_prior"
+    assert all(
+        item["positive_recall_prior"] is False
+        for item in plan["groups"][0]["ranked_view_choices"]
+    )
 
 
 def test_detection_ledger_merge_deduplicates_frames_and_namespaces_tracks(

@@ -754,6 +754,7 @@ def select_key_events(
     segments: Sequence[ExperimentSegment],
     events: Sequence[EvidenceEvent],
     config: dict[str, Any],
+    decision_receipts: list[dict[str, Any]] | None = None,
 ) -> list[EvidenceEvent]:
     """Select representative, non-duplicate physical actions for user delivery."""
     by_segment = {segment.segment_id: segment for segment in segments}
@@ -767,6 +768,65 @@ def select_key_events(
     overlap_ratio = float(cfg.get("duplicate_interval_overlap_ratio", 0.50))
     max_per_type = int(cfg["max_per_action_type_per_atomic_experiment"])
     selected: list[EvidenceEvent] = []
+    decisions: dict[str, dict[str, Any]] = {}
+
+    def ensure_decision(
+        event: EvidenceEvent,
+        group: ExperimentGroup,
+        segment_id: str,
+    ) -> dict[str, Any]:
+        return decisions.setdefault(
+            event.event_id,
+            {
+                "event_id": event.event_id,
+                "group_id": group.group_id,
+                "segment_id": segment_id,
+                "action_type": event.action_type.value,
+                "objects": list(event.objects),
+                "global_start_ms": event.global_start_ms,
+                "global_end_ms": event.global_end_ms,
+                "peak_timestamp_ms": event.key_global_ms,
+                "confidence": event.confidence,
+                "selected": False,
+                "decision": "pending",
+                "competitor_event_id": None,
+                "shared_objects": [],
+                "peak_distance_ms": None,
+                "interval_overlap_ms": None,
+                "interval_overlap_ratio": None,
+                "minimum_separation_ms": separation_ms,
+                "legacy_overlap_ratio_threshold_not_used": overlap_ratio,
+                "requires_positive_interval_overlap": True,
+            },
+        )
+
+    def duplicate_metrics(
+        existing: EvidenceEvent,
+        event: EvidenceEvent,
+    ) -> dict[str, Any]:
+        shared_objects = sorted(set(existing.objects) & set(event.objects))
+        interval_overlap_ms = max(
+            0.0,
+            min(existing.global_end_ms, event.global_end_ms)
+            - max(existing.global_start_ms, event.global_start_ms),
+        )
+        shorter_duration_ms = max(
+            1.0,
+            min(
+                existing.global_end_ms - existing.global_start_ms,
+                event.global_end_ms - event.global_start_ms,
+            ),
+        )
+        return {
+            "shared_objects": shared_objects,
+            "peak_distance_ms": abs(
+                existing.key_global_ms - event.key_global_ms
+            ),
+            "interval_overlap_ms": interval_overlap_ms,
+            "interval_overlap_ratio": interval_overlap_ms
+            / shorter_duration_ms,
+        }
+
     for group in groups:
         group_selected: list[EvidenceEvent] = []
         for segment_id in group.atomic_experiment_ids:
@@ -781,43 +841,61 @@ def select_key_events(
             )
             per_type: dict[str, list[EvidenceEvent]] = {}
             for event in candidates:
+                event_decision = ensure_decision(event, group, segment_id)
                 bucket = per_type.setdefault(event.action_type.value, [])
-                nearby = next(
-                    (
-                        existing
-                        for existing in bucket
-                        if bool(set(existing.objects) & set(event.objects))
-                        and (
-                            abs(existing.key_global_ms - event.key_global_ms)
-                            < separation_ms
-                            or (
-                                max(
-                                    0.0,
-                                    min(existing.global_end_ms, event.global_end_ms)
-                                    - max(existing.global_start_ms, event.global_start_ms),
-                                )
-                                / max(
-                                    1.0,
-                                    min(
-                                        existing.global_end_ms
-                                        - existing.global_start_ms,
-                                        event.global_end_ms - event.global_start_ms,
-                                    ),
-                                )
-                                >= overlap_ratio
-                            )
-                        )
-                    ),
-                    None,
-                )
-                if nearby is not None:
+                duplicate: tuple[EvidenceEvent, dict[str, Any]] | None = None
+                for existing in bucket:
+                    metrics = duplicate_metrics(existing, event)
+                    is_duplicate = bool(metrics["shared_objects"]) and bool(
+                        metrics["interval_overlap_ms"] > 0.0
+                        and metrics["peak_distance_ms"] < separation_ms
+                    )
+                    if is_duplicate:
+                        duplicate = (existing, metrics)
+                        break
+                if duplicate is not None:
+                    nearby, metrics = duplicate
+                    event_decision.update(metrics)
+                    event_decision["competitor_event_id"] = nearby.event_id
                     if event.confidence > nearby.confidence:
                         bucket[bucket.index(nearby)] = event
+                        replaced = ensure_decision(nearby, group, segment_id)
+                        replaced.update(metrics)
+                        replaced.update(
+                            {
+                                "selected": False,
+                                "decision": "duplicate_replaced_by_higher_confidence",
+                                "competitor_event_id": event.event_id,
+                            }
+                        )
+                        event_decision["decision"] = "pending_after_replacement"
+                    else:
+                        event_decision.update(
+                            {
+                                "selected": False,
+                                "decision": "duplicate_lower_or_equal_confidence",
+                            }
+                        )
                     continue
                 bucket.append(event)
             for bucket in per_type.values():
                 if len(bucket) > max_per_type:
-                    bucket = sorted(bucket, key=lambda event: event.confidence, reverse=True)[:max_per_type]
+                    ranked = sorted(
+                        bucket, key=lambda event: event.confidence, reverse=True
+                    )
+                    retained_ids = {
+                        event.event_id for event in ranked[:max_per_type]
+                    }
+                    for dropped in ranked[max_per_type:]:
+                        ensure_decision(dropped, group, segment_id).update(
+                            {
+                                "selected": False,
+                                "decision": "per_action_type_cap",
+                                "retained_event_ids": sorted(retained_ids),
+                                "cap": max_per_type,
+                            }
+                        )
+                    bucket = ranked[:max_per_type]
                 group_selected.extend(bucket)
         group_selected.sort(key=lambda event: event.key_global_ms)
         max_total = int(cfg["max_per_experiment_group"])
@@ -832,10 +910,41 @@ def select_key_events(
                 )
             remaining = [event for event in group_selected if event not in mandatory]
             remaining.sort(key=lambda event: event.confidence, reverse=True)
+            retained = mandatory + remaining[: max(0, max_total - len(mandatory))]
+            retained_ids = {event.event_id for event in retained}
+            for dropped in group_selected:
+                if dropped.event_id not in retained_ids:
+                    decisions[dropped.event_id].update(
+                        {
+                            "selected": False,
+                            "decision": "per_experiment_group_cap",
+                            "retained_event_ids": sorted(retained_ids),
+                            "cap": max_total,
+                        }
+                    )
             group_selected = sorted(
-                mandatory + remaining[: max(0, max_total - len(mandatory))],
+                retained,
                 key=lambda event: event.key_global_ms,
+            )
+        for event in group_selected:
+            decisions[event.event_id].update(
+                {
+                    "selected": True,
+                    "decision": "selected",
+                }
             )
         group.key_event_ids = [event.event_id for event in group_selected]
         selected.extend(group_selected)
+    if decision_receipts is not None:
+        decision_receipts.extend(
+            sorted(
+                decisions.values(),
+                key=lambda item: (
+                    str(item["group_id"]),
+                    str(item["segment_id"]),
+                    float(item["peak_timestamp_ms"]),
+                    str(item["event_id"]),
+                ),
+            )
+        )
     return selected

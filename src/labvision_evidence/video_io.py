@@ -485,6 +485,22 @@ def _selected_session_timestamps(
     ]
 
 
+def _aligned_grid_start_ms(
+    start_ms: float,
+    grid_origin_ms: float,
+    period_ms: float,
+) -> float:
+    """Return the first half-open sampling-grid timestamp at or after start."""
+
+    if period_ms <= 0.0:
+        raise ValueError("sampling grid period must be positive")
+    grid_index = math.ceil((start_ms - grid_origin_ms) / period_ms - 1e-9)
+    aligned = grid_origin_ms + grid_index * period_ms
+    if aligned < start_ms - 1e-6:
+        aligned += period_ms
+    return aligned
+
+
 def _ffmpeg_multi_window_iterator(
     path: Path,
     info: VideoInfo,
@@ -496,6 +512,7 @@ def _ffmpeg_multi_window_iterator(
     hwaccel: str | None,
     decoder_threads: int | None,
     cuda_scale: bool = False,
+    receipt: dict[str, Any] | None = None,
 ) -> Iterator[tuple[int, float, np.ndarray]]:
     """Decode one physical span once and emit only its requested 10 FPS windows."""
 
@@ -559,6 +576,15 @@ def _ffmpeg_multi_window_iterator(
     expected_timestamps = _selected_session_timestamps(
         start_ms, end_ms, normalized, sample_fps
     )
+    if receipt is not None:
+        receipt.update(
+            {
+                "fps_rounding_policy": "round=near:eof_action=round",
+                "expected_frame_count": len(expected_timestamps),
+                "actual_frame_count": 0,
+                "frame_accounting_mismatch": None,
+            }
+        )
     frame_bytes = width * height * 3
     emitted = 0
     try:
@@ -567,6 +593,14 @@ def _ffmpeg_multi_window_iterator(
             if len(raw) != frame_bytes:
                 break
             if emitted >= len(expected_timestamps):
+                if receipt is not None:
+                    receipt.update(
+                        {
+                            "actual_frame_count": emitted + 1,
+                            "frame_accounting_mismatch": emitted + 1
+                            - len(expected_timestamps),
+                        }
+                    )
                 raise RuntimeError("persistent FFmpeg session emitted unexpected extra frames")
             local_ms = expected_timestamps[emitted]
             frame = np.frombuffer(raw, dtype=np.uint8).reshape((height, width, 3)).copy()
@@ -581,6 +615,13 @@ def _ffmpeg_multi_window_iterator(
     if process.returncode not in (0, None):
         message = stderr.decode("utf-8", errors="replace")[-1500:]
         raise RuntimeError(f"FFmpeg 持久分片抽帧失败: {message}")
+    if receipt is not None:
+        receipt.update(
+            {
+                "actual_frame_count": emitted,
+                "frame_accounting_mismatch": emitted - len(expected_timestamps),
+            }
+        )
     if emitted != len(expected_timestamps):
         raise RuntimeError(
             "persistent FFmpeg session frame accounting mismatch: "
@@ -740,6 +781,8 @@ def iter_physical_segment_session_frames(
     decoder_threads: int | None = None,
     cuda_scale: bool = False,
     receipt: dict[str, Any] | None = None,
+    sampling_grid_origin_ms: float | None = None,
+    sampling_grid_period_ms: float | None = None,
 ) -> Iterator[tuple[int, float, np.ndarray]]:
     """Serve disjoint target windows with one physical MP4 decoder session."""
 
@@ -753,6 +796,46 @@ def iter_physical_segment_session_frames(
         frame_count=segment.frame_count,
         size_bytes=segment.size_bytes,
     )
+    effective_sample_fps = sample_fps
+    aligned_virtual_start_ms = session.virtual_start_ms
+    if sampling_grid_origin_ms is not None and sampling_grid_period_ms is not None:
+        aligned_virtual_start_ms = _aligned_grid_start_ms(
+            session.virtual_start_ms,
+            sampling_grid_origin_ms,
+            sampling_grid_period_ms,
+        )
+        effective_sample_fps = 1000.0 / sampling_grid_period_ms
+    aligned_source_start_ms = (
+        aligned_virtual_start_ms - segment.virtual_start_ms
+    )
+    if receipt is not None:
+        receipt.update(
+            {
+                "sampling_grid_mode": (
+                    "aligned_global_timeline"
+                    if sampling_grid_origin_ms is not None
+                    and sampling_grid_period_ms is not None
+                    else "session_start"
+                ),
+                "sampling_grid_origin_virtual_ms": sampling_grid_origin_ms,
+                "sampling_grid_period_local_ms": sampling_grid_period_ms,
+                "unaligned_session_start_virtual_ms": session.virtual_start_ms,
+                "aligned_session_start_virtual_ms": aligned_virtual_start_ms,
+                "sampling_phase_adjustment_ms": (
+                    aligned_virtual_start_ms - session.virtual_start_ms
+                ),
+            }
+        )
+    if aligned_source_start_ms >= session.source_end_ms - 1e-6:
+        if receipt is not None:
+            receipt.update(
+                {
+                    "expected_frame_count": 0,
+                    "actual_frame_count": 0,
+                    "frame_accounting_mismatch": 0,
+                }
+            )
+        return
 
     def convert(
         frames: Iterator[tuple[int, float, np.ndarray]],
@@ -777,14 +860,15 @@ def iter_physical_segment_session_frames(
                     _ffmpeg_multi_window_iterator(
                         segment.path,
                         source_info,
-                        session.source_start_ms,
+                        aligned_source_start_ms,
                         session.source_end_ms,
                         session.target_source_windows,
-                        sample_fps,
+                        effective_sample_fps,
                         max_width,
                         attempt_hwaccel,
                         decoder_threads,
                         attempt_cuda_scale,
+                        receipt,
                     )
                 ):
                     emitted = True
@@ -826,14 +910,34 @@ def iter_physical_segment_session_frames(
                 "fallback_reopened_windows": len(session.target_source_windows),
             }
         )
+    fallback_expected_frames = 0
+    fallback_actual_frames = 0
     for source_start, source_end in session.target_source_windows:
-        yield from convert(
+        aligned_source_start = source_start
+        if sampling_grid_origin_ms is not None and sampling_grid_period_ms is not None:
+            aligned_virtual_start = _aligned_grid_start_ms(
+                segment.virtual_start_ms + source_start,
+                sampling_grid_origin_ms,
+                sampling_grid_period_ms,
+            )
+            aligned_source_start = aligned_virtual_start - segment.virtual_start_ms
+        if aligned_source_start >= source_end - 1e-6:
+            continue
+        fallback_expected_frames += len(
+            _selected_session_timestamps(
+                aligned_source_start,
+                source_end,
+                [(aligned_source_start, source_end)],
+                effective_sample_fps,
+            )
+        )
+        for item in convert(
             iter_sampled_frames(
                 segment.path,
                 source_info,
-                source_start,
+                aligned_source_start,
                 source_end,
-                sample_fps,
+                effective_sample_fps,
                 max_width,
                 None,
                 False,
@@ -841,6 +945,22 @@ def iter_physical_segment_session_frames(
                 "indexed_seek",
                 False,
             )
+        ):
+            fallback_actual_frames += 1
+            yield item
+    if receipt is not None:
+        receipt.update(
+            {
+                "expected_frame_count": fallback_expected_frames,
+                "actual_frame_count": fallback_actual_frames,
+                "frame_accounting_mismatch": fallback_actual_frames
+                - fallback_expected_frames,
+            }
+        )
+    if fallback_actual_frames != fallback_expected_frames:
+        raise RuntimeError(
+            "persistent compatibility fallback frame accounting mismatch: "
+            f"expected={fallback_expected_frames} actual={fallback_actual_frames}"
         )
 
 
