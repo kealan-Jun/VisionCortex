@@ -1,3 +1,5 @@
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -23,6 +25,8 @@ from labvision_evidence.schemas import (
 )
 from labvision_evidence.video_io import (
     _aligned_grid_start_ms,
+    _ffmpeg_multi_window_iterator,
+    _selected_session_frame_indices,
     _selected_session_timestamps,
     plan_physical_segment_decode_sessions,
 )
@@ -121,6 +125,88 @@ def test_persistent_sessions_share_one_alignment_anchored_global_sampling_grid()
 
     assert transform.to_global(first) % 100.0 == pytest.approx(0.0, abs=1e-6)
     assert transform.to_global(second) % 100.0 == pytest.approx(0.0, abs=1e-6)
+
+
+def test_discontinuous_windows_compile_to_exact_integer_fps_indices():
+    indices = _selected_session_frame_indices(
+        0.0,
+        2_000.0,
+        [(0.0, 450.0), (1_000.0002, 1_150.0)],
+        sample_fps=9.99999993,
+    )
+
+    assert indices == [0, 1, 2, 3, 4, 11]
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is optional")
+def test_non_identity_discontinuous_ffmpeg_windows_do_not_emit_extra_frame(
+    tmp_path,
+):
+    """DEV-030: rounded ``t`` bounds emitted 7 frames for a 6-frame ledger."""
+
+    path = tmp_path / "source.mp4"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:size=16x16:rate=30:duration=2",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+            "-y",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    info = VideoInfo(
+        path=path,
+        duration_ms=2_000.0,
+        fps=30.0,
+        width=16,
+        height=16,
+        frame_count=60,
+        size_bytes=path.stat().st_size,
+    )
+    transform = AlignmentTransform(
+        view_id="tp",
+        reference_view_id="fp",
+        scale=0.999999993,
+        offset_ms=75.491930160,
+        state="aligned",
+    )
+    effective_local_fps = 10.0 * transform.scale
+    receipt = {}
+
+    frames = list(
+        _ffmpeg_multi_window_iterator(
+            path,
+            info,
+            0.0,
+            2_000.0,
+            [(0.0, 450.0), (1_000.0002, 1_150.0)],
+            effective_local_fps,
+            16,
+            None,
+            1,
+            False,
+            receipt,
+        )
+    )
+
+    assert len(frames) == 6
+    assert receipt["expected_frame_count"] == 6
+    assert receipt["actual_frame_count"] == 6
+    assert receipt["frame_accounting_mismatch"] == 0
+    assert receipt["frame_selection_policy"] == "post_fps_integer_indices_half_open"
 
 
 def _candidate(

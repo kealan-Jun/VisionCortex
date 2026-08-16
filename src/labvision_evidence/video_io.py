@@ -469,6 +469,31 @@ def _selected_session_timestamps(
     sample_fps: float,
 ) -> list[float]:
     period_ms = 1000.0 / max(sample_fps, 1e-9)
+    return [
+        start_ms + index * period_ms
+        for index in _selected_session_frame_indices(
+            start_ms, end_ms, windows, sample_fps
+        )
+    ]
+
+
+def _selected_session_frame_indices(
+    start_ms: float,
+    end_ms: float,
+    windows: Sequence[tuple[float, float]],
+    sample_fps: float,
+) -> list[int]:
+    """Return the exact post-``fps`` frame indices selected by the ledger.
+
+    FFmpeg's ``select`` time variable is quantized to its filter time base. A
+    six-decimal floating window boundary can therefore include or exclude one
+    different frame than the Python half-open comparison, especially after a
+    non-identity clock transform. Selecting the integer ``n`` produced by the
+    immediately preceding ``fps`` filter makes media and ledger use one
+    deterministic decision.
+    """
+
+    period_ms = 1000.0 / max(sample_fps, 1e-9)
     # The persistent FFmpeg path uses fps=...:round=near:eof_action=round.
     # Mirror that positive-duration rounding exactly.  Using ceil here made a
     # fractional endpoint (205.633333 s at 10 FPS) demand 2057 ledger rows even
@@ -476,13 +501,29 @@ def _selected_session_timestamps(
     scaled_frame_count = max(0.0, (end_ms - start_ms) / period_ms)
     frame_count = int(math.floor(scaled_frame_count + 0.5))
     return [
-        start_ms + index * period_ms
+        index
         for index in range(frame_count)
         if any(
             window_start - 1e-6 <= start_ms + index * period_ms < window_end - 1e-6
             for window_start, window_end in windows
         )
     ]
+
+
+def _consecutive_index_ranges(indices: Sequence[int]) -> list[tuple[int, int]]:
+    if not indices:
+        return []
+    ranges: list[tuple[int, int]] = []
+    range_start = previous = int(indices[0])
+    for value in indices[1:]:
+        current = int(value)
+        if current == previous + 1:
+            previous = current
+            continue
+        ranges.append((range_start, previous))
+        range_start = previous = current
+    ranges.append((range_start, previous))
+    return ranges
 
 
 def _aligned_grid_start_ms(
@@ -527,13 +568,40 @@ def _ffmpeg_multi_window_iterator(
         return
     width, height = _scaled_size(info.width, info.height, max_width)
     use_cuda_scale = bool(cuda_scale and hwaccel == "cuda")
-    relative = [
-        (window_start - start_ms, window_end - start_ms)
-        for window_start, window_end in normalized
-    ]
+    expected_indices = _selected_session_frame_indices(
+        start_ms, end_ms, normalized, sample_fps
+    )
+    expected_timestamps = _selected_session_timestamps(
+        start_ms, end_ms, normalized, sample_fps
+    )
+    index_ranges = _consecutive_index_ranges(expected_indices)
+    if receipt is not None:
+        receipt.update(
+            {
+                "fps_rounding_policy": "round=near:eof_action=round",
+                "frame_selection_policy": "post_fps_integer_indices_half_open",
+                "expected_frame_index_ranges": [list(item) for item in index_ranges],
+                "expected_frame_count": len(expected_timestamps),
+                "actual_frame_count": 0,
+                "frame_accounting_mismatch": None,
+            }
+        )
+    if not expected_indices:
+        if receipt is not None:
+            receipt.update(
+                {
+                    "actual_frame_count": 0,
+                    "frame_accounting_mismatch": 0,
+                }
+            )
+        return
     select_expression = "+".join(
-        f"gte(t\\,{window_start / 1000.0:.6f})*lt(t\\,{window_end / 1000.0:.6f})"
-        for window_start, window_end in relative
+        (
+            f"eq(n\\,{range_start})"
+            if range_start == range_end
+            else f"between(n\\,{range_start}\\,{range_end})"
+        )
+        for range_start, range_end in index_ranges
     )
     filter_graph = (
         "setpts=PTS-STARTPTS,"
@@ -573,18 +641,6 @@ def _ffmpeg_multi_window_iterator(
     ]
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     assert process.stdout is not None
-    expected_timestamps = _selected_session_timestamps(
-        start_ms, end_ms, normalized, sample_fps
-    )
-    if receipt is not None:
-        receipt.update(
-            {
-                "fps_rounding_policy": "round=near:eof_action=round",
-                "expected_frame_count": len(expected_timestamps),
-                "actual_frame_count": 0,
-                "frame_accounting_mismatch": None,
-            }
-        )
     frame_bytes = width * height * 3
     emitted = 0
     try:
