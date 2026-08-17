@@ -23,6 +23,12 @@ from .indexing import (
     stable_evidence_uid,
 )
 from .mllm import ArkStepAnalyzer, EVENT_SYSTEM_PROMPT, GROUP_SYSTEM_PROMPT
+from .material_naming import (
+    ACTION_CATEGORY_FOLDERS,
+    ACTION_SLUGS,
+    key_material_action_folder,
+    key_material_semantic_name as _key_material_semantic_name,
+)
 from .schemas import (
     AlignmentTransform,
     EvidenceEvent,
@@ -40,58 +46,6 @@ from .video_io import (
     extract_view_clip,
     write_annotated_frame,
 )
-
-
-ACTION_SLUGS = {
-    "hand_object_contact": "Hand-Object-Contact",
-    "object_movement": "Object-Movement",
-    "liquid_movement": "Liquid-Movement",
-    "container_state_change": "Container-State-Change",
-    "device_panel_operation": "Device-Panel-Operation",
-}
-
-ACTION_CATEGORY_FOLDERS = {
-    action_type: f"{index:02d}-{slug}"
-    for index, (action_type, slug) in enumerate(ACTION_SLUGS.items(), 1)
-}
-
-OBJECT_NAME_ALIASES = {
-    "hand": "Hand",
-    "gloved_hand": "Gloved-Hand",
-    "paper": "Weighing-Paper",
-    "weighing_paper": "Weighing-Paper",
-    "pipette": "Pipette",
-    "spearhead": "Pipette-Tip",
-    "spatula": "Spatula",
-    "sample_bottle": "Sample-Bottle",
-    "reagent_bottle": "Reagent-Bottle",
-    "reagent_bottle_open": "Open-Reagent-Bottle",
-    "tube": "Tube",
-    "tube_rack": "Tube-Rack",
-    "balance": "Analytical-Balance",
-    "magnetic_stirrer": "Magnetic-Stirrer",
-    "panel": "Device-Panel",
-    "cap": "Container-Cap",
-    "移液器": "Pipette",
-    "移液枪": "Pipette",
-    "枪头": "Pipette-Tip",
-    "吸头": "Pipette-Tip",
-    "药勺": "Spatula",
-    "称量纸": "Weighing-Paper",
-    "试剂瓶": "Reagent-Bottle",
-    "离心管": "Centrifuge-Tube",
-    "分析天平": "Analytical-Balance",
-}
-
-HAND_OBJECT_NAMES = {"hand", "gloved_hand", "手", "戴手套的手"}
-
-
-def key_material_action_folder(action_type: Any) -> str:
-    value = str(getattr(action_type, "value", action_type))
-    try:
-        return ACTION_CATEGORY_FOLDERS[value]
-    except KeyError as error:
-        raise ValueError(f"Unsupported key-material action type: {value}") from error
 
 
 def _json_default(value: Any) -> Any:
@@ -212,60 +166,6 @@ def _safe_folder_name(value: str) -> str:
         return cleaned[:120]
     digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:8]
     return f"Unnamed-Experiment-{digest}"
-
-
-def _readable_object_label(value: str) -> str:
-    normalized = str(value).strip()
-    lowered = normalized.lower().replace("-", "_").replace(" ", "_")
-    if normalized in OBJECT_NAME_ALIASES:
-        return OBJECT_NAME_ALIASES[normalized]
-    if lowered in OBJECT_NAME_ALIASES:
-        return OBJECT_NAME_ALIASES[lowered]
-    ascii_slug = _safe_slug(normalized.replace("_", "-"))
-    if ascii_slug != "unknown":
-        return "-".join(part.capitalize() for part in ascii_slug.split("-") if part)
-    return "Unknown-Object"
-
-
-def _key_material_semantic_name(event: EvidenceEvent) -> dict[str, Any]:
-    raw_objects = list(dict.fromkeys(str(item) for item in event.objects if str(item).strip()))
-    non_hand_objects = [
-        item
-        for item in raw_objects
-        if item.strip().lower().replace("-", "_").replace(" ", "_")
-        not in HAND_OBJECT_NAMES
-    ]
-    object_labels = [_readable_object_label(item) for item in non_hand_objects]
-    if not object_labels:
-        object_labels = ["Unknown-Object"]
-    primary = object_labels[0]
-    secondary = object_labels[1] if len(object_labels) > 1 else None
-    action_type = event.action_type.value
-    if action_type == "hand_object_contact":
-        descriptor = f"Contact-Hand-With-{primary}"
-    elif action_type == "object_movement":
-        descriptor = f"Move-{primary}"
-    elif action_type == "liquid_movement":
-        descriptor = f"Transfer-Liquid-{primary}"
-        if secondary:
-            descriptor += f"-To-{secondary}"
-    elif action_type == "container_state_change":
-        descriptor = f"Change-State-{primary}"
-    elif action_type == "device_panel_operation":
-        descriptor = f"Operate-{primary}"
-    else:
-        descriptor = f"{ACTION_SLUGS.get(action_type, 'Action')}-{primary}"
-    return {
-        # Put the human-readable action/object first. If a very deep Windows
-        # archive forces deterministic truncation, the visible prefix still
-        # explains the material while the digest preserves uniqueness.
-        "file_stem": f"{descriptor}_{event.event_id}",
-        "display_name_en": descriptor.replace("-", " "),
-        "action_label_en": ACTION_SLUGS.get(action_type, action_type),
-        "primary_object": primary,
-        "object_labels": object_labels,
-        "raw_object_labels": raw_objects,
-    }
 
 
 def _bounded_component(value: str, maximum_chars: int) -> str:
