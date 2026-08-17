@@ -7,6 +7,12 @@ models:
   first_person_engine: ./models/first_person/best.engine
   third_person_engine: ./models/third_person/best.engine
 
+# Keep the liquid-state foundation out of the validated 20-minute preprocessing
+# path until a separately benchmarked adapter is explicitly deployed.
+liquid_state:
+  enabled: false
+  backend: disabled
+
 performance:
   profile: rtx4060-laptop-8gb-six-view
   preprocessing_budget_seconds: 1200

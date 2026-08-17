@@ -603,6 +603,7 @@ def _artifact_json(
 ) -> dict[str, Any]:
     views = [view_id] if view_id else [group.first_person_view, group.third_person_view]
     understanding = event.model_understanding or {}
+    liquid_state = event.liquid_state
     physical_change = understanding.get("physical_change") or {}
     before_state = str(physical_change.get("before") or "unknown")
     after_state = str(physical_change.get("after") or "unknown")
@@ -737,6 +738,24 @@ def _artifact_json(
             }
             for index, supported_view in enumerate(event.supporting_views, 1)
         ]
+    if liquid_state is not None:
+        for index, item in enumerate(
+            liquid_state.per_view_observations, len(observations) + 1
+        ):
+            facts = item.observed_facts or [
+                f"liquid_present={item.liquid_present}; "
+                f"fill_ratio={item.fill_ratio}; visible_flow={item.visible_flow}"
+            ]
+            observations.extend(
+                {
+                    "observation_id": f"{event.event_id}-obs-{index:02d}-{fact_index:02d}",
+                    "view_id": item.view_id,
+                    "view_role": item.view_role.value,
+                    "timestamp_us": item.timestamp_us,
+                    "observed_fact": fact,
+                }
+                for fact_index, fact in enumerate(facts, 1)
+            )
 
     alignment_uncertainty_us = max(
         80_000,
@@ -783,6 +802,10 @@ def _artifact_json(
             ]
         )
     )
+    if liquid_state is not None:
+        uncertainties = list(
+            dict.fromkeys([*uncertainties, *liquid_state.uncertain_claims])
+        )
     consistency = str(understanding.get("cross_view_consistency") or "unreviewed")
     model_confidence = float(understanding.get("confidence") or 0.0)
     confirmed_action = str(understanding.get("action_type_confirmed") or "unknown")
@@ -866,6 +889,15 @@ def _artifact_json(
     supported_inferences = []
     if next_step and next_step not in {"未知", "unknown", "不确定"}:
         supported_inferences.append(f"下一步：{next_step}")
+    if liquid_state is not None:
+        observed_facts = list(
+            dict.fromkeys([*observed_facts, *liquid_state.observed_facts])
+        )
+        supported_inferences = list(
+            dict.fromkeys(
+                [*supported_inferences, *liquid_state.supported_inferences]
+            )
+        )
     contradictions = []
     if consistency == "conflict":
         contradictions.append("第一人称与第三人称观察发生冲突，详见 observations")
@@ -878,6 +910,36 @@ def _artifact_json(
     }.get(consistency, 0.35)
     change_observed = before_state != "unknown" and after_state != "unknown"
     action_agrees = confirmed_action in {event.action_type.value, normalized_action}
+
+    def liquid_container_state(value: Any, fallback: str) -> str:
+        if value is None:
+            return fallback
+        fragments = []
+        if value.liquid_present is not None:
+            fragments.append(f"liquid_present={str(value.liquid_present).lower()}")
+        if value.fill_ratio is not None:
+            fragments.append(f"fill_ratio={value.fill_ratio:.4f}")
+        return "; ".join(fragments) or fallback
+
+    source_before_state = liquid_container_state(
+        liquid_state.source_before if liquid_state else None, "unknown"
+    )
+    source_after_state = liquid_container_state(
+        liquid_state.source_after if liquid_state else None, "unknown"
+    )
+    target_before_state = liquid_container_state(
+        liquid_state.target_before if liquid_state else None, "unknown"
+    )
+    target_after_state = liquid_container_state(
+        liquid_state.target_after if liquid_state else None, "unknown"
+    )
+    state_change_score = (
+        liquid_state.confidence
+        if liquid_state is not None and liquid_state.state_change_confirmed is True
+        else model_confidence
+        if change_observed
+        else 0.25
+    )
     return {
         "event_id": event.event_id,
         "parent_event_id": group.group_id,
@@ -903,13 +965,13 @@ def _artifact_json(
         },
         "state_before": {
             "tool": before_state,
-            "source": "unknown",
-            "target": "unknown",
+            "source": source_before_state,
+            "target": target_before_state,
         },
         "state_after": {
             "tool": after_state,
-            "source": "unknown",
-            "target": "unknown",
+            "source": source_after_state,
+            "target": target_after_state,
         },
         "observations": observations,
         "cross_view_associations": cross_view_associations,
@@ -925,7 +987,7 @@ def _artifact_json(
             "object_identity": round(min(1.0, 0.35 + min(len(event.objects), 4) * 0.08 + model_confidence * 0.3), 4),
             "phase_completeness": round((0.45 + model_confidence * 0.5) if change_observed else (0.25 + model_confidence * 0.35), 4),
             "cross_view_support": cross_view_score,
-            "state_change_support": round(model_confidence if change_observed else 0.25, 4),
+            "state_change_support": round(state_change_score, 4),
             "model_agreement": round((float(event.confidence) + model_confidence) / 2.0 if action_agrees else model_confidence * 0.5, 4),
             "contradiction_penalty": 0.8 if consistency == "conflict" else 0.0,
         },
@@ -961,6 +1023,13 @@ def _artifact_json(
                 "current_step": current_step or None,
                 "next_step": next_step or None,
             },
+            **(
+                {
+                    "liquid_state": liquid_state.model_dump(mode="json")
+                }
+                if liquid_state is not None
+                else {}
+            ),
             "alignment": {
                 item: transforms[item].model_dump(mode="json")
                 for item in (group.first_person_view, group.third_person_view)

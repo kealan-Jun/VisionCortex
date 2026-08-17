@@ -15,6 +15,21 @@ models:
   iou: 0.55
   max_detections: 300
 
+# Optional specialist for liquid visibility, meniscus, fill ratio and flow.
+# The foundation is intentionally disabled and is not connected to preprocessing;
+# enabling it also requires a separately registered deployment adapter.
+liquid_state:
+  enabled: false
+  backend: disabled
+  model_path: null
+  device: 0
+  half: true
+  sample_fps: 2.0
+  burst_fps: 10.0
+  confidence_threshold: 0.65
+  container_roi_padding_fraction: 0.10
+  max_runtime_seconds: 200.0
+
 performance:
   preprocessing_budget_seconds: 1200
   device: 0

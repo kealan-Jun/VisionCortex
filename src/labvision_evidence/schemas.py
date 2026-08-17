@@ -21,6 +21,139 @@ class ActionType(str, Enum):
     DEVICE_PANEL_OPERATION = "device_panel_operation"
 
 
+class LiquidStateStatus(str, Enum):
+    """How strongly the visual evidence supports a liquid-state claim."""
+
+    NOT_EVALUATED = "not_evaluated"
+    OBSERVED = "observed"
+    INFERRED = "inferred"
+    UNCERTAIN = "uncertain"
+    OCCLUDED = "occluded"
+
+
+class LiquidFlowDirection(str, Enum):
+    SOURCE_TO_TARGET = "source_to_target"
+    TARGET_TO_SOURCE = "target_to_source"
+    INTO_TOOL = "into_tool"
+    OUT_OF_TOOL = "out_of_tool"
+    UNKNOWN = "unknown"
+
+
+class NormalizedPoint(BaseModel):
+    """One image-space point expressed independently of source resolution."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    x: float = Field(ge=0.0, le=1.0)
+    y: float = Field(ge=0.0, le=1.0)
+
+
+class LiquidViewObservation(BaseModel):
+    """Direct, view-specific liquid evidence inside a bounded container ROI."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    view_id: str = Field(min_length=1)
+    view_role: ViewRole
+    timestamp_us: int = Field(ge=0)
+    container_id: str | None = None
+    liquid_present: bool | None = None
+    mask_ref: str | None = None
+    meniscus_polyline: list[NormalizedPoint] = Field(default_factory=list)
+    fill_ratio: float | None = Field(default=None, ge=0.0, le=1.0)
+    visible_flow: bool | None = None
+    flow_direction: LiquidFlowDirection = LiquidFlowDirection.UNKNOWN
+    visibility: float = Field(default=0.0, ge=0.0, le=1.0)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    observed_facts: list[str] = Field(default_factory=list)
+    uncertainty: list[str] = Field(default_factory=list)
+
+
+class LiquidContainerState(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    container_id: str
+    liquid_present: bool | None = None
+    fill_ratio: float | None = Field(default=None, ge=0.0, le=1.0)
+    observed_by_views: list[str] = Field(default_factory=list)
+
+
+class LiquidStateEvidence(BaseModel):
+    """Structured specialist evidence; absent unless the opt-in expert runs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str = "visioncortex-liquid-state/1.0.0"
+    status: LiquidStateStatus = LiquidStateStatus.NOT_EVALUATED
+    backend: str = "disabled"
+    source_before: LiquidContainerState | None = None
+    source_after: LiquidContainerState | None = None
+    target_before: LiquidContainerState | None = None
+    target_after: LiquidContainerState | None = None
+    per_view_observations: list[LiquidViewObservation] = Field(default_factory=list)
+    visible_flow: bool | None = None
+    flow_direction: LiquidFlowDirection = LiquidFlowDirection.UNKNOWN
+    state_change_confirmed: bool | None = None
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    observed_facts: list[str] = Field(default_factory=list)
+    supported_inferences: list[str] = Field(default_factory=list)
+    uncertain_claims: list[str] = Field(default_factory=list)
+    model_receipt: dict[str, Any] = Field(default_factory=dict)
+
+
+class LiquidExpertSample(BaseModel):
+    """A reference-only request passed to a registered specialist adapter."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    sample_id: str = Field(min_length=1)
+    event_id: str = Field(min_length=1)
+    group_id: str = Field(min_length=1)
+    view_id: str = Field(min_length=1)
+    view_role: ViewRole
+    timestamp_us: int = Field(ge=0)
+    media_ref: str = Field(min_length=1)
+    container_id: str | None = None
+    roi_xyxy_norm: tuple[float, float, float, float] | None = None
+
+    @field_validator("roi_xyxy_norm")
+    @classmethod
+    def validate_roi(
+        cls, value: tuple[float, float, float, float] | None
+    ) -> tuple[float, float, float, float] | None:
+        if value is None:
+            return None
+        x1, y1, x2, y2 = value
+        if not all(0.0 <= item <= 1.0 for item in value) or x2 <= x1 or y2 <= y1:
+            raise ValueError("roi_xyxy_norm must be a normalized non-empty box")
+        return x1, y1, x2, y2
+
+
+class LiquidBenchmarkSample(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    sample_id: str
+    event_id: str
+    group_id: str
+    split: Literal["train", "validation", "test"]
+    image_refs: list[str] = Field(default_factory=list)
+    clip_refs: list[str] = Field(default_factory=list)
+    ground_truth: LiquidStateEvidence | None = None
+    tags: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class LiquidBenchmarkManifest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str = "visioncortex-liquid-benchmark/1.0.0"
+    benchmark_id: str
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    source_archive: str
+    media_policy: Literal["references_only"] = "references_only"
+    samples: list[LiquidBenchmarkSample] = Field(default_factory=list)
+
+
 class VideoSegmentInput(BaseModel):
     """One immutable recorder segment on a view's virtual timeline."""
 
@@ -178,6 +311,7 @@ class EvidenceEvent(BaseModel):
     key_frames: dict[str, str] = Field(default_factory=dict)
     key_clips: dict[str, str] = Field(default_factory=dict)
     model_understanding: dict[str, Any] | None = None
+    liquid_state: LiquidStateEvidence | None = None
 
 
 class ExperimentSegment(BaseModel):

@@ -10,12 +10,12 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from .schemas import EvidenceEvent, ExperimentGroup, VideoInfo
 
 
-INDEX_SCHEMA_VERSION = "visioncortex-evidence-index/1"
+INDEX_SCHEMA_VERSION = "visioncortex-evidence-index/2"
 INDEX_DB_NAME = "evidence_index.sqlite"
 INDEX_MANIFEST_NAME = "evidence_index_manifest.json"
 ARTIFACT_REGISTRY_NAME = "artifact_registry.jsonl"
@@ -79,6 +79,51 @@ def _flatten_text(value: Any) -> list[str]:
         text = str(value).strip()
         return [text] if text else []
     return []
+
+
+def _liquid_index_values(payload: Mapping[str, Any]) -> dict[str, Any]:
+    liquid = (payload.get("provenance") or {}).get("liquid_state")
+    if not isinstance(liquid, Mapping):
+        return {
+            "status": None,
+            "liquid_present": None,
+            "visible_flow": None,
+            "source_fill_before": None,
+            "source_fill_after": None,
+            "target_fill_before": None,
+            "target_fill_after": None,
+            "payload": None,
+        }
+    presence_values = []
+    for field in ("source_before", "source_after", "target_before", "target_after"):
+        state = liquid.get(field)
+        if isinstance(state, Mapping) and state.get("liquid_present") is not None:
+            presence_values.append(bool(state.get("liquid_present")))
+    for observation in liquid.get("per_view_observations") or []:
+        if isinstance(observation, Mapping) and observation.get("liquid_present") is not None:
+            presence_values.append(bool(observation.get("liquid_present")))
+
+    def fill_ratio(field: str) -> float | None:
+        state = liquid.get(field)
+        value = state.get("fill_ratio") if isinstance(state, Mapping) else None
+        return float(value) if value is not None else None
+
+    return {
+        "status": str(liquid.get("status") or "") or None,
+        "liquid_present": (
+            True if any(presence_values) else False if presence_values else None
+        ),
+        "visible_flow": (
+            bool(liquid.get("visible_flow"))
+            if liquid.get("visible_flow") is not None
+            else None
+        ),
+        "source_fill_before": fill_ratio("source_before"),
+        "source_fill_after": fill_ratio("source_after"),
+        "target_fill_before": fill_ratio("target_before"),
+        "target_fill_after": fill_ratio("target_after"),
+        "payload": liquid,
+    }
 
 
 def _group_for_event(
@@ -396,6 +441,13 @@ def _build_sqlite(
                 peak_timestamp_us INTEGER NOT NULL,
                 decision_status TEXT,
                 cross_view_supported INTEGER NOT NULL,
+                liquid_state_status TEXT,
+                liquid_present INTEGER,
+                visible_flow INTEGER,
+                source_fill_before REAL,
+                source_fill_after REAL,
+                target_fill_before REAL,
+                target_fill_after REAL,
                 search_text TEXT NOT NULL,
                 event_json TEXT NOT NULL
             );
@@ -403,6 +455,8 @@ def _build_sqlite(
                 ON key_events(archive_id, peak_timestamp_us, event_uid);
             CREATE INDEX key_events_action_idx
                 ON key_events(action_type, parent_event_id);
+            CREATE INDEX key_events_liquid_state_idx
+                ON key_events(liquid_state_status, liquid_present, visible_flow);
             CREATE TABLE artifacts (
                 artifact_uid TEXT PRIMARY KEY,
                 event_uid TEXT NOT NULL REFERENCES key_events(event_uid),
@@ -455,6 +509,7 @@ def _build_sqlite(
         )
         for payload in normalized_events:
             event_uid = _event_uid_from_payload(archive_id, payload, [])
+            liquid = _liquid_index_values(payload)
             understanding = (payload.get("provenance") or {}).get("mllm") or {}
             current_step = str(understanding.get("current_step") or "")
             next_step = str(understanding.get("next_step") or "")
@@ -473,6 +528,7 @@ def _build_sqlite(
                             "experiment": (payload.get("provenance") or {}).get(
                                 "experiment_name"
                             ),
+                            "liquid_state": liquid["payload"],
                         }
                     )
                 )
@@ -483,7 +539,14 @@ def _build_sqlite(
             )
             connection.execute(
                 """
-                INSERT INTO key_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO key_events (
+                    event_uid, archive_id, event_id, parent_event_id,
+                    action_type, action_subtype, start_us, end_us,
+                    peak_timestamp_us, decision_status, cross_view_supported,
+                    liquid_state_status, liquid_present, visible_flow,
+                    source_fill_before, source_fill_after,
+                    target_fill_before, target_fill_after, search_text, event_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event_uid,
@@ -497,6 +560,21 @@ def _build_sqlite(
                     int(payload.get("peak_timestamp_us") or 0),
                     str((payload.get("decision") or {}).get("status") or ""),
                     int(cross_view),
+                    liquid["status"],
+                    (
+                        int(liquid["liquid_present"])
+                        if liquid["liquid_present"] is not None
+                        else None
+                    ),
+                    (
+                        int(liquid["visible_flow"])
+                        if liquid["visible_flow"] is not None
+                        else None
+                    ),
+                    liquid["source_fill_before"],
+                    liquid["source_fill_after"],
+                    liquid["target_fill_before"],
+                    liquid["target_fill_after"],
                     search_text,
                     _json_dumps(payload),
                 ),
@@ -737,6 +815,9 @@ def search_archive_index(
     action_type: str | None = None,
     parent_event_id: str | None = None,
     cross_view: bool | None = None,
+    liquid_state_status: str | None = None,
+    liquid_present: bool | None = None,
+    visible_flow: bool | None = None,
     start_us: int | None = None,
     end_us: int | None = None,
     after_peak_us: int | None = None,
@@ -749,6 +830,22 @@ def search_archive_index(
     connection = sqlite3.connect(str(database))
     connection.row_factory = sqlite3.Row
     try:
+        available_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(key_events)").fetchall()
+        }
+        requested_liquid_columns = {
+            "liquid_state_status": liquid_state_status,
+            "liquid_present": liquid_present,
+            "visible_flow": visible_flow,
+        }
+        if any(
+            value is not None and column not in available_columns
+            for column, value in requested_liquid_columns.items()
+        ):
+            # Old, rebuildable v1 indexes contain no specialist state. Treat
+            # them as no matches instead of failing a cross-archive API query.
+            return []
         conditions: list[str] = []
         parameters: list[Any] = []
         join = ""
@@ -770,6 +867,15 @@ def search_archive_index(
         if cross_view is not None:
             conditions.append("k.cross_view_supported = ?")
             parameters.append(int(cross_view))
+        if liquid_state_status:
+            conditions.append("k.liquid_state_status = ?")
+            parameters.append(liquid_state_status)
+        if liquid_present is not None:
+            conditions.append("k.liquid_present = ?")
+            parameters.append(int(liquid_present))
+        if visible_flow is not None:
+            conditions.append("k.visible_flow = ?")
+            parameters.append(int(visible_flow))
         if start_us is not None:
             conditions.append("k.end_us >= ?")
             parameters.append(int(start_us))
