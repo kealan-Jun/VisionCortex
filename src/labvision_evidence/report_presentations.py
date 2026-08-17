@@ -133,6 +133,7 @@ def render_daily_html(report: dict[str, Any]) -> str:
             for item in group.get("key_action_summary") or []
             if item["event_count"]
         )
+        empty_actions = '<span class="pill">无已验收动作</span>'
         first_step = group["steps"][0] if group.get("steps") else {}
         last_step = group["steps"][-1] if group.get("steps") else {}
         continuity = "连续实验" if group["continuity_type"] == "continuous" else "独立实验"
@@ -144,7 +145,7 @@ def render_daily_html(report: dict[str, Any]) -> str:
             f"<h3>结果摘要</h3><p>{e(group.get('overall_summary') or '暂无摘要')}</p>"
             f"<dl><dt>开始阶段</dt><dd>{e(first_step.get('current_step') or '未说明')}</dd>"
             f"<dt>后续阶段</dt><dd>{e(last_step.get('next_step') or last_step.get('current_step') or '证据不足')}</dd></dl>"
-            f"<div class='pills'>{actions or '<span class=\"pill\">无已验收动作</span>'}</div>"
+            f"<div class='pills'>{actions or empty_actions}</div>"
             f"</div></div></section>"
         )
     return f"""<!doctype html>
