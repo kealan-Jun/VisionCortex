@@ -246,6 +246,41 @@ def test_archive_index_registers_key_material_recall_receipt(tmp_path):
     assert integrity["sha256"] == hashlib.sha256(receipt.read_bytes()).hexdigest()
 
 
+def test_archive_detail_exposes_key_material_recall_receipt(
+    monkeypatch, tmp_path
+):
+    archive_root = tmp_path / "archives"
+    root = archive_root / "Archive-Recall-Web"
+    _indexed_archive(root)
+    receipt = root / "JSON-Config-Files" / "key_material_recall_eval.json"
+    receipt.write_text(
+        json.dumps(
+            {
+                "status": "evaluated",
+                "evaluated": True,
+                "threshold_results": [
+                    {
+                        "temporal_iou_threshold": 0.5,
+                        "precision": 0.5,
+                        "recall": 0.4,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(api, "_archive_root", lambda settings=None: archive_root)
+
+    payload = TestClient(api.app).get(
+        f"/api/archives/{root.name}"
+    ).json()
+
+    assert payload["key_material_recall_eval"]["evaluated"] is True
+    assert payload["links"]["key_material_recall_eval"].endswith(
+        "key_material_recall_eval.json"
+    )
+
+
 def test_search_archive_index_filters_full_text_and_returns_material_hashes(tmp_path):
     root = tmp_path / "Archive-Search"
     _, _, _, _, _ = _indexed_archive(root, event_count=2)
