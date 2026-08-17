@@ -134,9 +134,59 @@ def test_key_material_roles_export_concurrently_and_write_runtime(monkeypatch, t
     assert concurrency["maximum"] == 2
     assert len(event.key_frames) == 3
     assert len(event.key_clips) == 3
+    expected_category = "01-Hand-Object-Contact"
+    for relative in (*event.key_frames.values(), *event.key_clips.values()):
+        assert f"/{group.archive_folder}/{expected_category}/" in relative
+    for category in (
+        "01-Hand-Object-Contact",
+        "02-Object-Movement",
+        "03-Liquid-Movement",
+        "04-Container-State-Change",
+        "05-Device-Panel-Operation",
+    ):
+        assert (layout.key_frames / group.archive_folder / category).is_dir()
+        assert (layout.key_clips / group.archive_folder / category).is_dir()
+        assert (
+            layout.key_frames / group.archive_folder / category / "Category.json"
+        ).is_file()
+        assert (
+            layout.key_clips / group.archive_folder / category / "Category.json"
+        ).is_file()
+    category_index_path = layout.key_materials / "Key-Material-Category-Index.json"
+    category_index = json.loads(category_index_path.read_text(encoding="utf-8"))
+    assert category_index["category_count"] == 5
+    experiment = category_index["experiments"][0]
+    assert experiment["group_id"] == group.group_id
+    assert experiment["key_event_count"] == 1
+    categories = {
+        item["action_type"]: item for item in experiment["action_categories"]
+    }
+    assert categories["hand_object_contact"]["event_count"] == 1
+    assert categories["hand_object_contact"]["events"][0]["event_id"] == event.event_id
+    assert categories["liquid_movement"]["event_count"] == 0
+    empty_summary = json.loads(
+        (
+            layout.key_frames
+            / group.archive_folder
+            / "03-Liquid-Movement"
+            / "Category.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert empty_summary["media_kind"] == "key_frame"
+    assert empty_summary["event_count"] == 0
+    frame_sidecar = json.loads(
+        (layout.root / event.key_frames["fp"]).with_suffix(".json").read_text(
+            encoding="utf-8"
+        )
+    )
+    classification = frame_sidecar["provenance"]["archive_classification"]
+    assert classification["experiment_folder"] == group.archive_folder
+    assert classification["action_category_folder"] == expected_category
     runtime_path = layout.json_config / "key_material_materialization_runtime.json"
     runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
     assert runtime["workers"] == 2
     assert runtime["accepted_event_count"] == 1
+    assert runtime["archive_hierarchy_version"] == "2.0.0"
+    assert runtime["category_index"] == "Key-Materials/Key-Material-Category-Index.json"
     assert len(runtime["records"]) == 3
     assert runtime["total_duration_seconds"] > 0

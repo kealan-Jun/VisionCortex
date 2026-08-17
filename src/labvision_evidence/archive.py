@@ -45,10 +45,23 @@ from .video_io import (
 ACTION_SLUGS = {
     "hand_object_contact": "Hand-Object-Contact",
     "object_movement": "Object-Movement",
-    "liquid_movement": "Liquid-Transfer",
+    "liquid_movement": "Liquid-Movement",
     "container_state_change": "Container-State-Change",
-    "device_panel_operation": "Device-Operation",
+    "device_panel_operation": "Device-Panel-Operation",
 }
+
+ACTION_CATEGORY_FOLDERS = {
+    action_type: f"{index:02d}-{slug}"
+    for index, (action_type, slug) in enumerate(ACTION_SLUGS.items(), 1)
+}
+
+
+def key_material_action_folder(action_type: Any) -> str:
+    value = str(getattr(action_type, "value", action_type))
+    try:
+        return ACTION_CATEGORY_FOLDERS[value]
+    except KeyError as error:
+        raise ValueError(f"Unsupported key-material action type: {value}") from error
 
 
 def _json_default(value: Any) -> Any:
@@ -205,10 +218,34 @@ def _group_folder_name(
 def _group_folder_budget(layout: "ArchiveLayout") -> int:
     return min(
         _component_budget(layout.experiment_clips, 28),
-        # event folder (up to 40) + separators + the longest aligned sidecar
-        _component_budget(layout.key_frames, 72),
-        _component_budget(layout.key_clips, 72),
+        # Action category + event folder + separators + longest aligned sidecar.
+        _component_budget(layout.key_frames, 104),
+        _component_budget(layout.key_clips, 104),
     )
+
+
+def _key_material_event_folder_name(
+    layout: "ArchiveLayout",
+    experiment_folder: str,
+    event: EvidenceEvent,
+) -> str:
+    action_folder = key_material_action_folder(event.action_type)
+    desired = (
+        f"{event.event_id}_{event.action_type.value}_{_time_slug(event.key_global_ms)}"
+    )
+    budget = min(
+        _component_budget(
+            layout.key_frames / experiment_folder / action_folder,
+            26,
+            maximum_chars=40,
+        ),
+        _component_budget(
+            layout.key_clips / experiment_folder / action_folder,
+            26,
+            maximum_chars=40,
+        ),
+    )
+    return _bounded_component(desired, budget)
 
 
 class ArchiveLayout:
@@ -939,6 +976,14 @@ def _artifact_json(
             "experiment_name": group.experiment_name,
             "continuity_type": group.continuity_type,
             "atomic_experiment_ids": group.atomic_experiment_ids,
+            "archive_classification": {
+                "hierarchy_version": "2.0.0",
+                "experiment_folder": (
+                    group.archive_folder or _safe_folder_name(group.group_id)
+                ),
+                "action_type": event.action_type.value,
+                "action_category_folder": key_material_action_folder(event.action_type),
+            },
             "sidecar_for": {
                 "artifact_type": artifact_type,
                 "artifact_file": artifact_file,
@@ -992,6 +1037,151 @@ def _artifact_json(
     }
 
 
+def prepare_key_material_category_layout(
+    layout: ArchiveLayout,
+    groups: Sequence[ExperimentGroup],
+) -> None:
+    """Create the stable experiment/action hierarchy before materialization."""
+
+    for group in groups:
+        experiment_folder = group.archive_folder or _safe_folder_name(group.group_id)
+        for action_folder in ACTION_CATEGORY_FOLDERS.values():
+            (layout.key_frames / experiment_folder / action_folder).mkdir(
+                parents=True, exist_ok=True
+            )
+            (layout.key_clips / experiment_folder / action_folder).mkdir(
+                parents=True, exist_ok=True
+            )
+
+
+def write_key_material_category_index(
+    layout: ArchiveLayout,
+    groups: Sequence[ExperimentGroup],
+    events: Sequence[EvidenceEvent],
+    publisher: Any | None = None,
+) -> Path:
+    """Write a human-browsable and machine-indexable five-category manifest."""
+
+    event_by_id = {event.event_id: event for event in events if event.accepted}
+    experiments: list[dict[str, Any]] = []
+    for group in groups:
+        experiment_folder = group.archive_folder or _safe_folder_name(group.group_id)
+        group_events = [
+            event_by_id[event_id]
+            for event_id in group.key_event_ids
+            if event_id in event_by_id
+        ]
+        categories: list[dict[str, Any]] = []
+        for action_type, action_folder in ACTION_CATEGORY_FOLDERS.items():
+            category_events = [
+                event
+                for event in group_events
+                if event.action_type.value == action_type
+            ]
+            frame_category_folder = (
+                layout.key_frames / experiment_folder / action_folder
+            )
+            clip_category_folder = (
+                layout.key_clips / experiment_folder / action_folder
+            )
+            category_summary = {
+                "schema_version": "visioncortex-key-material-category/1.0.0",
+                "group_id": group.group_id,
+                "experiment_name": group.experiment_name,
+                "experiment_name_en": group.experiment_name_en,
+                "experiment_folder": experiment_folder,
+                "action_type": action_type,
+                "action_category_folder": action_folder,
+                "event_count": len(category_events),
+                "event_ids": [event.event_id for event in category_events],
+            }
+            frame_summary_path = frame_category_folder / "Category.json"
+            clip_summary_path = clip_category_folder / "Category.json"
+            write_json(
+                frame_summary_path,
+                {**category_summary, "media_kind": "key_frame"},
+            )
+            write_json(
+                clip_summary_path,
+                {**category_summary, "media_kind": "key_clip"},
+            )
+            if publisher is not None:
+                publisher.publish_file(frame_summary_path)
+                publisher.publish_file(clip_summary_path)
+            categories.append(
+                {
+                    "action_type": action_type,
+                    "folder": action_folder,
+                    "event_count": len(category_events),
+                    "key_frames_folder": (
+                        Path("Key-Materials")
+                        / "Key-Frames"
+                        / experiment_folder
+                        / action_folder
+                    ).as_posix(),
+                    "key_clips_folder": (
+                        Path("Key-Materials")
+                        / "Key-Clips"
+                        / experiment_folder
+                        / action_folder
+                    ).as_posix(),
+                    "key_frames_category_summary": _relative(
+                        frame_summary_path, layout.root
+                    ),
+                    "key_clips_category_summary": _relative(
+                        clip_summary_path, layout.root
+                    ),
+                    "events": [
+                        {
+                            "event_id": event.event_id,
+                            "peak_timestamp_us": round(
+                                event.key_global_ms * 1000.0
+                            ),
+                            "key_frames": dict(event.key_frames),
+                            "key_clips": dict(event.key_clips),
+                        }
+                        for event in category_events
+                    ],
+                }
+            )
+        experiments.append(
+            {
+                "group_id": group.group_id,
+                "experiment_name": group.experiment_name,
+                "experiment_name_en": group.experiment_name_en,
+                "experiment_folder": experiment_folder,
+                "key_event_count": len(group_events),
+                "action_categories": categories,
+            }
+        )
+    path = layout.key_materials / "Key-Material-Category-Index.json"
+    write_json(
+        path,
+        {
+            "schema_version": "visioncortex-key-material-category-index/1.0.0",
+            "hierarchy": (
+                "Key-Materials/{Key-Frames|Key-Clips}/"
+                "{Experiment}/{Action-Category}/{Event}"
+            ),
+            "category_count": len(ACTION_CATEGORY_FOLDERS),
+            "categories": [
+                {
+                    "order": index,
+                    "action_type": action_type,
+                    "folder": action_folder,
+                }
+                for index, (action_type, action_folder) in enumerate(
+                    ACTION_CATEGORY_FOLDERS.items(), 1
+                )
+            ],
+            "experiments": experiments,
+        },
+    )
+    if publisher is not None:
+        publisher.publish_file(path)
+    return path
+
+
 def materialize_key_materials(
     layout: ArchiveLayout,
     events: Sequence[EvidenceEvent],
@@ -1010,6 +1200,7 @@ def materialize_key_materials(
     encoder = config["performance"]["ffmpeg_video_encoder"]
     workers = max(1, min(2, int(config["performance"].get("materialization_workers", 2))))
     group_by_event = {event_id: group for group in groups for event_id in group.key_event_ids}
+    prepare_key_material_category_layout(layout, groups)
     runtime_records: list[dict[str, Any]] = []
     stage_started = time.perf_counter()
     accepted_timestamps = [
@@ -1029,16 +1220,10 @@ def materialize_key_materials(
         event_started = time.perf_counter()
         group = group_by_event[event.event_id]
         folder = group.archive_folder or _safe_folder_name(group.group_id)
-        event_folder_value = (
-            f"{event.event_id}_{event.action_type.value}_{_time_slug(event.key_global_ms)}"
-        )
-        event_budget = min(
-            _component_budget(layout.key_frames / folder, 26, maximum_chars=40),
-            _component_budget(layout.key_clips / folder, 26, maximum_chars=40),
-        )
-        event_folder = _bounded_component(event_folder_value, event_budget)
-        frame_dir = layout.key_frames / folder / event_folder
-        clip_dir = layout.key_clips / folder / event_folder
+        action_folder = key_material_action_folder(event.action_type)
+        event_folder = _key_material_event_folder_name(layout, folder, event)
+        frame_dir = layout.key_frames / folder / action_folder / event_folder
+        clip_dir = layout.key_clips / folder / action_folder / event_folder
         frame_dir.mkdir(parents=True, exist_ok=True)
         clip_dir.mkdir(parents=True, exist_ok=True)
         frame_paths: dict[str, Path] = {}
@@ -1092,6 +1277,9 @@ def materialize_key_materials(
             clip_seconds = time.perf_counter() - clip_started
             return {
                 "event_id": event.event_id,
+                "experiment_group_id": group.group_id,
+                "action_type": event.action_type.value,
+                "action_category_folder": action_folder,
                 "role_label": role_label,
                 "view_id": view_id,
                 "frame_path": frame_path,
@@ -1230,6 +1418,9 @@ def materialize_key_materials(
         runtime_records.append(
             {
                 "event_id": event.event_id,
+                "experiment_group_id": group.group_id,
+                "action_type": event.action_type.value,
+                "action_category_folder": action_folder,
                 "role_label": "Aligned-First-Third",
                 "view_id": "aligned_first_third",
                 "duration_seconds": round(time.perf_counter() - aligned_started, 6),
@@ -1239,6 +1430,12 @@ def materialize_key_materials(
             }
         )
 
+    category_index_path = write_key_material_category_index(
+        layout,
+        groups,
+        events,
+        publisher=publisher,
+    )
     runtime_path = layout.json_config / "key_material_materialization_runtime.json"
     write_json(
         runtime_path,
@@ -1248,6 +1445,8 @@ def materialize_key_materials(
             "total_duration_seconds": round(time.perf_counter() - stage_started, 6),
             "detection_ledger_lookup_seconds": round(lookup_seconds, 6),
             "detection_ledger_passes": len(nearest_by_view),
+            "archive_hierarchy_version": "2.0.0",
+            "category_index": _relative(category_index_path, layout.root),
             "accepted_event_count": sum(
                 bool(event.accepted and event.event_id in group_by_event) for event in events
             ),

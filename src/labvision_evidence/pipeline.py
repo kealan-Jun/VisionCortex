@@ -37,8 +37,11 @@ from .archive import (
     finalize_archive,
     materialize_experiment_clips,
     materialize_key_materials,
+    key_material_action_folder,
+    prepare_key_material_category_layout,
     refresh_key_material_metadata,
     write_aligned_csv,
+    write_key_material_category_index,
     write_json,
 )
 from .grouping import (
@@ -3916,12 +3919,6 @@ def create_dry_run(output: Path, config: dict[str, Any]) -> Path:
     )
     image = np.full((360, 640, 3), 35, dtype=np.uint8)
     cv2.putText(image, "DRY RUN - ALIGNED KEY FRAME", (45, 185), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 220, 255), 2)
-    for view in views:
-        path = layout.key_frames / event.event_id / f"{view.view_id}.jpg"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        cv2.imwrite(str(path), image)
-        event.key_frames[view.view_id] = path.relative_to(layout.root).as_posix()
-        event.key_clips[view.view_id] = f"dry-run://{view.view_id}/key-clip"
     segment = ExperimentSegment(
         segment_id="EXP-0001",
         global_start_ms=8_000.0,
@@ -3964,6 +3961,21 @@ def create_dry_run(output: Path, config: dict[str, Any]) -> Path:
             "aligned_first_third": "dry-run://aligned/experiment-json",
         },
     )
+    prepare_key_material_category_layout(layout, [group])
+    action_folder = key_material_action_folder(event.action_type)
+    for view in views:
+        path = (
+            layout.key_frames
+            / str(group.archive_folder)
+            / action_folder
+            / event.event_id
+            / f"{view.view_id}.jpg"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(path), image)
+        event.key_frames[view.view_id] = path.relative_to(layout.root).as_posix()
+        event.key_clips[view.view_id] = f"dry-run://{view.view_id}/key-clip"
+    write_key_material_category_index(layout, [group], [event])
     physical = [
         PhysicalChange(
             change_id="CHANGE-000001",

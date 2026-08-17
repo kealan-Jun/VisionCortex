@@ -101,8 +101,23 @@ def _indexed_archive(root: Path, *, event_count: int = 1):
             archive_folder=f"{ordinal:03d}_Pipetting-Experiment",
             key_event_ids=[event_id],
         )
-        frame_root = root / "Key-Materials" / "Key-Frames" / group.archive_folder / event_id
-        clip_root = root / "Key-Materials" / "Key-Clips" / group.archive_folder / event_id
+        action_folder = "03-Liquid-Movement"
+        frame_root = (
+            root
+            / "Key-Materials"
+            / "Key-Frames"
+            / group.archive_folder
+            / action_folder
+            / event_id
+        )
+        clip_root = (
+            root
+            / "Key-Materials"
+            / "Key-Clips"
+            / group.archive_folder
+            / action_folder
+            / event_id
+        )
         for collection, media_root, suffix in (
             (event.key_frames, frame_root, ".jpg"),
             (event.key_clips, clip_root, ".mp4"),

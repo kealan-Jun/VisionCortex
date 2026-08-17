@@ -750,6 +750,8 @@ def build_archive_index(
         decision_records,
     )
     sqlite_duration_seconds = time.perf_counter() - sqlite_started
+    category_index = root / "Key-Materials" / "Key-Material-Category-Index.json"
+    category_index_relative = "../Key-Materials/Key-Material-Category-Index.json"
     manifest = {
         "schema_version": INDEX_SCHEMA_VERSION,
         "authority": "JSON files remain canonical; SQLite and JSONL registries are rebuildable derivatives",
@@ -802,6 +804,11 @@ def build_archive_index(
             "artifact_registry": ARTIFACT_REGISTRY_NAME,
             "evidence_registry": EVIDENCE_REGISTRY_NAME,
             "decision_receipt_registry": DECISION_REGISTRY_NAME,
+            **(
+                {"key_material_category_index": category_index_relative}
+                if category_index.is_file()
+                else {}
+            ),
         },
         "integrity": {
             INDEX_DB_NAME: {"size_bytes": database.stat().st_size, "sha256": _sha256(database)},
@@ -817,6 +824,16 @@ def build_archive_index(
                 "size_bytes": decision_registry.stat().st_size,
                 "sha256": _sha256(decision_registry),
             },
+            **(
+                {
+                    category_index_relative: {
+                        "size_bytes": category_index.stat().st_size,
+                        "sha256": _sha256(category_index),
+                    }
+                }
+                if category_index.is_file()
+                else {}
+            ),
         },
     }
     _atomic_write_text(

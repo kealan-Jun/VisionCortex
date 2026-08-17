@@ -815,6 +815,7 @@ function metricsView(data) {
   const links = {
     experiment_understanding: "实验级步骤理解 JSON",
     key_material_understanding: "关键素材模型理解 JSON",
+    key_material_category_index: "关键素材实验/五类目录索引 JSON",
     metrics: "耗时与 Token JSON",
     acceptance: "验收汇总 JSON",
     quality_acceptance: "自动质量验收 JSON",

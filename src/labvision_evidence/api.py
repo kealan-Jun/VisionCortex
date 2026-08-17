@@ -1041,6 +1041,11 @@ def archive_detail(archive_name: str) -> dict[str, Any]:
         "key_material_understanding": _file_url(
             archive_name, "Key-Materials/Key-Materials-Model-Understanding.json"
         ),
+        "key_material_category_index": _file_url(
+            archive_name, "Key-Materials/Key-Material-Category-Index.json"
+        )
+        if (root / "Key-Materials" / "Key-Material-Category-Index.json").is_file()
+        else None,
         "metrics": _file_url(archive_name, "JSON-Config-Files/run_metrics.json"),
         "acceptance": _file_url(archive_name, "JSON-Config-Files/acceptance_report.json"),
         "quality_acceptance": _file_url(

@@ -1,7 +1,12 @@
 import json
 from pathlib import Path
 
-from labvision_evidence.archive import ArchiveLayout, _group_folder_name
+from labvision_evidence.archive import (
+    ArchiveLayout,
+    _group_folder_name,
+    _key_material_event_folder_name,
+)
+from labvision_evidence.schemas import ActionType, EvidenceEvent
 from labvision_evidence.storage import DERIVED_ARCHIVE_DIRECTORIES, promote_fixed_archive
 
 
@@ -73,4 +78,30 @@ def test_model_named_archive_paths_stay_below_classic_windows_limit():
     assert folder.startswith("001-")
     assert folder.isascii()
     assert len(str(layout.experiment_clips / folder / "Aligned_First+Third.json")) <= 235
-    assert len(str(layout.key_frames / folder / ("E" * 40) / "Aligned_First+Third.json")) <= 235
+    event = EvidenceEvent(
+        event_id="EVT-000001",
+        action_type=ActionType.DEVICE_PANEL_OPERATION,
+        global_start_ms=10_000,
+        global_end_ms=12_000,
+        key_global_ms=11_000,
+        objects=["panel"],
+        confidence=0.9,
+        accepted=True,
+        audit_reason="test",
+        supporting_views=[],
+        supporting_roles=[],
+        candidates=[],
+    )
+    event_folder = _key_material_event_folder_name(layout, folder, event)
+    assert (
+        len(
+            str(
+                layout.key_frames
+                / folder
+                / "05-Device-Panel-Operation"
+                / event_folder
+                / "Aligned_First+Third.json"
+            )
+        )
+        <= 235
+    )
