@@ -973,6 +973,7 @@ def _artifact_json(
                         "database": "JSON-Config-Files/evidence_index.sqlite",
                         "artifact_registry": "JSON-Config-Files/artifact_registry.jsonl",
                         "evidence_registry": "JSON-Config-Files/evidence_registry.jsonl",
+                        "decision_receipt_registry": "JSON-Config-Files/decision_receipt_registry.jsonl",
                         "evidence_refs": [
                             {
                                 "evidence_id": evidence_id,

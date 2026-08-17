@@ -6,14 +6,17 @@ from fastapi.testclient import TestClient
 
 from labvision_evidence import api
 from labvision_evidence.archive import _artifact_json
+from labvision_evidence.decisions import decision_receipt
 from labvision_evidence.indexing import (
     ARTIFACT_REGISTRY_NAME,
+    DECISION_REGISTRY_NAME,
     EVIDENCE_REGISTRY_NAME,
     INDEX_DB_NAME,
     INDEX_MANIFEST_NAME,
     build_archive_index,
     get_indexed_evidence,
     search_archive_index,
+    search_decision_receipts,
     stable_evidence_uid,
     stable_event_uid,
 )
@@ -217,6 +220,54 @@ def test_search_archive_index_filters_full_text_and_returns_material_hashes(tmp_
     assert all(item["event_uid"] for item in results)
     assert all(len(item["artifact_references"]) == 6 for item in results)
     assert all(item["artifact_references"][0]["sha256"] for item in results)
+
+
+def test_quality_decision_receipts_are_indexed_by_rule_verdict_and_subject(tmp_path):
+    root = tmp_path / "Archive-Decisions"
+    archive_id, events, groups, normalized, _ = _indexed_archive(root)
+    receipt = decision_receipt(
+        decision_type="experiment_continuity_edge",
+        rule_id="QF2-STABLE-OBJECT-IDENTITY",
+        verdict="rejected",
+        subject_ids=["EXP-LEFT", "EXP-RIGHT"],
+        reason_codes=["class_overlap_without_stable_identity"],
+        facts={"shared_object_labels": ["tube", "tube_rack"]},
+    )
+    json_root = root / "JSON-Config-Files"
+    (json_root / "audit_layer.json").write_text(
+        json.dumps(
+            {"quality_decision_receipts": [receipt]},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    infos = {
+        "fp": VideoInfo(
+            path=root / "source-fp.mp4",
+            duration_ms=60_000,
+            fps=30,
+            width=1920,
+            height=1080,
+            frame_count=1800,
+        )
+    }
+
+    manifest = build_archive_index(
+        root, archive_id, normalized, events, groups, infos
+    )
+    results = search_decision_receipts(
+        root,
+        rule_id="QF2-STABLE-OBJECT-IDENTITY",
+        verdict="rejected",
+        subject_id="EXP-RIGHT",
+    )
+
+    assert manifest["counts"]["decision_receipts"] == 1
+    assert (json_root / DECISION_REGISTRY_NAME).is_file()
+    assert [item["decision_id"] for item in results] == [receipt["decision_id"]]
+    assert results[0]["json_references"][0]["path"].endswith(
+        "audit_layer.json"
+    )
 
 
 def test_key_event_api_paginates_and_resolves_event_and_evidence(monkeypatch, tmp_path):

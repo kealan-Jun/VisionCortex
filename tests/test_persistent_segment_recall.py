@@ -9,6 +9,7 @@ from labvision_evidence.pipeline import (
     EvidencePipeline,
     _merge_frame_evidence_ledgers,
 )
+from labvision_evidence.detection import _accept_unique_frame_timestamp
 from labvision_evidence.schemas import (
     ActionCandidate,
     ActionType,
@@ -364,7 +365,7 @@ def test_group_local_recall_selects_unscanned_evidence_producing_view(
     assert all(item["view_id"] != "b439" for item in choices)
 
 
-def test_group_local_recall_skips_zero_prior_views_for_complete_dual_view_group(
+def test_group_local_recall_uses_zero_prior_quality_fallback_for_unresolved_cluster(
     default_config,
 ):
     pipeline = EvidencePipeline(default_config)
@@ -451,12 +452,17 @@ def test_group_local_recall_skips_zero_prior_views_for_complete_dual_view_group(
         transforms,
     )
 
-    assert plan["complete"] is True
-    assert plan["selected_plans"] == []
-    assert plan["groups"][0]["status"] == "complete_no_positive_recall_prior"
+    assert plan["complete"] is False
+    assert plan["selected_plans"][0]["view_id"] == "d12"
+    assert plan["groups"][0]["status"] == "needs_group_local_recall"
+    assert plan["groups"][0]["selection_mode"] == "zero_prior_quality_fallback"
+    assert plan["groups"][0]["unresolved_temporal_cluster_count"] == 1
     assert all(
         item["positive_recall_prior"] is False
         for item in plan["groups"][0]["ranked_view_choices"]
+    )
+    assert plan["decision_receipts"][0]["rule_id"] == (
+        "QF3-TEMPORAL-CLUSTER-COMPLETENESS"
     )
 
 
@@ -520,6 +526,16 @@ def test_detection_ledger_merge_deduplicates_frames_and_namespaces_tracks(
     assert [item.local_ms for item in frames] == [100.0, 200.0, 300.0]
     assert frames[1].detections[0].track_id == 4_000_003
     assert frames[2].detections[0].track_id == 4_000_004
+
+
+def test_scan_timestamp_gate_deduplicates_adjacent_physical_segment_boundary():
+    emitted: dict[str, set[int]] = {}
+
+    assert _accept_unique_frame_timestamp(emitted, "fp", 900_000.0) is True
+    assert _accept_unique_frame_timestamp(emitted, "fp", 900_000.0) is False
+    assert _accept_unique_frame_timestamp(emitted, "tp", 900_000.0) is True
+    assert _accept_unique_frame_timestamp(emitted, "fp", 900_000.001) is True
+    assert len(emitted["fp"]) == 2
 
 
 def test_rtx_profile_enables_persistent_decode_and_local_recall():

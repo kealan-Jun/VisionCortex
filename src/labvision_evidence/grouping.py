@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any, Sequence
 
+from .decisions import decision_receipt
 from .schemas import (
     ActionCandidate,
     ActionType,
@@ -32,6 +33,72 @@ FIXED_EQUIPMENT_OBJECTS = {
     "computer",
 }
 
+ACTOR_OBJECTS = {"hand", "gloved_hand", "lab_coat"}
+
+
+def _non_actor_objects(event: EvidenceEvent) -> set[str]:
+    return set(event.objects) - ACTOR_OBJECTS
+
+
+def _candidate_track_identities(candidate: ActionCandidate) -> set[tuple[str, str, int]]:
+    """Return object identities that are explicitly bound to a tracker ID.
+
+    Tracker IDs are scoped to one view.  We therefore require the same view,
+    normalized object class, and ID on both sides of a continuity edge.  A
+    class name by itself is intentionally not treated as physical identity.
+    """
+
+    objects = sorted(set(candidate.objects) - ACTOR_OBJECTS)
+    identities: set[tuple[str, str, int]] = set()
+    for evidence in candidate.evidence:
+        explicit_object = evidence.get("object_class_name") or evidence.get(
+            "object_name"
+        )
+        bound_objects = (
+            [str(explicit_object)]
+            if explicit_object in objects
+            else objects
+            if len(objects) == 1
+            else []
+        )
+        track_ids = [
+            evidence.get(key)
+            for key in (
+                "object_track_id",
+                "track_id",
+                "container_track_id",
+                "tool_track_id",
+            )
+            if evidence.get(key) is not None
+        ]
+        for object_name in bound_objects:
+            for track_id in track_ids:
+                try:
+                    identities.add(
+                        (candidate.view_id, object_name, int(track_id))
+                    )
+                except (TypeError, ValueError):
+                    continue
+    return identities
+
+
+def _event_track_identities(event: EvidenceEvent) -> set[tuple[str, str, int]]:
+    return {
+        identity
+        for candidate in event.candidates
+        for identity in _candidate_track_identities(candidate)
+    }
+
+
+def _segment_track_identities(
+    segment: ExperimentSegment, by_event: dict[str, EvidenceEvent]
+) -> set[tuple[str, str, int]]:
+    return {
+        identity
+        for event in _segment_events(segment, by_event)
+        for identity in _event_track_identities(event)
+    }
+
 
 def is_experiment_start_anchor(
     event: EvidenceEvent, config: dict[str, Any]
@@ -53,20 +120,23 @@ def is_experiment_start_anchor(
         return len(event.supporting_views) > 1 and (
             not required or bool(set(event.objects) & required)
         )
-    return event.action_type == ActionType.OBJECT_MOVEMENT and not bool(
-        set(event.objects) & FIXED_EQUIPMENT_OBJECTS
-    )
+    # Movement by itself is context, not proof that an experiment started.  It
+    # becomes an opener only when the selector below finds a later accepted
+    # dual-role operation on the same manipulated object.
+    return False
 
 
 def select_formal_experiment_start_events(
-    events: Sequence[EvidenceEvent], config: dict[str, Any]
+    events: Sequence[EvidenceEvent],
+    config: dict[str, Any],
+    decision_receipts: list[dict[str, Any]] | None = None,
 ) -> list[EvidenceEvent]:
     """Select events allowed to open a formal dual-view experiment.
 
     A confident single-view prelude remains useful audit evidence, but it must
     not pull the delivered clip ahead of the first corroborated first/third-
-    person operation. If no canonical action anchor exists, the earliest
-    accepted dual-role event is the conservative fallback.
+    person operation. Object movement is allowed only when a later accepted
+    dual-role action corroborates the same non-hand manipulated object.
     """
 
     required_roles = {ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON}
@@ -75,10 +145,111 @@ def select_formal_experiment_start_events(
         for event in events
         if event.accepted and required_roles.issubset(set(event.supporting_roles))
     ]
-    anchored = [
+    canonical = [
         event for event in dual_role if is_experiment_start_anchor(event, config)
     ]
-    return anchored or dual_role
+    corroboration_gap_ms = float(
+        config["segmentation"].get(
+            "movement_opener_corroboration_seconds", 30.0
+        )
+    ) * 1000.0
+    corroborated_movement: list[EvidenceEvent] = []
+    for event in sorted(dual_role, key=lambda item: item.global_start_ms):
+        if event.action_type != ActionType.OBJECT_MOVEMENT:
+            if decision_receipts is not None:
+                accepted = event in canonical
+                decision_receipts.append(
+                    decision_receipt(
+                        decision_type="experiment_opener",
+                        rule_id="QF4-CANONICAL-OPENER",
+                        verdict="accepted" if accepted else "deferred",
+                        subject_ids=[event.event_id],
+                        reason_codes=[
+                            "canonical_physical_anchor"
+                            if accepted
+                            else "noncanonical_action"
+                        ],
+                        facts={
+                            "action_type": event.action_type.value,
+                            "objects": sorted(_non_actor_objects(event)),
+                        },
+                        legacy={
+                            "event_id": event.event_id,
+                            "decision": (
+                                "accepted_canonical_opener"
+                                if accepted
+                                else "deferred_noncanonical_opener"
+                            ),
+                        },
+                    )
+                )
+            continue
+        manipulated = _non_actor_objects(event)
+        corroborator = next(
+            (
+                later
+                for later in sorted(dual_role, key=lambda item: item.global_start_ms)
+                if later.event_id != event.event_id
+                and later.action_type != ActionType.OBJECT_MOVEMENT
+                and 0.0
+                <= later.global_start_ms - event.global_end_ms
+                <= corroboration_gap_ms
+                and bool(manipulated & _non_actor_objects(later))
+            ),
+            None,
+        )
+        if corroborator is not None:
+            corroborated_movement.append(event)
+        if decision_receipts is not None:
+            shared_objects = sorted(
+                manipulated & _non_actor_objects(corroborator)
+                if corroborator is not None
+                else set()
+            )
+            decision_receipts.append(
+                decision_receipt(
+                    decision_type="experiment_opener",
+                    rule_id="QF4-MOVEMENT-CORROBORATION",
+                    verdict="accepted" if corroborator else "deferred",
+                    subject_ids=[
+                        event.event_id,
+                        *([corroborator.event_id] if corroborator else []),
+                    ],
+                    reason_codes=[
+                        "later_same_object_dual_role_action"
+                        if corroborator
+                        else "missing_later_same_object_dual_role_action"
+                    ],
+                    facts={
+                        "action_type": event.action_type.value,
+                        "objects": sorted(manipulated),
+                        "corroborating_event_id": (
+                            corroborator.event_id if corroborator else None
+                        ),
+                        "shared_non_hand_objects": shared_objects,
+                    },
+                    thresholds={
+                        "maximum_corroboration_gap_ms": corroboration_gap_ms,
+                    },
+                    evidence_refs=[event.event_id],
+                    legacy={
+                        "event_id": event.event_id,
+                        "decision": (
+                            "accepted_corroborated_movement_opener"
+                            if corroborator
+                            else "deferred_uncorroborated_movement_opener"
+                        ),
+                        "corroborating_event_id": (
+                            corroborator.event_id if corroborator else None
+                        ),
+                        "shared_objects": shared_objects,
+                    },
+                )
+            )
+    return sorted(
+        [*canonical, *corroborated_movement],
+        key=lambda event: (event.global_start_ms, event.event_id),
+    )
 
 
 def normalize_experiment_segments(
@@ -86,6 +257,7 @@ def normalize_experiment_segments(
     events: Sequence[EvidenceEvent],
     views: Sequence[ViewInput],
     config: dict[str, Any],
+    decision_receipts: list[dict[str, Any]] | None = None,
 ) -> list[ExperimentSegment]:
     """Collapse duplicate overlapping windows and suppress equipment-only preludes.
 
@@ -224,14 +396,73 @@ def normalize_experiment_segments(
         right_objects = {
             obj for event in right_events for obj in event.objects
         } & CONTINUITY_OBJECTS
+        shared_object_labels = sorted(left_objects & right_objects)
         minimum_shared_objects = max(
             1,
             int(continuity_cfg.get("atomic_fragment_min_shared_objects", 2)),
         )
-        return (
-            has_shared_dual_view(left, right)
-            and len(left_objects & right_objects) >= minimum_shared_objects
+        shared_identities = sorted(
+            _segment_track_identities(left, by_event)
+            & _segment_track_identities(right, by_event)
         )
+        minimum_shared_identities = max(
+            1,
+            int(
+                continuity_cfg.get(
+                    "atomic_fragment_min_shared_object_identities", 1
+                )
+            ),
+        )
+        accepted = (
+            has_shared_dual_view(left, right)
+            and len(shared_object_labels) >= minimum_shared_objects
+            and len(shared_identities) >= minimum_shared_identities
+        )
+        if decision_receipts is not None:
+            decision_receipts.append(
+                decision_receipt(
+                    decision_type="atomic_fragment_merge",
+                    rule_id="QF2-STABLE-OBJECT-IDENTITY",
+                    verdict="merged" if accepted else "rejected",
+                    subject_ids=[left.segment_id, right.segment_id],
+                    reason_codes=[
+                        "stable_object_identity_proven"
+                        if accepted
+                        else "class_overlap_without_stable_identity"
+                    ],
+                    facts={
+                        "gap_ms": gap_ms,
+                        "shared_object_labels": shared_object_labels,
+                        "shared_track_identities": [
+                            {
+                                "view_id": view_id,
+                                "object": object_name,
+                                "track_id": track_id,
+                            }
+                            for view_id, object_name, track_id in shared_identities
+                        ],
+                    },
+                    thresholds={
+                        "maximum_gap_ms": maximum_gap_ms,
+                        "minimum_shared_object_labels": minimum_shared_objects,
+                        "minimum_shared_object_identities": minimum_shared_identities,
+                    },
+                    evidence_refs=[
+                        *left.event_ids,
+                        *right.event_ids,
+                    ],
+                    legacy={
+                        "left_segment_id": left.segment_id,
+                        "right_segment_id": right.segment_id,
+                        "decision": (
+                            "merged_atomic_fragment"
+                            if accepted
+                            else "rejected_atomic_fragment_merge"
+                        ),
+                    },
+                )
+            )
+        return accepted
 
     consolidated: list[ExperimentSegment] = []
     for segment in ordered:
@@ -365,6 +596,14 @@ def prepare_formal_experiment_segments(
             window.candidate_id
             for window in coarse_windows
             if window.global_start_ms <= midpoint <= window.global_end_ms
+        }
+
+    def event_boundary_ids(event: EvidenceEvent) -> set[str]:
+        return {
+            window.candidate_id
+            for window in coarse_windows
+            if window.global_end_ms >= event.global_start_ms
+            and window.global_start_ms <= event.global_end_ms
         }
 
     def event_objects(segment: ExperimentSegment) -> set[str]:
@@ -548,6 +787,25 @@ def prepare_formal_experiment_segments(
 
         current_roles = segment_roles(segment)
         if required_roles.issubset(current_roles):
+            opener_receipts: list[dict[str, Any]] = []
+            formal_openers = select_formal_experiment_start_events(
+                _segment_events(segment, by_event),
+                config,
+                decision_receipts=opener_receipts,
+            )
+            if not formal_openers:
+                receipts.extend(opener_receipts)
+                receipts.append(
+                    {
+                        "segment_id": segment.segment_id,
+                        "decision": "quarantined_missing_corroborated_opener",
+                        "roles": sorted(role.value for role in current_roles),
+                        "event_ids": list(segment.event_ids),
+                    }
+                )
+                previous_input_attachable = False
+                index += 1
+                continue
             promoted.append(segment)
             previous_input_attachable = True
             receipts.append(
@@ -557,6 +815,7 @@ def prepare_formal_experiment_segments(
                     "roles": sorted(role.value for role in current_roles),
                 }
             )
+            receipts.extend(opener_receipts)
             index += 1
             continue
 
@@ -643,7 +902,148 @@ def prepare_formal_experiment_segments(
         previous_input_attachable = False
         index += 1
 
-    return promoted, receipts
+    pre_roll_ms = (
+        float(segmentation.get("experiment_pre_roll_seconds", 2.0)) * 1000.0
+    )
+    extended: list[ExperimentSegment] = []
+    for segment in promoted:
+        formal_events = sorted(
+            _segment_events(segment, by_event),
+            key=lambda item: (item.global_start_ms, item.event_id),
+        )
+        openers = select_formal_experiment_start_events(formal_events, config)
+        if not openers:
+            extended.append(segment)
+            continue
+        anchor = openers[0]
+        segment_boundaries = boundary_ids(segment) | event_boundary_ids(anchor)
+        considered = [
+            event
+            for event in events
+            if event.accepted
+            and event.event_id not in segment.event_ids
+            and len(set(event.supporting_roles)) == 1
+            and 0.0
+            <= anchor.global_start_ms - event.global_end_ms
+            <= maximum_gap_ms
+            and bool(segment_boundaries & event_boundary_ids(event))
+        ]
+        eligible: list[EvidenceEvent] = []
+        for context in sorted(
+            considered, key=lambda item: (item.global_start_ms, item.event_id)
+        ):
+            shared_objects = sorted(
+                _non_actor_objects(context) & _non_actor_objects(anchor)
+            )
+            same_action = context.action_type == anchor.action_type
+            confident = context.confidence >= float(
+                segmentation.get("boundary_context_min_confidence", 0.65)
+            )
+            accepted_context = bool(shared_objects and same_action and confident)
+            if accepted_context:
+                eligible.append(context)
+            receipts.append(
+                decision_receipt(
+                    decision_type="leading_boundary_context",
+                    rule_id="QF1-SINGLE-VIEW-BOUNDARY-CONTEXT",
+                    verdict="accepted" if accepted_context else "rejected",
+                    subject_ids=[segment.segment_id, context.event_id, anchor.event_id],
+                    reason_codes=[
+                        "same_boundary_action_object_continuity"
+                        if accepted_context
+                        else "insufficient_action_object_confidence_continuity"
+                    ],
+                    facts={
+                        "context_event_id": context.event_id,
+                        "anchor_event_id": anchor.event_id,
+                        "context_roles": sorted(
+                            role.value for role in set(context.supporting_roles)
+                        ),
+                        "gap_ms": anchor.global_start_ms - context.global_end_ms,
+                        "same_action_type": same_action,
+                        "shared_non_hand_objects": shared_objects,
+                        "context_confidence": context.confidence,
+                        "shared_boundary_ids": sorted(
+                            segment_boundaries & event_boundary_ids(context)
+                        ),
+                        "formal_membership_changed": False,
+                    },
+                    thresholds={
+                        "maximum_gap_ms": maximum_gap_ms,
+                        "minimum_confidence": float(
+                            segmentation.get(
+                                "boundary_context_min_confidence", 0.65
+                            )
+                        ),
+                        "maximum_extension_ms": maximum_extension_ms,
+                    },
+                    evidence_refs=[context.event_id, anchor.event_id],
+                    legacy={
+                        "segment_id": segment.segment_id,
+                        "event_id": context.event_id,
+                        "decision": (
+                            "extended_boundary_from_single_view_context"
+                            if accepted_context
+                            else "rejected_single_view_boundary_context"
+                        ),
+                    },
+                )
+            )
+        if not eligible:
+            extended.append(segment)
+            continue
+        earliest_context = min(
+            eligible, key=lambda item: (item.global_start_ms, item.event_id)
+        )
+        shared_window_starts = [
+            window.global_start_ms
+            for window in coarse_windows
+            if window.candidate_id
+            in (segment_boundaries & event_boundary_ids(earliest_context))
+        ]
+        lower_boundary = max(shared_window_starts) if shared_window_starts else 0.0
+        extended_start = max(
+            0.0,
+            lower_boundary,
+            segment.global_start_ms - maximum_extension_ms,
+            earliest_context.global_start_ms - pre_roll_ms,
+        )
+        extended.append(
+            segment.model_copy(
+                update={
+                    "global_start_ms": min(segment.global_start_ms, extended_start)
+                }
+            )
+        )
+
+    normalized_receipts: list[dict[str, Any]] = []
+    for item in receipts:
+        if item.get("receipt_schema_version"):
+            normalized_receipts.append(item)
+            continue
+        segment_id = str(item.get("segment_id") or "unknown-segment")
+        decision = str(item.get("decision") or "unspecified")
+        normalized_receipts.append(
+            decision_receipt(
+                decision_type="formal_segment_membership",
+                rule_id="FORMAL-DUAL-VIEW-MEMBERSHIP",
+                verdict=(
+                    "accepted"
+                    if decision.startswith(("promoted", "attached", "merged"))
+                    else "quarantined"
+                ),
+                subject_ids=[segment_id],
+                reason_codes=[decision],
+                facts={
+                    key: value
+                    for key, value in item.items()
+                    if key not in {"segment_id", "decision"}
+                },
+                evidence_refs=item.get("event_ids") or [],
+                legacy=item,
+            )
+        )
+    return extended, normalized_receipts
 
 
 def _continuity_evidence(
@@ -652,19 +1052,35 @@ def _continuity_evidence(
     by_event: dict[str, EvidenceEvent],
     roles: dict[str, ViewRole],
     config: dict[str, Any],
-) -> tuple[bool, str]:
+) -> tuple[bool, str, dict[str, Any]]:
     cfg = config["continuity"]
     gap_ms = right.global_start_ms - left.global_end_ms
     max_gap_ms = float(cfg["max_gap_seconds"]) * 1000.0
     if gap_ms < 0:
-        return True, "原子实验边界重叠，属于同一连续活动链"
+        return True, "原子实验边界重叠，属于同一连续活动链", {
+            "gap_ms": gap_ms,
+            "continuity_basis": "temporal_overlap",
+            "shared_object_labels": [],
+            "shared_track_identities": [],
+        }
     if gap_ms > max_gap_ms:
-        return False, f"间隔 {gap_ms / 1000.0:.1f}s 超过连续实验阈值 {max_gap_ms / 1000.0:.1f}s"
+        return False, f"间隔 {gap_ms / 1000.0:.1f}s 超过连续实验阈值 {max_gap_ms / 1000.0:.1f}s", {
+            "gap_ms": gap_ms,
+            "continuity_basis": "gap_exceeded",
+            "shared_object_labels": [],
+            "shared_track_identities": [],
+        }
 
     shared_views = sorted(set(left.participating_views) & set(right.participating_views))
     shared_third = [view for view in shared_views if roles.get(view) == ViewRole.THIRD_PERSON]
     if bool(cfg.get("require_shared_third_view", True)) and not shared_third:
-        return False, "前后原子实验没有共同的有效第三人称证据视角"
+        return False, "前后原子实验没有共同的有效第三人称证据视角", {
+            "gap_ms": gap_ms,
+            "continuity_basis": "missing_shared_third_view",
+            "shared_views": shared_views,
+            "shared_object_labels": [],
+            "shared_track_identities": [],
+        }
 
     left_events = _segment_events(left, by_event)
     right_events = _segment_events(right, by_event)
@@ -672,10 +1088,45 @@ def _continuity_evidence(
     right_objects = {obj for event in right_events for obj in event.objects} & CONTINUITY_OBJECTS
     shared_objects = sorted(left_objects & right_objects)
     if len(shared_objects) < int(cfg.get("minimum_shared_objects", 1)):
-        return False, "时间接近但没有容器/样品对象承接，判定为独立实验"
+        return False, "时间接近但没有足够的容器/样品对象承接，判定为独立实验", {
+            "gap_ms": gap_ms,
+            "continuity_basis": "insufficient_object_labels",
+            "shared_views": shared_views,
+            "shared_object_labels": shared_objects,
+            "shared_track_identities": [],
+        }
+    shared_identities = sorted(
+        _segment_track_identities(left, by_event)
+        & _segment_track_identities(right, by_event)
+    )
+    minimum_shared_identities = max(
+        1, int(cfg.get("minimum_shared_object_identities", 1))
+    )
+    if len(shared_identities) < minimum_shared_identities:
+        return False, "对象类别相同但缺少稳定轨迹身份承接，判定为独立实验", {
+            "gap_ms": gap_ms,
+            "continuity_basis": "class_overlap_without_stable_identity",
+            "shared_views": shared_views,
+            "shared_object_labels": shared_objects,
+            "shared_track_identities": [],
+        }
     return (
         True,
-        f"间隔 {gap_ms / 1000.0:.1f}s，共同视角={shared_views}，承接对象={shared_objects}",
+        f"间隔 {gap_ms / 1000.0:.1f}s，共同视角={shared_views}，稳定对象身份={shared_identities}",
+        {
+            "gap_ms": gap_ms,
+            "continuity_basis": "stable_object_identity",
+            "shared_views": shared_views,
+            "shared_object_labels": shared_objects,
+            "shared_track_identities": [
+                {
+                    "view_id": view_id,
+                    "object": object_name,
+                    "track_id": track_id,
+                }
+                for view_id, object_name, track_id in shared_identities
+            ],
+        },
     )
 
 
@@ -707,6 +1158,7 @@ def build_experiment_groups(
     events: Sequence[EvidenceEvent],
     views: Sequence[ViewInput],
     config: dict[str, Any],
+    decision_receipts: list[dict[str, Any]] | None = None,
 ) -> list[ExperimentGroup]:
     """Group atomic experiments only when temporal and physical continuity agree."""
     ordered = sorted(segments, key=lambda segment: segment.global_start_ms)
@@ -718,7 +1170,46 @@ def build_experiment_groups(
     current = [ordered[0]]
     reasons: list[str] = []
     for segment in ordered[1:]:
-        continuous, reason = _continuity_evidence(current[-1], segment, by_event, roles, config)
+        left = current[-1]
+        continuous, reason, facts = _continuity_evidence(
+            left, segment, by_event, roles, config
+        )
+        if decision_receipts is not None:
+            cfg = config["continuity"]
+            decision_receipts.append(
+                decision_receipt(
+                    decision_type="experiment_continuity_edge",
+                    rule_id="QF2-STABLE-OBJECT-IDENTITY",
+                    verdict="accepted" if continuous else "rejected",
+                    subject_ids=[left.segment_id, segment.segment_id],
+                    reason_codes=[str(facts.get("continuity_basis"))],
+                    facts=facts,
+                    thresholds={
+                        "maximum_gap_ms": float(cfg["max_gap_seconds"])
+                        * 1000.0,
+                        "minimum_shared_object_labels": int(
+                            cfg.get("minimum_shared_objects", 1)
+                        ),
+                        "minimum_shared_object_identities": int(
+                            cfg.get("minimum_shared_object_identities", 1)
+                        ),
+                        "require_shared_third_view": bool(
+                            cfg.get("require_shared_third_view", True)
+                        ),
+                    },
+                    evidence_refs=[*left.event_ids, *segment.event_ids],
+                    legacy={
+                        "left_segment_id": left.segment_id,
+                        "right_segment_id": segment.segment_id,
+                        "decision": (
+                            "accepted_continuity_edge"
+                            if continuous
+                            else "rejected_continuity_edge"
+                        ),
+                        "reason": reason,
+                    },
+                )
+            )
         if continuous:
             current.append(segment)
             reasons.append(reason)
@@ -791,12 +1282,14 @@ def select_key_events(
                 "decision": "pending",
                 "competitor_event_id": None,
                 "shared_objects": [],
+                "shared_actor_objects": [],
                 "peak_distance_ms": None,
                 "interval_overlap_ms": None,
                 "interval_overlap_ratio": None,
                 "minimum_separation_ms": separation_ms,
                 "legacy_overlap_ratio_threshold_not_used": overlap_ratio,
                 "requires_positive_interval_overlap": True,
+                "dedup_comparisons": [],
             },
         )
 
@@ -804,7 +1297,9 @@ def select_key_events(
         existing: EvidenceEvent,
         event: EvidenceEvent,
     ) -> dict[str, Any]:
-        shared_objects = sorted(set(existing.objects) & set(event.objects))
+        shared_all = set(existing.objects) & set(event.objects)
+        shared_objects = sorted(shared_all - ACTOR_OBJECTS)
+        shared_actor_objects = sorted(shared_all & ACTOR_OBJECTS)
         interval_overlap_ms = max(
             0.0,
             min(existing.global_end_ms, event.global_end_ms)
@@ -819,6 +1314,7 @@ def select_key_events(
         )
         return {
             "shared_objects": shared_objects,
+            "shared_actor_objects": shared_actor_objects,
             "peak_distance_ms": abs(
                 existing.key_global_ms - event.key_global_ms
             ),
@@ -849,6 +1345,18 @@ def select_key_events(
                     is_duplicate = bool(metrics["shared_objects"]) and bool(
                         metrics["interval_overlap_ms"] > 0.0
                         and metrics["peak_distance_ms"] < separation_ms
+                    )
+                    event_decision["dedup_comparisons"].append(
+                        {
+                            "competitor_event_id": existing.event_id,
+                            **metrics,
+                            "is_duplicate": is_duplicate,
+                            "reason": (
+                                "shared_non_hand_object_with_overlapping_interval"
+                                if is_duplicate
+                                else "missing_shared_non_hand_object_or_interval_overlap"
+                            ),
+                        }
                     )
                     if is_duplicate:
                         duplicate = (existing, metrics)
@@ -938,7 +1446,52 @@ def select_key_events(
     if decision_receipts is not None:
         decision_receipts.extend(
             sorted(
-                decisions.values(),
+                (
+                    decision_receipt(
+                        decision_type="key_material_selection",
+                        rule_id="QF5-NON-HAND-OBJECT-DEDUPLICATION",
+                        verdict=(
+                            "selected" if item.get("selected") else "dropped"
+                        ),
+                        subject_ids=[
+                            str(item["event_id"]),
+                            *(
+                                [str(item["competitor_event_id"])]
+                                if item.get("competitor_event_id")
+                                else []
+                            ),
+                        ],
+                        reason_codes=[str(item.get("decision") or "unknown")],
+                        facts={
+                            "action_type": item.get("action_type"),
+                            "objects": item.get("objects"),
+                            "shared_non_hand_objects": item.get(
+                                "shared_objects", []
+                            ),
+                            "shared_actor_objects": item.get(
+                                "shared_actor_objects", []
+                            ),
+                            "peak_distance_ms": item.get("peak_distance_ms"),
+                            "interval_overlap_ms": item.get(
+                                "interval_overlap_ms"
+                            ),
+                            "interval_overlap_ratio": item.get(
+                                "interval_overlap_ratio"
+                            ),
+                            "dedup_comparisons": item.get(
+                                "dedup_comparisons", []
+                            ),
+                        },
+                        thresholds={
+                            "minimum_separation_ms": separation_ms,
+                            "requires_positive_interval_overlap": True,
+                            "requires_shared_non_hand_object": True,
+                        },
+                        evidence_refs=[str(item["event_id"])],
+                        legacy=item,
+                    )
+                    for item in decisions.values()
+                ),
                 key=lambda item: (
                     str(item["group_id"]),
                     str(item["segment_id"]),

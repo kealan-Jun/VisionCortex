@@ -292,6 +292,30 @@ def test_short_dual_view_fragments_with_carried_objects_form_one_atomic_experime
     ]
 
     def evidence(event_id, action, start, end, objects):
+        track_ids = {
+            "sample_bottle": 101,
+            "tube": 102,
+            "tube_rack": 103,
+            "pipette": 104,
+        }
+        candidates = [
+            ActionCandidate(
+                candidate_id=f"{event_id}-{obj}",
+                action_type=action,
+                view_id="fp01",
+                role=ViewRole.FIRST_PERSON,
+                local_start_ms=start,
+                local_end_ms=end,
+                global_start_ms=start,
+                global_end_ms=end,
+                key_global_ms=(start + end) / 2,
+                objects=[obj],
+                confidence=0.8,
+                evidence=[{"track_id": track_ids[obj]}],
+            )
+            for obj in objects
+            if obj in track_ids
+        ]
         return EvidenceEvent(
             event_id=event_id,
             action_type=action,
@@ -304,7 +328,7 @@ def test_short_dual_view_fragments_with_carried_objects_form_one_atomic_experime
             audit_reason="cross-view evidence",
             supporting_views=["fp01", "tp01"],
             supporting_roles=[ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON],
-            candidates=[],
+            candidates=candidates,
         )
 
     events = [
@@ -359,6 +383,23 @@ def test_explicit_state_transition_remains_a_continuous_two_atomic_chain(
     ]
 
     def evidence(event_id, action, start, end):
+        candidates = [
+            ActionCandidate(
+                candidate_id=f"{event_id}-{obj}",
+                action_type=action,
+                view_id="fp01",
+                role=ViewRole.FIRST_PERSON,
+                local_start_ms=start,
+                local_end_ms=end,
+                global_start_ms=start,
+                global_end_ms=end,
+                key_global_ms=(start + end) / 2,
+                objects=[obj],
+                confidence=0.9,
+                evidence=[{"track_id": track_id}],
+            )
+            for obj, track_id in (("sample_bottle", 201), ("tube", 202))
+        ]
         return EvidenceEvent(
             event_id=event_id,
             action_type=action,
@@ -371,7 +412,7 @@ def test_explicit_state_transition_remains_a_continuous_two_atomic_chain(
             audit_reason="cross-view evidence",
             supporting_views=["fp01", "tp01"],
             supporting_roles=[ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON],
-            candidates=[],
+            candidates=candidates,
         )
 
     events = [
@@ -413,6 +454,25 @@ def test_single_carried_object_does_not_join_independent_atomic_experiments(
     ]
 
     def event(event_id, start, end, objects):
+        track_ids = {"tube": 301, "tube_rack": 302}
+        candidates = [
+            ActionCandidate(
+                candidate_id=f"{event_id}-{obj}",
+                action_type=ActionType.OBJECT_MOVEMENT,
+                view_id="fp01",
+                role=ViewRole.FIRST_PERSON,
+                local_start_ms=start,
+                local_end_ms=end,
+                global_start_ms=start,
+                global_end_ms=end,
+                key_global_ms=(start + end) / 2.0,
+                objects=[obj],
+                confidence=0.9,
+                evidence=[{"track_id": track_ids[obj]}],
+            )
+            for obj in objects
+            if obj in track_ids
+        ]
         return EvidenceEvent(
             event_id=event_id,
             action_type=ActionType.OBJECT_MOVEMENT,
@@ -425,7 +485,7 @@ def test_single_carried_object_does_not_join_independent_atomic_experiments(
             audit_reason="cross-view evidence",
             supporting_views=["fp01", "tp01"],
             supporting_roles=[ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON],
-            candidates=[],
+            candidates=candidates,
         )
 
     single_object_events = [

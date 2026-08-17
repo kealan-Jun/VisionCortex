@@ -50,6 +50,7 @@ from .grouping import (
 )
 from .detection import iter_frame_evidence, scan_videos, validate_models
 from .daily_reports import generate_daily_report_archive
+from .decisions import decision_receipt
 from .schemas import (
     ActionCandidate,
     ActionType,
@@ -622,6 +623,7 @@ class EvidencePipeline:
         self,
         layout: ArchiveLayout,
         groups: list[ExperimentGroup],
+        progressive_report: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         validation = self.config.get("validation", {})
         full_report = validate_experiment_and_material_quality(
@@ -636,8 +638,18 @@ class EvidencePipeline:
             ),
         )
         boundary = full_report["experiment_boundaries"]
-        evaluated = bool(boundary["evaluated"])
-        passed = bool(boundary["passed"]) if evaluated else True
+        boundary_evaluated = bool(boundary["evaluated"])
+        boundary_passed = (
+            bool(boundary["passed"]) if boundary_evaluated else True
+        )
+        progressive_evaluated = progressive_report is not None
+        progressive_passed = bool(
+            progressive_report.get("quality_complete", True)
+            if progressive_report is not None
+            else True
+        )
+        evaluated = boundary_evaluated or progressive_evaluated
+        passed = boundary_passed and progressive_passed
         report = {
             "schema_version": "visioncortex-boundary-precheck/1",
             "status": "passed" if passed else "failed",
@@ -646,6 +658,20 @@ class EvidencePipeline:
             "baseline": full_report["baseline"],
             "thresholds": full_report["thresholds"],
             "experiment_boundaries": boundary,
+            "cross_view_cluster_completeness": {
+                "evaluated": progressive_evaluated,
+                "passed": progressive_passed,
+                "unresolved_candidate_ids": (
+                    progressive_report.get("unresolved_candidate_ids", [])
+                    if progressive_report is not None
+                    else []
+                ),
+                "group_local_recall": (
+                    progressive_report.get("group_local_recall", {})
+                    if progressive_report is not None
+                    else {}
+                ),
+            },
             "gate_position": "before_experiment_and_key_material_model_calls",
         }
         path = layout.json_config / "boundary_precheck.json"
@@ -1318,8 +1344,15 @@ class EvidencePipeline:
         actual_windows: dict[str, list[tuple[float, float]]],
         infos,
         transforms,
+        boundary_candidates: list[ActionCandidate] | None = None,
     ) -> dict[str, Any]:
-        """Find formal groups whose FP actions still have unscanned TP opportunities."""
+        """Plan TP supplementation per unresolved temporal cluster.
+
+        A single early dual-role event cannot close a broad refined target.  FP
+        anchors are evaluated across the entire overlapping coarse boundary,
+        clustered in time, and each unresolved cluster is supplemented until a
+        TP association is found or every eligible TP view is exhausted.
+        """
 
         perf = self.config["performance"]
         minimum_unresolved = max(
@@ -1328,6 +1361,14 @@ class EvidencePipeline:
         padding_ms = max(
             0.0, float(perf.get("fine_group_recall_padding_seconds", 0.0))
         ) * 1000.0
+        cluster_gap_ms = max(
+            0.0,
+            float(perf.get("fine_group_recall_cluster_gap_seconds", 10.0))
+            * 1000.0,
+        )
+        zero_prior_fallback = bool(
+            perf.get("fine_group_recall_zero_prior_quality_fallback", True)
+        )
         by_segment = {segment.segment_id: segment for segment in segments}
         third_views = [
             view for view in fine_views if view.role == ViewRole.THIRD_PERSON
@@ -1335,6 +1376,7 @@ class EvidencePipeline:
         positions = {view.view_id: index for index, view in enumerate(fine_views)}
         reports: list[dict[str, Any]] = []
         selected_plans: list[dict[str, Any]] = []
+        decision_receipts: list[dict[str, Any]] = []
 
         for group in groups:
             event_ids = {
@@ -1355,12 +1397,26 @@ class EvidencePipeline:
                     set(event.supporting_roles)
                 )
             ]
+            overlapping_targets = [
+                candidate
+                for candidate in (boundary_candidates or [])
+                if candidate.global_end_ms >= group.global_start_ms
+                and candidate.global_start_ms <= group.global_end_ms
+            ]
+            target_start_ms = min(
+                [group.global_start_ms]
+                + [item.global_start_ms for item in overlapping_targets]
+            )
+            target_end_ms = max(
+                [group.global_end_ms]
+                + [item.global_end_ms for item in overlapping_targets]
+            )
             fp_candidates = [
                 candidate
                 for candidate in candidates
                 if candidate.role == ViewRole.FIRST_PERSON
-                and candidate.global_end_ms >= group.global_start_ms
-                and candidate.global_start_ms <= group.global_end_ms
+                and candidate.global_end_ms >= target_start_ms
+                and candidate.global_start_ms <= target_end_ms
             ]
 
             def candidate_supported(candidate: ActionCandidate) -> bool:
@@ -1385,10 +1441,43 @@ class EvidencePipeline:
                 for candidate in fp_candidates
                 if not candidate_supported(candidate)
             ]
+            unresolved_clusters: list[list[ActionCandidate]] = []
+            for candidate in sorted(
+                unresolved,
+                key=lambda item: (item.global_start_ms, item.candidate_id),
+            ):
+                if (
+                    unresolved_clusters
+                    and candidate.global_start_ms
+                    <= max(
+                        item.global_end_ms for item in unresolved_clusters[-1]
+                    )
+                    + cluster_gap_ms
+                ):
+                    unresolved_clusters[-1].append(candidate)
+                else:
+                    unresolved_clusters.append([candidate])
+            cluster_reports = [
+                {
+                    "cluster_id": f"{group.group_id}-UNRESOLVED-{index:03d}",
+                    "global_start_ms": min(
+                        item.global_start_ms for item in cluster
+                    ),
+                    "global_end_ms": max(item.global_end_ms for item in cluster),
+                    "candidate_ids": [item.candidate_id for item in cluster],
+                    "candidate_count": len(cluster),
+                }
+                for index, cluster in enumerate(unresolved_clusters, 1)
+            ]
             base_report: dict[str, Any] = {
                 "group_id": group.group_id,
                 "global_start_ms": group.global_start_ms,
                 "global_end_ms": group.global_end_ms,
+                "refined_target_start_ms": target_start_ms,
+                "refined_target_end_ms": target_end_ms,
+                "refined_target_candidate_ids": [
+                    item.candidate_id for item in overlapping_targets
+                ],
                 "first_person_candidate_count": len(fp_candidates),
                 "cross_view_event_count": len(cross_view_events),
                 "unresolved_anchor_count": len(unresolved),
@@ -1396,10 +1485,35 @@ class EvidencePipeline:
                 "unresolved_candidate_ids": [
                     candidate.candidate_id for candidate in unresolved
                 ],
+                "unresolved_temporal_clusters": cluster_reports,
+                "unresolved_temporal_cluster_count": len(cluster_reports),
             }
             if len(unresolved) < minimum_unresolved:
                 base_report["status"] = "complete_below_recall_trigger"
                 reports.append(base_report)
+                decision_receipts.append(
+                    decision_receipt(
+                        decision_type="cross_view_cluster_recall",
+                        rule_id="QF3-TEMPORAL-CLUSTER-COMPLETENESS",
+                        verdict="not_required",
+                        subject_ids=[group.group_id],
+                        reason_codes=["below_unresolved_anchor_trigger"],
+                        facts={
+                            "unresolved_anchor_count": len(unresolved),
+                            "cluster_count": len(cluster_reports),
+                        },
+                        thresholds={
+                            "minimum_unresolved_anchors": minimum_unresolved,
+                        },
+                        evidence_refs=[
+                            candidate.candidate_id for candidate in unresolved
+                        ],
+                        legacy={
+                            "group_id": group.group_id,
+                            "decision": "recall_not_required",
+                        },
+                    )
+                )
                 continue
 
             choices: list[dict[str, Any]] = []
@@ -1425,19 +1539,31 @@ class EvidencePipeline:
                 ]
                 if not missing:
                     continue
+                missing_ids = {candidate.candidate_id for candidate in missing}
+                missing_clusters = [
+                    item
+                    for item in cluster_reports
+                    if missing_ids & set(item["candidate_ids"])
+                ]
                 local_windows = self._merge_time_windows(
                     [
                         (
                             max(
                                 0.0,
                                 transforms[view_id].to_local(
-                                    candidate.global_start_ms - padding_ms
+                                    max(
+                                        target_start_ms,
+                                        candidate.global_start_ms - padding_ms,
+                                    )
                                 ),
                             ),
                             min(
                                 infos[view_id].duration_ms,
                                 transforms[view_id].to_local(
-                                    candidate.global_end_ms + padding_ms
+                                    min(
+                                        target_end_ms,
+                                        candidate.global_end_ms + padding_ms,
+                                    )
                                 ),
                             ),
                         )
@@ -1471,6 +1597,9 @@ class EvidencePipeline:
                         "missing_anchor_count": len(missing),
                         "missing_candidate_ids": [
                             candidate.candidate_id for candidate in missing
+                        ],
+                        "missing_cluster_ids": [
+                            str(item["cluster_id"]) for item in missing_clusters
                         ],
                         "existing_group_event_support": local_support,
                         "existing_group_candidate_count": local_candidate_count,
@@ -1508,8 +1637,33 @@ class EvidencePipeline:
                     }
                 )
             if not choices:
-                base_report["status"] = "complete_all_tp_windows_exhausted"
+                base_report["status"] = "unresolved_all_tp_windows_exhausted"
+                base_report["quality_fallback_exhausted"] = True
                 reports.append(base_report)
+                for cluster in cluster_reports:
+                    decision_receipts.append(
+                        decision_receipt(
+                            decision_type="cross_view_cluster_recall",
+                            rule_id="QF3-TEMPORAL-CLUSTER-COMPLETENESS",
+                            verdict="exhausted",
+                            subject_ids=[
+                                group.group_id,
+                                str(cluster["cluster_id"]),
+                            ],
+                            reason_codes=["all_eligible_tp_views_exhausted"],
+                            facts=cluster,
+                            thresholds={
+                                "cluster_gap_ms": cluster_gap_ms,
+                                "minimum_unresolved_anchors": minimum_unresolved,
+                            },
+                            evidence_refs=cluster["candidate_ids"],
+                            legacy={
+                                "group_id": group.group_id,
+                                "cluster_id": cluster["cluster_id"],
+                                "decision": "recall_views_exhausted",
+                            },
+                        )
+                    )
                 continue
             choices.sort(
                 key=lambda item: (
@@ -1522,12 +1676,10 @@ class EvidencePipeline:
                 )
             )
             base_report["ranked_view_choices"] = choices
-            formal_dual_view_complete = bool(
-                group.first_person_view and group.third_person_view
-            )
-            if formal_dual_view_complete and not any(
+            all_zero_prior = not any(
                 bool(item["positive_recall_prior"]) for item in choices
-            ):
+            )
+            if all_zero_prior and not zero_prior_fallback:
                 base_report["status"] = "complete_no_positive_recall_prior"
                 base_report["recall_guard_reason"] = (
                     "formal group already has first/third evidence and every "
@@ -1541,6 +1693,11 @@ class EvidencePipeline:
                     "status": "needs_group_local_recall",
                     "selected_view_id": chosen["view_id"],
                     "selected_windows": chosen["windows"],
+                    "selection_mode": (
+                        "zero_prior_quality_fallback"
+                        if all_zero_prior
+                        else "evidence_prior_ranked"
+                    ),
                 }
             )
             reports.append(base_report)
@@ -1551,14 +1708,71 @@ class EvidencePipeline:
                     "windows": chosen["windows"],
                     "missing_anchor_count": chosen["missing_anchor_count"],
                     "missing_candidate_ids": chosen["missing_candidate_ids"],
+                    "missing_cluster_ids": chosen["missing_cluster_ids"],
+                    "refined_target_start_ms": target_start_ms,
+                    "refined_target_end_ms": target_end_ms,
                 }
             )
+            for cluster in cluster_reports:
+                if str(cluster["cluster_id"]) not in set(
+                    chosen["missing_cluster_ids"]
+                ):
+                    continue
+                decision_receipts.append(
+                    decision_receipt(
+                        decision_type="cross_view_cluster_recall",
+                        rule_id="QF3-TEMPORAL-CLUSTER-COMPLETENESS",
+                        verdict="selected",
+                        subject_ids=[
+                            group.group_id,
+                            str(cluster["cluster_id"]),
+                            str(chosen["view_id"]),
+                        ],
+                        reason_codes=[
+                            "zero_prior_quality_fallback"
+                            if all_zero_prior
+                            else "ranked_tp_evidence_prior"
+                        ],
+                        facts={
+                            **cluster,
+                            "selected_view_id": chosen["view_id"],
+                            "selected_windows": chosen["windows"],
+                            "refined_target_start_ms": target_start_ms,
+                            "refined_target_end_ms": target_end_ms,
+                        },
+                        thresholds={
+                            "cluster_gap_ms": cluster_gap_ms,
+                            "minimum_unresolved_anchors": minimum_unresolved,
+                            "zero_prior_quality_fallback": zero_prior_fallback,
+                        },
+                        evidence_refs=cluster["candidate_ids"],
+                        legacy={
+                            "group_id": group.group_id,
+                            "cluster_id": cluster["cluster_id"],
+                            "decision": "selected_tp_supplemental_scan",
+                            "selected_view_id": chosen["view_id"],
+                        },
+                    )
+                )
+        operational_complete = not selected_plans
+        quality_complete = operational_complete and not any(
+            item.get("status")
+            in {
+                "unresolved_all_tp_windows_exhausted",
+                "complete_no_positive_recall_prior",
+            }
+            for item in reports
+        )
         return {
-            "schema_version": "visioncortex-group-local-recall-plan/1",
+            "schema_version": "visioncortex-group-local-recall-plan/2",
             "minimum_unresolved_anchors": minimum_unresolved,
+            "cluster_gap_ms": cluster_gap_ms,
+            "zero_prior_quality_fallback": zero_prior_fallback,
             "groups": reports,
             "selected_plans": selected_plans,
-            "complete": not selected_plans,
+            "decision_receipts": decision_receipts,
+            "complete": operational_complete,
+            "quality_complete": quality_complete,
         }
 
     def _run_progressive_fine_scan(
@@ -1994,7 +2208,7 @@ class EvidencePipeline:
             0, int(perf.get("fine_group_recall_max_rounds", 5))
         )
         local_recall_plan: dict[str, Any] = {
-            "schema_version": "visioncortex-group-local-recall-plan/1",
+            "schema_version": "visioncortex-group-local-recall-plan/2",
             "groups": [],
             "selected_plans": [],
             "complete": True,
@@ -2018,6 +2232,7 @@ class EvidencePipeline:
                     actual_windows,
                     infos,
                     transforms,
+                    boundary_candidates=boundary_candidates,
                 )
                 selected_plans = list(
                     local_recall_plan.get("selected_plans") or []
@@ -2108,6 +2323,7 @@ class EvidencePipeline:
                 actual_windows,
                 infos,
                 transforms,
+                boundary_candidates=boundary_candidates,
             )
             local_recall_summary = {
                 "enabled": True,
@@ -2116,7 +2332,14 @@ class EvidencePipeline:
                 "selected_key_event_count": len(final_recall_key_events),
                 "completeness_gate": local_recall_plan,
                 "stopping_reason": (
-                    "no_positive_recall_prior"
+                    "all_eligible_tp_views_exhausted"
+                    if local_recall_plan.get("complete")
+                    and any(
+                        item.get("status")
+                        == "unresolved_all_tp_windows_exhausted"
+                        for item in local_recall_plan.get("groups", [])
+                    )
+                    else "no_positive_recall_prior_without_quality_fallback"
                     if local_recall_plan.get("complete")
                     and any(
                         item.get("status")
@@ -2163,6 +2386,15 @@ class EvidencePipeline:
         scout_frames = int(scout_summary.get("estimated_frames", 0))
         full_fine_frames = int(round(actual_seconds * sample_fps))
         all_view_frames = int(round(all_seconds * sample_fps))
+        group_recall_quality_complete = bool(
+            not local_recall_summary.get("enabled")
+            or local_recall_summary.get("completeness_gate", {}).get(
+                "quality_complete", True
+            )
+        )
+        progressive_quality_complete = bool(
+            not unresolved_ids and group_recall_quality_complete
+        )
         report = {
             "schema_version": "visioncortex-progressive-fine-scan/3",
             "enabled": True,
@@ -2194,9 +2426,12 @@ class EvidencePipeline:
             "passes": pass_reports,
             "final_target_status": target_status,
             "unresolved_candidate_ids": sorted(unresolved_ids),
+            "quality_complete": progressive_quality_complete,
             "stopping_reason": (
                 "all_demanded_windows_have_dual_role_anchor"
-                if not unresolved_ids
+                if progressive_quality_complete
+                else "group_local_evidence_exhausted_with_unresolved_clusters"
+                if not group_recall_quality_complete
                 else "all_eligible_third_person_views_exhausted"
             ),
             "all_view_selected_seconds": round(all_seconds, 3),
@@ -3185,8 +3420,13 @@ class EvidencePipeline:
             raw_segments = build_experiment_segments(
                 events, manifest.views, self.config, coarse_windows=boundary_candidates
             )
+            normalization_receipts: list[dict[str, Any]] = []
             normalized_segments = normalize_experiment_segments(
-                raw_segments, events, manifest.views, self.config
+                raw_segments,
+                events,
+                manifest.views,
+                self.config,
+                decision_receipts=normalization_receipts,
             )
             segments, formal_segment_receipts = prepare_formal_experiment_segments(
                 normalized_segments,
@@ -3195,7 +3435,14 @@ class EvidencePipeline:
                 boundary_candidates,
                 self.config,
             )
-            groups = build_experiment_groups(segments, events, manifest.views, self.config)
+            continuity_receipts: list[dict[str, Any]] = []
+            groups = build_experiment_groups(
+                segments,
+                events,
+                manifest.views,
+                self.config,
+                decision_receipts=continuity_receipts,
+            )
             selection_decisions: list[dict[str, Any]] = []
             precheck_key_events = select_key_events(
                 groups,
@@ -3229,10 +3476,20 @@ class EvidencePipeline:
                     ],
                     "segments": [segment.model_dump(mode="json") for segment in segments],
                     "formal_segment_receipts": formal_segment_receipts,
+                    "normalization_decision_receipts": normalization_receipts,
+                    "continuity_decision_receipts": continuity_receipts,
+                    "quality_decision_receipts": [
+                        *normalization_receipts,
+                        *formal_segment_receipts,
+                        *continuity_receipts,
+                        *selection_decisions,
+                    ],
                     "experiment_groups": [group.model_dump(mode="json") for group in groups],
                 },
             )
-            boundary_precheck = self._run_boundary_precheck(layout, groups)
+            boundary_precheck = self._run_boundary_precheck(
+                layout, groups, progressive_report=progressive_report
+            )
             self._complete_stage(
                 layout,
                 "candidate_audit",

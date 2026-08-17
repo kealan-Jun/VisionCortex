@@ -24,6 +24,19 @@ from .video_io import (
 )
 
 
+def _accept_unique_frame_timestamp(
+    emitted: dict[str, set[int]], view_id: str, local_ms: float
+) -> bool:
+    """Accept one ledger row per view and microsecond-normalized timestamp."""
+
+    key = round(float(local_ms) * 1000.0)
+    view_keys = emitted.setdefault(view_id, set())
+    if key in view_keys:
+        return False
+    view_keys.add(key)
+    return True
+
+
 def _iou(a: Sequence[float], b: Sequence[float]) -> float:
     x1, y1 = max(a[0], b[0]), max(a[1], b[1])
     x2, y2 = min(a[2], b[2]), min(a[3], b[3])
@@ -1062,6 +1075,19 @@ def scan_videos(
             view.view_id: output_paths[view.view_id].open("a", encoding="utf-8", buffering=1024 * 1024)
             for view in role_views
         }
+        emitted_timestamp_keys: dict[str, set[int]] = {
+            view.view_id: set() for view in role_views
+        }
+        for view in role_views:
+            if not completed[view.view_id] or not output_paths[view.view_id].is_file():
+                continue
+            for previous in iter_frame_evidence(output_paths[view.view_id]):
+                _accept_unique_frame_timestamp(
+                    emitted_timestamp_keys, view.view_id, previous.local_ms
+                )
+        duplicate_timestamp_frames: dict[str, int] = {
+            view.view_id: 0 for view in role_views
+        }
         queue_depth = int(
             config["performance"].get(
                 "decode_queue_depth", config["performance"].get("frame_queue_size", 64)
@@ -1150,6 +1176,13 @@ def scan_videos(
             for item in pending_items:
                 if isinstance(item, FramePacket):
                     boxes = next(inferred_iter)
+                    if not _accept_unique_frame_timestamp(
+                        emitted_timestamp_keys,
+                        item.view.view_id,
+                        item.local_ms,
+                    ):
+                        duplicate_timestamp_frames[item.view.view_id] += 1
+                        continue
                     tracked = (
                         trackers[item.view.view_id].update(boxes, item.local_ms)
                         if scanner is not None
@@ -1263,6 +1296,16 @@ def scan_videos(
                     "max_observed_queue_depth": max_queue_size,
                     "configured_queue_depth": queue_depth,
                     "inference_batch_wait_ms": round(batch_wait_seconds * 1000.0, 3),
+                    "duplicate_timestamp_frames_removed": sum(
+                        duplicate_timestamp_frames.values()
+                    ),
+                    "duplicate_timestamp_frames_removed_by_view": dict(
+                        duplicate_timestamp_frames
+                    ),
+                    "unique_output_timestamps_by_view": {
+                        view_id: len(keys)
+                        for view_id, keys in emitted_timestamp_keys.items()
+                    },
                     "full_batch_flushes": full_batch_flushes,
                     "microbatch_timeout_flushes": microbatch_timeout_flushes,
                     "control_only_flushes": control_only_flushes,

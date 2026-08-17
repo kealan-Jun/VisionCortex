@@ -86,6 +86,8 @@ performance:
   fine_group_recall_min_unresolved_anchors: 3
   fine_group_recall_padding_seconds: 0.0
   fine_group_recall_max_rounds: 5
+  fine_group_recall_cluster_gap_seconds: 10.0
+  fine_group_recall_zero_prior_quality_fallback: true
   # Scan the wearable view and best coarse-ranked static view first. A remaining
   # static view is decoded only for aligned candidate windows that contain a
   # reliable first-person start anchor but still lack valid dual-role evidence.

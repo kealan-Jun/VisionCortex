@@ -15,11 +15,12 @@ from typing import Any, Iterable, Sequence
 from .schemas import EvidenceEvent, ExperimentGroup, VideoInfo
 
 
-INDEX_SCHEMA_VERSION = "visioncortex-evidence-index/1"
+INDEX_SCHEMA_VERSION = "visioncortex-evidence-index/2"
 INDEX_DB_NAME = "evidence_index.sqlite"
 INDEX_MANIFEST_NAME = "evidence_index_manifest.json"
 ARTIFACT_REGISTRY_NAME = "artifact_registry.jsonl"
 EVIDENCE_REGISTRY_NAME = "evidence_registry.jsonl"
+DECISION_REGISTRY_NAME = "decision_receipt_registry.jsonl"
 
 
 def stable_event_uid(archive_id: str, group_id: str, event_id: str) -> str:
@@ -366,12 +367,57 @@ def _evidence_records(
     return sorted(records.values(), key=lambda item: item["evidence_uid"])
 
 
+def _decision_receipt_records(json_root: Path) -> list[dict[str, Any]]:
+    """Collect canonical rule decisions without coupling callers to pipeline state."""
+
+    sources = (
+        "audit_layer.json",
+        "key_material_selection.json",
+        "key_material_selection_preview.json",
+        "progressive_fine_scan.json",
+    )
+    records: dict[str, dict[str, Any]] = {}
+
+    def visit(value: Any, source: str, pointer: str = "") -> None:
+        if isinstance(value, dict):
+            if value.get("receipt_schema_version") and value.get("decision_id"):
+                decision_id = str(value["decision_id"])
+                reference = {
+                    "path": f"JSON-Config-Files/{source}",
+                    "json_pointer": pointer or "/",
+                }
+                if decision_id not in records:
+                    records[decision_id] = {
+                        **value,
+                        "json_references": [reference],
+                    }
+                elif reference not in records[decision_id]["json_references"]:
+                    records[decision_id]["json_references"].append(reference)
+            for key, child in value.items():
+                escaped = str(key).replace("~", "~0").replace("/", "~1")
+                visit(child, source, f"{pointer}/{escaped}")
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                visit(child, source, f"{pointer}/{index}")
+
+    for source in sources:
+        path = json_root / source
+        if not path.is_file():
+            continue
+        try:
+            visit(json.loads(path.read_text(encoding="utf-8-sig")), source)
+        except (OSError, json.JSONDecodeError):
+            continue
+    return sorted(records.values(), key=lambda item: str(item["decision_id"]))
+
+
 def _build_sqlite(
     path: Path,
     archive_id: str,
     normalized_events: Sequence[dict[str, Any]],
     artifact_records: Sequence[dict[str, Any]],
     evidence_records: Sequence[dict[str, Any]],
+    decision_records: Sequence[dict[str, Any]],
 ) -> bool:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.partial-{uuid.uuid4().hex[:8]}")
@@ -427,6 +473,24 @@ def _build_sqlite(
                 evidence_json TEXT NOT NULL
             );
             CREATE INDEX evidence_event_idx ON evidence(event_uid, evidence_id);
+            CREATE TABLE decision_receipts (
+                decision_id TEXT PRIMARY KEY,
+                decision_type TEXT NOT NULL,
+                rule_id TEXT NOT NULL,
+                rule_version TEXT NOT NULL,
+                verdict TEXT NOT NULL,
+                search_text TEXT NOT NULL,
+                receipt_json TEXT NOT NULL
+            );
+            CREATE INDEX decision_receipts_rule_idx
+                ON decision_receipts(rule_id, verdict, decision_id);
+            CREATE TABLE decision_subjects (
+                decision_id TEXT NOT NULL REFERENCES decision_receipts(decision_id),
+                subject_id TEXT NOT NULL,
+                PRIMARY KEY(decision_id, subject_id)
+            );
+            CREATE INDEX decision_subjects_subject_idx
+                ON decision_subjects(subject_id, decision_id);
             """
         )
         try:
@@ -547,6 +611,29 @@ def _build_sqlite(
                 for item in evidence_records
             ],
         )
+        connection.executemany(
+            "INSERT INTO decision_receipts VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    str(item["decision_id"]),
+                    str(item.get("decision_type") or ""),
+                    str(item.get("rule_id") or ""),
+                    str(item.get("rule_version") or ""),
+                    str(item.get("verdict") or ""),
+                    " ".join(_flatten_text(item)),
+                    _json_dumps(item),
+                )
+                for item in decision_records
+            ],
+        )
+        connection.executemany(
+            "INSERT INTO decision_subjects VALUES (?, ?)",
+            [
+                (str(item["decision_id"]), str(subject_id))
+                for item in decision_records
+                for subject_id in item.get("subject_ids", [])
+            ],
+        )
         connection.commit()
     finally:
         connection.close()
@@ -624,6 +711,7 @@ def build_archive_index(
     hash_duration_seconds = time.perf_counter() - hash_started
     artifact_records.sort(key=lambda item: item["artifact_uid"])
     evidence_records = _evidence_records(archive_id, events, groups, infos)
+    decision_records = _decision_receipt_records(json_root)
     expected_evidence_uids = {
         str(reference["evidence_uid"])
         for payload in normalized_events
@@ -645,14 +733,21 @@ def build_archive_index(
 
     artifact_registry = json_root / ARTIFACT_REGISTRY_NAME
     evidence_registry = json_root / EVIDENCE_REGISTRY_NAME
+    decision_registry = json_root / DECISION_REGISTRY_NAME
     database = json_root / INDEX_DB_NAME
     registry_started = time.perf_counter()
     _write_jsonl(artifact_registry, artifact_records)
     _write_jsonl(evidence_registry, evidence_records)
+    _write_jsonl(decision_registry, decision_records)
     registry_duration_seconds = time.perf_counter() - registry_started
     sqlite_started = time.perf_counter()
     fts5_enabled = _build_sqlite(
-        database, archive_id, normalized_events, artifact_records, evidence_records
+        database,
+        archive_id,
+        normalized_events,
+        artifact_records,
+        evidence_records,
+        decision_records,
     )
     sqlite_duration_seconds = time.perf_counter() - sqlite_started
     manifest = {
@@ -664,6 +759,7 @@ def build_archive_index(
             "key_events": len(normalized_events),
             "artifacts": len(artifact_records),
             "evidence": len(evidence_records),
+            "decision_receipts": len(decision_records),
             "artifact_hashes_reused": sum(
                 item.get("hash_reused") is True for item in artifact_records
             ),
@@ -705,6 +801,7 @@ def build_archive_index(
             "database": INDEX_DB_NAME,
             "artifact_registry": ARTIFACT_REGISTRY_NAME,
             "evidence_registry": EVIDENCE_REGISTRY_NAME,
+            "decision_receipt_registry": DECISION_REGISTRY_NAME,
         },
         "integrity": {
             INDEX_DB_NAME: {"size_bytes": database.stat().st_size, "sha256": _sha256(database)},
@@ -715,6 +812,10 @@ def build_archive_index(
             EVIDENCE_REGISTRY_NAME: {
                 "size_bytes": evidence_registry.stat().st_size,
                 "sha256": _sha256(evidence_registry),
+            },
+            DECISION_REGISTRY_NAME: {
+                "size_bytes": decision_registry.stat().st_size,
+                "sha256": _sha256(decision_registry),
             },
         },
     }
@@ -823,6 +924,54 @@ def search_archive_index(
             )
             results.append(payload)
         return results
+    finally:
+        connection.close()
+
+
+def search_decision_receipts(
+    root: Path,
+    *,
+    rule_id: str | None = None,
+    verdict: str | None = None,
+    subject_id: str | None = None,
+    query: str | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """Search deterministic quality decisions by rule, outcome, or subject."""
+
+    database = root / "JSON-Config-Files" / INDEX_DB_NAME
+    if not database.is_file():
+        return []
+    connection = sqlite3.connect(str(database))
+    connection.row_factory = sqlite3.Row
+    try:
+        conditions: list[str] = []
+        parameters: list[Any] = []
+        join = ""
+        if subject_id:
+            join = (
+                " JOIN decision_subjects s"
+                " ON s.decision_id = d.decision_id"
+            )
+            conditions.append("s.subject_id = ?")
+            parameters.append(str(subject_id))
+        if rule_id:
+            conditions.append("d.rule_id = ?")
+            parameters.append(str(rule_id))
+        if verdict:
+            conditions.append("d.verdict = ?")
+            parameters.append(str(verdict))
+        if query:
+            conditions.append("d.search_text LIKE ?")
+            parameters.append(f"%{query}%")
+        where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+        parameters.append(max(1, min(int(limit), 1000)))
+        rows = connection.execute(
+            "SELECT d.receipt_json FROM decision_receipts d"
+            f"{join}{where} ORDER BY d.rule_id, d.decision_id LIMIT ?",
+            parameters,
+        ).fetchall()
+        return [json.loads(row["receipt_json"]) for row in rows]
     finally:
         connection.close()
 

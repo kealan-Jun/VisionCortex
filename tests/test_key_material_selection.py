@@ -130,3 +130,37 @@ def test_overlapping_nearby_actions_keep_higher_confidence_with_receipt(
     assert by_id["E-1"]["competitor_event_id"] == "E-2"
     assert by_id["E-1"]["interval_overlap_ms"] == 100.0
     assert by_id["E-2"]["selected"] is True
+
+
+def test_hand_only_overlap_cannot_deduplicate_different_manipulated_objects(
+    default_config,
+):
+    events = [
+        _event(1, 10_000, confidence=0.8).model_copy(
+            update={"objects": ["gloved_hand", "paper"]}
+        ),
+        _event(2, 10_800, confidence=0.95).model_copy(
+            update={"objects": ["gloved_hand", "balance"]}
+        ),
+    ]
+    group, segment = _context(events)
+    receipts = []
+
+    selected = select_key_events(
+        [group], [segment], events, default_config, decision_receipts=receipts
+    )
+    by_id = {item["event_id"]: item for item in receipts}
+
+    assert [event.event_id for event in selected] == ["E-1", "E-2"]
+    assert by_id["E-1"]["selected"] is True
+    assert by_id["E-2"]["selected"] is True
+    assert by_id["E-2"]["shared_objects"] == []
+    assert by_id["E-2"]["facts"]["dedup_comparisons"][0][
+        "shared_actor_objects"
+    ] == ["gloved_hand"]
+    assert by_id["E-2"]["facts"]["dedup_comparisons"][0][
+        "is_duplicate"
+    ] is False
+    assert by_id["E-2"]["receipt_schema_version"] == (
+        "visioncortex-decision-receipt/1.0.0"
+    )

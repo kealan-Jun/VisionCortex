@@ -41,6 +41,11 @@ performance:
   fine_group_recall_min_unresolved_anchors: 3
   fine_group_recall_padding_seconds: 0.0
   fine_group_recall_max_rounds: 5
+  fine_group_recall_cluster_gap_seconds: 10.0
+  # A zero-yield coarse prior is not proof that a static view cannot close a
+  # later dual-view gap. Exhaust remaining views for unresolved temporal
+  # clusters before declaring the evidence layer complete.
+  fine_group_recall_zero_prior_quality_fallback: true
   # Optional workload-adaptive mode. The default remains the established all-
   # selected-view scan; hardware profiles may enable progressive cross-view
   # supplementation explicitly.
@@ -168,6 +173,7 @@ segmentation:
   # This prevents isolated pipette-tip/vessel motion from pulling the boundary
   # earlier than the first directly observed physical interaction.
   liquid_start_anchor_required_objects: [pipette]
+  movement_opener_corroboration_seconds: 30.0
   key_clip_pre_seconds: 2.0
   key_clip_post_seconds: 3.0
   event_merge_gap_seconds: 1.25
@@ -191,6 +197,7 @@ continuity:
   max_gap_seconds: 300.0
   require_shared_third_view: false
   minimum_shared_objects: 2
+  minimum_shared_object_identities: 1
   preparation_bridge_max_gap_seconds: 20.0
   preparation_segment_max_seconds: 20.0
   preparation_segment_max_events: 2
@@ -200,6 +207,7 @@ continuity:
   # objects agree, and neither side contains an explicit state/equipment step.
   atomic_fragment_merge_max_gap_seconds: 20.0
   atomic_fragment_min_shared_objects: 2
+  atomic_fragment_min_shared_object_identities: 1
   # A brief FP-only observation may sit between two corroborated fragments of
   # one recalled operation when the TP view is occluded. It may connect the
   # audit graph, but its events must never enter the formal segment.
