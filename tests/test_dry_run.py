@@ -37,7 +37,20 @@ def test_dry_run_builds_contract_without_video_or_ffmpeg(tmp_path):
         == "../Key-Materials/Key-Material-Category-Index.json"
     )
     assert list((output / "Lab-Daily-Reports").glob("*/Lab-Daily-Report-*.json"))
-    assert list((output / "Professional-PDFs").glob("Lab-Daily-Report-*.pdf"))
+    assert list(
+        (output / "Professional-PDFs").glob(
+            "VisionCortex-Professional-Evidence-Report-*.pdf"
+        )
+    )
+    professional_manifest = json.loads(
+        (output / "JSON-Config-Files" / "professional_report_manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert professional_manifest["template_id"] == (
+        "VC-PROFESSIONAL-EVIDENCE-REPORT-V1"
+    )
+    assert professional_manifest["additional_model_tokens"] == 0
     daily_eval_path = next((output / "Lab-Daily-Reports").glob("*/Daily-Report-Eval.json"))
     daily_evaluation = json.loads(daily_eval_path.read_text(encoding="utf-8"))
     assert daily_evaluation["passed"] is True

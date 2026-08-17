@@ -34,7 +34,11 @@ def test_fixed_archive_promotion_replaces_derived_outputs_and_retains_previous(t
     daily_eval = staging / "Lab-Daily-Reports" / "2026-08-13" / "Daily-Report-Eval.json"
     daily_eval.parent.mkdir(parents=True, exist_ok=True)
     daily_eval.write_text(json.dumps({"passed": True}), encoding="utf-8")
-    daily_pdf = staging / "Professional-PDFs" / "Lab-Daily-Report-2026-08-13.pdf"
+    daily_pdf = (
+        staging
+        / "Professional-PDFs"
+        / "VisionCortex-Professional-Evidence-Report-2026-08-13.pdf"
+    )
     daily_pdf.parent.mkdir(parents=True, exist_ok=True)
     daily_pdf.write_bytes(b"%PDF-test")
     staged_original = staging / "Original-Experiment-Videos"

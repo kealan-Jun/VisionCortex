@@ -246,7 +246,7 @@ archive:
 
 daily_report:
   enabled: true
-  template_id: VC-LAB-DAILY-REPORT-V1
+  template_id: VC-LAB-DAILY-REPORT-V2
   timezone: Asia/Shanghai
   generate_pdf: true
   additional_mllm_calls: false

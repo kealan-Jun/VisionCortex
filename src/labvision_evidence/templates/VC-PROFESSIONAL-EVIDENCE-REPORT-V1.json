@@ -1,0 +1,53 @@
+{
+  "template_id": "VC-PROFESSIONAL-EVIDENCE-REPORT-V1",
+  "schema_version": "1.0.0",
+  "title": "VisionCortex 多视角实验分析专业证据报告",
+  "audience": "实验室管理者、质量负责人、项目委托方和审计人员",
+  "reading_layers": [
+    {
+      "layer": "decision",
+      "title": "结论与可信度",
+      "reader": "所有读者"
+    },
+    {
+      "layer": "experiment",
+      "title": "实验过程与双视角证据",
+      "reader": "实验与项目人员"
+    },
+    {
+      "layer": "audit",
+      "title": "质量、耗时、Token 与来源附录",
+      "reader": "质量与审计人员"
+    }
+  ],
+  "sections": [
+    "cover_and_document_control",
+    "executive_summary",
+    "scope_and_evidence_basis",
+    "experiment_results",
+    "selected_dual_view_visual_evidence",
+    "quality_uncertainty_and_limitations",
+    "performance_and_token_accounting",
+    "provenance_and_archive_index"
+  ],
+  "visual_policy": {
+    "source": "accepted_key_materials_only",
+    "dual_view_only": true,
+    "maximum_images_per_experiment": 5,
+    "prefer_action_category_diversity": true,
+    "caption_fields": ["experiment_name", "event_id", "action_label", "peak_timecode", "objects", "source_path"],
+    "preserve_originals": true
+  },
+  "claim_policy": {
+    "observed_fact": "可从已归档视频、关键帧、时间轴或检测账本直接回溯",
+    "supported_model_understanding": "由已归档双视角关键素材支持的模型解释",
+    "uncertain": "证据不足、遮挡或跨视角不一致，必须显式标注",
+    "forbid_unreferenced_claims": true
+  },
+  "generation_policy": {
+    "layout_editable_by_model": false,
+    "content_source": "accepted_evidence_package_only",
+    "additional_mllm_calls": false,
+    "additional_model_tokens": 0
+  }
+}

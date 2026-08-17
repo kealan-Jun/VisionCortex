@@ -29,6 +29,13 @@ def test_daily_report_reconciles_local_validation_package(default_config):
     assert report["overview"]["experiment_group_count"] == 5
     assert report["overview"]["key_event_count"] == 32
     assert report["source_policy"]["additional_model_tokens"]["total_tokens"] == 0
-    assert report["template_id"] == "VC-LAB-DAILY-REPORT-V1"
+    assert report["template_id"] == "VC-LAB-DAILY-REPORT-V2"
     assert report["source_policy"]["layout_editable_by_model"] is False
+    assert (
+        report["presentation_contract"]["professional_template_id"]
+        == "VC-PROFESSIONAL-EVIDENCE-REPORT-V1"
+    )
+    assert report["source_policy"]["report_narrative_source"] == (
+        "accepted_existing_model_understanding"
+    )
     assert report["performance"]["total_tokens"] == 219535

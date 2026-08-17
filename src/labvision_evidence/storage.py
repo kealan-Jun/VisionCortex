@@ -312,8 +312,16 @@ def promote_fixed_archive(
         for path in report_evaluations
     ):
         raise RuntimeError("Staged daily report did not pass evaluation; promotion refused")
-    if not any((staging_root / "Professional-PDFs").glob("Lab-Daily-Report-*.pdf")):
-        raise RuntimeError("Staged daily report PDF is missing; promotion refused")
+    professional_pdfs = staging_root / "Professional-PDFs"
+    if not (
+        any(
+            professional_pdfs.glob(
+                "VisionCortex-Professional-Evidence-Report-*.pdf"
+            )
+        )
+        or any(professional_pdfs.glob("Lab-Daily-Report-*.pdf"))
+    ):
+        raise RuntimeError("Staged professional evidence PDF is missing; promotion refused")
 
     staged_manifests = {
         directory: _directory_manifest(staging_root / directory)
