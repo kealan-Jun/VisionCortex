@@ -101,6 +101,69 @@ def validate_archive_quality_command(
     typer.echo(json.dumps(report, ensure_ascii=False, indent=2))
 
 
+@app.command("register-archived-collection")
+def register_archived_collection_command(
+    experiment_id: Annotated[str, typer.Option("--experiment-id")],
+    archive: Annotated[Path, typer.Option("--archive", "-a", exists=True, file_okay=False)],
+    config: Annotated[Path | None, typer.Option("--config", "-c", exists=True, dir_okay=False)] = None,
+) -> None:
+    """Register an existing accepted archive in the central collection ledger."""
+
+    accepted_files = (
+        archive / "JSON-Config-Files" / "evidence_package_eval.json",
+        archive / "JSON-Config-Files" / "quality_acceptance.json",
+    )
+    for path in accepted_files:
+        if not path.is_file():
+            raise typer.BadParameter(f"Acceptance receipt is missing: {path}")
+        if not json.loads(path.read_text(encoding="utf-8-sig")).get("passed"):
+            raise typer.BadParameter(f"Acceptance receipt did not pass: {path}")
+    report_evaluations = list(
+        (archive / "Lab-Daily-Reports").glob("*/Daily-Report-Eval.json")
+    )
+    if not report_evaluations or not all(
+        json.loads(path.read_text(encoding="utf-8-sig")).get("passed")
+        for path in report_evaluations
+    ):
+        raise typer.BadParameter("A passing daily-report evaluation is required")
+    professional_pdfs = list(
+        (archive / "Professional-PDFs").glob(
+            "VisionCortex-Professional-Evidence-Report-*.pdf"
+        )
+    )
+    if not professional_pdfs:
+        raise typer.BadParameter("A professional evidence PDF is required")
+    settings = load_config(config)
+    run_id = f"archive-registration-{datetime.now():%Y%m%d-%H%M%S}"
+    ledger = record_collection_state(
+        settings,
+        experiment_id,
+        archive_name=archive.name,
+        run_id=run_id,
+        state="archived",
+        details={
+            "formal_archive": str(archive.resolve()),
+            "registration_only": True,
+            "daily_report_evaluations": len(report_evaluations),
+            "professional_pdf_count": len(professional_pdfs),
+        },
+    )
+    typer.echo(
+        json.dumps(
+            {
+                "state": "archived",
+                "source_experiment_id": experiment_id,
+                "archive": str(archive.resolve()),
+                "ledger": str(ledger),
+                "model_calls": 0,
+                "token_usage": 0,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+
 @app.command("prepare-engine")
 def prepare_engine_command(
     config: Annotated[Path | None, typer.Option("--config", "-c", exists=True, dir_okay=False)] = None,

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from labvision_evidence import cli
@@ -72,3 +73,41 @@ def test_index_collection_cli_promotes_only_after_pipeline_success(monkeypatch, 
     assert records == ["queued", "processing", "archived"]
     assert len(promoted) == 1
     assert promoted[0][1].name == "Collection-01"
+
+
+def test_register_archive_requires_and_records_passing_report_receipts(
+    monkeypatch, tmp_path
+):
+    archive = tmp_path / "Accepted-Archive"
+    json_root = archive / "JSON-Config-Files"
+    report_root = archive / "Lab-Daily-Reports" / "2026-08-17"
+    pdf_root = archive / "Professional-PDFs"
+    for root in (json_root, report_root, pdf_root):
+        root.mkdir(parents=True, exist_ok=True)
+    for name in ("evidence_package_eval.json", "quality_acceptance.json"):
+        (json_root / name).write_text(json.dumps({"passed": True}), encoding="utf-8")
+    (report_root / "Daily-Report-Eval.json").write_text(
+        json.dumps({"passed": True}), encoding="utf-8"
+    )
+    (pdf_root / "VisionCortex-Professional-Evidence-Report-2026-08-17.pdf").write_bytes(
+        b"%PDF-test"
+    )
+    recorded = []
+    monkeypatch.setattr(
+        cli,
+        "load_config",
+        lambda *_: {"storage": {"archive_root": str(tmp_path / "archive-root")}},
+    )
+    monkeypatch.setattr(
+        cli,
+        "record_collection_state",
+        lambda *args, **kwargs: recorded.append(kwargs) or tmp_path / "ledger.json",
+    )
+
+    cli.register_archived_collection_command(
+        experiment_id="exp-accepted", archive=archive, config=None
+    )
+
+    assert recorded[0]["state"] == "archived"
+    assert recorded[0]["archive_name"] == "Accepted-Archive"
+    assert recorded[0]["details"]["registration_only"] is True
