@@ -65,6 +65,12 @@ def test_nas_ingest_registers_segments_without_copying(default_config, tmp_path)
     assert ingest["source_validation"]["verified_file_count"] == 8
     assert ingest["source_validation"]["missing_count"] == 0
     assert manifest_path.is_file()
+    role_receipt = json.loads(
+        Path(ingest["view_role_resolution"]["receipt"]).read_text(encoding="utf-8")
+    )
+    assert role_receipt["status"] == "resolved"
+    assert role_receipt["resolved_first_person_views"] == 1
+    assert role_receipt["resolved_third_person_views"] == 1
     assert not (tmp_path / "runtime" / "Input" / "segmented" / "video.mp4").exists()
     original_root = tmp_path / "archive" / "Original-Experiment-Videos"
     original_index = json.loads(

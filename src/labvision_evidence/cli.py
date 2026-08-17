@@ -14,12 +14,19 @@ import yaml
 
 from .archive import ArchiveLayout, _artifact_json, refresh_key_material_metadata, write_json
 from .config import load_config, load_manifest
+from .collection_state import record_collection_state
 from .daily_reports import generate_daily_report_from_archive
 from .detection import validate_models
 from .indexing import build_archive_index
 from .pipeline import EvidencePipeline, create_dry_run
 from .schemas import RunSummary, VideoInfo
-from .storage import fixed_archive_staging_paths, prepare_from_nas_index, promote_fixed_archive
+from .storage import (
+    fixed_archive_staging_paths,
+    initialize_nas_archive,
+    prepare_from_nas_index,
+    promote_fixed_archive,
+    safe_archive_name,
+)
 from .validation import validate_experiment_and_material_quality
 
 
@@ -186,6 +193,110 @@ def run_fixed_benchmark_command(
         f"{fixed_root} total_seconds={time.perf_counter() - started:.6f} "
         f"previous_package_retained={receipt['previous_package_retained']}"
     )
+
+
+@app.command("run-index-collection")
+def run_index_collection_command(
+    experiment_id: Annotated[str, typer.Option("--experiment-id")],
+    archive_name: Annotated[str, typer.Option("--archive-name")],
+    config: Annotated[Path, typer.Option("--config", "-c", exists=True, dir_okay=False)] = Path(
+        "configs/rtx4060-laptop-production.yaml"
+    ),
+) -> None:
+    """Run one indexed NAS collection through staging and verified promotion."""
+
+    settings = load_config(config)
+    safe_name = safe_archive_name(archive_name)
+    run_id = f"collection-{datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:4]}"
+    fixed_root, staging_root, history_root = fixed_archive_staging_paths(
+        settings, safe_name, run_id
+    )
+    if fixed_root.exists():
+        raise typer.BadParameter(
+            f"Formal archive already exists; choose a new English archive name: {fixed_root}"
+        )
+    settings["storage"]["sync_to_nas"] = True
+    settings["storage"]["active_archive_path"] = str(staging_root)
+    settings["project"]["output_root"] = str(
+        Path(settings["storage"]["local_runtime_root"]).resolve() / "runs" / run_id
+    )
+    initialize_nas_archive(settings, safe_name)
+    started = time.perf_counter()
+    record_collection_state(
+        settings,
+        experiment_id,
+        archive_name=safe_name,
+        run_id=run_id,
+        state="queued",
+        details={"staging": str(staging_root), "source_copy_bytes": 0},
+    )
+    try:
+        record_collection_state(
+            settings,
+            experiment_id,
+            archive_name=safe_name,
+            run_id=run_id,
+            state="processing",
+            details={"staging": str(staging_root)},
+        )
+        manifest, manifest_path, ingest = prepare_from_nas_index(
+            settings, experiment_id, lambda message: typer.echo(f"[NAS] {message}")
+        )
+        manifest.experiment_id = safe_name
+        manifest_path.write_text(
+            yaml.safe_dump(
+                manifest.model_dump(mode="json"), allow_unicode=True, sort_keys=False
+            ),
+            encoding="utf-8",
+        )
+        typer.echo(
+            f"run_id={run_id} input_views={len(manifest.views)} "
+            f"input_mode={ingest['input_mode']} source_copy_bytes="
+            f"{ingest['copied_source_bytes']} staging={staging_root}"
+        )
+        EvidencePipeline(settings, _progress).run(manifest)
+        receipt = promote_fixed_archive(staging_root, fixed_root, history_root)
+        record_collection_state(
+            settings,
+            experiment_id,
+            archive_name=safe_name,
+            run_id=run_id,
+            state="archived",
+            details={
+                "formal_archive": str(fixed_root),
+                "promotion_verification": receipt.get("verification"),
+            },
+        )
+        typer.echo(
+            json.dumps(
+                {
+                    "run_id": run_id,
+                    "state": "archived",
+                    "source_experiment_id": experiment_id,
+                    "archive": str(fixed_root),
+                    "staging": str(staging_root),
+                    "source_copy_bytes": ingest["copied_source_bytes"],
+                    "total_seconds": round(time.perf_counter() - started, 6),
+                    "promotion": receipt,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    except Exception as exc:
+        record_collection_state(
+            settings,
+            experiment_id,
+            archive_name=safe_name,
+            run_id=run_id,
+            state="failed",
+            details={
+                "staging": str(staging_root),
+                "error": f"{type(exc).__name__}: {exc}",
+                "total_seconds": round(time.perf_counter() - started, 6),
+            },
+        )
+        raise
 
 
 @app.command("serve")

@@ -17,6 +17,7 @@ from typing import Any, Callable, Sequence
 
 import yaml
 
+from .device_registry import load_device_registry, resolve_view_role
 from .schemas import RunManifest, VideoSegmentInput, ViewInput, ViewRole
 
 
@@ -473,16 +474,6 @@ class IncrementalArchivePublisher:
         return destination
 
 
-KNOWN_ROLE_OVERRIDES = {
-    # The NAS index says "first", but this source is obstructed in this exact
-    # validation recording. The wearable lubancat stream is the usable FP view.
-    "exp_20260810_144014_e918b762": {
-        "lubancat-e8cc0cb3_cam01": ViewRole.FIRST_PERSON,
-        "orangepi5pro-d12a4719_cam01": ViewRole.THIRD_PERSON,
-    }
-}
-
-
 def _parts(value: str | None) -> list[str]:
     return [item.strip() for item in (value or "").split(";") if item.strip()]
 
@@ -561,7 +552,59 @@ def prepare_from_nas_index(
     else:
         manifest_root = Path(storage["local_runtime_root"]) / "input-manifests" / experiment_id
     manifest_root.mkdir(parents=True, exist_ok=True)
-    overrides = KNOWN_ROLE_OVERRIDES.get(experiment_id, {})
+    registry = load_device_registry(storage.get("device_registry_path"))
+    role_receipts = [
+        resolve_view_role(
+            registry,
+            experiment_id,
+            str(row.get("camera_key") or ""),
+            row.get("camera_view"),
+        )
+        for row in rows
+    ]
+    receipt_by_camera = {
+        str(receipt["camera_key"]): receipt for receipt in role_receipts
+    }
+    role_receipt_payload = {
+        "schema_version": "visioncortex-view-role-resolution-ledger/1",
+        "experiment_id": experiment_id,
+        "index_csv": str(index_csv),
+        "registry": registry.get("provenance"),
+        "status": "blocked"
+        if any(receipt.get("blocking_reasons") for receipt in role_receipts)
+        else "resolved",
+        "resolved_first_person_views": sum(
+            receipt.get("resolved_role") == ViewRole.FIRST_PERSON.value
+            for receipt in role_receipts
+        ),
+        "resolved_third_person_views": sum(
+            receipt.get("resolved_role") == ViewRole.THIRD_PERSON.value
+            for receipt in role_receipts
+        ),
+        "approved_override_count": sum(
+            receipt.get("status") == "approved_override" for receipt in role_receipts
+        ),
+        "views": role_receipts,
+    }
+    role_receipt_path = (
+        Path(active_archive) / "JSON-Config-Files" / "view_role_resolution.json"
+        if active_archive
+        else manifest_root / "view_role_resolution.json"
+    )
+    _atomic_write_text(
+        role_receipt_path,
+        json.dumps(role_receipt_payload, ensure_ascii=False, indent=2),
+    )
+    blocking_roles = [
+        {
+            "camera_key": receipt.get("camera_key"),
+            "blocking_reasons": receipt.get("blocking_reasons"),
+        }
+        for receipt in role_receipts
+        if receipt.get("blocking_reasons") or not receipt.get("resolved_role")
+    ]
+    if blocking_roles:
+        raise ValueError(f"View role resolution blocked: {blocking_roles}")
 
     def prepare(row: dict[str, str]) -> ViewInput:
         camera_key = str(row["camera_key"])
@@ -578,9 +621,7 @@ def prepare_from_nas_index(
             off_nas = [str(item) for item in videos + clocks if item.drive.upper() != expected_drive]
             if off_nas:
                 raise ValueError(f"Source path escaped NAS drive {expected_drive}: {off_nas[:4]}")
-        role = overrides.get(camera_key)
-        if role is None:
-            role = ViewRole.FIRST_PERSON if row.get("camera_view") == "first" else ViewRole.THIRD_PERSON
+        role = ViewRole(receipt_by_camera[camera_key]["resolved_role"])
         return ViewInput(
             view_id=camera_key,
             role=role,
@@ -636,7 +677,18 @@ def prepare_from_nas_index(
         "manifest": str(manifest_path),
         "segment_counts": segment_counts,
         "source_validation": source_validation,
-        "role_overrides": {key: value.value for key, value in overrides.items()},
+        "view_role_resolution": {
+            "status": role_receipt_payload["status"],
+            "receipt": str(role_receipt_path),
+            "approved_override_count": role_receipt_payload[
+                "approved_override_count"
+            ],
+        },
+        "role_overrides": {
+            str(receipt["camera_key"]): str(receipt["resolved_role"])
+            for receipt in role_receipts
+            if receipt.get("status") == "approved_override"
+        },
     }
     _atomic_write_text(
         manifest_root / "nas_ingest.json",
@@ -755,6 +807,7 @@ def prepare_from_nas_index(
                         str(readme_path),
                         str(manifest_path),
                         str(manifest_root / "nas_ingest.json"),
+                        str(role_receipt_path),
                     ],
                 },
                 ensure_ascii=False,

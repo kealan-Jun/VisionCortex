@@ -11,6 +11,7 @@ import threading
 import time
 import unicodedata
 import uuid
+from collections import Counter
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -23,6 +24,8 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 
+from .collection_catalog import discover_collections, get_collection
+from .collection_state import record_collection_state
 from .config import load_config
 from .indexing import (
     INDEX_DB_NAME,
@@ -150,6 +153,32 @@ def _reserve_archive(settings: dict[str, Any], experiment_name: str) -> tuple[st
     return archive_name, nas_root
 
 
+def _reserve_collection_archive(
+    settings: dict[str, Any], experiment_name: str, run_id: str
+) -> tuple[str, Path, Path, Path]:
+    """Reserve a unique formal name while writing only to run staging."""
+
+    base_name = safe_archive_name(experiment_name)
+    archive_root = _archive_root(settings)
+    with _lock:
+        archive_name = base_name
+        if (archive_root / archive_name).exists() or any(
+            run.get("experiment_id") == archive_name
+            and run.get("state") not in {"completed", "failed", "interrupted"}
+            for run in _runs.values()
+        ):
+            suffix = datetime.now().strftime("%Y%m%d-%H%M%S")
+            archive_name = f"{base_name}-{suffix}-{uuid.uuid4().hex[:4]}"
+        fixed_root, staging_root, history_root = fixed_archive_staging_paths(
+            settings, archive_name, run_id
+        )
+        local_runtime_root = Path(settings["storage"]["local_runtime_root"]).resolve()
+        settings["project"]["output_root"] = str(local_runtime_root / "runs" / run_id)
+        settings["storage"]["active_archive_path"] = str(staging_root)
+        initialize_nas_archive(settings, archive_name)
+    return archive_name, fixed_root, staging_root, history_root
+
+
 def _reserve_fixed_benchmark(settings: dict[str, Any], run_id: str) -> Path:
     fixed_root, nas_root, history_root = fixed_archive_staging_paths(
         settings, _BENCHMARK_ARCHIVE_NAME, run_id
@@ -264,6 +293,31 @@ def _append_fixed_benchmark_metrics(
             "completed": completed,
             "experiment_id": _BENCHMARK_EXPERIMENT_ID,
             "archive_name": _BENCHMARK_ARCHIVE_NAME,
+        }
+        _write_json_atomic(metrics_path, metrics)
+
+
+def _append_collection_index_metrics(
+    roots: list[Path], timing: dict[str, Any], completed: bool
+) -> None:
+    ended_at = datetime.now().astimezone().isoformat()
+    total_seconds = round(time.perf_counter() - float(timing["request_started_perf"]), 6)
+    for root in dict.fromkeys(path.resolve() for path in roots):
+        metrics_path = root / "JSON-Config-Files" / "run_metrics.json"
+        metrics = _read_json(metrics_path, {}) or {}
+        metrics["nas_index_ingest"] = {
+            key: value
+            for key, value in timing.items()
+            if key not in {"request_started_perf", "request_received_at"}
+        }
+        metrics["collection_end_to_end"] = {
+            "definition": "collection card selection + zero-copy NAS index ingest + analysis + NAS archive",
+            "request_received_at": timing["request_received_at"],
+            "completed_at": ended_at,
+            "total_duration_seconds": total_seconds,
+            "completed": completed,
+            "source_experiment_id": timing.get("source_experiment_id"),
+            "archive_name": timing.get("archive_name"),
         }
         _write_json_atomic(metrics_path, metrics)
 
@@ -580,6 +634,124 @@ def _execute_fixed_benchmark(
         _update(run_id, state="failed", progress=1.0, error=f"{type(exc).__name__}: {exc}")
 
 
+def _execute_index_collection(
+    run_id: str,
+    source_experiment_id: str,
+    archive_name: str,
+    settings: dict[str, Any],
+    staging_root: Path,
+    fixed_root: Path,
+    history_root: Path,
+    timing: dict[str, Any],
+) -> None:
+    def progress(stage: str, value: float, message: str) -> None:
+        _update(
+            run_id,
+            state=stage,
+            progress=value,
+            message=message,
+            nas_output=str(fixed_root),
+            nas_staging=str(staging_root),
+        )
+
+    try:
+        record_collection_state(
+            settings,
+            source_experiment_id,
+            archive_name=archive_name,
+            run_id=run_id,
+            state="processing",
+            details={"staging": str(staging_root)},
+        )
+        manifest, manifest_path, ingest = prepare_from_nas_index(
+            settings,
+            source_experiment_id,
+            lambda message: _update(
+                run_id,
+                state="nas_ingest",
+                progress=0.01,
+                message=message,
+                nas_output=str(fixed_root),
+                nas_staging=str(staging_root),
+            ),
+        )
+        manifest.experiment_id = archive_name
+        manifest_path.write_text(
+            yaml.safe_dump(
+                manifest.model_dump(mode="json"), allow_unicode=True, sort_keys=False
+            ),
+            encoding="utf-8",
+        )
+        timing.update(
+            {
+                "ingest_completed_at": datetime.now().astimezone().isoformat(),
+                "ingest_duration_seconds": round(
+                    time.perf_counter() - float(timing["request_started_perf"]), 6
+                ),
+                "manifest": str(manifest_path),
+                "source_count": len(manifest.views),
+                "ingest_details": ingest,
+            }
+        )
+        _update(
+            run_id,
+            state="running",
+            progress=0.02,
+            nas_output=str(fixed_root),
+            nas_staging=str(staging_root),
+        )
+        output = EvidencePipeline(settings, progress).run(manifest)
+        _append_collection_index_metrics(
+            [Path(output), staging_root], timing, completed=True
+        )
+        promotion = promote_fixed_archive(staging_root, fixed_root, history_root)
+        record_collection_state(
+            settings,
+            source_experiment_id,
+            archive_name=archive_name,
+            run_id=run_id,
+            state="archived",
+            details={
+                "formal_archive": str(fixed_root),
+                "promotion_verification": promotion.get("verification"),
+            },
+        )
+        _update(
+            run_id,
+            state="completed",
+            progress=1.0,
+            output=str(fixed_root),
+            nas_output=str(fixed_root),
+            nas_staging=str(staging_root),
+            promotion=promotion,
+            archive_url=f"/#/archive/{quote(archive_name)}/experiments",
+        )
+    except Exception as exc:
+        timing.setdefault(
+            "ingest_duration_seconds",
+            round(time.perf_counter() - float(timing["request_started_perf"]), 6),
+        )
+        with _lock:
+            timing.setdefault("failure_stage", _runs.get(run_id, {}).get("state"))
+        _append_collection_index_metrics([staging_root], timing, completed=False)
+        try:
+            record_collection_state(
+                settings,
+                source_experiment_id,
+                archive_name=archive_name,
+                run_id=run_id,
+                state="failed",
+                details={
+                    "failure_stage": timing.get("failure_stage"),
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "staging": str(staging_root),
+                },
+            )
+        except Exception:
+            pass
+        _update(run_id, state="failed", progress=1.0, error=f"{type(exc).__name__}: {exc}")
+
+
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
     return (_web_root / "index.html").read_text(encoding="utf-8")
@@ -616,6 +788,16 @@ def health() -> dict[str, Any]:
             "input_mode": "NAS 15-minute segments / zero-copy virtual timeline",
             "local_runtime_root": str(settings["storage"]["local_runtime_root"]),
             "local_cache_root": str(settings["storage"]["local_cache_root"]),
+        },
+        "collection_ingest": {
+            "enabled": bool((settings.get("collection_ingest") or {}).get("enabled", True)),
+            "mode": "index_metadata_poll",
+            "poll_seconds": float(
+                (settings.get("collection_ingest") or {}).get("poll_seconds", 30.0)
+            ),
+            "recursive_nas_scan": False,
+            "index_csv": str(settings["storage"]["index_csv"]),
+            "device_registry_path": settings["storage"].get("device_registry_path"),
         },
     }
 
@@ -655,6 +837,81 @@ def list_archives() -> dict[str, Any]:
             }
         )
     return {"archive_root": str(root), "archives": archives}
+
+
+def _collection_card(collection: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: collection.get(key)
+        for key in (
+            "collection_id",
+            "experiment_id",
+            "display_name",
+            "status",
+            "sealed",
+            "ready_to_analyze",
+            "recording_start_time",
+            "recording_end_time",
+            "duration_seconds",
+            "camera_count",
+            "video_segment_count",
+            "clock_segment_count",
+            "declared_view_counts",
+            "resolved_view_counts",
+            "blocking_issue_count",
+            "warning_count",
+            "approved_override_count",
+            "fingerprint_sha256",
+            "processing",
+        )
+    } | {
+        "blocking_issue_codes": sorted(
+            {str(item.get("code")) for item in collection.get("blocking_issues") or []}
+        ),
+        "warning_codes": sorted(
+            {str(item.get("code")) for item in collection.get("warnings") or []}
+        ),
+    }
+
+
+@app.get("/api/collections")
+def list_collections(
+    status: str | None = None,
+    q: str | None = None,
+    limit: int = Query(200, ge=1, le=1000),
+) -> dict[str, Any]:
+    try:
+        payload = discover_collections(
+            _settings(), status=status, query=q, limit=limit
+        )
+    except (OSError, ValueError) as exc:
+        raise HTTPException(503, f"无法读取采集批次索引: {exc}") from exc
+    collections = [_collection_card(item) for item in payload["collections"]]
+    counts = Counter(item["status"] for item in collections)
+    processing_counts = Counter(
+        str((item.get("processing") or {}).get("state") or "not_processed")
+        for item in collections
+    )
+    return {
+        "schema_version": payload["schema_version"],
+        "generated_at": payload["generated_at"],
+        "index": payload["index"],
+        "registry": payload["registry"],
+        "monitoring_policy": payload["monitoring_policy"],
+        "status_counts": dict(counts),
+        "processing_status_counts": dict(processing_counts),
+        "collection_count": len(collections),
+        "collections": collections,
+    }
+
+
+@app.get("/api/collections/{experiment_id}")
+def collection_detail(experiment_id: str) -> dict[str, Any]:
+    try:
+        return get_collection(_settings(), experiment_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except (OSError, ValueError) as exc:
+        raise HTTPException(503, f"无法读取采集批次索引: {exc}") from exc
 
 
 def _search_archive_roots(archive_name: str | None) -> list[tuple[str, Path]]:
@@ -1347,6 +1604,104 @@ def create_fixed_benchmark_run(background_tasks: BackgroundTasks) -> dict[str, A
         "client_process_independent": True,
         "submission_protocol_version": _BENCHMARK_SUBMISSION_PROTOCOL_VERSION,
         "submission_receipt": str(submission_receipt),
+    }
+
+
+@app.post("/api/collections/{experiment_id}/runs", status_code=202)
+def create_collection_run(
+    experiment_id: str,
+    background_tasks: BackgroundTasks,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    request_started_perf = time.perf_counter()
+    request_received_at = datetime.now().astimezone().isoformat()
+    settings = _settings()
+    try:
+        collection = get_collection(settings, experiment_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except (OSError, ValueError) as exc:
+        raise HTTPException(503, f"无法读取采集批次索引: {exc}") from exc
+    if not collection.get("ready_to_analyze"):
+        raise HTTPException(
+            409,
+            {
+                "message": "采集批次尚未通过自动封口与视角质量门",
+                "status": collection.get("status"),
+                "blocking_issues": collection.get("blocking_issues"),
+            },
+        )
+    with _lock:
+        duplicate = next(
+            (
+                run_id
+                for run_id, run in _runs.items()
+                if run.get("source_collection_id") == experiment_id
+                and run.get("state") not in {"completed", "failed", "interrupted"}
+            ),
+            None,
+        )
+    if duplicate:
+        raise HTTPException(409, f"该采集批次已在任务 {duplicate} 中运行")
+
+    payload = payload or {}
+    start_date = str(collection.get("recording_start_time") or "")[:10].replace("-", "")
+    default_name = (
+        f"VisionCortex-Collection-{start_date or 'Undated'}-{experiment_id[-8:]}"
+    )
+    requested_name = str(payload.get("experiment_name") or default_name).strip()
+    run_id = f"collection-{uuid.uuid4().hex[:10]}"
+    settings["storage"]["sync_to_nas"] = True
+    archive_name, fixed_root, staging_root, history_root = _reserve_collection_archive(
+        settings, requested_name, run_id
+    )
+    timing = {
+        "request_started_perf": request_started_perf,
+        "request_received_at": request_received_at,
+        "source_experiment_id": experiment_id,
+        "archive_name": archive_name,
+        "index_csv": str(settings["storage"]["index_csv"]),
+        "collection_fingerprint_sha256": collection.get("fingerprint_sha256"),
+        "source_copy_bytes": 0,
+    }
+    _update(
+        run_id,
+        state="queued",
+        progress=0.0,
+        experiment_id=archive_name,
+        source_collection_id=experiment_id,
+        nas_output=str(fixed_root),
+        nas_staging=str(staging_root),
+    )
+    record_collection_state(
+        settings,
+        experiment_id,
+        archive_name=archive_name,
+        run_id=run_id,
+        state="queued",
+        details={"staging": str(staging_root), "source_copy_bytes": 0},
+    )
+    background_tasks.add_task(
+        _execute_index_collection,
+        run_id,
+        experiment_id,
+        archive_name,
+        settings,
+        staging_root,
+        fixed_root,
+        history_root,
+        timing,
+    )
+    return {
+        "run_id": run_id,
+        "state": "queued",
+        "status_url": f"/api/runs/{run_id}",
+        "source_collection_id": experiment_id,
+        "source_copy_bytes": 0,
+        "nas_output": str(fixed_root),
+        "nas_staging": str(staging_root),
+        "archive_name": archive_name,
+        "archive_url": f"/#/archive/{quote(archive_name)}/experiments",
     }
 
 

@@ -379,6 +379,41 @@ svg { display: block; width: 17px; height: 17px; fill: none; stroke: currentColo
 .daily-action-grid article { display: grid; gap: 3px; border-radius: 12px; padding: 14px; background: var(--brand-soft); }
 .daily-action-grid strong { color: var(--brand); font-size: 22px; }
 .daily-action-grid span { color: var(--text-2); font-size: 9px; }
+.collection-picker { display: grid; gap: 16px; }
+.collection-summary { display: grid; grid-template-columns: repeat(5,minmax(0,1fr)); gap: 8px; }
+.collection-summary span { display: grid; gap: 2px; border: 1px solid var(--border); border-radius: 11px; padding: 11px 12px; color: var(--text-3); background: #f9fbfb; font-size: 8px; }
+.collection-summary b { color: var(--brand); font-size: 18px; }
+.collection-search { display: grid; grid-template-columns: 18px minmax(0,1fr); align-items: center; gap: 8px; border: 1px solid var(--border-strong); border-radius: 11px; padding: 0 12px; background: #fff; }
+.collection-search svg { width: 16px; height: 16px; color: var(--text-3); }
+.collection-search input { min-width: 0; border: 0; padding: 12px 0; outline: 0; background: transparent; }
+.collection-card-list { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; max-height: 480px; overflow: auto; padding-right: 3px; }
+.collection-card { display: grid; gap: 10px; border: 1px solid var(--border); border-radius: 13px; padding: 14px; background: #fff; }
+.collection-card.selected { border-color: var(--brand-2); box-shadow: 0 0 0 2px rgba(45,124,130,.1); }
+.collection-card.recording { border-style: dashed; }
+.collection-card.attention { border-color: rgba(182,106,36,.28); }
+.collection-card header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.collection-card header div { min-width: 0; }
+.collection-card header small, .collection-card header strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.collection-card header small { color: var(--text-3); font: 8px ui-monospace,"Cascadia Code",monospace; }
+.collection-card header strong { margin-top: 4px; font-size: 12px; }
+.collection-card p { margin: 0; color: var(--text-2); font-size: 9px; line-height: 1.5; }
+.collection-status { flex: 0 0 auto; border-radius: 99px; padding: 5px 8px; font-size: 8px; font-weight: 800; }
+.collection-status.ready { color: var(--success); background: rgba(32,138,104,.1); }
+.collection-status.recording { color: var(--brand); background: var(--brand-soft); }
+.collection-status.attention { color: var(--warning); background: rgba(182,106,36,.1); }
+.collection-status.archived { color: var(--success); background: rgba(32,138,104,.12); }
+.collection-status.processing { color: var(--brand); background: var(--brand-soft); }
+.collection-status.failed { color: var(--danger); background: rgba(184,77,69,.1); }
+.collection-metrics { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 5px; }
+.collection-metrics span { border-radius: 7px; padding: 6px 7px; color: var(--text-3); background: #f4f7f7; font-size: 8px; }
+.collection-metrics b { color: var(--text); }
+.collection-issues { overflow-wrap: anywhere; color: var(--warning); font-size: 8px; }
+.selected-collection-note { display: grid; grid-template-columns: 32px minmax(0,1fr) auto; align-items: center; gap: 11px; border: 1px solid rgba(32,138,104,.24); border-radius: 12px; padding: 12px; background: rgba(32,138,104,.045); }
+.selected-collection-note > span { display: grid; width: 32px; height: 32px; place-items: center; border-radius: 9px; color: #fff; background: var(--success); }
+.selected-collection-note svg { width: 16px; height: 16px; }
+.selected-collection-note strong { font-size: 10px; }
+.selected-collection-note p { margin: 3px 0 0; color: var(--text-2); font-size: 8px; line-height: 1.5; }
+.manual-upload-fallback.is-secondary { opacity: .7; }
 
 @media (min-width: 1600px) {
   .pipeline-journey { grid-template-columns: repeat(7,minmax(0,1fr)); }
@@ -389,6 +424,7 @@ svg { display: block; width: 17px; height: 17px; fill: none; stroke: currentColo
   .review-card { position: static; }
   .material-grid { grid-template-columns: 1fr; }
   .daily-action-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .collection-card-list { grid-template-columns: 1fr; }
   .workflow-strip { grid-template-columns: repeat(2,minmax(0,1fr)); }
   .live-metric-grid { grid-template-columns: repeat(3,minmax(0,1fr)); }
   .journey-step::after { display: none; }
@@ -436,4 +472,7 @@ svg { display: block; width: 17px; height: 17px; fill: none; stroke: currentColo
   .material-group > header { grid-template-columns: 36px minmax(0,1fr); }
   .material-group > header > .badge { grid-column: 2; justify-self: start; }
   .material-badges { justify-content: flex-start; }
+  .collection-summary { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .selected-collection-note { grid-template-columns: 32px minmax(0,1fr); }
+  .selected-collection-note .secondary-button { grid-column: 2; justify-self: start; }
 }

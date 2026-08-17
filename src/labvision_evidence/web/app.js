@@ -35,8 +35,12 @@ const state = {
   archives: [],
   health: null,
   runs: [],
+  collections: [],
   sources: [],
   activeRun: null,
+  selectedCollectionId: null,
+  collectionQuery: "",
+  experimentName: "",
   archiveCache: new Map(),
   search: "",
   refreshingTasks: false,
@@ -168,7 +172,11 @@ async function api(url, options) {
   const response = await fetch(url, options);
   let payload;
   try { payload = await response.json(); } catch { payload = null; }
-  if (!response.ok) throw new Error(payload?.detail || `${response.status} ${response.statusText}`);
+  if (!response.ok) {
+    const detail = payload?.detail;
+    const message = typeof detail === "string" ? detail : detail?.message || `${response.status} ${response.statusText}`;
+    throw new Error(message);
+  }
   return payload;
 }
 
@@ -226,10 +234,11 @@ function updateServiceChrome() {
 }
 
 async function loadAll() {
-  const results = await Promise.allSettled([api("/api/health"), api("/api/archives"), api("/api/runs")]);
+  const results = await Promise.allSettled([api("/api/health"), api("/api/archives"), api("/api/runs"), api("/api/collections?limit=200")]);
   if (results[0].status === "fulfilled") state.health = results[0].value;
   if (results[1].status === "fulfilled") state.archives = results[1].value.archives || [];
   if (results[2].status === "fulfilled") state.runs = results[2].value.runs || [];
+  if (results[3].status === "fulfilled") state.collections = results[3].value.collections || [];
   updateServiceChrome();
 }
 
@@ -347,6 +356,7 @@ function importBatch(fileList) {
     toast("没有识别到视频文件，请选择 MP4、MOV、MKV、AVI 或 WebM。", "error");
     return;
   }
+  state.selectedCollectionId = null;
   const unusedCsvs = [...csvs];
   state.sources = videos.map((video, index) => {
     const normalized = normalizePairName(video.name);
@@ -388,35 +398,107 @@ function roleGuidance() {
   return { tone: "ok", text: `已准备 ${videos} 路视频：${first} 路第一人称、${third} 路第三人称。系统会按这 ${videos} 路实际输入并发调度。` };
 }
 
+function selectedCollection() {
+  return state.collections.find((item) => item.collection_id === state.selectedCollectionId) || null;
+}
+
+function defaultCollectionArchiveName(collection) {
+  const date = String(collection?.recording_start_time || "").slice(0, 10).replaceAll("-", "") || "Undated";
+  const suffix = String(collection?.experiment_id || "Collection").slice(-8);
+  return `VisionCortex-Collection-${date}-${suffix}`;
+}
+
+function collectionStatusCopy(collection) {
+  const processing = collection.processing?.state;
+  if (processing === "archived") return { label: "已处理并留存", tone: "archived", note: `正式归档：${collection.processing.archive_name || "已生成"}` };
+  if (["queued", "processing"].includes(processing)) return { label: "处理中", tone: "processing", note: `任务 ${collection.processing.run_id || "已接管"}` };
+  if (processing === "failed") return { label: "处理失败", tone: "failed", note: "正式归档未提升，可查看失败 staging 证据" };
+  if (collection.status === "ready") return { label: "可开始分析", tone: "ready", note: "索引已封口，双视角角色完整" };
+  if (collection.status === "recording") return { label: "采集中", tone: "recording", note: "等待所有相机写入结束时间" };
+  return { label: "需处理", tone: "attention", note: `${number(collection.blocking_issue_count)} 项阻断问题` };
+}
+
+function filteredCollections() {
+  const query = state.collectionQuery.trim().toLocaleLowerCase();
+  const items = query
+    ? state.collections.filter((item) => `${item.collection_id} ${item.display_name}`.toLocaleLowerCase().includes(query))
+    : state.collections;
+  return items.slice(0, 24);
+}
+
+function collectionCards() {
+  const items = filteredCollections();
+  if (!items.length) return `<div class="empty-state compact"><strong>没有匹配的采集批次</strong><p>无需手工选择 15 分钟分片；刷新索引或修改日期/批次搜索词。</p></div>`;
+  return `<div class="collection-card-list">${items.map((collection) => {
+    const status = collectionStatusCopy(collection);
+    const views = collection.resolved_view_counts || {};
+    const selected = collection.collection_id === state.selectedCollectionId;
+    const issues = [...(collection.blocking_issue_codes || []), ...(collection.warning_codes || [])];
+    return `<article class="collection-card ${status.tone} ${selected ? "selected" : ""}">
+      <header><div><small>${esc(collection.collection_id)}</small><strong>${formatDate(collection.recording_start_time)}</strong></div><span class="collection-status ${status.tone}">${esc(status.label)}</span></header>
+      <p>${esc(status.note)}${collection.approved_override_count ? ` · ${number(collection.approved_override_count)} 个有收据的角色覆盖` : ""}</p>
+      <div class="collection-metrics"><span><b>${number(collection.camera_count)}</b> 路</span><span><b>${number(collection.video_segment_count)}</b> 个 MP4</span><span><b>${number(collection.clock_segment_count)}</b> 个 CSV</span><span><b>${number(views.first_person)}</b> 第一 + <b>${number(views.third_person)}</b> 第三</span></div>
+      ${issues.length ? `<small class="collection-issues">${esc(issues.join(" · "))}</small>` : ""}
+      <button class="${selected ? "secondary-button" : "primary-button"}" type="button" data-select-collection="${esc(collection.collection_id)}" ${collection.ready_to_analyze && !["queued", "processing"].includes(collection.processing?.state) ? "" : "disabled"}>${selected ? `${icon("check")}已选择` : collection.processing?.state === "archived" ? `${icon("check")}重新分析为新归档` : `${icon("server")}选择此批次`}</button>
+    </article>`;
+  }).join("")}</div>`;
+}
+
 function reviewState() {
+  const collection = selectedCollection();
+  const title = document.querySelector("#experiment-name")?.value.trim() || state.experimentName.trim();
+  if (collection) {
+    const views = collection.resolved_view_counts || {};
+    return {
+      mode: "nas_collection",
+      collection,
+      videos: Number(collection.camera_count || 0),
+      csvs: Number(collection.clock_segment_count || 0),
+      first: Number(views.first_person || 0),
+      third: Number(views.third_person || 0),
+      title,
+      ready: Boolean(title && collection.ready_to_analyze),
+    };
+  }
   const videos = state.sources.filter((source) => source.video).length;
   const csvs = state.sources.filter((source) => source.csv).length;
   const first = state.sources.filter((source) => source.role === "first_person").length;
   const third = state.sources.filter((source) => source.role === "third_person").length;
-  const title = document.querySelector("#experiment-name")?.value.trim() || "";
   const ids = state.sources.map((source) => source.viewId.trim()).filter(Boolean);
   const unique = new Set(ids).size === ids.length;
-  return { videos, csvs, first, third, title, ready: Boolean(title && videos >= 2 && videos === state.sources.length && first && third && unique && ids.length === state.sources.length) };
+  return { mode: "upload", videos, csvs, first, third, title, ready: Boolean(title && videos >= 2 && videos === state.sources.length && first && third && unique && ids.length === state.sources.length) };
 }
 
 function renderNew() {
   setChrome("new");
   const guide = roleGuidance();
-  const previousTitle = document.querySelector("#experiment-name")?.value || "";
+  const currentTitle = document.querySelector("#experiment-name")?.value;
+  if (currentTitle !== undefined) state.experimentName = currentTitle;
+  const selected = selectedCollection();
+  const readyCount = state.collections.filter((item) => item.status === "ready" && !["archived", "queued", "processing"].includes(item.processing?.state)).length;
+  const recordingCount = state.collections.filter((item) => item.status === "recording").length;
+  const attentionCount = state.collections.filter((item) => item.status === "attention").length;
+  const archivedCount = state.collections.filter((item) => item.processing?.state === "archived").length;
   main.innerHTML = `<div class="page new-experiment-page">
-    <header class="page-hero"><div><p class="eyebrow">实验分析 / 创建任务</p><h1>新建实验</h1><p>选择多少路视频，就生成多少个机位配置。视频先原样留存在正式 NAS 档案，再自动进入对齐、筛选、关键素材和模型理解流水线。</p></div><div class="hero-state"><small>输入策略</small><strong>2..N 路动态输入</strong><p>跨视角至少 1 路第一人称 + 1 路第三人称；容量按至少 6 路×3 小时预留。</p></div></header>
-    <nav class="setup-progress" aria-label="新建实验进度"><a href="#experiment-info"><span>01</span><strong>实验信息</strong><small>命名 NAS 档案</small></a><a href="#recorded-videos"><span>02</span><strong>录制视频</strong><small>按实际路数生成</small></a><a href="#analysis-method"><span>03</span><strong>分析方式</strong><small>YOLO + 豆包</small></a><a href="#review-start"><span>04</span><strong>核对启动</strong><small>上传并自动分析</small></a></nav>
+    <header class="page-hero"><div><p class="eyebrow">实验分析 / 创建任务</p><h1>选择采集批次</h1><p>系统从采集索引自动聚合同一 experiment_id 下的全部相机、15 分钟 MP4 和时钟 CSV。用户选择一张批次卡片即可，不再逐个上传和配置约 90 个文件。</p></div><div class="hero-state"><small>NAS 发现策略</small><strong>索引增量读取 · 零复制</strong><p>只监控约 1.2MB 的索引变化；选择任务后才校验源文件并进入分析。</p></div></header>
+    <nav class="setup-progress" aria-label="新建实验进度"><a href="#collection-source"><span>01</span><strong>选择批次</strong><small>自动聚合多路分片</small></a><a href="#experiment-info"><span>02</span><strong>归档名称</strong><small>英文安全命名</small></a><a href="#analysis-method"><span>03</span><strong>分析方式</strong><small>YOLO + 豆包</small></a><a href="#review-start"><span>04</span><strong>核对启动</strong><small>零复制自动分析</small></a></nav>
     <div class="new-layout"><div class="new-primary">
-      <section class="form-section" id="experiment-info"><div class="section-heading"><span>01</span><div><h2>实验信息</h2><p>实验名称会成为 NAS 正式归档文件夹名称；不会覆盖已有档案。</p></div></div><label class="field-label"><span>实验名称</span><input id="experiment-name" value="${esc(previousTitle)}" maxlength="120" placeholder="例如：固体称量与移液连续实验-2026-08-13" autocomplete="off" /></label></section>
-      <section class="form-section" id="recorded-videos"><div class="section-heading"><span>02</span><div><h2>录制视频</h2><p>一次多选视频与 CSV；页面按实际视频数建行并尝试按文件名配对 CSV，之后可逐路修正。</p></div></div>
+      <section class="form-section collection-picker" id="collection-source"><div class="section-heading"><span>01</span><div><h2>NAS 采集批次</h2><p>experiment_id 是批次主键；列表只读索引元数据，不扫描目录、不打开视频。</p></div></div>
+        <div class="collection-summary"><span><b>${number(readyCount)}</b> 未处理可分析</span><span><b>${number(archivedCount)}</b> 已处理留存</span><span><b>${number(recordingCount)}</b> 采集中</span><span><b>${number(attentionCount)}</b> 需处理</span><span><b>${number(state.collections.length)}</b> 全部批次</span></div>
+        <label class="collection-search">${icon("search")}<input id="collection-search" value="${esc(state.collectionQuery)}" placeholder="按日期或 experiment_id 查找" /></label>
+        <div id="collection-card-results">${collectionCards()}</div>
+        ${selected ? `<div class="selected-collection-note"><span>${icon("check")}</span><div><strong>已选择 ${esc(selected.collection_id)}</strong><p>${number(selected.camera_count)} 路 · ${number(selected.video_segment_count)} 个 MP4 · ${number(selected.clock_segment_count)} 个 CSV；启动前执行一次并发存在性校验，原视频复制 0 字节。</p></div><button class="secondary-button" id="clear-collection" type="button">改选批次</button></div>` : ""}
+      </section>
+      <section class="form-section" id="experiment-info"><div class="section-heading"><span>02</span><div><h2>归档名称</h2><p>仅命名 NAS 正式归档；模型理解完成后，内部实验文件夹仍按具体实验名称自动归档。</p></div></div><label class="field-label"><span>英文安全归档名称</span><input id="experiment-name" value="${esc(state.experimentName)}" maxlength="120" placeholder="例如：VisionCortex-Collection-20260810-e918b762" autocomplete="off" /></label></section>
+      <section class="form-section manual-upload-fallback ${selected ? "is-secondary" : ""}" id="recorded-videos"><div class="section-heading"><span>备用</span><div><h2>索引外文件上传</h2><p>仅当采集批次尚未进入 index 表时使用；正常采集数据无需选择这些文件。</p></div></div>
         <div class="batch-import-panel"><div><strong>一键选择全部实验文件</strong><p>可选择任意实际路数。支持 MP4/MOV/MKV/AVI/WebM 和时间戳 CSV。</p></div><div class="batch-actions"><label class="primary-button batch-import-button">${icon("upload")}选择视频与 CSV<input id="batch-input" type="file" multiple accept="video/*,.mp4,.mov,.m4v,.mkv,.avi,.webm,.csv,text/csv" /></label><label class="secondary-button batch-import-button">${icon("folder")}选择实验文件夹<input id="folder-input" type="file" multiple webkitdirectory directory /></label></div></div>
-        <div class="batch-notice">输入路数不是固定值。RTX 4060 配置中的“六路”是性能容量目标；本任务严格按用户实际上传的机位数生成清单和调度。</div>
+        <div class="batch-notice">备用上传仍按用户实际路数生成，不固定为 6 路；选择 NAS 批次后，本区域不会参与任务。</div>
         <div class="role-guidance ${guide.tone}">${esc(guide.text)}</div>
         <div class="source-list">${state.sources.length ? state.sources.map(sourceCard).join("") : `<div class="empty-state"><strong>尚未选择视频</strong><p>点击上方“选择视频与 CSV”，选中几路就会出现几条机位配置。</p></div>`}</div>
         <button class="secondary-button add-source" id="add-source" type="button">${icon("plus")}手动添加一路</button>
       </section>
       <section class="form-section" id="analysis-method"><div class="section-heading"><span>03</span><div><h2>分析与归档方式</h2><p>当前任务会自动执行整条流水线，不需要手工逐阶段启动。</p></div></div><div class="analysis-method-overview"><article class="method-card"><span>${icon("gauge")}</span><div><small>CV FOUNDATION</small><strong>YOLO + 跟踪 + 时序规则</strong><p>多路并发粗扫与有界精扫，先精确找出真实实验边界和五类动作候选。</p></div></article><article class="method-card"><span>${icon("brain")}</span><div><small>MULTIMODAL UNDERSTANDING</small><strong>豆包 Seed 2.1 Pro</strong><p>仅阅读有界片段和代表素材，输出当前步骤、下一步骤、对象、事实与不确定项。</p></div></article></div></section>
-    </div><aside class="review-card" id="review-start"><div class="section-heading"><span>04</span><div><h2>核对并启动</h2><p>原视频先留存，之后每完成一项就归档一项。</p></div></div><div class="review-summary" id="review-summary"></div><div class="upload-progress hidden" id="upload-progress"><div class="progress-copy"><span id="progress-message">准备上传</span><strong id="progress-percent">0%</strong></div><span class="progress-track"><i id="progress-bar" style="width:0%"></i></span><div class="run-stage-list" id="run-stages"></div></div><button class="primary-button" id="start-run" type="button">${icon("upload")}上传、留存并开始分析</button><div class="batch-notice">正式输出根目录：<strong>${esc(state.health?.nas_archive_root || "Y:\\VisionCortexExperimentArchive")}</strong><br/>任务创建后会立即生成六类标准子目录。</div></aside></div>
+    </div><aside class="review-card" id="review-start"><div class="section-heading"><span>04</span><div><h2>核对并启动</h2><p>${selected ? "源视频保持在 NAS 原位置；每完成一项就归档一项。" : "原视频先留存，之后每完成一项就归档一项。"}</p></div></div><div class="review-summary" id="review-summary"></div><div class="upload-progress hidden" id="upload-progress"><div class="progress-copy"><span id="progress-message">准备任务</span><strong id="progress-percent">0%</strong></div><span class="progress-track"><i id="progress-bar" style="width:0%"></i></span><div class="run-stage-list" id="run-stages"></div></div><button class="primary-button" id="start-run" type="button">${selected ? `${icon("server")}零复制开始分析` : `${icon("upload")}上传、留存并开始分析`}</button><div class="batch-notice">正式输出根目录：<strong>${esc(state.health?.nas_archive_root || "Y:\\VisionCortexExperimentArchive")}</strong><br/>${selected ? "源文件复制 0 字节，产出按阶段持续写入正式归档。" : "任务创建后会立即生成六类标准子目录。"}</div></aside></div>
   </div>`;
   bindNewPage();
   updateReview();
@@ -426,7 +508,9 @@ function updateReview() {
   const review = reviewState();
   const summary = document.querySelector("#review-summary");
   if (!summary) return;
-  summary.innerHTML = `<div class="review-line"><span>实际视频路数</span><strong>${review.videos} 路</strong></div><div class="review-line"><span>时间戳 CSV</span><strong>${review.csvs} 个</strong></div><div class="review-line"><span>视角构成</span><strong>${review.first} 第一人称 + ${review.third} 第三人称</strong></div><div class="review-line"><span>NAS 原视频留存</span><strong>启用</strong></div><div class="review-line"><span>自动完整流水线</span><strong>启用</strong></div>`;
+  summary.innerHTML = review.mode === "nas_collection"
+    ? `<div class="review-line"><span>采集批次</span><strong>${esc(review.collection.collection_id)}</strong></div><div class="review-line"><span>自动聚合</span><strong>${review.videos} 路 / ${number(review.collection.video_segment_count)} 个 MP4</strong></div><div class="review-line"><span>视角构成</span><strong>${review.first} 第一人称 + ${review.third} 第三人称</strong></div><div class="review-line"><span>源视频复制</span><strong>0 字节</strong></div><div class="review-line"><span>角色解析收据</span><strong>${number(review.collection.approved_override_count)} 个覆盖</strong></div><div class="review-line"><span>自动完整流水线</span><strong>启用</strong></div>`
+    : `<div class="review-line"><span>实际视频路数</span><strong>${review.videos} 路</strong></div><div class="review-line"><span>时间戳 CSV</span><strong>${review.csvs} 个</strong></div><div class="review-line"><span>视角构成</span><strong>${review.first} 第一人称 + ${review.third} 第三人称</strong></div><div class="review-line"><span>NAS 原视频留存</span><strong>启用</strong></div><div class="review-line"><span>自动完整流水线</span><strong>启用</strong></div>`;
   const button = document.querySelector("#start-run");
   button.disabled = !review.ready || Boolean(state.activeRun && !["completed","failed"].includes(state.activeRun.state));
 }
@@ -438,15 +522,38 @@ function updateSource(key, change) {
 }
 
 function bindNewPage() {
+  const bindCollectionButtons = () => {
+    document.querySelectorAll("[data-select-collection]").forEach((button) => button.addEventListener("click", () => {
+      const collection = state.collections.find((item) => item.collection_id === button.dataset.selectCollection);
+      if (!collection?.ready_to_analyze) return;
+      state.selectedCollectionId = collection.collection_id;
+      state.experimentName = defaultCollectionArchiveName(collection);
+      renderNew();
+    }));
+  };
+  bindCollectionButtons();
+  document.querySelector("#collection-search")?.addEventListener("input", (event) => {
+    state.collectionQuery = event.target.value;
+    const results = document.querySelector("#collection-card-results");
+    if (results) {
+      results.innerHTML = collectionCards();
+      bindCollectionButtons();
+    }
+  });
+  document.querySelector("#clear-collection")?.addEventListener("click", () => {
+    state.selectedCollectionId = null;
+    state.experimentName = "";
+    renderNew();
+  });
   document.querySelector("#batch-input").addEventListener("change", (event) => importBatch(event.target.files));
   document.querySelector("#folder-input").addEventListener("change", (event) => importBatch(event.target.files));
-  document.querySelector("#experiment-name").addEventListener("input", updateReview);
-  document.querySelector("#add-source").addEventListener("click", () => { state.sources.push(createSource()); renderNew(); });
+  document.querySelector("#experiment-name").addEventListener("input", (event) => { state.experimentName = event.target.value; updateReview(); });
+  document.querySelector("#add-source").addEventListener("click", () => { state.selectedCollectionId = null; state.sources.push(createSource()); renderNew(); });
   document.querySelectorAll("[data-remove]").forEach((button) => button.addEventListener("click", () => { state.sources = state.sources.filter((source) => source.key !== button.dataset.remove); renderNew(); }));
   document.querySelectorAll("[data-view-id]").forEach((input) => input.addEventListener("input", () => { updateSource(input.dataset.viewId, { viewId: input.value.replace(/[^A-Za-z0-9_.-]+/g, "-") }); updateReview(); }));
   document.querySelectorAll("[data-role]").forEach((select) => select.addEventListener("change", () => { updateSource(select.dataset.role, { role: select.value }); renderNew(); }));
-  document.querySelectorAll("[data-video]").forEach((input) => input.addEventListener("change", () => { const file = input.files[0] || null; updateSource(input.dataset.video, { video: file }); renderNew(); }));
-  document.querySelectorAll("[data-csv]").forEach((input) => input.addEventListener("change", () => { updateSource(input.dataset.csv, { csv: input.files[0] || null }); renderNew(); }));
+  document.querySelectorAll("[data-video]").forEach((input) => input.addEventListener("change", () => { state.selectedCollectionId = null; const file = input.files[0] || null; updateSource(input.dataset.video, { video: file }); renderNew(); }));
+  document.querySelectorAll("[data-csv]").forEach((input) => input.addEventListener("change", () => { state.selectedCollectionId = null; updateSource(input.dataset.csv, { csv: input.files[0] || null }); renderNew(); }));
   document.querySelector("#start-run").addEventListener("click", submitRun);
 }
 
@@ -487,7 +594,11 @@ function setProgress(value, message) {
 
 async function submitRun() {
   const review = reviewState();
-  if (!review.ready) { toast("请先填写实验名称，选择至少两路视频，并确认第一/第三人称。", "error"); return; }
+  if (!review.ready) { toast(review.mode === "nas_collection" ? "该批次尚未通过封口与视角质量门，或缺少归档名称。" : "请先填写实验名称，选择至少两路视频，并确认第一/第三人称。", "error"); return; }
+  if (review.mode === "nas_collection") {
+    await submitCollectionRun(review);
+    return;
+  }
   const formData = new FormData();
   formData.append("experiment_name", review.title);
   const specs = [];
@@ -513,6 +624,33 @@ async function submitRun() {
     state.activeRun = { run_id: created.run_id, state: "queued", progress: .15, experiment_id: archiveName };
     setPhase(state.activeRun);
     await pollRun(created.run_id, archiveName);
+  } catch (error) {
+    toast(error.message, "error");
+    setProgress(1, `失败：${error.message}`);
+    document.querySelector("#start-run").disabled = false;
+  }
+}
+
+async function submitCollectionRun(review) {
+  document.querySelector("#upload-progress").classList.remove("hidden");
+  document.querySelector("#start-run").disabled = true;
+  setProgress(.01, "正在锁定采集批次并生成零复制输入清单");
+  try {
+    const created = await api(`/api/collections/${encodeURIComponent(review.collection.collection_id)}/runs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ experiment_name: review.title }),
+    });
+    state.activeRun = {
+      run_id: created.run_id,
+      state: "queued",
+      progress: .02,
+      experiment_id: created.archive_name,
+      source_collection_id: review.collection.collection_id,
+    };
+    setPhase(state.activeRun);
+    setProgress(.02, "任务已接管；正在并发校验 NAS 分片与时钟 CSV");
+    await pollRun(created.run_id, created.archive_name);
   } catch (error) {
     toast(error.message, "error");
     setProgress(1, `失败：${error.message}`);

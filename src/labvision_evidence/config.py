@@ -70,6 +70,7 @@ def _apply_environment_overrides(config: dict[str, Any]) -> None:
 
     path_overrides = {
         "VISIONCORTEX_NAS_INDEX_CSV": "index_csv",
+        "VISIONCORTEX_DEVICE_REGISTRY": "device_registry_path",
         "VISIONCORTEX_NAS_ARCHIVE_ROOT": "archive_root",
         "VISIONCORTEX_LOCAL_INPUT_ROOT": "local_input_root",
         "VISIONCORTEX_LOCAL_RUNTIME_ROOT": "local_runtime_root",

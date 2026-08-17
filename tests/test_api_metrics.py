@@ -3,12 +3,14 @@ import hashlib
 import io
 import json
 import time
+import csv
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 from starlette.datastructures import UploadFile
 
 from labvision_evidence import api
+from labvision_evidence.collection_catalog import clear_collection_catalog_cache
 
 
 def test_nas_only_upload_does_not_create_persistent_local_copy(tmp_path):
@@ -87,6 +89,136 @@ def test_health_exposes_fixed_benchmark_and_cache_locations(monkeypatch, tmp_pat
     assert benchmark["submission_protocol_version"] == 1
     assert "zero-copy" in benchmark["input_mode"]
     assert benchmark["local_cache_root"].endswith("cache")
+    assert response.json()["collection_ingest"]["recursive_nas_scan"] is False
+
+
+def test_collection_api_returns_batch_cards_without_opening_video_paths(
+    monkeypatch, tmp_path
+):
+    registry = tmp_path / "registry.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "schema_version": "visioncortex-device-registry/1",
+                "devices": {},
+                "experiment_role_overrides": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    index_csv = tmp_path / "experiment_record_index.csv"
+    rows = [
+        {
+            "experiment_id": "exp-api",
+            "camera_key": "fp",
+            "camera_view": "first",
+            "recording_start_time": "2026-08-10T08:00:00+00:00",
+            "recording_end_time": "2026-08-10T09:00:00+00:00",
+            "segment_count": "1",
+            "rgb_file": "Z:/missing-fp.mp4",
+            "frames_file": "Z:/missing-fp.csv",
+            "updated_at": "2026-08-10T09:01:00+00:00",
+            "sync_error": "",
+        },
+        {
+            "experiment_id": "exp-api",
+            "camera_key": "tp",
+            "camera_view": "side",
+            "recording_start_time": "2026-08-10T08:00:00+00:00",
+            "recording_end_time": "2026-08-10T09:00:00+00:00",
+            "segment_count": "1",
+            "rgb_file": "Z:/missing-tp.mp4",
+            "frames_file": "Z:/missing-tp.csv",
+            "updated_at": "2026-08-10T09:01:00+00:00",
+            "sync_error": "",
+        },
+    ]
+    with index_csv.open("w", newline="", encoding="utf-8-sig") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    settings = {
+        "storage": {
+            "index_csv": str(index_csv),
+            "device_registry_path": str(registry),
+            "local_cache_root": str(tmp_path / "cache"),
+        },
+        "collection_ingest": {
+            "settle_seconds": 0,
+            "persist_snapshot": False,
+            "max_results": 20,
+        },
+    }
+    monkeypatch.setattr(api, "_settings", lambda: settings)
+    clear_collection_catalog_cache()
+    client = TestClient(api.app)
+
+    response = client.get("/api/collections")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["collection_count"] == 1
+    card = payload["collections"][0]
+    assert card["collection_id"] == "exp-api"
+    assert card["ready_to_analyze"] is True
+    assert card["camera_count"] == 2
+    assert card["video_segment_count"] == 2
+    assert not (tmp_path / "missing-fp.mp4").exists()
+
+
+def test_collection_run_queues_zero_copy_index_executor(monkeypatch, tmp_path):
+    settings = {
+        "project": {},
+        "storage": {
+            "archive_root": str(tmp_path / "archive"),
+            "index_csv": str(tmp_path / "index.csv"),
+            "local_runtime_root": str(tmp_path / "runtime"),
+        }
+    }
+    fixed_root = tmp_path / "archive" / "Collection-01"
+    staging_root = tmp_path / "archive" / ".staging" / "Collection-01"
+    history_root = tmp_path / "archive" / ".history" / "Collection-01"
+    queued = []
+    updates = []
+
+    class TaskCollector:
+        def add_task(self, function, *args):
+            queued.append((function, args))
+
+    monkeypatch.setattr(api, "_settings", lambda: settings)
+    monkeypatch.setattr(
+        api,
+        "get_collection",
+        lambda *_: {
+            "ready_to_analyze": True,
+            "recording_start_time": "2026-08-10T08:00:00+00:00",
+            "fingerprint_sha256": "abc",
+        },
+    )
+    monkeypatch.setattr(
+        api,
+        "_reserve_collection_archive",
+        lambda *_: ("Collection-01", fixed_root, staging_root, history_root),
+    )
+    monkeypatch.setattr(api, "_update", lambda run_id, **values: updates.append((run_id, values)))
+    monkeypatch.setattr(api.uuid, "uuid4", lambda: type("FixedUUID", (), {"hex": "b" * 32})())
+
+    response = api.create_collection_run(
+        "exp-source", TaskCollector(), {"experiment_name": "Collection 01"}
+    )
+
+    assert response["run_id"] == "collection-bbbbbbbbbb"
+    assert response["source_collection_id"] == "exp-source"
+    assert response["source_copy_bytes"] == 0
+    assert response["archive_name"] == "Collection-01"
+    assert len(queued) == 1
+    assert queued[0][0] is api._execute_index_collection
+    assert queued[0][1][1] == "exp-source"
+    assert queued[0][1][4] == staging_root
+    assert queued[0][1][5] == fixed_root
+    assert response["nas_output"] == str(fixed_root)
+    assert response["nas_staging"] == str(staging_root)
+    assert updates[0][1]["source_collection_id"] == "exp-source"
 
 
 def test_fixed_benchmark_submission_is_owned_by_web_service(monkeypatch, tmp_path):

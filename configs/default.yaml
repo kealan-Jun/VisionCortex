@@ -251,8 +251,17 @@ daily_report:
   generate_pdf: true
   additional_mllm_calls: false
 
+collection_ingest:
+  enabled: true
+  poll_seconds: 30
+  settle_seconds: 120
+  max_results: 200
+  persist_snapshot: true
+  snapshot_path: null
+
 storage:
   index_csv: Y:/experiment_record_index.csv
+  device_registry_path: null
   archive_root: Y:/VisionCortexExperimentArchive
   local_input_root: D:/VisionCortexLocal/Input
   local_runtime_root: D:/VisionCortexLocal/Runtime

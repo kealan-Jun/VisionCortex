@@ -1,0 +1,52 @@
+{
+  "schema_version": "visioncortex-device-registry/1",
+  "registry_id": "VC-DEVICE-REGISTRY-V1",
+  "devices": {
+    "lubancat-e8cc0cb3_cam01": {
+      "display_name": "Wearable Camera LUBANCAT E8CC0CB3",
+      "expected_role": "first_person",
+      "view_subtype": "wearable",
+      "workstation_id": null
+    },
+    "orangepi5pro-ab748372_cam01": {
+      "display_name": "Fixed Side Camera AB748372",
+      "expected_role": "third_person",
+      "view_subtype": "side",
+      "workstation_id": null
+    },
+    "orangepi5pro-b439137c_cam02": {
+      "display_name": "Fixed Side Camera B439137C",
+      "expected_role": "third_person",
+      "view_subtype": "side",
+      "workstation_id": null
+    },
+    "orangepi5pro-d12a4719_cam01": {
+      "display_name": "Wearable Camera D12A4719",
+      "expected_role": "first_person",
+      "view_subtype": "wearable",
+      "workstation_id": null
+    },
+    "orangepi5pro-fe0ec3fe_cam01": {
+      "display_name": "Fixed Side Camera FE0EC3FE",
+      "expected_role": "third_person",
+      "view_subtype": "side",
+      "workstation_id": null
+    },
+    "rk3588-ubuntu_cam01": {
+      "display_name": "Fixed Side Camera RK3588",
+      "expected_role": "third_person",
+      "view_subtype": "side",
+      "workstation_id": null
+    }
+  },
+  "experiment_role_overrides": {
+    "exp_20260810_144014_e918b762": {
+      "orangepi5pro-d12a4719_cam01": {
+        "role": "third_person",
+        "status": "policy_override",
+        "reason": "Preserves the validated benchmark policy for this recording: the indexed wearable source is obstructed and the usable LUBANCAT stream remains the primary first-person view.",
+        "source": "migrated_from_legacy_validation_rule"
+      }
+    }
+  }
+}
