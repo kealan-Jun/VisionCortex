@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import os
@@ -16,12 +18,19 @@ from typing import Annotated, Any
 from urllib.parse import quote
 
 import yaml
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 
 from .config import load_config
+from .indexing import (
+    INDEX_DB_NAME,
+    INDEX_MANIFEST_NAME,
+    get_indexed_event,
+    get_indexed_evidence,
+    search_archive_index,
+)
 from .pipeline import EvidencePipeline
 from .schemas import RunManifest, ViewInput
 from .storage import (
@@ -640,9 +649,168 @@ def list_archives() -> dict[str, Any]:
                 "progress": status.get("progress"),
                 "has_model_understanding": key_index.is_file(),
                 "has_daily_report": daily_manifest.is_file(),
+                "has_evidence_index": (
+                    folder / "JSON-Config-Files" / INDEX_DB_NAME
+                ).is_file(),
             }
         )
     return {"archive_root": str(root), "archives": archives}
+
+
+def _search_archive_roots(archive_name: str | None) -> list[tuple[str, Path]]:
+    if archive_name:
+        return [(archive_name, _resolve_archive(archive_name))]
+    root = _archive_root()
+    if not root.is_dir():
+        return []
+    return sorted(
+        (
+            (item.name, item)
+            for item in root.iterdir()
+            if item.is_dir()
+            and (item / "JSON-Config-Files" / INDEX_DB_NAME).is_file()
+        ),
+        key=lambda item: item[0],
+    )
+
+
+def _decode_event_cursor(value: str | None) -> tuple[str, int, str] | None:
+    if not value:
+        return None
+    try:
+        padded = value + "=" * (-len(value) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
+        return str(payload[0]), int(payload[1]), str(payload[2])
+    except (ValueError, TypeError, IndexError, binascii.Error, json.JSONDecodeError) as exc:
+        raise HTTPException(400, "无效的关键事件分页 cursor") from exc
+
+
+def _encode_event_cursor(archive_id: str, peak_timestamp_us: int, event_uid: str) -> str:
+    payload = json.dumps(
+        [archive_id, int(peak_timestamp_us), event_uid],
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def _attach_index_urls(
+    archive_name: str, event: dict[str, Any]
+) -> dict[str, Any]:
+    result = dict(event)
+    result["archive_name"] = archive_name
+    result["event_url"] = f"/api/key-events/{quote(str(event['event_uid']))}?archive={quote(archive_name)}"
+    result["artifact_references"] = [
+        {
+            **artifact,
+            "url": (
+                _file_url(archive_name, artifact["path"])
+                if "://" not in str(artifact.get("path") or "")
+                else None
+            ),
+            "sidecar_url": (
+                _file_url(archive_name, artifact["sidecar_path"])
+                if artifact.get("sidecar_path")
+                else None
+            ),
+        }
+        for artifact in event.get("artifact_references", [])
+    ]
+    return result
+
+
+@app.get("/api/key-events")
+def search_key_events(
+    archive: str | None = None,
+    q: str | None = None,
+    action_type: str | None = None,
+    parent_event_id: str | None = None,
+    cross_view: bool | None = None,
+    start_us: int | None = None,
+    end_us: int | None = None,
+    cursor: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+) -> dict[str, Any]:
+    """Search one or every archive without loading monolithic event JSON arrays."""
+
+    decoded_cursor = _decode_event_cursor(cursor)
+    collected: list[dict[str, Any]] = []
+    for archive_name, root in _search_archive_roots(archive):
+        manifest = _read_json(
+            root / "JSON-Config-Files" / INDEX_MANIFEST_NAME, {}
+        ) or {}
+        archive_id = str(manifest.get("archive_id") or archive_name)
+        after_peak_us = None
+        after_event_uid = None
+        if decoded_cursor:
+            cursor_archive, cursor_peak, cursor_event = decoded_cursor
+            if archive_id < cursor_archive:
+                continue
+            if archive_id == cursor_archive:
+                after_peak_us = cursor_peak
+                after_event_uid = cursor_event
+        items = search_archive_index(
+            root,
+            query=q,
+            action_type=action_type,
+            parent_event_id=parent_event_id,
+            cross_view=cross_view,
+            start_us=start_us,
+            end_us=end_us,
+            after_peak_us=after_peak_us,
+            after_event_uid=after_event_uid,
+            limit=limit + 1,
+        )
+        collected.extend(_attach_index_urls(archive_name, item) for item in items)
+    collected.sort(
+        key=lambda item: (
+            str(item["archive_id"]),
+            int(item.get("peak_timestamp_us") or 0),
+            str(item["event_uid"]),
+        )
+    )
+    has_more = len(collected) > limit
+    page = collected[:limit]
+    next_cursor = None
+    if has_more and page:
+        last = page[-1]
+        next_cursor = _encode_event_cursor(
+            str(last["archive_id"]),
+            int(last.get("peak_timestamp_us") or 0),
+            str(last["event_uid"]),
+        )
+    return {
+        "items": page,
+        "count": len(page),
+        "next_cursor": next_cursor,
+        "canonical_source": "archived JSON",
+        "index_is_rebuildable": True,
+    }
+
+
+@app.get("/api/key-events/{event_uid}")
+def indexed_key_event(event_uid: str, archive: str | None = None) -> dict[str, Any]:
+    for archive_name, root in _search_archive_roots(archive):
+        event = get_indexed_event(root, event_uid)
+        if event is not None:
+            return _attach_index_urls(archive_name, event)
+    raise HTTPException(404, "关键事件索引记录不存在")
+
+
+@app.get("/api/evidence/{evidence_uid:path}")
+def indexed_evidence(evidence_uid: str, archive: str | None = None) -> dict[str, Any]:
+    for archive_name, root in _search_archive_roots(archive):
+        evidence = get_indexed_evidence(root, evidence_uid)
+        if evidence is not None:
+            return {
+                **evidence,
+                "archive_name": archive_name,
+                "event_url": (
+                    f"/api/key-events/{quote(str(evidence['event_uid']))}"
+                    f"?archive={quote(archive_name)}"
+                ),
+            }
+    raise HTTPException(404, "证据索引记录不存在")
 
 
 def _event_has_cross_view_support(event: dict[str, Any]) -> bool:
@@ -759,6 +927,8 @@ def _attach_archive_performance_display(
 @app.get("/api/archives/{archive_name}")
 def archive_detail(archive_name: str) -> dict[str, Any]:
     root = _resolve_archive(archive_name)
+    index_manifest_path = root / "JSON-Config-Files" / INDEX_MANIFEST_NAME
+    index_manifest = _read_json(index_manifest_path, {}) or {}
     package = _read_json(root / "JSON-Config-Files" / "evidence_package.json", {}) or {}
     metrics = _read_json(root / "JSON-Config-Files" / "run_metrics.json", {}) or {}
     acceptance = _read_json(root / "JSON-Config-Files" / "acceptance_report.json", {}) or {}
@@ -894,6 +1064,9 @@ def archive_detail(archive_name: str) -> dict[str, Any]:
         "daily_report_eval": _file_url(archive_name, daily_manifest["evaluation"])
         if daily_manifest.get("evaluation")
         else None,
+        "evidence_index_manifest": _file_url(
+            archive_name, f"JSON-Config-Files/{INDEX_MANIFEST_NAME}"
+        ) if index_manifest_path.is_file() else None,
     }
     return {
         "name": archive_name,
@@ -918,6 +1091,10 @@ def archive_detail(archive_name: str) -> dict[str, Any]:
         "observability": _run_snapshot_from_root(root),
         "daily_report": daily_report,
         "daily_report_manifest": daily_manifest,
+        "evidence_index": {
+            **index_manifest,
+            "search_url": f"/api/key-events?archive={quote(archive_name)}",
+        } if index_manifest else None,
         "links": links,
     }
 

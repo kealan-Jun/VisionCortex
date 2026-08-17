@@ -3405,6 +3405,7 @@ class EvidencePipeline:
                 detection_paths,
                 self.config,
                 publisher=self._publisher,
+                archive_id=manifest.experiment_id,
             )
             self._complete_stage(
                 layout,
@@ -3433,7 +3434,13 @@ class EvidencePipeline:
                 layout.json_config / "run_metrics_live.json",
                 self._metrics(key_events, groups),
             )
-            refresh_key_material_metadata(layout, key_events, groups, transforms)
+            refresh_key_material_metadata(
+                layout,
+                key_events,
+                groups,
+                transforms,
+                archive_id=manifest.experiment_id,
+            )
             self._complete_stage(
                 layout,
                 "mllm",

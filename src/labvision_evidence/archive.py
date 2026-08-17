@@ -16,6 +16,12 @@ from openpyxl import Workbook
 
 from .alignment import iter_aligned_rows
 from .detection import nearest_frame_evidence_many
+from .indexing import (
+    build_archive_index,
+    stable_artifact_uid,
+    stable_event_uid,
+    stable_evidence_uid,
+)
 from .mllm import ArkStepAnalyzer, EVENT_SYSTEM_PROMPT, GROUP_SYSTEM_PROMPT
 from .schemas import (
     AlignmentTransform,
@@ -593,6 +599,7 @@ def _artifact_json(
     artifact_file: str,
     view_id: str | None,
     transforms: dict[str, AlignmentTransform],
+    archive_id: str | None = None,
 ) -> dict[str, Any]:
     views = [view_id] if view_id else [group.first_person_view, group.third_person_view]
     understanding = event.model_understanding or {}
@@ -792,6 +799,11 @@ def _artifact_json(
         if view_id == group.first_person_view
         else "third_person"
     )
+    event_uid = (
+        stable_event_uid(archive_id, group.group_id, event.event_id)
+        if archive_id
+        else None
+    )
     key_frames = [
         {
             "view_id": item,
@@ -804,6 +816,14 @@ def _artifact_json(
             ),
             "timestamp_us": round(event.key_global_ms * 1000.0),
             "path": path,
+            **(
+                {
+                    "artifact_uid": stable_artifact_uid(event_uid, "key_frame", item),
+                    "sidecar_path": str(Path(path).with_suffix(".json")).replace("\\", "/"),
+                }
+                if event_uid
+                else {}
+            ),
         }
         for item, path in event.key_frames.items()
     ]
@@ -820,6 +840,14 @@ def _artifact_json(
             "start_us": round(max(0.0, event.global_start_ms - 2000.0) * 1000.0),
             "end_us": round((event.global_end_ms + 3000.0) * 1000.0),
             "path": path,
+            **(
+                {
+                    "artifact_uid": stable_artifact_uid(event_uid, "key_clip", item),
+                    "sidecar_path": str(Path(path).with_suffix(".json")).replace("\\", "/"),
+                }
+                if event_uid
+                else {}
+            ),
         }
         for item, path in event.key_clips.items()
     ]
@@ -830,6 +858,7 @@ def _artifact_json(
         for item in candidate.evidence
         if item.get("frame_index") is not None
     ]
+    evidence_ids = list(dict.fromkeys([*candidate_ids, *frame_evidence_ids]))
     observed_facts = [item for item in [current_step] if item]
     observed_facts.extend(
         item["observed_fact"] for item in observations if item.get("observed_fact")
@@ -902,7 +931,7 @@ def _artifact_json(
         },
         "key_frames": key_frames,
         "key_clips": key_clips,
-        "evidence_ids": list(dict.fromkeys([*candidate_ids, *frame_evidence_ids])),
+        "evidence_ids": evidence_ids,
         "provenance": {
             "schema_version": "key-material-event-v1.0.0",
             "time_base": "aligned_global_timeline_microseconds",
@@ -937,6 +966,27 @@ def _artifact_json(
                 for item in (group.first_person_view, group.third_person_view)
             },
             "score_method": "deterministic_cv_mllm_evidence_mapping_v1",
+            **(
+                {
+                    "index": {
+                        "event_uid": event_uid,
+                        "database": "JSON-Config-Files/evidence_index.sqlite",
+                        "artifact_registry": "JSON-Config-Files/artifact_registry.jsonl",
+                        "evidence_registry": "JSON-Config-Files/evidence_registry.jsonl",
+                        "evidence_refs": [
+                            {
+                                "evidence_id": evidence_id,
+                                "evidence_uid": stable_evidence_uid(
+                                    event_uid, evidence_id
+                                ),
+                            }
+                            for evidence_id in evidence_ids
+                        ],
+                    }
+                }
+                if event_uid
+                else {}
+            ),
         },
     }
 
@@ -951,6 +1001,7 @@ def materialize_key_materials(
     detection_paths: dict[str, Path],
     config: dict[str, Any],
     publisher: Any | None = None,
+    archive_id: str | None = None,
 ) -> None:
     by_view = {view.view_id: view for view in views}
     before = float(config["segmentation"]["key_clip_pre_seconds"]) * 1000.0
@@ -1091,11 +1142,27 @@ def materialize_key_materials(
             clip_json = clip_dir / f"{role_label}.json"
             write_json(
                 frame_json,
-                _artifact_json(group, event, "key_frame", relative_frame, view_id, transforms),
+                _artifact_json(
+                    group,
+                    event,
+                    "key_frame",
+                    relative_frame,
+                    view_id,
+                    transforms,
+                    archive_id,
+                ),
             )
             write_json(
                 clip_json,
-                _artifact_json(group, event, "key_clip", relative_clip, view_id, transforms),
+                _artifact_json(
+                    group,
+                    event,
+                    "key_clip",
+                    relative_clip,
+                    view_id,
+                    transforms,
+                    archive_id,
+                ),
             )
             if publisher is not None:
                 for artifact in (frame_path, frame_json, clip_path, clip_json):
@@ -1121,7 +1188,13 @@ def materialize_key_materials(
         write_json(
             frame_dir / "Aligned_First+Third.json",
             _artifact_json(
-                group, event, "aligned_first_third_key_frame", aligned_frame_relative, None, transforms
+                group,
+                event,
+                "aligned_first_third_key_frame",
+                aligned_frame_relative,
+                None,
+                transforms,
+                archive_id,
             ),
         )
         if publisher is not None:
@@ -1141,7 +1214,13 @@ def materialize_key_materials(
         write_json(
             clip_dir / "Aligned_First+Third.json",
             _artifact_json(
-                group, event, "aligned_first_third_key_clip", aligned_clip_relative, None, transforms
+                group,
+                event,
+                "aligned_first_third_key_clip",
+                aligned_clip_relative,
+                None,
+                transforms,
+                archive_id,
             ),
         )
         if publisher is not None:
@@ -1231,6 +1310,7 @@ def refresh_key_material_metadata(
     events: Sequence[EvidenceEvent],
     groups: Sequence[ExperimentGroup],
     transforms: dict[str, AlignmentTransform],
+    archive_id: str | None = None,
 ) -> None:
     """Rewrite sidecars after MLLM so JSON and media never disagree."""
     group_by_event = {event_id: group for group in groups for event_id in group.key_event_ids}
@@ -1253,6 +1333,7 @@ def refresh_key_material_metadata(
                         relative,
                         None if aligned else view_id,
                         transforms,
+                        archive_id,
                     ),
                 )
 
@@ -1473,19 +1554,21 @@ def finalize_archive(
     write_json(layout.json_config / "evidence_package.json", summary.model_dump(mode="json"))
     if run_metrics is not None:
         write_json(layout.json_config / "run_metrics.json", run_metrics)
+    normalized_events = [
+        _artifact_json(
+            next(group for group in groups if event.event_id in group.key_event_ids),
+            event,
+            "key_material_event_index",
+            "",
+            None,
+            transforms,
+            manifest.experiment_id,
+        )
+        for event in key_events
+    ]
     write_json(
         layout.key_materials / "Key-Materials-Model-Understanding.json",
-        [
-            _artifact_json(
-                next(group for group in groups if event.event_id in group.key_event_ids),
-                event,
-                "key_material_event_index",
-                "",
-                None,
-                transforms,
-            )
-            for event in key_events
-        ],
+        normalized_events,
     )
     clip_analysis = {
         "experiment_id": manifest.experiment_id,
@@ -1507,4 +1590,35 @@ def finalize_archive(
     write_json(layout.json_config / "Experiment-Groups-Step-Level-Analysis.json", clip_analysis)
     evaluation = evidence_package_eval(layout.root, groups, segments, key_events, transforms)
     write_json(layout.json_config / "evidence_package_eval.json", evaluation)
+    index_manifest = build_archive_index(
+        layout.root,
+        manifest.experiment_id,
+        normalized_events,
+        events,
+        groups,
+        infos,
+        hash_workers=int(config.get("performance", {}).get("io_workers", 4)),
+    )
+    summary.stats["evidence_index"] = {
+        "schema_version": index_manifest["schema_version"],
+        "manifest": "JSON-Config-Files/evidence_index_manifest.json",
+        "counts": index_manifest["counts"],
+        "fts5_enabled": index_manifest["fts5_enabled"],
+    }
+    index_validation = index_manifest.get("validation") or {}
+    index_check = {
+        "id": manifest.experiment_id,
+        "check": "evidence_index_and_one_hop_registries",
+        "passed": index_validation.get("passed") is True
+        and index_validation.get("all_artifacts_have_integrity_receipts") is True,
+        "details": index_validation,
+    }
+    evaluation["checks"].append(index_check)
+    if not index_check["passed"]:
+        evaluation["failures"].append(
+            "Evidence index or one-hop artifact/evidence registry validation failed"
+        )
+        evaluation["passed"] = False
+    write_json(layout.json_config / "evidence_package_eval.json", evaluation)
+    write_json(layout.json_config / "evidence_package.json", summary.model_dump(mode="json"))
     return summary

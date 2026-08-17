@@ -12,12 +12,13 @@ from typing import Annotated
 import typer
 import yaml
 
+from .archive import ArchiveLayout, _artifact_json, refresh_key_material_metadata, write_json
 from .config import load_config, load_manifest
-from .detection import validate_models
 from .daily_reports import generate_daily_report_from_archive
+from .detection import validate_models
+from .indexing import build_archive_index
 from .pipeline import EvidencePipeline, create_dry_run
-from .archive import ArchiveLayout, refresh_key_material_metadata, write_json, _artifact_json
-from .schemas import RunSummary
+from .schemas import RunSummary, VideoInfo
 from .storage import fixed_archive_staging_paths, prepare_from_nas_index, promote_fixed_archive
 from .validation import validate_experiment_and_material_quality
 
@@ -213,7 +214,13 @@ def refresh_key_json_command(
     )
     transforms = {item.view_id: item for item in package.alignments}
     key_events = [event for event in package.events if event.key_frames or event.key_clips]
-    refresh_key_material_metadata(layout, key_events, package.experiment_groups, transforms)
+    refresh_key_material_metadata(
+        layout,
+        key_events,
+        package.experiment_groups,
+        transforms,
+        archive_id=package.experiment_id,
+    )
     normalized = [
         _artifact_json(
             next(
@@ -226,11 +233,34 @@ def refresh_key_json_command(
             "",
             None,
             transforms,
+            package.experiment_id,
         )
         for event in key_events
     ]
     write_json(layout.key_materials / "Key-Materials-Model-Understanding.json", normalized)
-    typer.echo(f"rewritten_events={len(normalized)}")
+    probe_path = layout.json_config / "video_probe.json"
+    infos = (
+        {
+            view_id: VideoInfo.model_validate(payload)
+            for view_id, payload in json.loads(
+                probe_path.read_text(encoding="utf-8-sig")
+            ).items()
+        }
+        if probe_path.is_file()
+        else {}
+    )
+    index_manifest = build_archive_index(
+        layout.root,
+        package.experiment_id,
+        normalized,
+        package.events,
+        package.experiment_groups,
+        infos,
+    )
+    typer.echo(
+        f"rewritten_events={len(normalized)} indexed_artifacts="
+        f"{index_manifest['counts']['artifacts']}"
+    )
 
 
 if __name__ == "__main__":
