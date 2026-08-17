@@ -137,6 +137,7 @@ def test_key_material_roles_export_concurrently_and_write_runtime(monkeypatch, t
     expected_category = "01-Hand-Object-Contact"
     for relative in (*event.key_frames.values(), *event.key_clips.values()):
         assert f"/{group.archive_folder}/{expected_category}/" in relative
+        assert "Contact-Hand-With-Tube_EVT-000001" in relative
     for category in (
         "01-Hand-Object-Contact",
         "02-Object-Movement",
@@ -174,6 +175,8 @@ def test_key_material_roles_export_concurrently_and_write_runtime(monkeypatch, t
     )
     assert empty_summary["media_kind"] == "key_frame"
     assert empty_summary["event_count"] == 0
+    assert empty_summary["coverage_status"] == "not_observed"
+    assert empty_summary["absence_reason"]
     frame_sidecar = json.loads(
         (layout.root / event.key_frames["fp"]).with_suffix(".json").read_text(
             encoding="utf-8"
@@ -182,6 +185,11 @@ def test_key_material_roles_export_concurrently_and_write_runtime(monkeypatch, t
     classification = frame_sidecar["provenance"]["archive_classification"]
     assert classification["experiment_folder"] == group.archive_folder
     assert classification["action_category_folder"] == expected_category
+    assert classification["primary_object"] == "Tube"
+    assert classification["semantic_file_stem"] == (
+        "Contact-Hand-With-Tube_EVT-000001"
+    )
+    assert classification["object_labels"] == ["Tube"]
     runtime_path = layout.json_config / "key_material_materialization_runtime.json"
     runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
     assert runtime["workers"] == 2

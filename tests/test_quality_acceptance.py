@@ -103,3 +103,18 @@ def test_structural_only_when_no_reviewed_baseline_is_available():
     assert report["status"] == "structural_only"
     assert report["experiment_boundaries"]["evaluated"] is False
     assert report["key_materials"]["passed"] is True
+
+
+def test_natural_experiment_does_not_require_all_five_action_categories():
+    report = validate_experiment_and_material_quality(
+        [group("GROUP-1", 1000, 2000, "independent", 1)],
+        [event(1, ActionType.HAND_OBJECT_CONTACT)],
+        None,
+    )
+
+    assert report["status"] == "structural_only"
+    assert report["key_materials"]["passed"] is True
+    assert report["key_materials"]["required_action_types"] == []
+    assert report["key_materials"]["missing_action_types"] == []
+    assert "liquid_movement" in report["key_materials"]["unobserved_action_types"]
+    assert report["key_materials"]["category_coverage_is_acceptance_gate"] is False

@@ -227,6 +227,25 @@ def test_build_archive_index_preserves_one_hop_artifact_and_source_references(tm
     assert rebuilt["counts"]["artifact_hashes_computed"] == 0
 
 
+def test_archive_index_registers_key_material_recall_receipt(tmp_path):
+    root = tmp_path / "Archive-Recall"
+    receipt = root / "JSON-Config-Files" / "key_material_recall_eval.json"
+    receipt.parent.mkdir(parents=True)
+    receipt.write_text(
+        json.dumps({"status": "not_evaluated", "evaluated": False}),
+        encoding="utf-8",
+    )
+
+    _, _, _, _, manifest = _indexed_archive(root)
+
+    assert manifest["files"]["key_material_recall_eval"] == (
+        "key_material_recall_eval.json"
+    )
+    integrity = manifest["integrity"]["key_material_recall_eval.json"]
+    assert integrity["size_bytes"] == receipt.stat().st_size
+    assert integrity["sha256"] == hashlib.sha256(receipt.read_bytes()).hexdigest()
+
+
 def test_search_archive_index_filters_full_text_and_returns_material_hashes(tmp_path):
     root = tmp_path / "Archive-Search"
     _, _, _, _, _ = _indexed_archive(root, event_count=2)

@@ -217,7 +217,21 @@ def validate_experiment_and_material_quality(
         )
     event_count = len(key_events)
     cross_view_rate = cross_view_count / event_count if event_count else 0.0
-    missing_action_types = [name for name, count in action_counts.items() if count == 0]
+    unobserved_action_types = [name for name, count in action_counts.items() if count == 0]
+    required_action_types = [
+        str(item) for item in (baseline or {}).get("required_action_types") or []
+    ]
+    unsupported_required_action_types = sorted(
+        set(required_action_types) - set(action_counts)
+    )
+    if unsupported_required_action_types:
+        raise ValueError(
+            "验收基线包含未知动作类别: "
+            + ", ".join(unsupported_required_action_types)
+        )
+    missing_action_types = [
+        name for name in required_action_types if action_counts.get(name, 0) == 0
+    ]
     materials_passed = bool(event_count) and not missing_action_types and all(
         (
             media_complete_count == event_count,
@@ -273,7 +287,17 @@ def validate_experiment_and_material_quality(
             "passed": materials_passed,
             "event_count": event_count,
             "action_counts": action_counts,
+            "required_action_types": required_action_types,
             "missing_action_types": missing_action_types,
+            "unobserved_action_types": unobserved_action_types,
+            "unobserved_action_type_reasons": {
+                name: (
+                    "No accepted evidence event of this action type was "
+                    "observed in the bounded experiment set."
+                )
+                for name in unobserved_action_types
+            },
+            "category_coverage_is_acceptance_gate": bool(required_action_types),
             "confirmed_count": confirmed_count,
             "media_complete_count": media_complete_count,
             "model_understanding_completed_count": model_completed_count,
@@ -283,6 +307,311 @@ def validate_experiment_and_material_quality(
             "events": per_event,
         },
         "passed": boundary_passed and materials_passed if boundary_evaluated else materials_passed,
+    }
+
+
+ACTION_TYPE_ALIASES = {
+    "hand_object_contact": "hand_object_contact",
+    "object_movement": "object_movement",
+    "liquid_movement": "liquid_movement",
+    "liquid_transfer": "liquid_movement",
+    "container_state_change": "container_state_change",
+    "device_panel_operation": "device_panel_operation",
+    "panel_operation": "device_panel_operation",
+}
+
+
+def _canonical_action_type(value: Any) -> str:
+    raw = str(getattr(value, "value", value)).strip().lower()
+    return ACTION_TYPE_ALIASES.get(raw, raw)
+
+
+def _label_interval_ms(item: dict[str, Any]) -> tuple[float, float]:
+    def value(name: str) -> float:
+        if item.get(f"{name}_ms") is not None:
+            return float(item[f"{name}_ms"])
+        if item.get(f"{name}_us") is not None:
+            return float(item[f"{name}_us"]) / 1000.0
+        return float(item[f"{name}_seconds"]) * 1000.0
+
+    return value("start"), value("end")
+
+
+def _normalized_object_set(values: Sequence[Any]) -> set[str]:
+    ignored = {"hand", "gloved_hand", "手", "戴手套的手"}
+    normalized = {
+        str(value).strip().lower().replace("-", "_").replace(" ", "_")
+        for value in values
+        if str(value).strip()
+    }
+    return normalized - ignored
+
+
+def evaluate_key_event_recall(
+    predictions: Sequence[EvidenceEvent],
+    ground_truth: dict[str, Any] | None,
+    *,
+    thresholds: Sequence[float] = (0.30, 0.50, 0.70),
+) -> dict[str, Any]:
+    """Create a reproducible action-event precision/recall receipt.
+
+    Ground truth stays evaluation-only. Matching is one-to-one within a
+    canonical action class, requires temporal overlap, and also requires an
+    object-label overlap whenever the reviewed label declares objects.
+    """
+
+    if not ground_truth:
+        return {
+            "schema_version": "visioncortex-key-event-recall-eval/1.0.0",
+            "status": "not_evaluated",
+            "evaluated": False,
+            "reason": "reviewed_key_event_ground_truth_not_configured",
+            "prediction_count": len(predictions),
+            "thresholds": [float(item) for item in thresholds],
+        }
+
+    labels = list(ground_truth.get("events") or [])
+    labeled_windows = [
+        _label_interval_ms(item)
+        for item in ground_truth.get("labeled_windows") or []
+    ]
+    source_duration_ms = ground_truth.get("source_duration_ms")
+    if (
+        source_duration_ms is None
+        and ground_truth.get("source_duration_seconds") is not None
+    ):
+        source_duration_ms = float(ground_truth["source_duration_seconds"]) * 1000.0
+
+    def in_coverage(start_ms: float, end_ms: float, peak_ms: float) -> bool:
+        if not labeled_windows:
+            return True
+        return any(
+            window_start <= peak_ms <= window_end
+            or max(start_ms, window_start) < min(end_ms, window_end)
+            for window_start, window_end in labeled_windows
+        )
+
+    normalized_labels: list[dict[str, Any]] = []
+    excluded_uncertain_labels: list[str] = []
+    for index, item in enumerate(labels, 1):
+        label_id = str(
+            item.get("event_id") or item.get("label_id") or f"GT-{index:05d}"
+        )
+        if bool(item.get("uncertain")) or (
+            str(item.get("status") or "").lower() == "uncertain"
+        ):
+            excluded_uncertain_labels.append(label_id)
+            continue
+        start_ms, end_ms = _label_interval_ms(item)
+        normalized_labels.append(
+            {
+                "event_id": label_id,
+                "action_type": _canonical_action_type(item.get("action_type")),
+                "start_ms": start_ms,
+                "end_ms": end_ms,
+                "objects": sorted(
+                    _normalized_object_set(item.get("objects") or [])
+                ),
+            }
+        )
+
+    normalized_predictions: list[dict[str, Any]] = []
+    excluded_prediction_ids: list[str] = []
+    for event in predictions:
+        if not event.accepted:
+            continue
+        if not in_coverage(
+            event.global_start_ms, event.global_end_ms, event.key_global_ms
+        ):
+            excluded_prediction_ids.append(event.event_id)
+            continue
+        normalized_predictions.append(
+            {
+                "event_id": event.event_id,
+                "action_type": _canonical_action_type(event.action_type),
+                "start_ms": float(event.global_start_ms),
+                "end_ms": float(event.global_end_ms),
+                "objects": sorted(_normalized_object_set(event.objects)),
+            }
+        )
+
+    action_types = sorted(
+        {
+            item["action_type"]
+            for item in [*normalized_labels, *normalized_predictions]
+            if item["action_type"]
+        }
+    )
+    threshold_reports: list[dict[str, Any]] = []
+    for threshold in thresholds:
+        candidate_pairs: list[tuple[float, str, str]] = []
+        labels_by_id = {item["event_id"]: item for item in normalized_labels}
+        predictions_by_id = {
+            item["event_id"]: item for item in normalized_predictions
+        }
+        for label in normalized_labels:
+            for prediction in normalized_predictions:
+                if prediction["action_type"] != label["action_type"]:
+                    continue
+                temporal_iou = _iou(
+                    (label["start_ms"], label["end_ms"]),
+                    (prediction["start_ms"], prediction["end_ms"]),
+                )
+                if temporal_iou < float(threshold):
+                    continue
+                label_objects = set(label["objects"])
+                prediction_objects = set(prediction["objects"])
+                if label_objects and not (label_objects & prediction_objects):
+                    continue
+                candidate_pairs.append(
+                    (temporal_iou, label["event_id"], prediction["event_id"])
+                )
+        matched_labels: set[str] = set()
+        matched_predictions: set[str] = set()
+        matches: list[dict[str, Any]] = []
+        for temporal_iou, label_id, prediction_id in sorted(
+            candidate_pairs,
+            key=lambda item: (-item[0], item[1], item[2]),
+        ):
+            if label_id in matched_labels or prediction_id in matched_predictions:
+                continue
+            matched_labels.add(label_id)
+            matched_predictions.add(prediction_id)
+            label = labels_by_id[label_id]
+            prediction = predictions_by_id[prediction_id]
+            matches.append(
+                {
+                    "ground_truth_event_id": label_id,
+                    "prediction_event_id": prediction_id,
+                    "action_type": label["action_type"],
+                    "temporal_iou": round(temporal_iou, 6),
+                    "object_supported": True,
+                    "ground_truth_objects": label["objects"],
+                    "prediction_objects": prediction["objects"],
+                }
+            )
+
+        per_class: list[dict[str, Any]] = []
+        for action_type in action_types:
+            ground_truth_ids = {
+                item["event_id"]
+                for item in normalized_labels
+                if item["action_type"] == action_type
+            }
+            prediction_ids = {
+                item["event_id"]
+                for item in normalized_predictions
+                if item["action_type"] == action_type
+            }
+            true_positives = len(ground_truth_ids & matched_labels)
+            false_positives = len(prediction_ids - matched_predictions)
+            false_negatives = len(ground_truth_ids - matched_labels)
+            precision = (
+                true_positives / (true_positives + false_positives)
+                if true_positives + false_positives
+                else None
+            )
+            recall = (
+                true_positives / (true_positives + false_negatives)
+                if true_positives + false_negatives
+                else None
+            )
+            f1 = (
+                2.0 * precision * recall / (precision + recall)
+                if precision is not None
+                and recall is not None
+                and precision + recall
+                else 0.0
+                if precision is not None and recall is not None
+                else None
+            )
+            per_class.append(
+                {
+                    "action_type": action_type,
+                    "true_positives": true_positives,
+                    "false_positives": false_positives,
+                    "false_negatives": false_negatives,
+                    "precision": precision,
+                    "recall": recall,
+                    "f1": f1,
+                }
+            )
+
+        true_positives = len(matches)
+        false_positives = len(normalized_predictions) - true_positives
+        false_negatives = len(normalized_labels) - true_positives
+        precision = (
+            true_positives / (true_positives + false_positives)
+            if true_positives + false_positives
+            else None
+        )
+        recall = (
+            true_positives / (true_positives + false_negatives)
+            if true_positives + false_negatives
+            else None
+        )
+        f1 = (
+            2.0 * precision * recall / (precision + recall)
+            if precision is not None and recall is not None and precision + recall
+            else 0.0
+            if precision is not None and recall is not None
+            else None
+        )
+        threshold_reports.append(
+            {
+                "temporal_iou_threshold": float(threshold),
+                "true_positives": true_positives,
+                "false_positives": false_positives,
+                "false_negatives": false_negatives,
+                "precision": precision,
+                "recall": recall,
+                "f1": f1,
+                "matches": matches,
+                "per_class": per_class,
+            }
+        )
+
+    labeled_duration_ms = sum(
+        max(0.0, end - start) for start, end in labeled_windows
+    )
+    annotation_coverage_ratio = (
+        min(1.0, labeled_duration_ms / float(source_duration_ms))
+        if source_duration_ms and labeled_windows
+        else 1.0
+        if not labeled_windows
+        else None
+    )
+    return {
+        "schema_version": "visioncortex-key-event-recall-eval/1.0.0",
+        "status": "evaluated",
+        "evaluated": True,
+        "authority": ground_truth.get("authority"),
+        "ground_truth_id": ground_truth.get("ground_truth_id"),
+        "matching_policy": {
+            "assignment": (
+                "highest_tiou_first_one_to_one_within_action_class"
+            ),
+            "action_aliases": ACTION_TYPE_ALIASES,
+            "object_rule": (
+                "reviewed object labels require at least one non-hand object overlap"
+            ),
+            "uncertain_labels": "excluded",
+            "predictions_outside_labeled_windows": "excluded",
+        },
+        "annotation_coverage": {
+            "labeled_windows": [
+                {"start_ms": start, "end_ms": end}
+                for start, end in labeled_windows
+            ],
+            "labeled_duration_ms": labeled_duration_ms if labeled_windows else None,
+            "source_duration_ms": source_duration_ms,
+            "coverage_ratio": annotation_coverage_ratio,
+        },
+        "ground_truth_event_count": len(normalized_labels),
+        "prediction_count_in_scope": len(normalized_predictions),
+        "excluded_uncertain_ground_truth_event_ids": excluded_uncertain_labels,
+        "excluded_prediction_ids_outside_labeled_windows": excluded_prediction_ids,
+        "threshold_results": threshold_reports,
     }
 
 

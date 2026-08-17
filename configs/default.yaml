@@ -279,6 +279,9 @@ validation:
   use_sidecar_annotations: true
   sidecar_name: video.annotation.json
   acceptance_baseline: null
+  # Optional reviewed action-event labels. The JSON must declare dataset
+  # applicability; labels are evaluation-only and never enter inference.
+  key_event_ground_truth: null
   boundary_match_iou: 0.50
   max_start_error_seconds: 8.0
   max_end_error_seconds: 8.0

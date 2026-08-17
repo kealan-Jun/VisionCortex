@@ -1359,6 +1359,10 @@ def archive_detail(archive_name: str) -> dict[str, Any]:
     quality_acceptance = _read_json(quality_path, {}) or {}
     evidence_eval_path = root / "JSON-Config-Files" / "evidence_package_eval.json"
     evidence_eval = _read_json(evidence_eval_path, {}) or {}
+    recall_eval_path = (
+        root / "JSON-Config-Files" / "key_material_recall_eval.json"
+    )
+    key_material_recall_eval = _read_json(recall_eval_path, {}) or {}
     _attach_archive_performance_display(metrics, acceptance)
     key_events = _read_json(
         root / "Key-Materials" / "Key-Materials-Model-Understanding.json", []
@@ -1477,6 +1481,9 @@ def archive_detail(archive_name: str) -> dict[str, Any]:
         "evidence_package_eval": _file_url(
             archive_name, "JSON-Config-Files/evidence_package_eval.json"
         ) if evidence_eval_path.is_file() else None,
+        "key_material_recall_eval": _file_url(
+            archive_name, "JSON-Config-Files/key_material_recall_eval.json"
+        ) if recall_eval_path.is_file() else None,
         "daily_report_json": _file_url(archive_name, daily_manifest["json"])
         if daily_manifest.get("json")
         else None,
@@ -1516,6 +1523,7 @@ def archive_detail(archive_name: str) -> dict[str, Any]:
         "key_events": normalized_events,
         "metrics": metrics,
         "quality_acceptance": quality_acceptance,
+        "key_material_recall_eval": key_material_recall_eval,
         "observability": _run_snapshot_from_root(root),
         "daily_report": daily_report,
         "daily_report_manifest": daily_manifest,

@@ -85,7 +85,11 @@ from .storage import (
     source_cache_diagnostics,
 )
 from .telemetry import ResourceMonitor
-from .validation import validate_experiment_and_material_quality
+from .reviewed_artifacts import load_dataset_scoped_json
+from .validation import (
+    evaluate_key_event_recall,
+    validate_experiment_and_material_quality,
+)
 
 
 ProgressCallback = Callable[[str, float, str], None]
@@ -447,6 +451,12 @@ class EvidencePipeline:
         self._view_runtime: dict[str, dict[str, Any]] = {}
         self._runtime_lock = threading.Lock()
         self._active_layout: ArchiveLayout | None = None
+        self._current_experiment_id: str | None = None
+        self._acceptance_baseline_selection: dict[str, Any] = {
+            "configured": False,
+            "applied": False,
+            "reason": "not_evaluated",
+        }
 
     def _scan_progress(
         self, phase: str, view_id: str, completed_units: int, total_units: int
@@ -589,16 +599,13 @@ class EvidencePipeline:
 
     def _acceptance_baseline(self) -> dict[str, Any] | None:
         configured = self.config.get("validation", {}).get("acceptance_baseline")
-        if not configured:
-            return None
-        path = Path(configured)
-        if not path.is_absolute():
-            path = Path(__file__).resolve().parents[2] / path
-        if not path.is_file():
-            raise FileNotFoundError(f"验收基线不存在: {path}")
-        payload = json.loads(path.read_text(encoding="utf-8-sig"))
-        if not isinstance(payload, dict):
-            raise ValueError(f"验收基线必须是 JSON 对象: {path}")
+        payload, selection = load_dataset_scoped_json(
+            configured,
+            self._current_experiment_id,
+            repository_root=Path(__file__).resolve().parents[2],
+            artifact_label="验收基线",
+        )
+        self._acceptance_baseline_selection = selection
         return payload
 
     def _run_quality_acceptance(
@@ -608,10 +615,11 @@ class EvidencePipeline:
         key_events: list[EvidenceEvent],
     ) -> dict[str, Any]:
         validation = self.config.get("validation", {})
+        baseline = self._acceptance_baseline()
         report = validate_experiment_and_material_quality(
             groups,
             key_events,
-            self._acceptance_baseline(),
+            baseline,
             boundary_match_iou=float(validation.get("boundary_match_iou", 0.50)),
             max_start_error_seconds=float(validation.get("max_start_error_seconds", 8.0)),
             max_end_error_seconds=float(validation.get("max_end_error_seconds", 8.0)),
@@ -619,7 +627,26 @@ class EvidencePipeline:
                 validation.get("minimum_cross_view_event_rate", 0.25)
             ),
         )
+        report["baseline_selection"] = dict(
+            self._acceptance_baseline_selection
+        )
         write_json(layout.json_config / "quality_acceptance.json", report)
+        key_event_ground_truth, ground_truth_selection = (
+            load_dataset_scoped_json(
+                validation.get("key_event_ground_truth"),
+                self._current_experiment_id,
+                repository_root=Path(__file__).resolve().parents[2],
+                artifact_label="关键事件真值",
+            )
+        )
+        recall_report = evaluate_key_event_recall(
+            key_events, key_event_ground_truth
+        )
+        recall_report["ground_truth_selection"] = ground_truth_selection
+        write_json(
+            layout.json_config / "key_material_recall_eval.json",
+            recall_report,
+        )
         return report
 
     def _run_boundary_precheck(
@@ -659,6 +686,7 @@ class EvidencePipeline:
             "evaluated": evaluated,
             "passed": passed,
             "baseline": full_report["baseline"],
+            "baseline_selection": dict(self._acceptance_baseline_selection),
             "thresholds": full_report["thresholds"],
             "experiment_boundaries": boundary,
             "cross_view_cluster_completeness": {
@@ -2694,6 +2722,13 @@ class EvidencePipeline:
         self._stage_metrics = []
         self._startup_metrics = {}
         self._preprocessing_completed_seconds = None
+        self._current_experiment_id = manifest.experiment_id
+        self._acceptance_baseline_selection = {
+            "configured": False,
+            "applied": False,
+            "reason": "not_evaluated",
+            "current_experiment_id": manifest.experiment_id,
+        }
         self._input_view_count = len(manifest.views)
         self._input_mode = (
             "segmented_virtual_timeline"
@@ -3575,6 +3610,9 @@ class EvidencePipeline:
                         "selected_key_event_count": len(key_events),
                         "minimum_selected_key_events": minimum_key_events,
                         "key_event_gate_passed": key_event_gate_passed,
+                        "baseline_selection": dict(
+                            self._acceptance_baseline_selection
+                        ),
                         "experiment_groups": [
                             group.model_dump(mode="json") for group in groups
                         ],

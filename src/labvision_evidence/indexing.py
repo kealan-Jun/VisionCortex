@@ -799,6 +799,7 @@ def build_archive_index(
     sqlite_duration_seconds = time.perf_counter() - sqlite_started
     category_index = root / "Key-Materials" / "Key-Material-Category-Index.json"
     category_index_relative = "../Key-Materials/Key-Material-Category-Index.json"
+    recall_eval = root / "JSON-Config-Files" / "key_material_recall_eval.json"
     manifest = {
         "schema_version": INDEX_SCHEMA_VERSION,
         "authority": "JSON files remain canonical; SQLite and JSONL registries are rebuildable derivatives",
@@ -858,6 +859,11 @@ def build_archive_index(
                 if category_index.is_file()
                 else {}
             ),
+            **(
+                {"key_material_recall_eval": "key_material_recall_eval.json"}
+                if recall_eval.is_file()
+                else {}
+            ),
         },
         "integrity": {
             INDEX_DB_NAME: {"size_bytes": database.stat().st_size, "sha256": _sha256(database)},
@@ -877,6 +883,16 @@ def build_archive_index(
                 "size_bytes": physical_change_registry.stat().st_size,
                 "sha256": _sha256(physical_change_registry),
             },
+            **(
+                {
+                    "key_material_recall_eval.json": {
+                        "size_bytes": recall_eval.stat().st_size,
+                        "sha256": _sha256(recall_eval),
+                    }
+                }
+                if recall_eval.is_file()
+                else {}
+            ),
             **(
                 {
                     category_index_relative: {

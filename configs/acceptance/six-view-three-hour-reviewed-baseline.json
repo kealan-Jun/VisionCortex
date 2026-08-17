@@ -2,9 +2,21 @@
   "schema_version": "visioncortex-reviewed-acceptance-baseline/1",
   "baseline_id": "six-view-three-hour-reviewed-baseline-20260813-v1",
   "experiment_id": "exp_20260810_144014_e918b762",
+  "applicability": {
+    "experiment_ids": [
+      "exp_20260810_144014_e918b762"
+    ]
+  },
   "authority": "reviewed_and_user_accepted_pipeline_output",
   "usage": "evaluation_only_not_inference",
   "minimum_selected_key_events": 80,
+  "required_action_types": [
+    "hand_object_contact",
+    "object_movement",
+    "liquid_movement",
+    "container_state_change",
+    "device_panel_operation"
+  ],
   "notes": [
     "用户已人工查看并认可该五组有界片段的筛选质量。",
     "该基线用于检测后续代码回归，不宣称替代逐帧人工真值。",

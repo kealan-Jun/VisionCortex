@@ -55,6 +55,36 @@ ACTION_CATEGORY_FOLDERS = {
     for index, (action_type, slug) in enumerate(ACTION_SLUGS.items(), 1)
 }
 
+OBJECT_NAME_ALIASES = {
+    "hand": "Hand",
+    "gloved_hand": "Gloved-Hand",
+    "paper": "Weighing-Paper",
+    "weighing_paper": "Weighing-Paper",
+    "pipette": "Pipette",
+    "spearhead": "Pipette-Tip",
+    "spatula": "Spatula",
+    "sample_bottle": "Sample-Bottle",
+    "reagent_bottle": "Reagent-Bottle",
+    "reagent_bottle_open": "Open-Reagent-Bottle",
+    "tube": "Tube",
+    "tube_rack": "Tube-Rack",
+    "balance": "Analytical-Balance",
+    "magnetic_stirrer": "Magnetic-Stirrer",
+    "panel": "Device-Panel",
+    "cap": "Container-Cap",
+    "移液器": "Pipette",
+    "移液枪": "Pipette",
+    "枪头": "Pipette-Tip",
+    "吸头": "Pipette-Tip",
+    "药勺": "Spatula",
+    "称量纸": "Weighing-Paper",
+    "试剂瓶": "Reagent-Bottle",
+    "离心管": "Centrifuge-Tube",
+    "分析天平": "Analytical-Balance",
+}
+
+HAND_OBJECT_NAMES = {"hand", "gloved_hand", "手", "戴手套的手"}
+
 
 def key_material_action_folder(action_type: Any) -> str:
     value = str(getattr(action_type, "value", action_type))
@@ -184,6 +214,60 @@ def _safe_folder_name(value: str) -> str:
     return f"Unnamed-Experiment-{digest}"
 
 
+def _readable_object_label(value: str) -> str:
+    normalized = str(value).strip()
+    lowered = normalized.lower().replace("-", "_").replace(" ", "_")
+    if normalized in OBJECT_NAME_ALIASES:
+        return OBJECT_NAME_ALIASES[normalized]
+    if lowered in OBJECT_NAME_ALIASES:
+        return OBJECT_NAME_ALIASES[lowered]
+    ascii_slug = _safe_slug(normalized.replace("_", "-"))
+    if ascii_slug != "unknown":
+        return "-".join(part.capitalize() for part in ascii_slug.split("-") if part)
+    return "Unknown-Object"
+
+
+def _key_material_semantic_name(event: EvidenceEvent) -> dict[str, Any]:
+    raw_objects = list(dict.fromkeys(str(item) for item in event.objects if str(item).strip()))
+    non_hand_objects = [
+        item
+        for item in raw_objects
+        if item.strip().lower().replace("-", "_").replace(" ", "_")
+        not in HAND_OBJECT_NAMES
+    ]
+    object_labels = [_readable_object_label(item) for item in non_hand_objects]
+    if not object_labels:
+        object_labels = ["Unknown-Object"]
+    primary = object_labels[0]
+    secondary = object_labels[1] if len(object_labels) > 1 else None
+    action_type = event.action_type.value
+    if action_type == "hand_object_contact":
+        descriptor = f"Contact-Hand-With-{primary}"
+    elif action_type == "object_movement":
+        descriptor = f"Move-{primary}"
+    elif action_type == "liquid_movement":
+        descriptor = f"Transfer-Liquid-{primary}"
+        if secondary:
+            descriptor += f"-To-{secondary}"
+    elif action_type == "container_state_change":
+        descriptor = f"Change-State-{primary}"
+    elif action_type == "device_panel_operation":
+        descriptor = f"Operate-{primary}"
+    else:
+        descriptor = f"{ACTION_SLUGS.get(action_type, 'Action')}-{primary}"
+    return {
+        # Put the human-readable action/object first. If a very deep Windows
+        # archive forces deterministic truncation, the visible prefix still
+        # explains the material while the digest preserves uniqueness.
+        "file_stem": f"{descriptor}_{event.event_id}",
+        "display_name_en": descriptor.replace("-", " "),
+        "action_label_en": ACTION_SLUGS.get(action_type, action_type),
+        "primary_object": primary,
+        "object_labels": object_labels,
+        "raw_object_labels": raw_objects,
+    }
+
+
 def _bounded_component(value: str, maximum_chars: int) -> str:
     cleaned = _safe_folder_name(value)
     maximum_chars = max(12, int(maximum_chars))
@@ -230,9 +314,7 @@ def _key_material_event_folder_name(
     event: EvidenceEvent,
 ) -> str:
     action_folder = key_material_action_folder(event.action_type)
-    desired = (
-        f"{event.event_id}_{event.action_type.value}_{_time_slug(event.key_global_ms)}"
-    )
+    desired = _key_material_semantic_name(event)["file_stem"]
     budget = min(
         _component_budget(
             layout.key_frames / experiment_folder / action_folder,
@@ -645,6 +727,7 @@ def _artifact_json(
     after_state = str(physical_change.get("after") or "unknown")
     model_objects = [str(item) for item in understanding.get("objects") or []]
     object_names = list(dict.fromkeys([*event.objects, *model_objects]))
+    material_name = _key_material_semantic_name(event)
 
     def contains(name: str, keywords: tuple[str, ...]) -> bool:
         lowered = name.lower()
@@ -983,6 +1066,9 @@ def _artifact_json(
                 ),
                 "action_type": event.action_type.value,
                 "action_category_folder": key_material_action_folder(event.action_type),
+                "semantic_file_stem": material_name["file_stem"],
+                "primary_object": material_name["primary_object"],
+                "object_labels": material_name["object_labels"],
             },
             "sidecar_for": {
                 "artifact_type": artifact_type,
@@ -1093,7 +1179,28 @@ def write_key_material_category_index(
                 "action_type": action_type,
                 "action_category_folder": action_folder,
                 "event_count": len(category_events),
+                "coverage_status": (
+                    "observed" if category_events else "not_observed"
+                ),
+                "absence_reason": (
+                    None
+                    if category_events
+                    else (
+                        "No accepted evidence event of this action type was "
+                        "observed in the bounded experiment."
+                    )
+                ),
                 "event_ids": [event.event_id for event in category_events],
+                "events": [
+                    {
+                        "event_id": event.event_id,
+                        "event_folder": _key_material_event_folder_name(
+                            layout, experiment_folder, event
+                        ),
+                        "material_name": _key_material_semantic_name(event),
+                    }
+                    for event in category_events
+                ],
             }
             frame_summary_path = frame_category_folder / "Category.json"
             clip_summary_path = clip_category_folder / "Category.json"
@@ -1134,6 +1241,10 @@ def write_key_material_category_index(
                     "events": [
                         {
                             "event_id": event.event_id,
+                            "event_folder": _key_material_event_folder_name(
+                                layout, experiment_folder, event
+                            ),
+                            "material_name": _key_material_semantic_name(event),
                             "peak_timestamp_us": round(
                                 event.key_global_ms * 1000.0
                             ),
