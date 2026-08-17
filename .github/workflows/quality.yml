@@ -88,5 +88,17 @@ jobs:
         run: |
           python -m compileall -q src tests
           python -m pip check
+      - name: Provision and verify the FFmpeg runtime dependency
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ($null -eq (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+            choco install ffmpeg -y --no-progress
+            $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+            $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+            $env:Path = "$machinePath;$userPath"
+          }
+          ffmpeg -version
+          ffprobe -version
       - name: Run the complete deterministic test suite
         run: python -m pytest
