@@ -36,6 +36,7 @@ RTX 4060 真实六路运行节点必须先阅读
     evidence_index_manifest.json       # 数量、FTS 能力与文件 SHA-256
     artifact_registry.jsonl            # 事件 → 素材/sidecar/大小/SHA-256
     evidence_registry.jsonl            # 证据 → JSON Pointer → 原视频物理分片/帧
+    physical_change_registry.jsonl     # 明确前后状态变化；不推断 unknown 区间
   Key-Materials/
     Key-Clips/<event-id>/first_person.mp4, third_person.mp4
     Key-Frames/<event-id>/first_person.jpg, third_person.jpg
@@ -98,7 +99,9 @@ labvision serve --host 127.0.0.1 --port 8000
 
 `POST /api/runs` 以 `videos[] + view_specs_json` 接收任意多路视频及 CSV，后台运行后从 `GET /api/runs/{run_id}` 查询状态。API 只绑定本机，除非显式改为 `0.0.0.0`。
 
-已完成档案不会依赖浏览器加载整份大 JSON 才能查找关键素材：`GET /api/key-events` 支持跨档案或指定档案的全文、动作类型、实验组、双视角和时间范围筛选，并通过 `cursor` 分页；`GET /api/key-events/{event_uid}` 返回事件及带 SHA-256 的素材引用；`GET /api/evidence/{evidence_uid}` 可一跳回到 `evidence_package.json` 的 JSON Pointer 和原视频物理分片。稳定事件 UID 格式为 `{archive_id}:{parent_event_id}:{event_id}`。SQLite/JSONL 都是权威归档 JSON 的派生产物，可随时重建，不会取代原 JSON。
+已完成档案不会依赖浏览器加载整份大 JSON 才能查找关键素材：`GET /api/key-events` 支持跨档案或指定档案的全文、动作类型、实验组、双视角和时间范围筛选，并通过与筛选条件绑定的 `cursor` 分页；`GET /api/key-events/{event_uid}` 返回事件及带 SHA-256 的素材引用；`GET /api/evidence/{evidence_uid}` 可一跳回到 `evidence_package.json` 的 JSON Pointer 和原视频物理分片；`GET /api/physical-changes` 查询明确观测到的对象前后状态变化，不会替 unknown 区间补状态。稳定事件 UID 格式为 `{archive_id}:{parent_event_id}:{event_id}`。SQLite/JSONL 都是权威归档 JSON 的派生产物，可随时重建，不会取代原 JSON。
+
+开发仓与稳定发布仓采用单向晋升，具体规则见 [双仓发布策略](docs/DUAL-REPOSITORY-RELEASE-POLICY.md)；旧 RealityLoopAI 仓库的全量只读审计与复用结论见 [旧仓库审计报告](docs/REALITYLOOP-LEGACY-REPOSITORY-AUDIT-20260817.md)。
 
 容量目标按至少 **6 路 × 每路 3 小时** 设计：600 秒一个可恢复分块，最多 6 路并行解码，但同一角色的帧合并成有界 GPU batch；检测结果逐行落盘，重启后跳过已完成分块，因此内存/显存占用不随视频时长增长。磁盘预检会在开始前估算原片、临时候选和交付片段所需空间，不足时拒绝启动并给出缺口。
 

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import base64
-import binascii
 import hashlib
 import json
 import os
@@ -33,7 +31,9 @@ from .indexing import (
     get_indexed_event,
     get_indexed_evidence,
     search_archive_index,
+    search_physical_changes,
 )
+from .pagination import decode_cursor, encode_cursor
 from .pipeline import EvidencePipeline
 from .schemas import RunManifest, ViewInput
 from .storage import (
@@ -878,14 +878,48 @@ def list_collections(
     status: str | None = None,
     q: str | None = None,
     limit: int = Query(200, ge=1, le=1000),
+    cursor: str | None = None,
 ) -> dict[str, Any]:
+    cursor_filters = {"status": status, "q": q}
+    decoded = None
+    if cursor:
+        try:
+            decoded = decode_cursor(
+                cursor,
+                namespace="collections",
+                filters=cursor_filters,
+            )
+            if set(decoded) != {"recording_start_time", "experiment_id"}:
+                raise ValueError("collection cursor position is invalid")
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(400, "无效的采集批次分页 cursor") from exc
     try:
         payload = discover_collections(
-            _settings(), status=status, query=q, limit=limit
+            _settings(),
+            status=status,
+            query=q,
+            limit=limit + 1,
+            after_recording_start_time=(
+                str(decoded["recording_start_time"]) if decoded else None
+            ),
+            after_experiment_id=(str(decoded["experiment_id"]) if decoded else None),
         )
     except (OSError, ValueError) as exc:
         raise HTTPException(503, f"无法读取采集批次索引: {exc}") from exc
-    collections = [_collection_card(item) for item in payload["collections"]]
+    has_more = len(payload["collections"]) > limit
+    source_page = payload["collections"][:limit]
+    collections = [_collection_card(item) for item in source_page]
+    next_cursor = None
+    if has_more and source_page:
+        last = source_page[-1]
+        next_cursor = encode_cursor(
+            namespace="collections",
+            position={
+                "recording_start_time": str(last.get("recording_start_time") or ""),
+                "experiment_id": str(last["experiment_id"]),
+            },
+            filters=cursor_filters,
+        )
     counts = Counter(item["status"] for item in collections)
     processing_counts = Counter(
         str((item.get("processing") or {}).get("state") or "not_processed")
@@ -900,6 +934,9 @@ def list_collections(
         "status_counts": dict(counts),
         "processing_status_counts": dict(processing_counts),
         "collection_count": len(collections),
+        "total_count": int(payload.get("total_count") or len(collections)),
+        "has_more": has_more,
+        "next_cursor": next_cursor,
         "collections": collections,
     }
 
@@ -931,24 +968,39 @@ def _search_archive_roots(archive_name: str | None) -> list[tuple[str, Path]]:
     )
 
 
-def _decode_event_cursor(value: str | None) -> tuple[str, int, str] | None:
+def _decode_event_cursor(
+    value: str | None, filters: dict[str, Any]
+) -> tuple[str, int, str] | None:
     if not value:
         return None
     try:
-        padded = value + "=" * (-len(value) % 4)
-        payload = json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
-        return str(payload[0]), int(payload[1]), str(payload[2])
-    except (ValueError, TypeError, IndexError, binascii.Error, json.JSONDecodeError) as exc:
+        payload = decode_cursor(value, namespace="key-events", filters=filters)
+        if set(payload) != {"archive_id", "peak_timestamp_us", "event_uid"}:
+            raise ValueError("key-event cursor position is invalid")
+        return (
+            str(payload["archive_id"]),
+            int(payload["peak_timestamp_us"]),
+            str(payload["event_uid"]),
+        )
+    except (ValueError, TypeError, KeyError) as exc:
         raise HTTPException(400, "无效的关键事件分页 cursor") from exc
 
 
-def _encode_event_cursor(archive_id: str, peak_timestamp_us: int, event_uid: str) -> str:
-    payload = json.dumps(
-        [archive_id, int(peak_timestamp_us), event_uid],
-        ensure_ascii=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+def _encode_event_cursor(
+    archive_id: str,
+    peak_timestamp_us: int,
+    event_uid: str,
+    filters: dict[str, Any],
+) -> str:
+    return encode_cursor(
+        namespace="key-events",
+        position={
+            "archive_id": archive_id,
+            "peak_timestamp_us": int(peak_timestamp_us),
+            "event_uid": event_uid,
+        },
+        filters=filters,
+    )
 
 
 def _attach_index_urls(
@@ -990,7 +1042,16 @@ def search_key_events(
 ) -> dict[str, Any]:
     """Search one or every archive without loading monolithic event JSON arrays."""
 
-    decoded_cursor = _decode_event_cursor(cursor)
+    cursor_filters = {
+        "archive": archive,
+        "q": q,
+        "action_type": action_type,
+        "parent_event_id": parent_event_id,
+        "cross_view": cross_view,
+        "start_us": start_us,
+        "end_us": end_us,
+    }
+    decoded_cursor = _decode_event_cursor(cursor, cursor_filters)
     collected: list[dict[str, Any]] = []
     for archive_name, root in _search_archive_roots(archive):
         manifest = _read_json(
@@ -1035,12 +1096,117 @@ def search_key_events(
             str(last["archive_id"]),
             int(last.get("peak_timestamp_us") or 0),
             str(last["event_uid"]),
+            cursor_filters,
         )
     return {
         "items": page,
         "count": len(page),
         "next_cursor": next_cursor,
         "canonical_source": "archived JSON",
+        "index_is_rebuildable": True,
+    }
+
+
+@app.get("/api/physical-changes")
+def indexed_physical_changes(
+    archive: str | None = None,
+    object_id: str | None = None,
+    object_role: str | None = None,
+    action_type: str | None = None,
+    parent_event_id: str | None = None,
+    start_us: int | None = None,
+    end_us: int | None = None,
+    cursor: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+) -> dict[str, Any]:
+    """Search observed state transitions without inferring unobserved states."""
+
+    cursor_filters = {
+        "archive": archive,
+        "object_id": object_id,
+        "object_role": object_role,
+        "action_type": action_type,
+        "parent_event_id": parent_event_id,
+        "start_us": start_us,
+        "end_us": end_us,
+    }
+    decoded = None
+    if cursor:
+        try:
+            decoded = decode_cursor(
+                cursor,
+                namespace="physical-changes",
+                filters=cursor_filters,
+            )
+            if set(decoded) != {"archive_id", "peak_timestamp_us", "change_uid"}:
+                raise ValueError("physical change cursor position is invalid")
+        except (ValueError, TypeError, KeyError) as exc:
+            raise HTTPException(400, "无效的物理状态变化分页 cursor") from exc
+    collected: list[dict[str, Any]] = []
+    for archive_name, root in _search_archive_roots(archive):
+        manifest = _read_json(
+            root / "JSON-Config-Files" / INDEX_MANIFEST_NAME, {}
+        ) or {}
+        archive_id = str(manifest.get("archive_id") or archive_name)
+        after_peak_us = None
+        after_change_uid = None
+        if decoded:
+            cursor_archive = str(decoded["archive_id"])
+            if archive_id < cursor_archive:
+                continue
+            if archive_id == cursor_archive:
+                after_peak_us = int(decoded["peak_timestamp_us"])
+                after_change_uid = str(decoded["change_uid"])
+        items = search_physical_changes(
+            root,
+            object_id=object_id,
+            object_role=object_role,
+            action_type=action_type,
+            parent_event_id=parent_event_id,
+            start_us=start_us,
+            end_us=end_us,
+            after_peak_us=after_peak_us,
+            after_change_uid=after_change_uid,
+            limit=limit + 1,
+        )
+        collected.extend(
+            {
+                **item,
+                "archive_name": archive_name,
+                "event_url": (
+                    f"/api/key-events/{quote(str(item['event_uid']))}"
+                    f"?archive={quote(archive_name)}"
+                ),
+            }
+            for item in items
+        )
+    collected.sort(
+        key=lambda item: (
+            str(item["archive_id"]),
+            int(item["peak_timestamp_us"]),
+            str(item["change_uid"]),
+        )
+    )
+    has_more = len(collected) > limit
+    page = collected[:limit]
+    next_cursor = None
+    if has_more and page:
+        last = page[-1]
+        next_cursor = encode_cursor(
+            namespace="physical-changes",
+            position={
+                "archive_id": str(last["archive_id"]),
+                "peak_timestamp_us": int(last["peak_timestamp_us"]),
+                "change_uid": str(last["change_uid"]),
+            },
+            filters=cursor_filters,
+        )
+    return {
+        "items": page,
+        "count": len(page),
+        "next_cursor": next_cursor,
+        "canonical_source": "archived key-material event JSON",
+        "projection_policy": "explicit before/after differences only; no gap-state inference",
         "index_is_rebuildable": True,
     }
 

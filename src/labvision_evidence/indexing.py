@@ -12,15 +12,17 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+from .physical_changes import physical_change_records
 from .schemas import EvidenceEvent, ExperimentGroup, VideoInfo
 
 
-INDEX_SCHEMA_VERSION = "visioncortex-evidence-index/2"
+INDEX_SCHEMA_VERSION = "visioncortex-evidence-index/3"
 INDEX_DB_NAME = "evidence_index.sqlite"
 INDEX_MANIFEST_NAME = "evidence_index_manifest.json"
 ARTIFACT_REGISTRY_NAME = "artifact_registry.jsonl"
 EVIDENCE_REGISTRY_NAME = "evidence_registry.jsonl"
 DECISION_REGISTRY_NAME = "decision_receipt_registry.jsonl"
+PHYSICAL_CHANGE_REGISTRY_NAME = "physical_change_registry.jsonl"
 
 
 def stable_event_uid(archive_id: str, group_id: str, event_id: str) -> str:
@@ -418,6 +420,7 @@ def _build_sqlite(
     artifact_records: Sequence[dict[str, Any]],
     evidence_records: Sequence[dict[str, Any]],
     decision_records: Sequence[dict[str, Any]],
+    change_records: Sequence[dict[str, Any]],
 ) -> bool:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.partial-{uuid.uuid4().hex[:8]}")
@@ -491,6 +494,25 @@ def _build_sqlite(
             );
             CREATE INDEX decision_subjects_subject_idx
                 ON decision_subjects(subject_id, decision_id);
+            CREATE TABLE physical_changes (
+                change_uid TEXT PRIMARY KEY,
+                event_uid TEXT NOT NULL REFERENCES key_events(event_uid),
+                parent_event_id TEXT NOT NULL,
+                action_type TEXT NOT NULL,
+                object_role TEXT NOT NULL,
+                object_id TEXT NOT NULL,
+                state_before TEXT NOT NULL,
+                state_after TEXT NOT NULL,
+                start_us INTEGER NOT NULL,
+                end_us INTEGER NOT NULL,
+                peak_timestamp_us INTEGER NOT NULL,
+                decision_status TEXT NOT NULL,
+                change_json TEXT NOT NULL
+            );
+            CREATE INDEX physical_changes_timeline_idx
+                ON physical_changes(peak_timestamp_us, change_uid);
+            CREATE INDEX physical_changes_object_idx
+                ON physical_changes(object_id, object_role, action_type);
             """
         )
         try:
@@ -634,6 +656,27 @@ def _build_sqlite(
                 for subject_id in item.get("subject_ids", [])
             ],
         )
+        connection.executemany(
+            "INSERT INTO physical_changes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    str(item["change_uid"]),
+                    str(item["event_uid"]),
+                    str(item.get("parent_event_id") or ""),
+                    str(item.get("action_type") or ""),
+                    str(item.get("object_role") or ""),
+                    str(item.get("object_id") or ""),
+                    str(item.get("state_before") or ""),
+                    str(item.get("state_after") or ""),
+                    int(item.get("start_us") or 0),
+                    int(item.get("end_us") or 0),
+                    int(item.get("peak_timestamp_us") or 0),
+                    str(item.get("decision_status") or ""),
+                    _json_dumps(item),
+                )
+                for item in change_records
+            ],
+        )
         connection.commit()
     finally:
         connection.close()
@@ -712,6 +755,7 @@ def build_archive_index(
     artifact_records.sort(key=lambda item: item["artifact_uid"])
     evidence_records = _evidence_records(archive_id, events, groups, infos)
     decision_records = _decision_receipt_records(json_root)
+    change_records = physical_change_records(archive_id, normalized_events)
     expected_evidence_uids = {
         str(reference["evidence_uid"])
         for payload in normalized_events
@@ -734,11 +778,13 @@ def build_archive_index(
     artifact_registry = json_root / ARTIFACT_REGISTRY_NAME
     evidence_registry = json_root / EVIDENCE_REGISTRY_NAME
     decision_registry = json_root / DECISION_REGISTRY_NAME
+    physical_change_registry = json_root / PHYSICAL_CHANGE_REGISTRY_NAME
     database = json_root / INDEX_DB_NAME
     registry_started = time.perf_counter()
     _write_jsonl(artifact_registry, artifact_records)
     _write_jsonl(evidence_registry, evidence_records)
     _write_jsonl(decision_registry, decision_records)
+    _write_jsonl(physical_change_registry, change_records)
     registry_duration_seconds = time.perf_counter() - registry_started
     sqlite_started = time.perf_counter()
     fts5_enabled = _build_sqlite(
@@ -748,6 +794,7 @@ def build_archive_index(
         artifact_records,
         evidence_records,
         decision_records,
+        change_records,
     )
     sqlite_duration_seconds = time.perf_counter() - sqlite_started
     category_index = root / "Key-Materials" / "Key-Material-Category-Index.json"
@@ -762,6 +809,7 @@ def build_archive_index(
             "artifacts": len(artifact_records),
             "evidence": len(evidence_records),
             "decision_receipts": len(decision_records),
+            "physical_changes": len(change_records),
             "artifact_hashes_reused": sum(
                 item.get("hash_reused") is True for item in artifact_records
             ),
@@ -804,6 +852,7 @@ def build_archive_index(
             "artifact_registry": ARTIFACT_REGISTRY_NAME,
             "evidence_registry": EVIDENCE_REGISTRY_NAME,
             "decision_receipt_registry": DECISION_REGISTRY_NAME,
+            "physical_change_registry": PHYSICAL_CHANGE_REGISTRY_NAME,
             **(
                 {"key_material_category_index": category_index_relative}
                 if category_index.is_file()
@@ -823,6 +872,10 @@ def build_archive_index(
             DECISION_REGISTRY_NAME: {
                 "size_bytes": decision_registry.stat().st_size,
                 "sha256": _sha256(decision_registry),
+            },
+            PHYSICAL_CHANGE_REGISTRY_NAME: {
+                "size_bytes": physical_change_registry.stat().st_size,
+                "sha256": _sha256(physical_change_registry),
             },
             **(
                 {
@@ -941,6 +994,61 @@ def search_archive_index(
             )
             results.append(payload)
         return results
+    finally:
+        connection.close()
+
+
+def search_physical_changes(
+    root: Path,
+    *,
+    object_id: str | None = None,
+    object_role: str | None = None,
+    action_type: str | None = None,
+    parent_event_id: str | None = None,
+    start_us: int | None = None,
+    end_us: int | None = None,
+    after_peak_us: int | None = None,
+    after_change_uid: str | None = None,
+    limit: int = 51,
+) -> list[dict[str, Any]]:
+    """Search explicit physical state transitions derived from canonical event JSON."""
+
+    database = root / "JSON-Config-Files" / INDEX_DB_NAME
+    if not database.is_file():
+        return []
+    connection = sqlite3.connect(str(database))
+    connection.row_factory = sqlite3.Row
+    try:
+        conditions: list[str] = []
+        parameters: list[Any] = []
+        for field, value in (
+            ("object_id", object_id),
+            ("object_role", object_role),
+            ("action_type", action_type),
+            ("parent_event_id", parent_event_id),
+        ):
+            if value:
+                conditions.append(f"{field} = ?")
+                parameters.append(str(value))
+        if start_us is not None:
+            conditions.append("end_us >= ?")
+            parameters.append(int(start_us))
+        if end_us is not None:
+            conditions.append("start_us <= ?")
+            parameters.append(int(end_us))
+        if after_peak_us is not None and after_change_uid is not None:
+            conditions.append(
+                "(peak_timestamp_us > ? OR (peak_timestamp_us = ? AND change_uid > ?))"
+            )
+            parameters.extend((after_peak_us, after_peak_us, after_change_uid))
+        where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+        parameters.append(max(1, min(int(limit), 1000)))
+        rows = connection.execute(
+            "SELECT change_json FROM physical_changes"
+            f"{where} ORDER BY peak_timestamp_us, change_uid LIMIT ?",
+            parameters,
+        ).fetchall()
+        return [json.loads(row["change_json"]) for row in rows]
     finally:
         connection.close()
 

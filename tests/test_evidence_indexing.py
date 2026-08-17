@@ -13,10 +13,12 @@ from labvision_evidence.indexing import (
     EVIDENCE_REGISTRY_NAME,
     INDEX_DB_NAME,
     INDEX_MANIFEST_NAME,
+    PHYSICAL_CHANGE_REGISTRY_NAME,
     build_archive_index,
     get_indexed_evidence,
     search_archive_index,
     search_decision_receipts,
+    search_physical_changes,
     stable_evidence_uid,
     stable_event_uid,
 )
@@ -84,6 +86,10 @@ def _indexed_archive(root: Path, *, event_count: int = 1):
                 "objects": ["pipette", "tube"],
                 "cross_view_consistency": "consistent",
                 "confidence": 0.9,
+                "physical_change": {
+                    "before": "outside_source",
+                    "after": "withdrawn_from_target",
+                },
             },
         )
         group = ExperimentGroup(
@@ -170,6 +176,8 @@ def test_build_archive_index_preserves_one_hop_artifact_and_source_references(tm
     assert manifest["counts"]["artifacts"] == 6
     assert manifest["counts"]["evidence"] == 2
     assert manifest["counts"]["artifact_hashes_computed"] == 6
+    assert manifest["counts"]["physical_changes"] == 1
+    assert (json_root / PHYSICAL_CHANGE_REGISTRY_NAME).is_file()
     event_uid = stable_event_uid(archive_id, groups[0].group_id, events[0].event_id)
     assert normalized[0]["provenance"]["index"]["event_uid"] == event_uid
     assert normalized[0]["provenance"]["index"]["evidence_refs"][0][
@@ -285,6 +293,26 @@ def test_quality_decision_receipts_are_indexed_by_rule_verdict_and_subject(tmp_p
     )
 
 
+def test_physical_change_index_only_projects_explicit_known_state_differences(tmp_path):
+    root = tmp_path / "Archive-Changes"
+    _, _, _, normalized, _ = _indexed_archive(root, event_count=2)
+
+    changes = search_physical_changes(
+        root,
+        object_role="tool",
+        action_type="liquid_transfer",
+        limit=10,
+    )
+
+    assert len(changes) == 2
+    assert {item["state_before"] for item in changes} == {"outside_source"}
+    assert {item["state_after"] for item in changes} == {"withdrawn_from_target"}
+    assert all(item["provenance"]["new_inference_performed"] is False for item in changes)
+    assert all(item["event_uid"] for item in changes)
+    assert normalized[0]["state_before"]["source"] == "unknown"
+    assert not search_physical_changes(root, object_role="source", limit=10)
+
+
 def test_key_event_api_paginates_and_resolves_event_and_evidence(monkeypatch, tmp_path):
     archive_root = tmp_path / "archives"
     root = archive_root / "Archive-Web"
@@ -313,6 +341,39 @@ def test_key_event_api_paginates_and_resolves_event_and_evidence(monkeypatch, tm
     )
     assert second_page.status_code == 200
     assert second_page.json()["items"][0]["event_uid"] != first_payload["items"][0]["event_uid"]
+
+    mismatched_cursor = client.get(
+        "/api/key-events",
+        params={
+            "archive": root.name,
+            "q": "different-filter",
+            "limit": 1,
+            "cursor": first_payload["next_cursor"],
+        },
+    )
+    assert mismatched_cursor.status_code == 400
+
+    first_change_page = client.get(
+        "/api/physical-changes",
+        params={"archive": root.name, "object_role": "tool", "limit": 1},
+    )
+    assert first_change_page.status_code == 200
+    change_payload = first_change_page.json()
+    assert change_payload["count"] == 1
+    assert change_payload["next_cursor"]
+    assert change_payload["items"][0]["event_url"].startswith("/api/key-events/")
+
+    second_change_page = client.get(
+        "/api/physical-changes",
+        params={
+            "archive": root.name,
+            "object_role": "tool",
+            "limit": 1,
+            "cursor": change_payload["next_cursor"],
+        },
+    )
+    assert second_change_page.status_code == 200
+    assert second_change_page.json()["items"][0]["change_uid"] != change_payload["items"][0]["change_uid"]
 
     event_uid = stable_event_uid(archive_id, groups[0].group_id, events[0].event_id)
     detail = client.get(

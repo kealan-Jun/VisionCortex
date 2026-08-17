@@ -339,6 +339,8 @@ def discover_collections(
     status: str | None = None,
     query: str | None = None,
     limit: int | None = None,
+    after_recording_start_time: str | None = None,
+    after_experiment_id: str | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     settings = config.get("collection_ingest") or {}
@@ -371,7 +373,11 @@ def discover_collections(
         for experiment_id, experiment_rows in grouped.items()
     ]
     collections.sort(
-        key=lambda item: str(item.get("recording_start_time") or ""), reverse=True
+        key=lambda item: (
+            str(item.get("recording_start_time") or ""),
+            str(item.get("experiment_id") or ""),
+        ),
+        reverse=True,
     )
     if status:
         collections = [item for item in collections if item["status"] == status]
@@ -388,6 +394,20 @@ def discover_collections(
                     *(str(camera.get("camera_key") or "") for camera in item["cameras"]),
                 ]
             ).lower()
+        ]
+    total_count = len(collections)
+    if (after_recording_start_time is None) != (after_experiment_id is None):
+        raise ValueError("collection cursor position must include both sort fields")
+    if after_recording_start_time is not None and after_experiment_id is not None:
+        cursor_key = (after_recording_start_time, after_experiment_id)
+        collections = [
+            item
+            for item in collections
+            if (
+                str(item.get("recording_start_time") or ""),
+                str(item.get("experiment_id") or ""),
+            )
+            < cursor_key
         ]
     result_limit = int(limit or settings.get("max_results", 200))
     collections = collections[: max(1, min(result_limit, 1000))]
@@ -408,6 +428,7 @@ def discover_collections(
             "recommended_poll_seconds": float(settings.get("poll_seconds", 30.0)),
         },
         "collection_count": len(collections),
+        "total_count": total_count,
         "collections": collections,
     }
     if not index_meta["cache_hit"]:

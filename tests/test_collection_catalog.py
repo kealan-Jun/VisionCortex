@@ -168,3 +168,39 @@ def test_collection_catalog_keeps_open_recordings_out_of_ready_queue(
     assert collection["status"] == "recording"
     assert collection["sealed"] is False
     assert collection["ready_to_analyze"] is False
+
+
+def test_collection_catalog_pages_by_stable_recording_and_experiment_key(
+    default_config, tmp_path
+):
+    registry_path = _write_registry(tmp_path / "registry.json")
+    rows = [
+        _row(experiment_id, camera_key, camera_view)
+        for experiment_id in ("exp-c", "exp-b", "exp-a")
+        for camera_key, camera_view in (("fp", "first"), ("tp", "side"))
+    ]
+    index_path = _write_index(tmp_path / "experiment_record_index.csv", rows)
+    default_config["storage"].update(
+        {
+            "index_csv": str(index_path),
+            "device_registry_path": str(registry_path),
+            "local_cache_root": str(tmp_path / "cache"),
+        }
+    )
+    default_config["collection_ingest"]["persist_snapshot"] = False
+    clear_collection_catalog_cache()
+    now = datetime(2026, 8, 11, tzinfo=timezone.utc)
+
+    first = discover_collections(default_config, limit=2, now=now)
+    last = first["collections"][-1]
+    second = discover_collections(
+        default_config,
+        limit=2,
+        after_recording_start_time=str(last["recording_start_time"]),
+        after_experiment_id=str(last["experiment_id"]),
+        now=now,
+    )
+
+    assert first["total_count"] == 3
+    assert [item["experiment_id"] for item in first["collections"]] == ["exp-c", "exp-b"]
+    assert [item["experiment_id"] for item in second["collections"]] == ["exp-a"]
