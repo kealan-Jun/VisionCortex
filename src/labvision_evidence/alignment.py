@@ -12,7 +12,7 @@ import numpy as np
 
 from .schemas import AlignmentTransform, TimestampPoint, VideoInfo, ViewInput
 from .storage import read_source_file_edges
-from .video_io import view_motion_signature
+from .video_io import view_motion_signature, virtual_frame_index_at
 
 
 FRAME_COLUMNS = (
@@ -619,7 +619,9 @@ def iter_aligned_rows(
         for view in views:
             local_ms = transforms[view.view_id].to_local(global_ms)
             row[f"{view.view_id}_local_ms"] = round(local_ms, 3)
-            row[f"{view.view_id}_frame"] = int(round(local_ms / 1000.0 * infos[view.view_id].fps))
+            row[f"{view.view_id}_frame"] = virtual_frame_index_at(
+                infos[view.view_id], local_ms
+            )
         yield row
         index += 1
         global_ms += step

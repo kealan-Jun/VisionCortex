@@ -121,11 +121,6 @@ def _build_segmented_view_info(view: ViewInput, probed: Sequence[VideoInfo]) -> 
                 f"segment resolution changed in {view.view_id}: "
                 f"{media.path} is {media.width}x{media.height}, expected {first.width}x{first.height}"
             )
-        if abs(media.fps - first.fps) > 0.05:
-            raise ValueError(
-                f"segment frame rate changed in {view.view_id}: "
-                f"{media.path} is {media.fps}, expected {first.fps}"
-            )
         segment_infos.append(
             VideoSegmentInfo(
                 path=media.path,
@@ -143,16 +138,59 @@ def _build_segmented_view_info(view: ViewInput, probed: Sequence[VideoInfo]) -> 
         )
         virtual_start_ms += media.duration_ms
         frame_start += media.frame_count
+    aggregate_fps = (
+        frame_start * 1000.0 / virtual_start_ms
+        if virtual_start_ms > 0.0 and frame_start > 0
+        else first.fps
+    )
     return VideoInfo(
         path=first.path,
         duration_ms=virtual_start_ms,
-        fps=first.fps,
+        # A segmented recorder may legitimately change its nominal/container
+        # rate between physical files.  The per-segment rates above remain the
+        # source of truth for frame/time conversion; this aggregate is only a
+        # useful view-level density for legacy callers and summaries.
+        fps=aggregate_fps,
         width=first.width,
         height=first.height,
         frame_count=frame_start,
         size_bytes=sum(item.size_bytes for item in segment_infos),
         segments=segment_infos,
     )
+
+
+def virtual_frame_index_at(info: VideoInfo, local_ms: float) -> int:
+    """Map virtual timeline time to a stable cumulative source frame index."""
+
+    if not info.segments:
+        frame_index = int(round(max(0.0, local_ms) * info.fps / 1000.0))
+        return min(max(0, frame_index), max(0, info.frame_count - 1))
+    selected = next(
+        (
+            segment
+            for segment in info.segments
+            if segment.virtual_start_ms <= local_ms < segment.virtual_end_ms
+        ),
+        None,
+    )
+    if selected is None:
+        selected = next(
+            (
+                segment
+                for segment in reversed(info.segments)
+                if segment.virtual_start_ms <= local_ms
+            ),
+            info.segments[0],
+        )
+    source_ms = min(
+        max(0.0, local_ms - selected.virtual_start_ms),
+        selected.duration_ms,
+    )
+    source_frame_index = int(round(source_ms * selected.fps / 1000.0))
+    source_frame_index = min(
+        max(0, source_frame_index), max(0, selected.frame_count - 1)
+    )
+    return selected.frame_start_index + source_frame_index
 
 
 def probe_view(view: ViewInput) -> VideoInfo:
@@ -498,8 +536,7 @@ def _selected_session_frame_indices(
     # Mirror that positive-duration rounding exactly.  Using ceil here made a
     # fractional endpoint (205.633333 s at 10 FPS) demand 2057 ledger rows even
     # though FFmpeg correctly emits 2056, aborting an otherwise valid session.
-    scaled_frame_count = max(0.0, (end_ms - start_ms) / period_ms)
-    frame_count = int(math.floor(scaled_frame_count + 0.5))
+    frame_count = _post_fps_frame_count(start_ms, end_ms, sample_fps)
     return [
         index
         for index in range(frame_count)
@@ -508,6 +545,31 @@ def _selected_session_frame_indices(
             for window_start, window_end in windows
         )
     ]
+
+
+def _post_fps_frame_count(start_ms: float, end_ms: float, sample_fps: float) -> int:
+    period_ms = 1000.0 / max(sample_fps, 1e-9)
+    scaled_frame_count = max(0.0, (end_ms - start_ms) / period_ms)
+    return int(math.floor(scaled_frame_count + 0.5))
+
+
+def _is_reconcilable_terminal_eof_shortfall(
+    expected_indices: Sequence[int],
+    emitted: int,
+    post_fps_frame_count: int,
+) -> bool:
+    """Accept only one absent terminal FPS-filter sample at a clean EOF.
+
+    FFmpeg can omit its final rounded sample when the physical stream ends
+    between two target-grid timestamps.  The fps filter regularises all prior
+    timestamps, so this narrow case cannot conceal an interior missing frame.
+    """
+
+    return bool(
+        emitted > 0
+        and len(expected_indices) - emitted == 1
+        and expected_indices[-1] == post_fps_frame_count - 1
+    )
 
 
 def _consecutive_index_ranges(indices: Sequence[int]) -> list[tuple[int, int]]:
@@ -571,6 +633,7 @@ def _ffmpeg_multi_window_iterator(
     expected_indices = _selected_session_frame_indices(
         start_ms, end_ms, normalized, sample_fps
     )
+    post_fps_frame_count = _post_fps_frame_count(start_ms, end_ms, sample_fps)
     expected_timestamps = _selected_session_timestamps(
         start_ms, end_ms, normalized, sample_fps
     )
@@ -584,6 +647,8 @@ def _ffmpeg_multi_window_iterator(
                 "expected_frame_count": len(expected_timestamps),
                 "actual_frame_count": 0,
                 "frame_accounting_mismatch": None,
+                "frame_accounting_reconciled": False,
+                "terminal_eof_shortfall_frames": 0,
             }
         )
     if not expected_indices:
@@ -678,6 +743,22 @@ def _ffmpeg_multi_window_iterator(
                 "frame_accounting_mismatch": emitted - len(expected_timestamps),
             }
         )
+    if emitted != len(expected_timestamps) and _is_reconcilable_terminal_eof_shortfall(
+        expected_indices,
+        emitted,
+        post_fps_frame_count,
+    ):
+        if receipt is not None:
+            receipt.update(
+                {
+                    "frame_accounting_reconciled": True,
+                    "terminal_eof_shortfall_frames": 1,
+                    "frame_accounting_reconciliation_reason": (
+                        "single_terminal_post_fps_frame_absent_at_clean_eof"
+                    ),
+                }
+            )
+        return
     if emitted != len(expected_timestamps):
         raise RuntimeError(
             "persistent FFmpeg session frame accounting mismatch: "

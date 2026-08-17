@@ -2557,6 +2557,29 @@ class EvidencePipeline:
         started_units = sum(
             item.get("event") == "source_unit_started" for item in source_activity
         )
+        decoder_receipts = [
+            item["decoder_receipt"]
+            for item in source_activity
+            if item.get("event") == "source_unit_completed"
+            and isinstance(item.get("decoder_receipt"), dict)
+        ]
+        frame_accounting = {
+            "session_count": len(decoder_receipts),
+            "exact_session_count": sum(
+                int(receipt.get("frame_accounting_mismatch") or 0) == 0
+                for receipt in decoder_receipts
+            ),
+            "reconciled_terminal_eof_session_count": sum(
+                bool(receipt.get("frame_accounting_reconciled"))
+                and int(receipt.get("terminal_eof_shortfall_frames") or 0) == 1
+                for receipt in decoder_receipts
+            ),
+            "unreconciled_mismatch_session_count": sum(
+                int(receipt.get("frame_accounting_mismatch") or 0) != 0
+                and not bool(receipt.get("frame_accounting_reconciled"))
+                for receipt in decoder_receipts
+            ),
+        }
         scheduler_reports = []
         for path in sorted(work_dir.rglob(f"scheduler_{phase}.json")):
             report = json.loads(path.read_text(encoding="utf-8"))
@@ -2656,6 +2679,7 @@ class EvidencePipeline:
                 "role_reports": role_reports,
                 "scheduler": scheduler,
                 "progressive_cross_view": progressive_report,
+                "frame_accounting": frame_accounting,
                 "bottleneck_diagnosis": bottleneck_diagnosis,
                 "source_activity": sorted(
                     source_activity, key=lambda item: float(item.get("timestamp", 0.0))

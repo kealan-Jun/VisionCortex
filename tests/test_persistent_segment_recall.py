@@ -1,3 +1,4 @@
+import io
 import shutil
 import subprocess
 from pathlib import Path
@@ -27,6 +28,7 @@ from labvision_evidence.schemas import (
 from labvision_evidence.video_io import (
     _aligned_grid_start_ms,
     _ffmpeg_multi_window_iterator,
+    _is_reconcilable_terminal_eof_shortfall,
     _selected_session_frame_indices,
     _selected_session_timestamps,
     plan_physical_segment_decode_sessions,
@@ -109,6 +111,63 @@ def test_persistent_session_timestamp_count_matches_ffmpeg_round_near_endpoint()
     assert len(timestamps) == 2056
     assert timestamps[0] == start_ms
     assert timestamps[-1] == start_ms + 205_500.0
+
+
+def test_only_single_terminal_eof_shortfall_is_reconcilable():
+    assert _is_reconcilable_terminal_eof_shortfall([0, 1, 2, 3], 3, 4) is True
+    assert _is_reconcilable_terminal_eof_shortfall([0, 1, 2, 3], 2, 4) is False
+    assert _is_reconcilable_terminal_eof_shortfall([0, 1, 2], 2, 4) is False
+    assert _is_reconcilable_terminal_eof_shortfall([1], 0, 2) is False
+
+
+def test_persistent_ffmpeg_records_and_accepts_one_terminal_eof_shortfall(
+    monkeypatch,
+):
+    class FakeProcess:
+        def __init__(self):
+            self.stdout = io.BytesIO(bytes(2 * 2 * 3 * 3))
+            self.stderr = io.BytesIO()
+            self.returncode = 0
+
+        def wait(self):
+            return self.returncode
+
+    monkeypatch.setattr(
+        "labvision_evidence.video_io.subprocess.Popen",
+        lambda *args, **kwargs: FakeProcess(),
+    )
+    info = VideoInfo(
+        path=Path("terminal-eof.mp4"),
+        duration_ms=400.0,
+        fps=30.0,
+        width=2,
+        height=2,
+        frame_count=12,
+    )
+    receipt = {}
+
+    frames = list(
+        _ffmpeg_multi_window_iterator(
+            info.path,
+            info,
+            0.0,
+            400.0,
+            [(0.0, 400.0)],
+            10.0,
+            2,
+            None,
+            1,
+            False,
+            receipt,
+        )
+    )
+
+    assert len(frames) == 3
+    assert receipt["expected_frame_count"] == 4
+    assert receipt["actual_frame_count"] == 3
+    assert receipt["frame_accounting_mismatch"] == -1
+    assert receipt["frame_accounting_reconciled"] is True
+    assert receipt["terminal_eof_shortfall_frames"] == 1
 
 
 def test_persistent_sessions_share_one_alignment_anchored_global_sampling_grid():
