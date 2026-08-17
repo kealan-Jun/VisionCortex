@@ -1,0 +1,342 @@
+{
+  "schema_version": "visioncortex-capability-freeze/1.0.0",
+  "freeze_id": "VC-FREEZE-20260817-001",
+  "created_at": "2026-08-17T13:00:00+08:00",
+  "status": "evidence_freeze_not_release",
+  "release_ready": false,
+  "authority": {
+    "repository": "kealan-Jun/VisionCortex",
+    "dev_032_quality_audit": "https://github.com/kealan-Jun/VisionCortex/issues/3#issuecomment-5311341855",
+    "dev_034_freeze_evidence": "https://github.com/kealan-Jun/VisionCortex/issues/3#issuecomment-5312034160",
+    "rule": "The formal quality baseline and the fast preprocessing candidate are independent evidence sets and must never be merged into one release claim."
+  },
+  "runner": {
+    "repository_path": "E:/VisionCortex-RTX4060-Baseline-v0.1.0",
+    "branch": "codex/post-dev008-adaptive-throughput",
+    "runtime_git_sha": "03f4ec0d4ac7432f55a3e5f030181ceea53b64ee",
+    "runtime_worktree_clean": true,
+    "remote_taskbook_sha_observed": "b787f67776fc7d2798d83f0438fed05c9affe542",
+    "synchronized_during_audit": false
+  },
+  "baselines": {
+    "formal_quality_and_completeness": {
+      "classification": "proven_historical_full_chain_quality",
+      "production_performance_proven": false,
+      "archive_root": "Y:/VisionCortexExperimentArchive/Six-View-Three-Hour-Experiment-2026-08-13",
+      "run_id": "benchmark-ec406f2e05",
+      "git_commit_binding": null,
+      "git_commit_binding_status": "not_proven",
+      "receipt_code_digest": "69ddd7a611188c7c960f58164df56d10d4715f9fff292cb053d64795ea65f73b",
+      "cache_key": "c77d05b7a3d20e828472",
+      "archive": {
+        "file_count": 1081,
+        "bytes": 45314893035,
+        "principal_receipt_manifest_sha256": "1be2af35e0884f3ba6c7f44b94c0f0f56129c5715b4f546d00b94bf4a39b063a",
+        "areas": {
+          "Original-Experiment-Videos": {"files": 22, "bytes": 44414301371},
+          "Experiment-Clips": {"files": 30, "bytes": 309451524},
+          "JSON-Config-Files": {"files": 59, "bytes": 15923763},
+          "Key-Materials": {"files": 964, "bytes": 574437614},
+          "Lab-Daily-Reports": {"files": 5, "bytes": 436043},
+          "Professional-PDFs": {"files": 1, "bytes": 342720}
+        }
+      },
+      "quality": {
+        "passed": true,
+        "experiment_groups": 5,
+        "atomic_experiments": 6,
+        "reviewed_boundaries_within_8_seconds": true,
+        "reviewed_false_positive_groups": 0,
+        "reviewed_false_negative_groups": 0,
+        "group_structure": {
+          "G1": "independent/1",
+          "G2": "independent/1",
+          "G3": "independent/1",
+          "G4": "continuous/2",
+          "G5": "independent/1"
+        },
+        "boundary_errors_seconds": {
+          "G1": {"start": 7.95, "end": -5.975},
+          "G2": {"start": 0.45, "end": 1.15},
+          "G3": {"start": -0.377795, "end": 0.222206},
+          "G4": {"start": 0.234422, "end": 0.834421},
+          "G5": {"start": 5.83758, "end": -0.212377}
+        },
+        "key_events": 80,
+        "media_complete_events": 80,
+        "model_understanding_complete_events": 80,
+        "cross_view_confirmed_events": 59,
+        "confirmed_events": 79
+      },
+      "materials": {
+        "experiment_first_person_videos": 5,
+        "experiment_third_person_videos": 5,
+        "experiment_aligned_videos": 5,
+        "key_frames": 240,
+        "key_clips": 240,
+        "dual_view_material_packages": 80,
+        "daily_report_present": true,
+        "professional_pdf_present": true
+      },
+      "performance_seconds": {
+        "total_pipeline": 4318.780239,
+        "preprocessing": 2391.82143,
+        "preprocessing_target": 1200.0,
+        "preprocessing_target_met": false,
+        "preflight": 98.174262,
+        "alignment": 1.231108,
+        "motion": 502.225646,
+        "fine": 1782.838646,
+        "audit": 7.283358,
+        "experiment_understanding": 323.558781,
+        "experiment_clips": 366.82959,
+        "key_materials": 1013.849755,
+        "key_material_understanding": 218.273215,
+        "package": 2.957048,
+        "daily_report": 1.059447
+      },
+      "model_usage": {
+        "model": "doubao-seed-2-1-pro-260628",
+        "calls": 85,
+        "input_tokens": 323410,
+        "output_tokens": 53197,
+        "total_tokens": 376607,
+        "experiment_understanding": {
+          "calls": 5,
+          "input_tokens": 71545,
+          "output_tokens": 12033,
+          "total_tokens": 83578
+        },
+        "key_material_understanding": {
+          "calls": 80,
+          "input_tokens": 251865,
+          "output_tokens": 41164,
+          "total_tokens": 293029
+        },
+        "daily_report_additional_tokens": 0,
+        "pdf_additional_tokens": 0
+      },
+      "receipt_sha256": {
+        "pipeline_status": "2a5218bc52f4764932797a2f63ca5ad0464c3c71b6ea1a68b59516302c2c97ba",
+        "run_manifest": "44dcd9df909f57766f47d0bebb9595101f04ccd6c436163850de811b8c7bd1a4",
+        "run_metrics": "39e9b9efa0bf303eeb9872879df0de9cb3423557d7f8100db4cd77263521df53",
+        "quality_acceptance": "7f325f60c855433619d2a817e1354fd2848aa9ff7a6b18b362e8897f9285794b",
+        "evidence_package_evaluation": "77f9cb23f9226bd642c69185ea760cd5b780f421834055552976a6819d54a8b4",
+        "fixed_archive_promotion": "cf60a558f171711d98f2b3ec50a90869d8feba08c5dab840af3746dc3ed134f1",
+        "daily_report_manifest": "91c4e6f6a724f5bc025ab55e09ad0ee87b772d9e338ac16e39396a56774d1602",
+        "experiment_group_understanding": "5ff43a081d44339f07557c5093925b57ff3b7c8602ec973cc7a93d54ded94b26",
+        "key_material_understanding": "cac0c107e57a431e3776958ea62231ae7e1dab8bb94d163a51d4ff488553f612",
+        "pdf": "d4689dc8af89c589d0204b87c7d9e7d79d92e044fe2225bc1b1e0105d5dbcc68"
+      },
+      "limitations": [
+        "No preserved Git commit binding exists for this formal run.",
+        "Dedicated SQLite, artifact registry and evidence registry are not present.",
+        "Comprehensive media integrity hashes are not present.",
+        "run_submission reports queued while pipeline receipts report completed.",
+        "One post-promotion resource telemetry partial file exists.",
+        "The preprocessing target was not met."
+      ]
+    },
+    "fast_preprocessing_candidate": {
+      "classification": "proven_performance_failed_quality_not_release_ready",
+      "runtime_git_sha": "03f4ec0d4ac7432f55a3e5f030181ceea53b64ee",
+      "run_id": "cli-20260817-095055-34d8",
+      "staging_root": "Y:/VisionCortexExperimentArchive/.VisionCortex-Run-Staging/Six-View-Three-Hour-Experiment-2026-08-13/cli-20260817-095055-34d8",
+      "cache_root": "D:/VisionCortexLocal/Cache/Six-View-Three-Hour-Experiment-2026-08-13/9c3c60dcecccbe81fcd0",
+      "cache_code_digest": "890d7862f8f0c577feeb98c9b7a193df8dc9d51fe5948cb8e5dea310ecc73a17",
+      "cache_key": "9c3c60dcecccbe81fcd0",
+      "performance_seconds": {
+        "total_elapsed": 915.250343,
+        "preprocessing": 914.920986,
+        "preprocessing_target": 1200.0,
+        "preprocessing_target_met": true,
+        "preflight": 37.480202,
+        "alignment": 1.23921,
+        "motion": 219.588207,
+        "coarse": 0.159511,
+        "fine": 653.677432,
+        "audit": 2.831347
+      },
+      "fine_runtime": {
+        "sessions": 27,
+        "expected_frames": 60828,
+        "actual_frames": 60828,
+        "fallback_sessions": 0,
+        "queue_wait_seconds": 286.16543,
+        "inference_seconds": 328.665678,
+        "mean_batch": 7.966,
+        "batch_fill_percent": 99.5744,
+        "inference_fps": 185.076
+      },
+      "candidate_and_selection": {
+        "candidates": 721,
+        "first_person_candidates": 503,
+        "third_person_candidates": 218,
+        "audit_events": 611,
+        "segments": 6,
+        "predicted_groups": 5,
+        "accepted_events": 103,
+        "selected_events": 87,
+        "per_action_cap_removals": 4,
+        "duplicate_lower_removals": 7,
+        "duplicate_replacements": 5
+      },
+      "quality": {
+        "passed": false,
+        "precision": 0.8,
+        "recall": 0.8,
+        "boundary_pass_rate": 0.5,
+        "continuity_pass_rate": 0.75,
+        "reviewed_false_negative_groups": 1,
+        "reviewed_false_positive_groups": 1,
+        "failures": {
+          "G1": "start_error_plus_8.55_seconds",
+          "G3": "false_continuous_two_atomic",
+          "G4": "reviewed_group_unmatched",
+          "G5": "start_error_minus_14.65_seconds"
+        }
+      },
+      "model_usage": {
+        "model_calls": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "reason": "candidate audit failed before model stages"
+      },
+      "classification_gates": {
+        "performance_sla": "proven",
+        "end_to_end_quality": "not_proven",
+        "release_readiness": "not_proven"
+      },
+      "preserved_evidence": {
+        "staging_files": 45,
+        "staging_bytes": 12353628,
+        "staging_core_manifest_sha256": "3a618d476065a6d95ffb395a428730f447506ee6d6401bdfc9239f43da89da22",
+        "cache_files": 29,
+        "cache_bytes": 55311020,
+        "cache_manifest_sha256": "e7c8f71b9e32d0599ff1bed9931d5d81a0eb7230f789c13878c0163d33f69858"
+      }
+    }
+  },
+  "runtime_identity": {
+    "config_sha256": {
+      "default": "e574e35178c95a85b9599cb57960fefe08f7d1f13686a7af1962b7ad16b5c7a2",
+      "rtx4060_laptop_production": "0fc4617281382fa1e4969e886e9ba5734b8399519a288da47aacc9cbfbcc6ea6",
+      "pyproject": "94c419a9f2f56b6084b8871f5f6ad559593a36d5f1bb913e26f6e068be744fee",
+      "dev031_input_manifest": "d92c1f28d1e0ef4ff832d81843d87436c5c6bc93f4009c439567b819f9b73485",
+      "dev031_cache_identity": "8b292838feaaf6f9684d5adb2549cfcfc04fd94b48d40b10bb75743ad40cba7d",
+      "dev031_nas_ingest": "e9e348ddcb8b0daa2107c1a897bf3e554dff641f301fba1a0d8e5bd6cc0a2f3a"
+    },
+    "model_sha256": {
+      "first_person_pt": "a541c59ef8b09158b9b22851dcada6231dbab0f2f1478ae824bcf609851c58ea",
+      "first_person_engine": "0166d0315850be2dc32973b99a3ae2f667038081f862b98cc3f62c8bd8692106",
+      "third_person_pt": "ef5a867abf21a8d790eaba054e92d114ae4567c1f867c041ed079cde0a01a36b",
+      "third_person_engine": "c62385cdf40412b3a7dcab382dcac817d785d31ccda6d8f46b79b8c67e575e5d"
+    },
+    "hardware": {
+      "os": "Windows 10 Pro 10.0.19045",
+      "cpu": "Intel Xeon E5-2686 v4",
+      "physical_cores": 18,
+      "logical_cores": 36,
+      "ram_bytes": 68565213184,
+      "gpu": "NVIDIA GeForce RTX 4060 Laptop GPU",
+      "gpu_memory_mib": 8188,
+      "driver": "556.12",
+      "nvidia_smi_cuda": "12.5",
+      "network": "Realtek PCIe GbE 1 Gbps",
+      "nas_unc": "//192.168.66.149/video_database",
+      "smb_version": "3.1.1"
+    },
+    "software": {
+      "python": "3.12.13",
+      "pytorch": "2.11.0+cu128",
+      "torchvision": "0.26.0+cu128",
+      "ultralytics": "8.4.118",
+      "opencv": "4.11.0.86",
+      "pydantic": "2.13.4",
+      "tensorrt": "11.2.1.2",
+      "ffmpeg": "8.1.1",
+      "nvenc_listed": true,
+      "nvenc_runtime_usable_for_formal_run": false,
+      "software_encoder_fallback": "libx264",
+      "dependency_lock_present": false
+    }
+  },
+  "quality_fix_scope": [
+    {
+      "id": "QF-001",
+      "issue": "leading_single_view_context_omitted",
+      "required_change": "Allow qualified leading context to extend a boundary without promoting it to formal event membership, and emit a receipt."
+    },
+    {
+      "id": "QF-002",
+      "issue": "class_label_continuity_used_as_object_identity",
+      "required_change": "Require identity-proven shared non-hand object carryover for continuity, and emit an edge/object receipt."
+    },
+    {
+      "id": "QF-003",
+      "issue": "broad_target_coverage_not_temporal_cluster_complete",
+      "required_change": "Exhaust or cover each unresolved first-person temporal cluster through refined target bounds."
+    },
+    {
+      "id": "QF-004",
+      "issue": "movement_only_opener_under_corroborated",
+      "required_change": "Require subsequent dual-view corroboration of the same non-hand object before a movement-only event opens a formal segment."
+    },
+    {
+      "id": "QF-005",
+      "issue": "generic_hand_classes_used_as_dedup_identity",
+      "required_change": "Exclude hand and gloved_hand from object identity and require a shared non-hand manipulated object."
+    }
+  ],
+  "separate_hygiene_scope": [
+    {
+      "id": "HYGIENE-001",
+      "issue": "fifteen_adjacent_segment_duplicate_grid_rows",
+      "quality_causal": false,
+      "rule": "Do not present this cleanup as a fix for G1, G3, G4 or G5."
+    }
+  ],
+  "release_blockers": [
+    "No single run proves both preprocessing below 1200 seconds and all production quality/output gates.",
+    "The five DEV-032 quality causes are not fixed in the frozen runtime.",
+    "The formal quality archive lacks a preserved Git commit binding.",
+    "A tracked dependency lock is not present.",
+    "The formal archive lacks the dedicated SQLite, artifact and evidence registries and comprehensive media integrity registry.",
+    "Submission, completion and promotion lineage contains a queued/completed mismatch.",
+    "One post-promotion resource telemetry partial file exists in the formal archive.",
+    "NVENC was not usable with the recorded driver and FFmpeg combination.",
+    "Live Web archive visibility is not proven under the freeze protocol."
+  ],
+  "next_release_acceptance": {
+    "requires_new_explicit_one_shot": true,
+    "same_run_requirements": {
+      "preprocessing_seconds_lte": 1200.0,
+      "experiment_groups": 5,
+      "atomic_experiments": 6,
+      "all_reviewed_boundary_absolute_error_seconds_lte": 8.0,
+      "minimum_valid_key_events": 80,
+      "all_formal_groups_dual_view": true,
+      "complete_first_person_third_person_aligned_materials": true,
+      "experiment_model_understanding_complete": true,
+      "key_material_model_understanding_complete": true,
+      "daily_report_complete": true,
+      "professional_pdf_complete": true,
+      "verified_nas_promotion": true,
+      "git_commit_binding_present": true,
+      "dependency_lock_present": true,
+      "artifact_evidence_integrity_registry_complete": true,
+      "timing_and_token_ledger_complete": true
+    }
+  },
+  "actions_performed_by_freeze": {
+    "production_tag_created": false,
+    "package_created": false,
+    "release_created": false,
+    "runner_synchronized": false,
+    "pipeline_run": false,
+    "model_api_calls": 0,
+    "tokens": 0,
+    "nas_mutation": false
+  }
+}
