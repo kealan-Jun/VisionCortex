@@ -59,6 +59,7 @@ from .grouping import (
 from .detection import iter_frame_evidence, scan_videos, validate_models
 from .daily_reports import generate_daily_report_archive
 from .decisions import decision_receipt
+from .schema_contracts import write_archive_contract_manifest
 from .schemas import (
     ActionCandidate,
     ActionType,
@@ -3858,6 +3859,7 @@ class EvidencePipeline:
             # Refresh the report with the closed daily_report stage duration and
             # final provider-reported token ledger. This remains deterministic.
             generate_daily_report_archive(layout, summary, run_metrics, self.config)
+            write_archive_contract_manifest(layout.root)
             self._complete_stage(
                 layout,
                 "completed",
@@ -4115,6 +4117,27 @@ def create_dry_run(output: Path, config: dict[str, Any]) -> Path:
             ],
         },
     )
+    write_json(
+        layout.json_config / "audit_layer.json",
+        {
+            "events": [event.model_dump(mode="json")],
+            "rejected": [],
+            "raw_segments": [segment.model_dump(mode="json")],
+            "normalized_segments": [segment.model_dump(mode="json")],
+            "segments": [segment.model_dump(mode="json")],
+            "formal_segment_receipts": [],
+            "experiment_groups": [group.model_dump(mode="json")],
+            "dry_run": True,
+        },
+    )
+    dry_quality = validate_experiment_and_material_quality(
+        [group],
+        [event],
+        None,
+        minimum_cross_view_event_rate=0.0,
+    )
+    dry_quality["dry_run"] = True
+    write_json(layout.json_config / "quality_acceptance.json", dry_quality)
     dry_metrics = {
         "total_duration_seconds": 0.0,
         "preprocessing_sla": {"actual_seconds": 0.0, "target_seconds": 1200.0, "met": True},
@@ -4129,5 +4152,6 @@ def create_dry_run(output: Path, config: dict[str, Any]) -> Path:
     }
     write_json(layout.json_config / "run_metrics.json", dry_metrics)
     generate_daily_report_archive(layout, summary, dry_metrics, config)
+    write_archive_contract_manifest(layout.root)
     write_json(layout.root / "run_status.json", {"stage": "completed", "progress": 1.0, "dry_run": True})
     return layout.root

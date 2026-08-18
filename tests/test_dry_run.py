@@ -57,3 +57,9 @@ def test_dry_run_builds_contract_without_video_or_ffmpeg(tmp_path):
     evaluation = json.loads((output / "JSON-Config-Files" / "evidence_package_eval.json").read_text(encoding="utf-8"))
     assert evaluation["passed"] is True
     assert evaluation["dry_run"] is True
+    schema_manifest = json.loads(
+        (output / "JSON-Config-Files" / "schema_contract_manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert schema_manifest["passed"] is True

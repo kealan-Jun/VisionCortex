@@ -287,12 +287,20 @@ collection_ingest:
   persist_snapshot: true
   snapshot_path: null
 
+developer_tools:
+  # Internal model-development utility. It is deliberately absent from the
+  # end-user navigation and disabled in normal product deployments.
+  yolo_annotation_workspace_enabled: false
+
 storage:
   index_csv: Y:/experiment_record_index.csv
   device_registry_path: null
   archive_root: Y:/VisionCortexExperimentArchive
   local_input_root: D:/VisionCortexLocal/Input
   local_runtime_root: D:/VisionCortexLocal/Runtime
+  # Optional explicit badcase queue. When empty, the newest local
+  # Model-Audits/*/YOLO-Annotation-Queue.json is discovered automatically.
+  yolo_annotation_queue_path: null
   local_cache_root: D:/VisionCortexLocal/Cache
   local_staging_root: ./outputs
   sync_to_nas: false

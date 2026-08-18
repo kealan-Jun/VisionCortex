@@ -29,6 +29,7 @@ const ICONS = {
   arrow: '<svg viewBox="0 0 24 24"><path d="M5 12h14M14 7l5 5-5 5"/></svg>',
   image: '<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m21 15-5-5L5 20"/></svg>',
   token: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M8 9h8M8 13h8M10 17h4"/></svg>',
+  target: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>',
 };
 
 const state = {
@@ -45,6 +46,7 @@ const state = {
   search: "",
   refreshingTasks: false,
   materialFilters: { archive: null, group: null, action: "all", support: "all", query: "" },
+  annotationFilters: { priority: "", reviewStatus: "", query: "" },
 };
 
 const main = document.querySelector("#main-content");
@@ -200,6 +202,7 @@ function pageContext(route) {
   if (route === "materials") return ["实验产出", "关键素材库"];
   if (route === "reports") return ["实验产出", "实验室日报"];
   if (route === "operations") return ["系统管理", "服务健康"];
+  if (route === "annotations") return ["系统管理", "YOLO 标注"];
   if (route === "archive") return ["实验结果", "实验详情"];
   if (route === "experiments") return ["核心工作", "实验记录"];
   return ["核心工作", "总览"];
@@ -335,7 +338,7 @@ function renderExperiments(target = "experiments") {
     : target === "reports"
       ? "从已验收证据自动生成日报 JSON、Markdown、HTML 与 PDF，并保留人工复核状态。"
       : `按实验查看原视频留存、分析结果与${archiveLabel()}位置。`;
-  main.innerHTML = `<div class="page"><header class="page-hero compact"><div><p class="eyebrow">EVIDENCE ARCHIVE</p><h1>${title}</h1><p>${copy}</p></div><div class="hero-actions"><a class="primary-button" href="#/new">${icon("plus")}新建实验</a></div></header><section class="panel"><header class="panel-heading"><div><h2>${archiveLabel()}目录</h2><p>${state.health?.nas_archive_root ? `根目录：${esc(state.health.nas_archive_root)}` : "正在读取归档根目录"}</p></div></header>${archiveRows(filteredArchives(), target === "materials" ? "materials" : target === "reports" ? "reports" : "experiments")}</section></div>`;
+  main.innerHTML = `<div class="page"><header class="page-hero compact"><div><p class="eyebrow">EVIDENCE ARCHIVE</p><h1>${title}</h1><p>${copy}</p></div><div class="hero-actions"><a class="primary-button" href="#/new">${icon("plus")}新建实验</a></div></header>${target === "experiments" ? `<section class="panel"><header class="panel-heading"><div><h2>采集批次处理账本</h2><p>直接说明每个 index 批次是否已处理并留存；不会让用户逐个筛选约 90 个分片。</p></div><a class="secondary-button" href="#/new">选择批次</a></header>${collectionLedger()}</section>` : ""}<section class="panel"><header class="panel-heading"><div><h2>${archiveLabel()}目录</h2><p>${state.health?.nas_archive_root ? `根目录：${esc(state.health.nas_archive_root)}` : "正在读取归档根目录"}</p></div></header>${archiveRows(filteredArchives(), target === "materials" ? "materials" : target === "reports" ? "reports" : "experiments")}</section></div>`;
 }
 
 function createSource(video = null, csv = null, index = state.sources.length) {
@@ -442,6 +445,29 @@ function collectionCards() {
       <button class="${selected ? "secondary-button" : "primary-button"}" type="button" data-select-collection="${esc(collection.collection_id)}" ${collection.ready_to_analyze && !["queued", "processing"].includes(collection.processing?.state) ? "" : "disabled"}>${selected ? `${icon("check")}已选择` : collection.processing?.state === "archived" ? `${icon("check")}重新分析为新归档` : `${icon("server")}选择此批次`}</button>
     </article>`;
   }).join("")}</div>`;
+}
+
+function collectionLedger() {
+  if (!state.collections.length) return `<div class="empty-state compact"><strong>索引中还没有采集批次</strong><p>系统只增量读取 index 字段表，不递归扫描 NAS 视频目录。</p></div>`;
+  const counts = { archived: 0, processing: 0, failed: 0, pending: 0 };
+  state.collections.forEach((collection) => {
+    const status = collectionStatusCopy(collection);
+    if (status.tone === "archived") counts.archived += 1;
+    else if (status.tone === "processing") counts.processing += 1;
+    else if (status.tone === "failed") counts.failed += 1;
+    else counts.pending += 1;
+  });
+  const rows = state.collections.slice(0, 12).map((collection) => {
+    const status = collectionStatusCopy(collection);
+    const archiveName = collection.processing?.archive_name;
+    const link = status.tone === "archived" && archiveName
+      ? `<a href="#/archive/${encodeURIComponent(archiveName)}/experiments">打开正式归档 ${icon("arrow")}</a>`
+      : status.tone === "processing" || status.tone === "failed"
+        ? `<a href="#/tasks">查看任务证据 ${icon("arrow")}</a>`
+        : `<a href="#/new">选择并分析 ${icon("arrow")}</a>`;
+    return `<article class="batch-ledger-row"><span class="collection-status ${status.tone}">${esc(status.label)}</span><div><strong>${esc(collection.display_name || collection.collection_id)}</strong><small>${esc(collection.collection_id)} · ${formatDate(collection.recording_start_time)}</small></div><p>${number(collection.camera_count)} 路 · ${number(collection.video_segment_count)} MP4 · ${esc(status.note)}</p>${link}</article>`;
+  }).join("");
+  return `<div class="batch-ledger-summary"><span><b>${counts.pending}</b> 未处理</span><span><b>${counts.processing}</b> 处理中</span><span><b>${counts.failed}</b> 失败待处理</span><span><b>${counts.archived}</b> 已处理并留存</span></div><div class="batch-ledger">${rows}</div>`;
 }
 
 function reviewState() {
@@ -1020,6 +1046,70 @@ async function renderArchive(name, tab = "experiments") {
   }
 }
 
+function annotationDecisionOptions(selected = "") {
+  return [
+    ["", "请选择判断"],
+    ["confirmed_false_negative", "确认漏检"],
+    ["false_positive", "确认误检"],
+    ["class_error", "类别错误"],
+    ["correct_detection", "检测正确"],
+    ["not_actionable", "无需标注"],
+    ["needs_review", "需要复审"],
+  ].map(([value,label])=>`<option value="${value}" ${selected === value ? "selected" : ""}>${label}</option>`).join("");
+}
+
+function annotationCard(item) {
+  const decision = item.decision || {};
+  const xyxy = decision.xyxy || [];
+  return `<article class="annotation-card">
+    <div class="annotation-image"><img loading="lazy" src="/api/annotation-workspace/items/${encodeURIComponent(item.item_id)}/image" alt="${esc(item.event_id)} ${esc(item.class_name)} badcase"/>${item.image_available ? "" : `<span>图片不可用</span>`}<b>${esc(item.priority)}</b></div>
+    <div class="annotation-copy"><header><div><small>${esc(item.event_id)} · ${esc(item.role)}</small><h3>${esc(item.class_name || "未指定类别")}</h3></div><span class="badge ${item.effective_review_status === "reviewed" ? "trusted" : "uncertain"}">${item.effective_review_status === "reviewed" ? "已审核" : "待审核"}</span></header><p>${esc(item.action_type)} · ${esc(item.issue_type)}</p>
+      <form class="annotation-form" data-annotation-form="${esc(item.item_id)}"><label>人工判断<select name="decision" required>${annotationDecisionOptions(decision.decision || "")}</select></label><label>正确类别<input name="corrected_class" value="${esc(decision.corrected_class || item.class_name || "")}" placeholder="例如 weighing_paper"/></label><label>人工框 xyxy<input name="xyxy" value="${esc(xyxy.join(", "))}" placeholder="x1, y1, x2, y2"/></label><label>审核人<input name="reviewer" value="${esc(decision.reviewer || "")}" placeholder="姓名或工号" required/></label><label class="annotation-notes">备注<textarea name="notes" rows="2" placeholder="遮挡、可见性或判断依据">${esc(decision.notes || "")}</textarea></label><button class="primary-button" type="submit">${icon("check")}保存审核</button></form>
+    </div>
+  </article>`;
+}
+
+async function renderAnnotations() {
+  setChrome("annotations");
+  const filters = state.annotationFilters;
+  const query = new URLSearchParams({ limit: "48" });
+  if (filters.priority) query.set("priority", filters.priority);
+  if (filters.reviewStatus) query.set("review_status", filters.reviewStatus);
+  if (filters.query) query.set("q", filters.query);
+  main.innerHTML = `<div class="page-loading"><span class="spinner"></span><strong>正在读取 YOLO badcase 队列</strong></div>`;
+  try {
+    const data = await api(`/api/annotation-workspace?${query}`);
+    const summary = data.summary || {};
+    main.innerHTML = `<div class="page annotation-page"><header class="page-hero compact"><div><p class="eyebrow">MODEL QUALITY WORKBENCH</p><h1>YOLO badcase 标注工作台</h1><p>把模型漏检、误检与类别混淆转成可复核训练数据。CV 推理结果与人工真值严格分离，只有人工实际提交的框才进入导出。</p></div><div class="hero-actions"><a class="secondary-button" target="_blank" href="/api/annotation-workspace/export">${icon("file")}导出已审核真值</a></div></header>
+      <section class="status-grid">${statusCard("target","badcase 总数",number(summary.total),"来自已冻结审计队列")}${statusCard("check","已审核",number(summary.reviewed),"决策已写本地可追溯账本")}${statusCard("clock","待审核",number(summary.pending),"按 P0/P1/P2 排序处理")}${statusCard("file","P0 高优先级",number(summary.priority_counts?.P0),"确认漏检和高风险问题")}</section>
+      <section class="panel"><header class="panel-heading"><div><h2>审核队列</h2><p>${esc(data.queue_path || "尚未发现 YOLO-Annotation-Queue.json")}</p></div></header><div class="annotation-toolbar"><label>优先级<select id="annotation-priority"><option value="">全部</option><option value="P0" ${filters.priority==="P0"?"selected":""}>P0</option><option value="P1" ${filters.priority==="P1"?"selected":""}>P1</option><option value="P2" ${filters.priority==="P2"?"selected":""}>P2</option></select></label><label>状态<select id="annotation-status"><option value="">全部</option><option value="pending" ${filters.reviewStatus==="pending"?"selected":""}>待审核</option><option value="reviewed" ${filters.reviewStatus==="reviewed"?"selected":""}>已审核</option></select></label><label class="annotation-query">搜索<input id="annotation-query" value="${esc(filters.query)}" placeholder="事件、类别、动作或问题"/></label><button class="secondary-button" id="annotation-filter" type="button">${icon("search")}筛选</button></div>${data.available ? `<div class="annotation-grid">${data.items.map(annotationCard).join("")}</div>` : `<div class="empty-state"><strong>未找到 badcase 队列</strong><p>先运行 YOLO badcase 审计，或在配置中指定 yolo_annotation_queue_path。</p></div>`}</section></div>`;
+    bindAnnotationActions();
+  } catch (error) {
+    main.innerHTML = `<div class="empty-state"><strong>无法读取标注工作台</strong><p>${esc(error.message)}</p></div>`;
+  }
+}
+
+function bindAnnotationActions() {
+  document.querySelector("#annotation-filter")?.addEventListener("click", () => {
+    state.annotationFilters = { priority: document.querySelector("#annotation-priority").value, reviewStatus: document.querySelector("#annotation-status").value, query: document.querySelector("#annotation-query").value.trim() };
+    renderAnnotations();
+  });
+  document.querySelectorAll("[data-annotation-form]").forEach((form)=>form.addEventListener("submit", async (event)=>{
+    event.preventDefault();
+    const values = new FormData(form);
+    const rawBox = String(values.get("xyxy") || "").trim();
+    const xyxy = rawBox ? rawBox.split(",").map((value)=>Number(value.trim())) : null;
+    if (xyxy && (xyxy.length !== 4 || xyxy.some((value)=>!Number.isFinite(value)))) { toast("人工框需要填写 4 个逗号分隔数字。", "error"); return; }
+    const button = form.querySelector("button[type=submit]");
+    button.disabled = true;
+    try {
+      await api(`/api/annotation-workspace/items/${encodeURIComponent(form.dataset.annotationForm)}/decision`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ decision: values.get("decision"), corrected_class: values.get("corrected_class"), xyxy, reviewer: values.get("reviewer"), notes: values.get("notes") }) });
+      toast("人工审核已保存到可追溯账本。");
+      await renderAnnotations();
+    } catch (error) { toast(error.message, "error"); button.disabled = false; }
+  }));
+}
+
 function bindArchiveActions() {
   document.querySelectorAll("[data-copy-path]").forEach((button) => button.addEventListener("click", async () => {
     try { await navigator.clipboard.writeText(button.dataset.copyPath); toast("归档路径已复制。" ); }
@@ -1042,6 +1132,7 @@ async function router() {
   if (route === "new") return renderNew();
   if (route === "tasks") return renderTasks();
   if (route === "operations") return renderOperations();
+  if (route === "annotations") return renderAnnotations();
   if (["experiments","materials","reports"].includes(route)) return renderExperiments(route);
   renderHome();
 }
