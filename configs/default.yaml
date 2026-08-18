@@ -198,6 +198,17 @@ segmentation:
   # switch only separates action acceptance from media-pair completeness.
   allow_strong_single_role_actions: true
 
+action_state_machine:
+  enabled: true
+  # Shadow mode preserves the frozen CV boundary/recall baseline. The receipt
+  # exposes incomplete or component-only actions without silently deleting
+  # candidates. A later dataset-specific acceptance task may enable a hard gate.
+  enforce_publish_gate: false
+  minimum_phase_completeness: 0.75
+  occlusion_grace_seconds: 1.50
+  release_hold_seconds: 0.30
+  fragment_identity_gap_seconds: 1.50
+
 continuity:
   # Temporal proximity alone is insufficient. Two carried container/sample
   # identities must bridge adjacent atomic experiments; a lone generic object

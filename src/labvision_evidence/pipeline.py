@@ -34,6 +34,7 @@ from .action_semantics import (
     attach_action_observability,
     build_semantic_review_plan,
 )
+from .action_state_machine import attach_continuous_action_states
 from .archive import (
     ArchiveLayout,
     analyze_experiment_groups,
@@ -3483,12 +3484,17 @@ class EvidencePipeline:
             self._status(layout, "candidate_audit", 0.68, "持续性、动作密度与跨视角一致性审计")
             events, rejected = audit_candidates(candidates, transforms, self.config)
             rejected.extend(refine_liquid_events_with_context(events, detection_paths))
+            state_machine_ledger = attach_continuous_action_states(events, self.config)
             observability_receipts = attach_action_observability(events)
             semantic_review_plan = build_semantic_review_plan(events, self.config)
             observability_path = layout.json_config / "action_observability.json"
             semantic_review_plan_path = (
                 layout.json_config / "semantic_review_plan.json"
             )
+            state_machine_path = (
+                layout.json_config / "continuous_action_state_ledger.json"
+            )
+            write_json(state_machine_path, state_machine_ledger)
             write_json(
                 observability_path,
                 {
@@ -3567,6 +3573,7 @@ class EvidencePipeline:
                     ],
                     "experiment_groups": [group.model_dump(mode="json") for group in groups],
                     "action_observability": observability_receipts,
+                    "continuous_action_state": state_machine_ledger,
                     "semantic_review_plan": semantic_review_plan,
                 },
             )
@@ -3581,6 +3588,7 @@ class EvidencePipeline:
                     layout.json_config / "boundary_precheck.json",
                     key_selection_path,
                     observability_path,
+                    state_machine_path,
                     semantic_review_plan_path,
                 ],
             )

@@ -701,6 +701,7 @@ def _artifact_json(
     normalized_action = {
         "liquid_movement": "liquid_transfer",
     }.get(event.action_type.value, event.action_type.value)
+    state_receipt = event.state_machine or {}
     combined = " ".join(object_names).lower()
     if normalized_action == "liquid_transfer":
         action_subtype = "pipette_transfer" if any(
@@ -726,6 +727,8 @@ def _artifact_json(
     else:
         action_subtype = "tool_contact" if tool else "generic_hand_object_contact"
         phases = ["object_approach", "contact", "manipulation", "release"]
+    action_subtype = str(state_receipt.get("action_subtype") or action_subtype)
+    phases = list(state_receipt.get("phases") or phases)
 
     observations = []
     for index, item in enumerate(understanding.get("per_view_observations") or [], 1):
@@ -820,6 +823,8 @@ def _artifact_json(
         status = "provisional_cv_only"
     elif confirmed_action == "unknown" or consistency == "conflict" or model_confidence < 0.55:
         status = "uncertain"
+    if state_receipt.get("lifecycle_state") == "incomplete_end":
+        status = "incomplete_observation"
 
     role_for = (
         "aligned_first_third"
@@ -934,11 +939,13 @@ def _artifact_json(
             "tool": before_state,
             "source": "unknown",
             "target": "unknown",
+            **dict(state_receipt.get("state_before") or {}),
         },
         "state_after": {
             "tool": after_state,
             "source": "unknown",
             "target": "unknown",
+            **dict(state_receipt.get("state_after") or {}),
         },
         "observations": observations,
         "cross_view_associations": cross_view_associations,
@@ -957,6 +964,7 @@ def _artifact_json(
             "state_change_support": round(model_confidence if change_observed else 0.25, 4),
             "model_agreement": round((float(event.confidence) + model_confidence) / 2.0 if action_agrees else model_confidence * 0.5, 4),
             "contradiction_penalty": 0.8 if consistency == "conflict" else 0.0,
+            **dict(state_receipt.get("scores") or {}),
         },
         "key_frames": key_frames,
         "key_clips": key_clips,
@@ -993,6 +1001,7 @@ def _artifact_json(
                 "supporting_views": event.supporting_views,
                 "observability": event.observability,
                 "semantic_review": event.semantic_review,
+                "continuous_state_machine": state_receipt,
             },
             "mllm": {
                 "model": understanding.get("model"),
