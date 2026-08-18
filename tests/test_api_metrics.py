@@ -459,3 +459,92 @@ def test_service_restart_marks_orphaned_task_resumable(monkeypatch, tmp_path):
     payload = json.loads(status_path.read_text(encoding="utf-8"))
     assert payload["stage"] == "interrupted"
     assert payload["recovery"]["resumable"] is True
+    assert payload["recovery"]["previous_stage"] == "fine_scan"
+    assert payload["recovery"]["heartbeat"]["active"] is False
+
+
+def test_runtime_activity_receipt_rejects_stale_heartbeat(tmp_path):
+    json_root = tmp_path / "JSON-Config-Files"
+    json_root.mkdir()
+    status_path = json_root / "pipeline_status.json"
+    status_path.write_text("{}", encoding="utf-8")
+    heartbeat_path = json_root / "resource_telemetry_live.json"
+    heartbeat_path.write_text("{}", encoding="utf-8")
+    heartbeat_mtime = heartbeat_path.stat().st_mtime
+
+    receipt = api._runtime_activity_receipt(
+        status_path,
+        now_epoch=heartbeat_mtime + api._RUNTIME_HEARTBEAT_STALE_SECONDS + 0.001,
+    )
+
+    assert receipt["active"] is False
+    assert receipt["latest_path"] == "resource_telemetry_live.json"
+    assert receipt["age_seconds"] > receipt["stale_after_seconds"]
+
+
+def test_service_restart_preserves_task_with_fresh_pipeline_heartbeat(monkeypatch, tmp_path):
+    archive_root = tmp_path / "archive"
+    json_root = (
+        archive_root
+        / ".VisionCortex-Run-Staging"
+        / "benchmark"
+        / "run-active"
+        / "JSON-Config-Files"
+    )
+    json_root.mkdir(parents=True)
+    status_path = json_root / "pipeline_status.json"
+    status_path.write_text(
+        json.dumps({"stage": "candidate_fine", "message": "fine scanning"}),
+        encoding="utf-8",
+    )
+    (json_root / "resource_telemetry_live.json").write_text(
+        json.dumps({"stage": "candidate_fine"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(api, "_archive_root", lambda settings=None: archive_root)
+
+    api._recover_orphaned_tasks()
+
+    payload = json.loads(status_path.read_text(encoding="utf-8"))
+    assert payload["stage"] == "candidate_fine"
+    assert "recovery" not in payload
+
+
+def test_service_restart_restores_previous_stage_when_heartbeat_resumes(monkeypatch, tmp_path):
+    archive_root = tmp_path / "archive"
+    json_root = (
+        archive_root
+        / ".VisionCortex-Run-Staging"
+        / "benchmark"
+        / "run-recovered"
+        / "JSON-Config-Files"
+    )
+    json_root.mkdir(parents=True)
+    status_path = json_root / "pipeline_status.json"
+    status_path.write_text(
+        json.dumps(
+            {
+                "stage": "interrupted",
+                "message": "service restarted",
+                "recovery": {
+                    "status": "orphaned_after_service_restart",
+                    "resumable": True,
+                    "previous_stage": "candidate_fine",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (json_root / "source_progress.json").write_text(
+        json.dumps({"views": []}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(api, "_archive_root", lambda settings=None: archive_root)
+
+    api._recover_orphaned_tasks()
+
+    payload = json.loads(status_path.read_text(encoding="utf-8"))
+    assert payload["stage"] == "candidate_fine"
+    assert payload["recovery"]["status"] == "active_after_service_restart"
+    assert payload["recovery"]["resumable"] is False
+    assert payload["recovery"]["heartbeat"]["active"] is True

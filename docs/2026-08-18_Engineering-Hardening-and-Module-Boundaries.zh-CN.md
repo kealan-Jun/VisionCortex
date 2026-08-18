@@ -106,6 +106,7 @@ python tools/replay_archive_acceptance.py `
 | 状态 | 现象 | 证据 | 下一步 |
 |---|---|---|---|
 | 已修复 | 既有正式归档导致 DEV-039 CLI 拒绝 | DEV-039 INCIDENT；修复提交 `c648868` | DEV-040 验证原子替换与历史保留 |
+| 已修复，待真实冻结验证 | Web 服务重启把仍在精扫的后台任务误报为 `interrupted` | DEV-040 现场中 `pipeline_status.json` 于 13:50 标记中断，但 `resource_telemetry_live.json` 持续更新且阶段为 `candidate_fine` | 启动恢复改为检查 telemetry/source/run-metrics 心跳；仅心跳超过 90 秒才标记中断，并保存原阶段用于恢复 |
 | 已缓解 | JSON 可索引但旧归档缺少后加索引清单 | 正式六路回放产生兼容性 warning | 新归档自动写 schema manifest 与 evidence index |
 | 已实现 | badcase 有队列但缺少可操作审核页 | 本地队列 72 条，P0/P1/P2=32/36/4 | 在 Web 完成人工审核并积累训练真值 |
 | 需数据 | 21 类 YOLO 不直接表达液体/液面状态 | 两套模型类别元数据均无液体状态类 | 先用容器 ROI + 状态专家；再按 badcase 决定增标 |

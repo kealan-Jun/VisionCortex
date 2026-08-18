@@ -77,10 +77,55 @@ _PHYSICAL_ACTION_TYPES = (
     "container_state_change",
     "device_panel_operation",
 )
+_RUNTIME_HEARTBEAT_STALE_SECONDS = 90.0
+_RUNTIME_HEARTBEAT_FILES = (
+    "resource_telemetry_live.json",
+    "source_progress.json",
+    "run_metrics_live.json",
+)
+
+
+def _runtime_activity_receipt(
+    status_path: Path,
+    *,
+    now_epoch: float | None = None,
+) -> dict[str, Any]:
+    """Describe recent pipeline activity without parsing a concurrently written JSON file."""
+
+    observed_at = time.time() if now_epoch is None else float(now_epoch)
+    latest_path: Path | None = None
+    latest_mtime: float | None = None
+    for file_name in _RUNTIME_HEARTBEAT_FILES:
+        candidate = status_path.parent / file_name
+        try:
+            candidate_mtime = candidate.stat().st_mtime
+        except (FileNotFoundError, OSError):
+            continue
+        if latest_mtime is None or candidate_mtime > latest_mtime:
+            latest_path = candidate
+            latest_mtime = candidate_mtime
+
+    if latest_path is None or latest_mtime is None:
+        return {
+            "active": False,
+            "latest_path": None,
+            "latest_mtime_epoch": None,
+            "age_seconds": None,
+            "stale_after_seconds": _RUNTIME_HEARTBEAT_STALE_SECONDS,
+        }
+
+    age_seconds = max(0.0, observed_at - latest_mtime)
+    return {
+        "active": age_seconds <= _RUNTIME_HEARTBEAT_STALE_SECONDS,
+        "latest_path": latest_path.name,
+        "latest_mtime_epoch": latest_mtime,
+        "age_seconds": age_seconds,
+        "stale_after_seconds": _RUNTIME_HEARTBEAT_STALE_SECONDS,
+    }
 
 
 def _recover_orphaned_tasks() -> None:
-    """Make stale durable `running` states honest after a service restart."""
+    """Mark only stale durable tasks interrupted after a Web service restart."""
 
     root = _archive_root()
     if not root.is_dir():
@@ -93,7 +138,35 @@ def _recover_orphaned_tasks() -> None:
         )
     for status_path in status_paths:
         payload = _read_json(status_path, {}) or {}
-        if payload.get("stage") in {"completed", "failed", "interrupted"}:
+        stage = str(payload.get("stage") or "")
+        if stage in {"completed", "failed"}:
+            continue
+        heartbeat = _runtime_activity_receipt(status_path)
+        recovery = payload.get("recovery") if isinstance(payload.get("recovery"), dict) else {}
+        if heartbeat["active"]:
+            previous_stage = str(recovery.get("previous_stage") or "")
+            if (
+                stage == "interrupted"
+                and recovery.get("status") == "orphaned_after_service_restart"
+                and previous_stage
+                and previous_stage not in {"completed", "failed", "interrupted"}
+            ):
+                payload.update(
+                    {
+                        "stage": previous_stage,
+                        "message": "后台流水线心跳仍活跃；Web 服务重启未中断正在运行的任务。",
+                        "updated_at": datetime.now().astimezone().isoformat(),
+                        "recovery": {
+                            "status": "active_after_service_restart",
+                            "resumable": False,
+                            "previous_stage": previous_stage,
+                            "heartbeat": heartbeat,
+                        },
+                    }
+                )
+                _write_json_atomic(status_path, payload)
+            continue
+        if stage == "interrupted":
             continue
         payload.update(
             {
@@ -103,6 +176,8 @@ def _recover_orphaned_tasks() -> None:
                 "recovery": {
                     "status": "orphaned_after_service_restart",
                     "resumable": True,
+                    "previous_stage": stage,
+                    "heartbeat": heartbeat,
                 },
             }
         )
