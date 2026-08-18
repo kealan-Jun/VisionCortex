@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from labvision_evidence import cli
 
 
@@ -24,6 +26,9 @@ def test_index_collection_cli_promotes_only_after_pipeline_success(monkeypatch, 
     manifest_path = tmp_path / "input" / "manifest.yaml"
     records = []
     promoted = []
+    fixed_root = tmp_path / "archive" / "Collection-01"
+    fixed_root.mkdir(parents=True)
+    (fixed_root / "existing.txt").write_text("accepted-old-package", encoding="utf-8")
 
     monkeypatch.setattr(cli, "load_config", lambda *_: settings)
     monkeypatch.setattr(
@@ -73,6 +78,77 @@ def test_index_collection_cli_promotes_only_after_pipeline_success(monkeypatch, 
     assert records == ["queued", "processing", "archived"]
     assert len(promoted) == 1
     assert promoted[0][1].name == "Collection-01"
+    assert (fixed_root / "existing.txt").read_text(encoding="utf-8") == "accepted-old-package"
+
+
+def test_index_collection_cli_preserves_existing_archive_when_pipeline_fails(
+    monkeypatch, tmp_path
+):
+    settings = {
+        "project": {},
+        "storage": {
+            "archive_root": str(tmp_path / "archive"),
+            "local_runtime_root": str(tmp_path / "runtime"),
+        },
+    }
+    fixed_root = tmp_path / "archive" / "Collection-01"
+    fixed_root.mkdir(parents=True)
+    marker = fixed_root / "accepted.txt"
+    marker.write_text("immutable-old-package", encoding="utf-8")
+    manifest_path = tmp_path / "input" / "manifest.yaml"
+    records = []
+
+    monkeypatch.setattr(cli, "load_config", lambda *_: settings)
+    monkeypatch.setattr(
+        cli,
+        "initialize_nas_archive",
+        lambda config, name: Path(config["storage"]["active_archive_path"]),
+    )
+
+    def prepare(*_):
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        return _Manifest(), manifest_path, {
+            "input_mode": "nas_segmented_virtual_timeline",
+            "copied_source_bytes": 0,
+        }
+
+    monkeypatch.setattr(cli, "prepare_from_nas_index", prepare)
+
+    class FailingPipeline:
+        def __init__(self, config, progress):
+            self.config = config
+
+        def run(self, manifest):
+            staging = Path(self.config["storage"]["active_archive_path"])
+            staging.mkdir(parents=True, exist_ok=True)
+            raise RuntimeError("quality gate failed")
+
+    monkeypatch.setattr(cli, "EvidencePipeline", FailingPipeline)
+    monkeypatch.setattr(
+        cli,
+        "promote_fixed_archive",
+        lambda *_: pytest.fail("promotion must not run after pipeline failure"),
+    )
+    monkeypatch.setattr(
+        cli,
+        "record_collection_state",
+        lambda *args, **kwargs: records.append(kwargs),
+    )
+
+    with pytest.raises(RuntimeError, match="quality gate failed"):
+        cli.run_index_collection_command(
+            experiment_id="exp-source",
+            archive_name="Collection 01",
+            config=tmp_path / "config.yaml",
+        )
+
+    assert [record["state"] for record in records] == [
+        "queued",
+        "processing",
+        "failed",
+    ]
+    assert marker.read_text(encoding="utf-8") == "immutable-old-package"
+    assert records[-1]["details"]["formal_archive_preserved"] is True
 
 
 def test_register_archive_requires_and_records_passing_report_receipts(

@@ -274,10 +274,11 @@ def run_index_collection_command(
     fixed_root, staging_root, history_root = fixed_archive_staging_paths(
         settings, safe_name, run_id
     )
-    if fixed_root.exists():
+    if fixed_root.exists() and not fixed_root.is_dir():
         raise typer.BadParameter(
-            f"Formal archive already exists; choose a new English archive name: {fixed_root}"
+            f"Formal archive path exists but is not a directory: {fixed_root}"
         )
+    formal_archive_preexisting = fixed_root.is_dir()
     settings["storage"]["sync_to_nas"] = True
     settings["storage"]["active_archive_path"] = str(staging_root)
     settings["project"]["output_root"] = str(
@@ -291,7 +292,13 @@ def run_index_collection_command(
         archive_name=safe_name,
         run_id=run_id,
         state="queued",
-        details={"staging": str(staging_root), "source_copy_bytes": 0},
+        details={
+            "staging": str(staging_root),
+            "source_copy_bytes": 0,
+            "formal_archive": str(fixed_root),
+            "formal_archive_preexisting": formal_archive_preexisting,
+            "promotion_mode": "verified_atomic_replace",
+        },
     )
     try:
         record_collection_state(
@@ -300,7 +307,12 @@ def run_index_collection_command(
             archive_name=safe_name,
             run_id=run_id,
             state="processing",
-            details={"staging": str(staging_root)},
+            details={
+                "staging": str(staging_root),
+                "formal_archive": str(fixed_root),
+                "formal_archive_preexisting": formal_archive_preexisting,
+                "promotion_mode": "verified_atomic_replace",
+            },
         )
         manifest, manifest_path, ingest = prepare_from_nas_index(
             settings, experiment_id, lambda message: typer.echo(f"[NAS] {message}")
@@ -328,6 +340,9 @@ def run_index_collection_command(
             details={
                 "formal_archive": str(fixed_root),
                 "promotion_verification": receipt.get("verification"),
+                "previous_package_retained": receipt.get(
+                    "previous_package_retained", False
+                ),
             },
         )
         typer.echo(
@@ -357,6 +372,9 @@ def run_index_collection_command(
                 "staging": str(staging_root),
                 "error": f"{type(exc).__name__}: {exc}",
                 "total_seconds": round(time.perf_counter() - started, 6),
+                "formal_archive": str(fixed_root),
+                "formal_archive_preexisting": formal_archive_preexisting,
+                "formal_archive_preserved": formal_archive_preexisting,
             },
         )
         raise
