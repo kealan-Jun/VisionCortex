@@ -170,6 +170,11 @@ segmentation:
   boundary_context_min_confidence: 0.65
   boundary_context_max_gap_seconds: 10.0
   boundary_context_max_extension_seconds: 90.0
+  # A strong single-role tail may extend clip time only when it shares the same
+  # recalled boundary and at least two manipulated objects with the preceding
+  # dual-view segment. Its events stay outside formal/key-material membership.
+  boundary_tail_context_max_gap_seconds: 30.0
+  boundary_tail_context_min_shared_objects: 2
   # A liquid-motion hypothesis may remain useful evidence, but only a complete
   # transfer tool is strong enough to establish the start of an experiment.
   # This prevents isolated pipette-tip/vessel motion from pulling the boundary
@@ -234,6 +239,8 @@ continuity:
   # audit graph, but its events must never enter the formal segment.
   quarantined_atomic_bridge_max_step_gap_seconds: 60.0
   quarantined_atomic_bridge_max_span_seconds: 180.0
+  quarantined_context_bridge_min_events: 2
+  quarantined_context_bridge_min_shared_objects: 2
 
 key_materials:
   # Only collapse near-identical evidence. Repeated transfers, contacts and

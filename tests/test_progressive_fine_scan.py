@@ -321,6 +321,97 @@ def test_progressive_gap_outside_formal_groups_is_quarantined(default_config):
     assert inside["status"] == "needs_third_person_supplement"
 
 
+def test_exhausted_rejected_anchor_cluster_does_not_block_proven_dual_view_group(
+    default_config,
+):
+    pipeline = EvidencePipeline(default_config)
+    target = {
+        "candidate_id": "WINDOW",
+        "global_start_ms": 10_000.0,
+        "global_end_ms": 80_000.0,
+        "status": "needs_third_person_supplement",
+        "anchor_clusters": [
+            {
+                "cluster_id": "WINDOW-ANCHOR-001",
+                "global_start_ms": 12_000.0,
+                "global_end_ms": 20_000.0,
+                "event_ids": ["BOTH"],
+                "covered": True,
+            },
+            {
+                "cluster_id": "WINDOW-ANCHOR-002",
+                "global_start_ms": 50_000.0,
+                "global_end_ms": 52_000.0,
+                "event_ids": ["WEAK-FIRST"],
+                "covered": False,
+            },
+        ],
+        "first_person_anchor_windows": [
+            {"event_id": "WEAK-FIRST", "accepted": False}
+        ],
+    }
+    group = type(
+        "Group",
+        (),
+        {"global_start_ms": 11_000.0, "global_end_ms": 60_000.0},
+    )()
+
+    unresolved, quarantined = pipeline._quarantine_nonformal_progressive_gaps(
+        [target], [group]
+    )
+
+    assert unresolved == set()
+    assert quarantined == set()
+    assert target["status"] == (
+        "cross_view_covered_with_quarantined_weak_anchor_context"
+    )
+    assert target["quarantined_anchor_cluster_ids"] == ["WINDOW-ANCHOR-002"]
+
+
+def test_exhausted_accepted_single_view_anchor_still_blocks_formal_group(
+    default_config,
+):
+    pipeline = EvidencePipeline(default_config)
+    target = {
+        "candidate_id": "WINDOW",
+        "global_start_ms": 10_000.0,
+        "global_end_ms": 80_000.0,
+        "status": "needs_third_person_supplement",
+        "anchor_clusters": [
+            {
+                "cluster_id": "WINDOW-ANCHOR-001",
+                "global_start_ms": 12_000.0,
+                "global_end_ms": 20_000.0,
+                "event_ids": ["BOTH"],
+                "covered": True,
+            },
+            {
+                "cluster_id": "WINDOW-ANCHOR-002",
+                "global_start_ms": 50_000.0,
+                "global_end_ms": 52_000.0,
+                "event_ids": ["STRONG-FIRST"],
+                "covered": False,
+            },
+        ],
+        "first_person_anchor_windows": [
+            {"event_id": "STRONG-FIRST", "accepted": True}
+        ],
+    }
+    group = type(
+        "Group",
+        (),
+        {"global_start_ms": 11_000.0, "global_end_ms": 60_000.0},
+    )()
+
+    unresolved, quarantined = pipeline._quarantine_nonformal_progressive_gaps(
+        [target], [group]
+    )
+
+    assert unresolved == {"WINDOW"}
+    assert quarantined == set()
+    assert target["blocking_anchor_cluster_ids"] == ["WINDOW-ANCHOR-002"]
+
+
 def test_progressive_scan_stops_after_first_successful_supplement(
     monkeypatch, tmp_path, default_config
 ):

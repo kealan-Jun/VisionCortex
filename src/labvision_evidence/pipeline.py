@@ -1066,7 +1066,14 @@ class EvidencePipeline:
         target_status: list[dict[str, Any]],
         groups: list[ExperimentGroup],
     ) -> tuple[set[str], set[str]]:
-        """Separate formal experiment gaps from exhausted single-view noise."""
+        """Separate formal experiment gaps from exhausted single-view noise.
+
+        Rejected first-person anchors are intentionally used while recall can
+        still discover a corroborating third-person view. Once every eligible
+        view is exhausted, a cluster containing only rejected anchors must not
+        invalidate an otherwise proven dual-view experiment. It remains in the
+        audit ledger and is never promoted into formal events or key materials.
+        """
 
         unresolved: set[str] = set()
         quarantined: set[str] = set()
@@ -1091,11 +1098,6 @@ class EvidencePipeline:
                 )
                 quarantined.add(candidate_id)
                 continue
-            if item.get("recall_window_basis") == (
-                "original_motion_bounds_after_coarse_refinement"
-            ):
-                unresolved.add(candidate_id)
-                continue
             uncovered_clusters = [
                 cluster
                 for cluster in item.get("anchor_clusters") or []
@@ -1110,18 +1112,68 @@ class EvidencePipeline:
                     for group in overlapping_groups
                 )
             ]
-            if blocking_clusters:
+            anchor_windows = {
+                str(anchor.get("event_id")): anchor
+                for anchor in item.get("first_person_anchor_windows") or []
+            }
+            weak_blocking_clusters = [
+                cluster
+                for cluster in blocking_clusters
+                if cluster.get("event_ids")
+                and all(
+                    event_id in anchor_windows
+                    and anchor_windows[event_id].get("accepted") is False
+                    for event_id in cluster["event_ids"]
+                )
+            ]
+            strong_blocking_clusters = [
+                cluster
+                for cluster in blocking_clusters
+                if cluster not in weak_blocking_clusters
+            ]
+            covered_clusters = [
+                cluster
+                for cluster in item.get("anchor_clusters") or []
+                if cluster.get("covered")
+                and any(
+                    float(cluster["global_end_ms"]) >= group.global_start_ms
+                    and float(cluster["global_start_ms"]) <= group.global_end_ms
+                    for group in overlapping_groups
+                )
+            ]
+            if strong_blocking_clusters or (blocking_clusters and not covered_clusters):
                 unresolved.add(candidate_id)
+                item["blocking_anchor_cluster_ids"] = [
+                    str(cluster["cluster_id"])
+                    for cluster in (
+                        strong_blocking_clusters
+                        if strong_blocking_clusters
+                        else blocking_clusters
+                    )
+                ]
                 continue
-            item["status"] = "cross_view_covered_with_quarantined_single_view_context"
+            item["status"] = (
+                "cross_view_covered_with_quarantined_weak_anchor_context"
+                if weak_blocking_clusters
+                else "cross_view_covered_with_quarantined_single_view_context"
+            )
             item["quarantine_reason"] = (
-                "formal experiment clusters have dual-view support; remaining "
+                "formal experiment has accepted dual-view anchor clusters; remaining "
+                "exhausted first-person clusters contain only rejected audit candidates"
+                if weak_blocking_clusters
+                else "formal experiment clusters have dual-view support; remaining "
                 "single-view context lies outside formal boundaries"
             )
             item["quarantined_anchor_cluster_ids"] = [
-                str(cluster["cluster_id"]) for cluster in uncovered_clusters
+                str(cluster["cluster_id"])
+                for cluster in (
+                    weak_blocking_clusters
+                    if weak_blocking_clusters
+                    else uncovered_clusters
+                )
             ]
-            quarantined.add(candidate_id)
+            if not weak_blocking_clusters:
+                quarantined.add(candidate_id)
         return unresolved, quarantined
 
     def _progressive_target_status(
@@ -2389,7 +2441,11 @@ class EvidencePipeline:
                 self.config,
             )
             state_groups = build_experiment_groups(
-                state_segments, state_events, manifest.views, self.config
+                state_segments,
+                state_events,
+                manifest.views,
+                self.config,
+                coarse_windows=boundary_candidates,
             )
             state_key_events = select_key_events(
                 state_groups, state_segments, state_events, self.config
@@ -2595,15 +2651,23 @@ class EvidencePipeline:
         scout_frames = int(scout_summary.get("estimated_frames", 0))
         full_fine_frames = int(round(actual_seconds * sample_fps))
         all_view_frames = int(round(all_seconds * sample_fps))
+        # The post-recall unresolved/quarantine classification is authoritative.
+        # A recall plan may have exhausted windows that are subsequently proven
+        # to contain only rejected audit context; those are resolved, not failed.
+        local_recall_was_enabled = bool(local_recall_summary.get("enabled"))
         group_recall_quality_complete = bool(
-            not local_recall_summary.get("enabled")
-            or local_recall_summary.get("completeness_gate", {}).get(
-                "quality_complete", True
-            )
+            not local_recall_was_enabled or not unresolved_ids
         )
         progressive_quality_complete = bool(
             not unresolved_ids and group_recall_quality_complete
         )
+        if local_recall_was_enabled:
+            local_recall_summary["post_quarantine_quality_complete"] = (
+                group_recall_quality_complete
+            )
+            local_recall_summary["post_quarantine_unresolved_candidate_ids"] = sorted(
+                unresolved_ids
+            )
         report = {
             "schema_version": "visioncortex-progressive-fine-scan/3",
             "enabled": True,
@@ -3703,6 +3767,7 @@ class EvidencePipeline:
                 manifest.views,
                 self.config,
                 decision_receipts=continuity_receipts,
+                coarse_windows=boundary_candidates,
             )
             selection_decisions: list[dict[str, Any]] = []
             precheck_key_events = select_key_events(
