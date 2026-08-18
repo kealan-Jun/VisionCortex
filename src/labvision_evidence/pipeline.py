@@ -56,6 +56,7 @@ from .grouping import (
     prepare_formal_experiment_segments,
     select_key_events,
 )
+from .pathing import archive_relative_posix
 from .detection import iter_frame_evidence, scan_videos, validate_models
 from .daily_reports import generate_daily_report_archive
 from .decisions import decision_receipt
@@ -578,11 +579,11 @@ class EvidencePipeline:
             artifact = Path(artifact)
             if not artifact.exists():
                 raise FileNotFoundError(f"Completed stage artifact is missing: {artifact}")
-            relative = artifact.resolve().relative_to(layout.root.resolve())
-            relative_artifacts.append(relative.as_posix())
+            relative = archive_relative_posix(artifact, layout.root)
+            relative_artifacts.append(relative)
             if self._publisher is not None:
                 if artifact.is_dir():
-                    self._publisher.publish_directory(relative)
+                    self._publisher.publish_directory(Path(relative))
                 else:
                     self._publisher.publish_file(artifact)
         receipt = {
@@ -4306,7 +4307,7 @@ def create_dry_run(output: Path, config: dict[str, Any]) -> Path:
         )
         path.parent.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(path), image)
-        event.key_frames[view.view_id] = path.relative_to(layout.root).as_posix()
+        event.key_frames[view.view_id] = archive_relative_posix(path, layout.root)
         event.key_clips[view.view_id] = f"dry-run://{view.view_id}/key-clip"
     write_key_material_category_index(layout, [group], [event])
     physical = [

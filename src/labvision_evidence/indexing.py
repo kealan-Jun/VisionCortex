@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 from .physical_changes import physical_change_records
+from .pathing import archive_contains, archive_relative_posix
 from .schemas import EvidenceEvent, ExperimentGroup, VideoInfo
 
 
@@ -66,7 +67,7 @@ def _sha256(path: Path) -> str:
 def _relative_media(root: Path, relative: str) -> Path:
     candidate = (root / relative).resolve()
     resolved_root = root.resolve()
-    if not candidate.is_relative_to(resolved_root):
+    if not archive_contains(candidate, resolved_root):
         raise ValueError(f"Artifact path escapes archive root: {relative}")
     return candidate
 
@@ -179,7 +180,7 @@ def _artifact_record(
         "view_id": view_id,
         "view_role": item.get("view_role"),
         "path": relative,
-        "sidecar_path": sidecar.relative_to(root.resolve()).as_posix(),
+        "sidecar_path": archive_relative_posix(sidecar, root),
         "mime_type": mimetypes.guess_type(media.name)[0] or "application/octet-stream",
         "size_bytes": media_stat.st_size,
         "mtime_ns": media_stat.st_mtime_ns,

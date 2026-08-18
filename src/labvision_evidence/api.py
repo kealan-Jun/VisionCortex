@@ -40,6 +40,7 @@ from .indexing import (
     search_physical_changes,
 )
 from .pagination import decode_cursor, encode_cursor
+from .pathing import archive_contains, archive_relative_posix
 from .pipeline import EvidencePipeline
 from .schemas import RunManifest, ViewInput
 from .storage import (
@@ -1546,7 +1547,7 @@ def archive_detail(archive_name: str) -> dict[str, Any]:
                     "steps": understanding.get("steps") or [],
                     "uncertainties": understanding.get("uncertainties") or [],
                     "aligned_video_url": _file_url(
-                        archive_name, aligned.relative_to(root)
+                        archive_name, Path(archive_relative_posix(aligned, root))
                     )
                     if aligned.is_file()
                     else None,
@@ -1683,7 +1684,7 @@ def archive_detail(archive_name: str) -> dict[str, Any]:
 def archive_file(archive: str, path: str) -> FileResponse:
     root = _resolve_archive(archive).resolve()
     candidate = (root / path).resolve()
-    if not candidate.is_relative_to(root) or not candidate.is_file():
+    if not archive_contains(candidate, root) or not candidate.is_file():
         raise HTTPException(404, "档案文件不存在")
     return FileResponse(candidate)
 

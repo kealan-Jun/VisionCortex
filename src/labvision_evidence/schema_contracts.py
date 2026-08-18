@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .pathing import archive_contains
+
 
 CONTRACT_MANIFEST_VERSION = "visioncortex-schema-contract-manifest/1.0.0"
 
@@ -127,9 +129,7 @@ def _validate_material_references(
             if value.startswith("dry-run://"):
                 continue
             path = (archive_root / value).resolve()
-            try:
-                path.relative_to(archive_root)
-            except ValueError:
+            if not archive_contains(path, archive_root):
                 failures.append(f"{collection_name}[{index}].path_outside_archive")
                 continue
             if not path.is_file():

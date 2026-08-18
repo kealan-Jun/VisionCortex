@@ -30,6 +30,7 @@ from .material_naming import (
     key_material_action_folder,
     key_material_semantic_name as _key_material_semantic_name,
 )
+from .pathing import archive_relative_posix
 from .schemas import (
     AlignmentTransform,
     EvidenceEvent,
@@ -146,7 +147,7 @@ def _write_semantic_cache(
 
 
 def _relative(path: Path, root: Path) -> str:
-    return path.resolve().relative_to(root.resolve()).as_posix()
+    return archive_relative_posix(path, root)
 
 
 def _time_slug(ms: float) -> str:

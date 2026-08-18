@@ -10,6 +10,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from .archive import ArchiveLayout, write_json
+from .pathing import archive_relative_posix
 from .report_presentations import (
     render_daily_html,
     render_daily_markdown,
@@ -590,7 +591,7 @@ def generate_daily_report_archive(
         "template_sha256": _sha256(PROFESSIONAL_TEMPLATE_PATH),
         "report_date": report_date,
         "status": "generated" if pdf_path.is_file() else "not_generated",
-        "pdf": str(pdf_path.relative_to(layout.root).as_posix())
+        "pdf": archive_relative_posix(pdf_path, layout.root)
         if pdf_path.is_file()
         else None,
         "visual_policy": {
@@ -605,12 +606,12 @@ def generate_daily_report_archive(
     write_json(professional_manifest_path, professional_manifest)
     artifacts = {
         "report_date": report_date,
-        "json": str(json_path.relative_to(layout.root).as_posix()),
-        "markdown": str(markdown_path.relative_to(layout.root).as_posix()),
-        "html": str(html_path.relative_to(layout.root).as_posix()),
-        "pdf": str(pdf_path.relative_to(layout.root).as_posix()) if pdf_path.is_file() else None,
+        "json": archive_relative_posix(json_path, layout.root),
+        "markdown": archive_relative_posix(markdown_path, layout.root),
+        "html": archive_relative_posix(html_path, layout.root),
+        "pdf": archive_relative_posix(pdf_path, layout.root) if pdf_path.is_file() else None,
         "professional_report_manifest": str(
-            professional_manifest_path.relative_to(layout.root).as_posix()
+            archive_relative_posix(professional_manifest_path, layout.root)
         ),
         "daily_template_id": report["template_id"],
         "professional_template_id": PROFESSIONAL_TEMPLATE_ID,
@@ -620,8 +621,8 @@ def generate_daily_report_archive(
         "professional_visual_count": report["overview"][
             "professional_visual_count"
         ],
-        "evaluation": str(eval_path.relative_to(layout.root).as_posix()),
-        "human_review": str(review_path.relative_to(layout.root).as_posix()),
+        "evaluation": archive_relative_posix(eval_path, layout.root),
+        "human_review": archive_relative_posix(review_path, layout.root),
         "passed": True,
         "additional_model_tokens": 0,
         "generation_duration_seconds": round(time.perf_counter() - started, 6),
