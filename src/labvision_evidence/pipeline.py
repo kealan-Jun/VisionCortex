@@ -30,6 +30,10 @@ from .actions import (
     select_fine_scan_views,
 )
 from .alignment import build_alignments
+from .action_semantics import (
+    attach_action_observability,
+    build_semantic_review_plan,
+)
 from .archive import (
     ArchiveLayout,
     analyze_experiment_groups,
@@ -3479,6 +3483,21 @@ class EvidencePipeline:
             self._status(layout, "candidate_audit", 0.68, "持续性、动作密度与跨视角一致性审计")
             events, rejected = audit_candidates(candidates, transforms, self.config)
             rejected.extend(refine_liquid_events_with_context(events, detection_paths))
+            observability_receipts = attach_action_observability(events)
+            semantic_review_plan = build_semantic_review_plan(events, self.config)
+            observability_path = layout.json_config / "action_observability.json"
+            semantic_review_plan_path = (
+                layout.json_config / "semantic_review_plan.json"
+            )
+            write_json(
+                observability_path,
+                {
+                    "schema_version": "visioncortex-action-observability-ledger/1",
+                    "event_count": len(events),
+                    "receipts": observability_receipts,
+                },
+            )
+            write_json(semantic_review_plan_path, semantic_review_plan)
             raw_segments = build_experiment_segments(
                 events, manifest.views, self.config, coarse_windows=boundary_candidates
             )
@@ -3547,6 +3566,8 @@ class EvidencePipeline:
                         *selection_decisions,
                     ],
                     "experiment_groups": [group.model_dump(mode="json") for group in groups],
+                    "action_observability": observability_receipts,
+                    "semantic_review_plan": semantic_review_plan,
                 },
             )
             boundary_precheck = self._run_boundary_precheck(
@@ -3559,6 +3580,8 @@ class EvidencePipeline:
                     layout.json_config / "audit_layer.json",
                     layout.json_config / "boundary_precheck.json",
                     key_selection_path,
+                    observability_path,
+                    semantic_review_plan_path,
                 ],
             )
 

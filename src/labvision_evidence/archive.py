@@ -15,6 +15,7 @@ import numpy as np
 from openpyxl import Workbook
 
 from .alignment import iter_aligned_rows
+from .action_semantics import record_semantic_review
 from .detection import nearest_frame_evidence_many
 from .indexing import (
     build_archive_index,
@@ -899,6 +900,14 @@ def _artifact_json(
         dict.fromkeys(
             [
                 *[str(item) for item in event.uncertainty],
+                *[
+                    f"CV未直接观察: {item}"
+                    for item in (
+                        event.observability.get("unmet_visual_requirements")
+                        if event.observability
+                        else []
+                    )
+                ],
                 *[str(item) for item in understanding.get("uncertainties") or []],
             ]
         )
@@ -1082,6 +1091,8 @@ def _artifact_json(
                 "confidence": event.confidence,
                 "audit_reason": event.audit_reason,
                 "supporting_views": event.supporting_views,
+                "observability": event.observability,
+                "semantic_review": event.semantic_review,
             },
             "mllm": {
                 "model": understanding.get("model"),
@@ -1568,17 +1579,106 @@ def materialize_key_materials(
         publisher.publish_file(runtime_path)
 
 
+def extract_temporal_review_frames(
+    clip_path: Path,
+    output_dir: Path,
+    view_id: str,
+    samples_per_view: int = 3,
+) -> list[tuple[str, Path]]:
+    """Sample a tiny before/peak/after storyboard from an already-made key clip.
+
+    This avoids another seek through the original NAS video and gives the MLLM
+    temporal evidence instead of asking it to infer an action from one still.
+    """
+
+    count = max(1, min(5, int(samples_per_view)))
+    capture = cv2.VideoCapture(str(clip_path))
+    try:
+        frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        if frame_count <= 0:
+            return []
+        if count == 1:
+            fractions = [0.5]
+            phases = ["peak"]
+        elif count == 2:
+            fractions = [0.2, 0.8]
+            phases = ["before", "after"]
+        elif count == 3:
+            fractions = [0.15, 0.5, 0.85]
+            phases = ["before", "peak", "after"]
+        else:
+            fractions = [0.1 + 0.8 * index / (count - 1) for index in range(count)]
+            phases = [f"temporal_{index + 1:02d}" for index in range(count)]
+        samples: list[tuple[str, Path]] = []
+        output_dir.mkdir(parents=True, exist_ok=True)
+        safe_view = _safe_slug(view_id)
+        for phase, fraction in zip(phases, fractions):
+            frame_index = min(frame_count - 1, max(0, round((frame_count - 1) * fraction)))
+            capture.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+            ok, frame = capture.read()
+            if not ok or frame is None:
+                continue
+            path = output_dir / f"{safe_view}_{phase}.jpg"
+            if not cv2.imwrite(str(path), frame, [cv2.IMWRITE_JPEG_QUALITY, 88]):
+                continue
+            samples.append(
+                (
+                    f"view_id={view_id}; temporal_phase={phase}; key_clip_frame={frame_index}",
+                    path,
+                )
+            )
+        return samples
+    finally:
+        capture.release()
+
+
 def analyze_key_materials(layout: ArchiveLayout, events: Sequence[EvidenceEvent], config: dict[str, Any]) -> None:
     analyzer = ArkStepAnalyzer(config)
     accepted = [event for event in events if event.accepted]
     cache_root = layout.work / "mllm-cache" / "key-materials"
 
     def analyze(event: EvidenceEvent) -> tuple[EvidenceEvent, dict[str, Any]]:
-        images = [
+        fallback_images = [
             (view_id, layout.root / relative)
             for view_id, relative in event.key_frames.items()
             if view_id != "aligned_first_third"
         ]
+        images: list[tuple[str, Path]] = []
+        if bool(config["mllm"].get("use_key_clip_temporal_samples", True)):
+            sample_dir = layout.work / "mllm-temporal-samples" / event.event_id
+            samples_per_view = int(config["mllm"].get("temporal_samples_per_view", 3))
+            by_phase: dict[str, list[tuple[str, Path]]] = {
+                "before": [],
+                "peak": [],
+                "after": [],
+            }
+            remaining: list[tuple[str, Path]] = []
+            for view_id, relative in event.key_clips.items():
+                if view_id == "aligned_first_third":
+                    continue
+                for label, path in extract_temporal_review_frames(
+                    layout.root / relative,
+                    sample_dir,
+                    view_id,
+                    samples_per_view=samples_per_view,
+                ):
+                    phase = next(
+                        (
+                            item
+                            for item in ("before", "peak", "after")
+                            if f"temporal_phase={item}" in label
+                        ),
+                        None,
+                    )
+                    if phase is None:
+                        remaining.append((label, path))
+                    else:
+                        by_phase[phase].append((label, path))
+            for phase in ("before", "peak", "after"):
+                images.extend(sorted(by_phase[phase], key=lambda item: item[0]))
+            images.extend(sorted(remaining, key=lambda item: item[0]))
+        if not images:
+            images = fallback_images
         semantic_evidence = event.model_dump(
             mode="json",
             exclude={"model_understanding", "key_frames", "key_clips"},
@@ -1612,6 +1712,7 @@ def analyze_key_materials(layout: ArchiveLayout, events: Sequence[EvidenceEvent]
             for future in as_completed(futures):
                 event, result = future.result()
                 event.model_understanding = result
+                record_semantic_review(event, result)
     finally:
         analyzer.close()
 

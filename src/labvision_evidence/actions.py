@@ -130,6 +130,9 @@ def _frame_observations(
                 )
 
     movement_threshold = float(cfg["movement_threshold_norm"])
+    movement_samples: list[
+        tuple[BoxEvidence, float, float, float, float, float]
+    ] = []
     for obj in objects:
         if obj.track_id is None:
             continue
@@ -141,7 +144,31 @@ def _frame_observations(
         delta_ms = frame.local_ms - previous[2]
         if not 0.0 < delta_ms <= 2000.0:
             continue
-        displacement = math.hypot(center_x - previous[0], center_y - previous[1])
+        dx = center_x - previous[0]
+        dy = center_y - previous[1]
+        movement_samples.append((obj, center_x, center_y, delta_ms, dx, dy))
+
+    minimum_anchors = max(2, int(cfg.get("camera_motion_compensation_min_anchors", 2)))
+    anchor_vectors = [
+        (dx, dy)
+        for obj, _, _, _, dx, dy in movement_samples
+        if obj.class_name in SUPPORT_ANCHOR_CLASSES
+    ]
+    camera_dx = float(median(item[0] for item in anchor_vectors)) if len(anchor_vectors) >= minimum_anchors else 0.0
+    camera_dy = float(median(item[1] for item in anchor_vectors)) if len(anchor_vectors) >= minimum_anchors else 0.0
+    camera_compensated = len(anchor_vectors) >= minimum_anchors
+    suppress_stationary_devices = bool(
+        cfg.get("suppress_stationary_device_movement", True)
+    )
+    for obj, _, _, delta_ms, dx, dy in movement_samples:
+        raw_displacement = math.hypot(dx, dy)
+        displacement = (
+            math.hypot(dx - camera_dx, dy - camera_dy)
+            if camera_compensated
+            else raw_displacement
+        )
+        if suppress_stationary_devices and obj.class_name in DEVICE_CLASSES:
+            continue
         if displacement >= movement_threshold:
             observations.append(
                 _Observation(
@@ -153,7 +180,11 @@ def _frame_observations(
                     evidence={
                         "frame_index": frame.frame_index,
                         "track_id": obj.track_id,
-                        "displacement_norm": round(displacement, 5),
+                        "displacement_norm": round(raw_displacement, 5),
+                        "camera_compensated_displacement_norm": round(displacement, 5),
+                        "camera_motion_compensated": camera_compensated,
+                        "camera_translation_norm": [round(camera_dx, 5), round(camera_dy, 5)],
+                        "camera_anchor_count": len(anchor_vectors),
                         "delta_ms": round(delta_ms, 3),
                     },
                 )
@@ -177,6 +208,10 @@ def _frame_observations(
                         "frame_index": frame.frame_index,
                         "distance_norm": round(distance, 5),
                         "roi_motion": round(roi_motion, 3),
+                        "tool_class": tool.class_name,
+                        "tool_track_id": tool.track_id,
+                        "vessel_class": vessel.class_name,
+                        "vessel_track_id": vessel.track_id,
                         "inference": "液体不属于21类标签；这是工具+容器+ROI运动候选，需多模态确认",
                     },
                 )
@@ -241,6 +276,120 @@ def _merge_observations(
     return sorted(candidates, key=lambda candidate: candidate.global_start_ms)
 
 
+def _infer_liquid_transfer_sequences(
+    observations: Sequence[_Observation],
+    view: ViewInput,
+    cfg: dict[str, Any],
+) -> list[ActionCandidate]:
+    """Infer source->transport->target sequences from existing tracks.
+
+    The result remains an indirect liquid hypothesis: it improves recall and
+    gives the MLLM a real temporal sequence, but never claims visible liquid.
+    """
+
+    maximum_gap_ms = float(
+        cfg.get("liquid_transfer_max_sequence_gap_seconds", 20.0)
+    ) * 1000.0
+    contact_gap_ms = float(cfg.get("event_merge_gap_seconds", 1.25)) * 1000.0
+    minimum_observations = max(
+        2, int(cfg.get("liquid_transfer_min_contact_observations", 2))
+    )
+    by_tool: dict[tuple[str, int], list[_Observation]] = defaultdict(list)
+    for observation in observations:
+        if observation.action_type != ActionType.LIQUID_MOVEMENT:
+            continue
+        tool_class = observation.evidence.get("tool_class")
+        tool_track_id = observation.evidence.get("tool_track_id")
+        vessel_track_id = observation.evidence.get("vessel_track_id")
+        if (
+            not isinstance(tool_class, str)
+            or not isinstance(tool_track_id, int)
+            or not isinstance(vessel_track_id, int)
+        ):
+            continue
+        by_tool[(tool_class, tool_track_id)].append(observation)
+
+    output: list[ActionCandidate] = []
+    for (tool_class, tool_track_id), items in by_tool.items():
+        runs: list[list[_Observation]] = []
+        current: list[_Observation] = []
+        current_vessel: tuple[str, int] | None = None
+        for item in sorted(items, key=lambda value: value.global_ms):
+            vessel = (
+                str(item.evidence.get("vessel_class") or "unknown"),
+                int(item.evidence["vessel_track_id"]),
+            )
+            if current and (
+                vessel != current_vessel
+                or item.global_ms - current[-1].global_ms > contact_gap_ms
+            ):
+                runs.append(current)
+                current = []
+            current.append(item)
+            current_vessel = vessel
+        if current:
+            runs.append(current)
+        runs = [run for run in runs if len(run) >= minimum_observations]
+        for source, target in zip(runs, runs[1:]):
+            source_identity = (
+                str(source[0].evidence.get("vessel_class") or "unknown"),
+                int(source[0].evidence["vessel_track_id"]),
+            )
+            target_identity = (
+                str(target[0].evidence.get("vessel_class") or "unknown"),
+                int(target[0].evidence["vessel_track_id"]),
+            )
+            gap_ms = target[0].global_ms - source[-1].global_ms
+            if source_identity == target_identity or not 0.0 <= gap_ms <= maximum_gap_ms:
+                continue
+            combined = [*source, *target]
+            confidence = min(
+                1.0,
+                sum(item.confidence for item in combined) / len(combined) + 0.08,
+            )
+            output.append(
+                ActionCandidate(
+                    candidate_id=f"TRANSFER-SEQ-{view.view_id}-{len(output) + 1:06d}",
+                    action_type=ActionType.LIQUID_MOVEMENT,
+                    view_id=view.view_id,
+                    role=view.role,
+                    local_start_ms=source[0].local_ms,
+                    local_end_ms=target[-1].local_ms,
+                    global_start_ms=source[0].global_ms,
+                    global_end_ms=target[-1].global_ms,
+                    key_global_ms=(source[-1].global_ms + target[0].global_ms) / 2.0,
+                    objects=sorted(
+                        {
+                            tool_class,
+                            source_identity[0],
+                            target_identity[0],
+                        }
+                    ),
+                    confidence=confidence,
+                    evidence=[
+                        {
+                            "transfer_sequence": "source_transport_target",
+                            "tool_class": tool_class,
+                            "tool_track_id": tool_track_id,
+                            "source_class": source_identity[0],
+                            "source_track_id": source_identity[1],
+                            "target_class": target_identity[0],
+                            "target_track_id": target_identity[1],
+                            "source_contact_end_global_ms": source[-1].global_ms,
+                            "target_contact_start_global_ms": target[0].global_ms,
+                            "transport_gap_ms": gap_ms,
+                            "source_observation_count": len(source),
+                            "target_observation_count": len(target),
+                        }
+                    ],
+                    uncertainty=[
+                        "工具从一个容器移动至另一容器；液体本体/液面仍需时序视觉或多模态确认"
+                    ],
+                )
+            )
+    return output
+
+
 def generate_candidates(
     views: Sequence[ViewInput], detection_paths: dict[str, Path], config: dict[str, Any]
 ) -> list[ActionCandidate]:
@@ -252,6 +401,7 @@ def generate_candidates(
         for frame in iter_frame_evidence(detection_paths[view.view_id]):
             observations.extend(_frame_observations(frame, previous_tracks, cfg))
         candidates.extend(_merge_observations(observations, view, cfg))
+        candidates.extend(_infer_liquid_transfer_sequences(observations, view, cfg))
     return sorted(candidates, key=lambda candidate: candidate.global_start_ms)
 
 
@@ -740,11 +890,37 @@ def select_fine_scan_views(
 def _objects_overlap(left: ActionCandidate, right: ActionCandidate) -> bool:
     a = set(left.objects) - HAND_CLASSES
     b = set(right.objects) - HAND_CLASSES
-    return bool(a & b) or left.action_type in {
-        ActionType.LIQUID_MOVEMENT,
-        ActionType.DEVICE_PANEL_OPERATION,
-        ActionType.CONTAINER_STATE_CHANGE,
-    }
+    if a & b:
+        return True
+    if left.action_type == ActionType.LIQUID_MOVEMENT:
+        # Cross-view detectors may call the same transfer tool pipette vs.
+        # spearhead and the same vessel tube vs. container. Require both
+        # physical families; never merge candidates merely because both are
+        # labelled "liquid_movement".
+        return bool(a & TRANSFER_TOOL_CLASSES and b & TRANSFER_TOOL_CLASSES) and bool(
+            a & CONTAINER_CLASSES and b & CONTAINER_CLASSES
+        )
+    if left.action_type == ActionType.DEVICE_PANEL_OPERATION:
+        return bool(a & b & DEVICE_CLASSES)
+    if left.action_type == ActionType.CONTAINER_STATE_CHANGE:
+        def families(objects: set[str]) -> set[str]:
+            result: set[str] = set()
+            if objects & {"tube", "tube_cap"}:
+                result.add("tube")
+            if objects & {
+                "reagent_bottle",
+                "reagent_bottle_open",
+                "sample_bottle",
+                "sample_bottle_blue",
+                "bottle_cap",
+            }:
+                result.add("bottle")
+            if objects & {"beaker", "container"}:
+                result.add("open_container")
+            return result
+
+        return bool(families(a) & families(b))
+    return False
 
 
 def audit_candidates(

@@ -14,9 +14,11 @@ import httpx
 from .schemas import EvidenceEvent, ExperimentGroup, ExperimentSegment
 
 
-EVENT_SYSTEM_PROMPT = """你是化学湿实验视频证据审计模型。你会收到同一全局时间点、严格对齐的第一人称和第三人称关键帧，以及传统 CV 证据。
+EVENT_SYSTEM_PROMPT = """你是化学湿实验视频证据审计模型。你会收到严格对齐的第一人称和第三人称动作前、峰值、动作后关键帧，以及传统 CV 证据。
 只描述画面可观察事实，不补写未出现的试剂名、剂量、读数或实验目的。第一/第三人称冲突时必须指出。
 液体移动必须看到液体/液面变化、倾倒姿态、移液器与容器配合等证据之一，否则标为待确认。
+必须按时间比较动作前、峰值和动作后；单帧中手与物体框接近不能直接证明接触，设备框出现不能直接证明面板操作，工具和容器同时出现不能直接证明液体转移。
+CV 可观测性收据会明确21类检测器能直接证明什么、仍缺什么。不要把收据中的“间接候选”复述成已观察事实。
 输出单个 JSON 对象，字段固定为：
 {
   "current_step": "当前这一步做什么，细到手、对象、状态",
@@ -27,6 +29,8 @@ EVENT_SYSTEM_PROMPT = """你是化学湿实验视频证据审计模型。你会�
   "physical_change": {"before":"之前状态", "after":"之后状态"},
   "per_view_observations": [{"view_id":"视角ID", "observation":"该视角独立证据"}],
   "cross_view_consistency": "consistent/partial/conflict/single_view",
+  "evidence_verdict": "confirmed/relabel_suggested/uncertain/rejected",
+  "temporal_support": {"before":"动作前可见事实", "peak":"峰值可见事实", "after":"动作后可见事实"},
   "confidence": 0.0,
   "uncertainties": ["无法确认项"]
 }
@@ -48,6 +52,7 @@ GROUP_SYSTEM_PROMPT = """你是化学湿实验有界视频的步骤级理解与�
   "atomic_experiments": [{"name":"内部原子实验名称", "start_global_ms":0, "end_global_ms":0, "purpose_observable":"可观察目标或未知"}],
   "steps": [{"step_index":1, "start_global_ms":0, "end_global_ms":0, "current_step":"当前动作", "next_step":"下一动作或未知", "objects":["物体"], "physical_change":"状态变化", "supporting_views":["视角ID"], "confidence":0.0}],
   "overall_summary": "整个有界视频的实验内容",
+  "boundary_assessment": {"start_complete":true, "end_complete":true, "start_reason":"起点证据", "end_reason":"终点证据", "localized_rescan_needed":false},
   "confidence": 0.0,
   "uncertainties": ["无法确认项"]
 }
@@ -250,6 +255,7 @@ class ArkAnalyzer:
                 "cv_confidence": event.confidence,
                 "supporting_views": event.supporting_views,
                 "audit_reason": event.audit_reason,
+                "cv_observability": event.observability,
                 "task": "逐视角核实当前细步骤，并描述画面支持的下一步",
             },
             image_paths,

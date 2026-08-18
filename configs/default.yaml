@@ -182,8 +182,16 @@ segmentation:
   min_view_action_density_per_minute: 0.30
   single_view_accept_confidence: 0.78
   movement_threshold_norm: 0.025
+  # Wearable camera motion shifts every box together. Subtract the median
+  # translation of at least two stable lab anchors before declaring movement.
+  camera_motion_compensation_min_anchors: 2
+  # A balance or stirrer box moving because of camera jitter is not an
+  # experiment-opening physical action.
+  suppress_stationary_device_movement: true
   contact_distance_norm: 0.035
   liquid_motion_threshold: 6.0
+  liquid_transfer_max_sequence_gap_seconds: 20.0
+  liquid_transfer_min_contact_observations: 2
   require_both_roles: true
   # A physical action can be visually conclusive in only one role because of
   # occlusion. Delivery still requires aligned first/third-person media; this
@@ -234,6 +242,15 @@ mllm:
   http2: false
   max_output_tokens: 4096
   max_images_per_event: 8
+  # Reuse the already-materialized short key clips. The model sees an aligned
+  # before/peak/after sequence for each selected role instead of one still.
+  use_key_clip_temporal_samples: true
+  temporal_samples_per_view: 3
+  # Build a bounded semantic audit queue for ontology-limited CV actions. The
+  # plan is written before any model call and cannot mutate CV acceptance.
+  candidate_review_max_events: 120
+  candidate_review_include_rejected: true
+  candidate_review_rejected_min_confidence: 0.75
   storyboard_pairs_per_group: 4
   group_workers: 4
   workers: 8

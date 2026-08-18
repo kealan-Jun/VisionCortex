@@ -175,6 +175,8 @@ class EvidenceEvent(BaseModel):
     supporting_roles: list[ViewRole]
     candidates: list[ActionCandidate]
     uncertainty: list[str] = Field(default_factory=list)
+    observability: dict[str, Any] = Field(default_factory=dict)
+    semantic_review: dict[str, Any] | None = None
     key_frames: dict[str, str] = Field(default_factory=dict)
     key_clips: dict[str, str] = Field(default_factory=dict)
     model_understanding: dict[str, Any] | None = None
