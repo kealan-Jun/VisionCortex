@@ -1,0 +1,27 @@
+{
+  "schema_version": "visioncortex-three-dataset-acceptance-spec/1.0.0",
+  "task_id": "DEV-20260818-041",
+  "datasets": [
+    {
+      "key": "six_view",
+      "expected_source_experiment_id": "exp_20260810_144014_e918b762",
+      "archive_name": "Six-View-Three-Hour-Experiment-2026-08-13",
+      "six_view_reviewed_baseline": true,
+      "preprocessing_target_seconds": 1200,
+      "expected_group_count": 5,
+      "minimum_key_event_count": 80
+    },
+    {
+      "key": "a",
+      "expected_source_experiment_id": "exp_20260811_161842_ca175e55",
+      "archive_name": "CustomFlow-Standard-Correct-12-A-0004-2026-08-11",
+      "six_view_reviewed_baseline": false
+    },
+    {
+      "key": "z",
+      "expected_source_experiment_id": "exp_20260812_133147_53d6cbd4",
+      "archive_name": "CustomFlow-Standard-Correct-12-Z-0001-2026-08-12",
+      "six_view_reviewed_baseline": false
+    }
+  ]
+}
