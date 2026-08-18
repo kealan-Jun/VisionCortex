@@ -669,7 +669,6 @@ def _execute_fixed_benchmark(
                 nas_output=str(fixed_root),
             ),
         )
-        manifest.experiment_id = _BENCHMARK_ARCHIVE_NAME
         manifest_path.write_text(
             yaml.safe_dump(manifest.model_dump(mode="json"), allow_unicode=True, sort_keys=False),
             encoding="utf-8",
@@ -756,7 +755,6 @@ def _execute_index_collection(
                 nas_staging=str(staging_root),
             ),
         )
-        manifest.experiment_id = archive_name
         manifest_path.write_text(
             yaml.safe_dump(
                 manifest.model_dump(mode="json"), allow_unicode=True, sort_keys=False

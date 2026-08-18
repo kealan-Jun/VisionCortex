@@ -7,8 +7,8 @@ from labvision_evidence import cli
 
 
 class _Manifest:
-    def __init__(self):
-        self.experiment_id = "source"
+    def __init__(self, experiment_id="source"):
+        self.experiment_id = experiment_id
         self.views = [object(), object()]
 
     def model_dump(self, mode="python"):
@@ -26,6 +26,7 @@ def test_index_collection_cli_promotes_only_after_pipeline_success(monkeypatch, 
     manifest_path = tmp_path / "input" / "manifest.yaml"
     records = []
     promoted = []
+    observed = {}
     fixed_root = tmp_path / "archive" / "Collection-01"
     fixed_root.mkdir(parents=True)
     (fixed_root / "existing.txt").write_text("accepted-old-package", encoding="utf-8")
@@ -39,7 +40,7 @@ def test_index_collection_cli_promotes_only_after_pipeline_success(monkeypatch, 
 
     def prepare(*_):
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        return _Manifest(), manifest_path, {
+        return _Manifest("exp-source"), manifest_path, {
             "input_mode": "nas_segmented_virtual_timeline",
             "copied_source_bytes": 0,
         }
@@ -51,6 +52,7 @@ def test_index_collection_cli_promotes_only_after_pipeline_success(monkeypatch, 
             self.config = config
 
         def run(self, manifest):
+            observed["experiment_id"] = manifest.experiment_id
             staging = Path(self.config["storage"]["active_archive_path"])
             staging.mkdir(parents=True, exist_ok=True)
             return staging
@@ -78,6 +80,7 @@ def test_index_collection_cli_promotes_only_after_pipeline_success(monkeypatch, 
     assert records == ["queued", "processing", "archived"]
     assert len(promoted) == 1
     assert promoted[0][1].name == "Collection-01"
+    assert observed["experiment_id"] == "exp-source"
     assert (fixed_root / "existing.txt").read_text(encoding="utf-8") == "accepted-old-package"
 
 
@@ -107,7 +110,7 @@ def test_index_collection_cli_preserves_existing_archive_when_pipeline_fails(
 
     def prepare(*_):
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        return _Manifest(), manifest_path, {
+        return _Manifest("exp-source"), manifest_path, {
             "input_mode": "nas_segmented_virtual_timeline",
             "copied_source_bytes": 0,
         }

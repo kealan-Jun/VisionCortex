@@ -233,7 +233,6 @@ def run_fixed_benchmark_command(
     manifest, manifest_path, ingest = prepare_from_nas_index(
         settings, experiment_id, lambda message: typer.echo(f"[NAS] {message}")
     )
-    manifest.experiment_id = archive_name
     manifest_path.write_text(
         yaml.safe_dump(manifest.model_dump(mode="json"), allow_unicode=True, sort_keys=False),
         encoding="utf-8",
@@ -317,7 +316,6 @@ def run_index_collection_command(
         manifest, manifest_path, ingest = prepare_from_nas_index(
             settings, experiment_id, lambda message: typer.echo(f"[NAS] {message}")
         )
-        manifest.experiment_id = safe_name
         manifest_path.write_text(
             yaml.safe_dump(
                 manifest.model_dump(mode="json"), allow_unicode=True, sort_keys=False

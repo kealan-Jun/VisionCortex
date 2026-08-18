@@ -537,9 +537,10 @@ def refine_motion_candidates_with_coarse(
 ) -> tuple[list[ActionCandidate], dict[str, Any]]:
     """Conservatively tighten motion windows with bounded YOLO evidence.
 
-    Unsupported motion candidates are retained, and coarse candidates outside
-    every motion interval are appended. The coarse layer can therefore reduce
-    fine-scan work without becoming a recall gate.
+    Unsupported motion candidates with object evidence are retained, and coarse
+    candidates outside every motion interval are appended. Objectless motion
+    intervals with no coarse YOLO match are quarantined with a receipt because
+    they cannot become a physical evidence event without an observed object.
     """
 
     perf = config["performance"]
@@ -548,6 +549,9 @@ def refine_motion_candidates_with_coarse(
     ) * 1000.0
     minimum_candidates = max(1, int(perf.get("coarse_refinement_min_candidates", 2)))
     minimum_span_ms = float(perf.get("coarse_refinement_min_span_seconds", 30.0)) * 1000.0
+    quarantine_objectless = bool(
+        perf.get("coarse_quarantine_objectless_unconfirmed_motion", True)
+    )
     used_coarse_ids: set[str] = set()
     refined: list[ActionCandidate] = []
     decisions: list[dict[str, Any]] = []
@@ -572,6 +576,23 @@ def refine_motion_candidates_with_coarse(
             and coarse_end - coarse_start >= minimum_span_ms
         )
         if not supported:
+            if quarantine_objectless and not matches and not motion.objects:
+                decisions.append(
+                    {
+                        "motion_candidate_id": motion.candidate_id,
+                        "decision": "quarantined_objectless_motion_without_coarse_yolo",
+                        "coarse_candidate_ids": [],
+                        "reason": (
+                            "motion-only interval has no object identity and no "
+                            "coarse YOLO match; it cannot form a physical event"
+                        ),
+                        "original_duration_seconds": round(
+                            (motion.global_end_ms - motion.global_start_ms) / 1000.0,
+                            3,
+                        ),
+                    }
+                )
+                continue
             refined.append(motion)
             decisions.append(
                 {
@@ -638,6 +659,11 @@ def refine_motion_candidates_with_coarse(
         "retained_motion_count": sum(
             item["decision"] == "retained_motion_recall_guard" for item in decisions
         ),
+        "quarantined_motion_count": sum(
+            item["decision"]
+            == "quarantined_objectless_motion_without_coarse_yolo"
+            for item in decisions
+        ),
         "unmatched_coarse_candidate_count": len(unmatched),
         "output_candidate_count": len(refined),
         "output_candidates": [
@@ -647,6 +673,7 @@ def refine_motion_candidates_with_coarse(
             "association_margin_seconds": association_margin_ms / 1000.0,
             "minimum_candidates": minimum_candidates,
             "minimum_span_seconds": minimum_span_ms / 1000.0,
+            "quarantine_objectless_unconfirmed_motion": quarantine_objectless,
         },
         "decisions": decisions,
     }

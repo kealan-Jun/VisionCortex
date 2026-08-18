@@ -27,6 +27,7 @@ performance:
   coarse_refinement_association_margin_seconds: 30.0
   coarse_refinement_min_candidates: 2
   coarse_refinement_min_span_seconds: 30.0
+  coarse_quarantine_objectless_unconfirmed_motion: true
   fine_batch_size: 16
   # A lone first-person source otherwise starves TensorRT between FFmpeg
   # bursts. Decode two adjacent bounded chunks concurrently, but consume them
@@ -56,6 +57,7 @@ performance:
   fine_preferred_third_person_views: []
   # Associate evidence with its recalled boundary, not the much wider decode padding.
   fine_progressive_audit_margin_seconds: 5.0
+  fine_progressive_anchor_cluster_gap_seconds: 10.0
   # Hardware profiles may scout all third-person views around precise first-
   # person anchors before the full-FPS fallback order is chosen.
   fine_dynamic_cross_view_scout: false

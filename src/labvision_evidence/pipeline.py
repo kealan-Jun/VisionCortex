@@ -1042,6 +1042,88 @@ class EvidencePipeline:
         initial_count = min(len(third), max(0, int(initial_third_person_views)))
         return first + third[:initial_count], third[initial_count:]
 
+    @staticmethod
+    def _progressive_candidate_recall_bounds(
+        candidate: ActionCandidate,
+    ) -> tuple[float, float, str]:
+        start = candidate.global_start_ms
+        end = candidate.global_end_ms
+        basis = "candidate_bounds"
+        for item in candidate.evidence:
+            if item.get("source") != "coarse_yolo_refinement":
+                continue
+            original_start = item.get("original_global_start_ms")
+            original_end = item.get("original_global_end_ms")
+            if original_start is None or original_end is None:
+                continue
+            start = min(start, float(original_start))
+            end = max(end, float(original_end))
+            basis = "original_motion_bounds_after_coarse_refinement"
+        return start, end, basis
+
+    @staticmethod
+    def _quarantine_nonformal_progressive_gaps(
+        target_status: list[dict[str, Any]],
+        groups: list[ExperimentGroup],
+    ) -> tuple[set[str], set[str]]:
+        """Separate formal experiment gaps from exhausted single-view noise."""
+
+        unresolved: set[str] = set()
+        quarantined: set[str] = set()
+        for item in target_status:
+            if item.get("status") != "needs_third_person_supplement":
+                continue
+            overlapping_groups = [
+                group
+                for group in groups
+                if float(item["global_end_ms"]) >= group.global_start_ms
+                and float(item["global_start_ms"]) <= group.global_end_ms
+            ]
+            candidate_id = str(item["candidate_id"])
+            if not groups or not overlapping_groups:
+                if not groups:
+                    unresolved.add(candidate_id)
+                    continue
+                item["status"] = "quarantined_missing_dual_view"
+                item["quarantine_reason"] = (
+                    "all eligible third-person views exhausted and candidate does "
+                    "not overlap any formal dual-view experiment group"
+                )
+                quarantined.add(candidate_id)
+                continue
+            if item.get("recall_window_basis") == (
+                "original_motion_bounds_after_coarse_refinement"
+            ):
+                unresolved.add(candidate_id)
+                continue
+            uncovered_clusters = [
+                cluster
+                for cluster in item.get("anchor_clusters") or []
+                if not cluster.get("covered")
+            ]
+            blocking_clusters = [
+                cluster
+                for cluster in uncovered_clusters
+                if any(
+                    float(cluster["global_end_ms"]) >= group.global_start_ms
+                    and float(cluster["global_start_ms"]) <= group.global_end_ms
+                    for group in overlapping_groups
+                )
+            ]
+            if blocking_clusters:
+                unresolved.add(candidate_id)
+                continue
+            item["status"] = "cross_view_covered_with_quarantined_single_view_context"
+            item["quarantine_reason"] = (
+                "formal experiment clusters have dual-view support; remaining "
+                "single-view context lies outside formal boundaries"
+            )
+            item["quarantined_anchor_cluster_ids"] = [
+                str(cluster["cluster_id"]) for cluster in uncovered_clusters
+            ]
+            quarantined.add(candidate_id)
+        return unresolved, quarantined
+
     def _progressive_target_status(
         self,
         boundary_candidates: list[ActionCandidate],
@@ -1065,11 +1147,18 @@ class EvidencePipeline:
         )
         results = []
         for candidate in boundary_candidates:
+            recall_start, recall_end, recall_basis = (
+                self._progressive_candidate_recall_bounds(candidate)
+            )
             # Decode padding maximizes recall and may overlap adjacent experiments.
             # It must not be reused as the evidence-association window, otherwise
             # one event can falsely mark two nearby candidates as cross-view covered.
-            window_start = candidate.global_start_ms - audit_margin_ms
-            window_end = candidate.global_end_ms + audit_margin_ms
+            # A coarse-refined candidate is the exception: its original motion
+            # bounds remain the recall envelope so a late atomic action cannot be
+            # suppressed by an early cross-view hit. Formal boundaries are still
+            # computed only from audited evidence, never from this recall envelope.
+            window_start = recall_start - audit_margin_ms
+            window_end = recall_end + audit_margin_ms
             relevant = []
             for event in events:
                 # The candidate/action ledger has already applied temporal and
@@ -1082,8 +1171,21 @@ class EvidencePipeline:
                             "liquid_start_anchor_required_objects", ["pipette"]
                         )
                     )
-                    reliable_start_signal = event.accepted and (
-                        not required or bool(set(event.objects) & required)
+                    complete_first_person_transfer = any(
+                        candidate.role == ViewRole.FIRST_PERSON
+                        and (
+                            candidate.candidate_id.startswith("TRANSFER-SEQ-")
+                            or any(
+                                evidence.get("transfer_sequence")
+                                == "source_transport_target"
+                                for evidence in candidate.evidence
+                            )
+                        )
+                        for candidate in event.candidates
+                    )
+                    reliable_start_signal = complete_first_person_transfer or (
+                        event.accepted
+                        and (not required or bool(set(event.objects) & required))
                     )
                 else:
                     reliable_start_signal = is_experiment_start_anchor(
@@ -1105,7 +1207,53 @@ class EvidencePipeline:
                     set(event.supporting_roles)
                 )
             ]
-            if cross_view:
+            cluster_gap_ms = (
+                float(
+                    self.config["performance"].get(
+                        "fine_progressive_anchor_cluster_gap_seconds", 10.0
+                    )
+                )
+                * 1000.0
+            )
+            clusters: list[list[EvidenceEvent]] = []
+            for event in sorted(first_signal, key=lambda item: item.global_start_ms):
+                if (
+                    clusters
+                    and event.global_start_ms - max(
+                        item.global_end_ms for item in clusters[-1]
+                    )
+                    <= cluster_gap_ms
+                ):
+                    clusters[-1].append(event)
+                else:
+                    clusters.append([event])
+            cross_view_ids = {event.event_id for event in cross_view}
+            cluster_receipts = []
+            supplement_events: list[EvidenceEvent] = []
+            for index, cluster in enumerate(clusters, start=1):
+                cluster_cross_view = [
+                    event for event in cluster if event.event_id in cross_view_ids
+                ]
+                covered = bool(cluster_cross_view)
+                if not covered:
+                    supplement_events.extend(cluster)
+                cluster_receipts.append(
+                    {
+                        "cluster_id": f"{candidate.candidate_id}-ANCHOR-{index:03d}",
+                        "global_start_ms": min(
+                            event.global_start_ms for event in cluster
+                        ),
+                        "global_end_ms": max(
+                            event.global_end_ms for event in cluster
+                        ),
+                        "event_ids": [event.event_id for event in cluster],
+                        "cross_view_event_ids": [
+                            event.event_id for event in cluster_cross_view
+                        ],
+                        "covered": covered,
+                    }
+                )
+            if first_signal and not supplement_events:
                 status = "cross_view_covered"
             elif first_signal:
                 status = "needs_third_person_supplement"
@@ -1116,6 +1264,9 @@ class EvidencePipeline:
                     "candidate_id": candidate.candidate_id,
                     "global_start_ms": candidate.global_start_ms,
                     "global_end_ms": candidate.global_end_ms,
+                    "recall_window_basis": recall_basis,
+                    "recall_window_start_ms": recall_start,
+                    "recall_window_end_ms": recall_end,
                     "audit_window_start_ms": window_start,
                     "audit_window_end_ms": window_end,
                     "status": status,
@@ -1133,9 +1284,16 @@ class EvidencePipeline:
                             "action_type": event.action_type.value,
                             "objects": list(event.objects),
                         }
-                        for event in first_signal
+                        for event in supplement_events
                     ],
                     "cross_view_anchor_event_ids": [event.event_id for event in cross_view],
+                    "anchor_cluster_gap_ms": cluster_gap_ms,
+                    "anchor_clusters": cluster_receipts,
+                    "uncovered_anchor_cluster_ids": [
+                        item["cluster_id"]
+                        for item in cluster_receipts
+                        if not item["covered"]
+                    ],
                 }
             )
         return results
@@ -1437,16 +1595,24 @@ class EvidencePipeline:
             overlapping_targets = [
                 candidate
                 for candidate in (boundary_candidates or [])
-                if candidate.global_end_ms >= group.global_start_ms
-                and candidate.global_start_ms <= group.global_end_ms
+                if self._progressive_candidate_recall_bounds(candidate)[1]
+                >= group.global_start_ms
+                and self._progressive_candidate_recall_bounds(candidate)[0]
+                <= group.global_end_ms
             ]
             target_start_ms = min(
                 [group.global_start_ms]
-                + [item.global_start_ms for item in overlapping_targets]
+                + [
+                    self._progressive_candidate_recall_bounds(item)[0]
+                    for item in overlapping_targets
+                ]
             )
             target_end_ms = max(
                 [group.global_end_ms]
-                + [item.global_end_ms for item in overlapping_targets]
+                + [
+                    self._progressive_candidate_recall_bounds(item)[1]
+                    for item in overlapping_targets
+                ]
             )
             fp_candidates = [
                 candidate
@@ -2397,22 +2563,28 @@ class EvidencePipeline:
             }
 
         scanned_views = [view for view in fine_views if view.view_id in scanned]
-        final_candidates = generate_candidates(scanned_views, detection_paths, self.config)
-        if local_recall_rounds:
-            final_target_events, _ = audit_candidates(
-                final_candidates, transforms, self.config
+        final_candidates = generate_candidates(
+            scanned_views, detection_paths, self.config
+        )
+        quarantined_ids: set[str] = set()
+        if local_recall_rounds or unresolved_ids:
+            (
+                final_candidates,
+                final_target_events,
+                _final_segments,
+                final_groups,
+                _final_key_events,
+            ) = formal_state()
+            if local_recall_rounds:
+                target_status = self._progressive_target_status(
+                    boundary_candidates, final_target_events
+                )
+            unresolved_ids, quarantined_ids = (
+                self._quarantine_nonformal_progressive_gaps(
+                    target_status,
+                    final_groups,
+                )
             )
-            refine_liquid_events_with_context(
-                final_target_events, detection_paths
-            )
-            target_status = self._progressive_target_status(
-                boundary_candidates, final_target_events
-            )
-            unresolved_ids = {
-                item["candidate_id"]
-                for item in target_status
-                if item["status"] == "needs_third_person_supplement"
-            }
         all_coverage = self._window_coverage(fine_windows, infos)
         actual_coverage = self._window_coverage(actual_windows, infos)
         all_seconds = sum(float(item["selected_seconds"]) for item in all_coverage.values())
@@ -2463,6 +2635,7 @@ class EvidencePipeline:
             "passes": pass_reports,
             "final_target_status": target_status,
             "unresolved_candidate_ids": sorted(unresolved_ids),
+            "quarantined_candidate_ids": sorted(quarantined_ids),
             "quality_complete": progressive_quality_complete,
             "stopping_reason": (
                 "all_demanded_windows_have_dual_role_anchor"

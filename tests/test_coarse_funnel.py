@@ -70,6 +70,30 @@ def test_coarse_refinement_tightens_supported_windows_without_erasing_recall(def
     assert report["unmatched_coarse_candidate_count"] == 1
 
 
+def test_coarse_refinement_quarantines_objectless_motion_without_yolo_support(
+    default_config,
+):
+    objectless = _candidate("motion-no-object", 100_000, 700_000)
+    objectless.objects = []
+    object_backed = _candidate("motion-with-object", 800_000, 900_000)
+
+    refined, report = refine_motion_candidates_with_coarse(
+        [objectless, object_backed], [], default_config
+    )
+
+    assert [item.candidate_id for item in refined] == ["motion-with-object"]
+    assert report["quarantined_motion_count"] == 1
+    assert report["retained_motion_count"] == 1
+    receipt = next(
+        item
+        for item in report["decisions"]
+        if item["motion_candidate_id"] == "motion-no-object"
+    )
+    assert receipt["decision"] == (
+        "quarantined_objectless_motion_without_coarse_yolo"
+    )
+
+
 def test_sentinel_coarse_scan_keeps_all_views_for_fine_quality_fallback(default_config):
     views = [
         ViewInput(view_id="fp", role=ViewRole.FIRST_PERSON, video=Path("fp.mp4")),

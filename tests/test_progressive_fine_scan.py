@@ -174,6 +174,153 @@ def test_progressive_status_does_not_share_one_anchor_across_padded_windows(
     assert status[1]["first_person_anchor_event_ids"] == ["FIRST-2"]
 
 
+def test_progressive_status_requires_each_temporal_anchor_cluster_to_close(
+    default_config,
+):
+    default_config["performance"]["fine_progressive_anchor_cluster_gap_seconds"] = 10.0
+    pipeline = EvidencePipeline(default_config)
+    boundary = [_candidate("WINDOW", start_ms=10_000.0, end_ms=80_000.0)]
+    early_both = _event(
+        "EARLY-BOTH",
+        [ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON],
+        start_ms=12_000.0,
+        end_ms=14_000.0,
+    )
+    late_first = _event(
+        "LATE-FIRST",
+        [ViewRole.FIRST_PERSON],
+        accepted=False,
+        start_ms=50_000.0,
+        end_ms=52_000.0,
+    )
+
+    status = pipeline._progressive_target_status(
+        boundary, [early_both, late_first]
+    )[0]
+
+    assert status["status"] == "needs_third_person_supplement"
+    assert status["cross_view_anchor_event_ids"] == ["EARLY-BOTH"]
+    assert status["first_person_anchor_event_ids"] == [
+        "EARLY-BOTH",
+        "LATE-FIRST",
+    ]
+    assert [item["event_id"] for item in status["first_person_anchor_windows"]] == [
+        "LATE-FIRST"
+    ]
+    assert len(status["anchor_clusters"]) == 2
+    assert status["anchor_clusters"][0]["covered"] is True
+    assert status["anchor_clusters"][1]["covered"] is False
+
+
+def test_progressive_status_recalls_rejected_first_person_transfer_sequence(
+    default_config,
+):
+    pipeline = EvidencePipeline(default_config)
+    boundary = [_candidate("WINDOW", start_ms=10_000.0, end_ms=80_000.0)]
+    transfer = _event(
+        "TRANSFER",
+        [ViewRole.FIRST_PERSON],
+        action_type=ActionType.LIQUID_MOVEMENT,
+        objects=["spearhead", "tube"],
+        accepted=False,
+        start_ms=50_000.0,
+        end_ms=62_000.0,
+    )
+    transfer.candidates = [
+        ActionCandidate(
+            candidate_id="TRANSFER-SEQ-fp-000001",
+            action_type=ActionType.LIQUID_MOVEMENT,
+            view_id="fp",
+            role=ViewRole.FIRST_PERSON,
+            local_start_ms=50_000.0,
+            local_end_ms=62_000.0,
+            global_start_ms=50_000.0,
+            global_end_ms=62_000.0,
+            key_global_ms=56_000.0,
+            objects=["spearhead", "tube"],
+            confidence=0.7,
+            evidence=[{"transfer_sequence": "source_transport_target"}],
+        )
+    ]
+
+    status = pipeline._progressive_target_status(boundary, [transfer])[0]
+
+    assert status["status"] == "needs_third_person_supplement"
+    assert status["first_person_anchor_event_ids"] == ["TRANSFER"]
+
+
+def test_progressive_status_preserves_original_refined_motion_recall_span(
+    default_config,
+):
+    pipeline = EvidencePipeline(default_config)
+    refined = _candidate("REFINED", start_ms=20_000.0, end_ms=40_000.0)
+    refined.evidence = [
+        {
+            "source": "coarse_yolo_refinement",
+            "original_global_start_ms": 10_000.0,
+            "original_global_end_ms": 80_000.0,
+        }
+    ]
+    late_first = _event(
+        "LATE-FIRST",
+        [ViewRole.FIRST_PERSON],
+        accepted=False,
+        start_ms=60_000.0,
+        end_ms=62_000.0,
+    )
+
+    status = pipeline._progressive_target_status([refined], [late_first])[0]
+
+    assert status["status"] == "needs_third_person_supplement"
+    assert status["recall_window_basis"] == (
+        "original_motion_bounds_after_coarse_refinement"
+    )
+    assert status["recall_window_start_ms"] == 10_000.0
+    assert status["recall_window_end_ms"] == 80_000.0
+
+
+def test_progressive_gap_outside_formal_groups_is_quarantined(default_config):
+    pipeline = EvidencePipeline(default_config)
+    outside = pipeline._progressive_target_status(
+        [_candidate("OUTSIDE", start_ms=10_000.0, end_ms=20_000.0)],
+        [
+            _event(
+                "OUTSIDE-FIRST",
+                [ViewRole.FIRST_PERSON],
+                accepted=False,
+                start_ms=12_000.0,
+                end_ms=14_000.0,
+            )
+        ],
+    )[0]
+    inside = pipeline._progressive_target_status(
+        [_candidate("INSIDE", start_ms=50_000.0, end_ms=60_000.0)],
+        [
+            _event(
+                "INSIDE-FIRST",
+                [ViewRole.FIRST_PERSON],
+                accepted=False,
+                start_ms=52_000.0,
+                end_ms=54_000.0,
+            )
+        ],
+    )[0]
+    group = type(
+        "Group",
+        (),
+        {"global_start_ms": 49_000.0, "global_end_ms": 61_000.0},
+    )()
+
+    unresolved, quarantined = pipeline._quarantine_nonformal_progressive_gaps(
+        [outside, inside], [group]
+    )
+
+    assert unresolved == {"INSIDE"}
+    assert quarantined == {"OUTSIDE"}
+    assert outside["status"] == "quarantined_missing_dual_view"
+    assert inside["status"] == "needs_third_person_supplement"
+
+
 def test_progressive_scan_stops_after_first_successful_supplement(
     monkeypatch, tmp_path, default_config
 ):

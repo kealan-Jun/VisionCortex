@@ -24,6 +24,7 @@ performance:
   coarse_refinement_association_margin_seconds: 30.0
   coarse_refinement_min_candidates: 2
   coarse_refinement_min_span_seconds: 30.0
+  coarse_quarantine_objectless_unconfirmed_motion: true
   # The same indexed sentinel frames feed motion and first-person YOLO once.
   # At one frame per 10 seconds the shortest reviewed 4.5-minute experiment
   # still contributes about 27 observations, while a second NAS decode pass is
@@ -104,6 +105,7 @@ performance:
   # Fine decode padding remains wide for recall, while pass/fail evidence is
   # associated to its actual boundary with only a small clock-tolerance margin.
   fine_progressive_audit_margin_seconds: 5.0
+  fine_progressive_anchor_cluster_gap_seconds: 10.0
   # A separate low-FPS ranking pass is optional in the generic pipeline, but
   # segmented NAS cold starts pay nearly all of its time in file open/seek.
   # DEV-022: a separate 1 FPS Scout decoded only 210 frames but paid 667 s of
