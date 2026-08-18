@@ -4,6 +4,12 @@ from collections import Counter
 from typing import Any, Sequence
 
 from .decisions import decision_receipt
+from .ordering import (
+    event_sort_key,
+    segment_sort_key,
+    stable_event_fingerprint,
+    stable_segment_fingerprint,
+)
 from .schemas import (
     ActionCandidate,
     ActionType,
@@ -154,7 +160,7 @@ def select_formal_experiment_start_events(
         )
     ) * 1000.0
     corroborated_movement: list[EvidenceEvent] = []
-    for event in sorted(dual_role, key=lambda item: item.global_start_ms):
+    for event in sorted(dual_role, key=event_sort_key):
         if event.action_type != ActionType.OBJECT_MOVEMENT:
             if decision_receipts is not None:
                 accepted = event in canonical
@@ -188,7 +194,7 @@ def select_formal_experiment_start_events(
         corroborator = next(
             (
                 later
-                for later in sorted(dual_role, key=lambda item: item.global_start_ms)
+                for later in sorted(dual_role, key=event_sort_key)
                 if later.event_id != event.event_id
                 and later.action_type != ActionType.OBJECT_MOVEMENT
                 and 0.0
@@ -248,7 +254,7 @@ def select_formal_experiment_start_events(
             )
     return sorted(
         [*canonical, *corroborated_movement],
-        key=lambda event: (event.global_start_ms, event.event_id),
+        key=event_sort_key,
     )
 
 
@@ -285,7 +291,7 @@ def normalize_experiment_segments(
     def trim_unrelated_head(segment: ExperimentSegment) -> ExperimentSegment:
         core_events = sorted(
             _segment_events(segment, by_event),
-            key=lambda item: item.global_start_ms,
+            key=event_sort_key,
         )
         anchors = select_formal_experiment_start_events(core_events, config)
         if not anchors:
@@ -327,7 +333,7 @@ def normalize_experiment_segments(
         supported_end = raw_end
         limit = max(raw_end, segment.global_end_ms - post_roll_ms)
         core_ids = {event.event_id for event in core_events}
-        for context in sorted(events, key=lambda item: item.global_start_ms):
+        for context in sorted(events, key=event_sort_key):
             if context.event_id in core_ids or context.global_end_ms <= cursor:
                 continue
             if context.global_start_ms > limit:
@@ -356,7 +362,7 @@ def normalize_experiment_segments(
 
     ordered = sorted(
         (trim_unrelated_tail(trim_unrelated_head(segment)) for segment in segments),
-        key=lambda item: (item.global_start_ms, item.global_end_ms),
+        key=lambda item: segment_sort_key(item, by_event),
     )
     if not ordered:
         return []
@@ -731,7 +737,8 @@ def prepare_formal_experiment_segments(
     receipts: list[dict[str, Any]] = []
     previous_input_attachable = False
     ordered_segments = sorted(
-        segments, key=lambda item: (item.global_start_ms, item.global_end_ms)
+        segments,
+        key=lambda item: segment_sort_key(item, by_event),
     )
     index = 0
     while index < len(ordered_segments):
@@ -977,7 +984,7 @@ def prepare_formal_experiment_segments(
     for segment in promoted:
         formal_events = sorted(
             _segment_events(segment, by_event),
-            key=lambda item: (item.global_start_ms, item.event_id),
+            key=event_sort_key,
         )
         openers = select_formal_experiment_start_events(formal_events, config)
         if not openers:
@@ -997,9 +1004,7 @@ def prepare_formal_experiment_segments(
             and bool(segment_boundaries & event_boundary_ids(event))
         ]
         eligible: list[EvidenceEvent] = []
-        for context in sorted(
-            considered, key=lambda item: (item.global_start_ms, item.event_id)
-        ):
+        for context in sorted(considered, key=event_sort_key):
             shared_objects = sorted(
                 _non_actor_objects(context) & _non_actor_objects(anchor)
             )
@@ -1060,9 +1065,7 @@ def prepare_formal_experiment_segments(
         if not eligible:
             extended.append(segment)
             continue
-        earliest_context = min(
-            eligible, key=lambda item: (item.global_start_ms, item.event_id)
-        )
+        earliest_context = min(eligible, key=event_sort_key)
         shared_window_starts = [
             window.global_start_ms
             for window in coarse_windows
@@ -1279,7 +1282,7 @@ def _quarantined_context_continuity_evidence(
             and event.global_end_ms >= left.global_end_ms
             and event.global_start_ms <= right.global_start_ms
         ),
-        key=lambda event: (event.global_start_ms, event.global_end_ms),
+        key=event_sort_key,
     )
     chain_gaps: list[float] = []
     if context_events:
@@ -1298,22 +1301,32 @@ def _quarantined_context_continuity_evidence(
     context_families = _continuity_object_families(context_events)
     left_context_families = sorted(left_families & context_families)
     right_context_families = sorted(right_families & context_families)
-    accepted = bool(
-        0.0 <= gap_ms <= maximum_span_ms
-        and shared_first
-        and shared_third
-        and shared_boundaries
-        and len(context_events) >= minimum_context_events
-        and maximum_observed_step_ms <= maximum_step_ms
-        and len(left_context_families) >= minimum_shared_objects
-        and len(right_context_families) >= minimum_shared_objects
-    )
+    criteria = {
+        "gap_within_span": 0.0 <= gap_ms <= maximum_span_ms,
+        "shared_first_person_view": bool(shared_first),
+        "shared_third_person_view": bool(shared_third),
+        "shared_boundary": bool(shared_boundaries),
+        "enough_context_events": len(context_events) >= minimum_context_events,
+        "context_step_within_limit": maximum_observed_step_ms <= maximum_step_ms,
+        "left_object_family_support": (
+            len(left_context_families) >= minimum_shared_objects
+        ),
+        "right_object_family_support": (
+            len(right_context_families) >= minimum_shared_objects
+        ),
+    }
+    accepted = all(criteria.values())
     facts = {
         "gap_ms": gap_ms,
         "continuity_basis": "quarantined_first_person_context_chain",
         "shared_views": sorted(shared_views),
+        "shared_first_person_views": shared_first,
+        "shared_third_person_views": shared_third,
         "shared_boundary_ids": shared_boundaries,
         "context_event_ids": [event.event_id for event in context_events],
+        "context_event_fingerprints": [
+            stable_event_fingerprint(event) for event in context_events
+        ],
         "context_event_count": len(context_events),
         "maximum_context_step_ms": maximum_observed_step_ms,
         "left_context_object_families": left_context_families,
@@ -1323,6 +1336,9 @@ def _quarantined_context_continuity_evidence(
         "minimum_shared_object_families": minimum_shared_objects,
         "maximum_step_ms": maximum_step_ms,
         "maximum_span_ms": maximum_span_ms,
+        "left_segment_fingerprint": stable_segment_fingerprint(left, by_event),
+        "right_segment_fingerprint": stable_segment_fingerprint(right, by_event),
+        "criteria": criteria,
     }
     if accepted:
         return (
@@ -1365,57 +1381,39 @@ def build_experiment_groups(
     coarse_windows: Sequence[ActionCandidate] | None = None,
 ) -> list[ExperimentGroup]:
     """Group atomic experiments only when temporal and physical continuity agree."""
-    ordered = sorted(segments, key=lambda segment: segment.global_start_ms)
+    by_event = {event.event_id: event for event in events}
+    ordered = sorted(
+        segments,
+        key=lambda segment: segment_sort_key(segment, by_event),
+    )
     if not ordered:
         return []
-    by_event = {event.event_id: event for event in events}
     roles = {view.view_id: view.role for view in views}
     chains: list[tuple[list[ExperimentSegment], list[str]]] = []
     current = [ordered[0]]
     reasons: list[str] = []
     for segment in ordered[1:]:
         left = current[-1]
-        continuous, reason, facts = _continuity_evidence(
+        base_continuous, base_reason, base_facts = _continuity_evidence(
             left, segment, by_event, roles, config
         )
-        if not continuous and coarse_windows:
-            fallback_continuous, fallback_reason, fallback_facts = (
-                _quarantined_context_continuity_evidence(
-                    left,
-                    segment,
-                    by_event,
-                    roles,
-                    coarse_windows,
-                    config,
-                )
-            )
-            if fallback_continuous:
-                continuous = fallback_continuous
-                reason = fallback_reason
-                facts = fallback_facts
-            else:
-                facts["quarantined_context_fallback"] = fallback_facts
+        cfg = config["continuity"]
+        segment_facts = {
+            "left_segment_fingerprint": stable_segment_fingerprint(left, by_event),
+            "right_segment_fingerprint": stable_segment_fingerprint(segment, by_event),
+        }
+        base_facts = {**base_facts, **segment_facts}
         if decision_receipts is not None:
-            cfg = config["continuity"]
-            context_bridge = (
-                facts.get("continuity_basis")
-                == "quarantined_first_person_context_chain"
-            )
             decision_receipts.append(
                 decision_receipt(
                     decision_type="experiment_continuity_edge",
-                    rule_id=(
-                        "QF2-QUARANTINED-CONTEXT-CHAIN"
-                        if context_bridge
-                        else "QF2-STABLE-OBJECT-IDENTITY"
-                    ),
-                    verdict="accepted" if continuous else "rejected",
+                    rule_id="QF2-STABLE-OBJECT-IDENTITY",
+                    verdict="accepted" if base_continuous else "rejected",
                     subject_ids=[left.segment_id, segment.segment_id],
-                    reason_codes=[str(facts.get("continuity_basis"))],
-                    facts=facts,
+                    reason_codes=[str(base_facts.get("continuity_basis"))],
+                    facts=base_facts,
                     thresholds={
-                        "maximum_gap_ms": float(cfg["max_gap_seconds"])
-                        * 1000.0,
+                        "maximum_gap_ms": float(cfg["max_gap_seconds"]) * 1000.0,
                         "minimum_shared_object_labels": int(
                             cfg.get("minimum_shared_objects", 1)
                         ),
@@ -1432,13 +1430,99 @@ def build_experiment_groups(
                         "right_segment_id": segment.segment_id,
                         "decision": (
                             "accepted_continuity_edge"
-                            if continuous
+                            if base_continuous
                             else "rejected_continuity_edge"
                         ),
-                        "reason": reason,
+                        "reason": base_reason,
                     },
                 )
             )
+
+        continuous = base_continuous
+        reason = base_reason
+        if not base_continuous and coarse_windows:
+            fallback_continuous, fallback_reason, fallback_facts = (
+                _quarantined_context_continuity_evidence(
+                    left,
+                    segment,
+                    by_event,
+                    roles,
+                    coarse_windows,
+                    config,
+                )
+            )
+            if decision_receipts is not None:
+                decision_receipts.append(
+                    decision_receipt(
+                        decision_type="experiment_continuity_fallback",
+                        rule_id="QF2-QUARANTINED-CONTEXT-CHAIN",
+                        verdict=(
+                            "accepted" if fallback_continuous else "rejected"
+                        ),
+                        subject_ids=[left.segment_id, segment.segment_id],
+                        reason_codes=[
+                            "quarantined_context_chain_satisfied"
+                            if fallback_continuous
+                            else "quarantined_context_chain_insufficient"
+                        ],
+                        facts=fallback_facts,
+                        thresholds={
+                            "maximum_span_ms": float(
+                                cfg.get(
+                                    "quarantined_atomic_bridge_max_span_seconds",
+                                    180.0,
+                                )
+                            )
+                            * 1000.0,
+                            "maximum_step_ms": float(
+                                cfg.get(
+                                    "quarantined_atomic_bridge_max_step_gap_seconds",
+                                    60.0,
+                                )
+                            )
+                            * 1000.0,
+                            "minimum_context_events": max(
+                                2,
+                                int(
+                                    cfg.get(
+                                        "quarantined_context_bridge_min_events",
+                                        2,
+                                    )
+                                ),
+                            ),
+                            "minimum_shared_object_families": max(
+                                2,
+                                int(
+                                    cfg.get(
+                                        "quarantined_context_bridge_min_shared_objects",
+                                        2,
+                                    )
+                                ),
+                            ),
+                            "require_shared_boundary": True,
+                            "require_shared_first_person_view": True,
+                            "require_shared_third_person_view": True,
+                        },
+                        evidence_refs=[
+                            *left.event_ids,
+                            *fallback_facts.get("context_event_ids", []),
+                            *segment.event_ids,
+                        ],
+                        legacy={
+                            "left_segment_id": left.segment_id,
+                            "right_segment_id": segment.segment_id,
+                            "decision": (
+                                "accepted_quarantined_context_bridge"
+                                if fallback_continuous
+                                else "rejected_quarantined_context_bridge"
+                            ),
+                            "reason": fallback_reason,
+                        },
+                    )
+                )
+            if fallback_continuous:
+                continuous = True
+                reason = fallback_reason
         if continuous:
             current.append(segment)
             reasons.append(reason)

@@ -12,7 +12,14 @@ from typing import Any, Iterable, Sequence
 import numpy as np
 
 from .detection import iter_frame_evidence
+from .decisions import decision_receipt
 from .grouping import select_formal_experiment_start_events
+from .ordering import (
+    candidate_sort_key,
+    event_sort_key,
+    stable_candidate_fingerprint,
+    stable_event_fingerprint,
+)
 from .schemas import (
     ActionCandidate,
     ActionType,
@@ -273,7 +280,7 @@ def _merge_observations(
                 )
             )
             counter += 1
-    return sorted(candidates, key=lambda candidate: candidate.global_start_ms)
+    return sorted(candidates, key=candidate_sort_key)
 
 
 def _infer_liquid_transfer_sequences(
@@ -402,7 +409,7 @@ def generate_candidates(
             observations.extend(_frame_observations(frame, previous_tracks, cfg))
         candidates.extend(_merge_observations(observations, view, cfg))
         candidates.extend(_infer_liquid_transfer_sequences(observations, view, cfg))
-    return sorted(candidates, key=lambda candidate: candidate.global_start_ms)
+    return sorted(candidates, key=candidate_sort_key)
 
 
 def generate_coarse_activity_candidates(
@@ -453,7 +460,7 @@ def generate_coarse_activity_candidates(
     candidates: list[ActionCandidate] = []
     for view_id, observations in observations_by_view.items():
         candidates.extend(_merge_observations(observations, by_id[view_id], cfg))
-    return sorted(candidates, key=lambda candidate: candidate.global_start_ms)
+    return sorted(candidates, key=candidate_sort_key)
 
 
 def generate_motion_burst_candidates(
@@ -527,7 +534,7 @@ def generate_motion_burst_candidates(
                     uncertainty=["粗层运动突发，仅用于召回精扫窗口，不作为最终动作证据"],
                 )
             )
-    return sorted(candidates, key=lambda candidate: candidate.global_start_ms)
+    return sorted(candidates, key=candidate_sort_key)
 
 
 def refine_motion_candidates_with_coarse(
@@ -552,16 +559,17 @@ def refine_motion_candidates_with_coarse(
     quarantine_objectless = bool(
         perf.get("coarse_quarantine_objectless_unconfirmed_motion", True)
     )
+    ordered_coarse_candidates = sorted(coarse_candidates, key=candidate_sort_key)
     used_coarse_ids: set[str] = set()
     refined: list[ActionCandidate] = []
     decisions: list[dict[str, Any]] = []
 
-    for motion in sorted(motion_candidates, key=lambda item: item.global_start_ms):
+    for motion in sorted(motion_candidates, key=candidate_sort_key):
         association_start = motion.global_start_ms - association_margin_ms
         association_end = motion.global_end_ms + association_margin_ms
         matches = [
             coarse
-            for coarse in coarse_candidates
+            for coarse in ordered_coarse_candidates
             if coarse.global_end_ms >= association_start
             and coarse.global_start_ms <= association_end
         ]
@@ -604,7 +612,10 @@ def refine_motion_candidates_with_coarse(
             continue
 
         used_coarse_ids.update(item.candidate_id for item in matches)
-        best = max(matches, key=lambda item: item.confidence)
+        best = min(
+            matches,
+            key=lambda item: (-float(item.confidence), candidate_sort_key(item)),
+        )
         refined.append(
             ActionCandidate(
                 candidate_id=f"REFINED-{motion.candidate_id}",
@@ -645,10 +656,12 @@ def refine_motion_candidates_with_coarse(
         )
 
     unmatched = [
-        item for item in coarse_candidates if item.candidate_id not in used_coarse_ids
+        item
+        for item in ordered_coarse_candidates
+        if item.candidate_id not in used_coarse_ids
     ]
     refined.extend(unmatched)
-    refined.sort(key=lambda item: item.global_start_ms)
+    refined.sort(key=candidate_sort_key)
     return refined, {
         "schema_version": "visioncortex-coarse-boundary-refinement/1",
         "motion_candidate_count": len(motion_candidates),
@@ -698,7 +711,7 @@ def fuse_motion_probe_candidates(
     clusters: list[list[ActionCandidate]] = []
     current: list[ActionCandidate] = []
     current_end = -1.0
-    for candidate in sorted(candidates, key=lambda item: item.global_start_ms):
+    for candidate in sorted(candidates, key=candidate_sort_key):
         if current and candidate.global_start_ms > current_end + merge_gap_ms:
             clusters.append(current)
             current = []
@@ -718,7 +731,10 @@ def fuse_motion_probe_candidates(
         )
         if len(views) < minimum_views and not sustained_primary:
             continue
-        best = max(cluster, key=lambda item: item.confidence)
+        best = min(
+            cluster,
+            key=lambda item: (-float(item.confidence), candidate_sort_key(item)),
+        )
         start_ms = min(item.global_start_ms for item in cluster)
         end_ms = max(item.global_end_ms for item in cluster)
         fused.append(
@@ -756,7 +772,7 @@ def fuse_motion_probe_candidates(
         )
     # A silent or obstructed secondary sentinel must not force a full-timeline
     # YOLO fallback. Keep the original motion windows as a recall-first fallback.
-    return fused or list(sorted(candidates, key=lambda item: item.global_start_ms))
+    return fused or list(sorted(candidates, key=candidate_sort_key))
 
 
 def generate_motion_safety_candidates(
@@ -817,7 +833,7 @@ def generate_motion_safety_candidates(
                     ],
                 )
             )
-    return sorted(candidates, key=lambda item: item.global_start_ms)
+    return sorted(candidates, key=candidate_sort_key)
 
 
 def select_fine_scan_views(
@@ -958,7 +974,7 @@ def audit_candidates(
     tolerance = float(config["alignment"]["cross_view_event_tolerance_ms"])
     seg_cfg = config["segmentation"]
     clusters: list[list[ActionCandidate]] = []
-    for candidate in candidates:
+    for candidate in sorted(candidates, key=candidate_sort_key):
         selected: list[ActionCandidate] | None = None
         for cluster in reversed(clusters):
             if candidate.global_start_ms - max(item.global_end_ms for item in cluster) > tolerance:
@@ -975,10 +991,11 @@ def audit_candidates(
 
     events: list[EvidenceEvent] = []
     rejected: list[dict[str, Any]] = []
-    for index, cluster in enumerate(clusters, 1):
+    for index, unsorted_cluster in enumerate(clusters, 1):
+        cluster = sorted(unsorted_cluster, key=candidate_sort_key)
         views = sorted({item.view_id for item in cluster})
         roles = sorted({item.role for item in cluster}, key=lambda role: role.value)
-        weighted_confidence = sum(item.confidence for item in cluster) / len(cluster)
+        weighted_confidence = math.fsum(item.confidence for item in cluster) / len(cluster)
         cross_view_bonus = min(0.16, 0.06 * (len(views) - 1) + (0.06 if len(roles) == 2 else 0.0))
         confidence = min(1.0, weighted_confidence + cross_view_bonus)
         aligned_views = [view_id for view_id in views if transforms[view_id].state == "aligned"]
@@ -1112,27 +1129,34 @@ def build_experiment_segments(
     views: Sequence[ViewInput],
     config: dict[str, Any],
     coarse_windows: Sequence[ActionCandidate] | None = None,
+    decision_receipts: list[dict[str, Any]] | None = None,
 ) -> list[ExperimentSegment]:
-    accepted = sorted((event for event in events if event.accepted), key=lambda event: event.global_start_ms)
+    accepted = sorted(
+        (event for event in events if event.accepted),
+        key=event_sort_key,
+    )
     if not accepted:
         return []
     cfg = config["segmentation"]
     gap_ms = float(cfg["experiment_gap_seconds"]) * 1000.0
     groups: list[list[EvidenceEvent]] = []
-    if coarse_windows:
+    ordered_windows = (
+        sorted(coarse_windows, key=candidate_sort_key) if coarse_windows else []
+    )
+    if ordered_windows:
         # A coarse motion burst is the experiment-level temporal envelope. Fine
         # actions may legitimately contain long pauses (incubation, reading a
         # balance, changing tools), so a fixed short event gap must not split one
         # bounded experiment. Padding is used only for assigning fine evidence;
         # the final boundary still comes from accepted fine events below.
         padding_ms = float(config["performance"]["fine_window_padding_seconds"]) * 1000.0
-        buckets: list[list[EvidenceEvent]] = [[] for _ in coarse_windows]
+        buckets: list[list[EvidenceEvent]] = [[] for _ in ordered_windows]
         unassigned: list[EvidenceEvent] = []
         for event in accepted:
             midpoint = (event.global_start_ms + event.global_end_ms) / 2.0
             matches = [
                 index
-                for index, window in enumerate(coarse_windows)
+                for index, window in enumerate(ordered_windows)
                 if window.global_start_ms - padding_ms <= midpoint <= window.global_end_ms + padding_ms
             ]
             if not matches:
@@ -1142,13 +1166,17 @@ def build_experiment_segments(
                 matches,
                 key=lambda index: abs(
                     midpoint
-                    - (coarse_windows[index].global_start_ms + coarse_windows[index].global_end_ms) / 2.0
+                    - (
+                        ordered_windows[index].global_start_ms
+                        + ordered_windows[index].global_end_ms
+                    )
+                    / 2.0
                 ),
             )
             buckets[best].append(event)
         for bucket in buckets:
             current: list[EvidenceEvent] = []
-            for event in sorted(bucket, key=lambda item: item.global_start_ms):
+            for event in sorted(bucket, key=event_sort_key):
                 if current and event.global_start_ms - current[-1].global_end_ms > gap_ms:
                     groups.append(current)
                     current = []
@@ -1165,7 +1193,12 @@ def build_experiment_segments(
             current.append(event)
         if current:
             groups.append(current)
-        groups.sort(key=lambda group: min(event.global_start_ms for event in group))
+        groups.sort(
+            key=lambda group: (
+                min(event.global_start_ms for event in group),
+                tuple(stable_event_fingerprint(event) for event in sorted(group, key=event_sort_key)),
+            )
+        )
     else:
         current = []
         for event in accepted:
@@ -1177,7 +1210,9 @@ def build_experiment_segments(
             groups.append(current)
 
     segments: list[ExperimentSegment] = []
-    for index, group in enumerate(groups, 1):
+    for index, unsorted_group in enumerate(groups, 1):
+        segment_id = f"EXP-{index:04d}"
+        group = sorted(unsorted_group, key=event_sort_key)
         # A segment must start on a physically meaningful operation anchor.
         # Single-view liquid hypotheses and movement of fixed equipment may be
         # useful context, but are too noisy to pull the experiment boundary
@@ -1192,31 +1227,43 @@ def build_experiment_segments(
         # that ends before the bounded clip starts to this experiment.
         bounded_group = [event for event in group if event.global_end_ms >= start]
         raw_end = max(event.global_end_ms for event in bounded_group)
-        # Cross-view agreement remains mandatory for accepted evidence and key
-        # materials. Once that core exists, however, a continuous tail of
-        # strong single-view physical actions may legitimately mark cleanup or
-        # the final device/container operation. Use it only to extend the end
-        # boundary inside the same coarse activity envelope; it never creates
-        # an event, material, or experiment by itself.
-        if coarse_windows:
+        boundary_context_receipt: dict[str, Any] | None = None
+        core_roles = {
+            role for event in bounded_group for role in event.supporting_roles
+        }
+        if ordered_windows and core_roles == {
+            ViewRole.FIRST_PERSON,
+            ViewRole.THIRD_PERSON,
+        }:
             midpoint = (raw_start + raw_end) / 2.0
             matching_windows = [
                 window
-                for window in coarse_windows
+                for window in ordered_windows
                 if window.global_start_ms <= midpoint <= window.global_end_ms
             ]
             if matching_windows:
                 boundary_window = min(
                     matching_windows,
-                    key=lambda window: abs(
-                        midpoint - (window.global_start_ms + window.global_end_ms) / 2.0
+                    key=lambda window: (
+                        abs(
+                            midpoint
+                            - (
+                                window.global_start_ms + window.global_end_ms
+                            )
+                            / 2.0
+                        ),
+                        candidate_sort_key(window),
                     ),
                 )
                 later_core_in_window = any(
-                    other is not group
+                    other is not unsorted_group
                     and min(item.global_start_ms for item in other) > raw_end
                     and boundary_window.global_start_ms
-                    <= (min(item.global_start_ms for item in other) + max(item.global_end_ms for item in other)) / 2.0
+                    <= (
+                        min(item.global_start_ms for item in other)
+                        + max(item.global_end_ms for item in other)
+                    )
+                    / 2.0
                     <= boundary_window.global_end_ms
                     for other in groups
                 )
@@ -1239,15 +1286,6 @@ def build_experiment_segments(
                     maximum_extension_ms = float(
                         cfg.get("boundary_context_max_extension_seconds", 90.0)
                     ) * 1000.0
-                    cursor = raw_end
-                    supported_end = raw_end
-                    limit = min(
-                        raw_end + maximum_extension_ms,
-                        boundary_window.global_end_ms,
-                    )
-                    connected_objects = {
-                        obj for item in bounded_group for obj in item.objects
-                    }
                     cleanup_objects = {
                         "brush",
                         "cleaning_tool",
@@ -1255,30 +1293,93 @@ def build_experiment_segments(
                         "wash_bottle",
                         "waste_container",
                     }
-                    for context in sorted(events, key=lambda item: item.global_start_ms):
-                        if context.global_end_ms <= cursor:
+                    cursor = raw_end
+                    supported_end = raw_end
+                    limit = min(
+                        raw_end + maximum_extension_ms,
+                        boundary_window.global_end_ms,
+                    )
+                    context_chain: list[EvidenceEvent] = []
+                    strong_context: list[EvidenceEvent] = []
+                    for context in sorted(events, key=event_sort_key):
+                        if context.accepted or context.global_end_ms <= cursor:
                             continue
                         if context.global_start_ms > limit:
                             break
                         if context.global_start_ms > cursor + maximum_gap_ms:
                             break
-                        physically_connected = bool(
-                            set(context.objects) & (connected_objects | cleanup_objects)
-                        ) or context.action_type in {
-                            ActionType.CONTAINER_STATE_CHANGE,
-                            ActionType.DEVICE_PANEL_OPERATION,
-                        }
+                        context_roles = set(context.supporting_roles)
+                        cleanup_evidence = sorted(
+                            set(context.objects) & cleanup_objects
+                        )
                         if (
-                            context.confidence < bridge_confidence
-                            or not context.objects
-                            or not physically_connected
+                            len(context_roles) != 1
+                            or context.confidence < bridge_confidence
+                            or not cleanup_evidence
                         ):
                             continue
+                        context_chain.append(context)
                         cursor = min(limit, max(cursor, context.global_end_ms))
-                        connected_objects.update(context.objects)
                         if context.confidence >= extension_confidence:
+                            strong_context.append(context)
                             supported_end = max(supported_end, cursor)
-                    raw_end = supported_end
+                    if supported_end > raw_end and strong_context:
+                        previous_end = raw_end
+                        raw_end = supported_end
+                        boundary_context_receipt = decision_receipt(
+                            decision_type="raw_boundary_context_extension",
+                            rule_id="QF1-SINGLE-VIEW-BOUNDARY-CONTEXT",
+                            verdict="accepted",
+                            subject_ids=[segment_id],
+                            reason_codes=[
+                                "single_role_cleanup_chain_inside_recalled_boundary"
+                            ],
+                            facts={
+                                "previous_raw_end_ms": previous_end,
+                                "extended_raw_end_ms": raw_end,
+                                "context_event_ids": [
+                                    event.event_id for event in context_chain
+                                ],
+                                "context_event_fingerprints": [
+                                    stable_event_fingerprint(event)
+                                    for event in context_chain
+                                ],
+                                "strong_context_event_ids": [
+                                    event.event_id for event in strong_context
+                                ],
+                                "cleanup_objects": sorted(
+                                    {
+                                        obj
+                                        for event in context_chain
+                                        for obj in event.objects
+                                        if obj in cleanup_objects
+                                    }
+                                ),
+                                "boundary_candidate_id": boundary_window.candidate_id,
+                                "boundary_candidate_fingerprint": (
+                                    stable_candidate_fingerprint(boundary_window)
+                                ),
+                                "formal_membership_changed": False,
+                                "boundary_clipped_to_recalled_window": (
+                                    raw_end == boundary_window.global_end_ms
+                                ),
+                            },
+                            thresholds={
+                                "activation_gap_ms": activation_gap_ms,
+                                "bridge_confidence": bridge_confidence,
+                                "extension_confidence": extension_confidence,
+                                "maximum_context_gap_ms": maximum_gap_ms,
+                                "maximum_extension_ms": maximum_extension_ms,
+                            },
+                            evidence_refs=[
+                                *[event.event_id for event in bounded_group],
+                                *[event.event_id for event in context_chain],
+                            ],
+                            legacy={
+                                "segment_id": segment_id,
+                                "decision": "extended_raw_boundary_from_cleanup_context",
+                            },
+                        )
         end = raw_end + float(cfg["experiment_post_roll_seconds"]) * 1000.0
         minimum = float(cfg["min_experiment_seconds"]) * 1000.0
         if end - start < minimum:
@@ -1335,9 +1436,8 @@ def build_experiment_segments(
                     "uncertainty": event.uncertainty,
                 }
             )
-        segments.append(
-            ExperimentSegment(
-                segment_id=f"EXP-{index:04d}",
+        segment = ExperimentSegment(
+                segment_id=segment_id,
                 global_start_ms=start,
                 global_end_ms=end,
                 event_ids=[event.event_id for event in bounded_group],
@@ -1345,7 +1445,90 @@ def build_experiment_segments(
                 rejected_views=rejected_views,
                 micro_segments=micro_segments,
             )
-        )
+        segments.append(segment)
+        if decision_receipts is not None:
+            if boundary_context_receipt is not None:
+                decision_receipts.append(boundary_context_receipt)
+            start_sources = sorted(
+                (
+                    event
+                    for event in (start_anchors or group)
+                    if event.global_start_ms == raw_start
+                ),
+                key=event_sort_key,
+            )
+            end_sources = sorted(
+                (
+                    event
+                    for event in bounded_group
+                    if event.global_end_ms == raw_end
+                ),
+                key=event_sort_key,
+            )
+            reason_codes = [
+                "start_from_accepted_operation_anchor",
+                (
+                    "end_from_explicit_qf1_receipt"
+                    if boundary_context_receipt is not None
+                    else "end_from_accepted_event"
+                ),
+            ]
+            direct_start = max(
+                0.0,
+                raw_start - float(cfg["experiment_pre_roll_seconds"]) * 1000.0,
+            )
+            direct_end = raw_end + float(cfg["experiment_post_roll_seconds"]) * 1000.0
+            if start < direct_start or end > direct_end:
+                reason_codes.append("minimum_duration_padding_applied")
+            decision_receipts.append(
+                decision_receipt(
+                    decision_type="raw_segment_boundary",
+                    rule_id="QF1-RAW-ACCEPTED-EVENT-BOUNDARY",
+                    verdict="accepted",
+                    subject_ids=[segment_id],
+                    reason_codes=reason_codes,
+                    facts={
+                        "raw_start_ms": raw_start,
+                        "raw_end_ms": raw_end,
+                        "final_start_ms": start,
+                        "final_end_ms": end,
+                        "start_source_event_ids": [event.event_id for event in start_sources],
+                        "start_source_event_fingerprints": [
+                            stable_event_fingerprint(event) for event in start_sources
+                        ],
+                        "end_source_event_ids": [event.event_id for event in end_sources],
+                        "end_source_event_fingerprints": [
+                            stable_event_fingerprint(event) for event in end_sources
+                        ],
+                        "end_source_decision_ids": (
+                            [boundary_context_receipt["decision_id"]]
+                            if boundary_context_receipt is not None
+                            else []
+                        ),
+                        "accepted_event_ids": [event.event_id for event in bounded_group],
+                        "accepted_event_fingerprints": [
+                            stable_event_fingerprint(event) for event in bounded_group
+                        ],
+                        "coarse_window_fingerprints": sorted(
+                            stable_candidate_fingerprint(window)
+                            for window in ordered_windows
+                            if window.global_end_ms >= raw_start
+                            and window.global_start_ms <= raw_end
+                        ),
+                        "implicit_motion_window_extension": False,
+                    },
+                    thresholds={
+                        "pre_roll_ms": float(cfg["experiment_pre_roll_seconds"]) * 1000.0,
+                        "post_roll_ms": float(cfg["experiment_post_roll_seconds"]) * 1000.0,
+                        "minimum_duration_ms": minimum,
+                    },
+                    evidence_refs=[event.event_id for event in bounded_group],
+                    legacy={
+                        "segment_id": segment_id,
+                        "decision": "bounded_from_accepted_events",
+                    },
+                )
+            )
     return segments
 
 

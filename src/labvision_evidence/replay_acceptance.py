@@ -5,11 +5,20 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .actions import build_experiment_segments
+from .grouping import (
+    build_experiment_groups,
+    normalize_experiment_segments,
+    prepare_formal_experiment_segments,
+    select_key_events,
+)
+from .schemas import ActionCandidate, EvidenceEvent, ExperimentSegment, RunManifest
 from .schema_contracts import inspect_archive_contracts
 
 
 REPLAY_SNAPSHOT_VERSION = "visioncortex-archive-regression-snapshot/1.0.0"
 REPLAY_RESULT_VERSION = "visioncortex-archive-regression-result/1.0.0"
+QUALITY_REPLAY_VERSION = "visioncortex-quality-ledger-replay/1.0.0"
 
 
 def _read(path: Path, default: Any) -> Any:
@@ -179,3 +188,184 @@ def compare_archive_snapshot(
         "failures": [item for item in checks if not item["passed"]],
         "snapshot": snapshot,
     }
+
+
+def replay_quality_decisions_from_ledgers(
+    archive_root: Path,
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    """Re-run deterministic quality rules from JSON without opening source media.
+
+    New archives persist the exact boundary candidates and can replay the raw
+    segment builder. Older ledgers fall back to their stored raw segments and
+    motion candidates; that mode is useful for QF2 diagnosis but is explicitly
+    marked as degraded and cannot prove raw-boundary equivalence.
+    """
+
+    root = archive_root.resolve()
+    json_root = root / "JSON-Config-Files"
+    audit = _read(json_root / "audit_layer.json", {})
+    manifest_payload = _read(json_root / "run_manifest.json", {})
+    if not audit or not manifest_payload:
+        raise ValueError("quality ledger replay requires audit_layer.json and run_manifest.json")
+
+    manifest = RunManifest.model_validate(manifest_payload)
+    events = [EvidenceEvent.model_validate(item) for item in audit.get("events") or []]
+    if not events:
+        raise ValueError("audit_layer.json contains no evidence events")
+
+    boundary_payload = audit.get("boundary_candidates") or []
+    exact_raw_replay = bool(boundary_payload)
+    if exact_raw_replay:
+        boundary_candidates = [
+            ActionCandidate.model_validate(item) for item in boundary_payload
+        ]
+        raw_boundary_receipts: list[dict[str, Any]] = []
+        raw_segments = build_experiment_segments(
+            events,
+            manifest.views,
+            config,
+            coarse_windows=boundary_candidates,
+            decision_receipts=raw_boundary_receipts,
+        )
+        raw_segment_source = "recomputed_from_persisted_boundary_candidates"
+    else:
+        motion = _read(json_root / "motion_probe_windows.json", {})
+        boundary_candidates = [
+            ActionCandidate.model_validate(item)
+            for item in motion.get("candidates") or []
+        ]
+        raw_segments = [
+            ExperimentSegment.model_validate(item)
+            for item in audit.get("raw_segments") or []
+        ]
+        if not raw_segments:
+            raise ValueError(
+                "legacy ledger has neither persisted boundary candidates nor raw segments"
+            )
+        raw_boundary_receipts = []
+        raw_segment_source = "stored_legacy_raw_segments"
+
+    normalization_receipts: list[dict[str, Any]] = []
+    normalized = normalize_experiment_segments(
+        raw_segments,
+        events,
+        manifest.views,
+        config,
+        decision_receipts=normalization_receipts,
+    )
+    formal_segments, formal_receipts = prepare_formal_experiment_segments(
+        normalized,
+        events,
+        manifest.views,
+        boundary_candidates,
+        config,
+    )
+    continuity_receipts: list[dict[str, Any]] = []
+    groups = build_experiment_groups(
+        formal_segments,
+        events,
+        manifest.views,
+        config,
+        decision_receipts=continuity_receipts,
+        coarse_windows=boundary_candidates,
+    )
+    selection_receipts: list[dict[str, Any]] = []
+    selected = select_key_events(
+        groups,
+        formal_segments,
+        events,
+        config,
+        decision_receipts=selection_receipts,
+    )
+
+    by_event = {event.event_id: event for event in events}
+    pre_roll_ms = float(config["segmentation"]["experiment_pre_roll_seconds"]) * 1000.0
+    post_roll_ms = float(config["segmentation"]["experiment_post_roll_seconds"]) * 1000.0
+    legacy_boundary_invariants = []
+    if not exact_raw_replay:
+        for segment in raw_segments:
+            member_events = [
+                by_event[event_id]
+                for event_id in segment.event_ids
+                if event_id in by_event and by_event[event_id].accepted
+            ]
+            if not member_events:
+                continue
+            accepted_start_ms = min(event.global_start_ms for event in member_events)
+            accepted_end_ms = max(event.global_end_ms for event in member_events)
+            expected_start_ms = max(0.0, accepted_start_ms - pre_roll_ms)
+            expected_end_ms = accepted_end_ms + post_roll_ms
+            legacy_boundary_invariants.append(
+                {
+                    "segment_id": segment.segment_id,
+                    "stored_start_ms": segment.global_start_ms,
+                    "stored_end_ms": segment.global_end_ms,
+                    "accepted_event_start_ms": accepted_start_ms,
+                    "accepted_event_end_ms": accepted_end_ms,
+                    "start_delta_from_direct_event_boundary_ms": (
+                        segment.global_start_ms - expected_start_ms
+                    ),
+                    "end_delta_from_direct_event_boundary_ms": (
+                        segment.global_end_ms - expected_end_ms
+                    ),
+                    "requires_explicit_qf1_receipt": bool(
+                        segment.global_start_ms < expected_start_ms - 1e-6
+                        or segment.global_end_ms > expected_end_ms + 1e-6
+                    ),
+                }
+            )
+
+    result: dict[str, Any] = {
+        "schema_version": QUALITY_REPLAY_VERSION,
+        "archive_root": str(root),
+        "experiment_id": manifest.experiment_id,
+        "evidence_grade": "exact" if exact_raw_replay else "degraded_legacy_ledger",
+        "raw_segment_source": raw_segment_source,
+        "boundary_candidate_source": (
+            "audit_layer.boundary_candidates"
+            if exact_raw_replay
+            else "motion_probe_windows.candidates"
+        ),
+        "counts": {
+            "events": len(events),
+            "raw_segments": len(raw_segments),
+            "normalized_segments": len(normalized),
+            "formal_segments": len(formal_segments),
+            "experiment_groups": len(groups),
+            "selected_key_events": len(selected),
+        },
+        "groups": [group.model_dump(mode="json") for group in groups],
+        "selected_event_ids": [event.event_id for event in selected],
+        "raw_boundary_decision_receipts": raw_boundary_receipts,
+        "normalization_decision_receipts": normalization_receipts,
+        "formal_segment_receipts": formal_receipts,
+        "continuity_decision_receipts": continuity_receipts,
+        "selection_decision_receipts": selection_receipts,
+        "legacy_boundary_invariants": legacy_boundary_invariants,
+        "limitations": (
+            []
+            if exact_raw_replay
+            else [
+                "The retained legacy audit did not persist exact boundary candidates.",
+                "Stored raw segments were reused, so raw-boundary equivalence is not proven.",
+                "Motion candidates are a degraded proxy for QF1/QF2 coarse-boundary context.",
+            ]
+        ),
+        "source_policy": {
+            "video_files_opened": 0,
+            "clock_csv_files_opened": 0,
+            "model_calls": 0,
+            "token_usage": 0,
+            "mode": "json_quality_ledger_replay",
+        },
+    }
+    encoded = json.dumps(
+        result,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    result["result_sha256"] = hashlib.sha256(encoded).hexdigest()
+    return result

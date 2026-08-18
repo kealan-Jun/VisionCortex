@@ -57,6 +57,7 @@ from .grouping import (
     select_key_events,
 )
 from .pathing import archive_relative_posix
+from .ordering import candidate_sort_key, event_sort_key
 from .detection import iter_frame_evidence, scan_videos, validate_models
 from .daily_reports import generate_daily_report_archive
 from .decisions import decision_receipt
@@ -1269,7 +1270,7 @@ class EvidencePipeline:
                 * 1000.0
             )
             clusters: list[list[EvidenceEvent]] = []
-            for event in sorted(first_signal, key=lambda item: item.global_start_ms):
+            for event in sorted(first_signal, key=event_sort_key):
                 if (
                     clusters
                     and event.global_start_ms - max(
@@ -1698,10 +1699,7 @@ class EvidencePipeline:
                 if not candidate_supported(candidate)
             ]
             unresolved_clusters: list[list[ActionCandidate]] = []
-            for candidate in sorted(
-                unresolved,
-                key=lambda item: (item.global_start_ms, item.candidate_id),
-            ):
+            for candidate in sorted(unresolved, key=candidate_sort_key):
                 if (
                     unresolved_clusters
                     and candidate.global_start_ms
@@ -3364,6 +3362,10 @@ class EvidencePipeline:
             raw_motion_candidates = generate_motion_burst_candidates(
                 motion_probe_views, motion_paths, probe_config
             )
+            raw_motion_candidates = sorted(
+                raw_motion_candidates,
+                key=candidate_sort_key,
+            )
             motion_candidates = fuse_motion_probe_candidates(
                 raw_motion_candidates, probe_config
             )
@@ -3373,6 +3375,7 @@ class EvidencePipeline:
                 motion_candidates = generate_motion_safety_candidates(
                     motion_probe_views, motion_paths, probe_config
                 )
+            motion_candidates = sorted(motion_candidates, key=candidate_sort_key)
             if not motion_candidates:
                 raise RuntimeError("输入视频没有产生任何可读运动帧，无法建立实验候选窗口")
             motion_windows = self._fine_windows(
@@ -3494,10 +3497,15 @@ class EvidencePipeline:
                 coarse_candidates = generate_coarse_activity_candidates(
                     fallback_views, fallback_paths, coarse_config
                 )
+            coarse_candidates = sorted(coarse_candidates, key=candidate_sort_key)
             boundary_candidates, boundary_report = refine_motion_candidates_with_coarse(
                 motion_candidates,
                 coarse_candidates,
                 self.config,
+            )
+            boundary_candidates = sorted(
+                boundary_candidates,
+                key=candidate_sort_key,
             )
             boundary_report["coarse_scan_view_ids"] = [
                 view.view_id for view in coarse_scan_views
@@ -3721,6 +3729,7 @@ class EvidencePipeline:
             self._complete_stage(layout, "candidate_fine", fine_artifacts)
 
             self._status(layout, "candidate_audit", 0.68, "持续性、动作密度与跨视角一致性审计")
+            candidates = sorted(candidates, key=candidate_sort_key)
             events, rejected = audit_candidates(candidates, transforms, self.config)
             rejected.extend(refine_liquid_events_with_context(events, detection_paths))
             state_machine_ledger = attach_continuous_action_states(events, self.config)
@@ -3743,8 +3752,13 @@ class EvidencePipeline:
                 },
             )
             write_json(semantic_review_plan_path, semantic_review_plan)
+            raw_boundary_receipts: list[dict[str, Any]] = []
             raw_segments = build_experiment_segments(
-                events, manifest.views, self.config, coarse_windows=boundary_candidates
+                events,
+                manifest.views,
+                self.config,
+                coarse_windows=boundary_candidates,
+                decision_receipts=raw_boundary_receipts,
             )
             normalization_receipts: list[dict[str, Any]] = []
             normalized_segments = normalize_experiment_segments(
@@ -3794,6 +3808,13 @@ class EvidencePipeline:
                 {
                     "events": [event.model_dump(mode="json") for event in events],
                     "rejected": rejected,
+                    "boundary_candidates": [
+                        candidate.model_dump(mode="json")
+                        for candidate in sorted(
+                            boundary_candidates,
+                            key=candidate_sort_key,
+                        )
+                    ],
                     "raw_segments": [
                         segment.model_dump(mode="json") for segment in raw_segments
                     ],
@@ -3802,10 +3823,12 @@ class EvidencePipeline:
                         for segment in normalized_segments
                     ],
                     "segments": [segment.model_dump(mode="json") for segment in segments],
+                    "raw_boundary_decision_receipts": raw_boundary_receipts,
                     "formal_segment_receipts": formal_segment_receipts,
                     "normalization_decision_receipts": normalization_receipts,
                     "continuity_decision_receipts": continuity_receipts,
                     "quality_decision_receipts": [
+                        *raw_boundary_receipts,
                         *normalization_receipts,
                         *formal_segment_receipts,
                         *continuity_receipts,

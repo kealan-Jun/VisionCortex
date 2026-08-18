@@ -6,6 +6,16 @@ from pathlib import Path
 from labvision_evidence.replay_acceptance import (
     build_archive_regression_snapshot,
     compare_archive_snapshot,
+    replay_quality_decisions_from_ledgers,
+)
+from labvision_evidence.schemas import (
+    ActionCandidate,
+    ActionType,
+    EvidenceEvent,
+    ExperimentSegment,
+    RunManifest,
+    ViewInput,
+    ViewRole,
 )
 
 
@@ -109,3 +119,105 @@ def test_replay_rejects_quarantined_event_leakage(tmp_path: Path):
 
     assert result["passed"] is False
     assert any(item["check"] == "quarantined_event_leakage" for item in result["failures"])
+
+
+def _quality_replay_archive(root: Path, *, exact: bool) -> None:
+    views = [
+        ViewInput(view_id="fp", role=ViewRole.FIRST_PERSON, video=Path("fp.mp4")),
+        ViewInput(view_id="tp", role=ViewRole.THIRD_PERSON, video=Path("tp.mp4")),
+    ]
+    candidates = [
+        ActionCandidate(
+            candidate_id=f"CORE-{view.view_id}",
+            action_type=ActionType.HAND_OBJECT_CONTACT,
+            view_id=view.view_id,
+            role=view.role,
+            local_start_ms=10_000.0,
+            local_end_ms=30_000.0,
+            global_start_ms=10_000.0,
+            global_end_ms=30_000.0,
+            key_global_ms=20_000.0,
+            objects=["gloved_hand", "pipette", "tube"],
+            confidence=0.9,
+        )
+        for view in views
+    ]
+    event = EvidenceEvent(
+        event_id="EVT-CORE",
+        action_type=ActionType.HAND_OBJECT_CONTACT,
+        global_start_ms=10_000.0,
+        global_end_ms=30_000.0,
+        key_global_ms=20_000.0,
+        objects=["gloved_hand", "pipette", "tube"],
+        confidence=0.95,
+        accepted=True,
+        audit_reason="dual-view fixture",
+        supporting_views=["fp", "tp"],
+        supporting_roles=[ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON],
+        candidates=candidates,
+    )
+    boundary = ActionCandidate(
+        candidate_id="MOTION",
+        action_type=ActionType.OBJECT_MOVEMENT,
+        view_id="fp",
+        role=ViewRole.FIRST_PERSON,
+        local_start_ms=5_000.0,
+        local_end_ms=60_000.0,
+        global_start_ms=5_000.0,
+        global_end_ms=60_000.0,
+        key_global_ms=20_000.0,
+        objects=[],
+        confidence=0.9,
+    )
+    raw = ExperimentSegment(
+        segment_id="EXP-0001",
+        global_start_ms=8_000.0,
+        global_end_ms=45_000.0,
+        event_ids=[event.event_id],
+        participating_views=["fp", "tp"],
+    )
+    json_root = root / "JSON-Config-Files"
+    _write(
+        json_root / "run_manifest.json",
+        RunManifest(experiment_id="quality_replay", views=views).model_dump(mode="json"),
+    )
+    audit = {
+        "events": [event.model_dump(mode="json")],
+        "raw_segments": [raw.model_dump(mode="json")],
+    }
+    if exact:
+        audit["boundary_candidates"] = [boundary.model_dump(mode="json")]
+    _write(json_root / "audit_layer.json", audit)
+    _write(
+        json_root / "motion_probe_windows.json",
+        {"candidates": [boundary.model_dump(mode="json")]},
+    )
+
+
+def test_quality_ledger_replay_is_exact_when_boundary_candidates_are_persisted(
+    tmp_path: Path, default_config
+):
+    _quality_replay_archive(tmp_path, exact=True)
+
+    result = replay_quality_decisions_from_ledgers(tmp_path, default_config)
+
+    assert result["evidence_grade"] == "exact"
+    assert result["counts"]["experiment_groups"] == 1
+    assert result["counts"]["selected_key_events"] == 1
+    assert result["limitations"] == []
+    assert result["source_policy"]["video_files_opened"] == 0
+    assert result["source_policy"]["token_usage"] == 0
+
+
+def test_legacy_quality_replay_marks_implicit_boundary_extension_as_degraded(
+    tmp_path: Path, default_config
+):
+    _quality_replay_archive(tmp_path, exact=False)
+
+    result = replay_quality_decisions_from_ledgers(tmp_path, default_config)
+
+    assert result["evidence_grade"] == "degraded_legacy_ledger"
+    assert result["limitations"]
+    invariant = result["legacy_boundary_invariants"][0]
+    assert invariant["end_delta_from_direct_event_boundary_ms"] == 12_000.0
+    assert invariant["requires_explicit_qf1_receipt"] is True

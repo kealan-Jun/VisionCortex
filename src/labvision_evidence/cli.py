@@ -19,6 +19,7 @@ from .daily_reports import generate_daily_report_from_archive
 from .detection import validate_models
 from .indexing import build_archive_index
 from .pipeline import EvidencePipeline, create_dry_run
+from .replay_acceptance import replay_quality_decisions_from_ledgers
 from .schemas import RunSummary, VideoInfo
 from .storage import (
     fixed_archive_staging_paths,
@@ -99,6 +100,26 @@ def validate_archive_quality_command(
     if write:
         write_json(archive / "JSON-Config-Files" / "quality_acceptance.json", report)
     typer.echo(json.dumps(report, ensure_ascii=False, indent=2))
+
+
+@app.command("replay-quality-ledger")
+def replay_quality_ledger_command(
+    archive: Annotated[Path, typer.Option("--archive", "-a", exists=True, file_okay=False)],
+    config: Annotated[
+        Path | None, typer.Option("--config", "-c", exists=True, dir_okay=False)
+    ] = None,
+    output: Annotated[Path | None, typer.Option("--output", "-o")] = None,
+) -> None:
+    """Replay CV quality decisions from JSON only; never open video or call MLLM."""
+
+    result = replay_quality_decisions_from_ledgers(archive, load_config(config))
+    rendered = json.dumps(result, ensure_ascii=False, indent=2)
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(rendered, encoding="utf-8")
+        typer.echo(str(output.resolve()))
+        return
+    typer.echo(rendered)
 
 
 @app.command("register-archived-collection")

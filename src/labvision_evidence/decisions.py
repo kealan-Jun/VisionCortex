@@ -6,7 +6,7 @@ from typing import Any, Mapping, Sequence
 
 
 DECISION_RECEIPT_SCHEMA_VERSION = "visioncortex-decision-receipt/1.0.0"
-QUALITY_RULE_VERSION = "dev032-quality-v1"
+QUALITY_RULE_VERSION = "dev043-quality-v2"
 
 
 def decision_receipt(
