@@ -24,12 +24,35 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
     return result
 
 
+def _load_profile(path: Path, seen: set[Path] | None = None) -> dict[str, Any]:
+    resolved = path.resolve()
+    visited = set(seen or set())
+    if resolved in visited:
+        chain = " -> ".join(str(item) for item in [*visited, resolved])
+        raise ValueError(f"Configuration inheritance cycle detected: {chain}")
+    visited.add(resolved)
+    with resolved.open("r", encoding="utf-8") as handle:
+        payload = yaml.safe_load(handle) or {}
+    if not isinstance(payload, dict):
+        raise ValueError(f"Configuration must contain a mapping: {resolved}")
+    extends = payload.pop("extends", None)
+    if extends is None:
+        return payload
+    if not isinstance(extends, str) or not extends.strip():
+        raise ValueError(f"Configuration extends must be a non-empty relative path: {resolved}")
+    candidate = Path(extends)
+    if candidate.is_absolute():
+        raise ValueError(f"Configuration extends must be relative: {resolved}")
+    base_path = (resolved.parent / candidate).resolve()
+    if base_path.parent != resolved.parent:
+        raise ValueError(f"Configuration extends must stay in {resolved.parent}: {base_path}")
+    return _deep_merge(_load_profile(base_path, visited), payload)
+
+
 def load_config(path: Path | None = None) -> dict[str, Any]:
-    with DEFAULT_CONFIG.open("r", encoding="utf-8") as handle:
-        config = yaml.safe_load(handle) or {}
+    config = _load_profile(DEFAULT_CONFIG)
     if path and path.resolve() != DEFAULT_CONFIG.resolve():
-        with path.open("r", encoding="utf-8") as handle:
-            config = _deep_merge(config, yaml.safe_load(handle) or {})
+        config = _deep_merge(config, _load_profile(path))
     _apply_environment_overrides(config)
     return config
 

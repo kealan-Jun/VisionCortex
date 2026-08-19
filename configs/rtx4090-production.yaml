@@ -1,0 +1,49 @@
+extends: ./rtx4060-laptop-production.yaml
+
+project:
+  output_root: D:/VisionCortex4090/Runtime/outputs
+
+performance:
+  profile: rtx4090-24gb-dynamic-multiview
+  batch_size: 32
+  coarse_batch_size: 32
+  motion_probe_batch_size: 32
+  fine_batch_size: 32
+  fine_active_decode_slots: 12
+  fine_first_person_decode_workers: 6
+  fine_third_person_decode_workers: 8
+  fine_decode_prefetch_frames: 96
+  fine_supplemental_view_batch_size: 4
+  motion_probe_indexed_segment_workers: 6
+  motion_probe_sequential_segment_workers: 8
+  # A single CUDA entry expands to the actual uploaded view count. It is a
+  # hardware policy, not a fixed camera-count contract.
+  coarse_decode_lanes: [cuda]
+  fine_decode_lanes: [cuda]
+  source_workers: 16
+  decode_queue_depth: 128
+  yolo_inference_workers: 2
+  materialization_workers: 4
+  io_workers: 8
+  max_gpu_memory_fraction: 0.94
+  concurrent_role_scanners: true
+  preflight_probe_workers: 24
+  source_stat_workers: 48
+  # Recorder batches do not need equal per-view segment counts in the generic
+  # upload product. Alignment remains timestamp-driven.
+  synchronized_segment_waves: false
+  # Use every third-person view supplied by the manifest progressively; never
+  # require the validation set's historical five static cameras.
+  fine_min_third_person_views: null
+
+resource_limits:
+  gpu_memory_normal_fraction: 0.78
+  gpu_memory_warning_fraction: 0.88
+  gpu_memory_contract_fraction: 0.94
+  gpu_temperature_warning_c: 83
+
+storage:
+  local_input_root: D:/VisionCortex4090/Input
+  local_runtime_root: D:/VisionCortex4090/Runtime
+  local_cache_root: D:/VisionCortex4090/Cache
+  local_staging_root: D:/VisionCortex4090/Runtime/outputs
