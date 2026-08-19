@@ -19,7 +19,10 @@ from .daily_reports import generate_daily_report_from_archive
 from .detection import validate_models
 from .indexing import build_archive_index
 from .pipeline import EvidencePipeline, create_dry_run
-from .replay_acceptance import replay_quality_decisions_from_ledgers
+from .replay_acceptance import (
+    inspect_quality_ledger_inputs,
+    replay_quality_decisions_from_ledgers,
+)
 from .schemas import RunSummary, VideoInfo
 from .storage import (
     fixed_archive_staging_paths,
@@ -120,6 +123,16 @@ def replay_quality_ledger_command(
         typer.echo(str(output.resolve()))
         return
     typer.echo(rendered)
+
+
+@app.command("inspect-quality-ledger-inputs")
+def inspect_quality_ledger_inputs_command(
+    archive: Annotated[Path, typer.Option("--archive", "-a", exists=True, file_okay=False)],
+) -> None:
+    """Validate bounded replay inputs without opening source video or clock CSV."""
+
+    result = inspect_quality_ledger_inputs(archive)
+    typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 @app.command("register-archived-collection")

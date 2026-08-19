@@ -37,6 +37,18 @@ try {
         throw "VisionCortex project runtime preflight failed: $LASTEXITCODE"
     }
 
+    & $visionCortexPython -B -m labvision_evidence.cli inspect-quality-ledger-inputs `
+        --archive $Dev041Archive
+    if ($LASTEXITCODE -ne 0) {
+        throw "DEV-041 quality-ledger input preflight failed: $LASTEXITCODE"
+    }
+
+    & $visionCortexPython -B -m labvision_evidence.cli inspect-quality-ledger-inputs `
+        --archive $Dev042Archive
+    if ($LASTEXITCODE -ne 0) {
+        throw "DEV-042 quality-ledger input preflight failed: $LASTEXITCODE"
+    }
+
     & $visionCortexPython -B -m labvision_evidence.cli replay-quality-ledger `
         --archive $Dev041Archive `
         --config $visionCortexConfig

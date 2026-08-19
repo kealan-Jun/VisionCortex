@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from .actions import build_experiment_segments
 from .grouping import (
     build_experiment_groups,
@@ -19,6 +21,7 @@ from .schema_contracts import inspect_archive_contracts
 REPLAY_SNAPSHOT_VERSION = "visioncortex-archive-regression-snapshot/1.0.0"
 REPLAY_RESULT_VERSION = "visioncortex-archive-regression-result/1.0.0"
 QUALITY_REPLAY_VERSION = "visioncortex-quality-ledger-replay/1.0.0"
+QUALITY_LEDGER_INPUT_VERSION = "visioncortex-quality-ledger-inputs/1.0.0"
 
 
 def _read(path: Path, default: Any) -> Any:
@@ -35,6 +38,124 @@ def _sha256(path: Path) -> str | None:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _read_yaml(path: Path, default: Any) -> Any:
+    if not path.is_file():
+        return default
+    return yaml.safe_load(path.read_text(encoding="utf-8-sig"))
+
+
+def _input_receipt(
+    path: Path,
+    root: Path,
+    *,
+    source_kind: str,
+    payload_format: str,
+) -> dict[str, Any]:
+    return {
+        "source_kind": source_kind,
+        "relative_path": path.relative_to(root).as_posix(),
+        "format": payload_format,
+        "size_bytes": path.stat().st_size,
+        "sha256": _sha256(path),
+    }
+
+
+def _load_quality_ledger_inputs(
+    archive_root: Path,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Load bounded JSON/YAML replay inputs without following source-media paths."""
+
+    root = archive_root.resolve()
+    json_root = root / "JSON-Config-Files"
+    audit_path = json_root / "audit_layer.json"
+    audit = _read(audit_path, {})
+    if not audit:
+        raise ValueError(
+            "quality ledger replay input is missing or empty: "
+            "JSON-Config-Files/audit_layer.json"
+        )
+
+    manifest_candidates = (
+        (
+            json_root / "run_manifest.json",
+            "packaged_run_manifest_json",
+            "json",
+        ),
+        (
+            json_root / "Input-Manifests" / "manifest.yaml",
+            "early_input_manifest_yaml",
+            "yaml",
+        ),
+    )
+    manifest_payload: dict[str, Any] = {}
+    selected_manifest: tuple[Path, str, str] | None = None
+    for path, source_kind, payload_format in manifest_candidates:
+        payload = _read(path, {}) if payload_format == "json" else _read_yaml(path, {})
+        if payload:
+            if not isinstance(payload, dict):
+                raise ValueError(
+                    f"quality ledger manifest must contain an object: {path.relative_to(root)}"
+                )
+            manifest_payload = payload
+            selected_manifest = (path, source_kind, payload_format)
+            break
+    if selected_manifest is None:
+        attempted = ", ".join(
+            path.relative_to(root).as_posix() for path, _, _ in manifest_candidates
+        )
+        raise ValueError(
+            "quality ledger replay requires one run manifest; attempted bounded paths: "
+            f"{attempted}"
+        )
+
+    manifest = RunManifest.model_validate(manifest_payload)
+    events = audit.get("events") or []
+    if not events:
+        raise ValueError("audit_layer.json contains no evidence events")
+    manifest_path, source_kind, payload_format = selected_manifest
+    receipts = {
+        "schema_version": QUALITY_LEDGER_INPUT_VERSION,
+        "status": "passed",
+        "archive_root": str(root),
+        "inputs": {
+            "audit_layer": _input_receipt(
+                audit_path,
+                root,
+                source_kind="candidate_audit_ledger_json",
+                payload_format="json",
+            ),
+            "run_manifest": _input_receipt(
+                manifest_path,
+                root,
+                source_kind=source_kind,
+                payload_format=payload_format,
+            ),
+        },
+        "summary": {
+            "experiment_id": manifest.experiment_id,
+            "view_count": len(manifest.views),
+            "event_count": len(events),
+            "boundary_candidate_count": len(audit.get("boundary_candidates") or []),
+            "stored_raw_segment_count": len(audit.get("raw_segments") or []),
+        },
+        "source_policy": {
+            "video_files_opened": 0,
+            "clock_csv_files_opened": 0,
+            "model_calls": 0,
+            "token_usage": 0,
+            "mode": "bounded_quality_ledger_input_inspection",
+        },
+    }
+    return audit, manifest_payload, receipts
+
+
+def inspect_quality_ledger_inputs(archive_root: Path) -> dict[str, Any]:
+    """Validate both required ledger inputs before any deterministic replay."""
+
+    _, _, receipts = _load_quality_ledger_inputs(archive_root)
+    return receipts
 
 
 def build_archive_regression_snapshot(archive_root: Path) -> dict[str, Any]:
@@ -204,15 +325,10 @@ def replay_quality_decisions_from_ledgers(
 
     root = archive_root.resolve()
     json_root = root / "JSON-Config-Files"
-    audit = _read(json_root / "audit_layer.json", {})
-    manifest_payload = _read(json_root / "run_manifest.json", {})
-    if not audit or not manifest_payload:
-        raise ValueError("quality ledger replay requires audit_layer.json and run_manifest.json")
+    audit, manifest_payload, ledger_inputs = _load_quality_ledger_inputs(root)
 
     manifest = RunManifest.model_validate(manifest_payload)
     events = [EvidenceEvent.model_validate(item) for item in audit.get("events") or []]
-    if not events:
-        raise ValueError("audit_layer.json contains no evidence events")
 
     boundary_payload = audit.get("boundary_candidates") or []
     exact_raw_replay = bool(boundary_payload)
@@ -320,6 +436,7 @@ def replay_quality_decisions_from_ledgers(
         "schema_version": QUALITY_REPLAY_VERSION,
         "archive_root": str(root),
         "experiment_id": manifest.experiment_id,
+        "ledger_inputs": ledger_inputs,
         "evidence_grade": "exact" if exact_raw_replay else "degraded_legacy_ledger",
         "raw_segment_source": raw_segment_source,
         "boundary_candidate_source": (

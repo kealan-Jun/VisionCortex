@@ -3,9 +3,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+import yaml
+
 from labvision_evidence.replay_acceptance import (
     build_archive_regression_snapshot,
     compare_archive_snapshot,
+    inspect_quality_ledger_inputs,
     replay_quality_decisions_from_ledgers,
 )
 from labvision_evidence.schemas import (
@@ -207,6 +211,9 @@ def test_quality_ledger_replay_is_exact_when_boundary_candidates_are_persisted(
     assert result["limitations"] == []
     assert result["source_policy"]["video_files_opened"] == 0
     assert result["source_policy"]["token_usage"] == 0
+    assert result["ledger_inputs"]["inputs"]["run_manifest"]["source_kind"] == (
+        "packaged_run_manifest_json"
+    )
 
 
 def test_legacy_quality_replay_marks_implicit_boundary_extension_as_degraded(
@@ -221,3 +228,64 @@ def test_legacy_quality_replay_marks_implicit_boundary_extension_as_degraded(
     invariant = result["legacy_boundary_invariants"][0]
     assert invariant["end_delta_from_direct_event_boundary_ms"] == 12_000.0
     assert invariant["requires_explicit_qf1_receipt"] is True
+
+
+def test_failed_staging_replay_uses_early_yaml_manifest_without_media_access(
+    tmp_path: Path, default_config
+):
+    _quality_replay_archive(tmp_path, exact=False)
+    json_root = tmp_path / "JSON-Config-Files"
+    packaged_manifest = json_root / "run_manifest.json"
+    manifest_payload = json.loads(packaged_manifest.read_text(encoding="utf-8"))
+    packaged_manifest.unlink()
+    early_manifest = json_root / "Input-Manifests" / "manifest.yaml"
+    early_manifest.parent.mkdir(parents=True, exist_ok=True)
+    early_manifest.write_text(
+        yaml.safe_dump(manifest_payload, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    inspection = inspect_quality_ledger_inputs(tmp_path)
+    result = replay_quality_decisions_from_ledgers(tmp_path, default_config)
+
+    assert inspection["status"] == "passed"
+    assert inspection["inputs"]["run_manifest"]["source_kind"] == (
+        "early_input_manifest_yaml"
+    )
+    assert inspection["inputs"]["run_manifest"]["relative_path"] == (
+        "JSON-Config-Files/Input-Manifests/manifest.yaml"
+    )
+    assert inspection["inputs"]["run_manifest"]["sha256"]
+    assert inspection["source_policy"]["video_files_opened"] == 0
+    assert inspection["source_policy"]["clock_csv_files_opened"] == 0
+    assert result["counts"]["experiment_groups"] == 1
+    assert result["ledger_inputs"] == inspection
+
+
+def test_packaged_json_manifest_has_precedence_over_early_yaml(tmp_path: Path):
+    _quality_replay_archive(tmp_path, exact=True)
+    json_root = tmp_path / "JSON-Config-Files"
+    manifest_payload = json.loads(
+        (json_root / "run_manifest.json").read_text(encoding="utf-8")
+    )
+    early_manifest = json_root / "Input-Manifests" / "manifest.yaml"
+    early_manifest.parent.mkdir(parents=True, exist_ok=True)
+    early_manifest.write_text(yaml.safe_dump(manifest_payload), encoding="utf-8")
+
+    inspection = inspect_quality_ledger_inputs(tmp_path)
+
+    assert inspection["inputs"]["run_manifest"]["source_kind"] == (
+        "packaged_run_manifest_json"
+    )
+
+
+def test_manifest_error_lists_all_bounded_attempted_paths(tmp_path: Path):
+    _quality_replay_archive(tmp_path, exact=True)
+    (tmp_path / "JSON-Config-Files" / "run_manifest.json").unlink()
+
+    with pytest.raises(ValueError) as exc_info:
+        inspect_quality_ledger_inputs(tmp_path)
+
+    message = str(exc_info.value)
+    assert "JSON-Config-Files/run_manifest.json" in message
+    assert "JSON-Config-Files/Input-Manifests/manifest.yaml" in message
