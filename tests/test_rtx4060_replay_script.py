@@ -10,6 +10,8 @@ SCRIPT = (
     / "05-Replay-Quality-Ledgers.ps1"
 )
 PATH_MODULE = SCRIPT.with_name("Replay-Path-Resolution.psm1")
+NAS_DIAGNOSTIC_SCRIPT = SCRIPT.with_name("06-Diagnose-Nas-Connectivity.ps1")
+NAS_DIAGNOSTIC_MODULE = SCRIPT.with_name("Nas-Diagnostic-Classification.psm1")
 
 
 def test_replay_script_uses_repository_virtual_environment_only():
@@ -93,6 +95,56 @@ def test_path_resolver_prefers_first_visible_exact_root_and_returns_one_receipt(
     assert len(receipt["path_resolution_attempts"]) == 2
     assert receipt["path_resolution_attempts"][0]["archive_root_visible"] is False
     assert receipt["path_resolution_attempts"][1]["exact_run_root_visible"] is True
+
+
+def test_nas_diagnostic_is_read_only_and_bounded_to_exact_runs():
+    content = NAS_DIAGNOSTIC_SCRIPT.read_text(encoding="utf-8")
+
+    assert "Test-NetConnection" in content
+    assert "Get-SmbMapping" in content
+    assert "Get-SmbConnection" in content
+    assert "collection-20260818-154357-29d1" in content
+    assert "collection-20260818-173813-fc76" in content
+    assert "Get-ChildItem" not in content
+    assert "-Recurse" not in content
+    assert "New-SmbMapping" not in content
+    assert "Remove-SmbMapping" not in content
+    assert "New-PSDrive" not in content
+    assert "cmd.exe" not in content
+    assert "net use" not in content.casefold()
+    assert "Credential" not in content
+
+
+def test_nas_diagnostic_classifier_distinguishes_external_failure_layers():
+    command = "\n".join(
+        [
+            "$ErrorActionPreference = 'Stop'",
+            f"Import-Module -Name '{NAS_DIAGNOSTIC_MODULE}' -Force",
+            "$cases = @(",
+            "  (Get-VisionCortexNasDiagnosis -ActiveAdapterCount 1 -Tcp445Succeeded $false -CanonicalShareVisible $false -CanonicalArchiveVisible $false -MappedArchiveVisible $false -Dev041Visible $false -Dev042Visible $false),",
+            "  (Get-VisionCortexNasDiagnosis -ActiveAdapterCount 1 -Tcp445Succeeded $true -CanonicalShareVisible $false -CanonicalArchiveVisible $false -MappedArchiveVisible $false -Dev041Visible $false -Dev042Visible $false),",
+            "  (Get-VisionCortexNasDiagnosis -ActiveAdapterCount 1 -Tcp445Succeeded $true -CanonicalShareVisible $true -CanonicalArchiveVisible $true -MappedArchiveVisible $false -Dev041Visible $true -Dev042Visible $false),",
+            "  (Get-VisionCortexNasDiagnosis -ActiveAdapterCount 1 -Tcp445Succeeded $true -CanonicalShareVisible $true -CanonicalArchiveVisible $true -MappedArchiveVisible $false -Dev041Visible $true -Dev042Visible $true)",
+            ")",
+            "$cases | ConvertTo-Json -Depth 4 -Compress",
+        ]
+    )
+
+    completed = subprocess.run(
+        ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    cases = json.loads(completed.stdout.strip())
+
+    assert [case["code"] for case in cases] == [
+        "nas_host_or_smb_port_unreachable",
+        "smb_share_session_or_authorization_unavailable",
+        "exact_staging_unavailable",
+        "retained_staging_reachable",
+    ]
+    assert cases[-1]["replay_permitted_by_connectivity"] is True
 
 
 def test_replay_script_preflights_both_ledgers_before_running_either_replay():
