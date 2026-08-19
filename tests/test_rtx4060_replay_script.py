@@ -22,10 +22,9 @@ def test_replay_script_uses_repository_virtual_environment_only():
 def test_replay_script_preflights_runtime_and_restores_process_environment():
     content = SCRIPT.read_text(encoding="utf-8")
 
-    for dependency in ("openpyxl", "cv2", "numpy", "pydantic", "yaml"):
-        assert f'"{dependency}"' in content
-    assert "import labvision_evidence.cli" in content
-    assert "import labvision_evidence.replay_acceptance" in content
-    assert "VISIONCORTEX_EXPECTED_SOURCE_ROOT" in content
+    assert "labvision_evidence.runtime_preflight" in content
+    assert "--expected-source $visionCortexSourceRoot" in content
+    assert "$runtimeProbe" not in content
+    assert " -c " not in content
     assert "finally" in content
     assert "Remove-Item Env:PYTHONPATH" in content

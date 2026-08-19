@@ -28,42 +28,11 @@ foreach ($requiredPath in @(
 }
 
 $previousPythonPath = $env:PYTHONPATH
-$previousExpectedSource = $env:VISIONCORTEX_EXPECTED_SOURCE_ROOT
 $env:PYTHONPATH = $visionCortexSourceRoot
-$env:VISIONCORTEX_EXPECTED_SOURCE_ROOT = $visionCortexSourceRoot
 
 try {
-    $runtimeProbe = @'
-import importlib
-import json
-import os
-import pathlib
-import sys
-
-required = ["openpyxl", "cv2", "numpy", "pydantic", "yaml"]
-versions = {}
-for name in required:
-    module = importlib.import_module(name)
-    versions[name] = str(getattr(module, "__version__", "available"))
-
-import labvision_evidence
-import labvision_evidence.cli
-import labvision_evidence.replay_acceptance
-
-expected = pathlib.Path(os.environ["VISIONCORTEX_EXPECTED_SOURCE_ROOT"]).resolve()
-actual = pathlib.Path(labvision_evidence.__file__).resolve()
-if expected not in actual.parents:
-    raise RuntimeError(f"unexpected package source: {actual}")
-
-print(json.dumps({
-    "python_executable": sys.executable,
-    "python_version": sys.version.split()[0],
-    "package_source": str(actual),
-    "dependency_versions": versions,
-}, ensure_ascii=True, sort_keys=True))
-'@
-
-    & $visionCortexPython -B -c $runtimeProbe
+    & $visionCortexPython -B -m labvision_evidence.runtime_preflight `
+        --expected-source $visionCortexSourceRoot
     if ($LASTEXITCODE -ne 0) {
         throw "VisionCortex project runtime preflight failed: $LASTEXITCODE"
     }
@@ -88,11 +57,5 @@ finally {
     }
     else {
         $env:PYTHONPATH = $previousPythonPath
-    }
-    if ($null -eq $previousExpectedSource) {
-        Remove-Item Env:VISIONCORTEX_EXPECTED_SOURCE_ROOT -ErrorAction SilentlyContinue
-    }
-    else {
-        $env:VISIONCORTEX_EXPECTED_SOURCE_ROOT = $previousExpectedSource
     }
 }
