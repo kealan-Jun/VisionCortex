@@ -1,3 +1,5 @@
+import json
+import subprocess
 from pathlib import Path
 
 
@@ -7,6 +9,7 @@ SCRIPT = (
     / "rtx4060"
     / "05-Replay-Quality-Ledgers.ps1"
 )
+PATH_MODULE = SCRIPT.with_name("Replay-Path-Resolution.psm1")
 
 
 def test_replay_script_uses_repository_virtual_environment_only():
@@ -28,6 +31,68 @@ def test_replay_script_preflights_runtime_and_restores_process_environment():
     assert " -c " not in content
     assert "finally" in content
     assert "Remove-Item Env:PYTHONPATH" in content
+
+
+def test_replay_script_resolves_exact_run_ids_via_unc_before_mapped_drive():
+    content = SCRIPT.read_text(encoding="utf-8")
+    module_content = PATH_MODULE.read_text(encoding="utf-8")
+
+    assert "\\\\192.168.66.149\\video_database\\VisionCortexExperimentArchive" in content
+    assert "Y:\\VisionCortexExperimentArchive" in content
+    assert "Import-Module -Name $replayPathModule -Force" in content
+    assert "collection-20260818-154357-29d1" in content
+    assert "collection-20260818-173813-fc76" in content
+    assert "$archiveRoots = @($CanonicalNasArchiveRoot, $MappedNasArchiveRoot)" in content
+    assert "Get-ChildItem" not in content + module_content
+    assert "-Recurse" not in content + module_content
+    assert "bounded path diagnosis" in module_content
+
+
+def test_replay_script_checks_runtime_before_nas_path_resolution():
+    content = SCRIPT.read_text(encoding="utf-8")
+
+    runtime_preflight = content.index("labvision_evidence.runtime_preflight")
+    nas_resolution = content.index("$dev041Resolution = Resolve-ExactReplayArchive")
+
+    assert runtime_preflight < nas_resolution
+
+
+def test_path_resolver_prefers_first_visible_exact_root_and_returns_one_receipt(
+    tmp_path: Path,
+):
+    missing_root = tmp_path / "missing"
+    visible_root = tmp_path / "visible"
+    relative = Path(".VisionCortex-Run-Staging") / "dataset" / "run-123"
+    expected = visible_root / relative
+    expected.mkdir(parents=True)
+    command = "\n".join(
+        [
+            "$ErrorActionPreference = 'Stop'",
+            f"Import-Module -Name '{PATH_MODULE}' -Force",
+            (
+                "$receipt = Resolve-ExactReplayArchive "
+                "-Label 'fixture' "
+                f"-RelativePath '{relative}' "
+                f"-ArchiveRoots @('{missing_root}', '{visible_root}')"
+            ),
+            "$receipt | ConvertTo-Json -Depth 5 -Compress",
+        ]
+    )
+
+    completed = subprocess.run(
+        ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    receipt = json.loads(completed.stdout.strip())
+
+    assert receipt["run_id"] == "run-123"
+    assert Path(receipt["resolved_archive"]) == expected.resolve()
+    assert receipt["selected_archive_root"] == str(visible_root)
+    assert len(receipt["path_resolution_attempts"]) == 2
+    assert receipt["path_resolution_attempts"][0]["archive_root_visible"] is False
+    assert receipt["path_resolution_attempts"][1]["exact_run_root_visible"] is True
 
 
 def test_replay_script_preflights_both_ledgers_before_running_either_replay():
