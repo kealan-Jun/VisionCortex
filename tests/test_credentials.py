@@ -12,6 +12,7 @@ def _config(name: str = "TEST_ARK_API_KEY") -> dict:
     return {"mllm": {"enabled": True, "api_key_env": name}}
 
 
+@pytest.mark.skipif(os.name != "posix", reason="0600 credential files are POSIX-only")
 def test_secure_credential_file_is_loaded_without_returning_secret(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -31,6 +32,7 @@ def test_secure_credential_file_is_loaded_without_returning_secret(
     assert secret not in str(report)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="0600 credential files are POSIX-only")
 def test_credential_file_must_be_mode_600(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

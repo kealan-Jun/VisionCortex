@@ -505,7 +505,12 @@ def _resolve_nas_path(value: str, index_csv: Path) -> Path:
     if pure.drive.upper() == "Z:":
         relative = pure.relative_to(pure.anchor)
         index_pure = PureWindowsPath(str(index_csv))
-        if index_pure.drive:
+        drive_root = (
+            PureWindowsPath(index_pure.drive + "\\")
+            if index_pure.drive
+            else None
+        )
+        if drive_root is not None and index_pure.parent == drive_root:
             return Path(index_pure.drive + "\\" + str(relative))
         # Linux mounts the SMB share at the directory containing the canonical
         # index CSV. Preserve the Z:-relative components without treating the

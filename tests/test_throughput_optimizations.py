@@ -154,7 +154,8 @@ def test_grid_video_retries_software_encoder_after_runtime_nvenc_failure(
     assert filter_graph.count("settb=AVTB") == 2
     assert filter_graph.count("setpts=N/(30*TB)") == 2
     assert "shortest=1" in filter_graph
-    assert commands[0][commands[0].index("-vsync") + 1] == "cfr"
+    sync_option, sync_value = video_io._ffmpeg_cfr_arguments()
+    assert commands[0][commands[0].index(sync_option) + 1] == sync_value
 
 
 def test_grid_video_timeout_fails_closed(monkeypatch, tmp_path):

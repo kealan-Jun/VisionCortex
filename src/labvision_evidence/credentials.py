@@ -70,6 +70,11 @@ def ensure_ark_api_key(
 
     if stat.S_ISLNK(file_status.st_mode) or not stat.S_ISREG(file_status.st_mode):
         raise RuntimeError("Ark credential file must be a regular non-symbolic-link file")
+    if os.name != "posix" or not hasattr(os, "geteuid"):
+        raise RuntimeError(
+            "Ark credential file ownership and 0600 permissions require POSIX; "
+            f"use {environment_name} on this platform"
+        )
     if file_status.st_uid != os.geteuid():
         raise RuntimeError("Ark credential file owner is invalid")
     if stat.S_IMODE(file_status.st_mode) != 0o600:

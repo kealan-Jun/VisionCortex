@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
+
+import pytest
 
 from labvision_evidence.api import _folder_open_command
 
@@ -11,6 +14,8 @@ DEPLOYMENT = ROOT / "deployment" / "rtx3090ti-ubuntu"
 
 
 def test_ubuntu_shell_scripts_are_syntactically_valid_and_gpu_scoped():
+    if os.name == "nt":
+        pytest.skip("Ubuntu shell syntax is validated by the Ubuntu CI job")
     for name in (
         "00-Preflight.sh",
         "01-Install-And-Validate.sh",

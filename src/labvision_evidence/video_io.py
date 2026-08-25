@@ -44,20 +44,41 @@ def _run(command: list[str], timeout: float | None = None) -> subprocess.Complet
     return subprocess.run(command, capture_output=True, check=False, timeout=timeout)
 
 
-@lru_cache(maxsize=1)
-def _ffmpeg_passthrough_arguments() -> tuple[str, str]:
-    """Use the modern output sync option when supported by the host FFmpeg."""
-
+def _ffmpeg_supports_fps_mode() -> bool:
+    """Probe FFmpeg without allowing test doubles to poison later calls."""
     try:
-        result = _run(["ffmpeg", "-hide_banner", "-h", "full"], timeout=10)
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-h", "full"],
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
     except (OSError, subprocess.SubprocessError, TypeError):
-        # The legacy spelling remains the safest fallback when capability
-        # probing is unavailable (including isolated/mock decoder sessions).
-        return "-vsync", "0"
+        # Current supported FFmpeg releases use -fps_mode. Defaulting to the
+        # modern spelling also keeps isolated/mock sessions deterministic.
+        return True
     help_text = (result.stdout + result.stderr).decode("utf-8", errors="replace")
-    if "-fps_mode" in help_text:
-        return "-fps_mode", "passthrough"
-    return "-vsync", "0"
+    return "-fps_mode" in help_text or "-vsync" not in help_text
+
+
+def _ffmpeg_passthrough_arguments() -> tuple[str, str]:
+    """Use the supported output timestamp passthrough spelling."""
+
+    return (
+        ("-fps_mode", "passthrough")
+        if _ffmpeg_supports_fps_mode()
+        else ("-vsync", "0")
+    )
+
+
+def _ffmpeg_cfr_arguments() -> tuple[str, str]:
+    """Use the supported constant-frame-rate output spelling."""
+
+    return (
+        ("-fps_mode", "cfr")
+        if _ffmpeg_supports_fps_mode()
+        else ("-vsync", "cfr")
+    )
 
 
 def probe_video(path: Path) -> VideoInfo:
@@ -1781,13 +1802,12 @@ def create_grid_video(
             *command_prefix,
             selected_encoder,
             *_encoder_quality_arguments(selected_encoder),
-        "-r",
-        "30",
-        "-vsync",
-        "cfr",
-        "-movflags",
-        "+faststart",
-        str(destination),
+            "-r",
+            "30",
+            *_ffmpeg_cfr_arguments(),
+            "-movflags",
+            "+faststart",
+            str(destination),
         ]
 
     command = build_command(encoder)
