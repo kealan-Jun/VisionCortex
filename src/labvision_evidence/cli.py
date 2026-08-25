@@ -40,14 +40,21 @@ from .content_probe import (
     run_bounded_content_probe,
     run_full_timeline_content_sweep,
 )
+from .consensus_labels import build_consensus_box_labels
 from .credentials import ensure_ark_api_key
 from .daily_reports import generate_daily_report_from_archive
 from .detection import validate_models
+from .hardware_acceptance import run_hardware_acceptance
+from .labpics_evaluation import (
+    calibrate_labpics_threshold,
+    evaluate_labpics_heldout,
+)
 from .indexing import build_archive_index
 from .model_certification import (
     audit_production_model_certification,
     build_model_quality_certification,
 )
+from .local_acceptance import run_local_six_view_acceptance
 from .pipeline import (
     EvidencePipeline,
     _synchronize_final_event_state_receipts,
@@ -57,6 +64,7 @@ from .pipeline import (
     validate_final_step_action_consistency,
 )
 from .public_model_assets import prepare_public_model_assets
+from .public_datasets import prepare_public_dataset
 from .replay_acceptance import (
     inspect_quality_ledger_inputs,
     replay_quality_decisions_from_ledgers,
@@ -802,6 +810,97 @@ def dry_run_command(
     typer.echo(str(result))
 
 
+@app.command("run-local-acceptance")
+def run_local_acceptance_command(
+    output: Annotated[
+        Path, typer.Option("--output", "-o")
+    ] = Path(
+        "/srv/sentinel-data/VisionCortex3090Ti/Runtime/LocalAcceptance"
+    ),
+    config: Annotated[
+        Path, typer.Option("--config", "-c", exists=True, dir_okay=False)
+    ] = Path("configs/rtx3090ti-ubuntu-local.yaml"),
+) -> None:
+    """Build a six-view synthetic structural package without NAS access."""
+
+    result = run_local_six_view_acceptance(output, load_config(config))
+    typer.echo(str(result))
+
+
+@app.command("benchmark-local-hardware")
+def benchmark_local_hardware_command(
+    output: Annotated[Path, typer.Option("--output", "-o")],
+    media: Annotated[list[Path], typer.Option("--media", exists=True, dir_okay=False)],
+    duration: Annotated[float, typer.Option("--duration-seconds")] = 60.0,
+    workers_per_role: Annotated[
+        int, typer.Option("--workers-per-role")
+    ] = 1,
+    config: Annotated[
+        Path, typer.Option("--config", "-c", exists=True, dir_okay=False)
+    ] = Path("configs/rtx3090ti-ubuntu-local.yaml"),
+) -> None:
+    """Stress six local NVDEC lanes and both real TensorRT role engines."""
+
+    result = run_hardware_acceptance(
+        output,
+        load_config(config),
+        media,
+        duration_seconds=duration,
+        workers_per_role=workers_per_role,
+    )
+    typer.echo(str(result))
+
+
+@app.command("evaluate-liquid-semantic")
+def evaluate_liquid_semantic_command(
+    dataset: Annotated[Path, typer.Option("--dataset", exists=True, file_okay=False)],
+    output: Annotated[Path, typer.Option("--output", "-o")],
+    sample_count: Annotated[int, typer.Option("--sample-count")] = 40,
+    split: Annotated[str, typer.Option("--split")] = "Test",
+    config: Annotated[
+        Path, typer.Option("--config", "-c", exists=True, dir_okay=False)
+    ] = Path("configs/rtx3090ti-ubuntu-local.yaml"),
+) -> None:
+    """Evaluate liquid masks on deterministic public human annotations."""
+
+    result = evaluate_labpics_heldout(
+        dataset,
+        output,
+        load_config(config),
+        sample_count=sample_count,
+        split=split,
+    )
+    typer.echo(str(result))
+
+
+@app.command("calibrate-liquid-semantic")
+def calibrate_liquid_semantic_command(
+    dataset: Annotated[Path, typer.Option("--dataset", exists=True, file_okay=False)],
+    output: Annotated[Path, typer.Option("--output", "-o")],
+    thresholds: Annotated[
+        list[float], typer.Option("--threshold")
+    ] = [0.25, 0.35, 0.45, 0.50],
+    sample_count: Annotated[int, typer.Option("--sample-count")] = 32,
+    minimum_precision: Annotated[
+        float, typer.Option("--minimum-precision")
+    ] = 0.90,
+    config: Annotated[
+        Path, typer.Option("--config", "-c", exists=True, dir_okay=False)
+    ] = Path("configs/rtx3090ti-ubuntu-local.yaml"),
+) -> None:
+    """Calibrate on public Train labels without inspecting Test labels."""
+
+    result = calibrate_labpics_threshold(
+        dataset,
+        output,
+        load_config(config),
+        thresholds=thresholds,
+        sample_count=sample_count,
+        minimum_precision=minimum_precision,
+    )
+    typer.echo(str(result))
+
+
 @app.command("validate-models")
 def validate_models_command(
     config: Annotated[Path | None, typer.Option("--config", "-c", exists=True, dir_okay=False)] = None,
@@ -818,6 +917,42 @@ def prepare_public_models_command(
     """Download and hash-check the profile's pinned public model assets."""
 
     payload = prepare_public_model_assets(load_config(config))
+    typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+@app.command("prepare-public-dataset")
+def prepare_public_dataset_command(
+    dataset_id: Annotated[str, typer.Option("--dataset-id")],
+    destination: Annotated[
+        Path, typer.Option("--destination")
+    ] = Path("/srv/sentinel-data/VisionCortex3090Ti/Runtime/PublicDatasets"),
+    registry: Annotated[
+        Path, typer.Option("--registry", exists=True, dir_okay=False)
+    ] = Path("configs/public-data-sources.json"),
+    extract: Annotated[bool, typer.Option("--extract/--no-extract")] = True,
+) -> None:
+    payload = prepare_public_dataset(
+        registry, dataset_id, destination, extract=extract
+    )
+    typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+@app.command("build-consensus-labels")
+def build_consensus_labels_command(
+    source: Annotated[Path, typer.Option("--input", exists=True, dir_okay=False)],
+    output: Annotated[Path, typer.Option("--output")],
+    minimum_models: Annotated[int, typer.Option("--minimum-models")] = 2,
+    minimum_iou: Annotated[float, typer.Option("--minimum-iou")] = 0.5,
+) -> None:
+    observations = json.loads(source.read_text(encoding="utf-8"))
+    if not isinstance(observations, list):
+        raise typer.BadParameter("Consensus input must be a JSON list")
+    payload = build_consensus_box_labels(
+        observations,
+        minimum_model_families=minimum_models,
+        minimum_iou=minimum_iou,
+    )
+    write_json(output, payload)
     typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
 
 

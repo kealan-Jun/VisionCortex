@@ -16,6 +16,7 @@ def test_ubuntu_shell_scripts_are_syntactically_valid_and_gpu_scoped():
         "01-Install-And-Validate.sh",
         "02-Start-Web.sh",
         "03-Stop-Web.sh",
+        "05-Install-Local-Service.sh",
     ):
         path = DEPLOYMENT / name
         subprocess.run(["bash", "-n", str(path)], check=True)
@@ -77,6 +78,22 @@ def test_web_lifecycle_is_local_and_pid_scoped():
     assert "/proc/$recorded_pid/cmdline" in start
     assert "/proc/$pid/cmdline" in stop
     assert "kill -9" not in stop
+
+
+def test_local_systemd_service_is_reboot_resilient_and_nas_independent():
+    service = (DEPLOYMENT / "visioncortex-local.service").read_text(
+        encoding="utf-8"
+    )
+    installer = (DEPLOYMENT / "05-Install-Local-Service.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Restart=on-failure" in service
+    assert "WantedBy=default.target" in service
+    assert "rtx3090ti-ubuntu-local.yaml" in service
+    assert "/srv/sentinel-data/VisionCortex3090Ti/Runtime/NoNasWeb" in service
+    assert "/home/x1/桌面/nas" not in service
+    assert "systemctl --user enable --now visioncortex-local.service" in installer
 
 
 def test_linux_archive_folder_uses_xdg_open(monkeypatch, tmp_path):

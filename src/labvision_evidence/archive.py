@@ -42,6 +42,7 @@ from .material_naming import (
     key_material_action_folder,
     key_material_semantic_name as _key_material_semantic_name,
 )
+from .liquid_semantic import analyze_liquid_semantics
 from .pathing import archive_relative_posix
 from .schemas import (
     ActionType,
@@ -1417,6 +1418,22 @@ def _artifact_json(
         }
         normalized_state_after = {
             "container": after_state if after_state != "unknown" else receipt_after
+        }
+    elif normalized_action in {
+        ActionType.HAND_OBJECT_CONTACT.value,
+        ActionType.DEVICE_PANEL_OPERATION.value,
+    }:
+        normalized_objects = {
+            "actor": tracked_id(actor, "actor"),
+            "target": tracked_id(target, "target"),
+        }
+        normalized_state_before = {
+            "target": before_state,
+            **dict(state_receipt.get("state_before") or {}),
+        }
+        normalized_state_after = {
+            "target": after_state,
+            **dict(state_receipt.get("state_after") or {}),
         }
     else:
         normalized_objects = {
@@ -2845,6 +2862,7 @@ def _rerender_curated_participant_annotations(
     }
     records: list[dict[str, Any]] = []
     segmentation_records: list[dict[str, Any]] = []
+    liquid_semantic_records: list[dict[str, Any]] = []
     for event in events:
         input_root = layout.work / "key-material-annotation-inputs" / event.event_id
         if not input_root.is_dir():
@@ -2988,6 +3006,45 @@ def _rerender_curated_participant_annotations(
                             **dict(segmentation_receipt or {}),
                         }
                     )
+                liquid_settings = (
+                    (config.get("models") or {}).get("liquid_semantic_sidecar")
+                    or {}
+                )
+                enabled_actions = {
+                    str(item) for item in liquid_settings.get("enabled_actions") or []
+                }
+                if liquid_settings.get("enabled") and (
+                    not enabled_actions or event.action_type.value in enabled_actions
+                ):
+                    liquid_output = (
+                        layout.key_materials
+                        / "Liquid-State-Observations"
+                        / str(group.archive_folder or group.group_id)
+                        / key_material_action_folder(event.action_type)
+                        / event.event_id
+                    )
+                    liquid_receipt = analyze_liquid_semantics(
+                        raw_frame,
+                        config,
+                        liquid_output,
+                        artifact_stem=view_id,
+                    )
+                    for path_key in ("overlay_path", "mask_path"):
+                        liquid_receipt[path_key] = archive_relative_posix(
+                            Path(str(liquid_receipt[path_key])), layout.root
+                        )
+                    receipt["liquid_semantic_sidecar"] = liquid_receipt
+                    event.observability.setdefault(
+                        "liquid_semantic_sidecar", {}
+                    )[view_id] = liquid_receipt
+                    liquid_semantic_records.append(
+                        {
+                            "event_id": event.event_id,
+                            "view_id": view_id,
+                            "role_label": role_label,
+                            **liquid_receipt,
+                        }
+                    )
             destination = layout.root / event.key_frames[view_id]
             write_annotated_frame(raw_frame, boxes, destination)
             rendered_frames[role_label] = destination
@@ -3037,6 +3094,15 @@ def _rerender_curated_participant_annotations(
                 for item in segmentation_records
             ),
             "records": segmentation_records,
+        },
+    )
+    write_json(
+        layout.json_config / "liquid_semantic_observations.json",
+        {
+            "schema_version": "visioncortex-labpics-liquid-semantic-index/1",
+            "policy": "bounded final key frames; observation only; never action confirmation",
+            "record_count": len(liquid_semantic_records),
+            "records": liquid_semantic_records,
         },
     )
     return report

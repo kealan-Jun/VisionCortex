@@ -1100,7 +1100,7 @@ def adjudicate_full_timeline_sweep_with_cv(
         "confidence": 1.0,
         "gate_reasons": [],
         "negative_exclusion_eligible": True,
-        "review_backend": "ark-full-timeline-plus-all-view-tensorrt",
+        "review_backend": "deterministic-full-cv-without-remote-model",
         "full_timeline_adjudication": adjudication,
         "previous_receipt": {
             "path": str(previous_path),

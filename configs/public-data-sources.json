@@ -1,0 +1,57 @@
+{
+  "schema_version": "visioncortex-public-dataset-registry/1",
+  "policy": {
+    "truth_boundary": "Public human annotations may be used as public benchmark ground truth; model consensus remains pseudo-labels only.",
+    "nas_access": "forbidden",
+    "production_promotion": "requires a pinned artifact hash, automated-acquisition permission and explicit license"
+  },
+  "datasets": {
+    "LabPicsChemistry": {
+      "title": "LabPics Chemistry V2",
+      "license": "MIT",
+      "source_record": "https://zenodo.org/records/4736111",
+      "scope": "chemistry vessels, fills, liquids, solids and vessel parts",
+      "automated_acquisition_allowed": true,
+      "artifact": {
+        "url": "https://zenodo.org/api/records/4736111/files/LabPicsChemistry.zip/content",
+        "filename": "LabPicsChemistry.zip",
+        "bytes": 3917445796,
+        "md5": "7d1525a72f538b78327b7ad3ba1ebe95",
+        "sha256": "1fe92dbf91df26de727a7fcbd13a7a02df6ad0cad30537bd6403a8f631963580",
+        "maximum_uncompressed_bytes": 30000000000
+      }
+    },
+    "LabPicsV1": {
+      "title": "LabPics V1",
+      "license": "MIT",
+      "source_record": "https://zenodo.org/records/3697452",
+      "scope": "legacy chemistry vessel/material segmentation benchmark",
+      "automated_acquisition_allowed": false,
+      "reason": "metadata-only fallback; V2 is the selected domain source"
+    },
+    "MatSeg": {
+      "title": "MatSeg material segmentation dataset",
+      "license": "CC0-1.0",
+      "source_record": "https://zenodo.org/records/10801191",
+      "scope": "general material-state semantic segmentation",
+      "automated_acquisition_allowed": false,
+      "reason": "metadata-only until a specific immutable artifact is selected and pinned"
+    },
+    "ClearGrasp": {
+      "title": "ClearGrasp",
+      "license": "Apache-2.0",
+      "source_record": "https://github.com/Shreeyak/cleargrasp",
+      "scope": "transparent-object depth completion",
+      "automated_acquisition_allowed": false,
+      "reason": "complementary depth task; not promoted as liquid semantic ground truth"
+    },
+    "HOT3D": {
+      "title": "HOT3D",
+      "license": "dataset terms require separate review",
+      "source_record": "https://github.com/facebookresearch/hot3d",
+      "scope": "egocentric hand-object tracking",
+      "automated_acquisition_allowed": false,
+      "reason": "large dataset and separate access terms; not auto-downloaded"
+    }
+  }
+}

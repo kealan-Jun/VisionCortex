@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -138,6 +139,59 @@ def _prepare_grounding_dino(settings: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _prepare_liquid_semantic(settings: dict[str, Any]) -> dict[str, Any]:
+    checkpoint = Path(str(settings.get("checkpoint_path") or "")).resolve()
+    checkpoint_sha = str(settings.get("checkpoint_sha256") or "").strip().lower()
+    reused = _validated_file("labpics_liquid_semantic", checkpoint, checkpoint_sha)
+    if reused is not None:
+        return {**reused, "source_record": str(settings.get("source_record") or "")}
+    archive = Path(str(settings.get("source_archive_path") or "")).resolve()
+    archive_record = _download_pinned_file(
+        "labpics_liquid_semantic_archive",
+        archive,
+        str(settings.get("source_archive_url") or ""),
+        str(settings.get("source_archive_sha256") or "").strip().lower(),
+    )
+    member = str(settings.get("source_archive_member") or "").strip()
+    if not member or member.startswith("/") or ".." in Path(member).parts:
+        raise RuntimeError("LabPics liquid semantic archive member is unsafe")
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    partial = checkpoint.with_name(f".{checkpoint.name}.partial-{uuid.uuid4().hex}")
+    with zipfile.ZipFile(archive) as bundle:
+        try:
+            info = bundle.getinfo(member)
+        except KeyError as exc:
+            raise RuntimeError(
+                f"LabPics liquid semantic member is missing: {member}"
+            ) from exc
+        with bundle.open(info) as source, partial.open("xb") as destination:
+            digest = hashlib.sha256()
+            for chunk in iter(lambda: source.read(4 * 1024 * 1024), b""):
+                destination.write(chunk)
+                digest.update(chunk)
+    actual = digest.hexdigest()
+    if actual != checkpoint_sha:
+        raise RuntimeError(
+            "LabPics liquid semantic extracted checkpoint hash mismatch; "
+            f"retained for audit at {partial}; expected={checkpoint_sha} actual={actual}"
+        )
+    if checkpoint.exists():
+        raise RuntimeError(
+            "LabPics liquid semantic target appeared during extraction: "
+            f"{checkpoint}"
+        )
+    partial.replace(checkpoint)
+    return {
+        "name": "labpics_liquid_semantic",
+        "path": str(checkpoint),
+        "bytes": checkpoint.stat().st_size,
+        "sha256": actual,
+        "status": "extracted_verified",
+        "archive": archive_record,
+        "source_record": str(settings.get("source_record") or ""),
+    }
+
+
 def prepare_public_model_assets(config: dict[str, Any]) -> dict[str, Any]:
     """Download only pinned public model files required by the active profile."""
 
@@ -181,6 +235,9 @@ def prepare_public_model_assets(config: dict[str, Any]) -> dict[str, Any]:
                 .lower(),
             )
         )
+    liquid_semantic = models.get("liquid_semantic_sidecar") or {}
+    if liquid_semantic.get("enabled"):
+        records.append(_prepare_liquid_semantic(liquid_semantic))
     return {
         "schema_version": "visioncortex-public-model-assets/1",
         "status": "completed",

@@ -864,6 +864,12 @@ def favicon() -> Response:
 def health() -> dict[str, Any]:
     settings = _settings()
     storage_mode = "nas" if settings["storage"].get("sync_to_nas") else "local_development"
+    archive_root = _archive_root(settings)
+    input_mode = (
+        "NAS 15-minute segments / zero-copy virtual timeline"
+        if storage_mode == "nas"
+        else "local files / zero-copy source references"
+    )
     return {
         "status": "ok",
         "storage_mode": storage_mode,
@@ -875,15 +881,20 @@ def health() -> dict[str, Any]:
         "view_count_policy": "dynamic",
         "minimum_cross_view_sources": 2,
         "ark_key_configured": bool(os.getenv(settings["mllm"]["api_key_env"])),
+        "mllm_enabled": bool(settings["mllm"].get("enabled")),
         "model": settings["mllm"]["model"],
-        "nas_archive_root": str(_archive_root(settings)),
-        "nas_available": _archive_root(settings).is_dir(),
+        "archive_root": str(archive_root),
+        "archive_available": archive_root.is_dir(),
+        # Compatibility aliases for existing production Web clients. In local
+        # mode the canonical archive_* fields above carry the accurate label.
+        "nas_archive_root": str(archive_root),
+        "nas_available": storage_mode == "nas" and archive_root.is_dir(),
         "fixed_benchmark": {
             "experiment_id": _BENCHMARK_EXPERIMENT_ID,
             "archive_name": _BENCHMARK_ARCHIVE_NAME,
             "submission_protocol_version": _BENCHMARK_SUBMISSION_PROTOCOL_VERSION,
             "index_csv": str(settings["storage"]["index_csv"]),
-            "input_mode": "NAS 15-minute segments / zero-copy virtual timeline",
+            "input_mode": input_mode,
             "local_runtime_root": str(settings["storage"]["local_runtime_root"]),
             "local_cache_root": str(settings["storage"]["local_cache_root"]),
         },

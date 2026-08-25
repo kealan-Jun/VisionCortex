@@ -1,0 +1,28 @@
+[Unit]
+Description=VisionCortex local no-NAS Web service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/x1/Projects/VisionCortex
+Environment=LABVISION_CONFIG=/home/x1/Projects/VisionCortex/configs/rtx3090ti-ubuntu-local.yaml
+Environment=PYTHONUNBUFFERED=1
+Environment=TMPDIR=/srv/sentinel-data/VisionCortex3090Ti/Runtime/tmp
+Environment=VISIONCORTEX_NAS_INDEX_CSV=/srv/sentinel-data/VisionCortex3090Ti/Runtime/NoNasWeb/local-experiment-index.csv
+Environment=VISIONCORTEX_DEVICE_REGISTRY=/srv/sentinel-data/VisionCortex3090Ti/Runtime/NoNasWeb/local-device-registry.json
+Environment=VISIONCORTEX_NAS_ARCHIVE_ROOT=/srv/sentinel-data/VisionCortex3090Ti/Runtime/NoNasWeb/Archives
+Environment=VISIONCORTEX_LOCAL_INPUT_ROOT=/srv/sentinel-data/VisionCortex3090Ti/Runtime/NoNasWeb/Input-Manifests
+Environment=VISIONCORTEX_LOCAL_RUNTIME_ROOT=/srv/sentinel-data/VisionCortex3090Ti/Runtime/NoNasWeb/Runtime
+Environment=VISIONCORTEX_LOCAL_CACHE_ROOT=/srv/sentinel-data/VisionCortex3090Ti/Runtime/NoNasWeb/Cache
+Environment=VISIONCORTEX_LOCAL_STAGING_ROOT=/srv/sentinel-data/VisionCortex3090Ti/Runtime/NoNasWeb/Archives/.VisionCortex-Run-Staging
+Environment=VISIONCORTEX_OUTPUT_ROOT=/srv/sentinel-data/VisionCortex3090Ti/Runtime/NoNasWeb/Archives/.VisionCortex-Run-Staging
+ExecStart=/srv/sentinel-data/VisionCortex3090Ti/.venv/bin/python -m labvision_evidence serve --host 127.0.0.1 --port 8000 --config /home/x1/Projects/VisionCortex/configs/rtx3090ti-ubuntu-local.yaml
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

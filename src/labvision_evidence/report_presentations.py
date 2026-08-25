@@ -423,7 +423,7 @@ def render_professional_pdf(path: Path, report: dict[str, Any], archive_root: Pa
     story.extend([
         CondPageBreak(112 * mm),
         Paragraph("6. 运行审计与归档索引", h1),
-        Paragraph("完整证据不重复塞入 PDF。本页摘录零拷贝、TensorRT、火山引擎、GPU/内存与质量真值账本；机器可读原始记录保留在同一 NAS 档案。", body),
+        Paragraph("完整证据不重复塞入 PDF。本页摘录零拷贝、TensorRT、火山引擎、GPU/内存与质量真值账本；机器可读原始记录保留在同一实验档案。", body),
     ])
     runtime_audit = performance.get("runtime_audit") or {}
     source_audit = runtime_audit.get("source") or {}

@@ -85,6 +85,7 @@ def _artifact_paths(settings: dict[str, Any]) -> list[tuple[str, Path]]:
     temporal_segmentation = (
         models.get("temporal_participant_segmentation") or {}
     )
+    liquid_semantic = models.get("liquid_semantic_sidecar") or {}
     configured = [
         ("first_person_tensor_rt", models.get("first_person_engine")),
         ("third_person_tensor_rt", models.get("third_person_engine")),
@@ -97,6 +98,7 @@ def _artifact_paths(settings: dict[str, Any]) -> list[tuple[str, Path]]:
             else None,
         ),
         ("sam2_video_segmentation", temporal_segmentation.get("checkpoint_path")),
+        ("labpics_liquid_semantic", liquid_semantic.get("checkpoint_path")),
     ]
     return [
         (name, Path(str(path)).resolve())

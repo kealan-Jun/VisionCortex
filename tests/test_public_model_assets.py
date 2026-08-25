@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,8 @@ def _config(tmp_path: Path) -> dict:
     world = tmp_path / "world.pt"
     clip = tmp_path / "clip.pt"
     sam2 = tmp_path / "sam2.pt"
+    liquid = tmp_path / "liquid.pt"
+    liquid_archive = tmp_path / "liquid.zip"
     dino = tmp_path / "dino"
     dino.mkdir()
     weights = dino / "model.safetensors"
@@ -23,11 +26,14 @@ def _config(tmp_path: Path) -> dict:
         (world, b"world"),
         (clip, b"clip"),
         (sam2, b"sam2"),
+        (liquid, b"liquid"),
         (weights, b"dino"),
         (dino / "config.json", b"{}"),
         (dino / "preprocessor_config.json", b"{}"),
     ):
         path.write_bytes(payload)
+    with zipfile.ZipFile(liquid_archive, "w") as bundle:
+        bundle.writestr("weights/liquid.pt", b"liquid")
     return {
         "models": {
             "open_vocabulary_key_frame": {
@@ -52,6 +58,16 @@ def _config(tmp_path: Path) -> dict:
                 "checkpoint_sha256": _sha(sam2),
                 "checkpoint_download_url": "https://example.invalid/sam2.pt",
             },
+            "liquid_semantic_sidecar": {
+                "enabled": True,
+                "checkpoint_path": str(liquid),
+                "checkpoint_sha256": _sha(liquid),
+                "source_archive_path": str(liquid_archive),
+                "source_archive_url": "https://example.invalid/liquid.zip",
+                "source_archive_sha256": _sha(liquid_archive),
+                "source_archive_member": "weights/liquid.pt",
+                "source_record": "https://example.invalid/record",
+            },
         }
     }
 
@@ -61,7 +77,7 @@ def test_existing_public_assets_are_hash_checked_without_network(tmp_path: Path)
 
     assert result["status"] == "completed"
     assert result["network_used"] is False
-    assert result["asset_count"] == 4
+    assert result["asset_count"] == 5
     assert {item["status"] for item in result["assets"]} == {
         "reused_verified"
     }
@@ -73,3 +89,17 @@ def test_existing_public_asset_hash_mismatch_fails_closed(tmp_path: Path):
 
     with pytest.raises(RuntimeError, match="unexpected hash"):
         prepare_public_model_assets(config)
+
+
+def test_liquid_semantic_checkpoint_is_safely_extracted(tmp_path: Path):
+    config = _config(tmp_path)
+    liquid = Path(config["models"]["liquid_semantic_sidecar"]["checkpoint_path"])
+    liquid.unlink()
+
+    result = prepare_public_model_assets(config)
+
+    record = next(
+        item for item in result["assets"] if item["name"] == "labpics_liquid_semantic"
+    )
+    assert record["status"] == "extracted_verified"
+    assert liquid.read_bytes() == b"liquid"

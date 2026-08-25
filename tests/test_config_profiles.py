@@ -56,6 +56,32 @@ def test_rtx3090ti_ubuntu_profile_matches_host_and_keeps_view_count_dynamic():
     assert segmentation["checkpoint_path"].startswith(
         "/srv/sentinel-data/VisionCortex3090Ti/Engines/"
     )
+    liquid = config["models"]["liquid_semantic_sidecar"]
+    assert liquid["enabled"] is True
+    assert liquid["required_for_selected_actions"] is True
+    assert len(liquid["checkpoint_sha256"]) == 64
+    assert liquid["license"] == "CC-BY-4.0"
+
+
+def test_rtx3090ti_local_profile_has_no_nas_storage_paths():
+    profile = Path(__file__).resolve().parents[1] / "configs" / "rtx3090ti-ubuntu-local.yaml"
+
+    config = load_config(profile)
+
+    assert config["mllm"]["enabled"] is False
+    assert config["storage"]["sync_to_nas"] is False
+    for key in (
+        "index_csv",
+        "device_registry_path",
+        "archive_root",
+        "local_input_root",
+        "local_runtime_root",
+        "local_cache_root",
+        "local_staging_root",
+    ):
+        assert str(config["storage"][key]).startswith(
+            "/srv/sentinel-data/VisionCortex3090Ti/Runtime/NoNasWeb/"
+        )
 
 
 def test_ubuntu_runtime_paths_and_engines_can_be_overridden(monkeypatch):

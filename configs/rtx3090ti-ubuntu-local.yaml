@@ -1,0 +1,30 @@
+extends: ./rtx3090ti-ubuntu-production.yaml
+
+# Local/offline acceptance and Web profile. Every path is rooted on the local
+# SSD so starting the Web service while NAS is unavailable cannot probe or
+# create a NAS directory by accident.
+project:
+  output_root: /srv/sentinel-data/VisionCortex3090Ti/Runtime/NoNasWeb/Archives/.VisionCortex-Run-Staging
+
+mllm:
+  enabled: false
+
+storage:
+  index_csv: /srv/sentinel-data/VisionCortex3090Ti/Runtime/NoNasWeb/local-experiment-index.csv
+  device_registry_path: /srv/sentinel-data/VisionCortex3090Ti/Runtime/NoNasWeb/local-device-registry.json
+  archive_root: /srv/sentinel-data/VisionCortex3090Ti/Runtime/NoNasWeb/Archives
+  local_input_root: /srv/sentinel-data/VisionCortex3090Ti/Runtime/NoNasWeb/Input-Manifests
+  local_runtime_root: /srv/sentinel-data/VisionCortex3090Ti/Runtime/NoNasWeb/Runtime
+  local_cache_root: /srv/sentinel-data/VisionCortex3090Ti/Runtime/NoNasWeb/Cache
+  local_staging_root: /srv/sentinel-data/VisionCortex3090Ti/Runtime/NoNasWeb/Archives/.VisionCortex-Run-Staging
+  sync_to_nas: false
+  web_upload_retention_mode: local_only
+
+collection_ingest:
+  enabled: false
+
+validation:
+  # The local UI remains available for inspecting already-built local
+  # acceptance packages. Real production execution still uses the separate
+  # fail-closed production profile and certification receipt.
+  require_model_certification: false

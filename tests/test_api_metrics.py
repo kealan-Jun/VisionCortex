@@ -94,6 +94,45 @@ def test_health_exposes_fixed_benchmark_and_cache_locations(monkeypatch, tmp_pat
     assert response.json()["collection_ingest"]["recursive_nas_scan"] is False
 
 
+def test_health_reports_local_storage_without_claiming_nas(monkeypatch, tmp_path):
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    settings = {
+        "mllm": {
+            "api_key_env": "TEST_ARK_KEY",
+            "enabled": False,
+            "model": "doubao-test",
+        },
+        "storage": {
+            "archive_root": str(archive),
+            "index_csv": str(tmp_path / "index.csv"),
+            "local_runtime_root": str(tmp_path / "runtime"),
+            "local_cache_root": str(tmp_path / "cache"),
+            "sync_to_nas": False,
+            "web_upload_retention_mode": "local_only",
+        },
+        "collection_ingest": {"enabled": False},
+    }
+    monkeypatch.setattr(api, "_settings", lambda: settings)
+    client = TestClient(api.app)
+
+    response = client.get("/api/health")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["storage_mode"] == "local_development"
+    assert payload["archive_label"] == "本地开发归档"
+    assert payload["archive_root"] == str(archive)
+    assert payload["archive_available"] is True
+    assert payload["nas_available"] is False
+    assert payload["mllm_enabled"] is False
+    assert payload["web_upload_retention_mode"] == "local_only"
+    assert payload["collection_ingest"]["enabled"] is False
+    assert payload["fixed_benchmark"]["input_mode"] == (
+        "local files / zero-copy source references"
+    )
+
+
 def test_collection_api_returns_batch_cards_without_opening_video_paths(
     monkeypatch, tmp_path
 ):

@@ -95,6 +95,9 @@ def test_certification_covers_text_encoder_and_video_segmentation(tmp_path):
             "temporal_participant_segmentation": {
                 "checkpoint_path": tmp_path / "sam2.pt"
             },
+            "liquid_semantic_sidecar": {
+                "checkpoint_path": tmp_path / "liquid.pt"
+            },
         }
     }
 
@@ -107,4 +110,5 @@ def test_certification_covers_text_encoder_and_video_segmentation(tmp_path):
         "clip_text_encoder",
         "grounding_dino",
         "sam2_video_segmentation",
+        "labpics_liquid_semantic",
     }

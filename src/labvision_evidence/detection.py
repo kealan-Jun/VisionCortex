@@ -17,6 +17,7 @@ import cv2
 import numpy as np
 
 from .schemas import AlignmentTransform, BoxEvidence, FrameEvidence, VideoInfo, ViewInput, ViewRole
+from .liquid_semantic import validate_liquid_semantic_runtime
 from .temporal_segmentation import validate_temporal_segmentation_runtime
 from .video_io import (
     PhysicalSegmentDecodeSession,
@@ -866,6 +867,7 @@ def validate_models(config: dict[str, Any]) -> dict[str, Any]:
     runtime["open_vocabulary_key_frame"] = _validate_open_vocabulary_runtime(
         config
     )
+    runtime["liquid_semantic_sidecar"] = validate_liquid_semantic_runtime(config)
     report["runtime"] = runtime
     report["consistent"] = True
     return report

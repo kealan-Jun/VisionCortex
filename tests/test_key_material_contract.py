@@ -96,6 +96,59 @@ def test_key_material_json_uses_normalized_event_contract():
     assert payload["provenance"]["mllm"]["usage"]["total_tokens"] == 120
 
 
+def test_contact_state_change_is_attached_to_target_not_unknown_tool():
+    event = EvidenceEvent(
+        event_id="EVT-CONTACT-TARGET",
+        action_type=ActionType.HAND_OBJECT_CONTACT,
+        global_start_ms=1000,
+        global_end_ms=2000,
+        key_global_ms=1500,
+        objects=["gloved_hand", "paper"],
+        confidence=0.9,
+        accepted=True,
+        audit_reason="target contact",
+        supporting_views=["fp", "tp"],
+        supporting_roles=[ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON],
+        candidates=[],
+        model_understanding={
+            "status": "completed",
+            "action_type_confirmed": "hand_object_contact",
+            "physical_change": {
+                "before": "not_contacting",
+                "after": "contacting",
+            },
+            "confidence": 0.9,
+        },
+    )
+    group = ExperimentGroup(
+        group_id="GROUP-CONTACT",
+        continuity_type="independent",
+        atomic_experiment_ids=["EXP-CONTACT"],
+        global_start_ms=1000,
+        global_end_ms=2000,
+        participating_views=["fp", "tp"],
+        first_person_view="fp",
+        third_person_view="tp",
+        continuity_reason="test",
+        key_event_ids=[event.event_id],
+    )
+    transforms = {
+        view_id: AlignmentTransform(
+            view_id=view_id, reference_view_id="fp", confidence=1.0
+        )
+        for view_id in ("fp", "tp")
+    }
+
+    payload = _artifact_json(
+        group, event, "key_material_event_index", "", None, transforms
+    )
+
+    assert set(payload["objects"]) == {"actor", "target"}
+    assert payload["objects"]["target"].startswith("paper-")
+    assert payload["state_before"] == {"target": "not_contacting"}
+    assert payload["state_after"] == {"target": "contacting"}
+
+
 def test_relabelled_key_material_contract_separates_cv_from_final_semantics():
     pre_curation_state = {
         "action_type": "liquid_transfer",
