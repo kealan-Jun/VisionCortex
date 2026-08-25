@@ -12,7 +12,14 @@ from typing import Any, Iterable, Sequence
 import numpy as np
 
 from .detection import iter_frame_evidence
+from .decisions import decision_receipt
 from .grouping import select_formal_experiment_start_events
+from .ordering import (
+    candidate_sort_key,
+    event_sort_key,
+    stable_candidate_fingerprint,
+    stable_event_fingerprint,
+)
 from .schemas import (
     ActionCandidate,
     ActionType,
@@ -130,6 +137,9 @@ def _frame_observations(
                 )
 
     movement_threshold = float(cfg["movement_threshold_norm"])
+    movement_samples: list[
+        tuple[BoxEvidence, float, float, float, float, float]
+    ] = []
     for obj in objects:
         if obj.track_id is None:
             continue
@@ -141,7 +151,31 @@ def _frame_observations(
         delta_ms = frame.local_ms - previous[2]
         if not 0.0 < delta_ms <= 2000.0:
             continue
-        displacement = math.hypot(center_x - previous[0], center_y - previous[1])
+        dx = center_x - previous[0]
+        dy = center_y - previous[1]
+        movement_samples.append((obj, center_x, center_y, delta_ms, dx, dy))
+
+    minimum_anchors = max(2, int(cfg.get("camera_motion_compensation_min_anchors", 2)))
+    anchor_vectors = [
+        (dx, dy)
+        for obj, _, _, _, dx, dy in movement_samples
+        if obj.class_name in SUPPORT_ANCHOR_CLASSES
+    ]
+    camera_dx = float(median(item[0] for item in anchor_vectors)) if len(anchor_vectors) >= minimum_anchors else 0.0
+    camera_dy = float(median(item[1] for item in anchor_vectors)) if len(anchor_vectors) >= minimum_anchors else 0.0
+    camera_compensated = len(anchor_vectors) >= minimum_anchors
+    suppress_stationary_devices = bool(
+        cfg.get("suppress_stationary_device_movement", True)
+    )
+    for obj, _, _, delta_ms, dx, dy in movement_samples:
+        raw_displacement = math.hypot(dx, dy)
+        displacement = (
+            math.hypot(dx - camera_dx, dy - camera_dy)
+            if camera_compensated
+            else raw_displacement
+        )
+        if suppress_stationary_devices and obj.class_name in DEVICE_CLASSES:
+            continue
         if displacement >= movement_threshold:
             observations.append(
                 _Observation(
@@ -153,7 +187,11 @@ def _frame_observations(
                     evidence={
                         "frame_index": frame.frame_index,
                         "track_id": obj.track_id,
-                        "displacement_norm": round(displacement, 5),
+                        "displacement_norm": round(raw_displacement, 5),
+                        "camera_compensated_displacement_norm": round(displacement, 5),
+                        "camera_motion_compensated": camera_compensated,
+                        "camera_translation_norm": [round(camera_dx, 5), round(camera_dy, 5)],
+                        "camera_anchor_count": len(anchor_vectors),
                         "delta_ms": round(delta_ms, 3),
                     },
                 )
@@ -177,6 +215,10 @@ def _frame_observations(
                         "frame_index": frame.frame_index,
                         "distance_norm": round(distance, 5),
                         "roi_motion": round(roi_motion, 3),
+                        "tool_class": tool.class_name,
+                        "tool_track_id": tool.track_id,
+                        "vessel_class": vessel.class_name,
+                        "vessel_track_id": vessel.track_id,
                         "inference": "液体不属于21类标签；这是工具+容器+ROI运动候选，需多模态确认",
                     },
                 )
@@ -238,7 +280,121 @@ def _merge_observations(
                 )
             )
             counter += 1
-    return sorted(candidates, key=lambda candidate: candidate.global_start_ms)
+    return sorted(candidates, key=candidate_sort_key)
+
+
+def _infer_liquid_transfer_sequences(
+    observations: Sequence[_Observation],
+    view: ViewInput,
+    cfg: dict[str, Any],
+) -> list[ActionCandidate]:
+    """Infer source->transport->target sequences from existing tracks.
+
+    The result remains an indirect liquid hypothesis: it improves recall and
+    gives the MLLM a real temporal sequence, but never claims visible liquid.
+    """
+
+    maximum_gap_ms = float(
+        cfg.get("liquid_transfer_max_sequence_gap_seconds", 20.0)
+    ) * 1000.0
+    contact_gap_ms = float(cfg.get("event_merge_gap_seconds", 1.25)) * 1000.0
+    minimum_observations = max(
+        2, int(cfg.get("liquid_transfer_min_contact_observations", 2))
+    )
+    by_tool: dict[tuple[str, int], list[_Observation]] = defaultdict(list)
+    for observation in observations:
+        if observation.action_type != ActionType.LIQUID_MOVEMENT:
+            continue
+        tool_class = observation.evidence.get("tool_class")
+        tool_track_id = observation.evidence.get("tool_track_id")
+        vessel_track_id = observation.evidence.get("vessel_track_id")
+        if (
+            not isinstance(tool_class, str)
+            or not isinstance(tool_track_id, int)
+            or not isinstance(vessel_track_id, int)
+        ):
+            continue
+        by_tool[(tool_class, tool_track_id)].append(observation)
+
+    output: list[ActionCandidate] = []
+    for (tool_class, tool_track_id), items in by_tool.items():
+        runs: list[list[_Observation]] = []
+        current: list[_Observation] = []
+        current_vessel: tuple[str, int] | None = None
+        for item in sorted(items, key=lambda value: value.global_ms):
+            vessel = (
+                str(item.evidence.get("vessel_class") or "unknown"),
+                int(item.evidence["vessel_track_id"]),
+            )
+            if current and (
+                vessel != current_vessel
+                or item.global_ms - current[-1].global_ms > contact_gap_ms
+            ):
+                runs.append(current)
+                current = []
+            current.append(item)
+            current_vessel = vessel
+        if current:
+            runs.append(current)
+        runs = [run for run in runs if len(run) >= minimum_observations]
+        for source, target in zip(runs, runs[1:]):
+            source_identity = (
+                str(source[0].evidence.get("vessel_class") or "unknown"),
+                int(source[0].evidence["vessel_track_id"]),
+            )
+            target_identity = (
+                str(target[0].evidence.get("vessel_class") or "unknown"),
+                int(target[0].evidence["vessel_track_id"]),
+            )
+            gap_ms = target[0].global_ms - source[-1].global_ms
+            if source_identity == target_identity or not 0.0 <= gap_ms <= maximum_gap_ms:
+                continue
+            combined = [*source, *target]
+            confidence = min(
+                1.0,
+                sum(item.confidence for item in combined) / len(combined) + 0.08,
+            )
+            output.append(
+                ActionCandidate(
+                    candidate_id=f"TRANSFER-SEQ-{view.view_id}-{len(output) + 1:06d}",
+                    action_type=ActionType.LIQUID_MOVEMENT,
+                    view_id=view.view_id,
+                    role=view.role,
+                    local_start_ms=source[0].local_ms,
+                    local_end_ms=target[-1].local_ms,
+                    global_start_ms=source[0].global_ms,
+                    global_end_ms=target[-1].global_ms,
+                    key_global_ms=(source[-1].global_ms + target[0].global_ms) / 2.0,
+                    objects=sorted(
+                        {
+                            tool_class,
+                            source_identity[0],
+                            target_identity[0],
+                        }
+                    ),
+                    confidence=confidence,
+                    evidence=[
+                        {
+                            "transfer_sequence": "source_transport_target",
+                            "tool_class": tool_class,
+                            "tool_track_id": tool_track_id,
+                            "source_class": source_identity[0],
+                            "source_track_id": source_identity[1],
+                            "target_class": target_identity[0],
+                            "target_track_id": target_identity[1],
+                            "source_contact_end_global_ms": source[-1].global_ms,
+                            "target_contact_start_global_ms": target[0].global_ms,
+                            "transport_gap_ms": gap_ms,
+                            "source_observation_count": len(source),
+                            "target_observation_count": len(target),
+                        }
+                    ],
+                    uncertainty=[
+                        "工具从一个容器移动至另一容器；液体本体/液面仍需时序视觉或多模态确认"
+                    ],
+                )
+            )
+    return output
 
 
 def generate_candidates(
@@ -252,7 +408,8 @@ def generate_candidates(
         for frame in iter_frame_evidence(detection_paths[view.view_id]):
             observations.extend(_frame_observations(frame, previous_tracks, cfg))
         candidates.extend(_merge_observations(observations, view, cfg))
-    return sorted(candidates, key=lambda candidate: candidate.global_start_ms)
+        candidates.extend(_infer_liquid_transfer_sequences(observations, view, cfg))
+    return sorted(candidates, key=candidate_sort_key)
 
 
 def generate_coarse_activity_candidates(
@@ -303,7 +460,7 @@ def generate_coarse_activity_candidates(
     candidates: list[ActionCandidate] = []
     for view_id, observations in observations_by_view.items():
         candidates.extend(_merge_observations(observations, by_id[view_id], cfg))
-    return sorted(candidates, key=lambda candidate: candidate.global_start_ms)
+    return sorted(candidates, key=candidate_sort_key)
 
 
 def generate_motion_burst_candidates(
@@ -377,7 +534,7 @@ def generate_motion_burst_candidates(
                     uncertainty=["粗层运动突发，仅用于召回精扫窗口，不作为最终动作证据"],
                 )
             )
-    return sorted(candidates, key=lambda candidate: candidate.global_start_ms)
+    return sorted(candidates, key=candidate_sort_key)
 
 
 def refine_motion_candidates_with_coarse(
@@ -387,9 +544,10 @@ def refine_motion_candidates_with_coarse(
 ) -> tuple[list[ActionCandidate], dict[str, Any]]:
     """Conservatively tighten motion windows with bounded YOLO evidence.
 
-    Unsupported motion candidates are retained, and coarse candidates outside
-    every motion interval are appended. The coarse layer can therefore reduce
-    fine-scan work without becoming a recall gate.
+    Unsupported motion candidates with object evidence are retained, and coarse
+    candidates outside every motion interval are appended. Objectless motion
+    intervals with no coarse YOLO match are quarantined with a receipt because
+    they cannot become a physical evidence event without an observed object.
     """
 
     perf = config["performance"]
@@ -398,16 +556,26 @@ def refine_motion_candidates_with_coarse(
     ) * 1000.0
     minimum_candidates = max(1, int(perf.get("coarse_refinement_min_candidates", 2)))
     minimum_span_ms = float(perf.get("coarse_refinement_min_span_seconds", 30.0)) * 1000.0
+    quarantine_objectless = bool(
+        perf.get("coarse_quarantine_objectless_unconfirmed_motion", True)
+    )
+    sustained_objectless_recall_ms = float(
+        perf.get(
+            "coarse_objectless_recall_guard_min_seconds",
+            perf.get("motion_probe_primary_min_seconds", 45.0),
+        )
+    ) * 1000.0
+    ordered_coarse_candidates = sorted(coarse_candidates, key=candidate_sort_key)
     used_coarse_ids: set[str] = set()
     refined: list[ActionCandidate] = []
     decisions: list[dict[str, Any]] = []
 
-    for motion in sorted(motion_candidates, key=lambda item: item.global_start_ms):
+    for motion in sorted(motion_candidates, key=candidate_sort_key):
         association_start = motion.global_start_ms - association_margin_ms
         association_end = motion.global_end_ms + association_margin_ms
         matches = [
             coarse
-            for coarse in coarse_candidates
+            for coarse in ordered_coarse_candidates
             if coarse.global_end_ms >= association_start
             and coarse.global_start_ms <= association_end
         ]
@@ -422,18 +590,61 @@ def refine_motion_candidates_with_coarse(
             and coarse_end - coarse_start >= minimum_span_ms
         )
         if not supported:
+            motion_duration_ms = (
+                motion.global_end_ms - motion.global_start_ms
+            )
+            sustained_objectless_recall_guard = bool(
+                not matches
+                and not motion.objects
+                and motion_duration_ms >= sustained_objectless_recall_ms
+            )
+            if (
+                quarantine_objectless
+                and not matches
+                and not motion.objects
+                and not sustained_objectless_recall_guard
+            ):
+                decisions.append(
+                    {
+                        "motion_candidate_id": motion.candidate_id,
+                        "decision": "quarantined_objectless_motion_without_coarse_yolo",
+                        "coarse_candidate_ids": [],
+                        "reason": (
+                            "motion-only interval has no object identity and no "
+                            "coarse YOLO match; it cannot form a physical event"
+                        ),
+                        "original_duration_seconds": round(
+                            (motion.global_end_ms - motion.global_start_ms) / 1000.0,
+                            3,
+                        ),
+                    }
+                )
+                continue
             refined.append(motion)
             decisions.append(
                 {
                     "motion_candidate_id": motion.candidate_id,
                     "decision": "retained_motion_recall_guard",
                     "coarse_candidate_ids": [item.candidate_id for item in matches],
+                    "reason": (
+                        "sustained objectless sentinel motion remains a bounded "
+                        "fine-scan recall guard"
+                        if sustained_objectless_recall_guard
+                        else "object-backed or coarse-supported motion recall guard"
+                    ),
+                    "original_duration_seconds": round(
+                        motion_duration_ms / 1000.0,
+                        3,
+                    ),
                 }
             )
             continue
 
         used_coarse_ids.update(item.candidate_id for item in matches)
-        best = max(matches, key=lambda item: item.confidence)
+        best = min(
+            matches,
+            key=lambda item: (-float(item.confidence), candidate_sort_key(item)),
+        )
         refined.append(
             ActionCandidate(
                 candidate_id=f"REFINED-{motion.candidate_id}",
@@ -474,10 +685,12 @@ def refine_motion_candidates_with_coarse(
         )
 
     unmatched = [
-        item for item in coarse_candidates if item.candidate_id not in used_coarse_ids
+        item
+        for item in ordered_coarse_candidates
+        if item.candidate_id not in used_coarse_ids
     ]
     refined.extend(unmatched)
-    refined.sort(key=lambda item: item.global_start_ms)
+    refined.sort(key=candidate_sort_key)
     return refined, {
         "schema_version": "visioncortex-coarse-boundary-refinement/1",
         "motion_candidate_count": len(motion_candidates),
@@ -488,6 +701,11 @@ def refine_motion_candidates_with_coarse(
         "retained_motion_count": sum(
             item["decision"] == "retained_motion_recall_guard" for item in decisions
         ),
+        "quarantined_motion_count": sum(
+            item["decision"]
+            == "quarantined_objectless_motion_without_coarse_yolo"
+            for item in decisions
+        ),
         "unmatched_coarse_candidate_count": len(unmatched),
         "output_candidate_count": len(refined),
         "output_candidates": [
@@ -497,6 +715,10 @@ def refine_motion_candidates_with_coarse(
             "association_margin_seconds": association_margin_ms / 1000.0,
             "minimum_candidates": minimum_candidates,
             "minimum_span_seconds": minimum_span_ms / 1000.0,
+            "quarantine_objectless_unconfirmed_motion": quarantine_objectless,
+            "objectless_recall_guard_min_seconds": (
+                sustained_objectless_recall_ms / 1000.0
+            ),
         },
         "decisions": decisions,
     }
@@ -521,7 +743,7 @@ def fuse_motion_probe_candidates(
     clusters: list[list[ActionCandidate]] = []
     current: list[ActionCandidate] = []
     current_end = -1.0
-    for candidate in sorted(candidates, key=lambda item: item.global_start_ms):
+    for candidate in sorted(candidates, key=candidate_sort_key):
         if current and candidate.global_start_ms > current_end + merge_gap_ms:
             clusters.append(current)
             current = []
@@ -541,7 +763,10 @@ def fuse_motion_probe_candidates(
         )
         if len(views) < minimum_views and not sustained_primary:
             continue
-        best = max(cluster, key=lambda item: item.confidence)
+        best = min(
+            cluster,
+            key=lambda item: (-float(item.confidence), candidate_sort_key(item)),
+        )
         start_ms = min(item.global_start_ms for item in cluster)
         end_ms = max(item.global_end_ms for item in cluster)
         fused.append(
@@ -579,7 +804,7 @@ def fuse_motion_probe_candidates(
         )
     # A silent or obstructed secondary sentinel must not force a full-timeline
     # YOLO fallback. Keep the original motion windows as a recall-first fallback.
-    return fused or list(sorted(candidates, key=lambda item: item.global_start_ms))
+    return fused or list(sorted(candidates, key=candidate_sort_key))
 
 
 def generate_motion_safety_candidates(
@@ -640,7 +865,7 @@ def generate_motion_safety_candidates(
                     ],
                 )
             )
-    return sorted(candidates, key=lambda item: item.global_start_ms)
+    return sorted(candidates, key=candidate_sort_key)
 
 
 def select_fine_scan_views(
@@ -710,8 +935,13 @@ def select_fine_scan_views(
             "anchor_classes": sorted(anchors),
             "motion_threshold": motion_threshold,
         }
-    minimum_third_views = max(
-        1, int(config["performance"].get("fine_min_third_person_views", 1))
+    configured_minimum = config["performance"].get(
+        "fine_min_third_person_views", 1
+    )
+    minimum_third_views = (
+        sum(view.role == ViewRole.THIRD_PERSON for view in views)
+        if configured_minimum is None
+        else max(1, int(configured_minimum))
     )
     selected_third = [view for view in selected if view.role == ViewRole.THIRD_PERSON]
     if len(selected_third) < minimum_third_views:
@@ -740,11 +970,37 @@ def select_fine_scan_views(
 def _objects_overlap(left: ActionCandidate, right: ActionCandidate) -> bool:
     a = set(left.objects) - HAND_CLASSES
     b = set(right.objects) - HAND_CLASSES
-    return bool(a & b) or left.action_type in {
-        ActionType.LIQUID_MOVEMENT,
-        ActionType.DEVICE_PANEL_OPERATION,
-        ActionType.CONTAINER_STATE_CHANGE,
-    }
+    if a & b:
+        return True
+    if left.action_type == ActionType.LIQUID_MOVEMENT:
+        # Cross-view detectors may call the same transfer tool pipette vs.
+        # spearhead and the same vessel tube vs. container. Require both
+        # physical families; never merge candidates merely because both are
+        # labelled "liquid_movement".
+        return bool(a & TRANSFER_TOOL_CLASSES and b & TRANSFER_TOOL_CLASSES) and bool(
+            a & CONTAINER_CLASSES and b & CONTAINER_CLASSES
+        )
+    if left.action_type == ActionType.DEVICE_PANEL_OPERATION:
+        return bool(a & b & DEVICE_CLASSES)
+    if left.action_type == ActionType.CONTAINER_STATE_CHANGE:
+        def families(objects: set[str]) -> set[str]:
+            result: set[str] = set()
+            if objects & {"tube", "tube_cap"}:
+                result.add("tube")
+            if objects & {
+                "reagent_bottle",
+                "reagent_bottle_open",
+                "sample_bottle",
+                "sample_bottle_blue",
+                "bottle_cap",
+            }:
+                result.add("bottle")
+            if objects & {"beaker", "container"}:
+                result.add("open_container")
+            return result
+
+        return bool(families(a) & families(b))
+    return False
 
 
 def audit_candidates(
@@ -755,7 +1011,7 @@ def audit_candidates(
     tolerance = float(config["alignment"]["cross_view_event_tolerance_ms"])
     seg_cfg = config["segmentation"]
     clusters: list[list[ActionCandidate]] = []
-    for candidate in candidates:
+    for candidate in sorted(candidates, key=candidate_sort_key):
         selected: list[ActionCandidate] | None = None
         for cluster in reversed(clusters):
             if candidate.global_start_ms - max(item.global_end_ms for item in cluster) > tolerance:
@@ -772,18 +1028,28 @@ def audit_candidates(
 
     events: list[EvidenceEvent] = []
     rejected: list[dict[str, Any]] = []
-    for index, cluster in enumerate(clusters, 1):
+    for index, unsorted_cluster in enumerate(clusters, 1):
+        cluster = sorted(unsorted_cluster, key=candidate_sort_key)
         views = sorted({item.view_id for item in cluster})
         roles = sorted({item.role for item in cluster}, key=lambda role: role.value)
-        weighted_confidence = sum(item.confidence for item in cluster) / len(cluster)
+        weighted_confidence = math.fsum(item.confidence for item in cluster) / len(cluster)
         cross_view_bonus = min(0.16, 0.06 * (len(views) - 1) + (0.06 if len(roles) == 2 else 0.0))
         confidence = min(1.0, weighted_confidence + cross_view_bonus)
         aligned_views = [view_id for view_id in views if transforms[view_id].state == "aligned"]
         both_roles = len(roles) == 2
         duration_ms = max(item.global_end_ms for item in cluster) - min(item.global_start_ms for item in cluster)
+        action_specific_thresholds = seg_cfg.get(
+            "single_view_action_accept_confidence", {}
+        )
+        single_view_threshold = float(
+            action_specific_thresholds.get(
+                cluster[0].action_type.value,
+                seg_cfg["single_view_accept_confidence"],
+            )
+        )
         single_view_strong = (
             len(views) == 1
-            and confidence >= float(seg_cfg["single_view_accept_confidence"])
+            and confidence >= single_view_threshold
             and cluster[0].action_type
             in {
                 ActionType.HAND_OBJECT_CONTACT,
@@ -792,7 +1058,56 @@ def audit_candidates(
                 ActionType.DEVICE_PANEL_OPERATION,
             }
         )
-        accepted = bool(aligned_views) and (both_roles or len(views) >= 2 or single_view_strong)
+        semantic_context_candidate: ActionCandidate | None = None
+        semantic_context_thresholds = seg_cfg.get(
+            "semantic_review_cross_role_context_min_confidence", {}
+        )
+        semantic_context_minimum = semantic_context_thresholds.get(
+            cluster[0].action_type.value
+        )
+        if (
+            bool(seg_cfg.get("semantic_review_cross_role_context_enabled", False))
+            and len(views) == 1
+            and semantic_context_minimum is not None
+            and confidence >= float(semantic_context_minimum)
+        ):
+            cluster_start_ms = min(item.global_start_ms for item in cluster)
+            cluster_end_ms = max(item.global_end_ms for item in cluster)
+            context_minimum = float(
+                seg_cfg.get(
+                    "semantic_review_cross_role_context_support_min_confidence",
+                    0.55,
+                )
+            )
+            context_candidates = [
+                item
+                for item in candidates
+                if item not in cluster
+                and item.role not in roles
+                and transforms[item.view_id].state == "aligned"
+                and item.confidence >= context_minimum
+                and item.global_start_ms <= cluster_end_ms + tolerance
+                and item.global_end_ms >= cluster_start_ms - tolerance
+            ]
+            if context_candidates:
+                semantic_context_candidate = max(
+                    context_candidates,
+                    key=lambda item: (
+                        min(cluster_end_ms, item.global_end_ms)
+                        - max(cluster_start_ms, item.global_start_ms),
+                        item.confidence,
+                        -abs(item.key_global_ms - median(
+                            candidate.key_global_ms for candidate in cluster
+                        )),
+                    ),
+                )
+        semantic_context_admitted = semantic_context_candidate is not None
+        accepted = bool(aligned_views) and (
+            both_roles
+            or len(views) >= 2
+            or single_view_strong
+            or semantic_context_admitted
+        )
         if bool(seg_cfg.get("require_both_roles")) and not bool(
             seg_cfg.get("allow_strong_single_role_actions", False)
         ):
@@ -800,6 +1115,11 @@ def audit_candidates(
         uncertainty: list[str] = []
         if not both_roles:
             uncertainty.append("该动作没有同时获得第一与第三人称支持")
+        if semantic_context_candidate is not None:
+            uncertainty.append(
+                "对侧视角仅提供同时动作上下文，不直接证明候选类别；"
+                f"必须经语义模型确认：{semantic_context_candidate.candidate_id}"
+            )
         uncertain_alignments = [view_id for view_id in views if transforms[view_id].state != "aligned"]
         if uncertain_alignments:
             uncertainty.append(f"以下视角对齐不确定: {', '.join(uncertain_alignments)}")
@@ -810,6 +1130,11 @@ def audit_candidates(
                 reason = "第一/第三人称动作、对象和全局时间窗一致"
             elif len(views) >= 2:
                 reason = "至少两路同角色视角动作、对象和全局时间窗一致"
+            elif semantic_context_candidate is not None:
+                reason = (
+                    "单路状态线索与对侧同时动作上下文通过语义召回门控；"
+                    "候选事实仍需多模态确认"
+                )
             else:
                 reason = "单路持续强物理证据通过门控；未强制其他空/无效视角产出"
         else:
@@ -828,6 +1153,37 @@ def audit_candidates(
             supporting_roles=roles,
             candidates=cluster,
             uncertainty=uncertainty,
+            observability=(
+                {
+                    "semantic_recall_admission": {
+                        "schema_version": (
+                            "visioncortex-semantic-recall-admission/1"
+                        ),
+                        "mode": "single_view_state_plus_cross_role_activity",
+                        "candidate_action_directly_confirmed": False,
+                        "mandatory_semantic_review": True,
+                        "context_candidate_id": (
+                            semantic_context_candidate.candidate_id
+                        ),
+                        "context_view_id": semantic_context_candidate.view_id,
+                        "context_role": semantic_context_candidate.role.value,
+                        "context_action_type": (
+                            semantic_context_candidate.action_type.value
+                        ),
+                        "context_confidence": (
+                            semantic_context_candidate.confidence
+                        ),
+                        "context_global_start_ms": (
+                            semantic_context_candidate.global_start_ms
+                        ),
+                        "context_global_end_ms": (
+                            semantic_context_candidate.global_end_ms
+                        ),
+                    }
+                }
+                if semantic_context_candidate is not None
+                else {}
+            ),
         )
         events.append(event)
         if not accepted:
@@ -904,32 +1260,234 @@ def refine_liquid_events_with_context(
     return rejected
 
 
+def _split_rich_repeated_primary_sequences(
+    groups: Sequence[Sequence[EvidenceEvent]],
+    config: dict[str, Any],
+    decision_receipts: list[dict[str, Any]] | None = None,
+) -> list[list[EvidenceEvent]]:
+    """Split two complete workflows that one coarse envelope fused together.
+
+    Coarse motion recall intentionally favors wide envelopes.  A fixed event
+    gap cannot distinguish a long pause inside one workflow from two adjacent
+    workflows, so this rule is deliberately stricter: both sides must be rich,
+    both roles must remain observable on each side, and both sides must repeat
+    the same configured primary process action.  The largest eligible inactive
+    interval is selected deterministically and the rule is applied recursively.
+    """
+
+    continuity_cfg = config["continuity"]
+    minimum_gap_ms = float(
+        continuity_cfg.get("atomic_sequence_split_min_gap_seconds", 5.0)
+    ) * 1000.0
+    minimum_events = max(
+        1,
+        int(continuity_cfg.get("atomic_sequence_split_min_events_per_side", 4)),
+    )
+    primary_action_names = {
+        str(value)
+        for value in continuity_cfg.get(
+            "atomic_fragment_repeated_primary_actions",
+            [ActionType.LIQUID_MOVEMENT.value],
+        )
+    }
+    required_roles = {ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON}
+
+    def primary_actions(items: Sequence[EvidenceEvent]) -> set[str]:
+        return {
+            event.action_type.value
+            for event in items
+            if event.action_type.value in primary_action_names
+        }
+
+    def observed_roles(items: Sequence[EvidenceEvent]) -> set[ViewRole]:
+        return {role for event in items for role in event.supporting_roles}
+
+    def split_one(items: Sequence[EvidenceEvent]) -> list[list[EvidenceEvent]]:
+        ordered = sorted(items, key=event_sort_key)
+        candidates: list[
+            tuple[
+                float,
+                int,
+                list[EvidenceEvent],
+                list[EvidenceEvent],
+                list[str],
+            ]
+        ] = []
+        for position in range(minimum_events, len(ordered) - minimum_events + 1):
+            left = ordered[:position]
+            right = ordered[position:]
+            left_end_ms = max(event.global_end_ms for event in left)
+            right_start_ms = min(event.global_start_ms for event in right)
+            inactive_gap_ms = right_start_ms - left_end_ms
+            if inactive_gap_ms < minimum_gap_ms:
+                continue
+            repeated_primary_actions = sorted(
+                primary_actions(left) & primary_actions(right)
+            )
+            if not repeated_primary_actions:
+                continue
+            if not (
+                required_roles <= observed_roles(left)
+                and required_roles <= observed_roles(right)
+            ):
+                continue
+            candidates.append(
+                (
+                    inactive_gap_ms,
+                    position,
+                    left,
+                    right,
+                    repeated_primary_actions,
+                )
+            )
+        if not candidates:
+            return [ordered]
+
+        # Prefer the strongest physical inactivity boundary.  For an exact tie,
+        # the earlier boundary wins so the result is stable across input order.
+        inactive_gap_ms, position, left, right, repeated = max(
+            candidates,
+            key=lambda item: (item[0], -item[1]),
+        )
+        if decision_receipts is not None:
+            decision_receipts.append(
+                decision_receipt(
+                    decision_type="raw_atomic_sequence_split",
+                    rule_id="QF1-RICH-REPEATED-PRIMARY-SEQUENCE-SPLIT",
+                    verdict="split",
+                    subject_ids=[event.event_id for event in ordered],
+                    reason_codes=[
+                        "rich_dual_view_sequences_repeat_primary_action_across_inactive_gap"
+                    ],
+                    facts={
+                        "split_position": position,
+                        "inactive_gap_ms": inactive_gap_ms,
+                        "left_event_ids": [event.event_id for event in left],
+                        "right_event_ids": [event.event_id for event in right],
+                        "left_event_fingerprints": [
+                            stable_event_fingerprint(event) for event in left
+                        ],
+                        "right_event_fingerprints": [
+                            stable_event_fingerprint(event) for event in right
+                        ],
+                        "left_roles": sorted(role.value for role in observed_roles(left)),
+                        "right_roles": sorted(role.value for role in observed_roles(right)),
+                        "repeated_primary_actions": repeated,
+                    },
+                    thresholds={
+                        "minimum_inactive_gap_ms": minimum_gap_ms,
+                        "minimum_events_per_side": minimum_events,
+                        "required_roles_per_side": sorted(
+                            role.value for role in required_roles
+                        ),
+                        "configured_primary_actions": sorted(primary_action_names),
+                    },
+                    evidence_refs=[event.event_id for event in ordered],
+                    legacy={
+                        "decision": "split_fused_complete_action_sequences",
+                    },
+                )
+            )
+        return [*split_one(left), *split_one(right)]
+
+    split_groups: list[list[EvidenceEvent]] = []
+    for group in groups:
+        split_groups.extend(split_one(group))
+    return split_groups
+
+
 def build_experiment_segments(
     events: Sequence[EvidenceEvent],
     views: Sequence[ViewInput],
     config: dict[str, Any],
     coarse_windows: Sequence[ActionCandidate] | None = None,
+    decision_receipts: list[dict[str, Any]] | None = None,
 ) -> list[ExperimentSegment]:
-    accepted = sorted((event for event in events if event.accepted), key=lambda event: event.global_start_ms)
+    component_only = sorted(
+        (
+            event
+            for event in events
+            if event.accepted
+            and str(
+                ((event.state_machine or {}).get("publication") or {}).get(
+                    "status"
+                )
+                or ""
+            )
+            == "component_only"
+        ),
+        key=event_sort_key,
+    )
+    # Higher-level state-machine actions keep their lower-level contacts and
+    # movements in the audit ledger, but those duplicate components must not
+    # open, extend, bridge, or merge experiment boundaries.  Otherwise a long
+    # static hand/tool proximity can fuse two independently completed workflows
+    # even though its containing liquid/panel action has already superseded it.
+    accepted = sorted(
+        (
+            event
+            for event in events
+            if event.accepted and event not in component_only
+        ),
+        key=event_sort_key,
+    )
+    if component_only and decision_receipts is not None:
+        decision_receipts.append(
+            decision_receipt(
+                decision_type="component_publication_boundary_quarantine",
+                rule_id="QF1-COMPONENT-ONLY-NONBOUNDING",
+                verdict="quarantined",
+                subject_ids=[event.event_id for event in component_only],
+                reason_codes=["superseded_components_cannot_define_boundaries"],
+                facts={
+                    "component_event_ids": [
+                        event.event_id for event in component_only
+                    ],
+                    "superseding_event_ids": sorted(
+                        {
+                            str(
+                                (
+                                    (event.state_machine or {}).get(
+                                        "publication"
+                                    )
+                                    or {}
+                                ).get("suppressed_by_event_id")
+                            )
+                            for event in component_only
+                            if (
+                                (event.state_machine or {}).get("publication")
+                                or {}
+                            ).get("suppressed_by_event_id")
+                        }
+                    ),
+                    "formal_membership_changed": True,
+                    "audit_ledger_membership_changed": False,
+                },
+                evidence_refs=[event.event_id for event in component_only],
+            )
+        )
     if not accepted:
         return []
     cfg = config["segmentation"]
     gap_ms = float(cfg["experiment_gap_seconds"]) * 1000.0
     groups: list[list[EvidenceEvent]] = []
-    if coarse_windows:
+    ordered_windows = (
+        sorted(coarse_windows, key=candidate_sort_key) if coarse_windows else []
+    )
+    if ordered_windows:
         # A coarse motion burst is the experiment-level temporal envelope. Fine
         # actions may legitimately contain long pauses (incubation, reading a
         # balance, changing tools), so a fixed short event gap must not split one
         # bounded experiment. Padding is used only for assigning fine evidence;
         # the final boundary still comes from accepted fine events below.
         padding_ms = float(config["performance"]["fine_window_padding_seconds"]) * 1000.0
-        buckets: list[list[EvidenceEvent]] = [[] for _ in coarse_windows]
+        buckets: list[list[EvidenceEvent]] = [[] for _ in ordered_windows]
         unassigned: list[EvidenceEvent] = []
         for event in accepted:
             midpoint = (event.global_start_ms + event.global_end_ms) / 2.0
             matches = [
                 index
-                for index, window in enumerate(coarse_windows)
+                for index, window in enumerate(ordered_windows)
                 if window.global_start_ms - padding_ms <= midpoint <= window.global_end_ms + padding_ms
             ]
             if not matches:
@@ -939,13 +1497,17 @@ def build_experiment_segments(
                 matches,
                 key=lambda index: abs(
                     midpoint
-                    - (coarse_windows[index].global_start_ms + coarse_windows[index].global_end_ms) / 2.0
+                    - (
+                        ordered_windows[index].global_start_ms
+                        + ordered_windows[index].global_end_ms
+                    )
+                    / 2.0
                 ),
             )
             buckets[best].append(event)
         for bucket in buckets:
             current: list[EvidenceEvent] = []
-            for event in sorted(bucket, key=lambda item: item.global_start_ms):
+            for event in sorted(bucket, key=event_sort_key):
                 if current and event.global_start_ms - current[-1].global_end_ms > gap_ms:
                     groups.append(current)
                     current = []
@@ -962,7 +1524,12 @@ def build_experiment_segments(
             current.append(event)
         if current:
             groups.append(current)
-        groups.sort(key=lambda group: min(event.global_start_ms for event in group))
+        groups.sort(
+            key=lambda group: (
+                min(event.global_start_ms for event in group),
+                tuple(stable_event_fingerprint(event) for event in sorted(group, key=event_sort_key)),
+            )
+        )
     else:
         current = []
         for event in accepted:
@@ -973,8 +1540,25 @@ def build_experiment_segments(
         if current:
             groups.append(current)
 
+    groups = _split_rich_repeated_primary_sequences(
+        groups,
+        config,
+        decision_receipts=decision_receipts,
+    )
+    groups.sort(
+        key=lambda group: (
+            min(event.global_start_ms for event in group),
+            tuple(
+                stable_event_fingerprint(event)
+                for event in sorted(group, key=event_sort_key)
+            ),
+        )
+    )
+
     segments: list[ExperimentSegment] = []
-    for index, group in enumerate(groups, 1):
+    for index, unsorted_group in enumerate(groups, 1):
+        segment_id = f"EXP-{index:04d}"
+        group = sorted(unsorted_group, key=event_sort_key)
         # A segment must start on a physically meaningful operation anchor.
         # Single-view liquid hypotheses and movement of fixed equipment may be
         # useful context, but are too noisy to pull the experiment boundary
@@ -983,37 +1567,102 @@ def build_experiment_segments(
         raw_start = min(
             event.global_start_ms for event in (start_anchors or group)
         )
+        leading_context: list[EvidenceEvent] = []
+        if start_anchors and bool(
+            cfg.get("accepted_leading_context_enabled", False)
+        ):
+            # A full-timeline scan often observes a reliable single-role
+            # preparation chain before the first dual-role opener.  Recover
+            # that boundary evidence only when it is already accepted,
+            # publication-primary (not semantic-provisional), and connected
+            # to the opener by a tight temporal chain.  This changes the clip
+            # boundary and membership but never promotes rejected evidence.
+            maximum_leading_gap_ms = float(
+                cfg.get("accepted_leading_context_max_gap_seconds", 10.0)
+            ) * 1000.0
+            maximum_leading_extension_ms = float(
+                cfg.get("accepted_leading_context_max_extension_seconds", 90.0)
+            ) * 1000.0
+            lower_limit_ms = max(0.0, raw_start - maximum_leading_extension_ms)
+            cursor_ms = raw_start
+            eligible_leading = [
+                event
+                for event in group
+                if event.global_start_ms < raw_start
+                and event.global_end_ms >= lower_limit_ms
+                and str(
+                    ((event.state_machine or {}).get("publication") or {}).get(
+                        "status"
+                    )
+                    or "primary"
+                )
+                == "primary"
+                and not bool(
+                    ((event.observability or {}).get("semantic_recall_admission") or {}).get(
+                        "mandatory_semantic_review"
+                    )
+                )
+            ]
+            for event in sorted(
+                eligible_leading,
+                key=lambda item: (item.global_end_ms, item.global_start_ms),
+                reverse=True,
+            ):
+                if event.global_start_ms >= cursor_ms:
+                    continue
+                if event.global_end_ms < cursor_ms - maximum_leading_gap_ms:
+                    break
+                leading_context.append(event)
+                cursor_ms = min(cursor_ms, event.global_start_ms)
+            if leading_context:
+                leading_context.sort(key=event_sort_key)
+                raw_start = min(
+                    raw_start,
+                    min(event.global_start_ms for event in leading_context),
+                )
         start = max(0.0, raw_start - float(cfg["experiment_pre_roll_seconds"]) * 1000.0)
         # Accepted recall evidence may precede the first reliable operation
         # anchor. Keep it in the global audit ledger, but do not attach an event
         # that ends before the bounded clip starts to this experiment.
         bounded_group = [event for event in group if event.global_end_ms >= start]
         raw_end = max(event.global_end_ms for event in bounded_group)
-        # Cross-view agreement remains mandatory for accepted evidence and key
-        # materials. Once that core exists, however, a continuous tail of
-        # strong single-view physical actions may legitimately mark cleanup or
-        # the final device/container operation. Use it only to extend the end
-        # boundary inside the same coarse activity envelope; it never creates
-        # an event, material, or experiment by itself.
-        if coarse_windows:
+        boundary_context_receipt: dict[str, Any] | None = None
+        core_roles = {
+            role for event in bounded_group for role in event.supporting_roles
+        }
+        if ordered_windows and core_roles == {
+            ViewRole.FIRST_PERSON,
+            ViewRole.THIRD_PERSON,
+        }:
             midpoint = (raw_start + raw_end) / 2.0
             matching_windows = [
                 window
-                for window in coarse_windows
+                for window in ordered_windows
                 if window.global_start_ms <= midpoint <= window.global_end_ms
             ]
             if matching_windows:
                 boundary_window = min(
                     matching_windows,
-                    key=lambda window: abs(
-                        midpoint - (window.global_start_ms + window.global_end_ms) / 2.0
+                    key=lambda window: (
+                        abs(
+                            midpoint
+                            - (
+                                window.global_start_ms + window.global_end_ms
+                            )
+                            / 2.0
+                        ),
+                        candidate_sort_key(window),
                     ),
                 )
                 later_core_in_window = any(
-                    other is not group
+                    other is not unsorted_group
                     and min(item.global_start_ms for item in other) > raw_end
                     and boundary_window.global_start_ms
-                    <= (min(item.global_start_ms for item in other) + max(item.global_end_ms for item in other)) / 2.0
+                    <= (
+                        min(item.global_start_ms for item in other)
+                        + max(item.global_end_ms for item in other)
+                    )
+                    / 2.0
                     <= boundary_window.global_end_ms
                     for other in groups
                 )
@@ -1036,15 +1685,6 @@ def build_experiment_segments(
                     maximum_extension_ms = float(
                         cfg.get("boundary_context_max_extension_seconds", 90.0)
                     ) * 1000.0
-                    cursor = raw_end
-                    supported_end = raw_end
-                    limit = min(
-                        raw_end + maximum_extension_ms,
-                        boundary_window.global_end_ms,
-                    )
-                    connected_objects = {
-                        obj for item in bounded_group for obj in item.objects
-                    }
                     cleanup_objects = {
                         "brush",
                         "cleaning_tool",
@@ -1052,30 +1692,93 @@ def build_experiment_segments(
                         "wash_bottle",
                         "waste_container",
                     }
-                    for context in sorted(events, key=lambda item: item.global_start_ms):
-                        if context.global_end_ms <= cursor:
+                    cursor = raw_end
+                    supported_end = raw_end
+                    limit = min(
+                        raw_end + maximum_extension_ms,
+                        boundary_window.global_end_ms,
+                    )
+                    context_chain: list[EvidenceEvent] = []
+                    strong_context: list[EvidenceEvent] = []
+                    for context in sorted(events, key=event_sort_key):
+                        if context.accepted or context.global_end_ms <= cursor:
                             continue
                         if context.global_start_ms > limit:
                             break
                         if context.global_start_ms > cursor + maximum_gap_ms:
                             break
-                        physically_connected = bool(
-                            set(context.objects) & (connected_objects | cleanup_objects)
-                        ) or context.action_type in {
-                            ActionType.CONTAINER_STATE_CHANGE,
-                            ActionType.DEVICE_PANEL_OPERATION,
-                        }
+                        context_roles = set(context.supporting_roles)
+                        cleanup_evidence = sorted(
+                            set(context.objects) & cleanup_objects
+                        )
                         if (
-                            context.confidence < bridge_confidence
-                            or not context.objects
-                            or not physically_connected
+                            len(context_roles) != 1
+                            or context.confidence < bridge_confidence
+                            or not cleanup_evidence
                         ):
                             continue
+                        context_chain.append(context)
                         cursor = min(limit, max(cursor, context.global_end_ms))
-                        connected_objects.update(context.objects)
                         if context.confidence >= extension_confidence:
+                            strong_context.append(context)
                             supported_end = max(supported_end, cursor)
-                    raw_end = supported_end
+                    if supported_end > raw_end and strong_context:
+                        previous_end = raw_end
+                        raw_end = supported_end
+                        boundary_context_receipt = decision_receipt(
+                            decision_type="raw_boundary_context_extension",
+                            rule_id="QF1-SINGLE-VIEW-BOUNDARY-CONTEXT",
+                            verdict="accepted",
+                            subject_ids=[segment_id],
+                            reason_codes=[
+                                "single_role_cleanup_chain_inside_recalled_boundary"
+                            ],
+                            facts={
+                                "previous_raw_end_ms": previous_end,
+                                "extended_raw_end_ms": raw_end,
+                                "context_event_ids": [
+                                    event.event_id for event in context_chain
+                                ],
+                                "context_event_fingerprints": [
+                                    stable_event_fingerprint(event)
+                                    for event in context_chain
+                                ],
+                                "strong_context_event_ids": [
+                                    event.event_id for event in strong_context
+                                ],
+                                "cleanup_objects": sorted(
+                                    {
+                                        obj
+                                        for event in context_chain
+                                        for obj in event.objects
+                                        if obj in cleanup_objects
+                                    }
+                                ),
+                                "boundary_candidate_id": boundary_window.candidate_id,
+                                "boundary_candidate_fingerprint": (
+                                    stable_candidate_fingerprint(boundary_window)
+                                ),
+                                "formal_membership_changed": False,
+                                "boundary_clipped_to_recalled_window": (
+                                    raw_end == boundary_window.global_end_ms
+                                ),
+                            },
+                            thresholds={
+                                "activation_gap_ms": activation_gap_ms,
+                                "bridge_confidence": bridge_confidence,
+                                "extension_confidence": extension_confidence,
+                                "maximum_context_gap_ms": maximum_gap_ms,
+                                "maximum_extension_ms": maximum_extension_ms,
+                            },
+                            evidence_refs=[
+                                *[event.event_id for event in bounded_group],
+                                *[event.event_id for event in context_chain],
+                            ],
+                            legacy={
+                                "segment_id": segment_id,
+                                "decision": "extended_raw_boundary_from_cleanup_context",
+                            },
+                        )
         end = raw_end + float(cfg["experiment_post_roll_seconds"]) * 1000.0
         minimum = float(cfg["min_experiment_seconds"]) * 1000.0
         if end - start < minimum:
@@ -1083,7 +1786,11 @@ def build_experiment_segments(
             start, end = max(0.0, start - padding), end + padding
         candidate_counts = defaultdict(int)
         direct_evidence_ms = defaultdict(float)
+        semantic_review_admitted_views: set[str] = set()
         for event in bounded_group:
+            semantic_admission = (event.observability or {}).get(
+                "semantic_recall_admission"
+            )
             for view_id in event.supporting_views:
                 candidate_counts[view_id] += 1
                 direct_evidence_ms[view_id] += max(
@@ -1097,12 +1804,37 @@ def build_experiment_segments(
                         default=0.0,
                     ),
                 )
+                if (
+                    isinstance(semantic_admission, dict)
+                    and semantic_admission.get("mandatory_semantic_review") is True
+                ):
+                    semantic_review_admitted_views.add(view_id)
+            if (
+                isinstance(semantic_admission, dict)
+                and semantic_admission.get("mandatory_semantic_review") is True
+                and str(semantic_admission.get("context_view_id") or "")
+            ):
+                context_view_id = str(semantic_admission["context_view_id"])
+                context_duration_ms = max(
+                    125.0,
+                    float(semantic_admission.get("context_global_end_ms") or 0.0)
+                    - float(
+                        semantic_admission.get("context_global_start_ms") or 0.0
+                    ),
+                )
+                candidate_counts[context_view_id] += 1
+                direct_evidence_ms[context_view_id] += context_duration_ms
+                semantic_review_admitted_views.add(context_view_id)
         duration_minutes = max((end - start) / 60_000.0, 1e-6)
         threshold = float(cfg["min_view_action_density_per_minute"])
         participating = sorted(
             view_id
             for view_id, count in candidate_counts.items()
-            if count / duration_minutes >= threshold and direct_evidence_ms[view_id] >= 500.0
+            if count / duration_minutes >= threshold
+            and (
+                direct_evidence_ms[view_id] >= 500.0
+                or view_id in semantic_review_admitted_views
+            )
         )
         rejected_views = {
             view.view_id: "该边界内没有通过审计的实验动作，或动作密度不足"
@@ -1132,9 +1864,8 @@ def build_experiment_segments(
                     "uncertainty": event.uncertainty,
                 }
             )
-        segments.append(
-            ExperimentSegment(
-                segment_id=f"EXP-{index:04d}",
+        segment = ExperimentSegment(
+                segment_id=segment_id,
                 global_start_ms=start,
                 global_end_ms=end,
                 event_ids=[event.event_id for event in bounded_group],
@@ -1142,7 +1873,119 @@ def build_experiment_segments(
                 rejected_views=rejected_views,
                 micro_segments=micro_segments,
             )
-        )
+        segments.append(segment)
+        if decision_receipts is not None:
+            if boundary_context_receipt is not None:
+                decision_receipts.append(boundary_context_receipt)
+            start_sources = sorted(
+                (
+                    event
+                    for event in (
+                        [*leading_context, *start_anchors]
+                        if start_anchors
+                        else group
+                    )
+                    if event.global_start_ms == raw_start
+                ),
+                key=event_sort_key,
+            )
+            end_sources = sorted(
+                (
+                    event
+                    for event in bounded_group
+                    if event.global_end_ms == raw_end
+                ),
+                key=event_sort_key,
+            )
+            reason_codes = [
+                "start_from_accepted_operation_anchor",
+                (
+                    "end_from_explicit_qf1_receipt"
+                    if boundary_context_receipt is not None
+                    else "end_from_accepted_event"
+                ),
+            ]
+            if leading_context:
+                reason_codes.append(
+                    "accepted_primary_leading_context_chain_applied"
+                )
+            direct_start = max(
+                0.0,
+                raw_start - float(cfg["experiment_pre_roll_seconds"]) * 1000.0,
+            )
+            direct_end = raw_end + float(cfg["experiment_post_roll_seconds"]) * 1000.0
+            if start < direct_start or end > direct_end:
+                reason_codes.append("minimum_duration_padding_applied")
+            decision_receipts.append(
+                decision_receipt(
+                    decision_type="raw_segment_boundary",
+                    rule_id="QF1-RAW-ACCEPTED-EVENT-BOUNDARY",
+                    verdict="accepted",
+                    subject_ids=[segment_id],
+                    reason_codes=reason_codes,
+                    facts={
+                        "raw_start_ms": raw_start,
+                        "raw_end_ms": raw_end,
+                        "final_start_ms": start,
+                        "final_end_ms": end,
+                        "start_source_event_ids": [event.event_id for event in start_sources],
+                        "start_source_event_fingerprints": [
+                            stable_event_fingerprint(event) for event in start_sources
+                        ],
+                        "end_source_event_ids": [event.event_id for event in end_sources],
+                        "end_source_event_fingerprints": [
+                            stable_event_fingerprint(event) for event in end_sources
+                        ],
+                        "end_source_decision_ids": (
+                            [boundary_context_receipt["decision_id"]]
+                            if boundary_context_receipt is not None
+                            else []
+                        ),
+                        "leading_context_event_ids": [
+                            event.event_id for event in leading_context
+                        ],
+                        "leading_context_event_fingerprints": [
+                            stable_event_fingerprint(event)
+                            for event in leading_context
+                        ],
+                        "accepted_event_ids": [event.event_id for event in bounded_group],
+                        "accepted_event_fingerprints": [
+                            stable_event_fingerprint(event) for event in bounded_group
+                        ],
+                        "coarse_window_fingerprints": sorted(
+                            stable_candidate_fingerprint(window)
+                            for window in ordered_windows
+                            if window.global_end_ms >= raw_start
+                            and window.global_start_ms <= raw_end
+                        ),
+                        "implicit_motion_window_extension": False,
+                    },
+                    thresholds={
+                        "pre_roll_ms": float(cfg["experiment_pre_roll_seconds"]) * 1000.0,
+                        "post_roll_ms": float(cfg["experiment_post_roll_seconds"]) * 1000.0,
+                        "minimum_duration_ms": minimum,
+                        "accepted_leading_context_max_gap_ms": float(
+                            cfg.get(
+                                "accepted_leading_context_max_gap_seconds",
+                                10.0,
+                            )
+                        )
+                        * 1000.0,
+                        "accepted_leading_context_max_extension_ms": float(
+                            cfg.get(
+                                "accepted_leading_context_max_extension_seconds",
+                                90.0,
+                            )
+                        )
+                        * 1000.0,
+                    },
+                    evidence_refs=[event.event_id for event in bounded_group],
+                    legacy={
+                        "segment_id": segment_id,
+                        "decision": "bounded_from_accepted_events",
+                    },
+                )
+            )
     return segments
 
 
@@ -1153,6 +1996,7 @@ def build_physical_change_log(events: Iterable[EvidenceEvent]) -> list[PhysicalC
         ActionType.LIQUID_MOVEMENT: "liquid_transferred",
         ActionType.CONTAINER_STATE_CHANGE: "container_state_changed",
         ActionType.DEVICE_PANEL_OPERATION: "device_operated",
+        ActionType.PIPETTE_TRANSFER_OPERATION: "pipette_transfer_operated",
     }
     changes: list[PhysicalChange] = []
     for event in events:

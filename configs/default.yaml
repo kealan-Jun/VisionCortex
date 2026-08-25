@@ -27,6 +27,7 @@ performance:
   coarse_refinement_association_margin_seconds: 30.0
   coarse_refinement_min_candidates: 2
   coarse_refinement_min_span_seconds: 30.0
+  coarse_quarantine_objectless_unconfirmed_motion: true
   fine_batch_size: 16
   # A lone first-person source otherwise starves TensorRT between FFmpeg
   # bursts. Decode two adjacent bounded chunks concurrently, but consume them
@@ -37,6 +38,9 @@ performance:
   fine_third_person_decode_workers: 2
   fine_decode_prefetch_frames: 12
   fine_persistent_segment_decode: false
+  # Optional seek/decode tradeoff. Null preserves one session per physical
+  # recorder segment; hardware profiles may split distant target windows.
+  fine_persistent_session_max_gap_seconds: null
   fine_group_local_recall_enabled: false
   fine_group_recall_min_unresolved_anchors: 3
   fine_group_recall_padding_seconds: 0.0
@@ -56,6 +60,7 @@ performance:
   fine_preferred_third_person_views: []
   # Associate evidence with its recalled boundary, not the much wider decode padding.
   fine_progressive_audit_margin_seconds: 5.0
+  fine_progressive_anchor_cluster_gap_seconds: 10.0
   # Hardware profiles may scout all third-person views around precise first-
   # person anchors before the full-FPS fallback order is chosen.
   fine_dynamic_cross_view_scout: false
@@ -168,6 +173,38 @@ segmentation:
   boundary_context_min_confidence: 0.65
   boundary_context_max_gap_seconds: 10.0
   boundary_context_max_extension_seconds: 90.0
+  # Rejected single-role CV events cannot become formal/key-material evidence,
+  # but a dense chain inside one object-verified motion envelope may bound the
+  # preparation/cleanup surrounding a dual-view core.  Boundary-only use is
+  # recorded by decision receipts and never changes event membership.
+  rejected_boundary_context_enabled: true
+  # Broad multi-workflow collections remain fail-closed: single-role context
+  # cannot safely decide which neighboring workflow owns it without semantics.
+  rejected_boundary_context_max_formal_segments: 3
+  rejected_boundary_context_min_confidence: 0.30
+  rejected_boundary_context_strong_confidence: 0.65
+  rejected_boundary_context_max_gap_seconds: 10.0
+  rejected_boundary_context_max_extension_seconds: 180.0
+  rejected_boundary_context_weak_fringe_seconds: 10.5
+  rejected_boundary_context_evidence_overflow_seconds: 15.0
+  recalled_boundary_start_snap_seconds: 60.0
+  recalled_boundary_start_bridge_gap_seconds: 30.0
+  # If a verified recall boundary extends ahead of the conservative formal
+  # opener, restore only already-accepted events that raw segmentation clipped
+  # entirely. Evidence quarantined in its own raw segment remains excluded.
+  recalled_boundary_membership_recovery_enabled: true
+  recalled_boundary_membership_max_step_gap_seconds: 30.0
+  recalled_boundary_membership_single_role_min_confidence: 0.78
+  recalled_boundary_membership_action_types:
+    - hand_object_contact
+    - object_movement
+    - container_state_change
+    - device_panel_operation
+  # A strong single-role tail may extend clip time only when it shares the same
+  # recalled boundary and at least two manipulated objects with the preceding
+  # dual-view segment. Its events stay outside formal/key-material membership.
+  boundary_tail_context_max_gap_seconds: 30.0
+  boundary_tail_context_min_shared_objects: 2
   # A liquid-motion hypothesis may remain useful evidence, but only a complete
   # transfer tool is strong enough to establish the start of an experiment.
   # This prevents isolated pipette-tip/vessel motion from pulling the boundary
@@ -181,14 +218,50 @@ segmentation:
   min_event_observations: 3
   min_view_action_density_per_minute: 0.30
   single_view_accept_confidence: 0.78
+  # Container open/close is a directly observable state transition. It still
+  # requires aligned media and MLLM confirmation before semantic acceptance.
+  single_view_action_accept_confidence:
+    container_state_change: 0.70
+  # A short state transition can be clear in one view while the paired view
+  # emits only a lower-level movement label. Admit the hypothesis to mandatory
+  # semantic review when an aligned opposite-role candidate overlaps in time;
+  # this does not itself confirm the action or claim cross-view support.
+  semantic_review_cross_role_context_enabled: true
+  semantic_review_cross_role_context_min_confidence:
+    liquid_movement: 0.50
+    # The cap/open cue is deliberately only an admission threshold. A 0.38+
+    # single-view hypothesis still needs aligned opposite-role activity and
+    # the strict structured before/after semantic proof before publication.
+    container_state_change: 0.38
+    device_panel_operation: 0.45
+  semantic_review_cross_role_context_support_min_confidence: 0.55
   movement_threshold_norm: 0.025
+  # Wearable camera motion shifts every box together. Subtract the median
+  # translation of at least two stable lab anchors before declaring movement.
+  camera_motion_compensation_min_anchors: 2
+  # A balance or stirrer box moving because of camera jitter is not an
+  # experiment-opening physical action.
+  suppress_stationary_device_movement: true
   contact_distance_norm: 0.035
   liquid_motion_threshold: 6.0
+  liquid_transfer_max_sequence_gap_seconds: 20.0
+  liquid_transfer_min_contact_observations: 2
   require_both_roles: true
   # A physical action can be visually conclusive in only one role because of
   # occlusion. Delivery still requires aligned first/third-person media; this
   # switch only separates action acceptance from media-pair completeness.
   allow_strong_single_role_actions: true
+
+action_state_machine:
+  enabled: true
+  # Shadow mode preserves the frozen CV boundary/recall baseline. The receipt
+  # exposes incomplete or component-only actions without silently deleting
+  # candidates. A later dataset-specific acceptance task may enable a hard gate.
+  enforce_publish_gate: false
+  minimum_phase_completeness: 0.75
+  occlusion_grace_seconds: 1.50
+  release_hold_seconds: 0.30
+  fragment_identity_gap_seconds: 1.50
 
 continuity:
   # Temporal proximity alone is insufficient. Two carried container/sample
@@ -208,11 +281,37 @@ continuity:
   atomic_fragment_merge_max_gap_seconds: 20.0
   atomic_fragment_min_shared_objects: 2
   atomic_fragment_min_shared_object_identities: 1
+  # A motion-envelope fragment is deliberately small. Rich sequences are
+  # preserved as separate atomic experiments only when both sides repeat a
+  # core process action; a following handling/cleanup envelope remains part of
+  # the original atomic experiment.
+  atomic_fragment_max_events_per_side: 3
+  atomic_fragment_repeated_primary_actions:
+    - liquid_movement
+  # One wide coarse motion envelope may cover two complete adjacent workflows.
+  # Split only at a real inactivity gap when each side remains a rich dual-view
+  # sequence and both sides repeat a primary process action. This is stricter
+  # than the ordinary event-gap rule and does not split handling/cleanup tails.
+  # An 8.6-second pause occurs inside one independently reviewed repeated
+  # pipetting workflow in the six-view collection. Require a clearer
+  # inactivity boundary; the independently reviewed Z0001 atomic split remains
+  # 9.9 seconds and therefore still exceeds this threshold.
+  atomic_sequence_split_min_gap_seconds: 9.0
+  atomic_sequence_split_min_events_per_side: 4
   # A brief FP-only observation may sit between two corroborated fragments of
   # one recalled operation when the TP view is occluded. It may connect the
   # audit graph, but its events must never enter the formal segment.
   quarantined_atomic_bridge_max_step_gap_seconds: 60.0
   quarantined_atomic_bridge_max_span_seconds: 180.0
+  quarantined_context_bridge_min_events: 2
+  quarantined_context_bridge_min_shared_objects: 2
+  # A motion probe can split one long workflow into adjacent coarse windows.
+  # Permit continuity without a shared coarse-window id only when a dense,
+  # object-consistent rejected FP chain independently proves the bridge.
+  quarantined_cross_boundary_bridge_enabled: true
+  quarantined_cross_boundary_bridge_max_span_seconds: 90.0
+  quarantined_cross_boundary_bridge_max_step_gap_seconds: 15.0
+  quarantined_cross_boundary_bridge_min_events: 4
 
 key_materials:
   # Only collapse near-identical evidence. Repeated transfers, contacts and
@@ -221,6 +320,9 @@ key_materials:
   duplicate_interval_overlap_ratio: 0.50
   max_per_action_type_per_atomic_experiment: 12
   max_per_experiment_group: 50
+  # Strict model relabels may enter the final user-facing Key-Materials tree.
+  # Rejected, uncertain and invalid multi-class replies remain in audit/cache.
+  semantic_relabel_min_confidence: 0.70
 
 mllm:
   enabled: true
@@ -234,6 +336,15 @@ mllm:
   http2: false
   max_output_tokens: 4096
   max_images_per_event: 8
+  # Reuse the already-materialized short key clips. The model sees an aligned
+  # before/peak/after sequence for each selected role instead of one still.
+  use_key_clip_temporal_samples: true
+  temporal_samples_per_view: 3
+  # Build a bounded semantic audit queue for ontology-limited CV actions. The
+  # plan is written before any model call and cannot mutate CV acceptance.
+  candidate_review_max_events: 120
+  candidate_review_include_rejected: true
+  candidate_review_rejected_min_confidence: 0.75
   storyboard_pairs_per_group: 4
   group_workers: 4
   workers: 8
@@ -259,12 +370,20 @@ collection_ingest:
   persist_snapshot: true
   snapshot_path: null
 
+developer_tools:
+  # Internal model-development utility. It is deliberately absent from the
+  # end-user navigation and disabled in normal product deployments.
+  yolo_annotation_workspace_enabled: false
+
 storage:
   index_csv: Y:/experiment_record_index.csv
   device_registry_path: null
   archive_root: Y:/VisionCortexExperimentArchive
   local_input_root: D:/VisionCortexLocal/Input
   local_runtime_root: D:/VisionCortexLocal/Runtime
+  # Optional explicit badcase queue. When empty, the newest local
+  # Model-Audits/*/YOLO-Annotation-Queue.json is discovered automatically.
+  yolo_annotation_queue_path: null
   local_cache_root: D:/VisionCortexLocal/Cache
   local_staging_root: ./outputs
   sync_to_nas: false
@@ -279,10 +398,22 @@ validation:
   use_sidecar_annotations: true
   sidecar_name: video.annotation.json
   acceptance_baseline: null
+  # Optional reviewed action-event labels. The JSON must declare dataset
+  # applicability; labels are evaluation-only and never enter inference.
+  key_event_ground_truth: null
   boundary_match_iou: 0.50
   max_start_error_seconds: 8.0
   max_end_error_seconds: 8.0
+  # When dataset-scoped reviewed key-event truth is configured, precision and
+  # recall become formal quality gates. Datasets without such truth remain
+  # explicitly not evaluated rather than failing structurally.
+  key_event_recall_iou: 0.50
+  minimum_key_event_precision: 0.80
+  minimum_key_event_recall: 0.80
   # Physical action support may be visually clear in only one view. Formal
   # delivery still requires synchronized first/third media for every event.
   minimum_cross_view_event_rate: 0.0
+  # User-facing key frames must render only the objects participating in the
+  # accepted event. Missing receipts fail production quality acceptance.
+  require_participant_only_annotations: true
   fail_before_model_on_boundary_regression: true

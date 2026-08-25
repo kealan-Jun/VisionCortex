@@ -24,12 +24,35 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
     return result
 
 
+def _load_profile(path: Path, seen: set[Path] | None = None) -> dict[str, Any]:
+    resolved = path.resolve()
+    visited = set(seen or set())
+    if resolved in visited:
+        chain = " -> ".join(str(item) for item in [*visited, resolved])
+        raise ValueError(f"Configuration inheritance cycle detected: {chain}")
+    visited.add(resolved)
+    with resolved.open("r", encoding="utf-8") as handle:
+        payload = yaml.safe_load(handle) or {}
+    if not isinstance(payload, dict):
+        raise ValueError(f"Configuration must contain a mapping: {resolved}")
+    extends = payload.pop("extends", None)
+    if extends is None:
+        return payload
+    if not isinstance(extends, str) or not extends.strip():
+        raise ValueError(f"Configuration extends must be a non-empty relative path: {resolved}")
+    candidate = Path(extends)
+    if candidate.is_absolute():
+        raise ValueError(f"Configuration extends must be relative: {resolved}")
+    base_path = (resolved.parent / candidate).resolve()
+    if base_path.parent != resolved.parent:
+        raise ValueError(f"Configuration extends must stay in {resolved.parent}: {base_path}")
+    return _deep_merge(_load_profile(base_path, visited), payload)
+
+
 def load_config(path: Path | None = None) -> dict[str, Any]:
-    with DEFAULT_CONFIG.open("r", encoding="utf-8") as handle:
-        config = yaml.safe_load(handle) or {}
+    config = _load_profile(DEFAULT_CONFIG)
     if path and path.resolve() != DEFAULT_CONFIG.resolve():
-        with path.open("r", encoding="utf-8") as handle:
-            config = _deep_merge(config, yaml.safe_load(handle) or {})
+        config = _deep_merge(config, _load_profile(path))
     _apply_environment_overrides(config)
     return config
 
@@ -49,13 +72,18 @@ def _apply_environment_overrides(config: dict[str, Any]) -> None:
         if value is not None:
             perf[key] = int(value)
 
-    lanes = os.getenv("VISIONCORTEX_COARSE_DECODE_LANES")
-    if lanes:
+    def decode_lanes(name: str, key: str) -> None:
+        lanes = os.getenv(name)
+        if not lanes:
+            return
         parsed = [item.strip().lower() for item in lanes.split(",") if item.strip()]
         invalid = [item for item in parsed if item not in {"cuda", "cpu"}]
         if invalid:
             raise ValueError(f"Invalid decode lane(s): {invalid}; expected cuda or cpu")
-        perf["coarse_decode_lanes"] = parsed
+        perf[key] = parsed
+
+    decode_lanes("VISIONCORTEX_COARSE_DECODE_LANES", "coarse_decode_lanes")
+    decode_lanes("VISIONCORTEX_FINE_DECODE_LANES", "fine_decode_lanes")
 
     integer("VISIONCORTEX_SOURCE_WORKERS", "source_workers")
     integer("VISIONCORTEX_DECODE_QUEUE_DEPTH", "decode_queue_depth")
@@ -75,11 +103,28 @@ def _apply_environment_overrides(config: dict[str, Any]) -> None:
         "VISIONCORTEX_LOCAL_INPUT_ROOT": "local_input_root",
         "VISIONCORTEX_LOCAL_RUNTIME_ROOT": "local_runtime_root",
         "VISIONCORTEX_LOCAL_CACHE_ROOT": "local_cache_root",
+        "VISIONCORTEX_LOCAL_STAGING_ROOT": "local_staging_root",
     }
     for name, key in path_overrides.items():
         value = os.getenv(name)
         if value:
             storage[key] = value
+
+    output_root = os.getenv("VISIONCORTEX_OUTPUT_ROOT")
+    if output_root:
+        config.setdefault("project", {})["output_root"] = output_root
+
+    models = config.setdefault("models", {})
+    model_overrides = {
+        "VISIONCORTEX_FIRST_PERSON_MODEL": "first_person",
+        "VISIONCORTEX_THIRD_PERSON_MODEL": "third_person",
+        "VISIONCORTEX_FIRST_PERSON_ENGINE": "first_person_engine",
+        "VISIONCORTEX_THIRD_PERSON_ENGINE": "third_person_engine",
+    }
+    for name, key in model_overrides.items():
+        value = os.getenv(name)
+        if value:
+            models[key] = value
 
 
 def load_manifest(path: Path) -> RunManifest:

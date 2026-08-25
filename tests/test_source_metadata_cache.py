@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from labvision_evidence import storage
 from labvision_evidence.alignment import read_timestamp_csv_endpoints
 from labvision_evidence.video_io import _clock_metadata_video_info
@@ -46,6 +48,8 @@ def test_clock_preflight_and_alignment_share_csv_edge_read(tmp_path):
 
     assert info is not None
     assert info.frame_count == 300
+    assert info.fps == 30.0
+    assert info.duration_ms == pytest.approx(10_000.0, abs=0.01)
     assert len(endpoints) == 2
     assert diagnostics["edge_cache_misses"] == 1
     assert diagnostics["edge_cache_hits"] == 1
@@ -62,3 +66,23 @@ def test_stale_z_index_path_remaps_without_network_probe(tmp_path, monkeypatch):
     )
 
     assert str(remapped) == r"Y:\experiment\camera\segment.mp4"
+
+
+def test_stale_z_index_path_remaps_to_linux_share_root(tmp_path):
+    index = tmp_path / "nas" / "experiment_record_index.csv"
+    remapped = storage._resolve_nas_path(
+        r"Z:\experiment\camera\segment.mp4",
+        index,
+    )
+
+    assert remapped == index.parent / "experiment" / "camera" / "segment.mp4"
+
+
+def test_historical_realityloop_unc_maps_to_same_linux_share(tmp_path):
+    index = tmp_path / "nas" / "experiment_record_index.csv"
+    remapped = storage._resolve_nas_path(
+        r"\\REALITYLOOP\video_database\camera\2026-06-01\segment.mp4",
+        index,
+    )
+
+    assert remapped == index.parent / "camera" / "2026-06-01" / "segment.mp4"

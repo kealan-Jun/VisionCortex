@@ -1,10 +1,13 @@
 import json
+import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from labvision_evidence import storage, video_io
 from labvision_evidence.mllm import ArkAnalyzer
@@ -95,15 +98,37 @@ def test_encoder_runtime_probe_rejects_nvenc_driver_mismatch(monkeypatch):
     assert sum("-encoders" in command for command, _ in calls) == 2
 
 
+def test_encoder_runtime_probe_uses_supported_production_dimensions(monkeypatch):
+    commands = []
+
+    def fake_run(command, timeout=None):
+        commands.append((command, timeout))
+        if "-encoders" in command:
+            return SimpleNamespace(returncode=0, stdout=b"h264_nvenc", stderr=b"")
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    video_io._encoder_available.cache_clear()
+    video_io._encoder_usable.cache_clear()
+    monkeypatch.setattr(video_io, "_run", fake_run)
+
+    assert video_io._encoder_usable("h264_nvenc") is True
+    probe = next(command for command, _ in commands if "-f" in command and "lavfi" in command)
+    source = probe[probe.index("-i") + 1]
+    assert "s=640x360" in source
+
+
 def test_grid_video_retries_software_encoder_after_runtime_nvenc_failure(
     monkeypatch, tmp_path
 ):
     encoders = []
+    commands = []
+    timeouts = []
 
     monkeypatch.setattr(video_io, "select_video_encoder", lambda _preferred: "h264_nvenc")
 
     def fake_run(command, timeout=None):
-        del timeout
+        commands.append(command.copy())
+        timeouts.append(timeout)
         encoder = command[command.index("-c:v") + 1]
         encoders.append(encoder)
         return SimpleNamespace(
@@ -119,6 +144,81 @@ def test_grid_video_retries_software_encoder_after_runtime_nvenc_failure(
     )
 
     assert encoders == ["h264_nvenc", "libx264"]
+    assert "-cq" in commands[0] and commands[0][commands[0].index("-cq") + 1] == "26"
+    assert "-rc" in commands[0] and "-b:v" in commands[0]
+    assert "-cq" not in commands[1] and "-rc" not in commands[1]
+    assert commands[1][commands[1].index("-crf") + 1] == "23"
+    assert all(timeout is not None and 0.0 < timeout <= 120.0 for timeout in timeouts)
+    filter_graph = commands[0][commands[0].index("-filter_complex") + 1]
+    assert filter_graph.count("fps=30") == 2
+    assert filter_graph.count("settb=AVTB") == 2
+    assert filter_graph.count("setpts=N/(30*TB)") == 2
+    assert "shortest=1" in filter_graph
+    assert commands[0][commands[0].index("-vsync") + 1] == "cfr"
+
+
+def test_grid_video_timeout_fails_closed(monkeypatch, tmp_path):
+    monkeypatch.setattr(video_io, "select_video_encoder", lambda _preferred: "libx264")
+
+    def fake_run(command, timeout=None):
+        raise subprocess.TimeoutExpired(command, timeout)
+
+    monkeypatch.setattr(video_io, "_run", fake_run)
+
+    with pytest.raises(RuntimeError, match="timed out after 0.050 seconds"):
+        video_io.create_grid_video(
+            [("first", tmp_path / "first.mp4"), ("third", tmp_path / "third.mp4")],
+            tmp_path / "aligned.mp4",
+            preferred_encoder="libx264",
+            timeout_seconds=0.05,
+        )
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is optional")
+def test_grid_video_bounds_near_matching_fractional_frame_rates(tmp_path):
+    first = tmp_path / "first-29.97fps.mp4"
+    third = tmp_path / "third-30.04fps.mp4"
+    destination = tmp_path / "aligned.mp4"
+    for path, rate, duration in (
+        (first, "30000/1001", "1.034"),
+        (third, "751/25", "1.032"),
+    ):
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                f"testsrc=size=96x64:rate={rate}",
+                "-t",
+                duration,
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                str(path),
+            ],
+            check=True,
+            timeout=10.0,
+        )
+
+    started = time.monotonic()
+    video_io.create_grid_video(
+        [("first", first), ("third", third)],
+        destination,
+        preferred_encoder="libx264",
+        timeout_seconds=10.0,
+    )
+
+    rendered = video_io.probe_video(destination)
+    assert time.monotonic() - started < 10.0
+    assert rendered.duration_ms == pytest.approx(1033.0, abs=80.0)
+    assert rendered.fps == pytest.approx(30.0, abs=0.05)
+    assert rendered.frame_count <= 32
 
 
 def test_frame_reader_reuses_decoder_for_same_segment(monkeypatch):

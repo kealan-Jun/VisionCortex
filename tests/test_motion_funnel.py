@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from labvision_evidence import video_io
 from labvision_evidence.actions import fuse_motion_probe_candidates
@@ -111,6 +112,84 @@ def test_parallel_segment_probe_preserves_virtual_order(monkeypatch):
     ]
     assert [segment.virtual_start_ms for segment in info.segments] == [0.0, 2_000.0]
     assert info.duration_ms == 3_000.0
+
+
+def test_parallel_probe_never_uses_wall_clock_pause_as_media_duration(monkeypatch):
+    """A recorder pause is a virtual gap, not decodable MP4 tail time."""
+
+    clock = Path("segment-frames.csv")
+    view = ViewInput(
+        view_id="fp",
+        role=ViewRole.FIRST_PERSON,
+        segments=[VideoSegmentInput(video=Path("segment.mp4"), timestamps_csv=clock)],
+    )
+    media = VideoInfo(
+        path=Path("segment.mp4"),
+        duration_ms=332_800.0,
+        fps=30.0,
+        width=1280,
+        height=800,
+        frame_count=9_984,
+        size_bytes=100,
+    )
+    recorder_clock = media.model_copy(update={"duration_ms": 410_402.117})
+
+    monkeypatch.setattr(
+        "labvision_evidence.video_io.probe_video", lambda _path: media.model_copy()
+    )
+    monkeypatch.setattr(
+        "labvision_evidence.video_io._clock_metadata_video_info",
+        lambda _video, _clock: recorder_clock.model_copy(),
+    )
+
+    info = probe_views([view], workers=1, prefer_clock_metadata=True)["fp"]
+
+    assert info.duration_ms == 332_800.0
+    assert info.segments[0].duration_ms == 332_800.0
+    assert info.segments[0].virtual_end_ms == 332_800.0
+    assert info.segments[0].source_clock_duration_ms == pytest.approx(410_402.117)
+
+
+def test_recorder_sidecars_avoid_remote_mp4_probe(tmp_path, monkeypatch):
+    video = tmp_path / "recording_rgb.mp4"
+    video.write_bytes(b"not-needed-by-fast-path")
+    clock = tmp_path / "recording_frames.csv"
+    clock.write_text(
+        "rgb_video_frame_index,rgb_recorded,width,height,global_timestamp_us,rgb_actual_fps\n"
+        "0,1,1280,800,1000000,30\n"
+        "9983,1,1280,800,411368784,30\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "recording_meta.json").write_text(
+        json.dumps(
+            {
+                "rgb_record_fps": 30,
+                "rgb_width": 1280,
+                "rgb_height": 800,
+            }
+        ),
+        encoding="utf-8",
+    )
+    view = ViewInput(
+        view_id="fp",
+        role=ViewRole.FIRST_PERSON,
+        segments=[VideoSegmentInput(video=video, timestamps_csv=clock)],
+    )
+
+    def forbidden_probe(_path):
+        raise AssertionError("recorder sidecars should avoid remote MP4 probing")
+
+    monkeypatch.setattr("labvision_evidence.video_io.probe_video", forbidden_probe)
+
+    info = probe_views([view], workers=1, prefer_clock_metadata=True)["fp"]
+
+    assert info.duration_ms == pytest.approx(332_800.0)
+    assert info.frame_count == 9_984
+    assert info.segments[0].source_clock_duration_ms > info.duration_ms
+    assert (
+        info.segments[0].media_timing_source
+        == "recorder_frame_ledger_plus_meta_record_fps"
+    )
 
 
 def test_absolute_clock_fit_does_not_require_simultaneous_segment_boundaries():
@@ -822,6 +901,8 @@ def test_ffmpeg_cuda_scale_resizes_before_host_download(monkeypatch, tmp_path):
     assert command[command.index("-hwaccel_output_format") + 1] == "cuda"
     filter_graph = command[command.index("-vf") + 1]
     assert "scale_cuda=640:360" in filter_graph
+    assert "scale_cuda=640:360:format" not in filter_graph
+    assert "interp_algo=bicubic" in filter_graph
     assert "hwdownload" in filter_graph
     assert filter_graph.index("scale_cuda") < filter_graph.index("hwdownload")
 

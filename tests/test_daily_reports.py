@@ -4,7 +4,168 @@ from pathlib import Path
 import pytest
 
 from labvision_evidence.daily_reports import build_daily_report, evaluate_daily_report
-from labvision_evidence.schemas import RunSummary
+from labvision_evidence.schemas import RunSummary, ViewRole
+
+
+def _summary_with_post_curation_rejection() -> RunSummary:
+    base_event = {
+        "action_type": "hand_object_contact",
+        "global_start_ms": 1000,
+        "global_end_ms": 2000,
+        "key_global_ms": 1500,
+        "objects": ["gloved_hand", "paper"],
+        "confidence": 0.9,
+        "accepted": True,
+        "audit_reason": "dual-view evidence",
+        "supporting_views": ["first", "third"],
+        "supporting_roles": ["first_person", "third_person"],
+        "candidates": [],
+        "key_frames": {"aligned_first_third": "Key-Materials/accepted.jpg"},
+        "key_clips": {"aligned_first_third": "Key-Materials/accepted.mp4"},
+        "model_understanding": {"status": "completed"},
+    }
+    return RunSummary.model_validate(
+        {
+            "experiment_id": "post-curation-filter-test",
+            "created_at": "2026-08-24T00:00:00+00:00",
+            "views": [
+                {"view_id": "first", "role": "first_person", "video": "/tmp/first.mp4"},
+                {"view_id": "third", "role": "third_person", "video": "/tmp/third.mp4"},
+            ],
+            "alignments": [
+                {
+                    "view_id": "first",
+                    "reference_view_id": "first",
+                    "state": "aligned",
+                    "confidence": 1.0,
+                },
+                {
+                    "view_id": "third",
+                    "reference_view_id": "first",
+                    "state": "aligned",
+                    "confidence": 1.0,
+                },
+            ],
+            "events": [
+                {**base_event, "event_id": "EVT-ACCEPTED"},
+                {
+                    **base_event,
+                    "event_id": "EVT-POST-CURATION-REJECTED",
+                    "global_start_ms": 3000,
+                    "global_end_ms": 4000,
+                    "key_global_ms": 3500,
+                },
+            ],
+            "segments": [],
+            "experiment_groups": [
+                {
+                    "group_id": "GROUP-001",
+                    "continuity_type": "continuous",
+                    "atomic_experiment_ids": ["SEG-001"],
+                    "global_start_ms": 0,
+                    "global_end_ms": 5000,
+                    "participating_views": ["first", "third"],
+                    "first_person_view": "first",
+                    "third_person_view": "third",
+                    "continuity_reason": "unit test",
+                    "key_event_ids": ["EVT-ACCEPTED"],
+                    "model_understanding": {"status": "completed", "steps": []},
+                }
+            ],
+            "physical_change_log": [
+                {
+                    "change_id": "CHANGE-ACCEPTED",
+                    "event_id": "EVT-ACCEPTED",
+                    "global_ms": 1500,
+                    "change_type": "contact_started",
+                    "object_names": ["gloved_hand", "paper"],
+                    "supporting_views": ["first", "third"],
+                    "confidence": 0.9,
+                },
+                {
+                    "change_id": "CHANGE-POST-CURATION-REJECTED",
+                    "event_id": "EVT-POST-CURATION-REJECTED",
+                    "global_ms": 3500,
+                    "change_type": "contact_started",
+                    "object_names": ["gloved_hand", "paper"],
+                    "supporting_views": ["first", "third"],
+                    "confidence": 0.9,
+                },
+            ],
+        }
+    )
+
+
+def test_daily_report_excludes_post_curation_physical_changes(default_config):
+    summary = _summary_with_post_curation_rejection()
+
+    report = build_daily_report(summary, {}, {"passed": True, "checks": []}, default_config)
+    evaluation = evaluate_daily_report(report, summary)
+
+    assert evaluation["passed"] is True
+    assert report["overview"]["key_event_count"] == 1
+    assert report["overview"]["physical_change_count"] == 1
+    assert report["experiment_timeline"][0]["physical_change_count"] == 1
+    assert [item["event_id"] for item in report["physical_change_log"]] == [
+        "EVT-ACCEPTED"
+    ]
+
+
+def test_daily_report_eval_fails_closed_on_rejected_physical_change(default_config):
+    summary = _summary_with_post_curation_rejection()
+    report = build_daily_report(summary, {}, {"passed": True, "checks": []}, default_config)
+    report["physical_change_log"].append(
+        summary.physical_change_log[1].model_dump(mode="json")
+    )
+    report["overview"]["physical_change_count"] = 2
+    report["experiment_timeline"][0]["physical_change_count"] = 2
+
+    evaluation = evaluate_daily_report(report, summary)
+
+    assert evaluation["passed"] is False
+    failed_checks = {
+        item["check"] for item in evaluation["checks"] if not item["passed"]
+    }
+    assert "accepted_physical_change_ids_match" in failed_checks
+
+
+def test_daily_report_carries_precomputed_runtime_audit(default_config):
+    summary = _summary_with_post_curation_rejection()
+    runtime_audit = {
+        "source": {"source_copy_bytes": 0},
+        "mllm": {"call_count": 3, "completed_count": 3},
+    }
+
+    report = build_daily_report(
+        summary,
+        {"runtime_audit": runtime_audit},
+        {"passed": True, "checks": []},
+        default_config,
+    )
+
+    assert report["performance"]["runtime_audit"] == runtime_audit
+
+
+def test_daily_report_shows_aligned_visual_without_inflating_direct_role_support(
+    default_config,
+):
+    summary = _summary_with_post_curation_rejection()
+    event = summary.events[0]
+    event.supporting_views = ["third"]
+    event.supporting_roles = [ViewRole.THIRD_PERSON]
+
+    report = build_daily_report(summary, {}, {"passed": True, "checks": []}, default_config)
+    evaluation = evaluate_daily_report(report, summary)
+    visual = report["experiment_timeline"][0]["representative_visual"]
+
+    assert evaluation["passed"] is True
+    assert visual is not None
+    assert visual["visual_roles"] == ["first_person", "third_person"]
+    assert visual["supporting_roles"] == ["third_person"]
+    assert visual["support_scope"] == (
+        "single_role_direct_with_aligned_cross_role_context"
+    )
+    assert visual["claim_class"] == "supported_model_understanding"
 
 
 def test_daily_report_reconciles_local_validation_package(default_config):

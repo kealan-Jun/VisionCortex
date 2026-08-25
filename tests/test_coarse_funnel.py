@@ -70,6 +70,47 @@ def test_coarse_refinement_tightens_supported_windows_without_erasing_recall(def
     assert report["unmatched_coarse_candidate_count"] == 1
 
 
+def test_coarse_refinement_quarantines_objectless_motion_without_yolo_support(
+    default_config,
+):
+    objectless = _candidate("motion-no-object", 100_000, 120_000)
+    objectless.objects = []
+    object_backed = _candidate("motion-with-object", 800_000, 900_000)
+
+    refined, report = refine_motion_candidates_with_coarse(
+        [objectless, object_backed], [], default_config
+    )
+
+    assert [item.candidate_id for item in refined] == ["motion-with-object"]
+    assert report["quarantined_motion_count"] == 1
+    assert report["retained_motion_count"] == 1
+    receipt = next(
+        item
+        for item in report["decisions"]
+        if item["motion_candidate_id"] == "motion-no-object"
+    )
+    assert receipt["decision"] == (
+        "quarantined_objectless_motion_without_coarse_yolo"
+    )
+
+
+def test_coarse_refinement_retains_sustained_objectless_motion_for_fine_recall(
+    default_config,
+):
+    sustained = _candidate("motion-sustained", 100_000, 260_000)
+    sustained.objects = []
+
+    refined, report = refine_motion_candidates_with_coarse(
+        [sustained], [], default_config
+    )
+
+    assert [item.candidate_id for item in refined] == ["motion-sustained"]
+    assert report["quarantined_motion_count"] == 0
+    receipt = report["decisions"][0]
+    assert receipt["decision"] == "retained_motion_recall_guard"
+    assert "bounded fine-scan recall guard" in receipt["reason"]
+
+
 def test_sentinel_coarse_scan_keeps_all_views_for_fine_quality_fallback(default_config):
     views = [
         ViewInput(view_id="fp", role=ViewRole.FIRST_PERSON, video=Path("fp.mp4")),
@@ -91,6 +132,26 @@ def test_sentinel_coarse_scan_keeps_all_views_for_fine_quality_fallback(default_
     )
 
     assert [view.view_id for view in coarse_views] == ["fp", "tp1"]
+    assert {view.view_id for view in selected} == {"fp", "tp1", "tp2"}
+    assert report["tp1"]["selected"] is True
+    assert report["tp2"]["selected"] is True
+
+
+def test_dynamic_fine_view_minimum_selects_every_supplied_third_view(default_config):
+    views = [
+        ViewInput(view_id="fp", role=ViewRole.FIRST_PERSON, video=Path("fp.mp4")),
+        ViewInput(view_id="tp1", role=ViewRole.THIRD_PERSON, video=Path("tp1.mp4")),
+        ViewInput(view_id="tp2", role=ViewRole.THIRD_PERSON, video=Path("tp2.mp4")),
+    ]
+    default_config["performance"]["fine_min_third_person_views"] = None
+
+    selected, report = select_fine_scan_views(
+        views,
+        detection_paths={},
+        coarse_candidates=[_candidate("motion", 0, 60_000)],
+        config=default_config,
+    )
+
     assert {view.view_id for view in selected} == {"fp", "tp1", "tp2"}
     assert report["tp1"]["selected"] is True
     assert report["tp2"]["selected"] is True

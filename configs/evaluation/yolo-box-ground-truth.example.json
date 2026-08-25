@@ -1,0 +1,28 @@
+{
+  "schema_version": "visioncortex-yolo-box-ground-truth/1.0.0",
+  "dataset_id": "replace-me",
+  "classes": ["bottle_cap", "gloved_hand", "paper"],
+  "images": [
+    {
+      "image_id": "EVT-000578-third-person-100",
+      "event_id": "EVT-000578",
+      "role": "third_person",
+      "frame_index": 100,
+      "file_name": "frame.jpg",
+      "width": 1920,
+      "height": 1080,
+      "split": "test"
+    }
+  ],
+  "annotations": [
+    {
+      "annotation_id": "ann-000001",
+      "image_id": "EVT-000578-third-person-100",
+      "class_name": "bottle_cap",
+      "xyxy": [910.0, 520.0, 970.0, 590.0],
+      "occlusion": "partial",
+      "visibility": "direct",
+      "review_status": "double_checked"
+    }
+  ]
+}

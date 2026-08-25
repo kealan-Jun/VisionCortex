@@ -4,7 +4,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from labvision_evidence import api
+from labvision_evidence import api, indexing
 from labvision_evidence.archive import _artifact_json
 from labvision_evidence.decisions import decision_receipt
 from labvision_evidence.indexing import (
@@ -227,6 +227,78 @@ def test_build_archive_index_preserves_one_hop_artifact_and_source_references(tm
     assert rebuilt["counts"]["artifact_hashes_computed"] == 0
 
 
+def test_archive_sqlite_is_built_outside_archive_before_publish(tmp_path, monkeypatch):
+    archive_root = tmp_path / "Archive-Local-Scratch"
+    connected_paths = []
+    original_connect = indexing.sqlite3.connect
+
+    def record_connect(path, *args, **kwargs):
+        connected_paths.append(Path(path).resolve())
+        return original_connect(path, *args, **kwargs)
+
+    monkeypatch.setattr(indexing.sqlite3, "connect", record_connect)
+
+    _indexed_archive(archive_root)
+
+    assert len(connected_paths) == 1
+    assert archive_root.resolve() not in connected_paths[0].parents
+    assert (archive_root / "JSON-Config-Files" / INDEX_DB_NAME).is_file()
+
+
+def test_archive_index_registers_key_material_recall_receipt(tmp_path):
+    root = tmp_path / "Archive-Recall"
+    receipt = root / "JSON-Config-Files" / "key_material_recall_eval.json"
+    receipt.parent.mkdir(parents=True)
+    receipt.write_text(
+        json.dumps({"status": "not_evaluated", "evaluated": False}),
+        encoding="utf-8",
+    )
+
+    _, _, _, _, manifest = _indexed_archive(root)
+
+    assert manifest["files"]["key_material_recall_eval"] == (
+        "key_material_recall_eval.json"
+    )
+    integrity = manifest["integrity"]["key_material_recall_eval.json"]
+    assert integrity["size_bytes"] == receipt.stat().st_size
+    assert integrity["sha256"] == hashlib.sha256(receipt.read_bytes()).hexdigest()
+
+
+def test_archive_detail_exposes_key_material_recall_receipt(
+    monkeypatch, tmp_path
+):
+    archive_root = tmp_path / "archives"
+    root = archive_root / "Archive-Recall-Web"
+    _indexed_archive(root)
+    receipt = root / "JSON-Config-Files" / "key_material_recall_eval.json"
+    receipt.write_text(
+        json.dumps(
+            {
+                "status": "evaluated",
+                "evaluated": True,
+                "threshold_results": [
+                    {
+                        "temporal_iou_threshold": 0.5,
+                        "precision": 0.5,
+                        "recall": 0.4,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(api, "_archive_root", lambda settings=None: archive_root)
+
+    payload = TestClient(api.app).get(
+        f"/api/archives/{root.name}"
+    ).json()
+
+    assert payload["key_material_recall_eval"]["evaluated"] is True
+    assert payload["links"]["key_material_recall_eval"].endswith(
+        "key_material_recall_eval.json"
+    )
+
+
 def test_search_archive_index_filters_full_text_and_returns_material_hashes(tmp_path):
     root = tmp_path / "Archive-Search"
     _, _, _, _, _ = _indexed_archive(root, event_count=2)
@@ -388,3 +460,78 @@ def test_key_event_api_paginates_and_resolves_event_and_evidence(monkeypatch, tm
     )
     assert evidence.status_code == 200
     assert evidence.json()["event_url"].startswith("/api/key-events/")
+
+
+def test_staging_run_web_endpoints_are_indexable_and_fail_closed(
+    monkeypatch, tmp_path
+):
+    archive_root = tmp_path / "archives"
+    run_id = "staging-20260822-000001-abc123"
+    root = archive_root / ".VisionCortex-Run-Staging" / "Audit-Campaign" / run_id
+    archive_id, events, groups, _, _ = _indexed_archive(root, event_count=2)
+    json_root = root / "JSON-Config-Files"
+    (json_root / "pipeline_status.json").write_text(
+        json.dumps({"stage": "completed", "progress": 1.0}),
+        encoding="utf-8",
+    )
+    retained = root / "Web-Retention" / "report.html"
+    retained.parent.mkdir(parents=True)
+    retained.write_text("<h1>staging report</h1>", encoding="utf-8")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("must not be served", encoding="utf-8")
+    (root / "outside-link.txt").symlink_to(outside)
+    monkeypatch.setattr(
+        api,
+        "_settings",
+        lambda: {"storage": {"archive_root": str(archive_root)}},
+    )
+    client = TestClient(api.app)
+
+    first_page = client.get(
+        f"/api/staging-runs/{run_id}/key-events",
+        params={"q": "吸取液体", "limit": 1},
+    )
+    assert first_page.status_code == 200
+    first_payload = first_page.json()
+    assert first_payload["count"] == 1
+    assert first_payload["next_cursor"]
+    assert first_payload["formal_archive_promotion"] is False
+    assert first_payload["items"][0]["artifact_references"][0]["url"].startswith(
+        "/api/staging-file?"
+    )
+
+    second_page = client.get(
+        f"/api/staging-runs/{run_id}/key-events",
+        params={
+            "q": "吸取液体",
+            "limit": 1,
+            "cursor": first_payload["next_cursor"],
+        },
+    )
+    assert second_page.status_code == 200
+    assert (
+        second_page.json()["items"][0]["event_uid"]
+        != first_payload["items"][0]["event_uid"]
+    )
+
+    event_uid = stable_event_uid(archive_id, groups[0].group_id, events[0].event_id)
+    detail = client.get(
+        f"/api/staging-runs/{run_id}/key-events/{event_uid}"
+    )
+    assert detail.status_code == 200
+    assert detail.json()["event_uid"] == event_uid
+
+    report = client.get(
+        "/api/staging-file",
+        params={"run_id": run_id, "path": "Web-Retention/report.html"},
+    )
+    assert report.status_code == 200
+    assert "staging report" in report.text
+    assert client.get(
+        "/api/staging-file",
+        params={"run_id": run_id, "path": "../../outside.txt"},
+    ).status_code == 404
+    assert client.get(
+        "/api/staging-file",
+        params={"run_id": run_id, "path": "outside-link.txt"},
+    ).status_code == 404

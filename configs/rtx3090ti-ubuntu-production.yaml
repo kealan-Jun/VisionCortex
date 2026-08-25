@@ -1,0 +1,354 @@
+extends: ./rtx4060-laptop-production.yaml
+
+# Dedicated profile for the actual Ubuntu workstation:
+# i7-13700KF, 32 GiB RAM, GeForce RTX 3090 Ti 24 GiB.
+project:
+  # nas_direct replaces this with the run-specific NAS staging directory. Keep
+  # the fallback on the same NAS staging filesystem as the formal archive.
+  output_root: /home/x1/桌面/nas/VisionCortexExperimentArchive/.VisionCortex-Run-Staging
+
+models:
+  first_person: ./models/first_person/best.pt
+  third_person: ./models/third_person/best.pt
+  first_person_engine: /srv/sentinel-data/VisionCortex3090Ti/Engines/first_person.engine
+  third_person_engine: /srv/sentinel-data/VisionCortex3090Ti/Engines/third_person.engine
+  open_vocabulary_key_frame:
+    enabled: true
+    model_path: /srv/sentinel-data/VisionCortex3090Ti/Engines/yolov8s-worldv2.pt
+    model_sha256: 9b2c17ab6124a913e9b3a5c170617920d91b0f01111a8479da69f00e2cf27792
+    model_download_url: https://github.com/ultralytics/assets/releases/download/v8.4.0/yolov8s-worldv2.pt
+    clip_model_path: /home/x1/.cache/clip/ViT-B-32.pt
+    clip_model_sha256: 40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af
+    clip_model_download_url: https://openaipublic.azureedge.net/clip/models/40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af/ViT-B-32.pt
+    device: 0
+    image_size: 1280
+    confidence: 0.03
+    iou: 0.50
+    max_actor_object_gap_norm: 0.02
+    manipulated_object_max_actor_gap_norm: 0.08
+    pipette_minimum_aspect_ratio: 1.70
+    pipette_center_must_overlap_actor: true
+    pipette_maximum_actor_iou: 0.65
+    minimum_manipulated_object_confidence:
+      balance: 0.15
+      pipette: 0.10
+      spearhead: 0.10
+      tube: 0.12
+    state_container_max_actor_gap_norm: 0.08
+    state_container_max_closure_gap_norm: 0.03
+    closure_max_actor_gap_norm: 0.01
+    closure_minimum_confidence: 0.12
+    grounded_actor_maximum_box_area_norm: 0.15
+    grounded_actor_confidence_ratio: 0.75
+    grounding_dino_fallback:
+      enabled: true
+      model_path: /srv/sentinel-data/VisionCortex3090Ti/Engines/grounding-dino-base
+      model_repository: IDEA-Research/grounding-dino-base
+      model_revision: 12bdfa3120f3e7ec7b434d90674b3396eccf88eb
+      model_sha256: 5548f844c928c4b6f411fa8cbcc2bfa8dbbba437cb1d513975519f93c2a9ed21
+      device: cuda
+      box_threshold: 0.12
+      text_threshold: 0.12
+      maximum_box_area_norm: 0.50
+      maximum_class_box_area_norm:
+        balance: 0.40
+        pipette: 0.20
+        spearhead: 0.08
+        tube: 0.05
+        tube_rack: 0.15
+        paper: 0.12
+        bottle_cap: 0.08
+        tube_cap: 0.05
+      pipette_minimum_aspect_ratio: 1.40
+      temporal_rescue_enabled: true
+      temporal_rescue_max_actor_gap_norm: 0.02
+      temporal_rescue_sample_interval_ms: 500
+      temporal_rescue_max_frames_per_view: 12
+      prompt_map:
+        blue gloved hand: gloved_hand
+        digital weighing scale: balance
+        white handheld electronic pipette: pipette
+        pipette tip: spearhead
+        orange cap centrifuge tube: tube
+        centrifuge tube: tube
+        tube rack: tube_rack
+        white weighing paper: paper
+        laboratory beaker: beaker
+        glass reagent bottle: reagent_bottle
+        brown reagent bottle: reagent_bottle
+        brown bottle: reagent_bottle
+        sample bottle: sample_bottle
+        transparent laboratory container: container
+        closed bottle: container
+        capped bottle: container
+        red bottle cap: bottle_cap
+        blue bottle cap: bottle_cap
+        bottle cap: bottle_cap
+        orange centrifuge tube cap: tube_cap
+        centrifuge tube cap: tube_cap
+    opening_container_prompts:
+      - open glass jar
+    closing_container_prompts:
+      - closed bottle
+      - capped bottle
+    prompt_map:
+      gloved hand: gloved_hand
+      bare hand: hand
+      white handheld electronic pipette: pipette
+      electronic pipette in gloved hand: pipette
+      automatic micropipette: pipette
+      pipette tip held in gloved hand: spearhead
+      pipette tip: spearhead
+      weighing paper held in gloved hand: paper
+      white weighing paper: paper
+      centrifuge tube held in gloved hand: tube
+      centrifuge tube: tube
+      centrifuge tube rack held by hand: tube_rack
+      laboratory balance touched by hand: balance
+      laboratory beaker held by hand: beaker
+      glass reagent bottle held by hand: reagent_bottle
+      brown reagent bottle held by hand: reagent_bottle
+      sample bottle held by hand: sample_bottle
+      transparent laboratory container held by hand: container
+      glass jar: container
+      open glass jar: container
+      open vial: container
+      closed bottle: container
+      capped bottle: container
+      glass vial: container
+      laboratory vial: container
+      small bottle: container
+      red bottle cap: bottle_cap
+      bottle cap: bottle_cap
+
+  # SAM2.1 runs only after Ark has adjudicated an event and the final
+  # participant-only boxes have been selected. It propagates those boxes over
+  # a bounded sample of the already-derived key clip, never over the original
+  # multi-hour recording. The mask receipt can tighten a final display box and
+  # audit temporal continuity, but it cannot confirm an action or liquid state.
+  temporal_participant_segmentation:
+    enabled: true
+    required_for_final_key_material: true
+    backend: SAM2VideoPredictor
+    model: sam2.1_hiera_base_plus
+    model_config: configs/sam2.1/sam2.1_hiera_b+.yaml
+    checkpoint_path: /srv/sentinel-data/VisionCortex3090Ti/Engines/sam2.1_hiera_base_plus.pt
+    checkpoint_sha256: a2345aede8715ab1d5d31b4a509fb160c5a4af1970f199d9054ccfb746c004c5
+    checkpoint_download_url: https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_base_plus.pt
+    source_revision: 2b90b9f5ceec907a1c18123530e92e794ad901a4
+    device: cuda
+    # Full torch.compile has a large first-run cost and is counterproductive
+    # for nine-frame evidence windows. Keep eager BF16 propagation cached.
+    vos_optimized: false
+    # The optional SAM2 CUDA connected-components extension is deliberately not
+    # built because the host nvcc and PyTorch CUDA minor versions differ.
+    apply_postprocessing: false
+    offload_video_to_cpu: true
+    offload_state_to_cpu: false
+    maximum_frames_per_clip: 9
+    jpeg_quality: 95
+    minimum_presence_ratio: 0.34
+    minimum_presence_ratio_by_action:
+      liquid_movement: 0.55
+      container_state_change: 0.45
+      pipette_transfer_operation: 0.45
+      object_movement: 0.34
+      hand_object_contact: 0.34
+      device_panel_operation: 0.34
+    minimum_seed_box_iou: 0.35
+    maximum_seed_area_expansion_ratio: 1.35
+    enabled_actions:
+      - hand_object_contact
+      - object_movement
+      - liquid_movement
+      - container_state_change
+      - device_panel_operation
+      - pipette_transfer_operation
+
+performance:
+  profile: rtx3090ti-24gb-ubuntu-dynamic-multiview
+  tensor_rt: required
+  # Short recordings can contain one decisive action anywhere in the clip.
+  # Their entire indexed timeline is cheap enough to scan at the normal 10 FPS
+  # on every eligible view, so the 0.1 FPS motion sentinel is never their sole
+  # recall path. Multi-hour sources retain the progressive full-timeline
+  # funnel and are certified separately on held-out action windows.
+  auto_exhaustive_short_timeline_enabled: true
+  auto_exhaustive_short_timeline_seconds: 600
+  # Ultralytics expands a dynamic 640 profile up to 1920x1920 while building.
+  # On the actual 3090 Ti, a max build batch of 16 exhausts builder memory in
+  # the attention block. Keep the runtime request at 16, but cap the engine's
+  # dynamic profile at four; the scanner reads the engine metadata and splits
+  # larger requested batches safely. Tune only after a bounded acceptance run.
+  engine_batch_size: 4
+  batch_size: 16
+  coarse_batch_size: 16
+  motion_probe_batch_size: 16
+  fine_batch_size: 16
+  fine_active_decode_slots: 8
+  fine_first_person_decode_workers: 4
+  fine_third_person_decode_workers: 6
+  fine_decode_prefetch_frames: 48
+  # The 2026-08-24 six-view cold A/B showed that splitting at 30 seconds
+  # increased exact decode sessions from 59 to 78 and candidate_fine wall time
+  # from 731.499 s to 872.931 s. Keep one persistent physical-segment session;
+  # the configurable split remains available for other storage topologies.
+  fine_persistent_session_max_gap_seconds: null
+  fine_supplemental_view_batch_size: 3
+  motion_probe_indexed_segment_workers: 4
+  motion_probe_sequential_segment_workers: 6
+  # One CUDA lane expands to the live view count. Camera count remains driven
+  # by the NAS index rather than by this hardware profile.
+  coarse_decode_lanes: [cuda]
+  fine_decode_lanes: [cuda]
+  # CUDA decode remains enabled, but GPU resize is deliberately disabled.
+  # Two cold A0004 audits (nearest and bicubic) reduced wall time yet shifted
+  # the reviewed start boundary by +13.6 s, beyond the 8 s quality contract.
+  # CPU scale reproduces the accepted detector input distribution and avoids
+  # the previously attempted incompatible scale_cuda syntax/fallback cycle.
+  ffmpeg_cuda_scale: false
+  source_workers: 12
+  decode_queue_depth: 64
+  cpu_decode_threads: 12
+  yolo_inference_workers: 2
+  materialization_workers: 3
+  # Exact derived MP4s are immutable and content-addressed beneath the existing
+  # NAS cache root. Cold audits populate the cache without reading it; their
+  # explicitly paired reuse runs verify hashes before materialization.
+  derived_media_cache_enabled: true
+
+  io_workers: 6
+  max_gpu_memory_fraction: 0.90
+  concurrent_role_scanners: true
+  preflight_probe_workers: 16
+  source_stat_workers: 32
+  synchronized_segment_waves: false
+  fine_min_third_person_views: null
+
+archive:
+  # Empty action categories remain represented in the central JSON coverage
+  # index, but do not appear as misleading media folders containing JSON only.
+  include_empty_action_categories: false
+
+mllm:
+  # Common actions retain both views in three aligned temporal phases while
+  # halving image count. Liquid/container/panel evidence keeps the inherited
+  # six high-detail per-view samples because small state changes limit quality.
+  compact_aligned_temporal_actions:
+    - hand_object_contact
+    - object_movement
+  # Liquid is the only class where sparse review can miss a complete source,
+  # transport, target and plunger sequence. Densely sample the primary view and
+  # retain three context frames from the paired view; all frames come from the
+  # already materialized event clip and never rescan or copy source video.
+  temporal_samples_per_view_by_action:
+    liquid_movement: 15
+  liquid_primary_samples: 15
+  liquid_context_samples: 3
+  max_images_per_event_by_action:
+    liquid_movement: 18
+
+segmentation:
+  # The exhaustive short-timeline path sees accepted preparation evidence
+  # outside sparse motion-sentinel windows.  A publication-primary single-role
+  # chain may extend the boundary only when it reaches the first dual-role
+  # opener through <=10 s steps; semantic-provisional and component-only events
+  # remain non-bounding.
+  accepted_leading_context_enabled: true
+  accepted_leading_context_max_gap_seconds: 10.0
+  accepted_leading_context_max_extension_seconds: 90.0
+  # A same-time opposite-role activity hint is recall evidence, not enough to
+  # create a formal experiment.  Small state/liquid/panel hypotheses require a
+  # separately completed cross-view movement anchor before Ark review.
+  semantic_review_requires_dual_role_movement_anchor: true
+  # This is only the CV-to-semantic-review recall gate.  A liquid event still
+  # requires the independent fail-closed Ark action-proof contract before it
+  # can enter key materials or satisfy production quality.  The 0.60 gate adds
+  # only four single-role candidates on the full 3.3 h ledger;
+  # one is the observed 0.6125 repeated pipette-transfer interval.  All four
+  # still require the unchanged independent Ark proof contract.
+  single_view_action_accept_confidence:
+    liquid_movement: 0.60
+
+continuity:
+  # Stationary bottles/racks can keep a tracker ID for minutes.  Stable identity
+  # is a direct continuity proof only across a short gap; longer reviewed chains
+  # must pass the existing dense cross-gap context rule instead.
+  stable_identity_max_gap_seconds: 10.0
+
+resource_limits:
+  gpu_memory_normal_fraction: 0.75
+  gpu_memory_warning_fraction: 0.85
+  gpu_memory_contract_fraction: 0.90
+  system_memory_normal_fraction: 0.68
+  system_memory_warning_fraction: 0.80
+  system_memory_contract_fraction: 0.88
+  gpu_temperature_warning_c: 82
+
+storage:
+  index_csv: /home/x1/桌面/nas/experiment_record_index.csv
+  archive_root: /home/x1/桌面/nas/VisionCortexExperimentArchive
+  # This contains only small generated manifests/bookkeeping. Original videos
+  # remain on the NAS and are read as a segmented virtual timeline.
+  local_input_root: /srv/sentinel-data/VisionCortex3090Ti/Runtime/Input-Manifests
+  local_runtime_root: /srv/sentinel-data/VisionCortex3090Ti/Runtime
+  # The inherited field name is kept for compatibility. Reuse the existing NAS
+  # cache root; do not create a second RTX-specific cache hierarchy.
+  local_cache_root: /home/x1/桌面/nas/VisionCortexExperimentCache
+  local_staging_root: /home/x1/桌面/nas/VisionCortexExperimentArchive/.VisionCortex-Run-Staging
+
+validation:
+  acceptance_baseline:
+    exp_20260717_114053_2f08f953: ./configs/acceptance/customflow-a-0002-codex-visual-baseline.json
+    exp_20260810_144014_e918b762: ./configs/acceptance/six-view-three-hour-reviewed-baseline.json
+    exp_20260811_161842_ca175e55: ./configs/acceptance/customflow-a-0004-codex-visual-baseline.json
+    exp_20260812_133147_53d6cbd4: ./configs/acceptance/customflow-z-0001-codex-visual-baseline.json
+  key_event_ground_truth:
+    exp_20260717_114053_2f08f953: ./configs/evaluation/customflow-a-0002-codex-visual-key-events.json
+    exp_20260811_161842_ca175e55: ./configs/evaluation/customflow-a-0004-codex-visual-key-events.json
+    exp_20260812_133147_53d6cbd4: ./configs/evaluation/customflow-z-0001-codex-visual-key-events.json
+  model_certification:
+    required_for_formal_production: true
+    path: /srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/production_model_certification.json
+    box_evaluation_reports: []
+    targets:
+      event_temporal_iou: 0.50
+      minimum_event_dataset_count: 5
+      minimum_event_ground_truth_count: 200
+      minimum_event_precision: 0.92
+      minimum_event_recall: 0.95
+      minimum_event_precision_ci_lower: 0.88
+      minimum_event_recall_ci_lower: 0.90
+      minimum_ground_truth_per_action: 20
+      minimum_per_action_precision: 0.90
+      minimum_per_action_recall: 0.90
+      minimum_box_dataset_count: 3
+      minimum_box_ground_truth_instances: 500
+      minimum_box_precision: 0.92
+      minimum_box_recall: 0.95
+      required_action_types:
+        - hand_object_contact
+        - object_movement
+        - liquid_movement
+        - container_state_change
+        - device_panel_operation
+        - pipette_transfer_operation
+
+collection_curation:
+  real_experiment_prefixes:
+    - CapToggle_
+    - CustomFlow_
+    - DissolveStir_
+    - FullProcess_
+    - Pipetting_
+    - TubeCleanDry_
+    - TubePlaceDilute_
+    - Weighing_
+  hardware_test_prefixes:
+    - recording_endurance_
+    - recording_matrix_
+  # Classification probes only. Accepted production jobs always retain the
+  # full indexed timeline and cannot use this receipt as completion evidence.
+  content_probe_max_seconds: 300
+  content_probe_max_views: 2
+  content_probe_receipt_dir: null

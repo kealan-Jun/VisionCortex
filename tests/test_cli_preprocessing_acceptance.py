@@ -12,7 +12,7 @@ def test_fixed_benchmark_preprocessing_only_never_promotes_formal_archive(
     history_root = tmp_path / "history"
     manifest_path = tmp_path / "manifest.yaml"
     manifest = RunManifest(
-        experiment_id="source",
+        experiment_id="exp_20260810_144014_e918b762",
         views=[
             ViewInput(
                 view_id="fp",
@@ -51,7 +51,8 @@ def test_fixed_benchmark_preprocessing_only_never_promotes_formal_archive(
         def __init__(self, settings, _progress):
             observed["settings"] = settings
 
-        def run(self, _manifest):
+        def run(self, pipeline_manifest):
+            observed["experiment_id"] = pipeline_manifest.experiment_id
             return nas_staging
 
     monkeypatch.setattr(cli, "EvidencePipeline", FakePipeline)
@@ -68,6 +69,7 @@ def test_fixed_benchmark_preprocessing_only_never_promotes_formal_archive(
 
     assert observed["settings"]["project"]["preprocessing_acceptance_only"] is True
     assert observed["settings"]["storage"]["active_archive_path"] == str(nas_staging)
+    assert observed["experiment_id"] == "exp_20260810_144014_e918b762"
     output = capsys.readouterr().out
     assert "run_mode=preprocessing_acceptance_only" in output
     assert "token_calls=0" in output

@@ -58,6 +58,316 @@ def test_only_views_with_valid_evidence_participate(default_config):
     assert "empty01" in segments[0].rejected_views
 
 
+def test_component_only_events_remain_audited_but_cannot_bridge_boundaries(
+    default_config,
+):
+    views = [
+        ViewInput(view_id="fp01", role=ViewRole.FIRST_PERSON, video=Path("a.mp4")),
+        ViewInput(view_id="tp01", role=ViewRole.THIRD_PERSON, video=Path("b.mp4")),
+    ]
+
+    def event(event_id, start, end, action, publication="primary"):
+        candidates = [
+            ActionCandidate(
+                candidate_id=f"{event_id}-{view_id}",
+                action_type=action,
+                view_id=view_id,
+                role=role,
+                local_start_ms=start,
+                local_end_ms=end,
+                global_start_ms=start,
+                global_end_ms=end,
+                key_global_ms=(start + end) / 2,
+                objects=["gloved_hand", "reagent_bottle"],
+                confidence=0.9,
+            )
+            for view_id, role in (
+                ("fp01", ViewRole.FIRST_PERSON),
+                ("tp01", ViewRole.THIRD_PERSON),
+            )
+        ]
+        return EvidenceEvent(
+            event_id=event_id,
+            action_type=action,
+            global_start_ms=start,
+            global_end_ms=end,
+            key_global_ms=(start + end) / 2,
+            objects=["gloved_hand", "reagent_bottle"],
+            confidence=0.9,
+            accepted=True,
+            audit_reason="cross-view evidence",
+            supporting_views=["fp01", "tp01"],
+            supporting_roles=[ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON],
+            candidates=candidates,
+            state_machine={
+                "publication": {
+                    "status": publication,
+                    "suppressed_by_event_id": (
+                        "PRIMARY-LEFT" if publication == "component_only" else None
+                    ),
+                }
+            },
+        )
+
+    events = [
+        event("PRIMARY-LEFT", 10_000, 12_000, ActionType.LIQUID_MOVEMENT),
+        event(
+            "STATIC-CONTACT-COMPONENT",
+            11_000,
+            55_000,
+            ActionType.HAND_OBJECT_CONTACT,
+            publication="component_only",
+        ),
+        event("PRIMARY-RIGHT", 70_000, 72_000, ActionType.HAND_OBJECT_CONTACT),
+    ]
+    receipts = []
+
+    segments = build_experiment_segments(
+        events, views, default_config, decision_receipts=receipts
+    )
+
+    assert [segment.event_ids for segment in segments] == [
+        ["PRIMARY-LEFT"],
+        ["PRIMARY-RIGHT"],
+    ]
+    quarantine = next(
+        receipt
+        for receipt in receipts
+        if receipt["decision_type"]
+        == "component_publication_boundary_quarantine"
+    )
+    assert quarantine["verdict"] == "quarantined"
+    assert quarantine["facts"]["audit_ledger_membership_changed"] is False
+
+
+def test_accepted_primary_leading_chain_extends_full_timeline_boundary(
+    default_config,
+):
+    default_config["segmentation"]["accepted_leading_context_enabled"] = True
+    default_config["segmentation"][
+        "accepted_leading_context_max_gap_seconds"
+    ] = 10.0
+    views = [
+        ViewInput(view_id="fp01", role=ViewRole.FIRST_PERSON, video=Path("a.mp4")),
+        ViewInput(view_id="tp01", role=ViewRole.THIRD_PERSON, video=Path("b.mp4")),
+    ]
+    leading = EvidenceEvent(
+        event_id="LEADING-PRIMARY",
+        action_type=ActionType.DEVICE_PANEL_OPERATION,
+        global_start_ms=70_000,
+        global_end_ms=80_000,
+        key_global_ms=75_000,
+        objects=["balance", "gloved_hand"],
+        confidence=0.9,
+        accepted=True,
+        audit_reason="strong third-person preparation",
+        supporting_views=["tp01"],
+        supporting_roles=[ViewRole.THIRD_PERSON],
+        candidates=[
+            ActionCandidate(
+                candidate_id="LEADING-TP",
+                action_type=ActionType.DEVICE_PANEL_OPERATION,
+                view_id="tp01",
+                role=ViewRole.THIRD_PERSON,
+                local_start_ms=70_000,
+                local_end_ms=80_000,
+                global_start_ms=70_000,
+                global_end_ms=80_000,
+                key_global_ms=75_000,
+                objects=["balance", "gloved_hand"],
+                confidence=0.9,
+            )
+        ],
+        state_machine={"publication": {"status": "primary"}},
+    )
+    opener = leading.model_copy(
+        update={
+            "event_id": "DUAL-OPENER",
+            "global_start_ms": 85_000,
+            "global_end_ms": 90_000,
+            "key_global_ms": 87_500,
+            "objects": ["gloved_hand", "spatula"],
+            "supporting_views": ["fp01", "tp01"],
+            "supporting_roles": [ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON],
+            "candidates": [
+                ActionCandidate(
+                    candidate_id=f"OPENER-{view_id}",
+                    action_type=ActionType.DEVICE_PANEL_OPERATION,
+                    view_id=view_id,
+                    role=role,
+                    local_start_ms=85_000,
+                    local_end_ms=90_000,
+                    global_start_ms=85_000,
+                    global_end_ms=90_000,
+                    key_global_ms=87_500,
+                    objects=["gloved_hand", "spatula"],
+                    confidence=0.9,
+                )
+                for view_id, role in (
+                    ("fp01", ViewRole.FIRST_PERSON),
+                    ("tp01", ViewRole.THIRD_PERSON),
+                )
+            ],
+        }
+    )
+    receipts = []
+
+    segments = build_experiment_segments(
+        [leading, opener], views, default_config, decision_receipts=receipts
+    )
+
+    assert len(segments) == 1
+    assert segments[0].global_start_ms == 68_000
+    assert segments[0].event_ids == ["LEADING-PRIMARY", "DUAL-OPENER"]
+    boundary = next(
+        receipt
+        for receipt in receipts
+        if receipt["decision_type"] == "raw_segment_boundary"
+    )
+    assert boundary["facts"]["leading_context_event_ids"] == [
+        "LEADING-PRIMARY"
+    ]
+
+
+def test_fused_rich_repeated_primary_sequences_split_at_largest_inactive_gap(
+    default_config,
+):
+    views = [
+        ViewInput(view_id="fp01", role=ViewRole.FIRST_PERSON, video=Path("a.mp4")),
+        ViewInput(view_id="tp01", role=ViewRole.THIRD_PERSON, video=Path("b.mp4")),
+    ]
+
+    def event(event_id, start, end, action):
+        return EvidenceEvent(
+            event_id=event_id,
+            action_type=action,
+            global_start_ms=start,
+            global_end_ms=end,
+            key_global_ms=(start + end) / 2.0,
+            objects=["gloved_hand", "pipette", "tube"],
+            confidence=0.9,
+            accepted=True,
+            audit_reason="cross-view evidence",
+            supporting_views=["fp01", "tp01"],
+            supporting_roles=[ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON],
+            candidates=[],
+        )
+
+    events = [
+        event("LEFT-1", 10_000, 14_000, ActionType.LIQUID_MOVEMENT),
+        event("LEFT-2", 17_000, 21_000, ActionType.HAND_OBJECT_CONTACT),
+        event("LEFT-3", 24_000, 28_000, ActionType.HAND_OBJECT_CONTACT),
+        event("LEFT-4", 31_000, 35_000, ActionType.LIQUID_MOVEMENT),
+        event("RIGHT-1", 45_000, 49_000, ActionType.HAND_OBJECT_CONTACT),
+        event("RIGHT-2", 52_000, 56_000, ActionType.LIQUID_MOVEMENT),
+        event("RIGHT-3", 59_000, 63_000, ActionType.HAND_OBJECT_CONTACT),
+        event("RIGHT-4", 66_000, 70_000, ActionType.LIQUID_MOVEMENT),
+    ]
+    receipts = []
+
+    segments = build_experiment_segments(
+        events,
+        views,
+        default_config,
+        coarse_windows=[
+            ActionCandidate(
+                candidate_id="COARSE-ONE-WIDE-ENVELOPE",
+                action_type=ActionType.OBJECT_MOVEMENT,
+                view_id="fp01",
+                role=ViewRole.FIRST_PERSON,
+                local_start_ms=0.0,
+                local_end_ms=80_000.0,
+                global_start_ms=0.0,
+                global_end_ms=80_000.0,
+                key_global_ms=40_000.0,
+                objects=["motion"],
+                confidence=0.9,
+            )
+        ],
+        decision_receipts=receipts,
+    )
+
+    assert [segment.event_ids for segment in segments] == [
+        ["LEFT-1", "LEFT-2", "LEFT-3", "LEFT-4"],
+        ["RIGHT-1", "RIGHT-2", "RIGHT-3", "RIGHT-4"],
+    ]
+    split_receipt = next(
+        receipt
+        for receipt in receipts
+        if receipt["decision_type"] == "raw_atomic_sequence_split"
+    )
+    assert split_receipt["verdict"] == "split"
+    assert split_receipt["facts"]["inactive_gap_ms"] == 10_000
+    assert split_receipt["facts"]["repeated_primary_actions"] == [
+        "liquid_movement"
+    ]
+
+
+def test_eight_point_six_second_pause_does_not_split_one_rich_primary_sequence(
+    default_config,
+):
+    views = [
+        ViewInput(view_id="fp01", role=ViewRole.FIRST_PERSON, video=Path("a.mp4")),
+        ViewInput(view_id="tp01", role=ViewRole.THIRD_PERSON, video=Path("b.mp4")),
+    ]
+
+    def event(event_id, start, end, action):
+        return EvidenceEvent(
+            event_id=event_id,
+            action_type=action,
+            global_start_ms=start,
+            global_end_ms=end,
+            key_global_ms=(start + end) / 2.0,
+            objects=["gloved_hand", "pipette", "tube"],
+            confidence=0.9,
+            accepted=True,
+            audit_reason="cross-view evidence",
+            supporting_views=["fp01", "tp01"],
+            supporting_roles=[ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON],
+            candidates=[],
+        )
+
+    events = [
+        event("LEFT-1", 10_000, 14_000, ActionType.LIQUID_MOVEMENT),
+        event("LEFT-2", 17_000, 21_000, ActionType.HAND_OBJECT_CONTACT),
+        event("LEFT-3", 24_000, 28_000, ActionType.HAND_OBJECT_CONTACT),
+        event("LEFT-4", 31_000, 35_000, ActionType.LIQUID_MOVEMENT),
+        event("RIGHT-1", 43_600, 47_600, ActionType.HAND_OBJECT_CONTACT),
+        event("RIGHT-2", 50_600, 54_600, ActionType.LIQUID_MOVEMENT),
+        event("RIGHT-3", 57_600, 61_600, ActionType.HAND_OBJECT_CONTACT),
+        event("RIGHT-4", 64_600, 68_600, ActionType.LIQUID_MOVEMENT),
+    ]
+    receipts = []
+    coarse = ActionCandidate(
+        candidate_id="COARSE-ONE-WIDE-ENVELOPE",
+        action_type=ActionType.OBJECT_MOVEMENT,
+        view_id="fp01",
+        role=ViewRole.FIRST_PERSON,
+        local_start_ms=0.0,
+        local_end_ms=80_000.0,
+        global_start_ms=0.0,
+        global_end_ms=80_000.0,
+        key_global_ms=40_000.0,
+        objects=["motion"],
+        confidence=0.9,
+    )
+
+    segments = build_experiment_segments(
+        events,
+        views,
+        default_config,
+        coarse_windows=[coarse],
+        decision_receipts=receipts,
+    )
+
+    assert len(segments) == 1
+    assert segments[0].event_ids == [event.event_id for event in events]
+    assert not any(
+        receipt["decision_type"] == "raw_atomic_sequence_split"
+        for receipt in receipts
+    )
+
+
 def test_strong_single_role_action_is_accepted_with_paired_media_policy(default_config):
     transforms = {
         "fp01": AlignmentTransform(
@@ -84,6 +394,387 @@ def test_strong_single_role_action_is_accepted_with_paired_media_policy(default_
     assert events[0].accepted is True
     assert events[0].supporting_roles == [ViewRole.FIRST_PERSON]
     assert rejected == []
+
+
+def test_single_view_container_state_uses_direct_transition_threshold(
+    default_config,
+):
+    transforms = {
+        "fp01": AlignmentTransform(
+            view_id="fp01",
+            reference_view_id="fp01",
+            confidence=0.95,
+            state="aligned",
+        )
+    }
+
+    def candidate(action, candidate_id):
+        return ActionCandidate(
+            candidate_id=candidate_id,
+            action_type=action,
+            view_id="fp01",
+            role=ViewRole.FIRST_PERSON,
+            local_start_ms=10_000,
+            local_end_ms=11_200,
+            global_start_ms=10_000,
+            global_end_ms=11_200,
+            key_global_ms=10_600,
+            objects=["gloved_hand", "tube_cap"],
+            confidence=0.72,
+        )
+
+    state_events, _ = audit_candidates(
+        [candidate(ActionType.CONTAINER_STATE_CHANGE, "STATE")],
+        transforms,
+        default_config,
+    )
+    contact_events, _ = audit_candidates(
+        [candidate(ActionType.HAND_OBJECT_CONTACT, "CONTACT")],
+        transforms,
+        default_config,
+    )
+
+    assert state_events[0].accepted is True
+    assert contact_events[0].accepted is False
+
+
+def test_cross_role_context_admits_short_state_candidate_for_semantic_review(
+    default_config,
+):
+    transforms = {
+        view_id: AlignmentTransform(
+            view_id=view_id,
+            reference_view_id="fp01",
+            confidence=0.95,
+            state="aligned",
+        )
+        for view_id in ("fp01", "tp01")
+    }
+    state = ActionCandidate(
+        candidate_id="STATE-TP",
+        action_type=ActionType.CONTAINER_STATE_CHANGE,
+        view_id="tp01",
+        role=ViewRole.THIRD_PERSON,
+        local_start_ms=6_000,
+        local_end_ms=6_200,
+        global_start_ms=6_000,
+        global_end_ms=6_200,
+        key_global_ms=6_100,
+        objects=["gloved_hand", "bottle_cap"],
+        confidence=0.39,
+    )
+    movement = ActionCandidate(
+        candidate_id="MOVE-FP",
+        action_type=ActionType.OBJECT_MOVEMENT,
+        view_id="fp01",
+        role=ViewRole.FIRST_PERSON,
+        local_start_ms=4_800,
+        local_end_ms=7_900,
+        global_start_ms=4_800,
+        global_end_ms=7_900,
+        key_global_ms=7_300,
+        objects=["pipette"],
+        confidence=0.60,
+    )
+
+    events, rejected = audit_candidates([movement, state], transforms, default_config)
+    state_event = next(
+        event for event in events if event.action_type == ActionType.CONTAINER_STATE_CHANGE
+    )
+
+    assert state_event.accepted is True
+    assert state_event.supporting_views == ["tp01"]
+    assert state_event.supporting_roles == [ViewRole.THIRD_PERSON]
+    assert "候选事实仍需多模态确认" in state_event.audit_reason
+    assert any("MOVE-FP" in item for item in state_event.uncertainty)
+    assert state_event.observability["semantic_recall_admission"][
+        "candidate_action_directly_confirmed"
+    ] is False
+    assert all(item["event_id"] != state_event.event_id for item in rejected)
+
+    views = [
+        ViewInput(view_id="fp01", role=ViewRole.FIRST_PERSON, video=Path("a.mp4")),
+        ViewInput(view_id="tp01", role=ViewRole.THIRD_PERSON, video=Path("b.mp4")),
+    ]
+    segments = build_experiment_segments(events, views, default_config)
+    assert len(segments) == 1
+    assert segments[0].participating_views == ["fp01", "tp01"]
+    formal, receipts = prepare_formal_experiment_segments(
+        segments,
+        events,
+        views,
+        [],
+        default_config,
+    )
+    assert len(formal) == 1
+    assert any(
+        item.get("decision") == "promoted_provisional_semantic_review"
+        and item.get("candidate_action_directly_confirmed") is False
+        for item in receipts
+    )
+
+
+def test_production_semantic_review_requires_independent_dual_movement_anchor(
+    default_config,
+):
+    default_config["segmentation"][
+        "semantic_review_requires_dual_role_movement_anchor"
+    ] = True
+    views = [
+        ViewInput(view_id="fp01", role=ViewRole.FIRST_PERSON, video=Path("a.mp4")),
+        ViewInput(view_id="tp01", role=ViewRole.THIRD_PERSON, video=Path("b.mp4")),
+    ]
+    event = EvidenceEvent(
+        event_id="STATE-PROVISIONAL",
+        action_type=ActionType.CONTAINER_STATE_CHANGE,
+        global_start_ms=10_000,
+        global_end_ms=11_000,
+        key_global_ms=10_500,
+        objects=["gloved_hand", "bottle_cap"],
+        confidence=0.6,
+        accepted=True,
+        audit_reason="single-role hypothesis plus opposite-role activity",
+        supporting_views=["tp01"],
+        supporting_roles=[ViewRole.THIRD_PERSON],
+        candidates=[],
+        observability={
+            "semantic_review_priority": "required",
+            "can_cv_directly_prove_action": False,
+            "semantic_recall_admission": {
+                "mandatory_semantic_review": True,
+                "candidate_action_directly_confirmed": False,
+                "context_view_id": "fp01",
+                "context_global_start_ms": 9_800,
+                "context_global_end_ms": 11_200,
+            },
+        },
+        state_machine={
+            "lifecycle_state": "incomplete_end",
+            "publication": {"status": "provisional_semantic_review"},
+        },
+    )
+    segment = ExperimentSegment(
+        segment_id="EXP-PROVISIONAL",
+        global_start_ms=8_000,
+        global_end_ms=14_000,
+        event_ids=[event.event_id],
+        participating_views=["fp01", "tp01"],
+    )
+
+    formal, receipts = prepare_formal_experiment_segments(
+        [segment], [event], views, [], default_config
+    )
+
+    assert formal == []
+    quarantine = next(
+        item
+        for item in receipts
+        if item.get("decision") == "quarantined_missing_corroborated_opener"
+    )
+    assert quarantine[
+        "semantic_review_requires_dual_role_movement_anchor"
+    ] is True
+    assert quarantine["required_semantic_event_ids"] == [event.event_id]
+
+
+def test_cross_view_movement_with_required_semantic_event_gets_model_review(
+    default_config,
+):
+    views = [
+        ViewInput(view_id="fp01", role=ViewRole.FIRST_PERSON, video=Path("a.mp4")),
+        ViewInput(view_id="tp01", role=ViewRole.THIRD_PERSON, video=Path("b.mp4")),
+    ]
+    movement = EvidenceEvent(
+        event_id="MOVE-DUAL",
+        action_type=ActionType.OBJECT_MOVEMENT,
+        global_start_ms=8_000,
+        global_end_ms=9_600,
+        key_global_ms=8_850,
+        objects=["tube"],
+        confidence=0.62,
+        accepted=True,
+        audit_reason="cross-view direct movement",
+        supporting_views=["fp01", "tp01"],
+        supporting_roles=[ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON],
+        candidates=[],
+        observability={
+            "cv_ontology_support": "direct_cv",
+            "semantic_review_priority": "optional",
+            "can_cv_directly_prove_action": True,
+        },
+        state_machine={"lifecycle_state": "completed"},
+    )
+    semantic = EvidenceEvent(
+        event_id="SEMANTIC-REQUIRED",
+        action_type=ActionType.LIQUID_MOVEMENT,
+        global_start_ms=20_100,
+        global_end_ms=21_900,
+        key_global_ms=21_100,
+        objects=["pipette", "sample_bottle"],
+        confidence=0.61,
+        accepted=True,
+        audit_reason="single-view high-risk hypothesis",
+        supporting_views=["fp01"],
+        supporting_roles=[ViewRole.FIRST_PERSON],
+        candidates=[],
+        observability={
+            "cv_ontology_support": "indirect_cv",
+            "semantic_review_priority": "required",
+            "can_cv_directly_prove_action": False,
+        },
+        state_machine={"lifecycle_state": "completed"},
+    )
+    segment = ExperimentSegment(
+        segment_id="EXP-SEMANTIC-RESCUE",
+        global_start_ms=6_000,
+        global_end_ms=24_900,
+        event_ids=[movement.event_id, semantic.event_id],
+        participating_views=["fp01", "tp01"],
+    )
+
+    formal, receipts = prepare_formal_experiment_segments(
+        [segment], [movement, semantic], views, [], default_config
+    )
+
+    assert [item.segment_id for item in formal] == [segment.segment_id]
+    promoted = next(
+        item
+        for item in receipts
+        if item.get("decision") == "promoted_provisional_semantic_review"
+    )
+    assert promoted["candidate_action_directly_confirmed"] is False
+    assert promoted["provisional_movement_opener_event_ids"] == ["MOVE-DUAL"]
+    assert promoted["required_semantic_event_ids"] == ["SEMANTIC-REQUIRED"]
+
+
+def test_cross_view_movement_alone_stays_quarantined_without_model_review(
+    default_config,
+):
+    views = [
+        ViewInput(view_id="fp01", role=ViewRole.FIRST_PERSON, video=Path("a.mp4")),
+        ViewInput(view_id="tp01", role=ViewRole.THIRD_PERSON, video=Path("b.mp4")),
+    ]
+    movement = EvidenceEvent(
+        event_id="MOVE-ONLY",
+        action_type=ActionType.OBJECT_MOVEMENT,
+        global_start_ms=8_000,
+        global_end_ms=9_600,
+        key_global_ms=8_850,
+        objects=["tube"],
+        confidence=0.62,
+        accepted=True,
+        audit_reason="cross-view direct movement",
+        supporting_views=["fp01", "tp01"],
+        supporting_roles=[ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON],
+        candidates=[],
+        observability={
+            "cv_ontology_support": "direct_cv",
+            "semantic_review_priority": "optional",
+            "can_cv_directly_prove_action": True,
+        },
+        state_machine={"lifecycle_state": "completed"},
+    )
+    segment = ExperimentSegment(
+        segment_id="EXP-MOVEMENT-ONLY",
+        global_start_ms=6_000,
+        global_end_ms=12_600,
+        event_ids=[movement.event_id],
+        participating_views=["fp01", "tp01"],
+    )
+
+    formal, receipts = prepare_formal_experiment_segments(
+        [segment], [movement], views, [], default_config
+    )
+
+    assert formal == []
+    assert any(
+        item.get("decision") == "quarantined_missing_corroborated_opener"
+        for item in receipts
+    )
+
+
+def test_below_floor_state_candidate_with_context_stays_rejected(
+    default_config,
+):
+    transforms = {
+        view_id: AlignmentTransform(
+            view_id=view_id,
+            reference_view_id="fp01",
+            confidence=0.95,
+            state="aligned",
+        )
+        for view_id in ("fp01", "tp01")
+    }
+    state = ActionCandidate(
+        candidate_id="STATE-TP",
+        action_type=ActionType.CONTAINER_STATE_CHANGE,
+        view_id="tp01",
+        role=ViewRole.THIRD_PERSON,
+        local_start_ms=6_000,
+        local_end_ms=6_200,
+        global_start_ms=6_000,
+        global_end_ms=6_200,
+        key_global_ms=6_100,
+        objects=["gloved_hand", "bottle_cap"],
+        confidence=0.37,
+    )
+    movement = ActionCandidate(
+        candidate_id="MOVE-FP",
+        action_type=ActionType.OBJECT_MOVEMENT,
+        view_id="fp01",
+        role=ViewRole.FIRST_PERSON,
+        local_start_ms=4_800,
+        local_end_ms=7_900,
+        global_start_ms=4_800,
+        global_end_ms=7_900,
+        key_global_ms=7_300,
+        objects=["pipette"],
+        confidence=0.60,
+    )
+
+    events, rejected = audit_candidates(
+        [movement, state], transforms, default_config
+    )
+    state_event = next(
+        event
+        for event in events
+        if event.action_type == ActionType.CONTAINER_STATE_CHANGE
+    )
+
+    assert state_event.accepted is False
+    assert "semantic_recall_admission" not in (state_event.observability or {})
+    assert any(item["event_id"] == state_event.event_id for item in rejected)
+
+
+def test_short_state_candidate_without_cross_role_context_stays_rejected(
+    default_config,
+):
+    transforms = {
+        "tp01": AlignmentTransform(
+            view_id="tp01",
+            reference_view_id="tp01",
+            confidence=0.95,
+            state="aligned",
+        )
+    }
+    state = ActionCandidate(
+        candidate_id="STATE-TP",
+        action_type=ActionType.CONTAINER_STATE_CHANGE,
+        view_id="tp01",
+        role=ViewRole.THIRD_PERSON,
+        local_start_ms=6_000,
+        local_end_ms=6_200,
+        global_start_ms=6_000,
+        global_end_ms=6_200,
+        key_global_ms=6_100,
+        objects=["gloved_hand", "bottle_cap"],
+        confidence=0.46,
+    )
+
+    events, rejected = audit_candidates([state], transforms, default_config)
+
+    assert events[0].accepted is False
+    assert rejected[0]["event_id"] == events[0].event_id
 
 
 def test_single_view_tail_extends_only_an_existing_cross_view_boundary(default_config):
@@ -443,6 +1134,181 @@ def test_explicit_state_transition_remains_a_continuous_two_atomic_chain(
     assert len(groups) == 1
     assert groups[0].continuity_type == "continuous"
     assert groups[0].atomic_experiment_ids == ["EXP-1", "EXP-2"]
+
+
+def test_stationary_track_identity_across_long_gap_requires_context_chain(
+    default_config,
+):
+    default_config["continuity"]["stable_identity_max_gap_seconds"] = 10.0
+    views = [
+        ViewInput(view_id="fp01", role=ViewRole.FIRST_PERSON, video=Path("a.mp4")),
+        ViewInput(view_id="tp01", role=ViewRole.THIRD_PERSON, video=Path("b.mp4")),
+    ]
+
+    def event(event_id, start, end):
+        candidates = [
+            ActionCandidate(
+                candidate_id=f"{event_id}-{name}",
+                action_type=ActionType.HAND_OBJECT_CONTACT,
+                view_id="tp01",
+                role=ViewRole.THIRD_PERSON,
+                local_start_ms=start,
+                local_end_ms=end,
+                global_start_ms=start,
+                global_end_ms=end,
+                key_global_ms=(start + end) / 2,
+                objects=[name],
+                confidence=0.9,
+                evidence=[{"track_id": track_id}],
+            )
+            for name, track_id in (("reagent_bottle", 11), ("tube_rack", 12))
+        ]
+        return EvidenceEvent(
+            event_id=event_id,
+            action_type=ActionType.HAND_OBJECT_CONTACT,
+            global_start_ms=start,
+            global_end_ms=end,
+            key_global_ms=(start + end) / 2,
+            objects=["gloved_hand", "reagent_bottle", "tube_rack"],
+            confidence=0.9,
+            accepted=True,
+            audit_reason="same stationary identities",
+            supporting_views=["fp01", "tp01"],
+            supporting_roles=[ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON],
+            candidates=candidates,
+        )
+
+    events = [event("LEFT", 10_000, 20_000), event("RIGHT", 45_000, 55_000)]
+    segments = [
+        ExperimentSegment(
+            segment_id="EXP-LEFT",
+            global_start_ms=8_000,
+            global_end_ms=23_000,
+            event_ids=["LEFT"],
+            participating_views=["fp01", "tp01"],
+        ),
+        ExperimentSegment(
+            segment_id="EXP-RIGHT",
+            global_start_ms=43_000,
+            global_end_ms=58_000,
+            event_ids=["RIGHT"],
+            participating_views=["fp01", "tp01"],
+        ),
+    ]
+    receipts = []
+
+    groups = build_experiment_groups(
+        segments,
+        events,
+        views,
+        default_config,
+        decision_receipts=receipts,
+    )
+
+    assert len(groups) == 2
+    edge = next(
+        receipt
+        for receipt in receipts
+        if receipt["decision_type"] == "experiment_continuity_edge"
+    )
+    assert edge["verdict"] == "rejected"
+    assert edge["reason_codes"] == ["identity_gap_requires_context_chain"]
+
+
+def test_rich_adjacent_sequences_remain_two_continuous_atomic_experiments(
+    default_config,
+):
+    views = [
+        ViewInput(view_id="fp01", role=ViewRole.FIRST_PERSON, video=Path("a.mp4")),
+        ViewInput(view_id="tp01", role=ViewRole.THIRD_PERSON, video=Path("b.mp4")),
+    ]
+
+    def event(event_id, start, end, action):
+        candidates = [
+            ActionCandidate(
+                candidate_id=f"{event_id}-{obj}",
+                action_type=action,
+                view_id="fp01",
+                role=ViewRole.FIRST_PERSON,
+                local_start_ms=start,
+                local_end_ms=end,
+                global_start_ms=start,
+                global_end_ms=end,
+                key_global_ms=(start + end) / 2,
+                objects=[obj],
+                confidence=0.85,
+                evidence=[{"track_id": track_id}],
+            )
+            for obj, track_id in (("sample_bottle", 401), ("tube", 402))
+        ]
+        return EvidenceEvent(
+            event_id=event_id,
+            action_type=action,
+            global_start_ms=start,
+            global_end_ms=end,
+            key_global_ms=(start + end) / 2,
+            objects=["gloved_hand", "sample_bottle", "tube"],
+            confidence=0.85,
+            accepted=True,
+            audit_reason="cross-view evidence",
+            supporting_views=["fp01", "tp01"],
+            supporting_roles=[ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON],
+            candidates=candidates,
+        )
+
+    events = [
+        event("LEFT-1", 10_000, 14_000, ActionType.HAND_OBJECT_CONTACT),
+        event("LEFT-2", 17_000, 21_000, ActionType.LIQUID_MOVEMENT),
+        event("LEFT-3", 24_000, 28_000, ActionType.HAND_OBJECT_CONTACT),
+        event("LEFT-4", 31_000, 35_000, ActionType.LIQUID_MOVEMENT),
+        event("RIGHT-1", 45_000, 49_000, ActionType.HAND_OBJECT_CONTACT),
+        event("RIGHT-2", 52_000, 56_000, ActionType.LIQUID_MOVEMENT),
+        event("RIGHT-3", 59_000, 63_000, ActionType.HAND_OBJECT_CONTACT),
+        event("RIGHT-4", 66_000, 70_000, ActionType.LIQUID_MOVEMENT),
+    ]
+    segments = [
+        ExperimentSegment(
+            segment_id="EXP-LEFT",
+            global_start_ms=8_000,
+            global_end_ms=37_000,
+            event_ids=[item.event_id for item in events[:4]],
+            participating_views=["fp01", "tp01"],
+        ),
+        ExperimentSegment(
+            segment_id="EXP-RIGHT",
+            global_start_ms=43_000,
+            global_end_ms=73_000,
+            event_ids=[item.event_id for item in events[4:]],
+            participating_views=["fp01", "tp01"],
+        ),
+    ]
+    receipts = []
+
+    normalized = normalize_experiment_segments(
+        segments,
+        events,
+        views,
+        default_config,
+        decision_receipts=receipts,
+    )
+    groups = build_experiment_groups(
+        normalized,
+        events,
+        views,
+        default_config,
+    )
+
+    assert [item.segment_id for item in normalized] == ["EXP-LEFT", "EXP-RIGHT"]
+    assert len(groups) == 1
+    assert groups[0].continuity_type == "continuous"
+    assert groups[0].atomic_experiment_ids == ["EXP-LEFT", "EXP-RIGHT"]
+    fragment_receipt = next(
+        item for item in receipts if item["decision_type"] == "atomic_fragment_merge"
+    )
+    assert fragment_receipt["verdict"] == "rejected"
+    assert fragment_receipt["reason_codes"] == [
+        "complete_action_sequences_not_fragments"
+    ]
 
 
 def test_single_carried_object_does_not_join_independent_atomic_experiments(

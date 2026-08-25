@@ -13,6 +13,99 @@ COLLECTION_STATE_SCHEMA_VERSION = "visioncortex-collection-processing-registry/1
 _LEDGER_LOCK = threading.Lock()
 
 
+def _accepted_formal_archive(path: Path) -> bool:
+    """Return true only for a still-present archive that passed all gates."""
+
+    try:
+        quality = json.loads(
+            (path / "JSON-Config-Files" / "quality_acceptance.json").read_text(
+                encoding="utf-8-sig"
+            )
+        )
+        evidence = json.loads(
+            (path / "JSON-Config-Files" / "evidence_package_eval.json").read_text(
+                encoding="utf-8-sig"
+            )
+        )
+        report_paths = list(
+            (path / "Lab-Daily-Reports").glob("*/Daily-Report-Eval.json")
+        )
+        return bool(
+            path.is_dir()
+            and quality.get("passed") is True
+            and evidence.get("passed") is True
+            and report_paths
+            and all(
+                json.loads(item.read_text(encoding="utf-8-sig")).get("passed")
+                is True
+                for item in report_paths
+            )
+        )
+    except (FileNotFoundError, OSError, ValueError, TypeError):
+        return False
+
+
+def _effective_collection_entry(
+    config: dict[str, Any], entry: dict[str, Any]
+) -> dict[str, Any]:
+    """Keep an accepted formal archive authoritative across failed retries.
+
+    The latest retry remains visible in ``latest_run_*`` while catalog
+    disposition uses the still-valid formal package.  This prevents a failed
+    replacement attempt from silently re-queuing an already delivered
+    experiment.
+    """
+
+    if str(entry.get("state") or "") == "archived":
+        return entry
+    archived_entries = [
+        item
+        for item in entry.get("history") or []
+        if str(item.get("state") or "") == "archived"
+    ]
+    if not archived_entries:
+        return entry
+    archive_root = Path(config["storage"]["archive_root"])
+    for archived in reversed(archived_entries):
+        configured_path = str(
+            (archived.get("details") or {}).get("formal_archive") or ""
+        ).strip()
+        candidates = []
+        if configured_path:
+            candidate = Path(configured_path)
+            candidates.append(
+                candidate if candidate.is_absolute() else archive_root / candidate
+            )
+        archive_name = str(archived.get("archive_name") or "").strip()
+        if archive_name:
+            candidates.append(archive_root / archive_name)
+        accepted_path = next(
+            (candidate for candidate in candidates if _accepted_formal_archive(candidate)),
+            None,
+        )
+        if accepted_path is None:
+            continue
+        return {
+            **entry,
+            "state": "archived",
+            "archive_name": archived.get("archive_name"),
+            "run_id": archived.get("run_id"),
+            "updated_at": archived.get("updated_at"),
+            "details": {
+                **dict(archived.get("details") or {}),
+                "formal_archive": str(accepted_path),
+            },
+            "latest_run_state": entry.get("state"),
+            "latest_run_id": entry.get("run_id"),
+            "latest_run_updated_at": entry.get("updated_at"),
+            "latest_run_details": dict(entry.get("details") or {}),
+            "effective_state_reason": (
+                "accepted_formal_archive_preserved_across_retry"
+            ),
+        }
+    return entry
+
+
 def collection_state_path(config: dict[str, Any]) -> Path:
     return (
         Path(config["storage"]["archive_root"])
@@ -34,11 +127,15 @@ def read_collection_states(config: dict[str, Any]) -> dict[str, Any]:
             "available": False,
             "collections": {},
         }
+    collections = {
+        str(experiment_id): _effective_collection_entry(config, dict(entry))
+        for experiment_id, entry in (payload.get("collections") or {}).items()
+    }
     return {
         "schema_version": COLLECTION_STATE_SCHEMA_VERSION,
         "path": str(path),
         "available": True,
-        "collections": payload.get("collections") or {},
+        "collections": collections,
         "updated_at": payload.get("updated_at"),
     }
 

@@ -1,3 +1,4 @@
+import io
 import shutil
 import subprocess
 from pathlib import Path
@@ -27,6 +28,7 @@ from labvision_evidence.schemas import (
 from labvision_evidence.video_io import (
     _aligned_grid_start_ms,
     _ffmpeg_multi_window_iterator,
+    _is_reconcilable_terminal_eof_shortfall,
     _selected_session_frame_indices,
     _selected_session_timestamps,
     plan_physical_segment_decode_sessions,
@@ -94,6 +96,102 @@ def test_physical_segment_sessions_collapse_repeated_references_without_widening
     assert sessions[1].target_virtual_windows == ((900_000.0, 905_000.0),)
 
 
+def test_distant_windows_split_without_changing_selected_timestamps():
+    segment = VideoSegmentInfo(
+        path=Path("segment.mp4"),
+        virtual_start_ms=0.0,
+        virtual_end_ms=900_000.0,
+        frame_start_index=0,
+        duration_ms=900_000.0,
+        fps=30.0,
+        width=1920,
+        height=1080,
+        frame_count=27_000,
+        size_bytes=1,
+    )
+    info = VideoInfo(
+        path=segment.path,
+        duration_ms=900_000.0,
+        fps=30.0,
+        width=1920,
+        height=1080,
+        frame_count=27_000,
+        size_bytes=1,
+        segments=[segment],
+    )
+    windows = [(100_000.0, 110_000.0), (125_000.0, 130_000.0), (800_000.0, 805_000.0)]
+
+    sessions = plan_physical_segment_decode_sessions(
+        info, windows, max_gap_ms=30_000.0
+    )
+
+    assert len(sessions) == 2
+    assert sessions[0].target_virtual_windows == (
+        (100_000.0, 110_000.0),
+        (125_000.0, 130_000.0),
+    )
+    assert sessions[1].target_virtual_windows == ((800_000.0, 805_000.0),)
+    assert sum(session.selected_duration_ms for session in sessions) == 20_000.0
+    selected_after_split = [
+        timestamp
+        for session in sessions
+        for timestamp in _selected_session_timestamps(
+            session.source_start_ms,
+            session.source_end_ms,
+            session.target_source_windows,
+            sample_fps=10.0,
+        )
+    ]
+    selected_without_split = _selected_session_timestamps(
+        100_000.0,
+        805_000.0,
+        windows,
+        sample_fps=10.0,
+    )
+    assert selected_after_split == selected_without_split
+
+
+def test_physical_session_excludes_wall_clock_gap_after_media_eof():
+    segment = VideoSegmentInfo(
+        path=Path("paused-recorder.mp4"),
+        timestamps_csv=Path("paused-recorder-frames.csv"),
+        virtual_start_ms=0.0,
+        virtual_end_ms=332_800.0,
+        frame_start_index=0,
+        duration_ms=332_800.0,
+        fps=30.0,
+        width=1280,
+        height=800,
+        frame_count=9_984,
+        size_bytes=1,
+        source_clock_duration_ms=410_402.117,
+    )
+    info = VideoInfo(
+        path=segment.path,
+        duration_ms=410_402.117,
+        fps=30.0,
+        width=1280,
+        height=800,
+        frame_count=9_984,
+        size_bytes=1,
+        segments=[segment],
+    )
+
+    sessions = plan_physical_segment_decode_sessions(info, [(0.0, 405_000.0)])
+
+    assert len(sessions) == 1
+    assert sessions[0].source_end_ms == 332_800.0
+    assert sessions[0].target_source_windows == ((0.0, 332_800.0),)
+    assert len(
+        _selected_session_timestamps(
+            sessions[0].source_start_ms,
+            sessions[0].source_end_ms,
+            sessions[0].target_source_windows,
+            sample_fps=10.0,
+        )
+    ) == 3_328
+
+
 def test_persistent_session_timestamp_count_matches_ffmpeg_round_near_endpoint():
     """DEV-027: 205.633333 seconds at 10 FPS must be 2056, not ceil=2057."""
 
@@ -109,6 +207,139 @@ def test_persistent_session_timestamp_count_matches_ffmpeg_round_near_endpoint()
     assert len(timestamps) == 2056
     assert timestamps[0] == start_ms
     assert timestamps[-1] == start_ms + 205_500.0
+
+
+def test_only_single_terminal_eof_shortfall_is_reconcilable():
+    assert _is_reconcilable_terminal_eof_shortfall([0, 1, 2, 3], 3, 4) is True
+    assert _is_reconcilable_terminal_eof_shortfall([0, 1, 2, 3], 2, 4) is False
+    assert _is_reconcilable_terminal_eof_shortfall([0, 1, 2], 2, 4) is False
+    assert _is_reconcilable_terminal_eof_shortfall([1], 0, 2) is False
+
+
+def test_bounded_multi_frame_terminal_eof_shortfall_requires_full_session():
+    assert (
+        _is_reconcilable_terminal_eof_shortfall(
+            list(range(10)), 6, 10, maximum_shortfall_frames=4
+        )
+        is True
+    )
+    assert (
+        _is_reconcilable_terminal_eof_shortfall(
+            list(range(10)), 6, 10, maximum_shortfall_frames=3
+        )
+        is False
+    )
+    assert (
+        _is_reconcilable_terminal_eof_shortfall(
+            [0, 1, 8, 9], 2, 10, maximum_shortfall_frames=2
+        )
+        is False
+    )
+
+
+def test_persistent_ffmpeg_fills_and_records_one_terminal_eof_shortfall(
+    monkeypatch,
+):
+    class FakeProcess:
+        def __init__(self):
+            self.stdout = io.BytesIO(bytes(2 * 2 * 3 * 3))
+            self.stderr = io.BytesIO()
+            self.returncode = 0
+
+        def wait(self):
+            return self.returncode
+
+    monkeypatch.setattr(
+        "labvision_evidence.video_io.subprocess.Popen",
+        lambda *args, **kwargs: FakeProcess(),
+    )
+    info = VideoInfo(
+        path=Path("terminal-eof.mp4"),
+        duration_ms=400.0,
+        fps=30.0,
+        width=2,
+        height=2,
+        frame_count=12,
+    )
+    receipt = {}
+
+    frames = list(
+        _ffmpeg_multi_window_iterator(
+            info.path,
+            info,
+            0.0,
+            400.0,
+            [(0.0, 400.0)],
+            10.0,
+            2,
+            None,
+            1,
+            False,
+            receipt,
+        )
+    )
+
+    assert len(frames) == 4
+    assert receipt["expected_frame_count"] == 4
+    assert receipt["decoded_frame_count"] == 3
+    assert receipt["actual_frame_count"] == 4
+    assert receipt["pre_fill_frame_accounting_mismatch"] == -1
+    assert receipt["frame_accounting_mismatch"] == 0
+    assert receipt["frame_accounting_reconciled"] is True
+    assert receipt["terminal_eof_shortfall_frames"] == 1
+    assert receipt["terminal_eof_fill_frames"] == 1
+    assert receipt["terminal_eof_fill_duration_ms"] == 100.0
+    assert frames[-1][1] == 300.0
+    assert (frames[-1][2] == frames[-2][2]).all()
+
+
+def test_persistent_ffmpeg_fills_seven_frame_terminal_tail_within_one_second(
+    monkeypatch,
+):
+    class FakeProcess:
+        def __init__(self):
+            self.stdout = io.BytesIO(bytes(2 * 2 * 3 * 3))
+            self.stderr = io.BytesIO()
+            self.returncode = 0
+
+        def wait(self):
+            return self.returncode
+
+    monkeypatch.setattr(
+        "labvision_evidence.video_io.subprocess.Popen",
+        lambda *args, **kwargs: FakeProcess(),
+    )
+    info = VideoInfo(
+        path=Path("terminal-eof-seven.mp4"),
+        duration_ms=1_000.0,
+        fps=30.0,
+        width=2,
+        height=2,
+        frame_count=30,
+    )
+    receipt = {}
+
+    frames = list(
+        _ffmpeg_multi_window_iterator(
+            info.path,
+            info,
+            0.0,
+            1_000.0,
+            [(0.0, 1_000.0)],
+            10.0,
+            2,
+            None,
+            1,
+            False,
+            receipt,
+        )
+    )
+
+    assert len(frames) == 10
+    assert receipt["decoded_frame_count"] == 3
+    assert receipt["terminal_eof_fill_frames"] == 7
+    assert receipt["terminal_eof_fill_duration_ms"] == 700.0
+    assert receipt["frame_accounting_mismatch"] == 0
 
 
 def test_persistent_sessions_share_one_alignment_anchored_global_sampling_grid():
@@ -464,6 +695,199 @@ def test_group_local_recall_uses_zero_prior_quality_fallback_for_unresolved_clus
     assert plan["decision_receipts"][0]["rule_id"] == (
         "QF3-TEMPORAL-CLUSTER-COMPLETENESS"
     )
+
+
+def test_group_local_recall_never_rescans_clipped_media_tail(default_config):
+    default_config["performance"]["fine_group_recall_min_unresolved_anchors"] = 3
+    pipeline = EvidencePipeline(default_config)
+    views = [
+        ViewInput(view_id="fp", role=ViewRole.FIRST_PERSON, video=Path("fp.mp4")),
+        ViewInput(view_id="tp-covered", role=ViewRole.THIRD_PERSON, video=Path("a.mp4")),
+        ViewInput(view_id="tp-unscanned", role=ViewRole.THIRD_PERSON, video=Path("b.mp4")),
+    ]
+    infos = {
+        view.view_id: VideoInfo(
+            path=view.video,
+            duration_ms=500_000.0,
+            fps=30.0,
+            width=16,
+            height=16,
+            frame_count=15_000,
+        )
+        for view in views
+    }
+    transforms = {
+        view.view_id: AlignmentTransform(
+            view_id=view.view_id,
+            reference_view_id="fp",
+            state="aligned",
+            confidence=1.0,
+        )
+        for view in views
+    }
+    event = EvidenceEvent(
+        event_id="E-CROSS",
+        action_type=ActionType.HAND_OBJECT_CONTACT,
+        global_start_ms=470_000.0,
+        global_end_ms=471_000.0,
+        key_global_ms=470_500.0,
+        objects=["gloved_hand", "tube"],
+        confidence=0.9,
+        accepted=True,
+        audit_reason="test",
+        supporting_views=["fp", "tp-covered"],
+        supporting_roles=[ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON],
+        candidates=[],
+    )
+    segment = ExperimentSegment(
+        segment_id="EXP-1",
+        global_start_ms=470_000.0,
+        global_end_ms=500_250.0,
+        event_ids=[event.event_id],
+        participating_views=["fp", "tp-covered"],
+    )
+    group = ExperimentGroup(
+        group_id="G1",
+        continuity_type="independent",
+        atomic_experiment_ids=[segment.segment_id],
+        global_start_ms=470_000.0,
+        global_end_ms=500_250.0,
+        participating_views=["fp", "tp-covered"],
+        first_person_view="fp",
+        third_person_view="tp-covered",
+        continuity_reason="test",
+    )
+    unresolved = [
+        _candidate(
+            f"C-{index}",
+            499_000.0 + index * 100.0,
+            500_200.0 + index * 10.0,
+            ActionType.OBJECT_MOVEMENT,
+            ["tube"],
+        )
+        for index in range(3)
+    ]
+
+    plan = pipeline._group_local_recall_plan(
+        [group],
+        [segment],
+        [event],
+        unresolved,
+        views,
+        {view.view_id: {} for view in views},
+        {
+            "fp": [(470_000.0, 500_000.0)],
+            "tp-covered": [(499_000.0, 500_000.0)],
+        },
+        infos,
+        transforms,
+    )
+
+    assert plan["complete"] is False
+    assert plan["selected_plans"][0]["view_id"] == "tp-unscanned"
+    assert all(
+        item["view_id"] != "tp-covered"
+        for item in plan["groups"][0]["ranked_view_choices"]
+    )
+
+
+def test_group_local_recall_closes_each_temporal_cluster_with_cross_view_proof(
+    default_config,
+):
+    default_config["performance"]["fine_group_recall_min_unresolved_anchors"] = 3
+    pipeline = EvidencePipeline(default_config)
+    views = [
+        ViewInput(view_id="fp", role=ViewRole.FIRST_PERSON, video=Path("fp.mp4")),
+        ViewInput(view_id="tp", role=ViewRole.THIRD_PERSON, video=Path("tp.mp4")),
+    ]
+    infos = {
+        view.view_id: VideoInfo(
+            path=view.video,
+            duration_ms=500_000.0,
+            fps=30.0,
+            width=16,
+            height=16,
+            frame_count=15_000,
+        )
+        for view in views
+    }
+    transforms = {
+        view.view_id: AlignmentTransform(
+            view_id=view.view_id,
+            reference_view_id="fp",
+            state="aligned",
+            confidence=1.0,
+        )
+        for view in views
+    }
+    cross_view = EvidenceEvent(
+        event_id="E-CROSS",
+        action_type=ActionType.DEVICE_PANEL_OPERATION,
+        global_start_ms=350_000.0,
+        global_end_ms=351_000.0,
+        key_global_ms=350_500.0,
+        objects=["balance", "gloved_hand"],
+        confidence=0.9,
+        accepted=True,
+        audit_reason="test",
+        supporting_views=["fp", "tp"],
+        supporting_roles=[ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON],
+        candidates=[],
+    )
+    segment = ExperimentSegment(
+        segment_id="EXP-1",
+        global_start_ms=340_000.0,
+        global_end_ms=370_000.0,
+        event_ids=[cross_view.event_id],
+        participating_views=["fp", "tp"],
+    )
+    group = ExperimentGroup(
+        group_id="G1",
+        continuity_type="independent",
+        atomic_experiment_ids=[segment.segment_id],
+        global_start_ms=340_000.0,
+        global_end_ms=370_000.0,
+        participating_views=["fp", "tp"],
+        first_person_view="fp",
+        third_person_view="tp",
+        continuity_reason="test",
+    )
+    # These detector fragments deliberately disagree with the accepted event's
+    # action/object labels.  They form one temporal cluster that already has
+    # direct dual-role proof and therefore must not trigger redundant rescans.
+    fragments = [
+        _candidate(
+            f"C-{index}",
+            345_000.0 + index * 2_000.0,
+            352_000.0 + index * 2_000.0,
+            ActionType.OBJECT_MOVEMENT,
+            ["tube"],
+        )
+        for index in range(3)
+    ]
+
+    plan = pipeline._group_local_recall_plan(
+        [group],
+        [segment],
+        [cross_view],
+        fragments,
+        views,
+        {view.view_id: {} for view in views},
+        {"fp": [(340_000.0, 370_000.0)], "tp": [(340_000.0, 370_000.0)]},
+        infos,
+        transforms,
+    )
+
+    assert plan["complete"] is True
+    assert plan["quality_complete"] is True
+    assert plan["selected_plans"] == []
+    report = plan["groups"][0]
+    assert report["raw_candidate_level_unresolved_anchor_count"] == 3
+    assert report["unresolved_anchor_count"] == 0
+    assert report["cross_view_supported_temporal_cluster_count"] == 1
+    assert report["cross_view_supported_temporal_clusters"][0][
+        "cross_view_event_ids"
+    ] == ["E-CROSS"]
 
 
 def test_detection_ledger_merge_deduplicates_frames_and_namespaces_tracks(

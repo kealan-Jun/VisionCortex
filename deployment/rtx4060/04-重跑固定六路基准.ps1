@@ -18,7 +18,7 @@ if ($Health.fixed_benchmark.submission_protocol_version -ne 1) {
 }
 if (-not $Health.nas_available) { throw 'The configured NAS archive root is unavailable. The benchmark is not started.' }
 if (-not $Health.ark_key_configured) { throw 'ARK_API_KEY is not available to the Web service. The benchmark is not started.' }
-if ($Health.fixed_benchmark.archive_name -ne 'Six-View-Three-Hour-Experiment-2026-08-13') {
+if ($Health.fixed_benchmark.archive_name -ne 'CustomFlow_standard_correct_12_ABCFA_0001--exp_20260810_144014_e918b762') {
     throw "The Web service exposes an unexpected fixed benchmark: $($Health.fixed_benchmark.archive_name)"
 }
 

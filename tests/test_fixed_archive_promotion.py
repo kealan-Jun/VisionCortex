@@ -97,6 +97,7 @@ def test_model_named_archive_paths_stay_below_classic_windows_limit():
         candidates=[],
     )
     event_folder = _key_material_event_folder_name(layout, folder, event)
+    assert event_folder.startswith("Operate-")
     assert (
         len(
             str(

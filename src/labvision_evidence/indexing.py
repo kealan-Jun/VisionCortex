@@ -5,7 +5,9 @@ import json
 import mimetypes
 import os
 import re
+import shutil
 import sqlite3
+import tempfile
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -13,6 +15,7 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 from .physical_changes import physical_change_records
+from .pathing import archive_contains, archive_relative_posix
 from .schemas import EvidenceEvent, ExperimentGroup, VideoInfo
 
 
@@ -66,7 +69,7 @@ def _sha256(path: Path) -> str:
 def _relative_media(root: Path, relative: str) -> Path:
     candidate = (root / relative).resolve()
     resolved_root = root.resolve()
-    if not candidate.is_relative_to(resolved_root):
+    if not archive_contains(candidate, resolved_root):
         raise ValueError(f"Artifact path escapes archive root: {relative}")
     return candidate
 
@@ -179,7 +182,7 @@ def _artifact_record(
         "view_id": view_id,
         "view_role": item.get("view_role"),
         "path": relative,
-        "sidecar_path": sidecar.relative_to(root.resolve()).as_posix(),
+        "sidecar_path": archive_relative_posix(sidecar, root),
         "mime_type": mimetypes.guess_type(media.name)[0] or "application/octet-stream",
         "size_bytes": media_stat.st_size,
         "mtime_ns": media_stat.st_mtime_ns,
@@ -413,7 +416,7 @@ def _decision_receipt_records(json_root: Path) -> list[dict[str, Any]]:
     return sorted(records.values(), key=lambda item: str(item["decision_id"]))
 
 
-def _build_sqlite(
+def _populate_sqlite(
     path: Path,
     archive_id: str,
     normalized_events: Sequence[dict[str, Any]],
@@ -422,10 +425,8 @@ def _build_sqlite(
     decision_records: Sequence[dict[str, Any]],
     change_records: Sequence[dict[str, Any]],
 ) -> bool:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.partial-{uuid.uuid4().hex[:8]}")
     fts5_enabled = True
-    connection = sqlite3.connect(temporary)
+    connection = sqlite3.connect(path)
     try:
         connection.executescript(
             """
@@ -680,8 +681,40 @@ def _build_sqlite(
         connection.commit()
     finally:
         connection.close()
-    os.replace(temporary, path)
     return fts5_enabled
+
+
+def _build_sqlite(
+    path: Path,
+    archive_id: str,
+    normalized_events: Sequence[dict[str, Any]],
+    artifact_records: Sequence[dict[str, Any]],
+    evidence_records: Sequence[dict[str, Any]],
+    decision_records: Sequence[dict[str, Any]],
+    change_records: Sequence[dict[str, Any]],
+) -> bool:
+    """Build SQLite on local scratch before atomically publishing to NAS."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    nas_temporary = path.with_name(f".{path.name}.partial-{uuid.uuid4().hex[:8]}")
+    try:
+        with tempfile.TemporaryDirectory(prefix="visioncortex-evidence-index-") as root:
+            local_database = Path(root) / path.name
+            fts5_enabled = _populate_sqlite(
+                local_database,
+                archive_id,
+                normalized_events,
+                artifact_records,
+                evidence_records,
+                decision_records,
+                change_records,
+            )
+            shutil.copyfile(local_database, nas_temporary)
+        os.replace(nas_temporary, path)
+        return fts5_enabled
+    except BaseException:
+        nas_temporary.unlink(missing_ok=True)
+        raise
 
 
 def build_archive_index(
@@ -799,6 +832,7 @@ def build_archive_index(
     sqlite_duration_seconds = time.perf_counter() - sqlite_started
     category_index = root / "Key-Materials" / "Key-Material-Category-Index.json"
     category_index_relative = "../Key-Materials/Key-Material-Category-Index.json"
+    recall_eval = root / "JSON-Config-Files" / "key_material_recall_eval.json"
     manifest = {
         "schema_version": INDEX_SCHEMA_VERSION,
         "authority": "JSON files remain canonical; SQLite and JSONL registries are rebuildable derivatives",
@@ -858,6 +892,11 @@ def build_archive_index(
                 if category_index.is_file()
                 else {}
             ),
+            **(
+                {"key_material_recall_eval": "key_material_recall_eval.json"}
+                if recall_eval.is_file()
+                else {}
+            ),
         },
         "integrity": {
             INDEX_DB_NAME: {"size_bytes": database.stat().st_size, "sha256": _sha256(database)},
@@ -877,6 +916,16 @@ def build_archive_index(
                 "size_bytes": physical_change_registry.stat().st_size,
                 "sha256": _sha256(physical_change_registry),
             },
+            **(
+                {
+                    "key_material_recall_eval.json": {
+                        "size_bytes": recall_eval.stat().st_size,
+                        "sha256": _sha256(recall_eval),
+                    }
+                }
+                if recall_eval.is_file()
+                else {}
+            ),
             **(
                 {
                     category_index_relative: {

@@ -93,6 +93,44 @@ def test_device_registry_conflict_requires_explicit_approved_override(tmp_path):
     assert receipt["blocking_reasons"] == []
 
 
+def test_device_registry_can_auditably_override_stale_index_role(tmp_path):
+    registry_path = _write_registry(tmp_path / "registry.json")
+    payload = json.loads(registry_path.read_text(encoding="utf-8"))
+    payload["devices"]["fp"]["role_policy"] = {
+        "status": "policy_override",
+        "reason": "Trusted device-specific ground truth supersedes the generic index label.",
+        "source": "/trusted/device-role-ledger.json",
+    }
+    registry_path.write_text(json.dumps(payload), encoding="utf-8")
+    registry = load_device_registry(registry_path)
+
+    receipt = resolve_view_role(registry, "exp-1", "fp", "front")
+
+    assert receipt["status"] == "approved_override"
+    assert receipt["resolved_role"] == "first_person"
+    assert receipt["resolution_source"] == "approved_device_registry_override"
+    assert receipt["blocking_reasons"] == []
+    assert receipt["device_role_policy"]["approved"] is True
+
+
+def test_device_registry_rejects_unaudited_device_role_override(tmp_path):
+    registry_path = _write_registry(tmp_path / "registry.json")
+    payload = json.loads(registry_path.read_text(encoding="utf-8"))
+    payload["devices"]["fp"]["role_policy"] = {
+        "status": "policy_override",
+        "reason": "Missing a source reference.",
+    }
+    registry_path.write_text(json.dumps(payload), encoding="utf-8")
+    registry = load_device_registry(registry_path)
+
+    receipt = resolve_view_role(registry, "exp-1", "fp", "front")
+
+    assert receipt["status"] == "blocking_conflict"
+    assert receipt["resolved_role"] == "third_person"
+    assert "index_registry_role_mismatch" in receipt["blocking_reasons"]
+    assert receipt["device_role_policy"]["approved"] is False
+
+
 def test_collection_catalog_groups_index_rows_without_opening_media(default_config, tmp_path):
     registry_path = _write_registry(tmp_path / "registry.json")
     index_path = _write_index(
@@ -168,6 +206,48 @@ def test_collection_catalog_keeps_open_recordings_out_of_ready_queue(
     assert collection["status"] == "recording"
     assert collection["sealed"] is False
     assert collection["ready_to_analyze"] is False
+
+
+def test_collection_catalog_omits_explicitly_failed_empty_extra_camera(
+    default_config, tmp_path
+):
+    registry_path = _write_registry(tmp_path / "registry.json")
+    rows = [_row("exp-ready", "fp", "first"), _row("exp-ready", "tp", "side")]
+    failed = _row("exp-ready", "tp-failed", "side", segment_count=0)
+    failed.update(
+        {
+            "rgb_file": "",
+            "frames_file": "",
+            "sync_error": "matching meta.json was not found on Z: for this experiment prefix",
+        }
+    )
+    rows.append(failed)
+    index_path = _write_index(tmp_path / "experiment_record_index.csv", rows)
+    default_config["storage"].update(
+        {
+            "index_csv": str(index_path),
+            "device_registry_path": str(registry_path),
+            "local_cache_root": str(tmp_path / "cache"),
+        }
+    )
+    default_config["collection_ingest"]["persist_snapshot"] = False
+    clear_collection_catalog_cache()
+
+    collection = discover_collections(
+        default_config, now=datetime(2026, 8, 11, tzinfo=timezone.utc)
+    )["collections"][0]
+
+    assert collection["status"] == "ready"
+    assert collection["resolved_view_counts"] == {
+        "first_person": 1,
+        "third_person": 1,
+    }
+    assert collection["warning_count"] == 1
+    assert collection["warnings"][0]["code"] == "unavailable_camera_omitted"
+    omitted = next(
+        item for item in collection["cameras"] if item["camera_key"] == "tp-failed"
+    )
+    assert omitted["source_included"] is False
 
 
 def test_collection_catalog_pages_by_stable_recording_and_experiment_key(

@@ -93,6 +93,52 @@ def test_scan_runtime_aggregates_progressive_passes(tmp_path):
     assert report["bottleneck_diagnosis"]["inference_milliseconds_per_call"] == 600.0
 
 
+def test_scan_runtime_summarizes_terminal_eof_reconciliation(tmp_path):
+    layout = ArchiveLayout(tmp_path / "archive")
+    layout.create()
+    work = tmp_path / "scan"
+    work.mkdir()
+    activity = work / "source_activity_fine_first_person.jsonl"
+    activity.write_text(
+        "\n".join(
+            json.dumps(item)
+            for item in (
+                {
+                    "timestamp": 1.0,
+                    "event": "source_unit_completed",
+                    "decoder_receipt": {
+                        "frame_accounting_mismatch": 0,
+                        "frame_accounting_reconciled": False,
+                    },
+                },
+                {
+                    "timestamp": 2.0,
+                    "event": "source_unit_completed",
+                    "decoder_receipt": {
+                        "frame_accounting_mismatch": -1,
+                        "frame_accounting_reconciled": True,
+                        "terminal_eof_shortfall_frames": 1,
+                    },
+                },
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    EvidencePipeline._archive_scan_runtime(layout, work, "fine")
+
+    report = json.loads(
+        (layout.json_config / "scan_runtime_fine.json").read_text(encoding="utf-8")
+    )
+    assert report["frame_accounting"] == {
+        "session_count": 2,
+        "exact_session_count": 1,
+        "reconciled_terminal_eof_session_count": 1,
+        "unreconciled_mismatch_session_count": 0,
+    }
+
+
 def test_fine_runtime_does_not_absorb_nested_fine_scout_reports(tmp_path):
     layout = ArchiveLayout(tmp_path / "archive")
     layout.create()

@@ -1,0 +1,54 @@
+{
+  "schema_version": "visioncortex-key-event-ground-truth/1.0.0",
+  "ground_truth_id": "customflow-a-0002-codex-visual-key-events-20260824-v1",
+  "experiment_id": "exp_20260717_114053_2f08f953",
+  "applicability": {
+    "experiment_ids": ["exp_20260717_114053_2f08f953"]
+  },
+  "authority": "user_delegated_codex_visual_review",
+  "review_protocol": {
+    "annotator_count": 1,
+    "adjudicated": true,
+    "annotation_tool": "Codex aligned contact sheets plus before/peak/after Ark evidence",
+    "notes": "Prospective frozen truth from the preceding independent cold run. It covers both complete dual-view experiment windows, uses only semantically confirmed or strict single-class relabels, corrects relabel participants back to the 21-class ontology, and removes post-relabel physical duplicates."
+  },
+  "source_duration_seconds": 308.756,
+  "labeled_windows": [
+    {"start_seconds": 73.3, "end_seconds": 210.8},
+    {"start_seconds": 228.3, "end_seconds": 306.2}
+  ],
+  "events": [
+    {"event_id":"CODEX-A0002-EVT-000030","action_type":"hand_object_contact","start_seconds":78.2,"end_seconds":80.5,"objects":["balance","gloved_hand"],"decision":{"status":"confirmed"}},
+    {"event_id":"CODEX-A0002-EVT-000034","action_type":"hand_object_contact","start_seconds":79.7,"end_seconds":83.2,"objects":["gloved_hand","spatula"],"decision":{"status":"confirmed"}},
+    {"event_id":"CODEX-A0002-EVT-000036","action_type":"hand_object_contact","start_seconds":82.0,"end_seconds":86.7,"objects":["balance","gloved_hand"],"decision":{"status":"confirmed"}},
+    {"event_id":"CODEX-A0002-EVT-000097","action_type":"hand_object_contact","start_seconds":133.0,"end_seconds":145.3,"objects":["gloved_hand","paper"],"decision":{"status":"confirmed"}},
+    {"event_id":"CODEX-A0002-EVT-000114","action_type":"hand_object_contact","start_seconds":149.1,"end_seconds":187.6,"objects":["gloved_hand","paper"],"decision":{"status":"confirmed"}},
+    {"event_id":"CODEX-A0002-EVT-000122","action_type":"object_movement","start_seconds":154.4,"end_seconds":158.1,"objects":["paper"],"decision":{"status":"confirmed"}},
+    {"event_id":"CODEX-A0002-EVT-000129","action_type":"object_movement","start_seconds":158.9,"end_seconds":160.4,"objects":["paper"],"decision":{"status":"confirmed"}},
+    {"event_id":"CODEX-A0002-EVT-000156","action_type":"object_movement","start_seconds":176.1,"end_seconds":183.5,"objects":["paper"],"decision":{"status":"confirmed"}},
+    {"event_id":"CODEX-A0002-EVT-000163","action_type":"hand_object_contact","start_seconds":178.5,"end_seconds":190.0,"objects":["balance","gloved_hand"],"decision":{"status":"confirmed"}},
+    {"event_id":"CODEX-A0002-EVT-000167","action_type":"hand_object_contact","start_seconds":179.9,"end_seconds":182.7,"objects":["gloved_hand","paper"],"decision":{"status":"confirmed"}},
+    {"event_id":"CODEX-A0002-EVT-000168","action_type":"hand_object_contact","start_seconds":179.9,"end_seconds":182.7,"objects":["bottle_cap","gloved_hand"],"decision":{"status":"confirmed"}},
+    {"event_id":"CODEX-A0002-EVT-000171","action_type":"hand_object_contact","start_seconds":181.8,"end_seconds":187.6,"objects":["gloved_hand","spatula"],"decision":{"status":"confirmed"}},
+    {"event_id":"CODEX-A0002-EVT-000174","action_type":"object_movement","start_seconds":185.0,"end_seconds":187.4,"objects":["paper"],"decision":{"status":"confirmed"}},
+    {"event_id":"CODEX-A0002-EVT-000189","action_type":"hand_object_contact","start_seconds":191.6,"end_seconds":194.0,"objects":["balance","gloved_hand"],"decision":{"status":"confirmed"}},
+    {"event_id":"CODEX-A0002-EVT-000223","action_type":"hand_object_contact","start_seconds":230.3,"end_seconds":242.4,"objects":["gloved_hand","bottle_cap","spatula","reagent_bottle"],"decision":{"status":"confirmed"}},
+    {"event_id":"CODEX-A0002-EVT-000224","action_type":"hand_object_contact","start_seconds":230.3,"end_seconds":242.4,"objects":["balance","gloved_hand"],"decision":{"status":"confirmed"}},
+    {"event_id":"CODEX-A0002-EVT-000235","action_type":"hand_object_contact","start_seconds":237.6,"end_seconds":245.7,"objects":["balance","gloved_hand"],"decision":{"status":"confirmed"}},
+    {"event_id":"CODEX-A0002-EVT-000236","action_type":"container_state_change","start_seconds":237.7,"end_seconds":247.7,"objects":["bottle_cap","gloved_hand","reagent_bottle_open"],"decision":{"status":"confirmed"}},
+    {"event_id":"CODEX-A0002-EVT-000237","action_type":"hand_object_contact","start_seconds":237.7,"end_seconds":243.8,"objects":["bottle_cap","gloved_hand"],"decision":{"status":"confirmed"}},
+    {"event_id":"CODEX-A0002-EVT-000249","action_type":"hand_object_contact","start_seconds":243.7,"end_seconds":255.1,"objects":["balance","gloved_hand"],"decision":{"status":"confirmed"}},
+    {"event_id":"CODEX-A0002-EVT-000257","action_type":"hand_object_contact","start_seconds":247.1,"end_seconds":255.0,"objects":["balance","gloved_hand"],"decision":{"status":"confirmed"}},
+    {"event_id":"CODEX-A0002-EVT-000259","action_type":"container_state_change","start_seconds":247.4,"end_seconds":247.9,"objects":["bottle_cap","gloved_hand","reagent_bottle_open"],"decision":{"status":"confirmed"}},
+    {"event_id":"CODEX-A0002-EVT-000274","action_type":"hand_object_contact","start_seconds":257.0,"end_seconds":260.4,"objects":["balance","gloved_hand"],"decision":{"status":"confirmed"}},
+    {"event_id":"CODEX-A0002-EVT-000276","action_type":"hand_object_contact","start_seconds":258.5,"end_seconds":260.1,"objects":["gloved_hand","reagent_bottle"],"decision":{"status":"confirmed"}},
+    {"event_id":"CODEX-A0002-EVT-000281","action_type":"hand_object_contact","start_seconds":263.1,"end_seconds":264.5,"objects":["gloved_hand","reagent_bottle"],"decision":{"status":"confirmed"}},
+    {"event_id":"CODEX-A0002-EVT-000289","action_type":"object_movement","start_seconds":266.9,"end_seconds":267.9,"objects":["gloved_hand","bottle_cap","reagent_bottle"],"decision":{"status":"confirmed"}},
+    {"event_id":"CODEX-A0002-EVT-000290","action_type":"hand_object_contact","start_seconds":266.9,"end_seconds":267.9,"objects":["balance","gloved_hand"],"decision":{"status":"confirmed"}},
+    {"event_id":"CODEX-A0002-EVT-000298","action_type":"hand_object_contact","start_seconds":269.4,"end_seconds":287.5,"objects":["gloved_hand","paper"],"decision":{"status":"confirmed"}},
+    {"event_id":"CODEX-A0002-EVT-000299","action_type":"hand_object_contact","start_seconds":269.4,"end_seconds":287.5,"objects":["balance","gloved_hand"],"decision":{"status":"confirmed"}},
+    {"event_id":"CODEX-A0002-EVT-000310","action_type":"container_state_change","start_seconds":273.7,"end_seconds":275.7,"objects":["gloved_hand","tube_cap"],"decision":{"status":"confirmed"}},
+    {"event_id":"CODEX-A0002-EVT-000316","action_type":"hand_object_contact","start_seconds":276.3,"end_seconds":278.6,"objects":["gloved_hand","spatula"],"decision":{"status":"confirmed"}},
+    {"event_id":"CODEX-A0002-EVT-000335","action_type":"hand_object_contact","start_seconds":290.9,"end_seconds":303.2,"objects":["balance","gloved_hand"],"decision":{"status":"confirmed"}}
+  ]
+}

@@ -11,6 +11,8 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 from pathlib import Path, PureWindowsPath
 from typing import Any, Callable, Sequence
@@ -478,6 +480,19 @@ def _parts(value: str | None) -> list[str]:
     return [item.strip() for item in (value or "").split(";") if item.strip()]
 
 
+def _parse_index_integer(value: str, field_name: str) -> int:
+    """Parse integral CSV numbers without losing precision to binary floats."""
+
+    text = str(value).strip()
+    try:
+        parsed = Decimal(text)
+    except InvalidOperation as exc:
+        raise ValueError(f"invalid {field_name}: {value!r}") from exc
+    if not parsed.is_finite() or parsed != parsed.to_integral_value():
+        raise ValueError(f"non-integral {field_name}: {value!r}")
+    return int(parsed)
+
+
 def _resolve_nas_path(value: str, index_csv: Path) -> Path:
     """Resolve stale Z: index entries through the index CSV's active drive.
 
@@ -488,8 +503,133 @@ def _resolve_nas_path(value: str, index_csv: Path) -> Path:
     candidate = Path(value)
     pure = PureWindowsPath(value)
     if pure.drive.upper() == "Z:":
-        return Path(index_csv.drive + "\\" + str(pure.relative_to(pure.anchor)))
+        relative = pure.relative_to(pure.anchor)
+        index_pure = PureWindowsPath(str(index_csv))
+        if index_pure.drive:
+            return Path(index_pure.drive + "\\" + str(relative))
+        # Linux mounts the SMB share at the directory containing the canonical
+        # index CSV. Preserve the Z:-relative components without treating the
+        # backslashes as literal POSIX filename characters.
+        return index_csv.parent.joinpath(*relative.parts)
+    if pure.drive.casefold() == r"\\realityloop\video_database".casefold():
+        # Historical rows used the canonical SMB UNC share while the Ubuntu
+        # workstation mounts that same share at the index CSV directory.
+        # This is a deterministic same-source translation, not a substitute
+        # search, and still undergoes the normal stat/decode validation.
+        relative = pure.relative_to(pure.anchor)
+        return index_csv.parent.joinpath(*relative.parts)
     return candidate
+
+
+def _zero_frame_segment_failure_evidence(
+    video: Path,
+    timestamps_csv: Path | None,
+) -> dict[str, Any] | None:
+    """Prove that an indexed-but-absent MP4 represents a zero-frame capture."""
+
+    suffix = "rgb.mp4"
+    if not video.name.endswith(suffix):
+        return None
+    meta = video.with_name(video.name[: -len(suffix)] + "meta.json")
+    try:
+        payload = json.loads(meta.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if (
+        payload.get("closed") is not True
+        or str(payload.get("rgb_file") or "") != video.name
+        or int(payload.get("rgb_frames", -1)) != 0
+        or float(payload.get("rgb_actual_fps") or 0.0) != 0.0
+        or float(payload.get("rgb_record_fps") or 0.0) != 0.0
+    ):
+        return None
+    if timestamps_csv is not None and not timestamps_csv.is_file():
+        return None
+    return {
+        "video_path": str(video),
+        "timestamps_csv": str(timestamps_csv) if timestamps_csv is not None else None,
+        "reason": "closed_recorder_segment_contains_zero_rgb_frames",
+        "meta_path": str(meta),
+        "meta_sha256": _sha256_file(meta),
+        "rgb_frames": 0,
+        "rgb_actual_fps": 0.0,
+        "rgb_record_fps": 0.0,
+        "source_copy_bytes": 0,
+    }
+
+
+def _clock_absolute_bounds_us(path: Path) -> tuple[int, int] | None:
+    """Read the first/last recorder wall-clock timestamps without scanning CSV."""
+
+    try:
+        with path.open("rb") as handle:
+            header_bytes = handle.readline()
+            first_bytes = handle.readline()
+            while first_bytes and not first_bytes.strip():
+                first_bytes = handle.readline()
+            if not header_bytes or not first_bytes:
+                return None
+            handle.seek(0, os.SEEK_END)
+            end = handle.tell()
+            block_size = min(65_536, end)
+            handle.seek(end - block_size)
+            tail = handle.read(block_size)
+            lines = [line for line in tail.splitlines() if line.strip()]
+            if not lines:
+                return None
+            last_bytes = lines[-1]
+        header = next(
+            csv.reader([header_bytes.decode("utf-8-sig").rstrip("\r\n")])
+        )
+        first = next(csv.reader([first_bytes.decode("utf-8").rstrip("\r\n")]))
+        last = next(csv.reader([last_bytes.decode("utf-8").rstrip("\r\n")]))
+        indexes = {name.strip(): index for index, name in enumerate(header)}
+        clock_name = next(
+            (
+                name
+                for name in (
+                    "local_time_us",
+                    "packet_system_timestamp_us",
+                    "rgb_system_timestamp_us",
+                    "frame_system_timestamp_us",
+                )
+                if name in indexes
+                and indexes[name] < len(first)
+                and indexes[name] < len(last)
+                and first[indexes[name]].strip()
+                and last[indexes[name]].strip()
+            ),
+            None,
+        )
+        if clock_name is None:
+            return None
+        start = int(Decimal(first[indexes[clock_name]].strip()))
+        finish = int(Decimal(last[indexes[clock_name]].strip()))
+        return (min(start, finish), max(start, finish))
+    except (
+        OSError,
+        UnicodeError,
+        csv.Error,
+        InvalidOperation,
+        ValueError,
+        IndexError,
+    ):
+        return None
+
+
+def _index_recording_window_us(row: dict[str, str]) -> tuple[int, int] | None:
+    try:
+        start = datetime.fromisoformat(
+            str(row.get("recording_start_time") or "").replace("Z", "+00:00")
+        )
+        end = datetime.fromisoformat(
+            str(row.get("recording_end_time") or "").replace("Z", "+00:00")
+        )
+    except ValueError:
+        return None
+    if start.tzinfo is None or end.tzinfo is None or end < start:
+        return None
+    return (round(start.timestamp() * 1_000_000), round(end.timestamp() * 1_000_000))
 
 
 def read_index_experiment(index_csv: Path, experiment_id: str) -> list[dict[str, str]]:
@@ -522,8 +662,16 @@ def describe_index_experiment(
                 "nas_segment_dirs": _parts(row.get("nas_segment_dir")),
             }
         )
-    starts = [int(row["recording_start_us"]) for row in rows if row.get("recording_start_us")]
-    ends = [int(row["recording_end_us"]) for row in rows if row.get("recording_end_us")]
+    starts = [
+        _parse_index_integer(row["recording_start_us"], "recording_start_us")
+        for row in rows
+        if row.get("recording_start_us")
+    ]
+    ends = [
+        _parse_index_integer(row["recording_end_us"], "recording_end_us")
+        for row in rows
+        if row.get("recording_end_us")
+    ]
     return {
         "experiment_id": experiment_id,
         "index_csv": str(index_csv),
@@ -546,6 +694,18 @@ def prepare_from_nas_index(
     index_csv = Path(storage["index_csv"])
     rows = read_index_experiment(index_csv, experiment_id)
     description = describe_index_experiment(index_csv, experiment_id, rows)
+    usable_rows = [row for row in rows if _parts(row.get("rgb_file"))]
+    omitted_rows = [row for row in rows if not _parts(row.get("rgb_file"))]
+    unsafe_omissions = [
+        str(row.get("camera_key") or "")
+        for row in omitted_rows
+        if not str(row.get("sync_error") or "").strip()
+    ]
+    if unsafe_omissions:
+        raise ValueError(
+            "Indexed cameras have no video and no explicit source failure: "
+            f"{unsafe_omissions}"
+        )
     active_archive = storage.get("active_archive_path")
     if active_archive and storage.get("manifest_storage", "nas") == "nas":
         manifest_root = Path(active_archive) / "JSON-Config-Files" / "Input-Manifests"
@@ -565,26 +725,52 @@ def prepare_from_nas_index(
     receipt_by_camera = {
         str(receipt["camera_key"]): receipt for receipt in role_receipts
     }
+    usable_camera_keys = {
+        str(row.get("camera_key") or "") for row in usable_rows
+    }
+    usable_role_receipts = [
+        receipt
+        for receipt in role_receipts
+        if str(receipt.get("camera_key") or "") in usable_camera_keys
+    ]
     role_receipt_payload = {
         "schema_version": "visioncortex-view-role-resolution-ledger/1",
         "experiment_id": experiment_id,
         "index_csv": str(index_csv),
         "registry": registry.get("provenance"),
         "status": "blocked"
-        if any(receipt.get("blocking_reasons") for receipt in role_receipts)
+        if any(receipt.get("blocking_reasons") for receipt in usable_role_receipts)
+        else "degraded_resolved"
+        if omitted_rows
         else "resolved",
         "resolved_first_person_views": sum(
             receipt.get("resolved_role") == ViewRole.FIRST_PERSON.value
-            for receipt in role_receipts
+            for receipt in usable_role_receipts
         ),
         "resolved_third_person_views": sum(
             receipt.get("resolved_role") == ViewRole.THIRD_PERSON.value
-            for receipt in role_receipts
+            for receipt in usable_role_receipts
         ),
         "approved_override_count": sum(
             receipt.get("status") == "approved_override" for receipt in role_receipts
         ),
-        "views": role_receipts,
+        "views": [
+            {
+                **receipt,
+                "source_included": str(receipt.get("camera_key") or "")
+                in usable_camera_keys,
+                "source_omission_reason": next(
+                    (
+                        str(row.get("sync_error") or "")
+                        for row in omitted_rows
+                        if str(row.get("camera_key") or "")
+                        == str(receipt.get("camera_key") or "")
+                    ),
+                    None,
+                ),
+            }
+            for receipt in role_receipts
+        ],
     }
     role_receipt_path = (
         Path(active_archive) / "JSON-Config-Files" / "view_role_resolution.json"
@@ -600,11 +786,13 @@ def prepare_from_nas_index(
             "camera_key": receipt.get("camera_key"),
             "blocking_reasons": receipt.get("blocking_reasons"),
         }
-        for receipt in role_receipts
+        for receipt in usable_role_receipts
         if receipt.get("blocking_reasons") or not receipt.get("resolved_role")
     ]
     if blocking_roles:
         raise ValueError(f"View role resolution blocked: {blocking_roles}")
+
+    omitted_out_of_window_segments: list[dict[str, Any]] = []
 
     def prepare(row: dict[str, str]) -> ViewInput:
         camera_key = str(row["camera_key"])
@@ -616,6 +804,66 @@ def prepare_from_nas_index(
                 f"NAS segment/clock count mismatch for {camera_key}: "
                 f"{len(videos)} videos, {len(clocks)} clock CSVs"
             )
+        recording_window = _index_recording_window_us(row)
+        if len(videos) > 1 and clocks and recording_window is not None:
+            clock_bounds = [_clock_absolute_bounds_us(clock) for clock in clocks]
+            # Filter only with complete recorder-clock proof. If even one
+            # sidecar is unreadable, retain the source-index declaration and
+            # let the normal fail-closed media checks decide.
+            if all(bounds is not None for bounds in clock_bounds):
+                tolerance_us = round(
+                    float(
+                        config["performance"].get(
+                            "index_segment_window_tolerance_seconds", 2.0
+                        )
+                    )
+                    * 1_000_000
+                )
+                window_start_us, window_end_us = recording_window
+                keep = [
+                    bool(
+                        bounds
+                        and bounds[1] >= window_start_us - tolerance_us
+                        and bounds[0] <= window_end_us + tolerance_us
+                    )
+                    for bounds in clock_bounds
+                ]
+                if not any(keep):
+                    raise ValueError(
+                        "No indexed segment overlaps the declared recording "
+                        f"window for {camera_key}"
+                    )
+                if not all(keep):
+                    retained_videos: list[Path] = []
+                    retained_clocks: list[Path] = []
+                    for index, (video, clock, bounds, retained) in enumerate(
+                        zip(videos, clocks, clock_bounds, keep, strict=True)
+                    ):
+                        if retained:
+                            retained_videos.append(video)
+                            retained_clocks.append(clock)
+                            continue
+                        assert bounds is not None
+                        omitted_out_of_window_segments.append(
+                            {
+                                "view_id": camera_key,
+                                "segment_index": index,
+                                "video_path": str(video),
+                                "timestamps_csv": str(clock),
+                                "clock_start_us": bounds[0],
+                                "clock_end_us": bounds[1],
+                                "recording_window_start_us": window_start_us,
+                                "recording_window_end_us": window_end_us,
+                                "tolerance_us": tolerance_us,
+                                "reason": (
+                                    "recorder_clock_does_not_overlap_declared_"
+                                    "experiment_window"
+                                ),
+                                "source_copy_bytes": 0,
+                            }
+                        )
+                    videos = retained_videos
+                    clocks = retained_clocks
         if storage.get("require_nas_source_paths"):
             expected_drive = index_csv.drive.upper()
             off_nas = [str(item) for item in videos + clocks if item.drive.upper() != expected_drive]
@@ -634,7 +882,12 @@ def prepare_from_nas_index(
             ],
         )
 
-    views = [prepare(row) for row in rows]
+    views = [prepare(row) for row in usable_rows]
+    roles = {view.role for view in views}
+    if not {ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON}.issubset(roles):
+        raise ValueError(
+            "Usable indexed sources do not contain a first/third-person pair"
+        )
     source_paths = [
         path
         for view in views
@@ -657,8 +910,75 @@ def prepare_from_nas_index(
         for path, snapshot in source_snapshots.items()
         if not snapshot["is_file"]
     ]
+    omitted_zero_frame_segments: list[dict[str, Any]] = []
+    if missing:
+        filtered_views: list[ViewInput] = []
+        for view in views:
+            retained_segments: list[VideoSegmentInput] = []
+            for segment in view.segments:
+                video_snapshot = source_snapshots.get(segment.video) or {}
+                if video_snapshot.get("is_file"):
+                    retained_segments.append(segment)
+                    continue
+                evidence = _zero_frame_segment_failure_evidence(
+                    segment.video, segment.timestamps_csv
+                )
+                if evidence is None:
+                    retained_segments.append(segment)
+                    continue
+                omitted_zero_frame_segments.append(
+                    {"view_id": view.view_id, **evidence}
+                )
+            if retained_segments:
+                filtered_views.append(
+                    view.model_copy(update={"segments": retained_segments})
+                )
+        views = filtered_views
+        source_paths = [
+            path
+            for view in views
+            for segment in view.segments
+            for path in (
+                [segment.video]
+                + (
+                    [segment.timestamps_csv]
+                    if segment.timestamps_csv is not None
+                    else []
+                )
+            )
+        ]
+        effective_snapshots, effective_validation = snapshot_source_paths(
+            source_paths,
+            workers=int(config["performance"].get("source_stat_workers", 24)),
+            max_age_seconds=float(
+                config["performance"].get(
+                    "source_stat_cache_ttl_seconds", 120.0
+                )
+            ),
+        )
+        source_validation = {
+            **effective_validation,
+            "initial_validation": source_validation,
+            "omitted_zero_frame_segment_count": len(
+                omitted_zero_frame_segments
+            ),
+        }
+        source_snapshots = effective_snapshots
+        missing = [
+            str(path)
+            for path, snapshot in source_snapshots.items()
+            if not snapshot["is_file"]
+        ]
     if missing:
         raise FileNotFoundError(f"NAS source missing: {missing[:4]}")
+    if omitted_zero_frame_segments:
+        remaining_roles = {view.role for view in views}
+        if not {ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON}.issubset(
+            remaining_roles
+        ):
+            raise ValueError(
+                "Zero-frame segment omission removed the required cross-view pair"
+            )
     segment_counts = {view.view_id: len(view.segments) for view in views}
     if config["performance"].get("synchronized_segment_waves") and len(set(segment_counts.values())) != 1:
         raise ValueError(f"Synchronized segment waves require equal segment counts: {segment_counts}")
@@ -670,6 +990,18 @@ def prepare_from_nas_index(
     )
     ingest = {
         **description,
+        "indexed_camera_count": len(rows),
+        "camera_count": len(views),
+        "omitted_unavailable_cameras": [
+            {
+                "camera_key": row.get("camera_key"),
+                "sync_error": row.get("sync_error"),
+                "source_copy_bytes": 0,
+            }
+            for row in omitted_rows
+        ],
+        "omitted_zero_frame_segments": omitted_zero_frame_segments,
+        "omitted_out_of_window_segments": omitted_out_of_window_segments,
         "input_mode": "nas_segmented_virtual_timeline",
         "copied_source_bytes": 0,
         "continuous_source_copies_created": 0,

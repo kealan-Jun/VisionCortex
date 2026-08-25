@@ -8,7 +8,36 @@ RTX 4060 真实六路运行节点必须先阅读
 
 > 冻结基线：六路、多视角、3 小时湿实验视频的时间对齐、有界实验筛选、五类关键素材和细粒度步骤理解流水线。RTX 4060 部署、固定 NAS 基准、缓存目录与开发协作方式见 [RTX4060-交接与运行说明.md](RTX4060-交接与运行说明.md)。
 
-固定基准不会重复创建实验目录：先启动 Web，再运行 `deployment\rtx4060\04-重跑固定六路基准.ps1`，由常驻 Web 服务异步执行并复用 `Y:\VisionCortexExperimentArchive\Six-View-Three-Hour-Experiment-2026-08-13`。不要在有超时限制的命令包装器里前台运行 `run-fixed-benchmark`。其他用户上传任务仍按实际上传路数动态创建独立档案。
+## Ubuntu RTX 3090 Ti 本地结构
+
+```text
+/home/x1/Projects/VisionCortex
+  ├── 源代码、配置与部署脚本
+  └── models/<role>/best.pt          # 本地闭集权重，不进入 Git
+
+/home/x1/VisionCortex-project        # 指向上述源码目录的稳定入口
+
+/srv/sentinel-data/VisionCortex3090Ti
+  ├── .venv/                         # 固定 Python/CUDA 依赖
+  ├── Engines/                       # TensorRT 与公共模型权重
+  └── Runtime/                       # 临时解码、日志、质量认证与运行缓存
+```
+
+Git 仓库只保存代码、模型版本/下载地址和 SHA-256，不保存 `.pt`、
+`.engine`、`.safetensors`、原视频、运行产出或密钥。两套项目训练的闭集
+权重须在本地放到 `models/first_person/best.pt` 和
+`models/third_person/best.pt`；3090 Ti 安装器会验固定哈希、重建 TensorRT
+引擎，并自动下载和验签 YOLO-World、CLIP、Grounding DINO 与 SAM2.1 公共
+资产。
+
+当前最终模型链不是单一 YOLO：两套 21 类 TensorRT 模型负责全时间轴候选；
+ByteTrack 风格的两阶段关联保持对象轨迹；YOLO-World 与 Grounding DINO 仅在
+已接受关键帧和有界时序补救中补齐小物体；豆包对双视角时序证据做动作与步骤
+裁决；SAM2.1 对裁决后的参与对象框在短关键片段中双向传播，收紧最终展示框并
+留下连续性收据。开放词汇框和 SAM2 掩码都不能单独确认动作或液体状态，正式
+生产仍受事件/参与对象框质量认证的 fail-closed 门禁约束。
+
+固定基准不会重复创建实验目录：先启动 Web，再运行 `deployment\rtx4060\04-重跑固定六路基准.ps1`，由常驻 Web 服务异步执行并复用 `Y:\VisionCortexExperimentArchive\CustomFlow_standard_correct_12_ABCFA_0001--exp_20260810_144014_e918b762`。不要在有超时限制的命令包装器里前台运行 `run-fixed-benchmark`。其他用户上传任务仍按实际上传路数动态创建独立档案。
 
 面向化学湿实验长视频的多视角证据流水线。系统把第一人称与第三人称视频先对齐，再以两套 21 类 YOLO 模型和 ByteTrack 生成候选，经过跨视角审计后，提取实验片段、五类物理动作关键帧/关键片段/时间戳，并调用豆包多模态模型生成步骤级理解。
 
@@ -54,7 +83,7 @@ RTX 4060 真实六路运行节点必须先阅读
 
 日报采用固定的 `VC-LAB-DAILY-REPORT-V1`：模型只产出结构化实验理解，确定性渲染器填充固定栏目，日报阶段不新增模型调用或 Token。模板栏目、版本策略和本地开发方式见 [实验室日报固定模板 V1](docs/daily-report-template-v1.md)。
 
-五类动作是 `hand_object_contact`（手与明确物体接触）、`object_movement`、`liquid_movement`、`container_state_change` 和 `device_panel_operation`。每个记录保留候选、接受/拒绝理由、视角支持、对齐置信度和不确定性，YOLO 框不会被直接当成最终证据。
+六类动作是 `hand_object_contact`（手与明确物体接触）、`object_movement`、`liquid_movement`、`container_state_change`、`device_panel_operation` 和 `pipette_transfer_operation`。每个记录保留候选、接受/拒绝理由、视角支持、对齐置信度和不确定性，YOLO 框不会被直接当成最终证据。
 
 ## 安装与安全配置
 

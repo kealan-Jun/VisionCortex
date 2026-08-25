@@ -19,6 +19,11 @@ class ActionType(str, Enum):
     LIQUID_MOVEMENT = "liquid_movement"
     CONTAINER_STATE_CHANGE = "container_state_change"
     DEVICE_PANEL_OPERATION = "device_panel_operation"
+    # A source-contact -> withdrawal/transport -> distinct-target-contact
+    # pipette chain is directly observable even when the microlitre payload is
+    # not. Keep that operational fact separate from LIQUID_MOVEMENT so an
+    # invisible fluid or occluded plunger is never promoted to visible liquid.
+    PIPETTE_TRANSFER_OPERATION = "pipette_transfer_operation"
 
 
 class VideoSegmentInput(BaseModel):
@@ -78,6 +83,11 @@ class VideoSegmentInfo(BaseModel):
     height: int
     frame_count: int
     size_bytes: int = 0
+    # The recorder clock can cover pauses during which no RGB sample was
+    # written.  Keep that wall-clock coverage for audit, but never use it as
+    # the physical MP4 decode duration.
+    source_clock_duration_ms: float | None = None
+    media_timing_source: str | None = None
 
 
 class VideoInfo(BaseModel):
@@ -88,6 +98,8 @@ class VideoInfo(BaseModel):
     height: int
     frame_count: int
     size_bytes: int = 0
+    source_clock_duration_ms: float | None = None
+    media_timing_source: str | None = None
     segments: list[VideoSegmentInfo] = Field(default_factory=list)
 
 
@@ -175,6 +187,9 @@ class EvidenceEvent(BaseModel):
     supporting_roles: list[ViewRole]
     candidates: list[ActionCandidate]
     uncertainty: list[str] = Field(default_factory=list)
+    observability: dict[str, Any] = Field(default_factory=dict)
+    state_machine: dict[str, Any] = Field(default_factory=dict)
+    semantic_review: dict[str, Any] | None = None
     key_frames: dict[str, str] = Field(default_factory=dict)
     key_clips: dict[str, str] = Field(default_factory=dict)
     model_understanding: dict[str, Any] | None = None

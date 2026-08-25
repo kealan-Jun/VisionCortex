@@ -1,0 +1,73 @@
+{
+  "schema_version": "visioncortex-key-event-ground-truth/1.0.0",
+  "ground_truth_id": "customflow-a-0004-codex-visual-key-events-20260821-v2",
+  "experiment_id": "exp_20260811_161842_ca175e55",
+  "applicability": {
+    "experiment_ids": [
+      "exp_20260811_161842_ca175e55"
+    ]
+  },
+  "authority": "user_delegated_codex_visual_review",
+  "review_protocol": {
+    "annotator_count": 1,
+    "adjudicated": true,
+    "annotation_tool": "Codex visual contact-sheet and aligned-video review",
+    "notes": "Confirmed labels require visible physical state or object motion. A second Codex review rejected the former 170.9-172.8 s weighing-paper movement label: the paper remains stationary while blue gloves are manipulated. The exhaustive scored window is therefore limited to 240.8-250.5 s. Indirect device-panel hypotheses remain uncertain and are excluded as truth."
+  },
+  "source_duration_seconds": 3754.716,
+  "labeled_windows": [
+    {"start_seconds": 240.8, "end_seconds": 250.5}
+  ],
+  "review_revision": {
+    "previous_ground_truth_id": "customflow-a-0004-codex-visual-key-events-20260821-v1",
+    "reviewed_at": "2026-08-21T20:43:00+08:00",
+    "reviewer": "Codex under user-delegated visual-ground-truth authority",
+    "reason": "Frame-by-frame aligned review showed stationary weighing paper at 170.9-172.8 s and blue-glove manipulation instead; that interval was not exhaustively relabeled and is excluded from scored coverage.",
+    "visual_receipt": "/home/x1/桌面/nas/VisionCortexExperimentArchive/.VisionCortex-Run-Staging/Ground-Truth-Review-Three-Collections-2026-08-21/review-20260821-181757/Review-Media/Ground-Truth-Corrections/A0004/A0004-global-163-to-180-contact-sheet.jpg"
+  },
+  "events": [
+    {
+      "event_id": "CODEX-A-KM-001",
+      "action_type": "object_movement",
+      "start_seconds": 170.9,
+      "end_seconds": 172.8,
+      "objects": ["weighing_paper"],
+      "decision": {
+        "status": "rejected",
+        "reason": "Aligned review shows the white weighing paper stationary on the bench while the operator manipulates blue gloves."
+      }
+    },
+    {
+      "event_id": "CODEX-A-KM-002",
+      "action_type": "device_panel_operation",
+      "start_seconds": 204.1,
+      "end_seconds": 204.9,
+      "objects": ["balance"],
+      "decision": {"status": "uncertain"}
+    },
+    {
+      "event_id": "CODEX-A-KM-003",
+      "action_type": "container_state_change",
+      "start_seconds": 242.3,
+      "end_seconds": 243.4,
+      "objects": ["reagent_bottle"],
+      "decision": {"status": "confirmed"}
+    },
+    {
+      "event_id": "CODEX-A-KM-004",
+      "action_type": "hand_object_contact",
+      "start_seconds": 240.8,
+      "end_seconds": 250.5,
+      "objects": ["weighing_paper"],
+      "decision": {"status": "confirmed"}
+    },
+    {
+      "event_id": "CODEX-A-KM-005",
+      "action_type": "hand_object_contact",
+      "start_seconds": 242.3,
+      "end_seconds": 243.4,
+      "objects": ["bottle_cap"],
+      "decision": {"status": "confirmed"}
+    }
+  ]
+}

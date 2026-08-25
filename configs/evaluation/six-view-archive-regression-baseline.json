@@ -1,0 +1,33 @@
+{
+  "schema_version": "visioncortex-archive-regression-baseline/1.0.0",
+  "baseline_id": "six-view-three-hour-reviewed-archive-20260815-v1",
+  "experiment_id": "exp_20260810_144014_e918b762",
+  "archive_name": "CustomFlow_standard_correct_12_ABCFA_0001--exp_20260810_144014_e918b762",
+  "authority": "reviewed_and_user_accepted_formal_archive",
+  "gates": {
+    "experiment_group_count": 5,
+    "minimum_key_event_count": 80,
+    "boundary_structure": {
+      "reviewed-exp-001": {
+        "continuity_type": "independent",
+        "atomic_experiment_count": 1
+      },
+      "reviewed-exp-002": {
+        "continuity_type": "independent",
+        "atomic_experiment_count": 1
+      },
+      "reviewed-exp-003": {
+        "continuity_type": "independent",
+        "atomic_experiment_count": 1
+      },
+      "reviewed-exp-004": {
+        "continuity_type": "continuous",
+        "atomic_experiment_count": 2
+      },
+      "reviewed-exp-005": {
+        "continuity_type": "independent",
+        "atomic_experiment_count": 1
+      }
+    }
+  }
+}

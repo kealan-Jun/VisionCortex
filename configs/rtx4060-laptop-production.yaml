@@ -24,6 +24,7 @@ performance:
   coarse_refinement_association_margin_seconds: 30.0
   coarse_refinement_min_candidates: 2
   coarse_refinement_min_span_seconds: 30.0
+  coarse_quarantine_objectless_unconfirmed_motion: true
   # The same indexed sentinel frames feed motion and first-person YOLO once.
   # At one frame per 10 seconds the shortest reviewed 4.5-minute experiment
   # still contributes about 27 observations, while a second NAS decode pass is
@@ -104,6 +105,7 @@ performance:
   # Fine decode padding remains wide for recall, while pass/fail evidence is
   # associated to its actual boundary with only a small clock-tolerance margin.
   fine_progressive_audit_margin_seconds: 5.0
+  fine_progressive_anchor_cluster_gap_seconds: 10.0
   # A separate low-FPS ranking pass is optional in the generic pipeline, but
   # segmented NAS cold starts pay nearly all of its time in file open/seek.
   # DEV-022: a separate 1 FPS Scout decoded only 210 frames but paid 667 s of
@@ -206,4 +208,10 @@ storage:
   web_upload_retention_mode: nas_only
 
 validation:
-  acceptance_baseline: ./configs/acceptance/six-view-three-hour-reviewed-baseline.json
+  acceptance_baseline:
+    exp_20260810_144014_e918b762: ./configs/acceptance/six-view-three-hour-reviewed-baseline.json
+    exp_20260811_161842_ca175e55: ./configs/acceptance/customflow-a-0004-codex-visual-baseline.json
+    exp_20260812_133147_53d6cbd4: ./configs/acceptance/customflow-z-0001-codex-visual-baseline.json
+  key_event_ground_truth:
+    exp_20260811_161842_ca175e55: ./configs/evaluation/customflow-a-0004-codex-visual-key-events.json
+    exp_20260812_133147_53d6cbd4: ./configs/evaluation/customflow-z-0001-codex-visual-key-events.json

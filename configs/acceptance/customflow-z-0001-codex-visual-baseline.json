@@ -1,0 +1,46 @@
+{
+  "schema_version": "visioncortex-reviewed-acceptance-baseline/1",
+  "baseline_id": "customflow-z-0001-codex-visual-20260821-v1",
+  "experiment_id": "exp_20260812_133147_53d6cbd4",
+  "applicability": {
+    "experiment_ids": [
+      "exp_20260812_133147_53d6cbd4"
+    ]
+  },
+  "authority": "user_delegated_codex_visual_review",
+  "usage": "evaluation_only_not_inference",
+  "review_protocol": {
+    "reviewer_type": "codex_visual_review",
+    "evidence": [
+      "full_aligned_first_third_clips",
+      "twenty_second_start_and_end_context",
+      "zero_copy_broad_context_1310_to_1510_seconds",
+      "zero_copy_broad_context_5370_to_5560_seconds",
+      "accepted_and_rejected_cv_event_ledger"
+    ],
+    "boundary_uncertainty_seconds": 6.0
+  },
+  "notes": [
+    "The first workflow is a pipetting and tube aliquoting sequence; visible tool/container state supports the workflow, while liquid identity and volume are unknown.",
+    "The second workflow includes preparation before the prior 5497.1 second model boundary and runs to the end of the common readable media.",
+    "The second workflow is treated as complete at the observable source end; any unrecorded continuation is unknown."
+  ],
+  "experiments": [
+    {
+      "baseline_id": "codex-z-0001-exp-001",
+      "name": "移液器移液与离心管分装实验",
+      "start_seconds": 1330.0,
+      "end_seconds": 1450.0,
+      "continuity_type": "continuous",
+      "atomic_experiment_count": 2
+    },
+    {
+      "baseline_id": "codex-z-0001-exp-002",
+      "name": "分析天平固体称量实验",
+      "start_seconds": 5393.167,
+      "end_seconds": 5552.667,
+      "continuity_type": "independent",
+      "atomic_experiment_count": 1
+    }
+  ]
+}

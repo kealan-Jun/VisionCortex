@@ -1,6 +1,6 @@
 {
   "template_id": "VC-PROFESSIONAL-EVIDENCE-REPORT-V1",
-  "schema_version": "1.0.0",
+  "schema_version": "1.1.0",
   "title": "VisionCortex 多视角实验分析专业证据报告",
   "audience": "实验室管理者、质量负责人、项目委托方和审计人员",
   "reading_layers": [
@@ -28,6 +28,7 @@
     "selected_dual_view_visual_evidence",
     "quality_uncertainty_and_limitations",
     "performance_and_token_accounting",
+    "zero_copy_runtime_hardware_and_model_audit",
     "provenance_and_archive_index"
   ],
   "visual_policy": {
@@ -49,5 +50,13 @@
     "content_source": "accepted_evidence_package_only",
     "additional_mllm_calls": false,
     "additional_model_tokens": 0
+  },
+  "runtime_audit_policy": {
+    "source_copy_bytes_required": true,
+    "tensorrt_and_video_encoder_status_required": true,
+    "mllm_call_status_and_reuse_required": true,
+    "gpu_vram_host_memory_decode_encode_power_temperature_peaks_required": true,
+    "quality_truth_metrics_required_when_available": true,
+    "source": "archived_deterministic_receipts_only"
   }
 }

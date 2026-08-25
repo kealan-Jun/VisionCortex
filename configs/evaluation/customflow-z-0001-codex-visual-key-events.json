@@ -1,0 +1,115 @@
+{
+  "schema_version": "visioncortex-key-event-ground-truth/1.0.0",
+  "ground_truth_id": "customflow-z-0001-codex-visual-key-events-20260821-v3",
+  "experiment_id": "exp_20260812_133147_53d6cbd4",
+  "applicability": {
+    "experiment_ids": [
+      "exp_20260812_133147_53d6cbd4"
+    ]
+  },
+  "authority": "user_delegated_codex_visual_review",
+  "review_protocol": {
+    "annotator_count": 1,
+    "adjudicated": true,
+    "annotation_tool": "Codex visual contact-sheet and aligned-video review",
+    "notes": "Pipette/container sequences without a visible liquid-level or flow change are uncertain liquid_movement labels. Direct tube contact and paper displacement are confirmed. The 1428.8-1429.9 s cap-state label was rejected after before/peak/after review showed only the capped-tube rack moving into view, with no cap opening or closing. The 1435.2-1440.6 s sample-bottle-contact label was rejected after a 2 FPS per-view re-review showed pipette return-to-rack instead of sample-bottle contact. The 5504.4-5505.6 s balance interaction was corrected from the generic component hand_object_contact to the more specific device_panel_operation because the third-person view shows panel contact followed by a display self-test state change."
+  },
+  "source_duration_seconds": 5560.633,
+  "labeled_windows": [
+    {"start_seconds": 1346.4, "end_seconds": 1352.6},
+    {"start_seconds": 1368.3, "end_seconds": 1371.0},
+    {"start_seconds": 1428.7, "end_seconds": 1430.0},
+    {"start_seconds": 1435.1, "end_seconds": 1440.7},
+    {"start_seconds": 5504.3, "end_seconds": 5505.7},
+    {"start_seconds": 5512.5, "end_seconds": 5517.0},
+    {"start_seconds": 5533.7, "end_seconds": 5536.9}
+  ],
+  "events": [
+    {
+      "event_id": "CODEX-Z-KM-001",
+      "action_type": "liquid_movement",
+      "start_seconds": 1346.5,
+      "end_seconds": 1352.5,
+      "objects": ["pipette", "tube"],
+      "decision": {"status": "uncertain"}
+    },
+    {
+      "event_id": "CODEX-Z-KM-002",
+      "action_type": "hand_object_contact",
+      "start_seconds": 1368.4,
+      "end_seconds": 1370.9,
+      "objects": ["tube"],
+      "decision": {"status": "confirmed"}
+    },
+    {
+      "event_id": "CODEX-Z-KM-003",
+      "action_type": "container_state_change",
+      "start_seconds": 1428.8,
+      "end_seconds": 1429.9,
+      "objects": ["tube_cap"],
+      "decision": {
+        "status": "rejected",
+        "reason": "Before/peak/after and aligned-view review shows only a rack of already capped tubes moving into view; no cap opening, closing, removal, or replacement is visible."
+      }
+    },
+    {
+      "event_id": "CODEX-Z-KM-004",
+      "action_type": "liquid_movement",
+      "start_seconds": 1435.2,
+      "end_seconds": 1440.6,
+      "objects": ["pipette", "sample_bottle", "tube"],
+      "decision": {"status": "uncertain"}
+    },
+    {
+      "event_id": "CODEX-Z-KM-005",
+      "action_type": "device_panel_operation",
+      "start_seconds": 5504.4,
+      "end_seconds": 5505.6,
+      "objects": ["balance"],
+      "decision": {"status": "uncertain"}
+    },
+    {
+      "event_id": "CODEX-Z-KM-006",
+      "action_type": "object_movement",
+      "start_seconds": 5512.6,
+      "end_seconds": 5516.9,
+      "objects": ["weighing_paper"],
+      "decision": {"status": "confirmed"}
+    },
+    {
+      "event_id": "CODEX-Z-KM-007",
+      "action_type": "object_movement",
+      "start_seconds": 5533.8,
+      "end_seconds": 5536.8,
+      "objects": ["weighing_paper"],
+      "decision": {"status": "confirmed"}
+    },
+    {
+      "event_id": "CODEX-Z-KM-008",
+      "action_type": "device_panel_operation",
+      "start_seconds": 5504.4,
+      "end_seconds": 5505.6,
+      "objects": ["balance"],
+      "decision": {"status": "confirmed"}
+    },
+    {
+      "event_id": "CODEX-Z-KM-009",
+      "action_type": "hand_object_contact",
+      "start_seconds": 1435.2,
+      "end_seconds": 1440.6,
+      "objects": ["sample_bottle"],
+      "decision": {
+        "status": "rejected",
+        "reason": "Per-view 2 FPS adjudication shows the right hand returning a pipette to its rack; no sample-bottle surface contact or grasp is visible in either aligned view."
+      }
+    },
+    {
+      "event_id": "CODEX-Z-KM-010",
+      "action_type": "hand_object_contact",
+      "start_seconds": 1435.2,
+      "end_seconds": 1440.6,
+      "objects": ["pipette"],
+      "decision": {"status": "confirmed"}
+    }
+  ]
+}

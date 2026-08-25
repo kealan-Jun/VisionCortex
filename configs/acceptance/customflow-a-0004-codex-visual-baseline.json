@@ -1,0 +1,37 @@
+{
+  "schema_version": "visioncortex-reviewed-acceptance-baseline/1",
+  "baseline_id": "customflow-a-0004-codex-visual-20260821-v1",
+  "experiment_id": "exp_20260811_161842_ca175e55",
+  "applicability": {
+    "experiment_ids": [
+      "exp_20260811_161842_ca175e55"
+    ]
+  },
+  "authority": "user_delegated_codex_visual_review",
+  "usage": "evaluation_only_not_inference",
+  "review_protocol": {
+    "reviewer_type": "codex_visual_review",
+    "evidence": [
+      "full_aligned_first_third_clip",
+      "twenty_second_start_and_end_context",
+      "zero_copy_broad_context_0_to_340_seconds",
+      "accepted_and_rejected_cv_event_ledger"
+    ],
+    "boundary_uncertainty_seconds": 6.0
+  },
+  "notes": [
+    "The prior 168.9-272.4 second model segment ends after opening the reagent bottle and is only the first part of the weighing workflow.",
+    "The reviewed boundary includes glove and weighing-paper preparation through the final cleanup/disposal movement.",
+    "Chemical identity, target mass, and measured value remain unknown."
+  ],
+  "experiments": [
+    {
+      "baseline_id": "codex-a-0004-exp-001",
+      "name": "分析天平固体称量实验",
+      "start_seconds": 155.3,
+      "end_seconds": 332.5,
+      "continuity_type": "independent",
+      "atomic_experiment_count": 1
+    }
+  ]
+}

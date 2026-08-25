@@ -11,25 +11,36 @@ from typing import Any, Sequence
 
 import httpx
 
-from .schemas import EvidenceEvent, ExperimentGroup, ExperimentSegment
+from .schemas import ActionType, EvidenceEvent, ExperimentGroup, ExperimentSegment
 
 
-EVENT_SYSTEM_PROMPT = """你是化学湿实验视频证据审计模型。你会收到同一全局时间点、严格对齐的第一人称和第三人称关键帧，以及传统 CV 证据。
+EVENT_SYSTEM_PROMPT = """你是化学湿实验视频证据审计模型。你会收到严格对齐的第一人称和第三人称动作前、峰值、动作后关键帧，以及传统 CV 证据。
 只描述画面可观察事实，不补写未出现的试剂名、剂量、读数或实验目的。第一/第三人称冲突时必须指出。
-液体移动必须看到液体/液面变化、倾倒姿态、移液器与容器配合等证据之一，否则标为待确认。
+候选动作是否存在，与两个视角是否拍到同一操作者/同一对象，是两个独立判断：只要至少一个视角清晰直接证明候选动作，就按该动作填写 action_type_confirmed，并在 candidate_action_support_by_view 对该视角标 true；另一个视角拍到并行动作时在 cross_view_consistency 标 conflict，不得仅因视角冲突把已清晰可见的动作改成 unknown。
+液体移动是高风险类别，必须 fail-closed：只有看到液流/液面变化、伴随可见液体变化的倾倒，或完整的移液闭环才能确认。移液闭环必须清晰看到源容器接触、抽离/运输、目标容器接触，再加可见的排液/推杆变化；仅当 cv_observability.measurements.dual_role_transfer_sequence_verified 为 true 且故事板未反证时，才可用结构化双视角路径替代不可见的推杆细节，并把 dual_role_cv_sequence_verified 填 true。cv_observability 中的 repeated_pipette_path 只是选择密集审阅主视角的召回候选，跟踪碎片不能证明重复循环或液体移动。容器倾斜姿态、移液器靠近、仅伸入一个容器或重复轨迹候选都不能单独确认液体已移动。
+pipette_transfer_operation 与 liquid_movement 是两个证据层级。只有同一个连续时序中清晰看到移液器吸头进入源容器、抽离/运输、再进入一个不同目标容器，才可确认 pipette_transfer_operation；它只声明可见的源到目标移液器操作链，不声明微量液体实际移动可见。此时 proof_type 必须为 pipette_operational_transfer_chain，source_contact_visible、withdrawal_or_transport_visible、target_contact_visible 必须都为 true；液体和柱塞相关字段仍须按画面如实填写。若液体候选只能证明该操作链，必须 relabel_suggested 为 pipette_transfer_operation，而不是放宽 liquid_movement。
+必须按时间比较动作前、峰值和动作后；单帧中手与物体框接近不能直接证明接触，设备框出现不能直接证明面板操作，工具和容器同时出现不能直接证明液体转移。
+CV 可观测性收据会明确21类检测器能直接证明什么、仍缺什么。不要把收据中的“间接候选”复述成已观察事实。
 输出单个 JSON 对象，字段固定为：
 {
   "current_step": "当前这一步做什么，细到手、对象、状态",
   "next_step": "根据尾部状态可直接观察或谨慎推断的下一步；不能判断写未知",
-  "action_type_confirmed": "hand_object_contact/object_movement/liquid_movement/container_state_change/device_panel_operation/unknown",
+  "action_type_confirmed": "hand_object_contact/object_movement/pipette_transfer_operation/liquid_movement/container_state_change/device_panel_operation/unknown",
   "objects": ["明确可见物体"],
   "hand_object_interactions": [{"hand":"left/right/unknown", "object":"物体", "contact":"接触/抓取/释放/操作"}],
   "physical_change": {"before":"之前状态", "after":"之后状态"},
   "per_view_observations": [{"view_id":"视角ID", "observation":"该视角独立证据"}],
+  "candidate_action_support_by_view": [{"view_id":"视角ID", "supports_candidate_action":true, "confidence":0.0, "reason":"该视角支持/不支持候选动作的可见依据"}],
+  "confirmed_action_support_by_view": [{"view_id":"视角ID", "supports_confirmed_action":true, "confidence":0.0, "reason":"该视角对 action_type_confirmed 的直接可见依据"}],
+  "action_proof": {"proof_type":"visible_liquid_flow/visible_liquid_level_change/pour_with_visible_liquid_change/pipette_closed_transfer_cycle/pipette_operational_transfer_chain/posture_only/direct_other/none", "visible_liquid_or_level_change":false, "source_contact_visible":false, "withdrawal_or_transport_visible":false, "target_contact_visible":false, "release_or_plunger_change_visible":false, "dual_role_cv_sequence_verified":false, "container_before_state_visible":false, "container_after_state_visible":false, "container_state_transition_completed":false, "reason":"可审计的直接证据"},
   "cross_view_consistency": "consistent/partial/conflict/single_view",
+  "evidence_verdict": "confirmed/relabel_suggested/uncertain/rejected",
+  "temporal_support": {"before":"动作前可见事实", "peak":"峰值可见事实", "after":"动作后可见事实"},
   "confidence": 0.0,
   "uncertainties": ["无法确认项"]
 }
+evidence_verdict 的含义只针对候选动作本身：至少一个视角直接清晰证明则为 confirmed；候选动作未被证明但另一个动作被证明才用 relabel_suggested；证据不足用 uncertain；直接反证用 rejected。candidate_action_support_by_view 只评价输入候选；confirmed_action_support_by_view 只评价 action_type_confirmed。视角主体冲突单独写入 cross_view_consistency 和 uncertainties，不能抹去单个视角对动作本体的直接证明。
+对 container_state_change，只有在同一个视角的时序中同时看到动作前容器状态、动作后容器状态，且开启/关闭/盖合/解除盖合的状态转换已完成，才能把 action_proof 中三个 container_* 字段都填 true 并确认该类。这里三个 container_* 字段表示“至少一个视角存在完整直接闭环”，不要求另一个视角重复拍到；若一个视角完整证明而另一视角模糊、遮挡或拍到并行动作，必须保留 container_state_change，把完整证明视角的 confirmed_action_support_by_view 标 true，并把另一视角的不完整性写入 cross_view_consistency/uncertainties，不得因此把三个字段改为 false 或降级为 hand_object_contact。只看到手持瓶盖对准瓶口、操作进行中、所有视角末帧仍被手遮挡，不算已完成的容器状态转换；此时才应按可见事实改为 hand_object_contact 或 object_movement。
 禁止输出 Markdown。"""
 
 
@@ -48,10 +59,22 @@ GROUP_SYSTEM_PROMPT = """你是化学湿实验有界视频的步骤级理解与�
   "atomic_experiments": [{"name":"内部原子实验名称", "start_global_ms":0, "end_global_ms":0, "purpose_observable":"可观察目标或未知"}],
   "steps": [{"step_index":1, "start_global_ms":0, "end_global_ms":0, "current_step":"当前动作", "next_step":"下一动作或未知", "objects":["物体"], "physical_change":"状态变化", "supporting_views":["视角ID"], "confidence":0.0}],
   "overall_summary": "整个有界视频的实验内容",
+  "boundary_assessment": {"start_complete":true, "end_complete":true, "start_reason":"起点证据", "end_reason":"终点证据", "localized_rescan_needed":false},
   "confidence": 0.0,
   "uncertainties": ["无法确认项"]
 }
 禁止输出 Markdown。"""
+
+
+FINAL_GROUP_SYSTEM_PROMPT = GROUP_SYSTEM_PROMPT + """
+
+这是事件级语义审核后的最终步骤精炼，不是候选发现。输入事件均为已经确认或严格重标的最终关键事件：
+1. 步骤中的动作事实必须能对应至少一个输入 final_adjudicated_event；故事板只用于描述参与对象的可见状态，不得从“手在设备附近”新增设备面板操作，不得从“工具与容器同框”新增液体移动或容器开合。
+2. absent_action_classes 中列出的类别在本实验组没有被确认，步骤、摘要、实验名称和下一步都不得把这些类别写成已经发生的事实。尤其 absent_action_classes 含 device_panel_operation 时，禁止写按键、按压面板、操作按钮、读取或确认读数；含 liquid_movement 时，禁止写吸液、排液、加液、倾倒或液体转移；即使瓶体横放、翻倒或姿态发生变化，也只能写“瓶体姿态改变”，不能使用“倾倒”这个会宣称功能性液体动作的词。若 pipette_transfer_operation 已确认但 liquid_movement 未确认，可写“移液器从源容器移动并进入目标容器”或“源到目标移液器操作（液体状态不可见）”，不得升级为液体已转移。含 pipette_transfer_operation 时若该类别 absent，禁止写移液操作、源到目标移液器操作或完整移液流程。含 container_state_change 时，禁止写开盖、合盖、旋开或旋紧。
+3. 可以写“手接触天平”“移动瓶盖”等已确认的较低层动作，但不得升级成未确认的功能性操作。
+4. 时间范围必须来自 final_adjudicated_events，不得把相邻步骤重叠扩展到没有最终事件支持的动作。
+输出结构仍严格使用上面的 JSON 合同。
+"""
 
 
 def _image_data_url(path: Path) -> str:
@@ -142,6 +165,8 @@ class ArkAnalyzer:
         system_prompt: str,
         metadata: dict[str, Any],
         image_paths: Sequence[tuple[str, Path]],
+        *,
+        max_images: int | None = None,
     ) -> dict[str, Any]:
         if not self.enabled:
             return {"status": "disabled", "uncertainties": ["多模态分析已在配置中关闭"]}
@@ -153,7 +178,7 @@ class ArkAnalyzer:
         content: list[dict[str, Any]] = [
             {"type": "input_text", "text": json.dumps(metadata, ensure_ascii=False)}
         ]
-        selected = list(image_paths)[: int(self.config["max_images_per_event"])]
+        selected = list(image_paths)[: int(max_images or self.config["max_images_per_event"])]
         for label, path in selected:
             content.append({"type": "input_text", "text": label})
             content.append(
@@ -238,6 +263,13 @@ class ArkAnalyzer:
     def analyze_event(
         self, event: EvidenceEvent, image_paths: Sequence[tuple[str, Path]]
     ) -> dict[str, Any]:
+        action_limits = self.config.get("max_images_per_event_by_action") or {}
+        max_images = int(
+            action_limits.get(
+                event.action_type.value,
+                self.config["max_images_per_event"],
+            )
+        )
         return self._call(
             EVENT_SYSTEM_PROMPT,
             {
@@ -250,9 +282,11 @@ class ArkAnalyzer:
                 "cv_confidence": event.confidence,
                 "supporting_views": event.supporting_views,
                 "audit_reason": event.audit_reason,
+                "cv_observability": event.observability,
                 "task": "逐视角核实当前细步骤，并描述画面支持的下一步",
             },
             image_paths,
+            max_images=max_images,
         )
 
     def analyze_group(
@@ -261,9 +295,12 @@ class ArkAnalyzer:
         segments: Sequence[ExperimentSegment],
         events: Sequence[EvidenceEvent],
         storyboards: Sequence[tuple[str, Path]],
+        *,
+        system_prompt: str = GROUP_SYSTEM_PROMPT,
+        final_adjudicated: bool = False,
     ) -> dict[str, Any]:
         return self._call(
-            GROUP_SYSTEM_PROMPT,
+            system_prompt,
             {
                 "group_id": group.group_id,
                 "rule_based_continuity_type": group.continuity_type,
@@ -273,7 +310,11 @@ class ArkAnalyzer:
                 "first_person_view": group.first_person_view,
                 "third_person_view": group.third_person_view,
                 "atomic_boundaries": [segment.model_dump(mode="json") for segment in segments],
-                "cv_events": [
+                (
+                    "final_adjudicated_events"
+                    if final_adjudicated
+                    else "cv_events"
+                ): [
                     {
                         "event_id": event.event_id,
                         "action_type": event.action_type.value,
@@ -287,8 +328,22 @@ class ArkAnalyzer:
                     for event in events
                     if event.accepted
                 ],
+                **(
+                    {
+                        "absent_action_classes": sorted(
+                            {item.value for item in ActionType}
+                            - {event.action_type.value for event in events if event.accepted}
+                        )
+                    }
+                    if final_adjudicated
+                    else {}
+                ),
                 "storyboard_order": [label for label, _ in storyboards],
-                "task": "理解整个有界实验视频、命名实验、判断连续性并输出步骤序列",
+                "task": (
+                    "仅用最终审核事件精炼步骤，不新增未确认动作事实"
+                    if final_adjudicated
+                    else "理解整个有界实验视频、命名实验、判断连续性并输出步骤序列"
+                ),
             },
             storyboards,
         )

@@ -16,9 +16,10 @@ tmp/
 *.log
 *.engine
 *.onnx
-# The two deployment weights under models/ are intentionally portable.
+# Model weights and generated runtimes stay on the workstation. Git contains
+# code, pinned hashes and acquisition metadata only.
 *.pt
-!models/
-!models/**/
-!models/**/best.pt
+*.safetensors
+*.pth
+.coverage
 .env

@@ -138,19 +138,21 @@ def _collection_summary(
         receipts.append(receipt)
         if receipt.get("index_role"):
             declared_counts[str(receipt["index_role"])] += 1
-        if receipt.get("resolved_role"):
+        if videos and receipt.get("resolved_role"):
             resolved_counts[str(receipt["resolved_role"])] += 1
 
         camera_issues: list[str] = []
+        sync_error = str(row.get("sync_error") or "").strip()
+        omitted_unavailable_camera = not videos and bool(sync_error)
         if not camera_key:
             camera_issues.append("camera_key_missing")
-        if not videos:
+        if not videos and not omitted_unavailable_camera:
             camera_issues.append("video_segments_missing")
         if declared != len(videos):
             camera_issues.append("declared_video_segment_count_mismatch")
         if clocks and len(clocks) != len(videos):
             camera_issues.append("video_clock_segment_count_mismatch")
-        if not clocks:
+        if not clocks and not omitted_unavailable_camera:
             warnings.append(
                 {
                     "code": "clock_csv_absent",
@@ -158,9 +160,27 @@ def _collection_summary(
                     "message": "No frame clock CSV is indexed; visual alignment is required.",
                 }
             )
-        sync_error = str(row.get("sync_error") or "").strip()
-        if sync_error:
+        historical_manual_backfill = bool(videos) and sync_error.casefold().startswith(
+            "manual backfill"
+        )
+        if sync_error and not omitted_unavailable_camera and not historical_manual_backfill:
             camera_issues.append("index_sync_error")
+        if omitted_unavailable_camera:
+            warnings.append(
+                {
+                    "code": "unavailable_camera_omitted",
+                    "camera_key": camera_key,
+                    "message": sync_error,
+                }
+            )
+        elif historical_manual_backfill:
+            warnings.append(
+                {
+                    "code": "historical_manual_backfill_provenance",
+                    "camera_key": camera_key,
+                    "message": sync_error,
+                }
+            )
         for code in camera_issues:
             blocking.append(
                 {
@@ -169,7 +189,9 @@ def _collection_summary(
                     "message": sync_error if code == "index_sync_error" else code,
                 }
             )
-        for reason in receipt.get("blocking_reasons") or []:
+        for reason in (
+            [] if omitted_unavailable_camera else receipt.get("blocking_reasons") or []
+        ):
             blocking.append(
                 {
                     "code": reason,
@@ -198,6 +220,10 @@ def _collection_summary(
                 "recording_start_time": row.get("recording_start_time"),
                 "recording_end_time": row.get("recording_end_time"),
                 "sync_error": sync_error or None,
+                "source_included": bool(videos),
+                "source_omission_reason": (
+                    sync_error if omitted_unavailable_camera else None
+                ),
             }
         )
 

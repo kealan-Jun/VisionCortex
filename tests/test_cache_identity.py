@@ -50,3 +50,28 @@ def test_cache_identity_ignores_run_specific_storage_paths(default_config, tmp_p
     modified = build_cache_identity(default_config, manifest)
 
     assert original["cache_key"] == modified["cache_key"]
+
+
+def test_cache_identity_isolated_by_namespace_but_shared_by_cold_hot_mode(
+    default_config, tmp_path
+):
+    first_weight = tmp_path / "first.pt"
+    third_weight = tmp_path / "third.pt"
+    first_weight.write_bytes(b"first")
+    third_weight.write_bytes(b"third")
+    default_config["models"]["first_person"] = str(first_weight)
+    default_config["models"]["third_person"] = str(third_weight)
+    manifest = _manifest(tmp_path)
+
+    default_config["project"]["cache_namespace"] = "audit-a"
+    default_config["project"]["cache_mode"] = "cold"
+    cold = build_cache_identity(default_config, manifest)
+    default_config["project"]["cache_mode"] = "reuse"
+    hot = build_cache_identity(default_config, manifest)
+    default_config["project"]["cache_namespace"] = "audit-b"
+    isolated = build_cache_identity(default_config, manifest)
+
+    assert cold["cache_key"] == hot["cache_key"]
+    assert cold["execution_cache_policy"]["mode"] == "cold"
+    assert hot["execution_cache_policy"]["mode"] == "reuse"
+    assert isolated["cache_key"] != hot["cache_key"]

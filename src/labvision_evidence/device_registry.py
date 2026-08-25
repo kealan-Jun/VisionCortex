@@ -69,6 +69,14 @@ def resolve_view_role(
     device = (registry.get("devices") or {}).get(camera_key) or {}
     expected_raw = device.get("expected_role")
     expected_role = ViewRole(expected_raw) if expected_raw else None
+    device_policy = device.get("role_policy") or {}
+    device_policy_status = str(device_policy.get("status") or "").lower()
+    approved_device_policy = bool(
+        expected_role is not None
+        and device_policy_status in {"approved", "policy_override"}
+        and str(device_policy.get("reason") or "").strip()
+        and str(device_policy.get("source") or "").strip()
+    )
     override = (
         ((registry.get("experiment_role_overrides") or {}).get(experiment_id) or {}).get(
             camera_key
@@ -98,6 +106,9 @@ def resolve_view_role(
     if override_role is not None and approved_override:
         resolved_role = override_role
         resolution_source = "approved_experiment_override"
+    elif expected_role is not None and approved_device_policy:
+        resolved_role = expected_role
+        resolution_source = "approved_device_registry_override"
     elif index_role is not None:
         resolved_role = index_role
         resolution_source = "experiment_record_index"
@@ -122,11 +133,15 @@ def resolve_view_role(
         blocking_reasons = [
             reason for reason in blocking_reasons if reason != "index_registry_role_mismatch"
         ]
+    if approved_device_policy:
+        blocking_reasons = [
+            reason for reason in blocking_reasons if reason != "index_registry_role_mismatch"
+        ]
     status = (
         "blocking_conflict"
         if blocking_reasons or resolved_role is None
         else "approved_override"
-        if approved_override and conflict_reasons
+        if (approved_override or approved_device_policy) and conflict_reasons
         else "resolved"
     )
     return {
@@ -151,6 +166,13 @@ def resolve_view_role(
         }
         if override
         else None,
+        "device_role_policy": {
+            "status": device_policy.get("status"),
+            "reason": device_policy.get("reason"),
+            "source": device_policy.get("source"),
+            "approved": approved_device_policy,
+        }
+        if device_policy
+        else None,
         "registry_provenance": registry.get("provenance"),
     }
-

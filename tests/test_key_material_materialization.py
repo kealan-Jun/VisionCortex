@@ -16,6 +16,203 @@ from labvision_evidence.schemas import (
 )
 
 
+def test_unobserved_action_categories_stay_in_index_without_json_only_folders(
+    tmp_path,
+):
+    layout = archive.ArchiveLayout(tmp_path / "archive")
+    layout.create()
+    event = EvidenceEvent(
+        event_id="EVT-OBSERVED",
+        action_type=ActionType.HAND_OBJECT_CONTACT,
+        global_start_ms=1000,
+        global_end_ms=2000,
+        key_global_ms=1500,
+        objects=["gloved_hand", "pipette"],
+        confidence=0.9,
+        accepted=True,
+        audit_reason="test",
+        supporting_views=["fp", "tp"],
+        supporting_roles=[ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON],
+        candidates=[],
+    )
+    group = ExperimentGroup(
+        group_id="GROUP-1",
+        continuity_type="independent",
+        atomic_experiment_ids=["EXP-1"],
+        global_start_ms=1000,
+        global_end_ms=2000,
+        participating_views=["fp", "tp"],
+        first_person_view="fp",
+        third_person_view="tp",
+        continuity_reason="test",
+        experiment_name="Test",
+        experiment_name_en="Test",
+        archive_folder="001-Test",
+        key_event_ids=[event.event_id],
+    )
+
+    path = archive.write_key_material_category_index(
+        layout,
+        [group],
+        [event],
+        include_empty_categories=False,
+    )
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    categories = {
+        item["action_type"]: item
+        for item in payload["experiments"][0]["action_categories"]
+    }
+    assert categories["hand_object_contact"]["materialized"] is True
+    assert categories["liquid_movement"]["materialized"] is False
+    assert categories["liquid_movement"]["coverage_status"] == "not_observed"
+    assert categories["liquid_movement"]["folder"] is None
+    assert not (
+        layout.key_frames / "001-Test" / "03-Liquid-Movement"
+    ).exists()
+
+
+def test_key_material_view_selection_uses_real_same_role_fallback_at_short_tail(
+    tmp_path,
+):
+    views = [
+        ViewInput(view_id="fp", role=ViewRole.FIRST_PERSON, video=tmp_path / "fp.mp4"),
+        ViewInput(
+            view_id="tp-primary",
+            role=ViewRole.THIRD_PERSON,
+            video=tmp_path / "tp-primary.mp4",
+        ),
+        ViewInput(
+            view_id="tp-fallback",
+            role=ViewRole.THIRD_PERSON,
+            video=tmp_path / "tp-fallback.mp4",
+        ),
+    ]
+    infos = {
+        view.view_id: VideoInfo(
+            path=view.video,
+            duration_ms=5_000,
+            fps=30,
+            width=1280,
+            height=720,
+            frame_count=150,
+        )
+        for view in views
+    }
+    transforms = {
+        "fp": AlignmentTransform(view_id="fp", reference_view_id="fp"),
+        "tp-primary": AlignmentTransform(
+            view_id="tp-primary", reference_view_id="fp", offset_ms=1_000
+        ),
+        "tp-fallback": AlignmentTransform(
+            view_id="tp-fallback", reference_view_id="fp", offset_ms=200
+        ),
+    }
+    event = EvidenceEvent(
+        event_id="EVT-000001",
+        action_type=ActionType.HAND_OBJECT_CONTACT,
+        global_start_ms=300,
+        global_end_ms=700,
+        key_global_ms=500,
+        objects=["tube"],
+        confidence=0.9,
+        accepted=True,
+        audit_reason="test",
+        supporting_views=["fp", "tp-primary", "tp-fallback"],
+        supporting_roles=[ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON],
+        candidates=[],
+    )
+    group = ExperimentGroup(
+        group_id="GROUP-0001",
+        continuity_type="independent",
+        atomic_experiment_ids=["EXP-0001"],
+        global_start_ms=0,
+        global_end_ms=1_000,
+        participating_views=[view.view_id for view in views],
+        first_person_view="fp",
+        third_person_view="tp-primary",
+        continuity_reason="test",
+        key_event_ids=[event.event_id],
+    )
+
+    pair, receipt = archive._select_key_material_view_pair(
+        group, event, views, infos, transforms
+    )
+
+    assert pair == ("fp", "tp-fallback")
+    assert receipt["fallback_applied"] is True
+    assert receipt["timestamp_clamped"] is False
+    assert receipt["synthetic_cross_view_evidence"] is False
+    primary = next(
+        item
+        for item in receipt["candidates"]["third_person"]
+        if item["view_id"] == "tp-primary"
+    )
+    assert primary["local_key_ms"] == -500
+    assert primary["in_physical_bounds"] is False
+
+
+def test_key_material_view_selection_restores_accepted_peak_for_dual_coverage(
+    tmp_path,
+):
+    views = [
+        ViewInput(view_id="fp", role=ViewRole.FIRST_PERSON, video=tmp_path / "fp.mp4"),
+        ViewInput(view_id="tp", role=ViewRole.THIRD_PERSON, video=tmp_path / "tp.mp4"),
+    ]
+    infos = {
+        view.view_id: VideoInfo(
+            path=view.video,
+            duration_ms=5_000,
+            fps=30,
+            width=1280,
+            height=720,
+            frame_count=150,
+        )
+        for view in views
+    }
+    transforms = {
+        "fp": AlignmentTransform(view_id="fp", reference_view_id="fp"),
+        "tp": AlignmentTransform(
+            view_id="tp", reference_view_id="fp", offset_ms=1_000
+        ),
+    }
+    event = EvidenceEvent(
+        event_id="EVT-000001",
+        action_type=ActionType.OBJECT_MOVEMENT,
+        global_start_ms=200,
+        global_end_ms=3_000,
+        key_global_ms=400,
+        objects=["pipette"],
+        confidence=0.9,
+        accepted=True,
+        audit_reason="test",
+        supporting_views=["fp", "tp"],
+        supporting_roles=[ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON],
+        candidates=[],
+    )
+    group = ExperimentGroup(
+        group_id="GROUP-0001",
+        continuity_type="independent",
+        atomic_experiment_ids=["EXP-0001"],
+        global_start_ms=0,
+        global_end_ms=3_000,
+        participating_views=["fp", "tp"],
+        first_person_view="fp",
+        third_person_view="tp",
+        continuity_reason="test",
+        key_event_ids=[event.event_id],
+    )
+
+    pair, receipt = archive._select_key_material_view_pair_with_peak_fallback(
+        group, event, views, infos, transforms, accepted_peak_global_ms=1_900
+    )
+
+    assert pair == ("fp", "tp")
+    assert event.key_global_ms == 1_900
+    assert receipt["key_timestamp_fallback"]["applied"] is True
+    assert receipt["key_timestamp_fallback"]["timestamp_clamped"] is False
+
+
 def test_key_material_roles_export_concurrently_and_write_runtime(monkeypatch, tmp_path):
     layout = archive.ArchiveLayout(tmp_path / "archive")
     layout.create()
@@ -137,12 +334,14 @@ def test_key_material_roles_export_concurrently_and_write_runtime(monkeypatch, t
     expected_category = "01-Hand-Object-Contact"
     for relative in (*event.key_frames.values(), *event.key_clips.values()):
         assert f"/{group.archive_folder}/{expected_category}/" in relative
+        assert "Contact-Hand-With-Tube_EVT-000001" in relative
     for category in (
         "01-Hand-Object-Contact",
         "02-Object-Movement",
         "03-Liquid-Movement",
         "04-Container-State-Change",
         "05-Device-Panel-Operation",
+        "06-Pipette-Transfer-Operation",
     ):
         assert (layout.key_frames / group.archive_folder / category).is_dir()
         assert (layout.key_clips / group.archive_folder / category).is_dir()
@@ -154,7 +353,7 @@ def test_key_material_roles_export_concurrently_and_write_runtime(monkeypatch, t
         ).is_file()
     category_index_path = layout.key_materials / "Key-Material-Category-Index.json"
     category_index = json.loads(category_index_path.read_text(encoding="utf-8"))
-    assert category_index["category_count"] == 5
+    assert category_index["category_count"] == 6
     experiment = category_index["experiments"][0]
     assert experiment["group_id"] == group.group_id
     assert experiment["key_event_count"] == 1
@@ -174,6 +373,8 @@ def test_key_material_roles_export_concurrently_and_write_runtime(monkeypatch, t
     )
     assert empty_summary["media_kind"] == "key_frame"
     assert empty_summary["event_count"] == 0
+    assert empty_summary["coverage_status"] == "not_observed"
+    assert empty_summary["absence_reason"]
     frame_sidecar = json.loads(
         (layout.root / event.key_frames["fp"]).with_suffix(".json").read_text(
             encoding="utf-8"
@@ -182,6 +383,11 @@ def test_key_material_roles_export_concurrently_and_write_runtime(monkeypatch, t
     classification = frame_sidecar["provenance"]["archive_classification"]
     assert classification["experiment_folder"] == group.archive_folder
     assert classification["action_category_folder"] == expected_category
+    assert classification["primary_object"] == "Tube"
+    assert classification["semantic_file_stem"] == (
+        "Contact-Hand-With-Tube_EVT-000001"
+    )
+    assert classification["object_labels"] == ["Tube"]
     runtime_path = layout.json_config / "key_material_materialization_runtime.json"
     runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
     assert runtime["workers"] == 2

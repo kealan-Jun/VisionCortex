@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any, Sequence
 
+from .recall_evaluation import (
+    evaluate_key_event_recall as evaluate_key_event_recall,
+)
 from .schemas import ActionType, EvidenceEvent, ExperimentGroup, ViewInput
 
 
@@ -77,6 +79,7 @@ def validate_experiment_and_material_quality(
     max_start_error_seconds: float = 8.0,
     max_end_error_seconds: float = 8.0,
     minimum_cross_view_event_rate: float = 0.25,
+    require_participant_only_annotations: bool = False,
 ) -> dict[str, Any]:
     """Evaluate bounded experiments and key material without leaking labels into inference.
 
@@ -182,9 +185,16 @@ def validate_experiment_and_material_quality(
     action_counts = {action.value: 0 for action in ActionType}
     cross_view_count = 0
     confirmed_count = 0
+    semantic_confirmed_count = 0
+    semantic_unconfirmed_count = 0
+    semantic_review_count = 0
     model_completed_count = 0
     media_complete_count = 0
     auditable_count = 0
+    participant_only_annotation_count = 0
+    participant_only_annotation_pass_count = 0
+    interaction_pair_annotation_pass_count = 0
+    action_participant_visibility_pass_count = 0
     per_event: list[dict[str, Any]] = []
     for event in key_events:
         action_counts[event.action_type.value] += 1
@@ -196,12 +206,131 @@ def validate_experiment_and_material_quality(
         understanding = event.model_understanding or {}
         model_completed = understanding.get("status") == "completed"
         model_completed_count += int(model_completed)
-        confirmed = event.accepted and event.confidence >= 0.5
+        semantic_review = event.semantic_review or {}
+        semantic_review_count += int(bool(semantic_review))
+        semantic_verdict = str(semantic_review.get("verdict") or "")
+        semantic_confirmed = bool(
+            semantic_review and semantic_verdict == "confirmed"
+        )
+        semantic_unconfirmed = bool(
+            semantic_review and semantic_verdict != "confirmed"
+        )
+        semantic_confirmed_count += int(semantic_confirmed)
+        semantic_unconfirmed_count += int(semantic_unconfirmed)
+        confirmed = bool(
+            event.accepted
+            and event.confidence >= 0.5
+            and (not semantic_review or semantic_confirmed)
+        )
         confirmed_count += int(confirmed)
         media_complete = len(event.key_frames) == 3 and len(event.key_clips) == 3
         media_complete_count += int(media_complete)
         auditable = both_roles or bool(event.uncertainty)
         auditable_count += int(auditable)
+        annotation = event.observability.get("key_material_annotation") or {}
+        annotation_present = bool(annotation)
+        annotation_passed = bool(
+            annotation.get("mode") == "event_participants_only"
+            and len(annotation.get("views") or {}) >= 2
+            and all(
+                not (item.get("extraneous_rendered_classes") or [])
+                for item in (annotation.get("views") or {}).values()
+                if isinstance(item, dict)
+            )
+        )
+        rendered_classes_by_view = {
+            str(view_id): {
+                str(class_name)
+                .strip()
+                .lower()
+                .replace("-", "_")
+                .replace(" ", "_")
+                for class_name in item.get("rendered_classes") or []
+            }
+            for view_id, item in (annotation.get("views") or {}).items()
+            if isinstance(item, dict)
+        }
+        rendered_classes = {
+            class_name
+            for classes in rendered_classes_by_view.values()
+            for class_name in classes
+        }
+        actor_classes = {"hand", "gloved_hand"}
+        manipulated_object_visible = bool(rendered_classes - actor_classes)
+        interaction_pair_view_ids = sorted(
+            view_id
+            for view_id, classes in rendered_classes_by_view.items()
+            if classes & actor_classes and classes - actor_classes
+        )
+        interaction_pair_annotation_passed = bool(
+            interaction_pair_view_ids
+        )
+        normalized_event_objects = {
+            str(class_name)
+            .strip()
+            .lower()
+            .replace("-", "_")
+            .replace(" ", "_")
+            for class_name in event.objects
+        }
+        expected_closure_classes = normalized_event_objects & {
+            "bottle_cap",
+            "tube_cap",
+        }
+        if not expected_closure_classes:
+            # A container-state claim without an explicit closure participant is
+            # itself incomplete.  Keep both supported closure classes here so
+            # the final-view evidence can still prove the physical slot, while
+            # preventing an arbitrary bottle box from satisfying the claim.
+            expected_closure_classes = {"bottle_cap", "tube_cap"}
+        expected_container_classes: set[str] = set()
+        if "bottle_cap" in expected_closure_classes:
+            expected_container_classes.update(
+                {
+                    "container",
+                    "sample_bottle",
+                    "sample_bottle_blue",
+                    "reagent_bottle",
+                }
+            )
+        if "tube_cap" in expected_closure_classes:
+            expected_container_classes.update({"container", "tube"})
+        state_transition_complete_view_ids = sorted(
+            view_id
+            for view_id, classes in rendered_classes_by_view.items()
+            if (
+                classes & actor_classes
+                and classes & expected_closure_classes
+                and classes & expected_container_classes
+            )
+        )
+        actor_required_for_action = event.action_type in {
+            ActionType.HAND_OBJECT_CONTACT,
+            ActionType.CONTAINER_STATE_CHANGE,
+            ActionType.DEVICE_PANEL_OPERATION,
+            ActionType.PIPETTE_TRANSFER_OPERATION,
+        }
+        if event.action_type == ActionType.CONTAINER_STATE_CHANGE:
+            action_participant_visibility_passed = bool(
+                state_transition_complete_view_ids
+            )
+        else:
+            action_participant_visibility_passed = bool(
+                manipulated_object_visible
+                and (
+                    interaction_pair_annotation_passed
+                    if actor_required_for_action
+                    else True
+                )
+            )
+        participant_only_annotation_count += int(annotation_present)
+        participant_only_annotation_pass_count += int(annotation_passed)
+        interaction_pair_annotation_pass_count += int(
+            interaction_pair_annotation_passed
+        )
+        action_participant_visibility_pass_count += int(
+            action_participant_visibility_passed
+        )
         per_event.append(
             {
                 "event_id": event.event_id,
@@ -211,19 +340,76 @@ def validate_experiment_and_material_quality(
                 "cross_view_supported": both_roles,
                 "media_complete": media_complete,
                 "model_understanding_completed": model_completed,
+                "semantic_review_verdict": semantic_verdict or None,
+                "semantic_claim_confirmed": confirmed,
                 "cross_view_or_explicit_uncertainty": auditable,
+                "rendered_participant_classes": sorted(rendered_classes),
+                "interaction_pair_view_ids": interaction_pair_view_ids,
+                "state_transition_complete_view_ids": (
+                    state_transition_complete_view_ids
+                    if event.action_type == ActionType.CONTAINER_STATE_CHANGE
+                    else []
+                ),
+                "actor_and_manipulated_object_visible": (
+                    interaction_pair_annotation_passed
+                    if annotation_present
+                    else None
+                ),
+                "action_participant_visibility_rule": (
+                    "actor_closure_container_same_view"
+                    if event.action_type == ActionType.CONTAINER_STATE_CHANGE
+                    else "actor_and_manipulated_object"
+                    if actor_required_for_action
+                    else "manipulated_object"
+                ),
+                "action_participant_visibility_passed": (
+                    action_participant_visibility_passed
+                    if annotation_present
+                    else None
+                ),
                 "uncertainty": event.uncertainty,
             }
         )
     event_count = len(key_events)
     cross_view_rate = cross_view_count / event_count if event_count else 0.0
-    missing_action_types = [name for name, count in action_counts.items() if count == 0]
+    participant_only_annotation_gate_passed = bool(
+        participant_only_annotation_count == event_count
+        and participant_only_annotation_pass_count == event_count
+    )
+    unobserved_action_types = [name for name, count in action_counts.items() if count == 0]
+    required_action_types = [
+        str(item) for item in (baseline or {}).get("required_action_types") or []
+    ]
+    unsupported_required_action_types = sorted(
+        set(required_action_types) - set(action_counts)
+    )
+    if unsupported_required_action_types:
+        raise ValueError(
+            "验收基线包含未知动作类别: "
+            + ", ".join(unsupported_required_action_types)
+        )
+    missing_action_types = [
+        name for name in required_action_types if action_counts.get(name, 0) == 0
+    ]
     materials_passed = bool(event_count) and not missing_action_types and all(
         (
             media_complete_count == event_count,
             model_completed_count == event_count,
             auditable_count == event_count,
             cross_view_rate >= minimum_cross_view_event_rate,
+            semantic_review_count == 0
+            or (
+                semantic_confirmed_count == event_count
+                and semantic_unconfirmed_count == 0
+            ),
+            participant_only_annotation_gate_passed
+            if require_participant_only_annotations
+            else (
+                participant_only_annotation_count == 0
+                or participant_only_annotation_pass_count == event_count
+            ),
+            participant_only_annotation_count == 0
+            or action_participant_visibility_pass_count == event_count,
         )
     )
     boundary_evaluated = bool(normalized_expected)
@@ -273,13 +459,66 @@ def validate_experiment_and_material_quality(
             "passed": materials_passed,
             "event_count": event_count,
             "action_counts": action_counts,
+            "required_action_types": required_action_types,
             "missing_action_types": missing_action_types,
+            "unobserved_action_types": unobserved_action_types,
+            "unobserved_action_type_reasons": {
+                name: (
+                    "No accepted evidence event of this action type was "
+                    "observed in the bounded experiment set."
+                )
+                for name in unobserved_action_types
+            },
+            "category_coverage_is_acceptance_gate": bool(required_action_types),
             "confirmed_count": confirmed_count,
+            "semantic_confirmed_count": semantic_confirmed_count,
+            "semantic_unconfirmed_count": semantic_unconfirmed_count,
+            "semantic_review_count": semantic_review_count,
             "media_complete_count": media_complete_count,
             "model_understanding_completed_count": model_completed_count,
             "cross_view_or_explicit_uncertainty_count": auditable_count,
             "cross_view_supported_count": cross_view_count,
             "cross_view_supported_rate": cross_view_rate,
+            "participant_only_annotation_count": participant_only_annotation_count,
+            "participant_only_annotation_pass_count": (
+                participant_only_annotation_pass_count
+            ),
+            "interaction_pair_annotation_pass_count": (
+                interaction_pair_annotation_pass_count
+            ),
+            "interaction_pair_annotation_gate_passed": bool(
+                participant_only_annotation_count == 0
+                or interaction_pair_annotation_pass_count == event_count
+            ),
+            "interaction_pair_annotation_contract": (
+                "At least one actor box and one manipulated-object box must be "
+                "rendered in the same final view; boxes split across opposite "
+                "views cannot prove an interaction pair."
+            ),
+            "action_participant_visibility_pass_count": (
+                action_participant_visibility_pass_count
+            ),
+            "action_participant_visibility_gate_passed": bool(
+                participant_only_annotation_count == 0
+                or action_participant_visibility_pass_count == event_count
+            ),
+            "action_participant_visibility_contract": (
+                "Container-state events require actor, the corresponding closure, "
+                "and the corresponding container in the same final view. Contact, "
+                "device-panel, and pipette-transfer events require actor plus "
+                "manipulated object; object or liquid movement requires the "
+                "manipulated object and may be actor-occluded."
+            ),
+            "participant_only_annotation_is_acceptance_gate": bool(
+                require_participant_only_annotations
+                or participant_only_annotation_count
+            ),
+            "participant_only_annotation_required": bool(
+                require_participant_only_annotations
+            ),
+            "participant_only_annotation_gate_passed": (
+                participant_only_annotation_gate_passed
+            ),
             "events": per_event,
         },
         "passed": boundary_passed and materials_passed if boundary_evaluated else materials_passed,

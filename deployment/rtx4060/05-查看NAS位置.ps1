@@ -1,6 +1,6 @@
 $ErrorActionPreference = 'Stop'
 $Index = 'Y:\experiment_record_index.csv'
-$Archive = 'Y:\VisionCortexExperimentArchive\Six-View-Three-Hour-Experiment-2026-08-13'
+$Archive = 'Y:\VisionCortexExperimentArchive\CustomFlow_standard_correct_12_ABCFA_0001--exp_20260810_144014_e918b762'
 $ExperimentId = 'exp_20260810_144014_e918b762'
 
 foreach ($path in @($Index, $Archive)) {

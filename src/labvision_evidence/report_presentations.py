@@ -85,7 +85,7 @@ def render_daily_markdown(report: dict[str, Any]) -> str:
             for item in group.get("key_action_summary") or []
             if item["event_count"]
         )
-        lines.extend([f"- 五类动作：{action_text or '无已验收动作'}", ""])
+        lines.extend([f"- 动作类别：{action_text or '无已验收动作'}", ""])
     lines.extend(
         [
             "## 关注事项与交接",
@@ -173,14 +173,28 @@ def _register_fonts() -> tuple[str, str]:
     candidates = [
         (Path("C:/Windows/Fonts/msyh.ttc"), Path("C:/Windows/Fonts/msyhbd.ttc")),
         (Path("C:/Windows/Fonts/simsun.ttc"), Path("C:/Windows/Fonts/simhei.ttf")),
+        (
+            Path("/usr/share/fonts/truetype/arphic/uming.ttc"),
+            Path("/usr/share/fonts/truetype/arphic/ukai.ttc"),
+        ),
+        (
+            Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+            Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"),
+        ),
     ]
     for regular, bold in candidates:
         if regular.is_file() and bold.is_file():
             try:
                 pdfmetrics.getFont("VCReport")
             except KeyError:
-                pdfmetrics.registerFont(TTFont("VCReport", str(regular)))
-                pdfmetrics.registerFont(TTFont("VCReportBold", str(bold)))
+                try:
+                    pdfmetrics.registerFont(TTFont("VCReport", str(regular)))
+                    pdfmetrics.registerFont(TTFont("VCReportBold", str(bold)))
+                except Exception:
+                    # ReportLab cannot load every TTC/OTF outline flavor. Try
+                    # the next installed candidate before falling back to the
+                    # built-in fonts.
+                    continue
             return "VCReport", "VCReportBold"
     return "Helvetica", "Helvetica-Bold"
 
@@ -194,6 +208,7 @@ def render_professional_pdf(path: Path, report: dict[str, Any], archive_root: Pa
     from reportlab.platypus import (
         CondPageBreak,
         Image,
+        KeepTogether,
         PageBreak,
         Paragraph,
         SimpleDocTemplate,
@@ -264,7 +279,7 @@ def render_professional_pdf(path: Path, report: dict[str, Any], archive_root: Pa
     path.parent.mkdir(parents=True, exist_ok=True)
     document = SimpleDocTemplate(
         str(path), pagesize=A4, rightMargin=18 * mm, leftMargin=18 * mm,
-        topMargin=16 * mm, bottomMargin=17 * mm,
+        topMargin=22 * mm, bottomMargin=17 * mm,
         title=f"VisionCortex 多视角实验分析专业证据报告 {report['report_date']}",
         author="VisionCortex",
     )
@@ -321,33 +336,61 @@ def render_professional_pdf(path: Path, report: dict[str, Any], archive_root: Pa
         ]
     )
     for index, group in enumerate(report["experiment_timeline"], 1):
-        story.append(PageBreak() if index == 1 else CondPageBreak(105 * mm))
+        story.append(PageBreak())
         story.append(Paragraph(f"3.{index} {html.escape(group['experiment_name'])}", h1))
         continuity = "连续实验" if group["continuity_type"] == "continuous" else "独立实验"
-        facts = [["时间范围", "实验类型", "持续时间", "步骤", "关键事件", "物理变化"], [f"{group['start_timecode']}—{group['end_timecode']}", continuity, f"{group['duration_seconds']:.1f} 秒", len(group["steps"]), len(group["key_events"]), group["physical_change_count"]]]
-        story.extend([styled_table(facts, [49*mm,25*mm,24*mm,18*mm,22*mm,27*mm]), Spacer(1, 4*mm)])
+        facts = [
+            ["时间范围", "实验类型", "持续时间", "步骤", "关键事件", "物理变化"],
+            [
+                Paragraph(
+                    f"{html.escape(group['start_timecode'])}<br/>— {html.escape(group['end_timecode'])}",
+                    small,
+                ),
+                continuity,
+                f"{group['duration_seconds']:.1f} 秒",
+                len(group["steps"]),
+                len(group["key_events"]),
+                group["physical_change_count"],
+            ],
+        ]
+        story.extend([styled_table(facts, [44*mm,24*mm,24*mm,18*mm,22*mm,33*mm]), Spacer(1, 4*mm)])
         visual = group.get("representative_visual")
         if visual:
             image = image_flowable(visual["image_path"], 165 * mm, 86 * mm)
             image.hAlign = "CENTER"
-            story.extend([image, Paragraph(f"图 {index}-1　{html.escape(visual['action_label'])} · {visual['event_id']} · {visual['peak_timecode']} · 对象：{html.escape('、'.join(visual['objects']) or '未明确')}", caption)])
+            support_note = (
+                "双视角直接支持"
+                if visual.get("support_scope") == "dual_role_direct"
+                else "对齐双视角；仅单视角直接证明动作，对侧为同步上下文"
+            )
+            story.extend([image, Paragraph(f"图 {index}-1　{html.escape(visual['action_label'])} · {visual['event_id']} · {visual['peak_timecode']} · 对象：{html.escape('、'.join(visual['objects']) or '未明确')} · {support_note}", caption)])
         else:
             story.append(image_flowable("", 165 * mm, 30 * mm))
         story.extend([Paragraph("实验结果摘要", h2), Paragraph(html.escape(group.get("overall_summary") or "暂无摘要"), body)])
         action_text = "；".join(f"{item['action_label']} {item['event_count']}" for item in group.get("key_action_summary") or [] if item["event_count"]) or "无已验收动作"
-        story.append(Paragraph(f"五类动作分布：{html.escape(action_text)}。", body))
+        story.append(Paragraph(f"动作类别分布：{html.escape(action_text)}。", body))
         step_rows = [["步骤", "时间", "当前在做什么", "下一步"]]
         for step in group["steps"]:
-            step_rows.append([str(step.get("step_index") or "-"), p(f"{step['start_timecode']}—{step['end_timecode']}", small), p(step.get("current_step") or "未说明", small), p(step.get("next_step") or "证据不足", small)])
-        story.extend([Paragraph("步骤级理解", h2), styled_table(step_rows, [12*mm,34*mm,59*mm,60*mm])])
+            step_rows.append(
+                [
+                    str(step.get("step_index") or "-"),
+                    Paragraph(
+                        f"{html.escape(step['start_timecode'])}<br/>— {html.escape(step['end_timecode'])}",
+                        small,
+                    ),
+                    p(step.get("current_step") or "未说明", small),
+                    p(step.get("next_step") or "证据不足", small),
+                ]
+            )
+        story.extend([Paragraph("步骤级理解", h2), styled_table(step_rows, [12*mm,40*mm,56.5*mm,56.5*mm])])
         gallery = group.get("evidence_gallery") or []
         if gallery:
-            story.append(Paragraph("五类动作代表证据", h2))
+            story.append(Paragraph("动作类别代表证据", h2))
             cells: list[Any] = []
             for item in gallery:
                 cells.append(
                     [
-                        image_flowable(item["image_path"], 79 * mm, 48 * mm),
+                        image_flowable(item["image_path"], 79 * mm, 38 * mm),
                         Paragraph(
                             f"{html.escape(item['action_label'])} · {item['event_id']} · {item['peak_timecode']}<br/>"
                             f"对象：{html.escape('、'.join(item['objects']) or '未明确')}",
@@ -360,7 +403,7 @@ def render_professional_pdf(path: Path, report: dict[str, Any], archive_root: Pa
             gallery_table = Table([cells[i:i+2] for i in range(0, len(cells), 2)], colWidths=[82.5*mm,82.5*mm], hAlign="LEFT")
             gallery_table.setStyle(TableStyle([("VALIGN", (0,0), (-1,-1), "TOP"), ("LEFTPADDING", (0,0), (-1,-1), 2), ("RIGHTPADDING", (0,0), (-1,-1), 2), ("TOPPADDING", (0,0), (-1,-1), 4), ("BOTTOMPADDING", (0,0), (-1,-1), 5)]))
             story.append(gallery_table)
-    story.extend([PageBreak(), Paragraph("4. 质量、局限与可追溯性", h1)])
+    story.extend([CondPageBreak(78 * mm), Paragraph("4. 质量、局限与可追溯性", h1)])
     alignment_rows = [["视角", "角色", "状态", "置信度", "CSV RMSE(ms)"]]
     for item in report["alignment_summary"]["views"]:
         alignment_rows.append([p(item.get("view_id"), small), item.get("role"), item.get("state"), f"{float(item.get('confidence') or 0):.4f}", "-" if item.get("csv_rmse_ms") is None else f"{float(item['csv_rmse_ms']):.3f}"])
@@ -376,12 +419,54 @@ def render_professional_pdf(path: Path, report: dict[str, Any], archive_root: Pa
         usage = token_by_stage.get(stage.get("stage"), {})
         stage_rows.append([p(stage.get("stage"), small), f"{float(stage.get('duration_seconds') or 0):.2f}", usage.get("input_tokens") or 0, usage.get("output_tokens") or 0, usage.get("total_tokens") or 0, usage.get("call_count") or 0])
     stage_rows.append(["TOTAL", f"{float(performance.get('total_duration_seconds') or 0):.2f}", performance.get("total_input_tokens") or 0, performance.get("total_output_tokens") or 0, performance.get("total_tokens") or 0, sum(int(item.get("call_count") or 0) for item in token_by_stage.values())])
+    story.append(styled_table(stage_rows, [54*mm,25*mm,28*mm,28*mm,27*mm,17*mm]))
     story.extend([
-        styled_table(stage_rows, [54*mm,25*mm,28*mm,28*mm,27*mm,17*mm]),
-        Paragraph("6. 证据与归档索引", h1),
-        Paragraph("完整证据不重复塞入 PDF。下列机器可读文件与媒体目录是本报告的事实来源，可通过 Web 端或 NAS 档案打开。", body),
+        CondPageBreak(112 * mm),
+        Paragraph("6. 运行审计与归档索引", h1),
+        Paragraph("完整证据不重复塞入 PDF。本页摘录零拷贝、TensorRT、火山引擎、GPU/内存与质量真值账本；机器可读原始记录保留在同一 NAS 档案。", body),
     ])
+    runtime_audit = performance.get("runtime_audit") or {}
+    source_audit = runtime_audit.get("source") or {}
+    trt_audit = runtime_audit.get("tensorrt") or {}
+    encoder_audit = runtime_audit.get("video_encoder") or {}
+    mllm_audit = runtime_audit.get("mllm") or {}
+    telemetry_audit = runtime_audit.get("telemetry") or {}
+    peaks = telemetry_audit.get("peaks") or {}
+    quality_audit = runtime_audit.get("quality") or {}
+
+    def peak_text(name: str, suffix: str) -> str:
+        item = peaks.get(name) or {}
+        if item.get("value") is None:
+            return "-"
+        return f"{item['value']}{suffix} @ {item.get('stage') or '-'}"
+
+    def metric_text(value: Any) -> str:
+        if value is None:
+            return "-"
+        return f"{float(value):.3f}"
+
+    audit_rows = [
+        ["审计项", "结果"],
+        ["输入/零拷贝", p(f"{source_audit.get('input_mode') or '-'}；source_copy_bytes={source_audit.get('source_copy_bytes') if source_audit.get('source_copy_bytes') is not None else '-'}；新建连续源副本={source_audit.get('continuous_source_copies_created') if source_audit.get('continuous_source_copies_created') is not None else '-'}", small)],
+        ["源文件验证", p(f"已验证 {source_audit.get('verified_file_count') or 0}；冷 stat {source_audit.get('fresh_stat_count') or 0}；命中验证缓存 {source_audit.get('cache_hit_count') or 0}", small)],
+        ["TensorRT", p(f"v{trt_audit.get('version') or '-'}；{trt_audit.get('role_count') or 0} 个角色引擎；全部反序列化={trt_audit.get('all_deserialized')}；batch={','.join(str(item) for item in trt_audit.get('build_batches') or []) or '-'}", small)],
+        ["NVENC", p(f"{encoder_audit.get('selected') or '-'}；可用={encoder_audit.get('usable')}；软件回退={encoder_audit.get('software_fallback_active')}", small)],
+        ["火山引擎/Ark", p(f"{mllm_audit.get('completed_count') or 0}/{mllm_audit.get('call_count') or 0} completed；failed={mllm_audit.get('failed_count') or 0}；reused={mllm_audit.get('cache_reused_call_count') or 0}；model={','.join(mllm_audit.get('models') or []) or '-'}", small)],
+        ["GPU / VRAM / RAM 峰值", p(f"{peak_text('gpu_compute_percent', '%')}；{peak_text('gpu_memory_used_mib', ' MiB')}；{peak_text('host_memory_percent', '%')}", small)],
+        ["NVDEC / NVENC 峰值", p(f"{peak_text('nvdec_percent', '%')}；{peak_text('nvenc_percent', '%')}", small)],
+        ["功耗 / 温度峰值", p(f"{peak_text('gpu_power_w', ' W')}；{peak_text('gpu_temperature_c', ' °C')}；监控样本={telemetry_audit.get('sample_count') or 0}；错误={telemetry_audit.get('sampling_error_count') or 0}", small)],
+        ["质量真值", p(f"边界 P/R={metric_text(quality_audit.get('boundary_precision'))}/{metric_text(quality_audit.get('boundary_recall'))}；关键素材 @IoU0.5 P/R/F1={metric_text(quality_audit.get('key_material_precision_at_iou_0_5'))}/{metric_text(quality_audit.get('key_material_recall_at_iou_0_5'))}/{metric_text(quality_audit.get('key_material_f1_at_iou_0_5'))}；状态={quality_audit.get('status') or '-'}", small)],
+    ]
+    story.extend([Spacer(1, 3*mm), styled_table(audit_rows, [43*mm,122*mm])])
     provenance_rows = [["用途", "归档相对路径"]] + [[key.replace("_", " "), p(value, small)] for key, value in report.get("provenance", {}).items()]
     provenance_rows.extend([["可检索数据库", p("JSON-Config-Files/evidence_index.sqlite", small)], ["关键素材", p("Key-Materials/", small)], ["实验片段", p("Experiment-Clips/", small)]])
-    story.extend([styled_table(provenance_rows, [46*mm,119*mm]), Spacer(1, 4*mm), Paragraph("文档控制：本 PDF 是固定模板对已验收证据的只读呈现。原视频、原始图片和机器可读 JSON 保持独立归档；报告中的图片标题均携带事件 ID 与全局时间戳。", small)])
+    story.append(
+        KeepTogether(
+            [
+                Spacer(1, 3 * mm),
+                Paragraph("归档路径索引", h2),
+                styled_table(provenance_rows, [46 * mm, 119 * mm]),
+            ]
+        )
+    )
     document.build(story, onFirstPage=footer, onLaterPages=footer)

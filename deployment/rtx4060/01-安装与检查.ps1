@@ -86,7 +86,7 @@ if (-not $SkipTensorRTExport) {
 Write-Host ''
 Write-Host 'RTX4060 node validation completed.'
 Write-Host "Fixed input index: $NasIndex"
-Write-Host "Fixed output archive: $NasArchive\Six-View-Three-Hour-Experiment-2026-08-13"
+Write-Host "Fixed output archive: $NasArchive\CustomFlow_standard_correct_12_ABCFA_0001--exp_20260810_144014_e918b762"
 Write-Host 'Original input: 15-minute NAS segments referenced by the index; no full local copy is created.'
 Write-Host 'Local cache: D:\VisionCortexLocal\Cache'
 Write-Host 'Next: run .\deployment\rtx4060\02-Start-Web.ps1 or the Chinese-named equivalent.'

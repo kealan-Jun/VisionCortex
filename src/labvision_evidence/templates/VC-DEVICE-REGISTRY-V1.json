@@ -32,6 +32,17 @@
       "view_subtype": "side",
       "workstation_id": null
     },
+    "raspberrypi-01_cam01": {
+      "display_name": "First-Person Camera Raspberry Pi 01",
+      "expected_role": "first_person",
+      "view_subtype": "first_person",
+      "workstation_id": null,
+      "role_policy": {
+        "status": "policy_override",
+        "reason": "The canonical NAS human-ground-truth benchmark repeatedly identifies this physical camera as First_Person; the legacy index value 'front' is a placement label and conflicts with that device identity.",
+        "source": "/home/x1/桌面/nas/VisionCortex-Benchmark1-Human-GroundTruth-v1/02_Bounded_Active_Clips"
+      }
+    },
     "rk3588-ubuntu_cam01": {
       "display_name": "Fixed Side Camera RK3588",
       "expected_role": "third_person",

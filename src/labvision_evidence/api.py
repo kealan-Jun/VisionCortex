@@ -4,7 +4,9 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
+import sys
 import threading
 import time
 import unicodedata
@@ -24,6 +26,12 @@ from fastapi.staticfiles import StaticFiles
 
 from .collection_catalog import discover_collections, get_collection
 from .collection_state import record_collection_state
+from .annotation_workspace import (
+    export_reviewed_ground_truth,
+    load_annotation_workspace,
+    record_annotation_decision,
+    resolve_annotation_image,
+)
 from .config import load_config
 from .indexing import (
     INDEX_DB_NAME,
@@ -34,6 +42,7 @@ from .indexing import (
     search_physical_changes,
 )
 from .pagination import decode_cursor, encode_cursor
+from .pathing import archive_contains, archive_relative_posix
 from .pipeline import EvidencePipeline
 from .schemas import RunManifest, ViewInput
 from .storage import (
@@ -62,7 +71,9 @@ app.mount("/ui", StaticFiles(directory=_web_root), name="ui")
 _lock = threading.Lock()
 _runs: dict[str, dict[str, Any]] = {}
 _BENCHMARK_EXPERIMENT_ID = "exp_20260810_144014_e918b762"
-_BENCHMARK_ARCHIVE_NAME = "Six-View-Three-Hour-Experiment-2026-08-13"
+_BENCHMARK_ARCHIVE_NAME = (
+    "CustomFlow_standard_correct_12_ABCFA_0001--exp_20260810_144014_e918b762"
+)
 _BENCHMARK_SUBMISSION_PROTOCOL_VERSION = 1
 _PHYSICAL_ACTION_TYPES = (
     "hand_object_contact",
@@ -71,10 +82,55 @@ _PHYSICAL_ACTION_TYPES = (
     "container_state_change",
     "device_panel_operation",
 )
+_RUNTIME_HEARTBEAT_STALE_SECONDS = 90.0
+_RUNTIME_HEARTBEAT_FILES = (
+    "resource_telemetry_live.json",
+    "source_progress.json",
+    "run_metrics_live.json",
+)
+
+
+def _runtime_activity_receipt(
+    status_path: Path,
+    *,
+    now_epoch: float | None = None,
+) -> dict[str, Any]:
+    """Describe recent pipeline activity without parsing a concurrently written JSON file."""
+
+    observed_at = time.time() if now_epoch is None else float(now_epoch)
+    latest_path: Path | None = None
+    latest_mtime: float | None = None
+    for file_name in _RUNTIME_HEARTBEAT_FILES:
+        candidate = status_path.parent / file_name
+        try:
+            candidate_mtime = candidate.stat().st_mtime
+        except (FileNotFoundError, OSError):
+            continue
+        if latest_mtime is None or candidate_mtime > latest_mtime:
+            latest_path = candidate
+            latest_mtime = candidate_mtime
+
+    if latest_path is None or latest_mtime is None:
+        return {
+            "active": False,
+            "latest_path": None,
+            "latest_mtime_epoch": None,
+            "age_seconds": None,
+            "stale_after_seconds": _RUNTIME_HEARTBEAT_STALE_SECONDS,
+        }
+
+    age_seconds = max(0.0, observed_at - latest_mtime)
+    return {
+        "active": age_seconds <= _RUNTIME_HEARTBEAT_STALE_SECONDS,
+        "latest_path": latest_path.name,
+        "latest_mtime_epoch": latest_mtime,
+        "age_seconds": age_seconds,
+        "stale_after_seconds": _RUNTIME_HEARTBEAT_STALE_SECONDS,
+    }
 
 
 def _recover_orphaned_tasks() -> None:
-    """Make stale durable `running` states honest after a service restart."""
+    """Mark only stale durable tasks interrupted after a Web service restart."""
 
     root = _archive_root()
     if not root.is_dir():
@@ -87,7 +143,35 @@ def _recover_orphaned_tasks() -> None:
         )
     for status_path in status_paths:
         payload = _read_json(status_path, {}) or {}
-        if payload.get("stage") in {"completed", "failed", "interrupted"}:
+        stage = str(payload.get("stage") or "")
+        if stage in {"completed", "failed"}:
+            continue
+        heartbeat = _runtime_activity_receipt(status_path)
+        recovery = payload.get("recovery") if isinstance(payload.get("recovery"), dict) else {}
+        if heartbeat["active"]:
+            previous_stage = str(recovery.get("previous_stage") or "")
+            if (
+                stage == "interrupted"
+                and recovery.get("status") == "orphaned_after_service_restart"
+                and previous_stage
+                and previous_stage not in {"completed", "failed", "interrupted"}
+            ):
+                payload.update(
+                    {
+                        "stage": previous_stage,
+                        "message": "后台流水线心跳仍活跃；Web 服务重启未中断正在运行的任务。",
+                        "updated_at": datetime.now().astimezone().isoformat(),
+                        "recovery": {
+                            "status": "active_after_service_restart",
+                            "resumable": False,
+                            "previous_stage": previous_stage,
+                            "heartbeat": heartbeat,
+                        },
+                    }
+                )
+                _write_json_atomic(status_path, payload)
+            continue
+        if stage == "interrupted":
             continue
         payload.update(
             {
@@ -97,6 +181,8 @@ def _recover_orphaned_tasks() -> None:
                 "recovery": {
                     "status": "orphaned_after_service_restart",
                     "resumable": True,
+                    "previous_stage": stage,
+                    "heartbeat": heartbeat,
                 },
             }
         )
@@ -464,12 +550,26 @@ def _file_url(archive_name: str, relative: str | Path) -> str:
     return f"/api/archive-file?archive={quote(archive_name)}&path={quote(Path(relative).as_posix())}"
 
 
+def _staging_file_url(run_id: str, relative: str | Path) -> str:
+    return (
+        f"/api/staging-file?run_id={quote(run_id)}"
+        f"&path={quote(Path(relative).as_posix())}"
+    )
+
+
 def _resolve_archive(archive_name: str) -> Path:
     root = _archive_root().resolve()
     candidate = (root / archive_name).resolve()
     if candidate.parent != root or not candidate.is_dir():
         raise HTTPException(404, "实验档案不存在")
     return candidate
+
+
+def _resolve_staging_run(run_id: str) -> Path:
+    root = _find_staging_run(_settings(), run_id)
+    if root is None:
+        raise HTTPException(404, "staging run_id 不存在")
+    return root.resolve()
 
 
 async def _save_upload_to_local_and_nas(
@@ -588,7 +688,6 @@ def _execute_fixed_benchmark(
                 nas_output=str(fixed_root),
             ),
         )
-        manifest.experiment_id = _BENCHMARK_ARCHIVE_NAME
         manifest_path.write_text(
             yaml.safe_dump(manifest.model_dump(mode="json"), allow_unicode=True, sort_keys=False),
             encoding="utf-8",
@@ -675,7 +774,6 @@ def _execute_index_collection(
                 nas_staging=str(staging_root),
             ),
         )
-        manifest.experiment_id = archive_name
         manifest_path.write_text(
             yaml.safe_dump(
                 manifest.model_dump(mode="json"), allow_unicode=True, sort_keys=False
@@ -800,6 +898,71 @@ def health() -> dict[str, Any]:
             "device_registry_path": settings["storage"].get("device_registry_path"),
         },
     }
+
+
+@app.get("/api/annotation-workspace")
+def annotation_workspace(
+    priority: str | None = None,
+    review_status: str | None = None,
+    q: str | None = None,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(24, ge=1, le=200),
+) -> dict[str, Any]:
+    settings = _settings()
+    if not bool((settings.get("developer_tools") or {}).get("yolo_annotation_workspace_enabled")):
+        raise HTTPException(404, "内部 YOLO 标注工具未启用")
+    try:
+        return load_annotation_workspace(
+            settings,
+            priority=priority,
+            review_status=review_status,
+            query=q,
+            offset=offset,
+            limit=limit,
+        )
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise HTTPException(500, f"无法读取 YOLO 标注工作台：{exc}") from exc
+
+
+@app.get("/api/annotation-workspace/items/{item_id}/image")
+def annotation_workspace_image(item_id: str) -> FileResponse:
+    settings = _settings()
+    if not bool((settings.get("developer_tools") or {}).get("yolo_annotation_workspace_enabled")):
+        raise HTTPException(404, "内部 YOLO 标注工具未启用")
+    try:
+        path = resolve_annotation_image(settings, item_id)
+    except KeyError as exc:
+        raise HTTPException(404, "标注项不存在") from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(404, "badcase 图片不存在") from exc
+    return FileResponse(path)
+
+
+@app.post("/api/annotation-workspace/items/{item_id}/decision")
+def save_annotation_workspace_decision(
+    item_id: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    settings = _settings()
+    if not bool((settings.get("developer_tools") or {}).get("yolo_annotation_workspace_enabled")):
+        raise HTTPException(404, "内部 YOLO 标注工具未启用")
+    try:
+        decision = record_annotation_decision(settings, item_id, payload)
+    except KeyError as exc:
+        raise HTTPException(404, "标注项不存在") from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"status": "saved", "decision": decision}
+
+
+@app.get("/api/annotation-workspace/export")
+def annotation_workspace_export() -> dict[str, Any]:
+    settings = _settings()
+    if not bool((settings.get("developer_tools") or {}).get("yolo_annotation_workspace_enabled")):
+        raise HTTPException(404, "内部 YOLO 标注工具未启用")
+    try:
+        return export_reviewed_ground_truth(settings)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise HTTPException(500, f"无法导出审核真值：{exc}") from exc
 
 
 @app.get("/api/archives")
@@ -1028,6 +1191,34 @@ def _attach_index_urls(
     return result
 
 
+def _attach_staging_index_urls(
+    run_id: str, event: dict[str, Any]
+) -> dict[str, Any]:
+    result = dict(event)
+    result["staging_run_id"] = run_id
+    result["event_url"] = (
+        f"/api/staging-runs/{quote(run_id)}/key-events/"
+        f"{quote(str(event['event_uid']))}"
+    )
+    result["artifact_references"] = [
+        {
+            **artifact,
+            "url": (
+                _staging_file_url(run_id, artifact["path"])
+                if "://" not in str(artifact.get("path") or "")
+                else None
+            ),
+            "sidecar_url": (
+                _staging_file_url(run_id, artifact["sidecar_path"])
+                if artifact.get("sidecar_path")
+                else None
+            ),
+        }
+        for artifact in event.get("artifact_references", [])
+    ]
+    return result
+
+
 @app.get("/api/key-events")
 def search_key_events(
     archive: str | None = None,
@@ -1105,6 +1296,86 @@ def search_key_events(
         "canonical_source": "archived JSON",
         "index_is_rebuildable": True,
     }
+
+
+@app.get("/api/staging-runs/{run_id}/key-events")
+def search_staging_key_events(
+    run_id: str,
+    q: str | None = None,
+    action_type: str | None = None,
+    parent_event_id: str | None = None,
+    cross_view: bool | None = None,
+    start_us: int | None = None,
+    end_us: int | None = None,
+    cursor: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+) -> dict[str, Any]:
+    """Search one isolated NAS staging run without promoting it."""
+
+    root = _resolve_staging_run(run_id)
+    cursor_filters = {
+        "staging_run_id": run_id,
+        "q": q,
+        "action_type": action_type,
+        "parent_event_id": parent_event_id,
+        "cross_view": cross_view,
+        "start_us": start_us,
+        "end_us": end_us,
+    }
+    decoded_cursor = _decode_event_cursor(cursor, cursor_filters)
+    manifest = _read_json(
+        root / "JSON-Config-Files" / INDEX_MANIFEST_NAME, {}
+    ) or {}
+    archive_id = str(manifest.get("archive_id") or run_id)
+    after_peak_us = None
+    after_event_uid = None
+    if decoded_cursor:
+        cursor_archive, after_peak_us, after_event_uid = decoded_cursor
+        if cursor_archive != archive_id:
+            raise HTTPException(400, "分页游标与 staging run 不匹配")
+    items = search_archive_index(
+        root,
+        query=q,
+        action_type=action_type,
+        parent_event_id=parent_event_id,
+        cross_view=cross_view,
+        start_us=start_us,
+        end_us=end_us,
+        after_peak_us=after_peak_us,
+        after_event_uid=after_event_uid,
+        limit=limit + 1,
+    )
+    has_more = len(items) > limit
+    page = [
+        _attach_staging_index_urls(run_id, item)
+        for item in items[:limit]
+    ]
+    next_cursor = None
+    if has_more and page:
+        last = page[-1]
+        next_cursor = _encode_event_cursor(
+            archive_id,
+            int(last.get("peak_timestamp_us") or 0),
+            str(last["event_uid"]),
+            cursor_filters,
+        )
+    return {
+        "items": page,
+        "count": len(page),
+        "next_cursor": next_cursor,
+        "canonical_source": "isolated staging indexed JSON",
+        "index_is_rebuildable": True,
+        "formal_archive_promotion": False,
+    }
+
+
+@app.get("/api/staging-runs/{run_id}/key-events/{event_uid}")
+def staging_key_event(run_id: str, event_uid: str) -> dict[str, Any]:
+    root = _resolve_staging_run(run_id)
+    event = get_indexed_event(root, event_uid)
+    if event is None:
+        raise HTTPException(404, "staging 关键事件索引记录不存在")
+    return _attach_staging_index_urls(run_id, event)
 
 
 @app.get("/api/physical-changes")
@@ -1359,6 +1630,10 @@ def archive_detail(archive_name: str) -> dict[str, Any]:
     quality_acceptance = _read_json(quality_path, {}) or {}
     evidence_eval_path = root / "JSON-Config-Files" / "evidence_package_eval.json"
     evidence_eval = _read_json(evidence_eval_path, {}) or {}
+    recall_eval_path = (
+        root / "JSON-Config-Files" / "key_material_recall_eval.json"
+    )
+    key_material_recall_eval = _read_json(recall_eval_path, {}) or {}
     _attach_archive_performance_display(metrics, acceptance)
     key_events = _read_json(
         root / "Key-Materials" / "Key-Materials-Model-Understanding.json", []
@@ -1398,7 +1673,7 @@ def archive_detail(archive_name: str) -> dict[str, Any]:
                     "steps": understanding.get("steps") or [],
                     "uncertainties": understanding.get("uncertainties") or [],
                     "aligned_video_url": _file_url(
-                        archive_name, aligned.relative_to(root)
+                        archive_name, Path(archive_relative_posix(aligned, root))
                     )
                     if aligned.is_file()
                     else None,
@@ -1477,6 +1752,9 @@ def archive_detail(archive_name: str) -> dict[str, Any]:
         "evidence_package_eval": _file_url(
             archive_name, "JSON-Config-Files/evidence_package_eval.json"
         ) if evidence_eval_path.is_file() else None,
+        "key_material_recall_eval": _file_url(
+            archive_name, "JSON-Config-Files/key_material_recall_eval.json"
+        ) if recall_eval_path.is_file() else None,
         "daily_report_json": _file_url(archive_name, daily_manifest["json"])
         if daily_manifest.get("json")
         else None,
@@ -1516,6 +1794,7 @@ def archive_detail(archive_name: str) -> dict[str, Any]:
         "key_events": normalized_events,
         "metrics": metrics,
         "quality_acceptance": quality_acceptance,
+        "key_material_recall_eval": key_material_recall_eval,
         "observability": _run_snapshot_from_root(root),
         "daily_report": daily_report,
         "daily_report_manifest": daily_manifest,
@@ -1531,17 +1810,46 @@ def archive_detail(archive_name: str) -> dict[str, Any]:
 def archive_file(archive: str, path: str) -> FileResponse:
     root = _resolve_archive(archive).resolve()
     candidate = (root / path).resolve()
-    if not candidate.is_relative_to(root) or not candidate.is_file():
+    if not archive_contains(candidate, root) or not candidate.is_file():
         raise HTTPException(404, "档案文件不存在")
     return FileResponse(candidate)
+
+
+@app.get("/api/staging-file")
+def staging_file(run_id: str, path: str) -> FileResponse:
+    root = _resolve_staging_run(run_id)
+    candidate = (root / path).resolve()
+    if not archive_contains(candidate, root) or not candidate.is_file():
+        raise HTTPException(404, "staging 文件不存在")
+    return FileResponse(candidate)
+
+
+def _folder_open_command(
+    root: Path,
+    *,
+    os_name: str | None = None,
+    platform: str | None = None,
+) -> list[str]:
+    effective_os_name = os.name if os_name is None else os_name
+    effective_platform = sys.platform if platform is None else platform
+    if effective_os_name == "nt":
+        return ["explorer.exe", str(root)]
+    if effective_platform == "darwin":
+        return ["open", str(root)]
+    opener = shutil.which("xdg-open")
+    if opener:
+        return [opener, str(root)]
+    raise RuntimeError("No supported desktop folder opener is installed")
 
 
 @app.post("/api/archives/{archive_name}/open")
 def open_archive_folder(archive_name: str) -> dict[str, str]:
     root = _resolve_archive(archive_name)
-    if os.name != "nt":
-        raise HTTPException(501, "仅支持在运行服务的 Windows 机器上打开文件夹")
-    subprocess.Popen(["explorer.exe", str(root)])
+    try:
+        command = _folder_open_command(root)
+    except RuntimeError as exc:
+        raise HTTPException(501, str(exc)) from exc
+    subprocess.Popen(command, start_new_session=True)
     return {"status": "opened", "path": str(root)}
 
 

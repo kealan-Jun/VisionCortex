@@ -10,6 +10,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from .archive import ArchiveLayout, write_json
+from .pathing import archive_relative_posix
 from .report_presentations import (
     render_daily_html,
     render_daily_markdown,
@@ -21,14 +22,16 @@ from .schemas import RunSummary
 ACTION_LABELS = {
     "hand_object_contact": "手部与物体接触",
     "object_movement": "物体移动",
-    "liquid_movement": "液体移动",
+    "liquid_movement": "液体移动（直接视觉证据）",
     "container_state_change": "容器状态变化",
     "device_panel_operation": "设备面板操作",
+    "pipette_transfer_operation": "移液器源到目标操作（液体不可见）",
 }
 TEMPLATE_DIRECTORY = Path(__file__).with_name("templates")
 DEFAULT_DAILY_TEMPLATE_ID = "VC-LAB-DAILY-REPORT-V2"
 PROFESSIONAL_TEMPLATE_ID = "VC-PROFESSIONAL-EVIDENCE-REPORT-V1"
 PROFESSIONAL_TEMPLATE_PATH = TEMPLATE_DIRECTORY / f"{PROFESSIONAL_TEMPLATE_ID}.json"
+PROFESSIONAL_RENDERER_PATH = Path(__file__).with_name("report_presentations.py")
 
 
 def _daily_template_path(template_id: str) -> Path:
@@ -43,14 +46,21 @@ def load_daily_report_template(template_id: str = DEFAULT_DAILY_TEMPLATE_ID) -> 
 
 
 def _select_group_visuals(key_events: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
-    """Select deterministic dual-view images without another model call."""
+    """Select deterministic aligned dual-view images without another model call.
+
+    ``supporting_roles`` describes which roles directly prove the accepted
+    action.  It must not be overloaded to describe the media layout: a valid
+    aligned first/third-person composite can still be useful when one role is
+    direct evidence and the other is synchronized context.  Keep those facts
+    separate so reports can show the real image without inflating cross-view
+    semantic support.
+    """
 
     eligible = [
         item
         for item in key_events
         if item.get("aligned_key_frame")
         and item.get("aligned_key_clip")
-        and {"first_person", "third_person"}.issubset(set(item.get("supporting_roles") or []))
     ]
     eligible.sort(
         key=lambda item: (
@@ -63,6 +73,10 @@ def _select_group_visuals(key_events: list[dict[str, Any]]) -> tuple[dict[str, A
         return None, []
 
     def visual(item: dict[str, Any]) -> dict[str, Any]:
+        direct_roles = list(item.get("supporting_roles") or [])
+        direct_dual_role = {"first_person", "third_person"}.issubset(
+            set(direct_roles)
+        )
         return {
             "event_id": item["event_id"],
             "action_type": item["action_type"],
@@ -72,10 +86,20 @@ def _select_group_visuals(key_events: list[dict[str, Any]]) -> tuple[dict[str, A
             "objects": item["objects"],
             "confidence": item["confidence"],
             "supporting_views": item["supporting_views"],
-            "supporting_roles": item["supporting_roles"],
+            "supporting_roles": direct_roles,
+            "visual_roles": ["first_person", "third_person"],
+            "support_scope": (
+                "dual_role_direct"
+                if direct_dual_role
+                else "single_role_direct_with_aligned_cross_role_context"
+            ),
             "image_path": item["aligned_key_frame"],
             "clip_path": item["aligned_key_clip"],
-            "claim_class": "observed_fact",
+            "claim_class": (
+                "observed_fact"
+                if direct_dual_role
+                else "supported_model_understanding"
+            ),
         }
 
     representative = visual(eligible[0])
@@ -120,6 +144,152 @@ def _duration(seconds: float | int | None) -> str:
     return f"{remaining:.3f} 秒"
 
 
+def _read_optional_json(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def collect_runtime_audit(
+    layout: ArchiveLayout,
+    run_metrics: dict[str, Any],
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    """Collect a deterministic runtime/quality digest from archived receipts."""
+
+    json_root = layout.json_config
+    ingest = _read_optional_json(json_root / "Input-Manifests" / "nas_ingest.json")
+    original_ingest = _read_optional_json(
+        json_root / "Stage-Receipts" / "original_ingest.json"
+    )
+    model_preflight = _read_optional_json(json_root / "model_runtime_preflight.json")
+    media_preflight = _read_optional_json(json_root / "media_pipeline_preflight.json")
+    telemetry = _read_optional_json(json_root / "resource_telemetry.json")
+    quality = _read_optional_json(json_root / "quality_acceptance.json")
+    recall = _read_optional_json(json_root / "key_material_recall_eval.json")
+
+    stage_summaries = telemetry.get("stage_summaries") or {}
+
+    def peak(metric: str) -> dict[str, Any]:
+        candidates = []
+        for stage, values in stage_summaries.items():
+            metric_values = values.get(metric) or {}
+            if metric_values.get("max") is not None:
+                candidates.append((float(metric_values["max"]), str(stage)))
+        if not candidates:
+            return {"value": None, "stage": None}
+        value, stage = max(candidates)
+        return {"value": round(value, 3), "stage": stage}
+
+    calls = run_metrics.get("mllm_calls") or []
+    status_counts = Counter(str(item.get("status") or "unknown") for item in calls)
+    model_counts = Counter(str(item.get("model") or "unknown") for item in calls)
+    runtime = model_preflight.get("runtime") or {}
+    roles = runtime.get("roles") or {}
+    source_validation = ingest.get("source_validation") or {}
+    recall_threshold = next(
+        (
+            item
+            for item in recall.get("threshold_results") or []
+            if abs(float(item.get("temporal_iou_threshold") or 0) - 0.5) < 1e-9
+        ),
+        {},
+    )
+    base_url = str(config.get("mllm", {}).get("base_url") or "")
+    provider = "Volcengine Ark" if "ark.cn-beijing.volces.com" in base_url else "configured MLLM"
+    return {
+        "source": {
+            "input_mode": ingest.get("input_mode")
+            or run_metrics.get("performance_mode", {}).get("input_mode"),
+            "source_copy_bytes": original_ingest.get(
+                "source_copy_bytes", ingest.get("copied_source_bytes")
+            ),
+            "continuous_source_copies_created": ingest.get(
+                "continuous_source_copies_created"
+            ),
+            "verified_file_count": source_validation.get("verified_file_count"),
+            "fresh_stat_count": source_validation.get("fresh_stat_count"),
+            "cache_hit_count": source_validation.get("cache_hit_count"),
+        },
+        "tensorrt": {
+            "version": runtime.get("tensorrt_version"),
+            "role_count": len(roles),
+            "all_deserialized": bool(roles)
+            and all(bool(item.get("deserialized")) for item in roles.values()),
+            "build_batches": sorted(
+                {
+                    int(item["build_batch"])
+                    for item in roles.values()
+                    if item.get("build_batch") is not None
+                }
+            ),
+        },
+        "video_encoder": {
+            "status": media_preflight.get("status"),
+            "selected": model_preflight.get("video_encoder", {}).get(
+                "selected_encoder"
+            ),
+            "usable": model_preflight.get("video_encoder", {}).get(
+                "requested_encoder_usable"
+            ),
+            "software_fallback_active": model_preflight.get(
+                "video_encoder", {}
+            ).get("software_fallback_active"),
+        },
+        "mllm": {
+            "provider": provider,
+            "call_count": len(calls),
+            "completed_count": status_counts.get("completed", 0),
+            "failed_count": len(calls) - status_counts.get("completed", 0),
+            "cache_reused_call_count": sum(
+                bool(item.get("cache_reused")) for item in calls
+            ),
+            "models": [name for name, _ in model_counts.most_common()],
+        },
+        "telemetry": {
+            "backend": telemetry.get("gpu_telemetry_backend"),
+            "sample_count": telemetry.get("sample_count"),
+            "sampling_error_count": telemetry.get("monitor_health", {}).get(
+                "sampling_error_count"
+            ),
+            "peaks": {
+                "gpu_compute_percent": peak("gpu_compute_percent"),
+                "gpu_memory_used_mib": peak("gpu_memory_used_mib"),
+                "host_memory_percent": peak("memory_percent"),
+                "nvdec_percent": peak("nvdec_percent"),
+                "nvenc_percent": peak("nvenc_percent"),
+                "gpu_power_w": peak("gpu_power_w"),
+                "gpu_temperature_c": peak("gpu_temperature_c"),
+            },
+        },
+        "quality": {
+            "status": quality.get("status"),
+            "boundary_precision": quality.get("experiment_boundaries", {}).get(
+                "precision"
+            ),
+            "boundary_recall": quality.get("experiment_boundaries", {}).get(
+                "recall"
+            ),
+            "key_material_precision_at_iou_0_5": recall_threshold.get("precision"),
+            "key_material_recall_at_iou_0_5": recall_threshold.get("recall"),
+            "key_material_f1_at_iou_0_5": recall_threshold.get("f1"),
+            "truth_authority": recall.get("authority"),
+        },
+        "provenance": {
+            "source_ingest": "JSON-Config-Files/Input-Manifests/nas_ingest.json",
+            "model_preflight": "JSON-Config-Files/model_runtime_preflight.json",
+            "media_preflight": "JSON-Config-Files/media_pipeline_preflight.json",
+            "resource_telemetry": "JSON-Config-Files/resource_telemetry.json",
+            "quality_acceptance": "JSON-Config-Files/quality_acceptance.json",
+            "key_material_recall_eval": "JSON-Config-Files/key_material_recall_eval.json",
+        },
+    }
+
+
 def _local_report_date(summary: RunSummary, timezone_name: str) -> str:
     try:
         report_timezone = ZoneInfo(timezone_name)
@@ -149,6 +319,16 @@ def build_daily_report(
     timezone_name = str(report_config.get("timezone", "Asia/Shanghai"))
     report_date = _local_report_date(summary, timezone_name)
     event_by_id = {event.event_id: event for event in summary.events}
+    accepted_event_ids = {
+        event_id
+        for group in summary.experiment_groups
+        for event_id in group.key_event_ids
+    }
+    accepted_physical_changes = [
+        item
+        for item in summary.physical_change_log
+        if item.event_id in accepted_event_ids
+    ]
     role_by_view = {view.view_id: view.role.value for view in summary.views}
     timeline = []
     action_counts: Counter[str] = Counter()
@@ -232,10 +412,11 @@ def build_daily_report(
                     "aligned_key_clip": event.key_clips.get("aligned_first_third"),
                 }
             )
+        group_event_ids = set(group.key_event_ids)
         group_changes = [
             item.model_dump(mode="json")
-            for item in summary.physical_change_log
-            if group.global_start_ms <= item.global_ms <= group.global_end_ms
+            for item in accepted_physical_changes
+            if item.event_id in group_event_ids
         ]
         group_change_counts = Counter(item["change_type"] for item in group_changes)
         group_change_objects = Counter(
@@ -327,6 +508,7 @@ def build_daily_report(
             "daily_template_sha256": _sha256(template_path),
             "professional_template_id": PROFESSIONAL_TEMPLATE_ID,
             "professional_template_sha256": _sha256(PROFESSIONAL_TEMPLATE_PATH),
+            "professional_renderer_sha256": _sha256(PROFESSIONAL_RENDERER_PATH),
             "brand": "VisionCortex",
             "dual_view_visuals_only": True,
             "reader_layers": ["decision", "experiment", "audit"],
@@ -355,7 +537,7 @@ def build_daily_report(
             "third_person_views": sum(view.role.value == "third_person" for view in summary.views),
             "experiment_group_count": len(summary.experiment_groups),
             "key_event_count": sum(len(item["key_events"]) for item in timeline),
-            "physical_change_count": len(summary.physical_change_log),
+            "physical_change_count": len(accepted_physical_changes),
             "accepted_event_count": summary.stats.get("accepted_event_count"),
             "rejected_event_count": summary.stats.get("rejected_event_count"),
             "candidate_event_count": len(summary.events),
@@ -381,7 +563,9 @@ def build_daily_report(
             }
             for action_type, label in ACTION_LABELS.items()
         ],
-        "physical_change_log": [item.model_dump(mode="json") for item in summary.physical_change_log],
+        "physical_change_log": [
+            item.model_dump(mode="json") for item in accepted_physical_changes
+        ],
         "uncertainties": uncertainties,
         "contradictions": contradictions,
         "performance": {
@@ -393,6 +577,7 @@ def build_daily_report(
             "total_input_tokens": total_tokens.get("input_tokens"),
             "total_output_tokens": total_tokens.get("output_tokens"),
             "total_tokens": total_tokens.get("total_tokens"),
+            "runtime_audit": run_metrics.get("runtime_audit") or {},
         },
         "human_review": {
             "status": "pending",
@@ -421,6 +606,16 @@ def evaluate_daily_report(report: dict[str, Any], summary: RunSummary) -> dict[s
     timeline = report.get("experiment_timeline") or []
     report_event_ids = [event["event_id"] for group in timeline for event in group.get("key_events") or []]
     expected_event_ids = [event_id for group in summary.experiment_groups for event_id in group.key_event_ids]
+    expected_change_ids = [
+        item.change_id
+        for item in summary.physical_change_log
+        if item.event_id in set(expected_event_ids)
+    ]
+    report_changes = report.get("physical_change_log") or []
+    report_change_ids = [str(item.get("change_id")) for item in report_changes]
+    timeline_change_count = sum(
+        int(group.get("physical_change_count") or 0) for group in timeline
+    )
     template_id = str(report.get("template_id") or DEFAULT_DAILY_TEMPLATE_ID)
     template_path = _daily_template_path(template_id)
     template = load_daily_report_template(template_id)
@@ -466,6 +661,20 @@ def evaluate_daily_report(report: dict[str, Any], summary: RunSummary) -> dict[s
         f"report={len(report_event_ids)} evidence_package={len(expected_event_ids)}",
     )
     check(
+        "accepted_physical_change_ids_match",
+        sorted(report_change_ids) == sorted(expected_change_ids),
+        f"report={len(report_change_ids)} accepted_evidence={len(expected_change_ids)}",
+    )
+    check(
+        "physical_change_counts_reconcile",
+        int(report.get("overview", {}).get("physical_change_count") or 0)
+        == len(report_changes)
+        == timeline_change_count,
+        "overview="
+        f"{report.get('overview', {}).get('physical_change_count')}; "
+        f"log={len(report_changes)}; timeline={timeline_change_count}",
+    )
+    check(
         "all_experiments_have_bounded_timeline",
         all(item["start_global_ms"] < item["end_global_ms"] for item in timeline),
         "Every experiment must have a positive bounded interval.",
@@ -500,7 +709,7 @@ def evaluate_daily_report(report: dict[str, Any], summary: RunSummary) -> dict[s
             and visual.get("image_path")
             and visual.get("clip_path")
             and {"first_person", "third_person"}.issubset(
-                set(visual.get("supporting_roles") or [])
+                set(visual.get("visual_roles") or [])
             )
             for visual in selected_visuals
         ),
@@ -515,6 +724,14 @@ def evaluate_daily_report(report: dict[str, Any], summary: RunSummary) -> dict[s
         )
         == _sha256(PROFESSIONAL_TEMPLATE_PATH),
         "The professional PDF has a separate versioned presentation contract.",
+    )
+    check(
+        "professional_renderer_integrity",
+        report.get("presentation_contract", {}).get(
+            "professional_renderer_sha256"
+        )
+        == _sha256(PROFESSIONAL_RENDERER_PATH),
+        "The report records the exact deterministic renderer source hash.",
     )
     check(
         "evidence_package_eval_passed",
@@ -541,6 +758,9 @@ def generate_daily_report_archive(
     if not evidence_eval.get("passed"):
         raise RuntimeError("Evidence package did not pass; daily report generation refused")
     effective_metrics = dict(run_metrics)
+    effective_metrics["runtime_audit"] = collect_runtime_audit(
+        layout, effective_metrics, config
+    )
     acceptance_path = layout.json_config / "acceptance_report.json"
     if acceptance_path.is_file():
         try:
@@ -588,9 +808,10 @@ def generate_daily_report_archive(
         "schema_version": "visioncortex-professional-report-manifest/1.0",
         "template_id": PROFESSIONAL_TEMPLATE_ID,
         "template_sha256": _sha256(PROFESSIONAL_TEMPLATE_PATH),
+        "renderer_sha256": _sha256(PROFESSIONAL_RENDERER_PATH),
         "report_date": report_date,
         "status": "generated" if pdf_path.is_file() else "not_generated",
-        "pdf": str(pdf_path.relative_to(layout.root).as_posix())
+        "pdf": archive_relative_posix(pdf_path, layout.root)
         if pdf_path.is_file()
         else None,
         "visual_policy": {
@@ -605,12 +826,12 @@ def generate_daily_report_archive(
     write_json(professional_manifest_path, professional_manifest)
     artifacts = {
         "report_date": report_date,
-        "json": str(json_path.relative_to(layout.root).as_posix()),
-        "markdown": str(markdown_path.relative_to(layout.root).as_posix()),
-        "html": str(html_path.relative_to(layout.root).as_posix()),
-        "pdf": str(pdf_path.relative_to(layout.root).as_posix()) if pdf_path.is_file() else None,
+        "json": archive_relative_posix(json_path, layout.root),
+        "markdown": archive_relative_posix(markdown_path, layout.root),
+        "html": archive_relative_posix(html_path, layout.root),
+        "pdf": archive_relative_posix(pdf_path, layout.root) if pdf_path.is_file() else None,
         "professional_report_manifest": str(
-            professional_manifest_path.relative_to(layout.root).as_posix()
+            archive_relative_posix(professional_manifest_path, layout.root)
         ),
         "daily_template_id": report["template_id"],
         "professional_template_id": PROFESSIONAL_TEMPLATE_ID,
@@ -620,8 +841,8 @@ def generate_daily_report_archive(
         "professional_visual_count": report["overview"][
             "professional_visual_count"
         ],
-        "evaluation": str(eval_path.relative_to(layout.root).as_posix()),
-        "human_review": str(review_path.relative_to(layout.root).as_posix()),
+        "evaluation": archive_relative_posix(eval_path, layout.root),
+        "human_review": archive_relative_posix(review_path, layout.root),
         "passed": True,
         "additional_model_tokens": 0,
         "generation_duration_seconds": round(time.perf_counter() - started, 6),
@@ -648,6 +869,5 @@ def generate_daily_report_from_archive(root: Path, config: dict[str, Any]) -> di
     summary = RunSummary.model_validate_json(
         (layout.json_config / "evidence_package.json").read_text(encoding="utf-8-sig")
     )
-    summary.experiment_id = root.resolve().name
     run_metrics = json.loads((layout.json_config / "run_metrics.json").read_text(encoding="utf-8-sig"))
     return generate_daily_report_archive(layout, summary, run_metrics, config)

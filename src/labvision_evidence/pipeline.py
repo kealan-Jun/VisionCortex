@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat as stat_module
 import threading
@@ -11,7 +12,7 @@ from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 import cv2
 import numpy as np
@@ -30,10 +31,20 @@ from .actions import (
     select_fine_scan_views,
 )
 from .alignment import build_alignments
+from .action_semantics import (
+    attach_action_observability,
+    build_semantic_review_plan,
+)
+from .action_state_machine import (
+    attach_continuous_action_states,
+    build_event_state_receipt,
+)
 from .archive import (
     ArchiveLayout,
+    _rerender_curated_participant_annotations,
     analyze_experiment_groups,
     analyze_key_materials,
+    curate_semantically_reviewed_key_materials,
     finalize_archive,
     materialize_experiment_clips,
     materialize_key_materials,
@@ -51,9 +62,12 @@ from .grouping import (
     prepare_formal_experiment_segments,
     select_key_events,
 )
+from .pathing import archive_relative_posix
+from .ordering import candidate_sort_key, event_sort_key
 from .detection import iter_frame_evidence, scan_videos, validate_models
 from .daily_reports import generate_daily_report_archive
 from .decisions import decision_receipt
+from .schema_contracts import write_archive_contract_manifest
 from .schemas import (
     ActionCandidate,
     ActionType,
@@ -85,10 +99,765 @@ from .storage import (
     source_cache_diagnostics,
 )
 from .telemetry import ResourceMonitor
-from .validation import validate_experiment_and_material_quality
+from .reviewed_artifacts import load_dataset_scoped_json
+from .validation import (
+    evaluate_key_event_recall,
+    validate_experiment_and_material_quality,
+)
 
 
 ProgressCallback = Callable[[str, float, str], None]
+
+
+def _explicit_container_state_direction(
+    current_step: str, physical_change: str
+) -> str | None:
+    """Recognize only an explicit model-described closure state transition."""
+
+    current = str(current_step or "")
+    physical = str(physical_change or "")
+    text = f"{current} {physical}".lower()
+    closure_named = bool(
+        re.search(r"瓶盖|管盖|离心管盖|bottle[_ -]?cap|tube[_ -]?cap", text)
+    )
+    container_named = bool(
+        re.search(r"试剂瓶|样品瓶|瓶身|离心管|容器|bottle|tube|container", text)
+    )
+    if not closure_named or not container_named:
+        return None
+    explicit_before_after = bool(
+        re.search(
+            r"(?:从|由).{0,18}(?:密封|闭合|关闭|盖合|有盖).{0,18}"
+            r"(?:变为|变成|转为|成为).{0,18}(?:开口|打开|开启|无盖|分离)",
+            physical,
+        )
+    )
+    explicit_open_action = bool(
+        re.search(
+            r"(?:旋开|拧开|打开|开启|取下|移除).{0,8}(?:瓶盖|管盖)"
+            r"|(?:瓶盖|管盖).{0,8}(?:旋开|拧开|打开|开启|取下|移除)"
+            r"|(?:瓶盖|管盖).{0,8}(?:与|从).{0,8}(?:瓶身|容器).{0,6}分离",
+            text,
+        )
+    )
+    if explicit_before_after or explicit_open_action:
+        return "opening"
+    explicit_close_before_after = bool(
+        re.search(
+            r"(?:从|由).{0,18}(?:开口|打开|开启|无盖|分离).{0,18}"
+            r"(?:变为|变成|转为|成为).{0,18}(?:密封|闭合|关闭|盖合|有盖)",
+            physical,
+        )
+    )
+    explicit_close_action = bool(
+        re.search(
+            r"(?:旋紧|拧紧|盖上|盖回|关闭|封闭).{0,8}(?:瓶盖|管盖|瓶|管)?"
+            r"|(?:瓶盖|管盖).{0,8}(?:旋紧|拧紧|盖上|盖回|关闭|封闭)",
+            text,
+        )
+    )
+    return "closing" if explicit_close_before_after or explicit_close_action else None
+
+
+def _semantic_state_participants(text: str) -> list[str]:
+    normalized = str(text or "").lower()
+    actor = (
+        "gloved_hand"
+        if re.search(r"手套|glov(?:e|ed)", normalized)
+        else "hand"
+    )
+    if re.search(r"离心管|试管|tube", normalized):
+        container = "tube"
+        closure = "tube_cap"
+    elif re.search(r"样品瓶|sample[_ -]?bottle", normalized):
+        container = "sample_bottle"
+        closure = "bottle_cap"
+    elif re.search(r"试剂瓶|reagent[_ -]?bottle", normalized):
+        container = "reagent_bottle"
+        closure = "bottle_cap"
+    else:
+        container = "container"
+        closure = "bottle_cap"
+    return [actor, container, closure]
+
+
+def _recover_group_storyboard_state_events(
+    groups: Sequence[ExperimentGroup],
+    segments: Sequence[ExperimentSegment],
+    events: list[EvidenceEvent],
+    config: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Create provisional state candidates from a real full-group Ark review.
+
+    This is recall-only.  The recovered event is still materialized and sent
+    through the independent event-level Ark action-proof contract; semantic
+    curation removes it if before/after state proof is not confirmed.
+    """
+
+    minimum_group_confidence = float(
+        config.get("mllm", {}).get(
+            "group_state_recall_minimum_confidence", 0.55
+        )
+    )
+    minimum_step_confidence = float(
+        config.get("mllm", {}).get(
+            "group_state_recall_step_minimum_confidence", 0.55
+        )
+    )
+    next_number = max(
+        [
+            int(match.group(1))
+            for event in events
+            if (match := re.fullmatch(r"EVT-(\d+)", event.event_id))
+        ],
+        default=0,
+    ) + 1
+    by_segment = {segment.segment_id: segment for segment in segments}
+    recovered: list[dict[str, Any]] = []
+    for group in groups:
+        understanding = group.model_understanding or {}
+        if (
+            understanding.get("status") != "completed"
+            or float(understanding.get("confidence") or 0.0)
+            < minimum_group_confidence
+        ):
+            continue
+        group_segments = [
+            by_segment[segment_id]
+            for segment_id in group.atomic_experiment_ids
+            if segment_id in by_segment
+        ]
+        group_event_ids = {
+            event_id
+            for segment in group_segments
+            for event_id in segment.event_ids
+        }
+        existing_state_events = [
+            event
+            for event in events
+            if event.event_id in group_event_ids
+            and event.accepted
+            and event.action_type == ActionType.CONTAINER_STATE_CHANGE
+        ]
+        for step in understanding.get("steps") or []:
+            if not isinstance(step, dict):
+                continue
+            step_confidence = float(step.get("confidence") or 0.0)
+            if step_confidence < minimum_step_confidence:
+                continue
+            current_step = str(step.get("current_step") or "")
+            physical_change = str(step.get("physical_change") or "")
+            direction = _explicit_container_state_direction(
+                current_step, physical_change
+            )
+            if direction is None:
+                continue
+            supporting_views = [
+                str(item)
+                for item in step.get("supporting_views") or []
+                if str(item)
+            ]
+            required_views = {
+                group.first_person_view,
+                group.third_person_view,
+            }
+            if not required_views.issubset(set(supporting_views)):
+                continue
+            start_ms = max(
+                float(group.global_start_ms),
+                float(step.get("start_global_ms") or group.global_start_ms),
+            )
+            end_ms = min(
+                float(group.global_end_ms),
+                float(step.get("end_global_ms") or group.global_end_ms),
+            )
+            if end_ms <= start_ms:
+                continue
+            if any(
+                min(end_ms, event.global_end_ms)
+                > max(start_ms, event.global_start_ms)
+                for event in existing_state_events
+            ):
+                continue
+            target_segment = max(
+                group_segments,
+                key=lambda segment: max(
+                    0.0,
+                    min(end_ms, segment.global_end_ms)
+                    - max(start_ms, segment.global_start_ms),
+                ),
+                default=None,
+            )
+            if target_segment is None:
+                continue
+            event_id = f"EVT-{next_number:06d}"
+            next_number += 1
+            participants = _semantic_state_participants(
+                f"{current_step} {physical_change}"
+            )
+            event = EvidenceEvent(
+                event_id=event_id,
+                action_type=ActionType.CONTAINER_STATE_CHANGE,
+                global_start_ms=start_ms,
+                global_end_ms=end_ms,
+                key_global_ms=start_ms + (end_ms - start_ms) * 0.80,
+                objects=participants,
+                confidence=min(
+                    float(understanding.get("confidence") or 0.0),
+                    step_confidence,
+                ),
+                accepted=True,
+                audit_reason=(
+                    "完整组故事板豆包显式提出容器开合状态转换；"
+                    "仅作为召回候选，必须通过独立事件级豆包状态证明"
+                ),
+                supporting_views=sorted(required_views),
+                supporting_roles=[
+                    ViewRole.FIRST_PERSON,
+                    ViewRole.THIRD_PERSON,
+                ],
+                candidates=[],
+                uncertainty=[
+                    "该候选由组级语义召回产生，不代表事件级状态证明已通过"
+                ],
+                observability={
+                    "semantic_recall_admission": {
+                        "schema_version": (
+                            "visioncortex-group-storyboard-state-recall/1"
+                        ),
+                        "mode": "full_group_storyboard_explicit_state_transition",
+                        "mandatory_semantic_review": True,
+                        "candidate_action_directly_confirmed": False,
+                        "source_group_id": group.group_id,
+                        "transition_direction": direction,
+                        "source_step_confidence": step_confidence,
+                    }
+                },
+            )
+            attach_action_observability([event])
+            event.state_machine = build_event_state_receipt(event, config)
+            event.state_machine["publication"] = {
+                "status": "provisional_semantic_review",
+                "suppressed_by_event_id": None,
+                "reason": "independent_event_level_state_proof_required",
+            }
+            events.append(event)
+            existing_state_events.append(event)
+            target_segment.event_ids = [
+                item.event_id
+                for item in sorted(
+                    [
+                        candidate
+                        for candidate in events
+                        if candidate.event_id in {
+                            *target_segment.event_ids,
+                            event_id,
+                        }
+                    ],
+                    key=event_sort_key,
+                )
+            ]
+            target_segment.micro_segments.append(
+                {
+                    "micro_segment_id": (
+                        f"MICRO-{target_segment.segment_id}-SEM-{event_id}"
+                    ),
+                    "start_global_ms": start_ms,
+                    "end_global_ms": end_ms,
+                    "action_type": ActionType.CONTAINER_STATE_CHANGE.value,
+                    "objects": participants,
+                    "evidence_event_id": event_id,
+                    "view_alignment_state": "aligned",
+                    "next_event_id": None,
+                    "uncertainty": list(event.uncertainty),
+                    "source": "full_group_storyboard_semantic_recall",
+                }
+            )
+            recovered.append(
+                {
+                    "event_id": event_id,
+                    "group_id": group.group_id,
+                    "segment_id": target_segment.segment_id,
+                    "transition_direction": direction,
+                    "global_start_ms": start_ms,
+                    "global_end_ms": end_ms,
+                    "participant_objects": participants,
+                    "source_step_confidence": step_confidence,
+                    "group_confidence": float(
+                        understanding.get("confidence") or 0.0
+                    ),
+                    "supporting_views": sorted(required_views),
+                    "independent_event_level_review_required": True,
+                }
+            )
+    return recovered
+
+
+FINAL_STEP_ACTION_PATTERNS: dict[str, tuple[str, ...]] = {
+    "device_panel_operation": (
+        r"(?:操作|点击|触碰|按下|调节|读取).{0,4}面板",
+        r"面板.{0,4}(?:操作|点击|触碰|按下|调节|读取)",
+        r"(?:按下|点击|触碰|操作).{0,3}按钮",
+        r"(?:按下|点击|触碰|操作).{0,3}按键",
+        r"读数",
+        r"数值.{0,4}(?:确认|读取)",
+    ),
+    "liquid_movement": (
+        r"吸液",
+        r"排液",
+        r"加液",
+        r"液体转移",
+        r"(?:清水|液体|试剂|溶液).{0,4}移液(?!器)",
+        r"倾倒",
+    ),
+    "pipette_transfer_operation": (
+        r"移液操作",
+        r"移液流程",
+        r"源.{0,12}目标.{0,12}移液器",
+        r"移液器.{0,8}(?:伸入|进入).{0,12}(?:容器|离心管|试剂瓶|烧杯)",
+    ),
+    "container_state_change": (
+        r"开盖",
+        r"合盖",
+        r"旋开",
+        r"旋紧",
+        r"拧开",
+        r"拧紧",
+        r"盖回",
+    ),
+}
+
+
+_SAFE_POSTURE_ONLY_REWRITES: tuple[tuple[re.Pattern[str], str], ...] = (
+    # These phrases describe an object's visible posture while accidentally
+    # using the same Chinese verb as a functional liquid-pouring claim.  The
+    # rewrite is deliberately narrow: claims such as "将液体倾倒入容器" remain
+    # untouched and therefore still fail the consistency gate.
+    (re.compile(r"发生移位倾倒"), "发生移位且姿态改变"),
+    (re.compile(r"移位倾倒"), "移位且姿态改变"),
+    (re.compile(r"倾倒姿态"), "倾斜姿态"),
+)
+
+
+def normalize_final_group_action_language(
+    groups: Sequence[ExperimentGroup],
+    key_events: Sequence[EvidenceEvent],
+) -> dict[str, Any]:
+    """Conservatively de-functionalize only known posture-word collisions.
+
+    This is not a general claim sanitizer.  It records every exact rewrite and
+    leaves all other unsupported high-risk action words in place so the normal
+    fail-closed consistency check rejects the archive.
+    """
+
+    event_by_id = {event.event_id: event for event in key_events}
+    corrections: list[dict[str, Any]] = []
+    for group in groups:
+        confirmed_actions = {
+            event_by_id[event_id].action_type.value
+            for event_id in group.key_event_ids
+            if event_id in event_by_id
+        }
+        if ActionType.LIQUID_MOVEMENT.value in confirmed_actions:
+            continue
+        understanding = deepcopy(group.model_understanding or {})
+        if ActionType.PIPETTE_TRANSFER_OPERATION.value in confirmed_actions:
+            identity_fields = (
+                ("group.experiment_name", group.experiment_name),
+                ("understanding.experiment_name", understanding.get("experiment_name")),
+            )
+            for field, value in identity_fields:
+                before = str(value or "")
+                after = re.sub(
+                    r"(清水|液体|试剂|溶液)移液",
+                    r"\1相关移液器操作",
+                    before,
+                )
+                if after == before:
+                    continue
+                if field == "group.experiment_name":
+                    group.experiment_name = after
+                else:
+                    understanding["experiment_name"] = after
+                corrections.append(
+                    {
+                        "group_id": group.group_id,
+                        "field": field,
+                        "before": before,
+                        "after": after,
+                        "reason": "liquid_unproven_but_pipette_operation_confirmed",
+                    }
+                )
+            english_fields = (
+                ("group.experiment_name_en", group.experiment_name_en),
+                (
+                    "understanding.experiment_name_en",
+                    understanding.get("experiment_name_en"),
+                ),
+            )
+            for field, value in english_fields:
+                before = str(value or "")
+                after = re.sub(
+                    r"(Clean-Water|Liquid|Reagent|Solution)-Pipetting",
+                    r"\1-Related-Pipette-Operation",
+                    before,
+                    flags=re.IGNORECASE,
+                )
+                if after == before:
+                    continue
+                if field == "group.experiment_name_en":
+                    group.experiment_name_en = after
+                else:
+                    understanding["experiment_name_en"] = after
+                corrections.append(
+                    {
+                        "group_id": group.group_id,
+                        "field": field,
+                        "before": before,
+                        "after": after,
+                        "reason": "liquid_unproven_but_pipette_operation_confirmed",
+                    }
+                )
+        for step in understanding.get("steps") or []:
+            for field in ("current_step", "next_step", "physical_change"):
+                before = str(step.get(field) or "")
+                after = before
+                for pattern, replacement in _SAFE_POSTURE_ONLY_REWRITES:
+                    after = pattern.sub(replacement, after)
+                if after == before:
+                    continue
+                step[field] = after
+                corrections.append(
+                    {
+                        "group_id": group.group_id,
+                        "step_index": step.get("step_index"),
+                        "field": field,
+                        "before": before,
+                        "after": after,
+                        "reason": "liquid_action_absent_posture_only_defunctionalization",
+                    }
+                )
+        if corrections_for_group := [
+            item for item in corrections if item["group_id"] == group.group_id
+        ]:
+            understanding["fail_closed_language_normalization"] = {
+                "schema_version": "visioncortex-final-language-normalization/1",
+                "policy": "narrow posture-only rewrite; all other unsupported claims remain fatal",
+                "corrections": corrections_for_group,
+            }
+            group.model_understanding = understanding
+    return {
+        "schema_version": "visioncortex-final-language-normalization/1",
+        "correction_count": len(corrections),
+        "corrections": corrections,
+    }
+
+
+def _synchronize_final_event_state_receipts(
+    events: Sequence[EvidenceEvent], config: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Keep final state receipts aligned with participant key-frame selection.
+
+    Key-frame selection is allowed to move the event peak inside the accepted
+    bounds.  Rebuild only receipts whose peak or final action no longer agrees
+    with the curated event, while retaining semantic-relabelling provenance and
+    any component-publication decision from the original receipt.
+    """
+
+    repairs: list[dict[str, Any]] = []
+    for event in events:
+        previous = dict(event.state_machine or {})
+        expected_action = (
+            "liquid_transfer"
+            if event.action_type == ActionType.LIQUID_MOVEMENT
+            else event.action_type.value
+        )
+        expected_peak_us = round(event.key_global_ms * 1000.0)
+        if (
+            str(previous.get("action_type") or "") == expected_action
+            and int(previous.get("peak_timestamp_us") or -1)
+            == expected_peak_us
+        ):
+            continue
+        rebuilt = build_event_state_receipt(event, config)
+        derivation = dict(previous.get("derivation") or {})
+        if derivation:
+            derivation["timing_resynchronized_after_final_key_frame_selection"] = (
+                True
+            )
+            rebuilt["derivation"] = derivation
+            if derivation.get("source") == "semantic_relabel_confirmed_state_proof":
+                for transition in rebuilt.get("transition_trace") or []:
+                    transition["source"] = "semantic_relabel_confirmed_state_proof"
+                identity = dict(rebuilt.get("object_identity") or {})
+                identity["track_tokens"] = []
+                identity["identity_status"] = "semantic_participant_classes"
+                rebuilt["object_identity"] = identity
+        if previous.get("publication"):
+            rebuilt["publication"] = dict(previous["publication"])
+        event.state_machine = rebuilt
+        repairs.append(
+            {
+                "event_id": event.event_id,
+                "previous_action_type": previous.get("action_type"),
+                "final_action_type": rebuilt.get("action_type"),
+                "previous_peak_timestamp_us": previous.get("peak_timestamp_us"),
+                "final_peak_timestamp_us": rebuilt.get("peak_timestamp_us"),
+            }
+        )
+    return repairs
+
+
+def _synchronize_segments_with_final_key_events(
+    segments: Sequence[ExperimentSegment],
+    groups: Sequence[ExperimentGroup],
+    events: Sequence[EvidenceEvent],
+) -> list[dict[str, Any]]:
+    """Remove rejected/duplicate CV hypotheses from final segment sidecars."""
+
+    event_by_id = {event.event_id: event for event in events}
+    group_by_id = {group.group_id: group for group in groups}
+    receipts: list[dict[str, Any]] = []
+    for segment in segments:
+        group = group_by_id.get(str(segment.group_id or ""))
+        if group is None:
+            continue
+        final_events = sorted(
+            (
+                event_by_id[event_id]
+                for event_id in group.key_event_ids
+                if event_id in event_by_id
+                and event_by_id[event_id].global_end_ms >= segment.global_start_ms
+                and event_by_id[event_id].global_start_ms <= segment.global_end_ms
+            ),
+            key=lambda event: (
+                event.global_start_ms,
+                event.key_global_ms,
+                event.event_id,
+            ),
+        )
+        previous_event_ids = list(segment.event_ids)
+        previous_micro_count = len(segment.micro_segments)
+        segment.event_ids = [event.event_id for event in final_events]
+        synchronized_micro_segments: list[dict[str, Any]] = []
+        for index, event in enumerate(final_events, start=1):
+            synchronized_micro_segments.append(
+                {
+                    "micro_segment_id": (
+                        f"MICRO-{segment.segment_id.removeprefix('EXP-')}-{index:04d}"
+                    ),
+                    "start_global_ms": float(event.global_start_ms),
+                    "end_global_ms": float(event.global_end_ms),
+                    "action_type": event.action_type.value,
+                    "objects": list(event.objects),
+                    "evidence_event_id": event.event_id,
+                    "view_alignment_state": (
+                        "aligned"
+                        if {
+                            role.value
+                            if isinstance(role, ViewRole)
+                            else str(role)
+                            for role in event.supporting_roles
+                        }
+                        >= {
+                            ViewRole.FIRST_PERSON.value,
+                            ViewRole.THIRD_PERSON.value,
+                        }
+                        else "single_role_with_aligned_context"
+                    ),
+                    "next_event_id": (
+                        final_events[index].event_id
+                        if index < len(final_events)
+                        else None
+                    ),
+                    "uncertainty": list(event.uncertainty),
+                }
+            )
+        segment.micro_segments = synchronized_micro_segments
+        receipts.append(
+            {
+                "segment_id": segment.segment_id,
+                "previous_event_ids": previous_event_ids,
+                "final_event_ids": list(segment.event_ids),
+                "previous_micro_segment_count": previous_micro_count,
+                "final_micro_segment_count": len(segment.micro_segments),
+            }
+        )
+    return receipts
+
+
+def validate_final_step_action_consistency(
+    groups: Sequence[ExperimentGroup],
+    key_events: Sequence[EvidenceEvent],
+) -> dict[str, Any]:
+    """Fail closed when final prose asserts an absent high-risk action."""
+
+    def is_explicitly_negated(text: str, start: int, end: int) -> bool:
+        """Return true only for a denial attached to this exact occurrence.
+
+        A phrase such as ``液体转移状态不可确认`` is an uncertainty, not a
+        claim that liquid moved.  Evaluate each regex occurrence separately so
+        a denial earlier in the sentence cannot mask a later positive claim.
+        """
+
+        before = text[max(0, start - 12) : start]
+        after = text[end : min(len(text), end + 14)]
+        before_denial = re.search(
+            r"(?:(?:未(?:观察到|观测到|看见|见到|见|确认|证明|发生)?|"
+            r"没有(?:观察到|看见|确认|证明)?|"
+            r"无法确认|不能确认|不可确认|不确定|"
+            r"是否(?:已)?(?:完成|发生)?)"
+            r"[^，。；！？]{0,4}|无(?:可见|明确)?|"
+            r"无已审核通过的事件支持|"
+            r"未发生(?:经证实的|已确认的)?)$",
+            before,
+        )
+        after_denial = re.match(
+            r"(?:状态)?(?:不可|无法|不能|未能|尚未)"
+            r"(?:确认|判断|观察到|看见|证明|辨认)"
+            r"|(?:不可见|未见|不确定|是否发生不可确认)"
+            r"|[^，。；！？]{0,6}(?:无法|不能|未能|尚未)"
+            r"(?:确认|判断|证实)",
+            after,
+        )
+        clause_start = max(text.rfind(mark, 0, start) for mark in "，。；！？") + 1
+        clause_before = text[clause_start:start]
+        scoped_marker = re.search(
+            r"(?:无(?:经(?:最终审核)?确认的|已确认的|可见的|明确的)?|"
+            r"无已审核通过的事件支持|"
+            r"未确认(?:存在|发生)?(?:其他)?|"
+            r"未发生(?:经证实的|已确认的)?|"
+            r"未(?:观察到|观测到)(?:实际|任何|其他|明确的|完整的)?|"
+            r"没有确认(?:其他)?|"
+            r"无法(?:证实|确认|认定)(?:存在|发生)?(?:完整的)?)"
+                r"(?:天平|读数|液体|容器|设备|面板|按键|按钮|开盖|合盖|"
+            r"拿取|旋盖|移液|吸液|排液|加液|倾倒)",
+            clause_before,
+        )
+        scoped_list_denial = False
+        if scoped_marker:
+            marker_to_occurrence = clause_before[scoped_marker.start() :]
+            scoped_list_denial = not re.search(
+                r"(?:但|但是|随后|之后|然后|而后|后又|再进行|转而)",
+                marker_to_occurrence,
+            )
+        clause_end_candidates = [
+            position
+            for mark in "，。；！？"
+            if (position := text.find(mark, end)) >= 0
+        ]
+        clause_end = min(clause_end_candidates, default=len(text))
+        open_parenthesis = text.rfind("（", clause_start, start)
+        close_parenthesis = text.find("）", end, clause_end)
+        parenthetical_list_denial = bool(
+            open_parenthesis >= clause_start
+            and close_parenthesis >= end
+            and re.search(
+                r"均(?:未通过|未确认|未被确认|无确认)",
+                text[close_parenthesis + 1 : clause_end],
+            )
+        )
+        return bool(
+            before_denial
+            or after_denial
+            or scoped_list_denial
+            or parenthetical_list_denial
+        )
+
+    def has_positive_occurrence(pattern: str, text: str) -> bool:
+        return any(
+            not is_explicitly_negated(text, match.start(), match.end())
+            for match in re.finditer(pattern, text)
+        )
+
+    event_by_id = {event.event_id: event for event in key_events}
+    violations: list[dict[str, Any]] = []
+    group_reports: list[dict[str, Any]] = []
+    for group in groups:
+        confirmed_actions = {
+            event_by_id[event_id].action_type.value
+            for event_id in group.key_event_ids
+            if event_id in event_by_id
+        }
+        understanding = group.model_understanding or {}
+        steps = list(understanding.get("steps") or [])
+        checked_claims: list[dict[str, Any]] = []
+        group_level_claims = (
+            ("experiment_name", str(group.experiment_name or "")),
+            (
+                "understanding.experiment_name",
+                str(understanding.get("experiment_name") or ""),
+            ),
+            ("overall_summary", str(understanding.get("overall_summary") or "")),
+        )
+        for field, text in group_level_claims:
+            if not text.strip():
+                continue
+            checked_claims.append(
+                {"step_index": None, "field": field, "text": text}
+            )
+            for action_type, patterns in FINAL_STEP_ACTION_PATTERNS.items():
+                if action_type in confirmed_actions:
+                    continue
+                matched = [
+                    pattern
+                    for pattern in patterns
+                    if has_positive_occurrence(pattern, text)
+                ]
+                if matched:
+                    violations.append(
+                        {
+                            "group_id": group.group_id,
+                            "step_index": None,
+                            "field": field,
+                            "unsupported_action_type": action_type,
+                            "matched_patterns": matched,
+                            "text": text,
+                        }
+                    )
+        for step in steps:
+            step_index = step.get("step_index")
+            for field in ("current_step", "physical_change"):
+                text = str(step.get(field) or "").strip()
+                if not text:
+                    continue
+                checked_claims.append(
+                    {"step_index": step_index, "field": field, "text": text}
+                )
+                for action_type, patterns in FINAL_STEP_ACTION_PATTERNS.items():
+                    if action_type in confirmed_actions:
+                        continue
+                    matched = [
+                        pattern
+                        for pattern in patterns
+                        if has_positive_occurrence(pattern, text)
+                    ]
+                    if matched:
+                        violations.append(
+                            {
+                                "group_id": group.group_id,
+                                "step_index": step_index,
+                                "field": field,
+                                "unsupported_action_type": action_type,
+                                "matched_patterns": matched,
+                                "text": text,
+                            }
+                        )
+        group_reports.append(
+            {
+                "group_id": group.group_id,
+                "confirmed_action_types": sorted(confirmed_actions),
+                "checked_claim_count": len(checked_claims),
+            }
+        )
+    return {
+        "schema_version": "visioncortex-final-step-action-consistency/1",
+        "status": "passed" if not violations else "failed",
+        "passed": not violations,
+        "policy": "final prose cannot assert absent high-risk action classes",
+        "groups": group_reports,
+        "violations": violations,
+    }
 
 
 def _noop_progress(stage: str, progress: float, message: str) -> None:
@@ -400,6 +1169,15 @@ def build_cache_identity(config: dict[str, Any], manifest: RunManifest) -> dict[
 
     stable_config = deepcopy(config)
     stable_config.get("project", {}).pop("output_root", None)
+    # Execution policy must not fork the deterministic cache identity: a cold
+    # run and its explicit hot replay intentionally share the same namespace.
+    # ``cache_namespace`` remains in the stable config and is therefore the
+    # auditable isolation boundary between independent benchmark campaigns.
+    stable_config.get("project", {}).pop("cache_mode", None)
+    # Ark response reuse is an execution policy independent of deterministic
+    # CV artifacts.  Excluding it lets a recovery run reuse the exact verified
+    # scan while forcing fresh semantic calls.
+    stable_config.get("project", {}).pop("semantic_cache_mode", None)
     # This switch changes only how far a run proceeds. Keeping it out of the
     # CV cache identity lets a later authorized full pipeline reuse the exact
     # accepted cold-start preprocessing ledgers without weakening provenance.
@@ -424,6 +1202,16 @@ def build_cache_identity(config: dict[str, Any], manifest: RunManifest) -> dict[
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
     payload["cache_key"] = hashlib.sha256(encoded).hexdigest()[:20]
+    payload["execution_cache_policy"] = {
+        "mode": str(config.get("project", {}).get("cache_mode") or "reuse"),
+        "semantic_mode": str(
+            config.get("project", {}).get(
+                "semantic_cache_mode",
+                config.get("project", {}).get("cache_mode") or "reuse",
+            )
+        ),
+        "namespace": config.get("project", {}).get("cache_namespace"),
+    }
     payload["source_snapshot_report"] = source_snapshot_report
     return payload
 
@@ -447,6 +1235,12 @@ class EvidencePipeline:
         self._view_runtime: dict[str, dict[str, Any]] = {}
         self._runtime_lock = threading.Lock()
         self._active_layout: ArchiveLayout | None = None
+        self._current_experiment_id: str | None = None
+        self._acceptance_baseline_selection: dict[str, Any] = {
+            "configured": False,
+            "applied": False,
+            "reason": "not_evaluated",
+        }
 
     def _scan_progress(
         self, phase: str, view_id: str, completed_units: int, total_units: int
@@ -562,11 +1356,11 @@ class EvidencePipeline:
             artifact = Path(artifact)
             if not artifact.exists():
                 raise FileNotFoundError(f"Completed stage artifact is missing: {artifact}")
-            relative = artifact.resolve().relative_to(layout.root.resolve())
-            relative_artifacts.append(relative.as_posix())
+            relative = archive_relative_posix(artifact, layout.root)
+            relative_artifacts.append(relative)
             if self._publisher is not None:
                 if artifact.is_dir():
-                    self._publisher.publish_directory(relative)
+                    self._publisher.publish_directory(Path(relative))
                 else:
                     self._publisher.publish_file(artifact)
         receipt = {
@@ -589,16 +1383,13 @@ class EvidencePipeline:
 
     def _acceptance_baseline(self) -> dict[str, Any] | None:
         configured = self.config.get("validation", {}).get("acceptance_baseline")
-        if not configured:
-            return None
-        path = Path(configured)
-        if not path.is_absolute():
-            path = Path(__file__).resolve().parents[2] / path
-        if not path.is_file():
-            raise FileNotFoundError(f"验收基线不存在: {path}")
-        payload = json.loads(path.read_text(encoding="utf-8-sig"))
-        if not isinstance(payload, dict):
-            raise ValueError(f"验收基线必须是 JSON 对象: {path}")
+        payload, selection = load_dataset_scoped_json(
+            configured,
+            self._current_experiment_id,
+            repository_root=Path(__file__).resolve().parents[2],
+            artifact_label="验收基线",
+        )
+        self._acceptance_baseline_selection = selection
         return payload
 
     def _run_quality_acceptance(
@@ -608,18 +1399,99 @@ class EvidencePipeline:
         key_events: list[EvidenceEvent],
     ) -> dict[str, Any]:
         validation = self.config.get("validation", {})
+        baseline = self._acceptance_baseline()
         report = validate_experiment_and_material_quality(
             groups,
             key_events,
-            self._acceptance_baseline(),
+            baseline,
             boundary_match_iou=float(validation.get("boundary_match_iou", 0.50)),
             max_start_error_seconds=float(validation.get("max_start_error_seconds", 8.0)),
             max_end_error_seconds=float(validation.get("max_end_error_seconds", 8.0)),
             minimum_cross_view_event_rate=float(
                 validation.get("minimum_cross_view_event_rate", 0.25)
             ),
+            require_participant_only_annotations=bool(
+                validation.get("require_participant_only_annotations", False)
+            ),
         )
+        report["baseline_selection"] = dict(
+            self._acceptance_baseline_selection
+        )
+        key_event_ground_truth, ground_truth_selection = (
+            load_dataset_scoped_json(
+                validation.get("key_event_ground_truth"),
+                self._current_experiment_id,
+                repository_root=Path(__file__).resolve().parents[2],
+                artifact_label="关键事件真值",
+            )
+        )
+        recall_report = evaluate_key_event_recall(
+            key_events, key_event_ground_truth
+        )
+        recall_report["ground_truth_selection"] = ground_truth_selection
+        recall_gate = {
+            "evaluated": bool(recall_report.get("evaluated")),
+            "passed": None,
+            "temporal_iou_threshold": float(
+                validation.get("key_event_recall_iou", 0.50)
+            ),
+            "minimum_precision": float(
+                validation.get("minimum_key_event_precision", 0.80)
+            ),
+            "minimum_recall": float(
+                validation.get("minimum_key_event_recall", 0.80)
+            ),
+            "precision": None,
+            "recall": None,
+            "small_sample_warning": recall_report.get(
+                "small_sample_warning"
+            ),
+        }
+        if recall_gate["evaluated"]:
+            selected_threshold = next(
+                (
+                    item
+                    for item in recall_report.get("threshold_results") or []
+                    if abs(
+                        float(item["temporal_iou_threshold"])
+                        - recall_gate["temporal_iou_threshold"]
+                    )
+                    < 1e-9
+                ),
+                None,
+            )
+            if selected_threshold is None:
+                raise ValueError(
+                    "Configured key-event recall IoU is absent from evaluation thresholds"
+                )
+            recall_gate["precision"] = selected_threshold.get("precision")
+            recall_gate["recall"] = selected_threshold.get("recall")
+            recall_gate["passed"] = bool(
+                recall_gate["precision"] is not None
+                and recall_gate["recall"] is not None
+                and float(recall_gate["precision"])
+                >= recall_gate["minimum_precision"]
+                and float(recall_gate["recall"])
+                >= recall_gate["minimum_recall"]
+            )
+            report["passed"] = bool(report.get("passed")) and bool(
+                recall_gate["passed"]
+            )
+            if not recall_gate["passed"]:
+                report["status"] = "failed"
+        report["key_event_recall"] = recall_gate
+        step_consistency = validate_final_step_action_consistency(
+            groups, key_events
+        )
+        report["step_action_consistency"] = step_consistency
+        if not step_consistency["passed"]:
+            report["passed"] = False
+            report["status"] = "failed"
         write_json(layout.json_config / "quality_acceptance.json", report)
+        write_json(
+            layout.json_config / "key_material_recall_eval.json",
+            recall_report,
+        )
         return report
 
     def _run_boundary_precheck(
@@ -638,6 +1510,9 @@ class EvidencePipeline:
             max_end_error_seconds=float(validation.get("max_end_error_seconds", 8.0)),
             minimum_cross_view_event_rate=float(
                 validation.get("minimum_cross_view_event_rate", 0.25)
+            ),
+            require_participant_only_annotations=bool(
+                validation.get("require_participant_only_annotations", False)
             ),
         )
         boundary = full_report["experiment_boundaries"]
@@ -659,6 +1534,7 @@ class EvidencePipeline:
             "evaluated": evaluated,
             "passed": passed,
             "baseline": full_report["baseline"],
+            "baseline_selection": dict(self._acceptance_baseline_selection),
             "thresholds": full_report["thresholds"],
             "experiment_boundaries": boundary,
             "cross_view_cluster_completeness": {
@@ -711,17 +1587,31 @@ class EvidencePipeline:
         group_calls = []
         for group in groups:
             understanding = group.model_understanding or {}
-            if "usage" in understanding or understanding.get("status") in {"completed", "failed"}:
+            candidates = [
+                (
+                    "experiment_group_understanding_pre_curation",
+                    understanding.get("pre_curation_understanding") or {},
+                ),
+                ("experiment_group_understanding", understanding),
+            ]
+            for stage_name, candidate in candidates:
+                if not (
+                    "usage" in candidate
+                    or candidate.get("status") in {"completed", "failed"}
+                ):
+                    continue
                 group_calls.append(
                     {
-                        "stage": "experiment_group_understanding",
+                        "stage": stage_name,
                         "group_id": group.group_id,
-                        "model": understanding.get("model", self.config["mllm"]["model"]),
-                        "status": understanding.get("status"),
-                        "latency_seconds": understanding.get("latency_seconds"),
-                        "attempts": understanding.get("attempts"),
-                        "cache_reused": bool(understanding.get("cache_reused")),
-                        "usage": understanding.get("usage", {}),
+                        "model": candidate.get(
+                            "model", self.config["mllm"]["model"]
+                        ),
+                        "status": candidate.get("status"),
+                        "latency_seconds": candidate.get("latency_seconds"),
+                        "attempts": candidate.get("attempts"),
+                        "cache_reused": bool(candidate.get("cache_reused")),
+                        "usage": candidate.get("usage", {}),
                     }
                 )
 
@@ -1008,6 +1898,140 @@ class EvidencePipeline:
         initial_count = min(len(third), max(0, int(initial_third_person_views)))
         return first + third[:initial_count], third[initial_count:]
 
+    @staticmethod
+    def _progressive_candidate_recall_bounds(
+        candidate: ActionCandidate,
+    ) -> tuple[float, float, str]:
+        start = candidate.global_start_ms
+        end = candidate.global_end_ms
+        basis = "candidate_bounds"
+        for item in candidate.evidence:
+            if item.get("source") != "coarse_yolo_refinement":
+                continue
+            original_start = item.get("original_global_start_ms")
+            original_end = item.get("original_global_end_ms")
+            if original_start is None or original_end is None:
+                continue
+            start = min(start, float(original_start))
+            end = max(end, float(original_end))
+            basis = "original_motion_bounds_after_coarse_refinement"
+        return start, end, basis
+
+    @staticmethod
+    def _quarantine_nonformal_progressive_gaps(
+        target_status: list[dict[str, Any]],
+        groups: list[ExperimentGroup],
+    ) -> tuple[set[str], set[str]]:
+        """Separate formal experiment gaps from exhausted single-view noise.
+
+        Rejected first-person anchors are intentionally used while recall can
+        still discover a corroborating third-person view. Once every eligible
+        view is exhausted, a cluster containing only rejected anchors must not
+        invalidate an otherwise proven dual-view experiment. It remains in the
+        audit ledger and is never promoted into formal events or key materials.
+        """
+
+        unresolved: set[str] = set()
+        quarantined: set[str] = set()
+        for item in target_status:
+            if item.get("status") != "needs_third_person_supplement":
+                continue
+            overlapping_groups = [
+                group
+                for group in groups
+                if float(item["global_end_ms"]) >= group.global_start_ms
+                and float(item["global_start_ms"]) <= group.global_end_ms
+            ]
+            candidate_id = str(item["candidate_id"])
+            if not groups or not overlapping_groups:
+                if not groups:
+                    unresolved.add(candidate_id)
+                    continue
+                item["status"] = "quarantined_missing_dual_view"
+                item["quarantine_reason"] = (
+                    "all eligible third-person views exhausted and candidate does "
+                    "not overlap any formal dual-view experiment group"
+                )
+                quarantined.add(candidate_id)
+                continue
+            uncovered_clusters = [
+                cluster
+                for cluster in item.get("anchor_clusters") or []
+                if not cluster.get("covered")
+            ]
+            blocking_clusters = [
+                cluster
+                for cluster in uncovered_clusters
+                if any(
+                    float(cluster["global_end_ms"]) >= group.global_start_ms
+                    and float(cluster["global_start_ms"]) <= group.global_end_ms
+                    for group in overlapping_groups
+                )
+            ]
+            anchor_windows = {
+                str(anchor.get("event_id")): anchor
+                for anchor in item.get("first_person_anchor_windows") or []
+            }
+            weak_blocking_clusters = [
+                cluster
+                for cluster in blocking_clusters
+                if cluster.get("event_ids")
+                and all(
+                    event_id in anchor_windows
+                    and anchor_windows[event_id].get("accepted") is False
+                    for event_id in cluster["event_ids"]
+                )
+            ]
+            strong_blocking_clusters = [
+                cluster
+                for cluster in blocking_clusters
+                if cluster not in weak_blocking_clusters
+            ]
+            covered_clusters = [
+                cluster
+                for cluster in item.get("anchor_clusters") or []
+                if cluster.get("covered")
+                and any(
+                    float(cluster["global_end_ms"]) >= group.global_start_ms
+                    and float(cluster["global_start_ms"]) <= group.global_end_ms
+                    for group in overlapping_groups
+                )
+            ]
+            if strong_blocking_clusters or (blocking_clusters and not covered_clusters):
+                unresolved.add(candidate_id)
+                item["blocking_anchor_cluster_ids"] = [
+                    str(cluster["cluster_id"])
+                    for cluster in (
+                        strong_blocking_clusters
+                        if strong_blocking_clusters
+                        else blocking_clusters
+                    )
+                ]
+                continue
+            item["status"] = (
+                "cross_view_covered_with_quarantined_weak_anchor_context"
+                if weak_blocking_clusters
+                else "cross_view_covered_with_quarantined_single_view_context"
+            )
+            item["quarantine_reason"] = (
+                "formal experiment has accepted dual-view anchor clusters; remaining "
+                "exhausted first-person clusters contain only rejected audit candidates"
+                if weak_blocking_clusters
+                else "formal experiment clusters have dual-view support; remaining "
+                "single-view context lies outside formal boundaries"
+            )
+            item["quarantined_anchor_cluster_ids"] = [
+                str(cluster["cluster_id"])
+                for cluster in (
+                    weak_blocking_clusters
+                    if weak_blocking_clusters
+                    else uncovered_clusters
+                )
+            ]
+            if not weak_blocking_clusters:
+                quarantined.add(candidate_id)
+        return unresolved, quarantined
+
     def _progressive_target_status(
         self,
         boundary_candidates: list[ActionCandidate],
@@ -1031,11 +2055,18 @@ class EvidencePipeline:
         )
         results = []
         for candidate in boundary_candidates:
+            recall_start, recall_end, recall_basis = (
+                self._progressive_candidate_recall_bounds(candidate)
+            )
             # Decode padding maximizes recall and may overlap adjacent experiments.
             # It must not be reused as the evidence-association window, otherwise
             # one event can falsely mark two nearby candidates as cross-view covered.
-            window_start = candidate.global_start_ms - audit_margin_ms
-            window_end = candidate.global_end_ms + audit_margin_ms
+            # A coarse-refined candidate is the exception: its original motion
+            # bounds remain the recall envelope so a late atomic action cannot be
+            # suppressed by an early cross-view hit. Formal boundaries are still
+            # computed only from audited evidence, never from this recall envelope.
+            window_start = recall_start - audit_margin_ms
+            window_end = recall_end + audit_margin_ms
             relevant = []
             for event in events:
                 # The candidate/action ledger has already applied temporal and
@@ -1043,18 +2074,47 @@ class EvidencePipeline:
                 # only for missing cross-view support is exactly the condition
                 # that must trigger a supplemental view.
                 if event.action_type == ActionType.LIQUID_MOVEMENT:
-                    required = set(
-                        self.config["segmentation"].get(
-                            "liquid_start_anchor_required_objects", ["pipette"]
+                    complete_first_person_transfer = any(
+                        candidate.role == ViewRole.FIRST_PERSON
+                        and (
+                            candidate.candidate_id.startswith("TRANSFER-SEQ-")
+                            or any(
+                                evidence.get("transfer_sequence")
+                                == "source_transport_target"
+                                for evidence in candidate.evidence
+                            )
                         )
+                        for candidate in event.candidates
                     )
-                    reliable_start_signal = event.accepted and (
-                        not required or bool(set(event.objects) & required)
+                    # Tool/container proximity plus camera motion is only a
+                    # semantic-review candidate.  It must not become a hard
+                    # progressive boundary anchor before the model has proved
+                    # liquid motion.  Deterministic CV may route recall only
+                    # when it has a complete source/transport/target chain, or
+                    # when observability explicitly says the action can define
+                    # a boundary without semantic promotion.
+                    reliable_start_signal = complete_first_person_transfer or (
+                        event.accepted
+                        and bool(
+                            (event.observability or {}).get(
+                                "can_define_boundary_without_semantic_promotion"
+                            )
+                        )
                     )
                 else:
                     reliable_start_signal = is_experiment_start_anchor(
                         event, self.config
                     )
+                    observability = event.observability or {}
+                    requires_semantic_promotion = bool(
+                        observability.get("semantic_review_priority") == "required"
+                        and not observability.get(
+                            "can_define_boundary_without_semantic_promotion",
+                            False,
+                        )
+                    )
+                    if requires_semantic_promotion:
+                        reliable_start_signal = False
                 if not reliable_start_signal:
                     continue
                 midpoint = (event.global_start_ms + event.global_end_ms) / 2.0
@@ -1071,7 +2131,53 @@ class EvidencePipeline:
                     set(event.supporting_roles)
                 )
             ]
-            if cross_view:
+            cluster_gap_ms = (
+                float(
+                    self.config["performance"].get(
+                        "fine_progressive_anchor_cluster_gap_seconds", 10.0
+                    )
+                )
+                * 1000.0
+            )
+            clusters: list[list[EvidenceEvent]] = []
+            for event in sorted(first_signal, key=event_sort_key):
+                if (
+                    clusters
+                    and event.global_start_ms - max(
+                        item.global_end_ms for item in clusters[-1]
+                    )
+                    <= cluster_gap_ms
+                ):
+                    clusters[-1].append(event)
+                else:
+                    clusters.append([event])
+            cross_view_ids = {event.event_id for event in cross_view}
+            cluster_receipts = []
+            supplement_events: list[EvidenceEvent] = []
+            for index, cluster in enumerate(clusters, start=1):
+                cluster_cross_view = [
+                    event for event in cluster if event.event_id in cross_view_ids
+                ]
+                covered = bool(cluster_cross_view)
+                if not covered:
+                    supplement_events.extend(cluster)
+                cluster_receipts.append(
+                    {
+                        "cluster_id": f"{candidate.candidate_id}-ANCHOR-{index:03d}",
+                        "global_start_ms": min(
+                            event.global_start_ms for event in cluster
+                        ),
+                        "global_end_ms": max(
+                            event.global_end_ms for event in cluster
+                        ),
+                        "event_ids": [event.event_id for event in cluster],
+                        "cross_view_event_ids": [
+                            event.event_id for event in cluster_cross_view
+                        ],
+                        "covered": covered,
+                    }
+                )
+            if first_signal and not supplement_events:
                 status = "cross_view_covered"
             elif first_signal:
                 status = "needs_third_person_supplement"
@@ -1082,6 +2188,9 @@ class EvidencePipeline:
                     "candidate_id": candidate.candidate_id,
                     "global_start_ms": candidate.global_start_ms,
                     "global_end_ms": candidate.global_end_ms,
+                    "recall_window_basis": recall_basis,
+                    "recall_window_start_ms": recall_start,
+                    "recall_window_end_ms": recall_end,
                     "audit_window_start_ms": window_start,
                     "audit_window_end_ms": window_end,
                     "status": status,
@@ -1099,9 +2208,16 @@ class EvidencePipeline:
                             "action_type": event.action_type.value,
                             "objects": list(event.objects),
                         }
-                        for event in first_signal
+                        for event in supplement_events
                     ],
                     "cross_view_anchor_event_ids": [event.event_id for event in cross_view],
+                    "anchor_cluster_gap_ms": cluster_gap_ms,
+                    "anchor_clusters": cluster_receipts,
+                    "uncovered_anchor_cluster_ids": [
+                        item["cluster_id"]
+                        for item in cluster_receipts
+                        if not item["covered"]
+                    ],
                 }
             )
         return results
@@ -1336,6 +2452,41 @@ class EvidencePipeline:
             for covered_start, covered_end in coverage
         )
 
+    @classmethod
+    def _uncovered_time_windows(
+        cls,
+        requested: list[tuple[float, float]],
+        coverage: list[tuple[float, float]],
+        tolerance_ms: float = 100.0,
+    ) -> list[tuple[float, float]]:
+        """Return only intervals that can add new decoded evidence.
+
+        Group-local recall may still regard a global FP anchor as unresolved
+        when a TP recording ends just before that anchor.  Converting the
+        anchor back to the TP timeline clips it at the physical media end.  If
+        that clipped interval was already scanned, decoding it again cannot
+        improve recall and used to repeat until the maximum-round guard fired.
+        """
+
+        merged_requested = cls._merge_time_windows(requested)
+        merged_coverage = cls._merge_time_windows(coverage)
+        uncovered: list[tuple[float, float]] = []
+        for requested_start, requested_end in merged_requested:
+            cursor = requested_start
+            for covered_start, covered_end in merged_coverage:
+                if covered_end <= cursor + tolerance_ms:
+                    continue
+                if covered_start >= requested_end - tolerance_ms:
+                    break
+                if covered_start > cursor + tolerance_ms:
+                    uncovered.append((cursor, min(covered_start, requested_end)))
+                cursor = max(cursor, covered_end)
+                if cursor >= requested_end - tolerance_ms:
+                    break
+            if cursor < requested_end - tolerance_ms:
+                uncovered.append((cursor, requested_end))
+        return cls._merge_time_windows(uncovered)
+
     def _group_local_recall_plan(
         self,
         groups: list[ExperimentGroup],
@@ -1403,16 +2554,24 @@ class EvidencePipeline:
             overlapping_targets = [
                 candidate
                 for candidate in (boundary_candidates or [])
-                if candidate.global_end_ms >= group.global_start_ms
-                and candidate.global_start_ms <= group.global_end_ms
+                if self._progressive_candidate_recall_bounds(candidate)[1]
+                >= group.global_start_ms
+                and self._progressive_candidate_recall_bounds(candidate)[0]
+                <= group.global_end_ms
             ]
             target_start_ms = min(
                 [group.global_start_ms]
-                + [item.global_start_ms for item in overlapping_targets]
+                + [
+                    self._progressive_candidate_recall_bounds(item)[0]
+                    for item in overlapping_targets
+                ]
             )
             target_end_ms = max(
                 [group.global_end_ms]
-                + [item.global_end_ms for item in overlapping_targets]
+                + [
+                    self._progressive_candidate_recall_bounds(item)[1]
+                    for item in overlapping_targets
+                ]
             )
             fp_candidates = [
                 candidate
@@ -1439,38 +2598,70 @@ class EvidencePipeline:
                         return True
                 return False
 
-            unresolved = [
+            raw_unresolved = [
                 candidate
                 for candidate in fp_candidates
                 if not candidate_supported(candidate)
             ]
-            unresolved_clusters: list[list[ActionCandidate]] = []
-            for candidate in sorted(
-                unresolved,
-                key=lambda item: (item.global_start_ms, item.candidate_id),
-            ):
+            raw_unresolved_clusters: list[list[ActionCandidate]] = []
+            for candidate in sorted(raw_unresolved, key=candidate_sort_key):
                 if (
-                    unresolved_clusters
+                    raw_unresolved_clusters
                     and candidate.global_start_ms
                     <= max(
-                        item.global_end_ms for item in unresolved_clusters[-1]
+                        item.global_end_ms for item in raw_unresolved_clusters[-1]
                     )
                     + cluster_gap_ms
                 ):
-                    unresolved_clusters[-1].append(candidate)
+                    raw_unresolved_clusters[-1].append(candidate)
                 else:
-                    unresolved_clusters.append([candidate])
-            cluster_reports = [
-                {
+                    raw_unresolved_clusters.append([candidate])
+            raw_cluster_reports: list[dict[str, Any]] = []
+            cross_view_supported_candidate_ids: set[str] = set()
+            for index, cluster in enumerate(raw_unresolved_clusters, 1):
+                cluster_start = min(item.global_start_ms for item in cluster)
+                cluster_end = max(item.global_end_ms for item in cluster)
+                supporting_cross_view_events = [
+                    event
+                    for event in cross_view_events
+                    if event.global_end_ms >= cluster_start
+                    and event.global_start_ms <= cluster_end
+                ]
+                supported = bool(supporting_cross_view_events)
+                if supported:
+                    cross_view_supported_candidate_ids.update(
+                        item.candidate_id for item in cluster
+                    )
+                raw_cluster_reports.append({
                     "cluster_id": f"{group.group_id}-UNRESOLVED-{index:03d}",
-                    "global_start_ms": min(
-                        item.global_start_ms for item in cluster
-                    ),
-                    "global_end_ms": max(item.global_end_ms for item in cluster),
+                    "global_start_ms": cluster_start,
+                    "global_end_ms": cluster_end,
                     "candidate_ids": [item.candidate_id for item in cluster],
                     "candidate_count": len(cluster),
-                }
-                for index, cluster in enumerate(unresolved_clusters, 1)
+                    "cross_view_event_ids": [
+                        event.event_id for event in supporting_cross_view_events
+                    ],
+                    "cross_view_supported": supported,
+                    "status": (
+                        "satisfied_by_temporally_overlapping_cross_view_event"
+                        if supported
+                        else "unresolved"
+                    ),
+                })
+            unresolved = [
+                candidate
+                for candidate in raw_unresolved
+                if candidate.candidate_id not in cross_view_supported_candidate_ids
+            ]
+            cluster_reports = [
+                item
+                for item in raw_cluster_reports
+                if not item["cross_view_supported"]
+            ]
+            supported_cluster_reports = [
+                item
+                for item in raw_cluster_reports
+                if item["cross_view_supported"]
             ]
             base_report: dict[str, Any] = {
                 "group_id": group.group_id,
@@ -1483,6 +2674,7 @@ class EvidencePipeline:
                 ],
                 "first_person_candidate_count": len(fp_candidates),
                 "cross_view_event_count": len(cross_view_events),
+                "raw_candidate_level_unresolved_anchor_count": len(raw_unresolved),
                 "unresolved_anchor_count": len(unresolved),
                 "minimum_unresolved_anchors": minimum_unresolved,
                 "unresolved_candidate_ids": [
@@ -1490,6 +2682,10 @@ class EvidencePipeline:
                 ],
                 "unresolved_temporal_clusters": cluster_reports,
                 "unresolved_temporal_cluster_count": len(cluster_reports),
+                "cross_view_supported_temporal_clusters": supported_cluster_reports,
+                "cross_view_supported_temporal_cluster_count": len(
+                    supported_cluster_reports
+                ),
             }
             if len(unresolved) < minimum_unresolved:
                 base_report["status"] = "complete_below_recall_trigger"
@@ -1548,7 +2744,7 @@ class EvidencePipeline:
                     for item in cluster_reports
                     if missing_ids & set(item["candidate_ids"])
                 ]
-                local_windows = self._merge_time_windows(
+                requested_local_windows = self._merge_time_windows(
                     [
                         (
                             max(
@@ -1573,6 +2769,12 @@ class EvidencePipeline:
                         for candidate in missing
                     ]
                 )
+                local_windows = self._uncovered_time_windows(
+                    requested_local_windows,
+                    actual_windows.get(view_id, []),
+                )
+                if not local_windows:
+                    continue
                 local_support = sum(
                     view_id in event.supporting_views for event in group_events
                 )
@@ -1597,6 +2799,8 @@ class EvidencePipeline:
                     {
                         "view_id": view_id,
                         "windows": local_windows,
+                        "requested_windows": requested_local_windows,
+                        "incremental_window_policy": "uncovered_local_timeline_only",
                         "missing_anchor_count": len(missing),
                         "missing_candidate_ids": [
                             candidate.candidate_id for candidate in missing
@@ -2172,6 +3376,7 @@ class EvidencePipeline:
                 state_candidates, transforms, self.config
             )
             refine_liquid_events_with_context(state_events, detection_paths)
+            attach_action_observability(state_events)
             raw_state_segments = build_experiment_segments(
                 state_events,
                 manifest.views,
@@ -2189,7 +3394,11 @@ class EvidencePipeline:
                 self.config,
             )
             state_groups = build_experiment_groups(
-                state_segments, state_events, manifest.views, self.config
+                state_segments,
+                state_events,
+                manifest.views,
+                self.config,
+                coarse_windows=boundary_candidates,
             )
             state_key_events = select_key_events(
                 state_groups, state_segments, state_events, self.config
@@ -2363,22 +3572,33 @@ class EvidencePipeline:
             }
 
         scanned_views = [view for view in fine_views if view.view_id in scanned]
-        final_candidates = generate_candidates(scanned_views, detection_paths, self.config)
-        if local_recall_rounds:
-            final_target_events, _ = audit_candidates(
-                final_candidates, transforms, self.config
-            )
-            refine_liquid_events_with_context(
-                final_target_events, detection_paths
-            )
+        final_candidates = generate_candidates(
+            scanned_views, detection_paths, self.config
+        )
+        quarantined_ids: set[str] = set()
+        if local_recall_rounds or unresolved_ids:
+            (
+                final_candidates,
+                final_target_events,
+                _final_segments,
+                final_groups,
+                _final_key_events,
+            ) = formal_state()
+            # The early progressive pass intentionally runs before the full
+            # observability ledger exists.  The formal state above attaches
+            # that ledger, so always recompute here—even when the group-level
+            # completeness gate needed zero recall rounds.  Otherwise an
+            # indirect state cue can remain a stale hard anchor in the final
+            # quality gate after observability has correctly demoted it.
             target_status = self._progressive_target_status(
                 boundary_candidates, final_target_events
             )
-            unresolved_ids = {
-                item["candidate_id"]
-                for item in target_status
-                if item["status"] == "needs_third_person_supplement"
-            }
+            unresolved_ids, quarantined_ids = (
+                self._quarantine_nonformal_progressive_gaps(
+                    target_status,
+                    final_groups,
+                )
+            )
         all_coverage = self._window_coverage(fine_windows, infos)
         actual_coverage = self._window_coverage(actual_windows, infos)
         all_seconds = sum(float(item["selected_seconds"]) for item in all_coverage.values())
@@ -2389,15 +3609,23 @@ class EvidencePipeline:
         scout_frames = int(scout_summary.get("estimated_frames", 0))
         full_fine_frames = int(round(actual_seconds * sample_fps))
         all_view_frames = int(round(all_seconds * sample_fps))
+        # The post-recall unresolved/quarantine classification is authoritative.
+        # A recall plan may have exhausted windows that are subsequently proven
+        # to contain only rejected audit context; those are resolved, not failed.
+        local_recall_was_enabled = bool(local_recall_summary.get("enabled"))
         group_recall_quality_complete = bool(
-            not local_recall_summary.get("enabled")
-            or local_recall_summary.get("completeness_gate", {}).get(
-                "quality_complete", True
-            )
+            not local_recall_was_enabled or not unresolved_ids
         )
         progressive_quality_complete = bool(
             not unresolved_ids and group_recall_quality_complete
         )
+        if local_recall_was_enabled:
+            local_recall_summary["post_quarantine_quality_complete"] = (
+                group_recall_quality_complete
+            )
+            local_recall_summary["post_quarantine_unresolved_candidate_ids"] = sorted(
+                unresolved_ids
+            )
         report = {
             "schema_version": "visioncortex-progressive-fine-scan/3",
             "enabled": True,
@@ -2429,6 +3657,7 @@ class EvidencePipeline:
             "passes": pass_reports,
             "final_target_status": target_status,
             "unresolved_candidate_ids": sorted(unresolved_ids),
+            "quarantined_candidate_ids": sorted(quarantined_ids),
             "quality_complete": progressive_quality_complete,
             "stopping_reason": (
                 "all_demanded_windows_have_dual_role_anchor"
@@ -2557,6 +3786,30 @@ class EvidencePipeline:
         started_units = sum(
             item.get("event") == "source_unit_started" for item in source_activity
         )
+        decoder_receipts = [
+            item["decoder_receipt"]
+            for item in source_activity
+            if item.get("event") == "source_unit_completed"
+            and isinstance(item.get("decoder_receipt"), dict)
+        ]
+        frame_accounting = {
+            "session_count": len(decoder_receipts),
+            "exact_session_count": sum(
+                int(receipt.get("frame_accounting_mismatch") or 0) == 0
+                and not bool(receipt.get("frame_accounting_reconciled"))
+                for receipt in decoder_receipts
+            ),
+            "reconciled_terminal_eof_session_count": sum(
+                bool(receipt.get("frame_accounting_reconciled"))
+                and int(receipt.get("terminal_eof_shortfall_frames") or 0) > 0
+                for receipt in decoder_receipts
+            ),
+            "unreconciled_mismatch_session_count": sum(
+                int(receipt.get("frame_accounting_mismatch") or 0) != 0
+                and not bool(receipt.get("frame_accounting_reconciled"))
+                for receipt in decoder_receipts
+            ),
+        }
         scheduler_reports = []
         for path in sorted(work_dir.rglob(f"scheduler_{phase}.json")):
             report = json.loads(path.read_text(encoding="utf-8"))
@@ -2656,6 +3909,7 @@ class EvidencePipeline:
                 "role_reports": role_reports,
                 "scheduler": scheduler,
                 "progressive_cross_view": progressive_report,
+                "frame_accounting": frame_accounting,
                 "bottleneck_diagnosis": bottleneck_diagnosis,
                 "source_activity": sorted(
                     source_activity, key=lambda item: float(item.get("timestamp", 0.0))
@@ -2670,6 +3924,13 @@ class EvidencePipeline:
         self._stage_metrics = []
         self._startup_metrics = {}
         self._preprocessing_completed_seconds = None
+        self._current_experiment_id = manifest.experiment_id
+        self._acceptance_baseline_selection = {
+            "configured": False,
+            "applied": False,
+            "reason": "not_evaluated",
+            "current_experiment_id": manifest.experiment_id,
+        }
         self._input_view_count = len(manifest.views)
         self._input_mode = (
             "segmented_virtual_timeline"
@@ -3061,6 +4322,10 @@ class EvidencePipeline:
             raw_motion_candidates = generate_motion_burst_candidates(
                 motion_probe_views, motion_paths, probe_config
             )
+            raw_motion_candidates = sorted(
+                raw_motion_candidates,
+                key=candidate_sort_key,
+            )
             motion_candidates = fuse_motion_probe_candidates(
                 raw_motion_candidates, probe_config
             )
@@ -3070,6 +4335,7 @@ class EvidencePipeline:
                 motion_candidates = generate_motion_safety_candidates(
                     motion_probe_views, motion_paths, probe_config
                 )
+            motion_candidates = sorted(motion_candidates, key=candidate_sort_key)
             if not motion_candidates:
                 raise RuntimeError("输入视频没有产生任何可读运动帧，无法建立实验候选窗口")
             motion_windows = self._fine_windows(
@@ -3191,10 +4457,15 @@ class EvidencePipeline:
                 coarse_candidates = generate_coarse_activity_candidates(
                     fallback_views, fallback_paths, coarse_config
                 )
+            coarse_candidates = sorted(coarse_candidates, key=candidate_sort_key)
             boundary_candidates, boundary_report = refine_motion_candidates_with_coarse(
                 motion_candidates,
                 coarse_candidates,
                 self.config,
+            )
+            boundary_candidates = sorted(
+                boundary_candidates,
+                key=candidate_sort_key,
             )
             boundary_report["coarse_scan_view_ids"] = [
                 view.view_id for view in coarse_scan_views
@@ -3269,14 +4540,34 @@ class EvidencePipeline:
             fine_windows = {view.view_id: fine_windows[view.view_id] for view in fine_views}
             fine_coverage = self._window_coverage(fine_windows, infos)
             fine_sample_fps = float(self.config["performance"]["detection_fps"])
+            exhaustive_negative_audit = bool(
+                self.config["performance"].get(
+                    "exhaustive_negative_audit_full_timeline", False
+                )
+            )
+            exhaustive_full_timeline = bool(
+                exhaustive_negative_audit
+                or self.config["performance"].get(
+                    "exhaustive_full_timeline_scan", False
+                )
+            )
             fine_window_report = {
                 "schema_version": "visioncortex-fine-scan-windows/2",
                 "strategy": (
-                    "progressive_cross_view" if progressive_enabled else "all_selected_views"
+                    "exhaustive_all_view_full_timeline_negative_audit"
+                    if exhaustive_negative_audit
+                    else "exhaustive_all_view_full_timeline"
+                    if exhaustive_full_timeline
+                    else "progressive_cross_view"
+                    if progressive_enabled
+                    else "all_selected_views"
                 ),
                 "eligible_view_ids": [view.view_id for view in fine_views],
                 "selected_view_ids": [view.view_id for view in fine_views],
                 "sample_fps": fine_sample_fps,
+                "full_timeline_reason": self.config["performance"].get(
+                    "exhaustive_full_timeline_reason"
+                ),
                 "image_size": int(self.config["performance"]["image_size"]),
                 "padding_seconds": float(
                     self.config["performance"]["fine_window_padding_seconds"]
@@ -3418,10 +4709,65 @@ class EvidencePipeline:
             self._complete_stage(layout, "candidate_fine", fine_artifacts)
 
             self._status(layout, "candidate_audit", 0.68, "持续性、动作密度与跨视角一致性审计")
+            candidates = sorted(candidates, key=candidate_sort_key)
             events, rejected = audit_candidates(candidates, transforms, self.config)
             rejected.extend(refine_liquid_events_with_context(events, detection_paths))
+            state_machine_ledger = attach_continuous_action_states(events, self.config)
+            observability_receipts = attach_action_observability(events)
+            semantic_review_plan = build_semantic_review_plan(events, self.config)
+            observability_path = layout.json_config / "action_observability.json"
+            semantic_review_plan_path = (
+                layout.json_config / "semantic_review_plan.json"
+            )
+            state_machine_path = (
+                layout.json_config / "continuous_action_state_ledger.json"
+            )
+            write_json(state_machine_path, state_machine_ledger)
+            write_json(
+                observability_path,
+                {
+                    "schema_version": "visioncortex-action-observability-ledger/1",
+                    "event_count": len(events),
+                    "receipts": observability_receipts,
+                },
+            )
+            write_json(semantic_review_plan_path, semantic_review_plan)
+            raw_boundary_receipts: list[dict[str, Any]] = []
+            segmentation_boundary_candidates = (
+                [] if exhaustive_full_timeline else boundary_candidates
+            )
+            if exhaustive_full_timeline:
+                raw_boundary_receipts.append(
+                    decision_receipt(
+                        decision_type="full_timeline_segmentation_basis",
+                        rule_id="QF1-EXHAUSTIVE-FINE-EVIDENCE-TIMELINE",
+                        verdict="accepted",
+                        subject_ids=[manifest.experiment_id],
+                        reason_codes=[
+                            "sparse_motion_windows_not_used_for_event_routing"
+                        ],
+                        facts={
+                            "full_timeline_fine_scan": True,
+                            "fine_view_ids": sorted(scanned_fine_ids),
+                            "sparse_motion_candidate_ids": [
+                                candidate.candidate_id
+                                for candidate in boundary_candidates
+                            ],
+                            "segmentation_boundary_candidate_ids": [],
+                            "formal_membership_changed": False,
+                        },
+                        evidence_refs=[
+                            candidate.candidate_id
+                            for candidate in boundary_candidates
+                        ],
+                    )
+                )
             raw_segments = build_experiment_segments(
-                events, manifest.views, self.config, coarse_windows=boundary_candidates
+                events,
+                manifest.views,
+                self.config,
+                coarse_windows=segmentation_boundary_candidates,
+                decision_receipts=raw_boundary_receipts,
             )
             normalization_receipts: list[dict[str, Any]] = []
             normalized_segments = normalize_experiment_segments(
@@ -3435,7 +4781,7 @@ class EvidencePipeline:
                 normalized_segments,
                 events,
                 manifest.views,
-                boundary_candidates,
+                segmentation_boundary_candidates,
                 self.config,
             )
             continuity_receipts: list[dict[str, Any]] = []
@@ -3445,6 +4791,7 @@ class EvidencePipeline:
                 manifest.views,
                 self.config,
                 decision_receipts=continuity_receipts,
+                coarse_windows=segmentation_boundary_candidates,
             )
             selection_decisions: list[dict[str, Any]] = []
             precheck_key_events = select_key_events(
@@ -3470,6 +4817,13 @@ class EvidencePipeline:
                 {
                     "events": [event.model_dump(mode="json") for event in events],
                     "rejected": rejected,
+                    "boundary_candidates": [
+                        candidate.model_dump(mode="json")
+                        for candidate in sorted(
+                            boundary_candidates,
+                            key=candidate_sort_key,
+                        )
+                    ],
                     "raw_segments": [
                         segment.model_dump(mode="json") for segment in raw_segments
                     ],
@@ -3478,16 +4832,21 @@ class EvidencePipeline:
                         for segment in normalized_segments
                     ],
                     "segments": [segment.model_dump(mode="json") for segment in segments],
+                    "raw_boundary_decision_receipts": raw_boundary_receipts,
                     "formal_segment_receipts": formal_segment_receipts,
                     "normalization_decision_receipts": normalization_receipts,
                     "continuity_decision_receipts": continuity_receipts,
                     "quality_decision_receipts": [
+                        *raw_boundary_receipts,
                         *normalization_receipts,
                         *formal_segment_receipts,
                         *continuity_receipts,
                         *selection_decisions,
                     ],
                     "experiment_groups": [group.model_dump(mode="json") for group in groups],
+                    "action_observability": observability_receipts,
+                    "continuous_action_state": state_machine_ledger,
+                    "semantic_review_plan": semantic_review_plan,
                 },
             )
             boundary_precheck = self._run_boundary_precheck(
@@ -3500,6 +4859,9 @@ class EvidencePipeline:
                     layout.json_config / "audit_layer.json",
                     layout.json_config / "boundary_precheck.json",
                     key_selection_path,
+                    observability_path,
+                    state_machine_path,
+                    semantic_review_plan_path,
                 ],
             )
 
@@ -3551,6 +4913,9 @@ class EvidencePipeline:
                         "selected_key_event_count": len(key_events),
                         "minimum_selected_key_events": minimum_key_events,
                         "key_event_gate_passed": key_event_gate_passed,
+                        "baseline_selection": dict(
+                            self._acceptance_baseline_selection
+                        ),
                         "experiment_groups": [
                             group.model_dump(mode="json") for group in groups
                         ],
@@ -3596,6 +4961,77 @@ class EvidencePipeline:
             analyze_experiment_groups(
                 layout, groups, segments, events, manifest.views, infos, transforms, self.config
             )
+            group_semantic_recall = _recover_group_storyboard_state_events(
+                groups,
+                segments,
+                events,
+                self.config,
+            )
+            group_semantic_recall_path = (
+                layout.json_config / "group_storyboard_semantic_recall.json"
+            )
+            write_json(
+                group_semantic_recall_path,
+                {
+                    "schema_version": (
+                        "visioncortex-group-storyboard-semantic-recall/1"
+                    ),
+                    "policy": (
+                        "explicit dual-view closure transition; recall-only; "
+                        "independent event-level Ark proof required"
+                    ),
+                    "recovered_event_count": len(group_semantic_recall),
+                    "events": group_semantic_recall,
+                },
+            )
+            if group_semantic_recall:
+                # The first ledgers are written before Ark so preprocessing can
+                # fail closed without any model call.  A real group review may
+                # add only provisional recall events; refresh the shadow
+                # ledgers so their semantic origin and incomplete state remain
+                # explicit until event-level adjudication.
+                observability_receipts = attach_action_observability(events)
+                state_machine_ledger = attach_continuous_action_states(
+                    events, self.config
+                )
+                semantic_review_plan = build_semantic_review_plan(
+                    events, self.config
+                )
+                write_json(observability_path, {
+                    "schema_version": "visioncortex-action-observability-ledger/1",
+                    "event_count": len(events),
+                    "receipts": observability_receipts,
+                })
+                write_json(state_machine_path, state_machine_ledger)
+                write_json(semantic_review_plan_path, semantic_review_plan)
+                audit_layer_path = layout.json_config / "audit_layer.json"
+                audit_layer = json.loads(
+                    audit_layer_path.read_text(encoding="utf-8-sig")
+                )
+                audit_layer.update(
+                    {
+                        "events": [
+                            event.model_dump(mode="json") for event in events
+                        ],
+                        "segments": [
+                            segment.model_dump(mode="json")
+                            for segment in segments
+                        ],
+                        "experiment_groups": [
+                            group.model_dump(mode="json") for group in groups
+                        ],
+                        "action_observability": observability_receipts,
+                        "continuous_action_state": state_machine_ledger,
+                        "semantic_review_plan": semantic_review_plan,
+                        "group_storyboard_semantic_recall": {
+                            "path": group_semantic_recall_path.relative_to(
+                                layout.root
+                            ).as_posix(),
+                            "events": group_semantic_recall,
+                        },
+                    }
+                )
+                write_json(audit_layer_path, audit_layer)
             group_understanding_path = layout.json_config / "experiment_group_understanding.json"
             write_json(
                 group_understanding_path,
@@ -3628,6 +5064,7 @@ class EvidencePipeline:
                 "experiment_understanding",
                 [
                     group_understanding_path,
+                    group_semantic_recall_path,
                     key_selection_path,
                     layout.json_config / "run_metrics_live.json",
                 ],
@@ -3654,7 +5091,7 @@ class EvidencePipeline:
                 ],
             )
 
-            self._status(layout, "key_materials", 0.84, "按实验组提取去重后的五类对齐关键素材")
+            self._status(layout, "key_materials", 0.84, "按实验组提取去重后的分层动作关键素材")
             materialize_key_materials(
                 layout,
                 key_events,
@@ -3678,6 +5115,155 @@ class EvidencePipeline:
 
             self._status(layout, "mllm", 0.92, "调用豆包理解去重后的关键动作当前/下一步骤")
             analyze_key_materials(layout, key_events, self.config)
+            reviewed_key_events = list(key_events)
+            key_events, semantic_curation = curate_semantically_reviewed_key_materials(
+                layout,
+                reviewed_key_events,
+                groups,
+                self.config,
+                publisher=self._publisher,
+            )
+            segment_semantic_repairs = _synchronize_segments_with_final_key_events(
+                segments, groups, key_events
+            )
+            # Semantic adjudication can replace both the action class and its
+            # participant set.  The first materialization intentionally
+            # precedes Ark so the model has review media, but those CV-era
+            # participants must not decide the final frame or final boxes.
+            # Re-select from the immutable fine ledger using only the curated
+            # participants.  Derived clips are content-addressed and reused;
+            # this does not repeat the full scan or copy source media.
+            pre_final_key_timestamps = {
+                event.event_id: float(event.key_global_ms) for event in key_events
+            }
+            materialize_key_materials(
+                layout,
+                key_events,
+                groups,
+                manifest.views,
+                infos,
+                transforms,
+                detection_paths,
+                self.config,
+                publisher=self._publisher,
+                archive_id=manifest.experiment_id,
+            )
+            state_receipt_repairs = _synchronize_final_event_state_receipts(
+                key_events, self.config
+            )
+            final_annotation = _rerender_curated_participant_annotations(
+                layout, key_events, groups, self.config
+            )
+            semantic_curation["final_annotation"] = {
+                key: value
+                for key, value in final_annotation.items()
+                if key != "records"
+            }
+            semantic_curation["post_semantic_participant_key_frame_selection"] = {
+                "schema_version": (
+                    "visioncortex-post-semantic-participant-key-frame-selection/1"
+                ),
+                "policy": (
+                    "immutable-fine-ledger; final semantic participants only"
+                ),
+                "full_scan_repeated": False,
+                "source_copy_bytes": 0,
+                "events": [
+                    {
+                        "event_id": event.event_id,
+                        "previous_key_global_ms": pre_final_key_timestamps[
+                            event.event_id
+                        ],
+                        "selected_key_global_ms": float(event.key_global_ms),
+                        "selection_offset_ms": round(
+                            float(event.key_global_ms)
+                            - pre_final_key_timestamps[event.event_id],
+                            3,
+                        ),
+                    }
+                    for event in key_events
+                ],
+                "state_receipt_repairs": state_receipt_repairs,
+                "segment_semantic_repairs": segment_semantic_repairs,
+            }
+            write_json(
+                layout.json_config / "semantic_key_material_curation.json",
+                semantic_curation,
+            )
+            # The initial group pass is needed to name/materialize bounded
+            # experiments. Refine its steps after event-level adjudication so
+            # rejected CV hypotheses (for example, a nearby balance mistaken
+            # for a panel operation) cannot leak into the final step narrative.
+            group_identity = {
+                group.group_id: {
+                    "experiment_name": group.experiment_name,
+                    "experiment_name_en": group.experiment_name_en,
+                    "archive_folder": group.archive_folder,
+                    "continuity_type": group.continuity_type,
+                    "continuity_reason": group.continuity_reason,
+                    "pre_curation_understanding": dict(
+                        group.model_understanding or {}
+                    ),
+                }
+                for group in groups
+            }
+            analyze_experiment_groups(
+                layout,
+                groups,
+                segments,
+                key_events,
+                manifest.views,
+                infos,
+                transforms,
+                self.config,
+                final_adjudicated=True,
+            )
+            for group in groups:
+                identity = group_identity[group.group_id]
+                refined_experiment_name = group.experiment_name
+                refined_experiment_name_en = group.experiment_name_en
+                refined = dict(group.model_understanding or {})
+                refined.update(
+                    {
+                        "pre_curation_understanding": identity[
+                            "pre_curation_understanding"
+                        ],
+                        "refinement_pass": "post_event_semantic_curation",
+                        "refinement_key_event_count": len(group.key_event_ids),
+                        "pre_curation_experiment_name": identity[
+                            "experiment_name"
+                        ],
+                        "pre_curation_experiment_name_en": identity[
+                            "experiment_name_en"
+                        ],
+                        "archive_folder_frozen_after_initial_materialization": (
+                            True
+                        ),
+                        "display_identity_refined_after_event_curation": True,
+                    }
+                )
+                group.model_understanding = refined
+                group.experiment_name = refined_experiment_name
+                group.experiment_name_en = refined_experiment_name_en
+                group.archive_folder = identity["archive_folder"]
+                group.continuity_type = identity["continuity_type"]
+                group.continuity_reason = str(identity["continuity_reason"])
+            normalize_final_group_action_language(groups, key_events)
+            for group in groups:
+                for segment in segments:
+                    if segment.group_id != group.group_id:
+                        continue
+                    segment.experiment_name = group.experiment_name
+                    segment.experiment_name_en = group.experiment_name_en
+                    segment.semantic_understanding = group.model_understanding
+            write_json(
+                group_understanding_path,
+                {
+                    "schema_version": "visioncortex-experiment-group-understanding/2",
+                    "refinement_pass": "post_event_semantic_curation",
+                    "groups": [group.model_dump(mode="json") for group in groups],
+                },
+            )
             key_understanding_path = (
                 layout.json_config / "key_material_model_understanding.json"
             )
@@ -3686,8 +5272,13 @@ class EvidencePipeline:
                 {
                     "schema_version": "visioncortex-key-material-understanding/1",
                     "events": [
-                        event.model_dump(mode="json") for event in key_events
+                        event.model_dump(mode="json") for event in reviewed_key_events
                     ],
+                    "semantic_curation": {
+                        key: value
+                        for key, value in semantic_curation.items()
+                        if key != "records"
+                    },
                 },
             )
             write_json(
@@ -3706,11 +5297,18 @@ class EvidencePipeline:
                 "mllm",
                 [
                     layout.key_materials,
+                    group_understanding_path,
                     key_understanding_path,
+                    layout.json_config / "semantic_key_material_curation.json",
+                    layout.json_config / "final_key_material_annotation.json",
                     layout.json_config / "run_metrics_live.json",
                 ],
             )
-            physical_changes = build_physical_change_log(events)
+            # Only semantically curated formal key events may create durable
+            # physical-change claims. Accepted CV recall candidates that never
+            # reached a formal dual-view segment must not leak into the report
+            # as liquid_transferred/container_state_changed facts.
+            physical_changes = build_physical_change_log(key_events)
 
             self._status(layout, "package", 0.96, "归档证据包并执行 evidence-package-eval")
             summary = finalize_archive(
@@ -3765,6 +5363,7 @@ class EvidencePipeline:
             # Refresh the report with the closed daily_report stage duration and
             # final provider-reported token ledger. This remains deterministic.
             generate_daily_report_archive(layout, summary, run_metrics, self.config)
+            write_archive_contract_manifest(layout.root)
             self._complete_stage(
                 layout,
                 "completed",
@@ -3813,6 +5412,19 @@ class EvidencePipeline:
         transforms,
         padding_seconds: float | None = None,
     ) -> dict[str, list[tuple[float, float]]]:
+        if bool(
+            self.config["performance"].get(
+                "exhaustive_negative_audit_full_timeline", False
+            )
+            or self.config["performance"].get(
+                "exhaustive_full_timeline_scan", False
+            )
+        ):
+            return {
+                view_id: [(0.0, float(info.duration_ms))]
+                for view_id, info in infos.items()
+                if float(info.duration_ms) > 0.0
+            }
         padding = float(
             self.config["performance"]["fine_window_padding_seconds"]
             if padding_seconds is None
@@ -3973,7 +5585,7 @@ def create_dry_run(output: Path, config: dict[str, Any]) -> Path:
         )
         path.parent.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(path), image)
-        event.key_frames[view.view_id] = path.relative_to(layout.root).as_posix()
+        event.key_frames[view.view_id] = archive_relative_posix(path, layout.root)
         event.key_clips[view.view_id] = f"dry-run://{view.view_id}/key-clip"
     write_key_material_category_index(layout, [group], [event])
     physical = [
@@ -4022,6 +5634,27 @@ def create_dry_run(output: Path, config: dict[str, Any]) -> Path:
             ],
         },
     )
+    write_json(
+        layout.json_config / "audit_layer.json",
+        {
+            "events": [event.model_dump(mode="json")],
+            "rejected": [],
+            "raw_segments": [segment.model_dump(mode="json")],
+            "normalized_segments": [segment.model_dump(mode="json")],
+            "segments": [segment.model_dump(mode="json")],
+            "formal_segment_receipts": [],
+            "experiment_groups": [group.model_dump(mode="json")],
+            "dry_run": True,
+        },
+    )
+    dry_quality = validate_experiment_and_material_quality(
+        [group],
+        [event],
+        None,
+        minimum_cross_view_event_rate=0.0,
+    )
+    dry_quality["dry_run"] = True
+    write_json(layout.json_config / "quality_acceptance.json", dry_quality)
     dry_metrics = {
         "total_duration_seconds": 0.0,
         "preprocessing_sla": {"actual_seconds": 0.0, "target_seconds": 1200.0, "met": True},
@@ -4036,5 +5669,6 @@ def create_dry_run(output: Path, config: dict[str, Any]) -> Path:
     }
     write_json(layout.json_config / "run_metrics.json", dry_metrics)
     generate_daily_report_archive(layout, summary, dry_metrics, config)
+    write_archive_contract_manifest(layout.root)
     write_json(layout.root / "run_status.json", {"stage": "completed", "progress": 1.0, "dry_run": True})
     return layout.root

@@ -408,6 +408,36 @@ svg { display: block; width: 17px; height: 17px; fill: none; stroke: currentColo
 .collection-metrics span { border-radius: 7px; padding: 6px 7px; color: var(--text-3); background: #f4f7f7; font-size: 8px; }
 .collection-metrics b { color: var(--text); }
 .collection-issues { overflow-wrap: anywhere; color: var(--warning); font-size: 8px; }
+.batch-ledger-summary { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 8px; padding: 0 20px 16px; }
+.batch-ledger-summary span { display: grid; gap: 3px; border: 1px solid var(--border); border-radius: 10px; padding: 10px; color: var(--text-3); background: #f9fbfb; font-size: 8px; }
+.batch-ledger-summary b { color: var(--brand); font-size: 18px; }
+.batch-ledger { display: grid; border-top: 1px solid var(--border); }
+.batch-ledger-row { display: grid; grid-template-columns: 110px minmax(180px,.85fr) minmax(240px,1.2fr) auto; align-items: center; gap: 12px; border-bottom: 1px solid var(--border); padding: 12px 20px; }
+.batch-ledger-row:last-child { border-bottom: 0; }
+.batch-ledger-row div { min-width: 0; }
+.batch-ledger-row strong, .batch-ledger-row small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.batch-ledger-row strong { font-size: 10px; }
+.batch-ledger-row small, .batch-ledger-row p { color: var(--text-3); font-size: 8px; }
+.batch-ledger-row p { margin: 0; }
+.batch-ledger-row a { display: inline-flex; align-items: center; gap: 5px; color: var(--brand); font-size: 8px; font-weight: 760; text-decoration: none; }
+.batch-ledger-row a svg { width: 12px; height: 12px; }
+.annotation-toolbar { display: grid; grid-template-columns: 150px 150px minmax(220px,1fr) auto; align-items: end; gap: 10px; padding: 0 20px 18px; }
+.annotation-toolbar label, .annotation-form label { display: grid; gap: 5px; color: var(--text-3); font-size: 8px; font-weight: 700; }
+.annotation-toolbar input, .annotation-toolbar select, .annotation-form input, .annotation-form select, .annotation-form textarea { min-width: 0; border: 1px solid var(--border-strong); border-radius: 9px; padding: 9px 10px; color: var(--text); background: #fff; font: inherit; outline: 0; }
+.annotation-toolbar input:focus, .annotation-toolbar select:focus, .annotation-form input:focus, .annotation-form select:focus, .annotation-form textarea:focus { border-color: var(--brand-2); box-shadow: 0 0 0 3px rgba(45,124,130,.1); }
+.annotation-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; padding: 0 20px 20px; }
+.annotation-card { display: grid; grid-template-columns: minmax(170px,.75fr) minmax(250px,1.25fr); overflow: hidden; border: 1px solid var(--border); border-radius: 14px; background: #fff; }
+.annotation-image { position: relative; min-height: 280px; background: #0b1e22; }
+.annotation-image img { width: 100%; height: 100%; object-fit: contain; }
+.annotation-image > b { position: absolute; top: 10px; left: 10px; border-radius: 99px; padding: 5px 8px; color: #fff; background: rgba(184,77,69,.9); font-size: 8px; }
+.annotation-copy { display: grid; align-content: start; gap: 10px; padding: 15px; }
+.annotation-copy header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.annotation-copy h3 { margin: 3px 0 0; font-size: 16px; }
+.annotation-copy small, .annotation-copy > p { color: var(--text-3); font-size: 8px; }
+.annotation-copy > p { margin: 0; }
+.annotation-form { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 9px; }
+.annotation-form .annotation-notes { grid-column: 1 / -1; }
+.annotation-form button { grid-column: 1 / -1; justify-self: start; }
 .selected-collection-note { display: grid; grid-template-columns: 32px minmax(0,1fr) auto; align-items: center; gap: 11px; border: 1px solid rgba(32,138,104,.24); border-radius: 12px; padding: 12px; background: rgba(32,138,104,.045); }
 .selected-collection-note > span { display: grid; width: 32px; height: 32px; place-items: center; border-radius: 9px; color: #fff; background: var(--success); }
 .selected-collection-note svg { width: 16px; height: 16px; }
@@ -425,6 +455,9 @@ svg { display: block; width: 17px; height: 17px; fill: none; stroke: currentColo
   .material-grid { grid-template-columns: 1fr; }
   .daily-action-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
   .collection-card-list { grid-template-columns: 1fr; }
+  .annotation-grid { grid-template-columns: 1fr; }
+  .batch-ledger-row { grid-template-columns: 100px minmax(0,1fr); }
+  .batch-ledger-row p, .batch-ledger-row a { grid-column: 2; }
   .workflow-strip { grid-template-columns: repeat(2,minmax(0,1fr)); }
   .live-metric-grid { grid-template-columns: repeat(3,minmax(0,1fr)); }
   .journey-step::after { display: none; }
@@ -473,6 +506,11 @@ svg { display: block; width: 17px; height: 17px; fill: none; stroke: currentColo
   .material-group > header > .badge { grid-column: 2; justify-self: start; }
   .material-badges { justify-content: flex-start; }
   .collection-summary { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .batch-ledger-summary, .annotation-toolbar { grid-template-columns: 1fr; }
+  .annotation-card { grid-template-columns: 1fr; }
+  .annotation-image { min-height: 220px; }
+  .annotation-form { grid-template-columns: 1fr; }
+  .annotation-form .annotation-notes, .annotation-form button { grid-column: 1; }
   .selected-collection-note { grid-template-columns: 32px minmax(0,1fr); }
   .selected-collection-note .secondary-button { grid-column: 2; justify-self: start; }
 }

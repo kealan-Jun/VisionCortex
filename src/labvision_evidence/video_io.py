@@ -44,6 +44,22 @@ def _run(command: list[str], timeout: float | None = None) -> subprocess.Complet
     return subprocess.run(command, capture_output=True, check=False, timeout=timeout)
 
 
+@lru_cache(maxsize=1)
+def _ffmpeg_passthrough_arguments() -> tuple[str, str]:
+    """Use the modern output sync option when supported by the host FFmpeg."""
+
+    try:
+        result = _run(["ffmpeg", "-hide_banner", "-h", "full"], timeout=10)
+    except (OSError, subprocess.SubprocessError, TypeError):
+        # The legacy spelling remains the safest fallback when capability
+        # probing is unavailable (including isolated/mock decoder sessions).
+        return "-vsync", "0"
+    help_text = (result.stdout + result.stderr).decode("utf-8", errors="replace")
+    if "-fps_mode" in help_text:
+        return "-fps_mode", "passthrough"
+    return "-vsync", "0"
+
+
 def probe_video(path: Path) -> VideoInfo:
     if not path.is_file():
         raise FileNotFoundError(f"视频不存在: {path}")
@@ -77,6 +93,7 @@ def probe_video(path: Path) -> VideoInfo:
                 height=int(stream["height"]),
                 frame_count=frame_count,
                 size_bytes=path.stat().st_size,
+                media_timing_source="ffprobe",
             )
     capture = cv2.VideoCapture(str(path))
     if not capture.isOpened():
@@ -94,6 +111,7 @@ def probe_video(path: Path) -> VideoInfo:
         height=height,
         frame_count=frames,
         size_bytes=path.stat().st_size,
+        media_timing_source="opencv_probe",
     )
 
 
@@ -121,11 +139,6 @@ def _build_segmented_view_info(view: ViewInput, probed: Sequence[VideoInfo]) -> 
                 f"segment resolution changed in {view.view_id}: "
                 f"{media.path} is {media.width}x{media.height}, expected {first.width}x{first.height}"
             )
-        if abs(media.fps - first.fps) > 0.05:
-            raise ValueError(
-                f"segment frame rate changed in {view.view_id}: "
-                f"{media.path} is {media.fps}, expected {first.fps}"
-            )
         segment_infos.append(
             VideoSegmentInfo(
                 path=media.path,
@@ -139,20 +152,65 @@ def _build_segmented_view_info(view: ViewInput, probed: Sequence[VideoInfo]) -> 
                 height=media.height,
                 frame_count=media.frame_count,
                 size_bytes=media.size_bytes,
+                source_clock_duration_ms=media.source_clock_duration_ms,
+                media_timing_source=media.media_timing_source,
             )
         )
         virtual_start_ms += media.duration_ms
         frame_start += media.frame_count
+    aggregate_fps = (
+        frame_start * 1000.0 / virtual_start_ms
+        if virtual_start_ms > 0.0 and frame_start > 0
+        else first.fps
+    )
     return VideoInfo(
         path=first.path,
         duration_ms=virtual_start_ms,
-        fps=first.fps,
+        # A segmented recorder may legitimately change its nominal/container
+        # rate between physical files.  The per-segment rates above remain the
+        # source of truth for frame/time conversion; this aggregate is only a
+        # useful view-level density for legacy callers and summaries.
+        fps=aggregate_fps,
         width=first.width,
         height=first.height,
         frame_count=frame_start,
         size_bytes=sum(item.size_bytes for item in segment_infos),
         segments=segment_infos,
     )
+
+
+def virtual_frame_index_at(info: VideoInfo, local_ms: float) -> int:
+    """Map virtual timeline time to a stable cumulative source frame index."""
+
+    if not info.segments:
+        frame_index = int(round(max(0.0, local_ms) * info.fps / 1000.0))
+        return min(max(0, frame_index), max(0, info.frame_count - 1))
+    selected = next(
+        (
+            segment
+            for segment in info.segments
+            if segment.virtual_start_ms <= local_ms < segment.virtual_end_ms
+        ),
+        None,
+    )
+    if selected is None:
+        selected = next(
+            (
+                segment
+                for segment in reversed(info.segments)
+                if segment.virtual_start_ms <= local_ms
+            ),
+            info.segments[0],
+        )
+    source_ms = min(
+        max(0.0, local_ms - selected.virtual_start_ms),
+        selected.duration_ms,
+    )
+    source_frame_index = int(round(source_ms * selected.fps / 1000.0))
+    source_frame_index = min(
+        max(0, source_frame_index), max(0, selected.frame_count - 1)
+    )
+    return selected.frame_start_index + source_frame_index
 
 
 def probe_view(view: ViewInput) -> VideoInfo:
@@ -244,7 +302,18 @@ def _clock_metadata_video_info(video: Path, clock: Path | None) -> VideoInfo | N
         nearest_integer_fps = round(fps)
         if nearest_integer_fps > 0 and abs(fps - nearest_integer_fps) <= 0.2:
             fps = float(nearest_integer_fps)
-        duration_seconds = frame_count / fps
+        # Recorder clocks describe the actual captured timeline more reliably
+        # than ``frame_count / nominal_fps``.  Some valid MP4s report a nominal
+        # 30 FPS in the CSV while their real cadence is about 30.02 FPS.  Using
+        # 30 exactly widened a five-minute segment by ~0.2 s and made the
+        # persistent 10 FPS decoder demand frames beyond the clean media EOF.
+        # Include one measured terminal-frame interval so the half-open media
+        # duration covers the last recorded frame without inventing tail time.
+        if elapsed_seconds > 0.0 and frame_count > 1:
+            measured_interval_seconds = elapsed_seconds / (frame_count - 1)
+            duration_seconds = elapsed_seconds + measured_interval_seconds
+        else:
+            duration_seconds = frame_count / fps
         return VideoInfo(
             path=video,
             duration_ms=duration_seconds * 1000.0,
@@ -253,9 +322,57 @@ def _clock_metadata_video_info(video: Path, clock: Path | None) -> VideoInfo | N
             height=int(number(first, "height")),
             frame_count=frame_count,
             size_bytes=video.stat().st_size,
+            media_timing_source="recorder_clock_endpoints",
         )
     except (OSError, UnicodeError, csv.Error, ValueError, IndexError):
         return None
+
+
+def _recorder_ledger_media_info(
+    video: Path,
+    clock_info: VideoInfo,
+) -> VideoInfo | None:
+    """Derive constant-rate MP4 timing from small recorder sidecars.
+
+    The frames CSV is the exact ledger of frames written to the MP4, while the
+    sibling meta JSON records the mux/playback rate.  Their quotient is the
+    physical container duration and avoids expensive random NAS reads.  The
+    clock endpoint delta is retained separately because it can include capture
+    pauses and therefore is not a valid FFmpeg ``-t`` value.
+    """
+
+    suffix = "_rgb.mp4"
+    if not video.name.endswith(suffix):
+        return None
+    meta_path = video.with_name(video.name[: -len(suffix)] + "_meta.json")
+    try:
+        payload = json.loads(meta_path.read_text(encoding="utf-8"))
+        record_fps = float(payload["rgb_record_fps"])
+        width = int(payload["rgb_width"])
+        height = int(payload["rgb_height"])
+    except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return None
+    if not (0.1 <= record_fps <= 240.0):
+        return None
+    if (width, height) != (clock_info.width, clock_info.height):
+        raise ValueError(
+            "recorder sidecar resolution disagrees with frame ledger: "
+            f"{video} meta={width}x{height} "
+            f"ledger={clock_info.width}x{clock_info.height}"
+        )
+    if clock_info.frame_count <= 0:
+        return None
+    return VideoInfo(
+        path=video,
+        duration_ms=clock_info.frame_count * 1000.0 / record_fps,
+        fps=record_fps,
+        width=width,
+        height=height,
+        frame_count=clock_info.frame_count,
+        size_bytes=clock_info.size_bytes,
+        source_clock_duration_ms=clock_info.duration_ms,
+        media_timing_source="recorder_frame_ledger_plus_meta_record_fps",
+    )
 
 
 def probe_views(
@@ -277,11 +394,39 @@ def probe_views(
             jobs.append((view.view_id, 0, view.video, view.timestamps_csv))
 
     def inspect(video: Path, clock: Path | None) -> VideoInfo:
-        if prefer_clock_metadata:
-            from_clock = _clock_metadata_video_info(video, clock)
-            if from_clock is not None:
-                return from_clock
-        return probe_video(video)
+        # A recorder CSV is a wall-clock ledger, not a container timeline.  It
+        # may span an acquisition pause while the MP4 remains a contiguous
+        # constant-frame-rate stream.  Using the CSV endpoint delta as ``-t``
+        # made a strict decoder demand frames that physically do not exist
+        # (for example 4050 expected versus 3328 decoded).  Always probe the
+        # media container for decode duration/rate, and retain the clock
+        # coverage only as auditable metadata used by alignment to position
+        # physical segments on the virtual timeline.
+        if not prefer_clock_metadata:
+            return probe_video(video)
+        from_clock = _clock_metadata_video_info(video, clock)
+        if from_clock is not None:
+            from_ledger = _recorder_ledger_media_info(video, from_clock)
+            if from_ledger is not None:
+                return from_ledger
+        media = probe_video(video)
+        if from_clock is None:
+            return media
+        if (from_clock.width, from_clock.height) != (media.width, media.height):
+            raise ValueError(
+                "recorder clock metadata resolution disagrees with physical media: "
+                f"{video} clock={from_clock.width}x{from_clock.height} "
+                f"media={media.width}x{media.height}"
+            )
+        # ffprobe may estimate the count from duration when the container omits
+        # nb_frames.  Prefer the recorder's exact written-frame ledger only
+        # when it agrees with the physical stream to a strict rounding margin.
+        frame_delta = abs(from_clock.frame_count - media.frame_count)
+        if frame_delta <= 1:
+            media.frame_count = from_clock.frame_count
+        return media.model_copy(
+            update={"source_clock_duration_ms": from_clock.duration_ms}
+        )
 
     probed: dict[str, dict[int, VideoInfo]] = {view.view_id: {} for view in views}
     with ThreadPoolExecutor(
@@ -347,7 +492,7 @@ def _ffmpeg_frame_iterator(
     width, height = _scaled_size(info.width, info.height, max_width)
     use_cuda_scale = bool(cuda_scale and hwaccel == "cuda")
     filter_graph = (
-        f"fps={sample_fps:.8f},scale_cuda={width}:{height}:format=nv12,"
+        f"fps={sample_fps:.8f},scale_cuda={width}:{height}:interp_algo=bicubic,"
         "hwdownload,format=nv12,format=bgr24"
         if use_cuda_scale
         else f"fps={sample_fps:.8f},scale={width}:{height}"
@@ -420,8 +565,17 @@ def _merge_windows(
 def plan_physical_segment_decode_sessions(
     info: VideoInfo,
     windows: Sequence[tuple[float, float]],
+    max_gap_ms: float | None = None,
 ) -> list[PhysicalSegmentDecodeSession]:
-    """Group target windows by recorder MP4 without widening the inference set."""
+    """Group target windows by recorder MP4 without widening the inference set.
+
+    A single physical segment may contain small recalled windows separated by
+    several minutes.  One FFmpeg process for their full first-to-last envelope
+    avoids reopens but still decodes every compressed frame in the gap.  When a
+    positive gap limit is supplied, split only those distant windows into
+    independent seek-bounded sessions; emitted sampling timestamps are
+    unchanged.
+    """
 
     if not info.segments:
         raise ValueError("physical segment sessions require segmented video info")
@@ -440,25 +594,39 @@ def plan_physical_segment_decode_sessions(
         )
         if not virtual_windows:
             continue
-        source_windows = tuple(
-            (
-                start - segment.virtual_start_ms,
-                end - segment.virtual_start_ms,
+        session_windows: list[list[tuple[float, float]]] = []
+        for window in virtual_windows:
+            if (
+                session_windows
+                and max_gap_ms is not None
+                and max_gap_ms >= 0.0
+                and window[0] - session_windows[-1][-1][1] > max_gap_ms
+            ):
+                session_windows.append([window])
+            elif session_windows:
+                session_windows[-1].append(window)
+            else:
+                session_windows.append([window])
+        for grouped_windows in session_windows:
+            source_windows = tuple(
+                (
+                    start - segment.virtual_start_ms,
+                    end - segment.virtual_start_ms,
+                )
+                for start, end in grouped_windows
             )
-            for start, end in virtual_windows
-        )
-        sessions.append(
-            PhysicalSegmentDecodeSession(
-                segment_index=segment_index,
-                path=segment.path,
-                virtual_start_ms=virtual_windows[0][0],
-                virtual_end_ms=virtual_windows[-1][1],
-                source_start_ms=source_windows[0][0],
-                source_end_ms=source_windows[-1][1],
-                target_virtual_windows=tuple(virtual_windows),
-                target_source_windows=source_windows,
+            sessions.append(
+                PhysicalSegmentDecodeSession(
+                    segment_index=segment_index,
+                    path=segment.path,
+                    virtual_start_ms=grouped_windows[0][0],
+                    virtual_end_ms=grouped_windows[-1][1],
+                    source_start_ms=source_windows[0][0],
+                    source_end_ms=source_windows[-1][1],
+                    target_virtual_windows=tuple(grouped_windows),
+                    target_source_windows=source_windows,
+                )
             )
-        )
     return sessions
 
 
@@ -498,8 +666,7 @@ def _selected_session_frame_indices(
     # Mirror that positive-duration rounding exactly.  Using ceil here made a
     # fractional endpoint (205.633333 s at 10 FPS) demand 2057 ledger rows even
     # though FFmpeg correctly emits 2056, aborting an otherwise valid session.
-    scaled_frame_count = max(0.0, (end_ms - start_ms) / period_ms)
-    frame_count = int(math.floor(scaled_frame_count + 0.5))
+    frame_count = _post_fps_frame_count(start_ms, end_ms, sample_fps)
     return [
         index
         for index in range(frame_count)
@@ -508,6 +675,44 @@ def _selected_session_frame_indices(
             for window_start, window_end in windows
         )
     ]
+
+
+def _post_fps_frame_count(start_ms: float, end_ms: float, sample_fps: float) -> int:
+    period_ms = 1000.0 / max(sample_fps, 1e-9)
+    scaled_frame_count = max(0.0, (end_ms - start_ms) / period_ms)
+    return int(math.floor(scaled_frame_count + 0.5))
+
+
+def _is_reconcilable_terminal_eof_shortfall(
+    expected_indices: Sequence[int],
+    emitted: int,
+    post_fps_frame_count: int,
+    maximum_shortfall_frames: int = 1,
+) -> bool:
+    """Accept a tightly bounded terminal FPS-filter shortfall at clean EOF.
+
+    FFmpeg can omit its final rounded sample when the physical stream ends
+    before the container-reported duration. Multi-frame reconciliation is
+    allowed only for a full contiguous post-FPS session, where the filter
+    regularises every prior timestamp and an early decoder failure would make
+    FFmpeg fail instead of silently skipping an interior selection. The caller
+    supplies the explicit audited upper bound; production uses one second.
+    """
+
+    shortfall = len(expected_indices) - emitted
+    if shortfall <= 0 or shortfall > max(1, int(maximum_shortfall_frames)):
+        return False
+    full_contiguous_session = (
+        len(expected_indices) == post_fps_frame_count
+        and bool(expected_indices)
+        and expected_indices[0] == 0
+        and expected_indices[-1] == post_fps_frame_count - 1
+    )
+    return bool(
+        emitted > 0
+        and (shortfall == 1 or full_contiguous_session)
+        and expected_indices[-1] == post_fps_frame_count - 1
+    )
 
 
 def _consecutive_index_ranges(indices: Sequence[int]) -> list[tuple[int, int]]:
@@ -571,6 +776,7 @@ def _ffmpeg_multi_window_iterator(
     expected_indices = _selected_session_frame_indices(
         start_ms, end_ms, normalized, sample_fps
     )
+    post_fps_frame_count = _post_fps_frame_count(start_ms, end_ms, sample_fps)
     expected_timestamps = _selected_session_timestamps(
         start_ms, end_ms, normalized, sample_fps
     )
@@ -584,6 +790,10 @@ def _ffmpeg_multi_window_iterator(
                 "expected_frame_count": len(expected_timestamps),
                 "actual_frame_count": 0,
                 "frame_accounting_mismatch": None,
+                "frame_accounting_reconciled": False,
+                "terminal_eof_shortfall_frames": 0,
+                "terminal_eof_fill_frames": 0,
+                "terminal_eof_fill_duration_ms": 0.0,
             }
         )
     if not expected_indices:
@@ -609,7 +819,7 @@ def _ffmpeg_multi_window_iterator(
         f"select={select_expression}"
     )
     filter_graph += (
-        f",scale_cuda={width}:{height}:format=nv12,hwdownload,format=nv12,format=bgr24"
+        f",scale_cuda={width}:{height}:interp_algo=bicubic,hwdownload,format=nv12,format=bgr24"
         if use_cuda_scale
         else f",scale={width}:{height}"
     )
@@ -631,8 +841,9 @@ def _ffmpeg_multi_window_iterator(
         filter_graph,
         "-an",
         "-sn",
-        "-fps_mode",
-        "passthrough",
+    ]
+    command += list(_ffmpeg_passthrough_arguments())
+    command += [
         "-f",
         "rawvideo",
         "-pix_fmt",
@@ -643,6 +854,7 @@ def _ffmpeg_multi_window_iterator(
     assert process.stdout is not None
     frame_bytes = width * height * 3
     emitted = 0
+    last_frame: np.ndarray | None = None
     try:
         while True:
             raw = process.stdout.read(frame_bytes)
@@ -660,6 +872,7 @@ def _ffmpeg_multi_window_iterator(
                 raise RuntimeError("persistent FFmpeg session emitted unexpected extra frames")
             local_ms = expected_timestamps[emitted]
             frame = np.frombuffer(raw, dtype=np.uint8).reshape((height, width, 3)).copy()
+            last_frame = frame
             yield int(round(local_ms * info.fps / 1000.0)), local_ms, frame
             emitted += 1
     finally:
@@ -671,13 +884,51 @@ def _ffmpeg_multi_window_iterator(
     if process.returncode not in (0, None):
         message = stderr.decode("utf-8", errors="replace")[-1500:]
         raise RuntimeError(f"FFmpeg 持久分片抽帧失败: {message}")
+    decoded_frame_count = emitted
     if receipt is not None:
         receipt.update(
             {
                 "actual_frame_count": emitted,
+                "decoded_frame_count": decoded_frame_count,
                 "frame_accounting_mismatch": emitted - len(expected_timestamps),
             }
         )
+    if emitted != len(expected_timestamps) and _is_reconcilable_terminal_eof_shortfall(
+        expected_indices,
+        emitted,
+        post_fps_frame_count,
+        maximum_shortfall_frames=max(1, int(math.ceil(sample_fps * 1.0))),
+    ):
+        shortfall = len(expected_timestamps) - emitted
+        assert last_frame is not None
+        for fill_index in range(emitted, len(expected_timestamps)):
+            local_ms = expected_timestamps[fill_index]
+            yield (
+                int(round(local_ms * info.fps / 1000.0)),
+                local_ms,
+                last_frame.copy(),
+            )
+        emitted = len(expected_timestamps)
+        if receipt is not None:
+            receipt.update(
+                {
+                    "actual_frame_count": emitted,
+                    "pre_fill_frame_accounting_mismatch": (
+                        decoded_frame_count - len(expected_timestamps)
+                    ),
+                    "frame_accounting_mismatch": 0,
+                    "frame_accounting_reconciled": True,
+                    "terminal_eof_shortfall_frames": shortfall,
+                    "terminal_eof_fill_frames": shortfall,
+                    "terminal_eof_fill_duration_ms": (
+                        shortfall * 1000.0 / max(sample_fps, 1e-9)
+                    ),
+                    "frame_accounting_reconciliation_reason": (
+                        "bounded_terminal_clean_eof_last_frame_hold"
+                    ),
+                }
+            )
+        return
     if emitted != len(expected_timestamps):
         raise RuntimeError(
             "persistent FFmpeg session frame accounting mismatch: "
@@ -1311,7 +1562,12 @@ def _encoder_usable(name: str) -> bool:
             "-f",
             "lavfi",
             "-i",
-            "color=c=black:s=64x64:d=0.04",
+            # Current NVENC drivers reject 64x64 as smaller than the encoder's
+            # supported frame dimensions even though every VisionCortex media
+            # path is at least 640x360.  Probe a representative production
+            # shape so capability detection tests the real encoder path rather
+            # than manufacturing a false software fallback.
+            "color=c=black:s=640x360:d=0.04",
             "-frames:v",
             "1",
             "-c:v",
@@ -1355,6 +1611,16 @@ def video_encoder_preflight(preferred_encoder: str = "h264_nvenc") -> dict[str, 
     }
 
 
+def _encoder_quality_arguments(encoder: str) -> list[str]:
+    if encoder == "h264_nvenc":
+        # A real dual-view 24 s audit on this workstation showed CQ 26 was
+        # 28% faster for two concurrent role clips while exceeding the current
+        # libx264/veryfast reference by +1.1/+1.8 dB PSNR. Explicit CQ also
+        # prevents FFmpeg's implicit bitrate defaults from varying by shape.
+        return ["-preset", "p4", "-rc", "vbr", "-cq", "26", "-b:v", "0"]
+    return ["-preset", "veryfast", "-crf", "23"]
+
+
 def extract_clip(
     source: Path,
     destination: Path,
@@ -1364,37 +1630,37 @@ def extract_clip(
 ) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     encoder = select_video_encoder(preferred_encoder)
-    command = [
-        "ffmpeg",
-        "-y",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-ss",
-        f"{max(0.0, start_ms) / 1000.0:.6f}",
-        "-i",
-        str(source),
-        "-t",
-        f"{max(1.0, duration_ms) / 1000.0:.6f}",
-        "-map",
-        "0:v:0",
-        "-map",
-        "0:a?",
-        "-c:v",
-        encoder,
-        "-preset",
-        "p4" if encoder == "h264_nvenc" else "veryfast",
-        "-c:a",
-        "aac",
-        "-movflags",
-        "+faststart",
-        str(destination),
-    ]
+    def build_command(selected_encoder: str) -> list[str]:
+        return [
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-ss",
+            f"{max(0.0, start_ms) / 1000.0:.6f}",
+            "-i",
+            str(source),
+            "-t",
+            f"{max(1.0, duration_ms) / 1000.0:.6f}",
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a?",
+            "-c:v",
+            selected_encoder,
+            *_encoder_quality_arguments(selected_encoder),
+            "-c:a",
+            "aac",
+            "-movflags",
+            "+faststart",
+            str(destination),
+        ]
+
+    command = build_command(encoder)
     result = _run(command)
     if result.returncode != 0 and encoder != "libx264":
-        command[command.index(encoder)] = "libx264"
-        preset_index = command.index("p4")
-        command[preset_index] = "veryfast"
+        command = build_command("libx264")
         result = _run(command)
     if result.returncode != 0:
         raise RuntimeError(result.stderr.decode("utf-8", errors="replace")[-2000:])
@@ -1467,41 +1733,83 @@ def create_grid_video(
     clips: Sequence[tuple[str, Path]],
     destination: Path,
     preferred_encoder: str = "h264_nvenc",
+    timeout_seconds: float | None = None,
 ) -> None:
     if not clips:
         return
+    if timeout_seconds is None:
+        durations = [
+            probe_video(clip).duration_ms / 1000.0
+            for _, clip in clips
+            if clip.is_file()
+        ]
+        # Encoding may legitimately be slower than real time on the software
+        # fallback, but it must never be allowed to run without a deadline.
+        timeout_seconds = max(30.0, 30.0 + 4.0 * max(durations, default=22.5))
+    if not math.isfinite(timeout_seconds) or timeout_seconds <= 0.0:
+        raise ValueError("grid video timeout must be finite and positive")
     destination.parent.mkdir(parents=True, exist_ok=True)
     columns = 3 if len(clips) >= 3 else len(clips)
-    rows = math.ceil(len(clips) / columns)
     command = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
     for _, clip in clips:
         command += ["-i", str(clip)]
     filters: list[str] = []
     for index in range(len(clips)):
-        filters.append(f"[{index}:v]scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2[v{index}]")
+        filters.append(
+            f"[{index}:v]fps=30,scale=640:360:force_original_aspect_ratio=decrease,"
+            f"pad=640:360:(ow-iw)/2:(oh-ih)/2,setsar=1,settb=AVTB,"
+            f"setpts=N/(30*TB)[v{index}]"
+        )
     layout = "|".join(f"{(i % columns) * 640}_{(i // columns) * 360}" for i in range(len(clips)))
     inputs = "".join(f"[v{i}]" for i in range(len(clips)))
-    filters.append(f"{inputs}xstack=inputs={len(clips)}:layout={layout}:fill=black[vout]")
+    filters.append(
+        f"{inputs}xstack=inputs={len(clips)}:layout={layout}:"
+        "shortest=1:fill=black[vout]"
+    )
     encoder = select_video_encoder(preferred_encoder)
-    command += [
+    command_prefix = command + [
         "-filter_complex",
         ";".join(filters),
         "-map",
         "[vout]",
         "-an",
         "-c:v",
-        encoder,
-        "-preset",
-        "p4" if encoder == "h264_nvenc" else "veryfast",
+    ]
+
+    def build_command(selected_encoder: str) -> list[str]:
+        return [
+            *command_prefix,
+            selected_encoder,
+            *_encoder_quality_arguments(selected_encoder),
+        "-r",
+        "30",
+        "-vsync",
+        "cfr",
         "-movflags",
         "+faststart",
         str(destination),
-    ]
-    result = _run(command)
+        ]
+
+    command = build_command(encoder)
+    started = time.monotonic()
+
+    def run_bounded() -> subprocess.CompletedProcess[bytes]:
+        remaining = timeout_seconds - (time.monotonic() - started)
+        if remaining <= 0.0:
+            raise RuntimeError(
+                f"grid video encoding timed out after {timeout_seconds:.3f} seconds"
+            )
+        try:
+            return _run(command, timeout=remaining)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"grid video encoding timed out after {timeout_seconds:.3f} seconds"
+            ) from exc
+
+    result = run_bounded()
     if result.returncode != 0 and encoder != "libx264":
-        command[command.index(encoder)] = "libx264"
-        command[command.index("p4")] = "veryfast"
-        result = _run(command)
+        command = build_command("libx264")
+        result = run_bounded()
     if result.returncode != 0:
         raise RuntimeError(result.stderr.decode("utf-8", errors="replace")[-2000:])
 

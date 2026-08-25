@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import hashlib
 import json
 import math
 import queue
@@ -8,7 +9,7 @@ import threading
 import time
 from collections.abc import Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -16,6 +17,7 @@ import cv2
 import numpy as np
 
 from .schemas import AlignmentTransform, BoxEvidence, FrameEvidence, VideoInfo, ViewInput, ViewRole
+from .temporal_segmentation import validate_temporal_segmentation_runtime
 from .video_io import (
     PhysicalSegmentDecodeSession,
     iter_physical_segment_session_frames,
@@ -241,7 +243,18 @@ def _producer(
         and perf.get("fine_persistent_segment_decode", False)
     )
     if persistent_segment_decode:
-        persistent_sessions = plan_physical_segment_decode_sessions(info, spans)
+        configured_session_gap_seconds = perf.get(
+            "fine_persistent_session_max_gap_seconds"
+        )
+        persistent_sessions = plan_physical_segment_decode_sessions(
+            info,
+            spans,
+            max_gap_ms=(
+                float(configured_session_gap_seconds) * 1000.0
+                if configured_session_gap_seconds is not None
+                else None
+            ),
+        )
         work_units = [
             (session.virtual_start_ms, session.virtual_end_ms)
             for session in persistent_sessions
@@ -715,6 +728,82 @@ def _engine_build_batch(path: Path) -> int | None:
     return _metadata_batch(metadata)
 
 
+def _validate_pinned_asset(
+    name: str, path: Path, expected_sha256: str
+) -> dict[str, Any]:
+    if not path.is_file():
+        raise FileNotFoundError(f"{name} model artifact is missing: {path}")
+    expected = str(expected_sha256 or "").strip().lower()
+    if not expected:
+        raise RuntimeError(f"{name} model SHA-256 is not configured")
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    actual = digest.hexdigest()
+    if actual != expected:
+        raise RuntimeError(
+            f"{name} model hash mismatch: expected={expected} actual={actual}"
+        )
+    return {
+        "path": str(path),
+        "bytes": path.stat().st_size,
+        "sha256": actual,
+    }
+
+
+def _validate_open_vocabulary_runtime(config: dict[str, Any]) -> dict[str, Any]:
+    settings = (config.get("models") or {}).get("open_vocabulary_key_frame") or {}
+    if not settings.get("enabled"):
+        return {"enabled": False, "status": "disabled"}
+    from ultralytics import YOLOWorld  # noqa: F401
+
+    model = _validate_pinned_asset(
+        "YOLO-World",
+        Path(str(settings.get("model_path") or "")).resolve(),
+        str(settings.get("model_sha256") or ""),
+    )
+    clip = _validate_pinned_asset(
+        "CLIP",
+        Path(str(settings.get("clip_model_path") or "")).resolve(),
+        str(settings.get("clip_model_sha256") or ""),
+    )
+    fallback = dict(settings.get("grounding_dino_fallback") or {})
+    grounding_dino: dict[str, Any] = {"enabled": False, "status": "disabled"}
+    if fallback.get("enabled"):
+        from transformers import (  # noqa: F401
+            AutoModelForZeroShotObjectDetection,
+            AutoProcessor,
+        )
+
+        root = Path(str(fallback.get("model_path") or "")).resolve()
+        for required_name in ("config.json", "preprocessor_config.json"):
+            required = root / required_name
+            if not required.is_file():
+                raise FileNotFoundError(
+                    f"Grounding DINO runtime file is missing: {required}"
+                )
+        grounding_dino = {
+            "enabled": True,
+            "status": "validated",
+            "model_revision": str(fallback.get("model_revision") or ""),
+            **_validate_pinned_asset(
+                "Grounding DINO",
+                root / "model.safetensors",
+                str(fallback.get("model_sha256") or ""),
+            ),
+        }
+    return {
+        "enabled": True,
+        "status": "validated",
+        "scope": "accepted_final_key_frames_and_bounded_temporal_rescue",
+        "full_timeline_inference": False,
+        "yolo_world": model,
+        "clip": clip,
+        "grounding_dino": grounding_dino,
+    }
+
+
 def validate_models(config: dict[str, Any]) -> dict[str, Any]:
     from ultralytics import YOLO
 
@@ -771,6 +860,12 @@ def validate_models(config: dict[str, Any]) -> dict[str, Any]:
                 "backend": "TensorRT" if selected.suffix.lower() == ".engine" else "PyTorch",
                 "path": str(selected),
             }
+    runtime["temporal_participant_segmentation"] = (
+        validate_temporal_segmentation_runtime(config)
+    )
+    runtime["open_vocabulary_key_frame"] = _validate_open_vocabulary_runtime(
+        config
+    )
     report["runtime"] = runtime
     report["consistent"] = True
     return report

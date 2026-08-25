@@ -29,6 +29,7 @@ const ICONS = {
   arrow: '<svg viewBox="0 0 24 24"><path d="M5 12h14M14 7l5 5-5 5"/></svg>',
   image: '<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m21 15-5-5L5 20"/></svg>',
   token: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M8 9h8M8 13h8M10 17h4"/></svg>',
+  target: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>',
 };
 
 const state = {
@@ -45,6 +46,7 @@ const state = {
   search: "",
   refreshingTasks: false,
   materialFilters: { archive: null, group: null, action: "all", support: "all", query: "" },
+  annotationFilters: { priority: "", reviewStatus: "", query: "" },
 };
 
 const main = document.querySelector("#main-content");
@@ -89,6 +91,7 @@ const ACTION_LABELS = {
   object_movement: "物体移动",
   liquid_movement: "液体移动",
   liquid_transfer: "液体移动",
+  pipette_transfer_operation: "移液器源到目标操作（液体不可见）",
   container_state_change: "容器状态变化",
   device_panel_operation: "设备面板操作",
   panel_operation: "设备面板操作",
@@ -149,14 +152,14 @@ const GUIDED_PIPELINE = [
     id: "materials", number: "05", title: "关键素材与细粒度步骤理解",
     stages: ["key_materials", "mllm"], completedBy: ["mllm"],
     folder: "Key-Materials",
-    doing: "提取五类物理动作的对齐关键帧、片段和时间戳，并理解当前与下一步骤。",
+    doing: "提取分层动作证据的对齐关键帧、片段和时间戳，并理解当前与下一步骤。",
     outcome: "跨视角关键帧/关键片段，以及统一事件 JSON 和模型证据。",
   },
   {
     id: "evidence", number: "06", title: "证据包与质量验收",
     stages: ["package"], completedBy: ["package"],
     folder: "JSON-Config-Files",
-    doing: "汇总边界、跨视角支持、五类覆盖、耗时与 Token，并执行自动验收。",
+    doing: "汇总边界、跨视角支持、动作覆盖、耗时与 Token，并执行自动验收。",
     outcome: "可审计的证据包、质量结论、阶段耗时与输入/输出 Token 账本。",
   },
   {
@@ -200,6 +203,7 @@ function pageContext(route) {
   if (route === "materials") return ["实验产出", "关键素材库"];
   if (route === "reports") return ["实验产出", "实验室日报"];
   if (route === "operations") return ["系统管理", "服务健康"];
+  if (route === "annotations") return ["系统管理", "YOLO 标注"];
   if (route === "archive") return ["实验结果", "实验详情"];
   if (route === "experiments") return ["核心工作", "实验记录"];
   return ["核心工作", "总览"];
@@ -335,7 +339,7 @@ function renderExperiments(target = "experiments") {
     : target === "reports"
       ? "从已验收证据自动生成日报 JSON、Markdown、HTML 与 PDF，并保留人工复核状态。"
       : `按实验查看原视频留存、分析结果与${archiveLabel()}位置。`;
-  main.innerHTML = `<div class="page"><header class="page-hero compact"><div><p class="eyebrow">EVIDENCE ARCHIVE</p><h1>${title}</h1><p>${copy}</p></div><div class="hero-actions"><a class="primary-button" href="#/new">${icon("plus")}新建实验</a></div></header><section class="panel"><header class="panel-heading"><div><h2>${archiveLabel()}目录</h2><p>${state.health?.nas_archive_root ? `根目录：${esc(state.health.nas_archive_root)}` : "正在读取归档根目录"}</p></div></header>${archiveRows(filteredArchives(), target === "materials" ? "materials" : target === "reports" ? "reports" : "experiments")}</section></div>`;
+  main.innerHTML = `<div class="page"><header class="page-hero compact"><div><p class="eyebrow">EVIDENCE ARCHIVE</p><h1>${title}</h1><p>${copy}</p></div><div class="hero-actions"><a class="primary-button" href="#/new">${icon("plus")}新建实验</a></div></header>${target === "experiments" ? `<section class="panel"><header class="panel-heading"><div><h2>采集批次处理账本</h2><p>直接说明每个 index 批次是否已处理并留存；不会让用户逐个筛选约 90 个分片。</p></div><a class="secondary-button" href="#/new">选择批次</a></header>${collectionLedger()}</section>` : ""}<section class="panel"><header class="panel-heading"><div><h2>${archiveLabel()}目录</h2><p>${state.health?.nas_archive_root ? `根目录：${esc(state.health.nas_archive_root)}` : "正在读取归档根目录"}</p></div></header>${archiveRows(filteredArchives(), target === "materials" ? "materials" : target === "reports" ? "reports" : "experiments")}</section></div>`;
 }
 
 function createSource(video = null, csv = null, index = state.sources.length) {
@@ -442,6 +446,29 @@ function collectionCards() {
       <button class="${selected ? "secondary-button" : "primary-button"}" type="button" data-select-collection="${esc(collection.collection_id)}" ${collection.ready_to_analyze && !["queued", "processing"].includes(collection.processing?.state) ? "" : "disabled"}>${selected ? `${icon("check")}已选择` : collection.processing?.state === "archived" ? `${icon("check")}重新分析为新归档` : `${icon("server")}选择此批次`}</button>
     </article>`;
   }).join("")}</div>`;
+}
+
+function collectionLedger() {
+  if (!state.collections.length) return `<div class="empty-state compact"><strong>索引中还没有采集批次</strong><p>系统只增量读取 index 字段表，不递归扫描 NAS 视频目录。</p></div>`;
+  const counts = { archived: 0, processing: 0, failed: 0, pending: 0 };
+  state.collections.forEach((collection) => {
+    const status = collectionStatusCopy(collection);
+    if (status.tone === "archived") counts.archived += 1;
+    else if (status.tone === "processing") counts.processing += 1;
+    else if (status.tone === "failed") counts.failed += 1;
+    else counts.pending += 1;
+  });
+  const rows = state.collections.slice(0, 12).map((collection) => {
+    const status = collectionStatusCopy(collection);
+    const archiveName = collection.processing?.archive_name;
+    const link = status.tone === "archived" && archiveName
+      ? `<a href="#/archive/${encodeURIComponent(archiveName)}/experiments">打开正式归档 ${icon("arrow")}</a>`
+      : status.tone === "processing" || status.tone === "failed"
+        ? `<a href="#/tasks">查看任务证据 ${icon("arrow")}</a>`
+        : `<a href="#/new">选择并分析 ${icon("arrow")}</a>`;
+    return `<article class="batch-ledger-row"><span class="collection-status ${status.tone}">${esc(status.label)}</span><div><strong>${esc(collection.display_name || collection.collection_id)}</strong><small>${esc(collection.collection_id)} · ${formatDate(collection.recording_start_time)}</small></div><p>${number(collection.camera_count)} 路 · ${number(collection.video_segment_count)} MP4 · ${esc(status.note)}</p>${link}</article>`;
+  }).join("");
+  return `<div class="batch-ledger-summary"><span><b>${counts.pending}</b> 未处理</span><span><b>${counts.processing}</b> 处理中</span><span><b>${counts.failed}</b> 失败待处理</span><span><b>${counts.archived}</b> 已处理并留存</span></div><div class="batch-ledger">${rows}</div>`;
 }
 
 function reviewState() {
@@ -770,7 +797,7 @@ function runObservabilityCard(run) {
   const freshnessNote = freshness.stale && !["completed","failed","interrupted"].includes(run.state)
     ? `<div class="freshness-warning">状态数据已 ${duration(freshness.age)} 未更新：NAS 遥测可能延迟，不能据此判定任务停止；页面仍会继续刷新。</div>` : "";
   const archiveLink = run.state === "completed" ? `<a class="secondary-button" href="#/archive/${encodeURIComponent(run.experiment_id || "")}/experiments">查看正式档案</a>` : "";
-  return `<section class="panel live-run-card"><header class="panel-heading"><div><h2>${esc(run.experiment_id || run.run_id)}</h2><p>${esc(run.run_id)} · ${esc(archivePath)}</p></div><div class="run-heading-actions"><button class="secondary-button" type="button" data-copy-path="${esc(archivePath)}">${icon("copy")}复制当前归档路径</button>${archiveLink}<span class="queue-status ${esc(run.state)}"><i></i>${esc(STAGE_LABELS[current] || current)}</span></div></header>${freshnessNote}${guidedPipelineView(run)}<details class="technical-observability" ${!["completed"].includes(run.state) ? "open" : ""}><summary>查看实时性能、逐视角进度与 Token</summary><div class="live-metric-grid"><article><small>总体进度</small><strong>${Math.round(Number(run.progress ?? status.progress ?? 0)*100)}%</strong><span>${duration(elapsedForRun(run,status))} 已用</span></article><article><small>GPU / NVDEC</small><strong>${gpuCompute}% / ${nvdec}%</strong><span>${memory} MiB 显存</span></article><article><small>CPU / 内存</small><strong>${live.cpu_percent ?? "—"}% / ${live.memory_percent ?? "—"}%</strong><span>主机实时采样</span></article><article><small>NAS/网络读取</small><strong>${network.received_mib_per_second ?? "—"} MiB/s</strong><span>进程树读 ${processIo.read_mib_per_second ?? "—"} MiB/s</span></article><article><small>模型 Token</small><strong>${number(tokens.total_tokens)}</strong><span>${number(tokens.input_tokens)} 输入 + ${number(tokens.output_tokens)} 输出</span></article><article><small>最近更新</small><strong>${freshness.value ? formatDate(freshness.value) : "待采样"}</strong><span>${freshness.age == null ? "正式运行账本" : `${duration(freshness.age)} 前`}</span></article></div>${views.length ? `<div class="view-runtime-grid">${views.map(([viewId,item])=>{ const done=item.completed_units ?? item.completed_work_units; const total=item.total_units ?? item.total_work_units; return `<article><span class="view-state-dot ${item.state === "completed" ? "completed" : ""}"></span><div><strong>${esc(viewId)}</strong><small>${esc(item.role || "待识别角色")} · ${esc(item.decode_backend || "待分配解码")} · ${esc(item.state || "waiting")} · ${total ? `${number(done)}/${number(total)} 单元` : `${number(item.segment_count)} 分片`}</small></div></article>`; }).join("")}</div>` : `<div class="empty-state compact-empty">等待逐视角运行账本；输入仍已纳入任务。</div>`}</details></section>`;
+  return `<section class="panel live-run-card"><header class="panel-heading"><div><h2>${esc(run.experiment_id || run.run_id)}</h2><p>${esc(run.run_id)} · ${esc(archivePath)}</p></div><div class="run-heading-actions"><button class="secondary-button" type="button" data-copy-path="${esc(archivePath)}">${icon("copy")}复制当前归档路径</button>${archiveLink}<span class="queue-status ${esc(run.state)}"><i></i>${esc(STAGE_LABELS[current] || current)}</span></div></header>${freshnessNote}${guidedPipelineView(run)}<details class="technical-observability" ${!["completed"].includes(run.state) ? "open" : ""}><summary>查看实时性能、逐视角进度与 Token</summary><div class="live-metric-grid"><article><small>总体进度</small><strong>${Math.round(Number(run.progress ?? status.progress ?? 0)*100)}%</strong><span>${duration(elapsedForRun(run,status))} 已用</span></article><article><small>GPU / NVDEC（瞬时）</small><strong>${gpuCompute}% / ${nvdec}%</strong><span>单点样本 · ${memory} MiB 显存</span></article><article><small>CPU / 内存（瞬时）</small><strong>${live.cpu_percent ?? "—"}% / ${live.memory_percent ?? "—"}%</strong><span>单点主机采样</span></article><article><small>NAS/网络读取（瞬时）</small><strong>${network.received_mib_per_second ?? "—"} MiB/s</strong><span>进程树读 ${processIo.read_mib_per_second ?? "—"} MiB/s</span></article><article><small>模型 Token</small><strong>${number(tokens.total_tokens)}</strong><span>${number(tokens.input_tokens)} 输入 + ${number(tokens.output_tokens)} 输出</span></article><article><small>最近更新</small><strong>${freshness.value ? formatDate(freshness.value) : "待采样"}</strong><span>${freshness.age == null ? "正式运行账本" : `${duration(freshness.age)} 前`}</span></article></div>${views.length ? `<div class="view-runtime-grid">${views.map(([viewId,item])=>{ const done=item.completed_units ?? item.completed_work_units; const total=item.total_units ?? item.total_work_units; return `<article><span class="view-state-dot ${item.state === "completed" ? "completed" : ""}"></span><div><strong>${esc(viewId)}</strong><small>${esc(item.role || "待识别角色")} · ${esc(item.decode_backend || "待分配解码")} · ${esc(item.state || "waiting")} · ${total ? `${number(done)}/${number(total)} 单元` : `${number(item.segment_count)} 分片`}</small></div></article>`; }).join("")}</div>` : `<div class="empty-state compact-empty">等待逐视角运行账本；输入仍已纳入任务。</div>`}</details></section>`;
 }
 
 function renderOperations() {
@@ -920,6 +947,49 @@ function dailyReportView(data) {
   <section class="panel"><header class="panel-heading"><div><h2>五类动作、质量与成本</h2><p>观察事实、证据支持的模型理解和不确定项在 JSON 中分别保存。</p></div></header><div class="daily-action-grid">${actions.map((item)=>`<article><strong>${number(item.event_count)}</strong><span>${esc(item.action_label)}</span></article>`).join("")}</div><table class="metric-table"><tbody><tr><td>时间对齐</td><td>${number(alignment.aligned)}/${number(alignment.view_count)} 路 aligned，平均置信度 ${alignment.mean_confidence ?? "—"}</td></tr><tr><td>不确定性 / 矛盾</td><td>${number(report.uncertainties?.length)} 组 / ${number(report.contradictions?.length)} 项</td></tr><tr><td>本次流水线总耗时</td><td>${duration(performance.total_duration_seconds)}</td></tr><tr><td>本次流水线预处理</td><td>${duration(performance.preprocessing_sla?.actual_seconds)}（不含模型理解；可能复用已验收 CV 账本）</td></tr>${fullRunPreprocessing.seconds != null ? `<tr><td>全量六路预处理验收</td><td>${duration(fullRunPreprocessing.seconds)}（${esc(fullRunPreprocessing.includes || "完整预处理") }）</td></tr>` : ""}<tr><td>总 Token</td><td>${number(performance.total_input_tokens)} 输入 + ${number(performance.total_output_tokens)} 输出 = ${number(performance.total_tokens)}</td></tr><tr><td>人工复核</td><td>${esc(report.human_review?.status || "pending")}</td></tr></tbody></table></section>`;
 }
 
+function keyMaterialEvaluationSummary(data) {
+  const quality = data.quality_acceptance || {};
+  const materials = quality.key_materials || {};
+  const recallEval = data.key_material_recall_eval || {};
+  const recallAtHalf = (recallEval.threshold_results || []).find(
+    (item)=>Number(item.temporal_iou_threshold) === 0.5
+  );
+  const precisionInterval = recallAtHalf?.precision_confidence_interval;
+  const recallInterval = recallAtHalf?.recall_confidence_interval;
+  const intervalLabel = precisionInterval && recallInterval
+    ? "；95%区间 P " + percent(precisionInterval.lower) + "–"
+      + percent(precisionInterval.upper) + "，R "
+      + percent(recallInterval.lower) + "–" + percent(recallInterval.upper)
+    : "";
+  const recallLabel = recallEval.evaluated && recallAtHalf
+    ? percent(recallAtHalf.precision) + " / " + percent(recallAtHalf.recall)
+      + "（tIoU 0.5，对象约束；标注覆盖 "
+      + percent(recallEval.annotation_coverage?.coverage_ratio) + intervalLabel
+      + (recallEval.small_sample_warning ? "；小样本" : "") + "）"
+    : "未评估（没有适用于本数据集的逐事件人工真值）";
+  const unobservedActions = (materials.unobserved_action_types || []).map(
+    (item)=>ACTION_LABELS[item] || item
+  );
+  const missingActions = (materials.missing_action_types || []).map(
+    (item)=>ACTION_LABELS[item] || item
+  );
+  const categoryCoverageLabel = materials.category_coverage_is_acceptance_gate
+    ? (missingActions.length
+      ? "未通过：缺少 " + missingActions.join("、")
+      : "固定基准要求的动作类别均已覆盖")
+    : (unobservedActions.length
+      ? "自然未观察到 " + unobservedActions.join("、") + "；不作为失败"
+      : "本实验观察到全部动作类别");
+  return {
+    recallLabel,
+    categoryCoverageLabel,
+    displayNote: (
+      quality.display_note
+      || "边界基线只参与评估，不参与推理；没有基线时不猜测准确率。"
+    ) + " 关键素材：" + recallLabel + "；动作覆盖：" + categoryCoverageLabel + "。",
+  };
+}
+
 function metricsView(data) {
   const metrics = data.metrics || {};
   const tokens = metrics.tokens || {};
@@ -931,6 +1001,7 @@ function metricsView(data) {
   const quality = data.quality_acceptance || {};
   const boundary = quality.experiment_boundaries || {};
   const materials = quality.key_materials || {};
+  const materialEvaluation = keyMaterialEvaluationSummary(data);
   const summaries = data.observability?.telemetry_summary?.stage_summaries || {};
   const performance = metrics.preprocessing_display || {};
   const fullColdStart = performance.full_cold_start || {};
@@ -958,8 +1029,9 @@ function metricsView(data) {
     acceptance: "验收汇总 JSON",
     quality_acceptance: "自动质量验收 JSON",
     evidence_package_eval: "证据包结构/媒体验收 JSON",
+    key_material_recall_eval: "关键素材 Precision / Recall 评估 JSON",
   };
-  return `<section class="panel"><header class="panel-heading"><div><h2>耗时口径</h2><p>${performanceSummary} ${reuseNote}</p></div></header><div class="performance-compare"><article><small>历史完整冷启动预处理</small><strong>${duration(fullColdStart.seconds)}</strong><span>${esc(fullColdStart.includes || "预检 + 对齐 + 全量粗扫 + 有界精扫 + 边界审计；不含模型理解")}</span></article><article><small>当前归档运行总耗时</small><strong>${duration(currentRun.total_seconds ?? metrics.total_duration_seconds)}</strong><span>${currentRun.reused_validated_cv_ledgers ? "复用已验收 CV 账本，重新生成理解/媒体/证据包" : "以本次运行账本为准"}</span></article><article><small>当前运行预处理</small><strong>${duration(currentRun.preprocessing_seconds)}</strong><span>${currentRun.reused_validated_cv_ledgers ? "不是冷启动基准" : "当前运行实际值"}</span></article></div><table class="metric-table"><thead><tr><th>阶段</th><th>说明</th><th>耗时</th></tr></thead><tbody>${extraRows}${stages.map((stage)=>`<tr><td>${esc(stage.stage)}</td><td>${esc(STAGE_LABELS[stage.stage] || stage.stage)}</td><td>${duration(stage.duration_seconds)}</td></tr>`).join("")}</tbody></table></section><section class="panel"><header class="panel-heading"><div><h2>Token 用量</h2><p>CV、FFmpeg 与 TensorRT 不消耗模型 Token；断点复用的模型结果不重复计入本次实际消耗。</p></div></header><table class="metric-table"><thead><tr><th>阶段</th><th>执行 / 复用</th><th>输入 Token</th><th>输出 Token</th><th>总 Token</th></tr></thead><tbody><tr><td>实验片段步骤理解</td><td>${number(tokens.experiment_groups?.executed_call_count ?? tokens.experiment_groups?.call_count)} / ${number(tokens.experiment_groups?.reused_call_count)}</td><td>${number(tokens.experiment_groups?.input_tokens)}</td><td>${number(tokens.experiment_groups?.output_tokens)}</td><td>${number(tokens.experiment_groups?.total_tokens)}</td></tr><tr><td>关键素材理解</td><td>${number(tokens.key_materials?.executed_call_count ?? tokens.key_materials?.call_count)} / ${number(tokens.key_materials?.reused_call_count)}</td><td>${number(tokens.key_materials?.input_tokens)}</td><td>${number(tokens.key_materials?.output_tokens)}</td><td>${number(tokens.key_materials?.total_tokens)}</td></tr><tr><td><strong>全任务</strong></td><td>—</td><td><strong>${number(tokens.run_total?.input_tokens)}</strong></td><td><strong>${number(tokens.run_total?.output_tokens)}</strong></td><td><strong>${number(tokens.run_total?.total_tokens)}</strong></td></tr></tbody></table></section><section class="panel"><header class="panel-heading"><div><h2>质量验收</h2><p>${esc(quality.display_note || "边界基线只参与评估，不参与推理；没有基线时不猜测准确率。")}</p></div></header><table class="metric-table"><tbody><tr><td>总体状态</td><td>${esc(statusLabel)}</td></tr><tr><td>实验检出 Precision / Recall</td><td>${boundaryAccuracy}</td></tr><tr><td>边界通过率 / 连续性准确率</td><td>${boundaryContinuity}</td></tr><tr><td>证据包结构与媒体</td><td>${boundary.evidence_package_eval_passed || materials.evidence_package_eval_passed ? "通过自动验收" : "未通过或无验收记录"}</td></tr><tr><td>关键素材五类覆盖</td><td>${esc((materials.missing_action_types || []).length ? `缺少 ${(materials.missing_action_types || []).join("、")}` : "完整")}</td></tr><tr><td>第一/第三人称成套素材</td><td>${number(materials.dual_view_material_count)} / ${number(materials.event_count)}（${percent(materials.dual_view_material_rate)}）</td></tr><tr><td>双侧共同佐证动作</td><td>${number(materials.cross_view_supported_count)} / ${number(materials.event_count)}（${percent(materials.cross_view_supported_rate)}）</td></tr><tr><td>双视角关联可审计</td><td>${number(materials.cross_view_or_explicit_uncertainty_count)} / ${number(materials.event_count)}</td></tr></tbody></table></section><section class="panel"><header class="panel-heading"><div><h2>资源遥测（按阶段）</h2><p>来源：resource_telemetry.json；主机网络包含其他流量，进程树 I/O 单独列出。</p></div></header><table class="metric-table"><thead><tr><th>阶段</th><th>GPU mean/max</th><th>NVDEC mean/max</th><th>CPU mean/max</th><th>网络接收 mean/max</th></tr></thead><tbody>${Object.entries(summaries).map(([stage,item])=>`<tr><td>${esc(STAGE_LABELS[stage]||stage)}</td><td>${metricStat(item.gpu_compute_percent)}/${metricStat(item.gpu_compute_percent,"max","%")}</td><td>${metricStat(item.nvdec_percent)}/${metricStat(item.nvdec_percent,"max","%")}</td><td>${metricStat(item.cpu_percent)}/${metricStat(item.cpu_percent,"max","%")}</td><td>${metricStat(item.host_network_receive_mib_s,"mean"," MiB/s")}/${metricStat(item.host_network_receive_mib_s,"max"," MiB/s")}</td></tr>`).join("")}</tbody></table></section><section class="panel"><header class="panel-heading"><div><h2>模型理解与验收文件</h2><p>这些链接直接指向当前 NAS 档案中的正式文件；历史档案没有的文件不会显示为可点击链接。</p></div></header><div class="result-links" style="padding:20px">${Object.entries(links).map(([key,label])=>data.links[key]?`<a target="_blank" href="${esc(data.links[key])}">${icon("file")}${label}</a>`:"").join("")}</div></section>`;
+  return `<section class="panel"><header class="panel-heading"><div><h2>耗时口径</h2><p>${performanceSummary} ${reuseNote}</p></div></header><div class="performance-compare"><article><small>历史完整冷启动预处理</small><strong>${duration(fullColdStart.seconds)}</strong><span>${esc(fullColdStart.includes || "预检 + 对齐 + 全量粗扫 + 有界精扫 + 边界审计；不含模型理解")}</span></article><article><small>当前归档运行总耗时</small><strong>${duration(currentRun.total_seconds ?? metrics.total_duration_seconds)}</strong><span>${currentRun.reused_validated_cv_ledgers ? "复用已验收 CV 账本，重新生成理解/媒体/证据包" : "以本次运行账本为准"}</span></article><article><small>当前运行预处理</small><strong>${duration(currentRun.preprocessing_seconds)}</strong><span>${currentRun.reused_validated_cv_ledgers ? "不是冷启动基准" : "当前运行实际值"}</span></article></div><table class="metric-table"><thead><tr><th>阶段</th><th>说明</th><th>耗时</th></tr></thead><tbody>${extraRows}${stages.map((stage)=>`<tr><td>${esc(stage.stage)}</td><td>${esc(STAGE_LABELS[stage.stage] || stage.stage)}</td><td>${duration(stage.duration_seconds)}</td></tr>`).join("")}</tbody></table></section><section class="panel"><header class="panel-heading"><div><h2>Token 用量</h2><p>CV、FFmpeg 与 TensorRT 不消耗模型 Token；断点复用的模型结果不重复计入本次实际消耗。</p></div></header><table class="metric-table"><thead><tr><th>阶段</th><th>执行 / 复用</th><th>输入 Token</th><th>输出 Token</th><th>总 Token</th></tr></thead><tbody><tr><td>实验片段步骤理解</td><td>${number(tokens.experiment_groups?.executed_call_count ?? tokens.experiment_groups?.call_count)} / ${number(tokens.experiment_groups?.reused_call_count)}</td><td>${number(tokens.experiment_groups?.input_tokens)}</td><td>${number(tokens.experiment_groups?.output_tokens)}</td><td>${number(tokens.experiment_groups?.total_tokens)}</td></tr><tr><td>关键素材理解</td><td>${number(tokens.key_materials?.executed_call_count ?? tokens.key_materials?.call_count)} / ${number(tokens.key_materials?.reused_call_count)}</td><td>${number(tokens.key_materials?.input_tokens)}</td><td>${number(tokens.key_materials?.output_tokens)}</td><td>${number(tokens.key_materials?.total_tokens)}</td></tr><tr><td><strong>全任务</strong></td><td>—</td><td><strong>${number(tokens.run_total?.input_tokens)}</strong></td><td><strong>${number(tokens.run_total?.output_tokens)}</strong></td><td><strong>${number(tokens.run_total?.total_tokens)}</strong></td></tr></tbody></table></section><section class="panel"><header class="panel-heading"><div><h2>质量验收</h2><p>${esc(materialEvaluation.displayNote)}</p></div></header><table class="metric-table"><tbody><tr><td>总体状态</td><td>${esc(statusLabel)}</td></tr><tr><td>实验检出 Precision / Recall</td><td>${boundaryAccuracy}</td></tr><tr><td>关键素材 Precision / Recall</td><td>${esc(materialEvaluation.recallLabel)}</td></tr><tr><td>边界通过率 / 连续性准确率</td><td>${boundaryContinuity}</td></tr><tr><td>证据包结构与媒体</td><td>${boundary.evidence_package_eval_passed || materials.evidence_package_eval_passed ? "通过自动验收" : "未通过或无验收记录"}</td></tr><tr><td>关键素材五类覆盖</td><td>${esc(materialEvaluation.categoryCoverageLabel)}</td></tr><tr><td>第一/第三人称成套素材</td><td>${number(materials.dual_view_material_count)} / ${number(materials.event_count)}（${percent(materials.dual_view_material_rate)}）</td></tr><tr><td>双侧共同佐证动作</td><td>${number(materials.cross_view_supported_count)} / ${number(materials.event_count)}（${percent(materials.cross_view_supported_rate)}）</td></tr><tr><td>双视角关联可审计</td><td>${number(materials.cross_view_or_explicit_uncertainty_count)} / ${number(materials.event_count)}</td></tr></tbody></table></section><section class="panel"><header class="panel-heading"><div><h2>资源遥测（按阶段）</h2><p>来源：resource_telemetry.json；主机网络包含其他流量，进程树 I/O 单独列出。</p></div></header><table class="metric-table"><thead><tr><th>阶段</th><th>GPU mean/max</th><th>NVDEC mean/max</th><th>CPU mean/max</th><th>网络接收 mean/max</th></tr></thead><tbody>${Object.entries(summaries).map(([stage,item])=>`<tr><td>${esc(STAGE_LABELS[stage]||stage)}</td><td>${metricStat(item.gpu_compute_percent)}/${metricStat(item.gpu_compute_percent,"max","%")}</td><td>${metricStat(item.nvdec_percent)}/${metricStat(item.nvdec_percent,"max","%")}</td><td>${metricStat(item.cpu_percent)}/${metricStat(item.cpu_percent,"max","%")}</td><td>${metricStat(item.host_network_receive_mib_s,"mean"," MiB/s")}/${metricStat(item.host_network_receive_mib_s,"max"," MiB/s")}</td></tr>`).join("")}</tbody></table></section><section class="panel"><header class="panel-heading"><div><h2>模型理解与验收文件</h2><p>这些链接直接指向当前 NAS 档案中的正式文件；历史档案没有的文件不会显示为可点击链接。</p></div></header><div class="result-links" style="padding:20px">${Object.entries(links).map(([key,label])=>data.links[key]?`<a target="_blank" href="${esc(data.links[key])}">${icon("file")}${label}</a>`:"").join("")}</div></section>`;
 }
 
 async function renderArchive(name, tab = "experiments") {
@@ -973,6 +1045,70 @@ async function renderArchive(name, tab = "experiments") {
   } catch (error) {
     main.innerHTML = `<div class="empty-state"><strong>无法读取该实验档案</strong><p>${esc(error.message)}</p><a class="secondary-button" href="#/experiments">返回实验记录</a></div>`;
   }
+}
+
+function annotationDecisionOptions(selected = "") {
+  return [
+    ["", "请选择判断"],
+    ["confirmed_false_negative", "确认漏检"],
+    ["false_positive", "确认误检"],
+    ["class_error", "类别错误"],
+    ["correct_detection", "检测正确"],
+    ["not_actionable", "无需标注"],
+    ["needs_review", "需要复审"],
+  ].map(([value,label])=>`<option value="${value}" ${selected === value ? "selected" : ""}>${label}</option>`).join("");
+}
+
+function annotationCard(item) {
+  const decision = item.decision || {};
+  const xyxy = decision.xyxy || [];
+  return `<article class="annotation-card">
+    <div class="annotation-image"><img loading="lazy" src="/api/annotation-workspace/items/${encodeURIComponent(item.item_id)}/image" alt="${esc(item.event_id)} ${esc(item.class_name)} badcase"/>${item.image_available ? "" : `<span>图片不可用</span>`}<b>${esc(item.priority)}</b></div>
+    <div class="annotation-copy"><header><div><small>${esc(item.event_id)} · ${esc(item.role)}</small><h3>${esc(item.class_name || "未指定类别")}</h3></div><span class="badge ${item.effective_review_status === "reviewed" ? "trusted" : "uncertain"}">${item.effective_review_status === "reviewed" ? "已审核" : "待审核"}</span></header><p>${esc(item.action_type)} · ${esc(item.issue_type)}</p>
+      <form class="annotation-form" data-annotation-form="${esc(item.item_id)}"><label>人工判断<select name="decision" required>${annotationDecisionOptions(decision.decision || "")}</select></label><label>正确类别<input name="corrected_class" value="${esc(decision.corrected_class || item.class_name || "")}" placeholder="例如 weighing_paper"/></label><label>人工框 xyxy<input name="xyxy" value="${esc(xyxy.join(", "))}" placeholder="x1, y1, x2, y2"/></label><label>审核人<input name="reviewer" value="${esc(decision.reviewer || "")}" placeholder="姓名或工号" required/></label><label class="annotation-notes">备注<textarea name="notes" rows="2" placeholder="遮挡、可见性或判断依据">${esc(decision.notes || "")}</textarea></label><button class="primary-button" type="submit">${icon("check")}保存审核</button></form>
+    </div>
+  </article>`;
+}
+
+async function renderAnnotations() {
+  setChrome("annotations");
+  const filters = state.annotationFilters;
+  const query = new URLSearchParams({ limit: "48" });
+  if (filters.priority) query.set("priority", filters.priority);
+  if (filters.reviewStatus) query.set("review_status", filters.reviewStatus);
+  if (filters.query) query.set("q", filters.query);
+  main.innerHTML = `<div class="page-loading"><span class="spinner"></span><strong>正在读取 YOLO badcase 队列</strong></div>`;
+  try {
+    const data = await api(`/api/annotation-workspace?${query}`);
+    const summary = data.summary || {};
+    main.innerHTML = `<div class="page annotation-page"><header class="page-hero compact"><div><p class="eyebrow">MODEL QUALITY WORKBENCH</p><h1>YOLO badcase 标注工作台</h1><p>把模型漏检、误检与类别混淆转成可复核训练数据。CV 推理结果与人工真值严格分离，只有人工实际提交的框才进入导出。</p></div><div class="hero-actions"><a class="secondary-button" target="_blank" href="/api/annotation-workspace/export">${icon("file")}导出已审核真值</a></div></header>
+      <section class="status-grid">${statusCard("target","badcase 总数",number(summary.total),"来自已冻结审计队列")}${statusCard("check","已审核",number(summary.reviewed),"决策已写本地可追溯账本")}${statusCard("clock","待审核",number(summary.pending),"按 P0/P1/P2 排序处理")}${statusCard("file","P0 高优先级",number(summary.priority_counts?.P0),"确认漏检和高风险问题")}</section>
+      <section class="panel"><header class="panel-heading"><div><h2>审核队列</h2><p>${esc(data.queue_path || "尚未发现 YOLO-Annotation-Queue.json")}</p></div></header><div class="annotation-toolbar"><label>优先级<select id="annotation-priority"><option value="">全部</option><option value="P0" ${filters.priority==="P0"?"selected":""}>P0</option><option value="P1" ${filters.priority==="P1"?"selected":""}>P1</option><option value="P2" ${filters.priority==="P2"?"selected":""}>P2</option></select></label><label>状态<select id="annotation-status"><option value="">全部</option><option value="pending" ${filters.reviewStatus==="pending"?"selected":""}>待审核</option><option value="reviewed" ${filters.reviewStatus==="reviewed"?"selected":""}>已审核</option></select></label><label class="annotation-query">搜索<input id="annotation-query" value="${esc(filters.query)}" placeholder="事件、类别、动作或问题"/></label><button class="secondary-button" id="annotation-filter" type="button">${icon("search")}筛选</button></div>${data.available ? `<div class="annotation-grid">${data.items.map(annotationCard).join("")}</div>` : `<div class="empty-state"><strong>未找到 badcase 队列</strong><p>先运行 YOLO badcase 审计，或在配置中指定 yolo_annotation_queue_path。</p></div>`}</section></div>`;
+    bindAnnotationActions();
+  } catch (error) {
+    main.innerHTML = `<div class="empty-state"><strong>无法读取标注工作台</strong><p>${esc(error.message)}</p></div>`;
+  }
+}
+
+function bindAnnotationActions() {
+  document.querySelector("#annotation-filter")?.addEventListener("click", () => {
+    state.annotationFilters = { priority: document.querySelector("#annotation-priority").value, reviewStatus: document.querySelector("#annotation-status").value, query: document.querySelector("#annotation-query").value.trim() };
+    renderAnnotations();
+  });
+  document.querySelectorAll("[data-annotation-form]").forEach((form)=>form.addEventListener("submit", async (event)=>{
+    event.preventDefault();
+    const values = new FormData(form);
+    const rawBox = String(values.get("xyxy") || "").trim();
+    const xyxy = rawBox ? rawBox.split(",").map((value)=>Number(value.trim())) : null;
+    if (xyxy && (xyxy.length !== 4 || xyxy.some((value)=>!Number.isFinite(value)))) { toast("人工框需要填写 4 个逗号分隔数字。", "error"); return; }
+    const button = form.querySelector("button[type=submit]");
+    button.disabled = true;
+    try {
+      await api(`/api/annotation-workspace/items/${encodeURIComponent(form.dataset.annotationForm)}/decision`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ decision: values.get("decision"), corrected_class: values.get("corrected_class"), xyxy, reviewer: values.get("reviewer"), notes: values.get("notes") }) });
+      toast("人工审核已保存到可追溯账本。");
+      await renderAnnotations();
+    } catch (error) { toast(error.message, "error"); button.disabled = false; }
+  }));
 }
 
 function bindArchiveActions() {
@@ -997,6 +1133,7 @@ async function router() {
   if (route === "new") return renderNew();
   if (route === "tasks") return renderTasks();
   if (route === "operations") return renderOperations();
+  if (route === "annotations") return renderAnnotations();
   if (["experiments","materials","reports"].includes(route)) return renderExperiments(route);
   renderHome();
 }

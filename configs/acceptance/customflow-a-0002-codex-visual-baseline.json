@@ -1,0 +1,36 @@
+{
+  "schema_version": "visioncortex-acceptance-baseline/1.0.0",
+  "baseline_id": "customflow-a-0002-codex-visual-baseline-20260824-v1",
+  "experiment_id": "exp_20260717_114053_2f08f953",
+  "applicability": {
+    "experiment_ids": ["exp_20260717_114053_2f08f953"]
+  },
+  "authority": "user_delegated_codex_visual_review",
+  "review_protocol": {
+    "annotator_count": 1,
+    "adjudicated": true,
+    "annotation_tool": "Codex aligned contact-sheet, temporal Ark evidence and cold-run audit",
+    "notes": "Frozen prospectively from the completed 2026-08-24 cold run before the next production execution. Boundaries require a dual-view physical workflow; semantic key events are evaluated separately."
+  },
+  "experiments": [
+    {
+      "baseline_id": "A0002-WEIGHING-PREPARATION",
+      "start_seconds": 73.3,
+      "end_seconds": 210.8,
+      "continuity_type": "independent",
+      "atomic_experiment_count": 1
+    },
+    {
+      "baseline_id": "A0002-SOLID-WEIGHING-AND-TRANSFER",
+      "start_seconds": 228.3,
+      "end_seconds": 306.2,
+      "continuity_type": "independent",
+      "atomic_experiment_count": 1
+    }
+  ],
+  "required_action_types": [
+    "hand_object_contact",
+    "object_movement",
+    "container_state_change"
+  ]
+}
