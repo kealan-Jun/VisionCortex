@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
 import math
 import shutil
 import subprocess
@@ -20,6 +21,9 @@ import numpy as np
 
 from .schemas import VideoInfo, VideoSegmentInfo, ViewInput
 from .storage import read_source_file_edges
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -1056,10 +1060,14 @@ def iter_sampled_frames(
                 path, info, start_ms, end_ms, sample_fps, max_width
             )
             return
-        except RuntimeError:
+        except RuntimeError as exc:
             # Preserve the sequential FFmpeg path as a compatibility fallback
             # for containers whose seek index is unavailable or damaged.
-            pass
+            LOGGER.warning(
+                "Sparse indexed seek failed; falling back to sequential decode: path=%s error=%s",
+                path,
+                exc,
+            )
     if shutil.which("ffmpeg"):
         try:
             yield from _ffmpeg_frame_iterator(
@@ -1067,7 +1075,14 @@ def iter_sampled_frames(
                 decoder_threads, cuda_scale,
             )
             return
-        except RuntimeError:
+        except RuntimeError as exc:
+            LOGGER.warning(
+                "FFmpeg decode attempt failed: path=%s hwaccel=%s cuda_scale=%s error=%s",
+                path,
+                hwaccel,
+                cuda_scale,
+                exc,
+            )
             if hwaccel:
                 if cuda_scale:
                     try:
@@ -1087,16 +1102,30 @@ def iter_sampled_frames(
                             False,
                         )
                         return
-                    except RuntimeError:
-                        pass
+                    except RuntimeError as scaled_exc:
+                        LOGGER.warning(
+                            "FFmpeg CUDA decode without scale_cuda failed: path=%s error=%s",
+                            path,
+                            scaled_exc,
+                        )
                 try:
                     yield from _ffmpeg_frame_iterator(
                         path, info, start_ms, end_ms, sample_fps, max_width, None, keyframes_only,
                         decoder_threads, False,
                     )
                     return
-                except RuntimeError:
-                    pass
+                except RuntimeError as cpu_exc:
+                    LOGGER.warning(
+                        "FFmpeg CPU decode fallback failed; using OpenCV: path=%s error=%s",
+                        path,
+                        cpu_exc,
+                    )
+    LOGGER.warning(
+        "Using OpenCV compatibility decoder: path=%s start_ms=%.3f end_ms=%.3f",
+        path,
+        start_ms,
+        end_ms,
+    )
     yield from _opencv_frame_iterator(path, info, start_ms, end_ms, sample_fps, max_width)
 
 

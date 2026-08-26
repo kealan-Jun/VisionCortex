@@ -318,6 +318,29 @@ def test_resource_monitor_survives_one_sampling_failure(monkeypatch, tmp_path):
     )
 
 
+def test_nvml_field_failure_is_retained_in_monitor_health(monkeypatch, tmp_path):
+    monitor = ResourceMonitor(tmp_path / "resource_telemetry.json", 0.25)
+
+    class PartialSampler:
+        def sample(self):
+            return {"utilization.gpu": 1.0}
+
+        def drain_errors(self):
+            return [("memory", RuntimeError("memory query failed"))]
+
+        def close(self):
+            return None
+
+    monitor._nvml = PartialSampler()
+    assert monitor._gpu()["utilization.gpu"] == 1.0
+    report = monitor.report()
+
+    assert any(
+        item["component"] == "nvml_memory"
+        for item in report["monitor_health"]["sampling_errors"]
+    )
+
+
 def test_publisher_ledger_skips_rehashing_verified_file(monkeypatch, tmp_path):
     local = tmp_path / "local"
     nas = tmp_path / "nas"

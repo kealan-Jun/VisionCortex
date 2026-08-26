@@ -63,7 +63,8 @@ Storage placement for this profile:
 - NAS source video: paths resolved from `experiment_record_index.csv`;
 - NAS formal output/staging: `.VisionCortex-Run-Staging` followed by promotion;
 - NAS persistent cache: existing `/home/x1/桌面/nas/VisionCortexExperimentCache`;
-- local: `.venv`, `Engines`, PID/log files, and auto-cleaned `Runtime/tmp`.
+- local: `.venv`, `Models`, `Engines`, PID/log files, model-quality receipts,
+  isolated third-party settings, and auto-cleaned `Runtime/tmp`.
 
 The local temporary directory is intentional. FFmpeg and TensorRT need a small
 fast scratch area while a clip or engine is actively being built; treating that
@@ -88,15 +89,24 @@ the deployment `.venv/bin` PATH so an export cannot auto-install into the
 user's base Conda environment.
 
 The source repository intentionally excludes every model binary. Before the
-installer starts, provision the two project-trained 21-class weights at
-`models/first_person/best.pt` and `models/third_person/best.pt`; the installer
-refuses a checksum mismatch. It then downloads and verifies the pinned public
+installer starts, provision the two project-trained 21-class weights at the
+paths frozen by `configs/models/closed-set-yolo.json`:
+
+- `/srv/sentinel-data/VisionCortex3090Ti/Models/ClosedSetYOLO/first_person/best.pt`
+- `/srv/sentinel-data/VisionCortex3090Ti/Models/ClosedSetYOLO/third_person/best.pt`
+
+`labvision install-closed-set-models` installs explicit source files only after
+hash verification and refuses to overwrite a non-matching destination;
+`labvision validate-closed-set-models` revalidates both the hash and exact
+21-class ontology. The installer refuses a checksum mismatch. It then downloads and verifies the pinned public
 YOLO-World, CLIP, Grounding DINO and SAM2.1 assets, builds both TensorRT engines,
 and runs one fail-closed validation covering all six local model artifacts.
 Subsequent installs reuse assets only after rechecking SHA-256.
 
 ```bash
 export VISIONCORTEX_PYTHON='/srv/sentinel-data/VisionCortex3090Ti/.venv/bin/python'
+labvision validate-closed-set-models \
+  --registry configs/models/closed-set-yolo.json
 ./deployment/rtx3090ti-ubuntu/01-Install-And-Validate.sh --skip-api-key-check
 ```
 
@@ -128,3 +138,11 @@ Do not run the three real datasets until all of the following pass:
 5. local Web health;
 6. a bounded non-production media acceptance run with telemetry;
 7. an explicit review of NAS staging/promotion paths on Linux.
+
+`labvision accept-local-models` is the bounded real-GPU model-execution gate;
+it executes both TensorRT role engines, YOLO-World, Grounding DINO, LabPics and
+SAM2 using a local public annotated image and derived nine-frame clip. Passing
+proves runtime wiring only. `labvision model-certification-readiness` reports
+the exact held-out event and participant-box truth deficits without opening a
+production archive. Neither command can certify production-domain quality or
+replace the cold Doubao call required by a formal end-to-end run.

@@ -8,8 +8,8 @@ project:
   output_root: /home/x1/桌面/nas/VisionCortexExperimentArchive/.VisionCortex-Run-Staging
 
 models:
-  first_person: ./models/first_person/best.pt
-  third_person: ./models/third_person/best.pt
+  first_person: /srv/sentinel-data/VisionCortex3090Ti/Models/ClosedSetYOLO/first_person/best.pt
+  third_person: /srv/sentinel-data/VisionCortex3090Ti/Models/ClosedSetYOLO/third_person/best.pt
   first_person_engine: /srv/sentinel-data/VisionCortex3090Ti/Engines/first_person.engine
   third_person_engine: /srv/sentinel-data/VisionCortex3090Ti/Engines/third_person.engine
   open_vocabulary_key_frame:

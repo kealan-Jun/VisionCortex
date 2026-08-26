@@ -12,21 +12,24 @@ RTX 4060 真实六路运行节点必须先阅读
 
 ```text
 /home/x1/Projects/VisionCortex
-  ├── 源代码、配置与部署脚本
-  └── models/<role>/best.pt          # 本地闭集权重，不进入 Git
+  └── 源代码、模型注册表、配置与部署脚本
 
 /home/x1/VisionCortex-project        # 指向上述源码目录的稳定入口
 
 /srv/sentinel-data/VisionCortex3090Ti
   ├── .venv/                         # 固定 Python/CUDA 依赖
+  ├── Models/ClosedSetYOLO/<role>/   # 可训练源权重，不进入 Git
   ├── Engines/                       # TensorRT 与公共模型权重
-  └── Runtime/                       # 临时解码、日志、质量认证与运行缓存
+  └── Runtime/
+      ├── ThirdParty/                # 隔离的第三方可变配置
+      ├── Model-Quality/              # 评估、认证就绪度与验收收据
+      └── NoNasWeb/                   # NAS 断开时的 Web/缓存/产出
 ```
 
 Git 仓库只保存代码、模型版本/下载地址和 SHA-256，不保存 `.pt`、
 `.engine`、`.safetensors`、原视频、运行产出或密钥。两套项目训练的闭集
-权重须在本地放到 `models/first_person/best.pt` 和
-`models/third_person/best.pt`；3090 Ti 安装器会验固定哈希、重建 TensorRT
+权重须按 `configs/models/closed-set-yolo.json` 注册到本地
+`Models/ClosedSetYOLO/<role>/best.pt`；3090 Ti 安装器会验固定哈希、重建 TensorRT
 引擎，并自动下载和验签 YOLO-World、CLIP、Grounding DINO、SAM2.1 与
 LabPics 液体/填充语义分割公共资产。
 
@@ -54,6 +57,17 @@ labvision benchmark-local-hardware --output <local-output> \
   --media <h264-1> --media <h264-2> --media <h264-3> \
   --media <h264-4> --media <h264-5> --media <h264-6>
 
+# 真实执行全部本地生产 CV 模型；使用公开人工标注样本，不访问 NAS/豆包
+labvision accept-local-models \
+  --dataset /srv/sentinel-data/VisionCortex3090Ti/Runtime/PublicDatasets/LabPicsChemistry/extracted \
+  --output /srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/<new-run> \
+  --config configs/rtx3090ti-ubuntu-production.yaml
+
+# 只读统计正式认证仍缺多少真值；不扫描生产归档
+labvision model-certification-readiness \
+  --config configs/rtx3090ti-ubuntu-production.yaml \
+  --output /srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/readiness.json
+
 # 安装仅绑定 127.0.0.1、重启自恢复且不继承 NAS 路径的本地 Web
 deployment/rtx3090ti-ubuntu/05-Install-Local-Service.sh
 ```
@@ -67,6 +81,12 @@ deployment/rtx3090ti-ubuntu/05-Install-Local-Service.sh
 HTTPS 且 SHA-256 固定的条目允许自动获取。`prepare-public-dataset` 会先验证完整
 ZIP，再拒绝路径穿越/软链接并有界解包。模型共识只能通过
 `build-consensus-labels` 生成 `pseudo_labels_not_ground_truth`，不能冒充人工真值。
+
+双闭集源权重可用 `validate-closed-set-models` 对注册哈希和 21 类本体做双重
+校验。框真值完成后，`evaluate-yolo-boxes` 计算独立 P/R/AP；
+`build-yolo-training-dataset` 用软链接或硬链接构建零拷贝训练集；
+`train-yolo-model` 只接受 reviewed ground truth，并把新权重标记为“未认证候选”。
+公开模型、模型共识或训练日志都不能解除生产认证门禁。
 
 固定基准不会重复创建实验目录：先启动 Web，再运行 `deployment\rtx4060\04-重跑固定六路基准.ps1`，由常驻 Web 服务异步执行并复用 `Y:\VisionCortexExperimentArchive\CustomFlow_standard_correct_12_ABCFA_0001--exp_20260810_144014_e918b762`。不要在有超时限制的命令包装器里前台运行 `run-fixed-benchmark`。其他用户上传任务仍按实际上传路数动态创建独立档案。
 

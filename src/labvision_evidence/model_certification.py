@@ -13,6 +13,7 @@ from .schemas import ActionType, RunSummary
 
 
 CERTIFICATION_SCHEMA = "visioncortex-production-model-certification/1"
+READINESS_SCHEMA = "visioncortex-production-model-certification-readiness/1"
 
 
 def _sha256(path: Path) -> str:
@@ -105,6 +106,56 @@ def _artifact_paths(settings: dict[str, Any]) -> list[tuple[str, Path]]:
         for name, path in configured
         if path is not None
     ]
+
+
+def _certification_input_fingerprint(
+    settings: dict[str, Any], repository_root: Path
+) -> tuple[str, dict[str, Any]]:
+    validation = settings.get("validation") or {}
+    certification = validation.get("model_certification") or {}
+    configured_truth = validation.get("key_event_ground_truth") or {}
+    if not isinstance(configured_truth, dict):
+        configured_truth = {}
+    truth_inputs = []
+    for experiment_id in sorted(
+        key for key in configured_truth if str(key) != "default"
+    ):
+        truth, selection = load_dataset_scoped_json(
+            configured_truth,
+            str(experiment_id),
+            repository_root=repository_root,
+            artifact_label="关键事件真值",
+        )
+        path_value = selection.get("artifact_path")
+        path = Path(str(path_value)) if path_value else None
+        truth_inputs.append(
+            {
+                "experiment_id": str(experiment_id),
+                "applicable": truth is not None,
+                "path": str(path.resolve()) if path is not None else None,
+                "sha256": _sha256(path) if path is not None and path.is_file() else None,
+            }
+        )
+    box_inputs = []
+    for configured_path in certification.get("box_evaluation_reports") or []:
+        path = Path(str(configured_path))
+        if not path.is_absolute():
+            path = repository_root / path
+        box_inputs.append(
+            {
+                "path": str(path.resolve()),
+                "sha256": _sha256(path) if path.is_file() else None,
+            }
+        )
+    inputs = {
+        "targets": certification.get("targets") or {},
+        "event_ground_truth": truth_inputs,
+        "box_evaluation_reports": box_inputs,
+    }
+    fingerprint = hashlib.sha256(
+        json.dumps(inputs, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    return fingerprint, inputs
 
 
 def summarize_certification_metrics(
@@ -317,6 +368,9 @@ def build_model_quality_certification(
         )
 
     metrics = summarize_certification_metrics(event_reports, box_reports, targets)
+    certification_input_fingerprint, certification_inputs = (
+        _certification_input_fingerprint(settings, repository_root)
+    )
     artifacts = []
     missing_artifacts = []
     for name, path in _artifact_paths(settings):
@@ -349,7 +403,250 @@ def build_model_quality_certification(
         "metrics": metrics,
         "model_artifacts": artifacts,
         "missing_model_artifacts": missing_artifacts,
+        "certification_input_fingerprint": certification_input_fingerprint,
+        "certification_inputs": certification_inputs,
         "failures": sorted(set(failures)),
+    }
+
+
+def build_model_certification_readiness(
+    settings: dict[str, Any],
+    *,
+    repository_root: Path,
+) -> dict[str, Any]:
+    """Audit certification inputs without inspecting production archives.
+
+    This command is safe while NAS storage is unavailable: it reads only the
+    repository-scoped truth declarations, explicitly configured local box
+    reports, and the local model artifacts named by the profile.
+    """
+
+    validation = settings.get("validation") or {}
+    certification = validation.get("model_certification") or {}
+    targets = dict(certification.get("targets") or {})
+    configured_truth = validation.get("key_event_ground_truth") or {}
+    if not isinstance(configured_truth, dict):
+        configured_truth = {}
+
+    event_datasets = []
+    action_counts: dict[str, int] = {}
+    eligible_event_count = 0
+    for experiment_id in sorted(
+        key for key in configured_truth if str(key) != "default"
+    ):
+        truth, selection = load_dataset_scoped_json(
+            configured_truth,
+            str(experiment_id),
+            repository_root=repository_root,
+            artifact_label="关键事件真值",
+        )
+        if truth is None:
+            event_datasets.append(
+                {
+                    "experiment_id": str(experiment_id),
+                    "status": "not_applicable",
+                    "selection": selection,
+                }
+            )
+            continue
+        empty_prediction_report = evaluate_key_event_recall([], truth)
+        count = int(empty_prediction_report.get("ground_truth_event_count") or 0)
+        eligible_event_count += count
+        per_action = {
+            str(item.get("action_type")): int(item.get("false_negatives") or 0)
+            for item in (
+                (empty_prediction_report.get("threshold_results") or [{}])[0].get(
+                    "per_class"
+                )
+                or []
+            )
+        }
+        for action, action_count in per_action.items():
+            action_counts[action] = action_counts.get(action, 0) + action_count
+        event_datasets.append(
+            {
+                "experiment_id": str(experiment_id),
+                "status": "truth_available",
+                "ground_truth_path": selection.get("artifact_path"),
+                "ground_truth_id": empty_prediction_report.get("ground_truth_id"),
+                "eligible_event_count": count,
+                "per_action": per_action,
+                "excluded_uncertain_count": len(
+                    empty_prediction_report.get(
+                        "excluded_uncertain_ground_truth_event_ids"
+                    )
+                    or []
+                ),
+                "excluded_rejected_count": len(
+                    empty_prediction_report.get(
+                        "excluded_rejected_ground_truth_event_ids"
+                    )
+                    or []
+                ),
+            }
+        )
+
+    box_inputs = []
+    box_report_count = 0
+    box_ground_truth_instances = 0
+    for configured_path in certification.get("box_evaluation_reports") or []:
+        path = Path(str(configured_path))
+        if not path.is_absolute():
+            path = repository_root / path
+        if not path.is_file():
+            box_inputs.append({"path": str(path), "status": "missing"})
+            continue
+        report = json.loads(path.read_text(encoding="utf-8-sig"))
+        micro = report.get("micro") or {}
+        gt_count = int(micro.get("true_positive") or 0) + int(
+            micro.get("false_negative") or 0
+        )
+        if report.get("status") == "completed":
+            box_report_count += 1
+            box_ground_truth_instances += gt_count
+        box_inputs.append(
+            {
+                "path": str(path.resolve()),
+                "status": report.get("status"),
+                "sha256": _sha256(path),
+                "ground_truth_instance_count": gt_count,
+            }
+        )
+
+    model_artifacts = []
+    missing_model_artifacts = []
+    for name, path in _artifact_paths(settings):
+        if not path.is_file():
+            missing_model_artifacts.append({"name": name, "path": str(path)})
+            continue
+        model_artifacts.append(
+            {
+                "name": name,
+                "path": str(path),
+                "size_bytes": path.stat().st_size,
+                "sha256": _sha256(path),
+            }
+        )
+
+    required_actions = [
+        str(item)
+        for item in targets.get(
+            "required_action_types", [item.value for item in ActionType]
+        )
+    ]
+    deficits = []
+    minimum_event_datasets = int(targets.get("minimum_event_dataset_count", 1))
+    available_event_datasets = sum(
+        item["status"] == "truth_available" for item in event_datasets
+    )
+    if available_event_datasets < minimum_event_datasets:
+        deficits.append(
+            {
+                "requirement": "event_dataset_count",
+                "current": available_event_datasets,
+                "target": minimum_event_datasets,
+                "missing": minimum_event_datasets - available_event_datasets,
+            }
+        )
+    minimum_events = int(targets.get("minimum_event_ground_truth_count", 1))
+    if eligible_event_count < minimum_events:
+        deficits.append(
+            {
+                "requirement": "event_ground_truth_count",
+                "current": eligible_event_count,
+                "target": minimum_events,
+                "missing": minimum_events - eligible_event_count,
+            }
+        )
+    minimum_per_action = int(targets.get("minimum_ground_truth_per_action", 1))
+    for action in required_actions:
+        current = int(action_counts.get(action, 0))
+        if current < minimum_per_action:
+            deficits.append(
+                {
+                    "requirement": f"action_ground_truth:{action}",
+                    "current": current,
+                    "target": minimum_per_action,
+                    "missing": minimum_per_action - current,
+                }
+            )
+    minimum_box_datasets = int(targets.get("minimum_box_dataset_count", 1))
+    if box_report_count < minimum_box_datasets:
+        deficits.append(
+            {
+                "requirement": "box_evaluation_dataset_count",
+                "current": box_report_count,
+                "target": minimum_box_datasets,
+                "missing": minimum_box_datasets - box_report_count,
+            }
+        )
+    minimum_box_instances = int(
+        targets.get("minimum_box_ground_truth_instances", 1)
+    )
+    if box_ground_truth_instances < minimum_box_instances:
+        deficits.append(
+            {
+                "requirement": "box_ground_truth_instance_count",
+                "current": box_ground_truth_instances,
+                "target": minimum_box_instances,
+                "missing": minimum_box_instances - box_ground_truth_instances,
+            }
+        )
+    if missing_model_artifacts:
+        deficits.append(
+            {
+                "requirement": "required_model_artifacts",
+                "current": len(model_artifacts),
+                "target": len(model_artifacts) + len(missing_model_artifacts),
+                "missing": len(missing_model_artifacts),
+            }
+        )
+
+    configured_certification_path = str(certification.get("path") or "").strip()
+    certification_path = Path(configured_certification_path)
+    certification_present = bool(configured_certification_path) and certification_path.is_file()
+    certification_audit: dict[str, Any]
+    if not certification_present:
+        certification_audit = {"status": "missing"}
+    else:
+        try:
+            certification_audit = audit_production_model_certification(settings)
+        except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+            certification_audit = {
+                "status": "invalid_or_stale",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+    production_certified = certification_audit.get("status") == "certified"
+    return {
+        "schema_version": READINESS_SCHEMA,
+        "status": "ready_for_certification_run" if not deficits else "inputs_incomplete",
+        "ready_for_certification_run": not deficits,
+        "production_certified": production_certified,
+        "production_certification_path": str(certification_path),
+        "production_certification_audit": certification_audit,
+        "generated_at": datetime.now().astimezone().isoformat(),
+        "event_truth": {
+            "dataset_count": available_event_datasets,
+            "eligible_event_count": eligible_event_count,
+            "per_action": dict(sorted(action_counts.items())),
+            "datasets": event_datasets,
+        },
+        "box_truth": {
+            "evaluation_report_count": box_report_count,
+            "ground_truth_instance_count": box_ground_truth_instances,
+            "inputs": box_inputs,
+        },
+        "model_artifacts": model_artifacts,
+        "missing_model_artifacts": missing_model_artifacts,
+        "targets": targets,
+        "deficits": deficits,
+        "nas_accessed": False,
+        "ark_calls": 0,
+        "token_usage": 0,
+        "policy": (
+            "Readiness is not certification. Precision and recall are reported "
+            "only after held-out predictions are evaluated against independent truth."
+        ),
     }
 
 
@@ -368,6 +665,14 @@ def audit_production_model_certification(settings: dict[str, Any]) -> dict[str, 
         raise RuntimeError(
             "Production model certification has not passed; failures="
             f"{payload.get('failures') or []}"
+        )
+    current_input_fingerprint, _current_inputs = _certification_input_fingerprint(
+        settings, Path(__file__).resolve().parents[2]
+    )
+    if payload.get("certification_input_fingerprint") != current_input_fingerprint:
+        raise RuntimeError(
+            "Production model certification inputs are stale: truth, box reports, "
+            "or target policy changed"
         )
     certified_hashes = {
         str(item.get("name")): str(item.get("sha256"))

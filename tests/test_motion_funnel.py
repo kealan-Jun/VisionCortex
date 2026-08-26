@@ -815,6 +815,47 @@ def test_sequential_sparse_strategy_bypasses_random_indexed_seeks(monkeypatch, t
     assert len(ffmpeg_calls) == 1
 
 
+def test_decode_fallback_is_visible_in_audit_log(monkeypatch, tmp_path, caplog):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"placeholder")
+    info = VideoInfo(
+        path=source,
+        duration_ms=1_000,
+        fps=30,
+        width=64,
+        height=36,
+        frame_count=30,
+    )
+
+    def failed_index(*args, **kwargs):
+        raise RuntimeError("seek index damaged")
+        yield
+
+    def ffmpeg_frame(*args, **kwargs):
+        yield 0, 0.0, np.zeros((36, 64, 3), dtype=np.uint8)
+
+    monkeypatch.setattr(video_io, "_opencv_indexed_seek_iterator", failed_index)
+    monkeypatch.setattr(video_io, "_ffmpeg_frame_iterator", ffmpeg_frame)
+    monkeypatch.setattr(video_io.shutil, "which", lambda _name: "ffmpeg")
+
+    with caplog.at_level("WARNING", logger="labvision_evidence.video_io"):
+        frames = list(
+            video_io.iter_sampled_frames(
+                source,
+                info,
+                0.0,
+                1_000.0,
+                0.1,
+                64,
+                "cuda",
+                True,
+            )
+        )
+
+    assert len(frames) == 1
+    assert "falling back to sequential decode" in caplog.text
+
+
 def test_short_microbatch_does_not_permanently_contract_engine_capacity(monkeypatch, default_config):
     scanner = RoleScanner.__new__(RoleScanner)
     scanner.role = ViewRole.FIRST_PERSON

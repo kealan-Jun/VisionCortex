@@ -845,9 +845,30 @@ def _execute_index_collection(
                     "staging": str(staging_root),
                 },
             )
-        except Exception:
-            pass
-        _update(run_id, state="failed", progress=1.0, error=f"{type(exc).__name__}: {exc}")
+        except Exception as state_exc:
+            timing["failure_state_record_error"] = (
+                f"{type(state_exc).__name__}: {state_exc}"
+            )
+        error = f"{type(exc).__name__}: {exc}"
+        if timing.get("failure_state_record_error"):
+            error += (
+                "; collection_state_audit_failed="
+                f"{timing['failure_state_record_error']}"
+            )
+        _update(
+            run_id,
+            state="failed",
+            progress=1.0,
+            error=error,
+            failure_audit={
+                "collection_state_recorded": not bool(
+                    timing.get("failure_state_record_error")
+                ),
+                "collection_state_error": timing.get(
+                    "failure_state_record_error"
+                ),
+            },
+        )
 
 
 @app.get("/", response_class=HTMLResponse)

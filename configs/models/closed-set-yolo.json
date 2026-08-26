@@ -1,0 +1,49 @@
+{
+  "schema_version": "visioncortex-closed-set-model-registry/1",
+  "ontology": {
+    "class_count": 21,
+    "classes": [
+      "balance",
+      "beaker",
+      "gloved_hand",
+      "lab_coat",
+      "paper",
+      "reagent_bottle",
+      "sample_bottle",
+      "sample_bottle_blue",
+      "spatula",
+      "tube",
+      "tube_cap",
+      "spearhead",
+      "pipette",
+      "container",
+      "PPE_Storage",
+      "hand",
+      "reagent_bottle_open",
+      "bottle_cap",
+      "magnetic_stirrer",
+      "tube_rack",
+      "magnetic_stir_bar"
+    ]
+  },
+  "models": {
+    "first_person": {
+      "path": "/srv/sentinel-data/VisionCortex3090Ti/Models/ClosedSetYOLO/first_person/best.pt",
+      "sha256": "a541c59ef8b09158b9b22851dcada6231dbab0f2f1478ae824bcf609851c58ea",
+      "size_bytes": 20416965,
+      "recovery_git_blob": "f109ef01abd2cfaa7e8f1d58a5b1d63948f501be"
+    },
+    "third_person": {
+      "path": "/srv/sentinel-data/VisionCortex3090Ti/Models/ClosedSetYOLO/third_person/best.pt",
+      "sha256": "ef5a867abf21a8d790eaba054e92d114ae4567c1f867c041ed079cde0a01a36b",
+      "size_bytes": 20416965,
+      "recovery_git_blob": "0bdbd21a928f8fa18d81309697af571c16d23894"
+    }
+  },
+  "policy": {
+    "runtime_uses_tensorrt_engines": true,
+    "source_weights_retained_for_retraining_and_engine_rebuild": true,
+    "overwrite_requires_matching_registered_hash": true,
+    "production_certification_required_after_model_change": true
+  }
+}

@@ -52,9 +52,12 @@ from .labpics_evaluation import (
 from .indexing import build_archive_index
 from .model_certification import (
     audit_production_model_certification,
+    build_model_certification_readiness,
     build_model_quality_certification,
 )
+from .model_registry import install_registered_models, validate_model_registry
 from .local_acceptance import run_local_six_view_acceptance
+from .local_model_acceptance import run_local_real_model_acceptance
 from .pipeline import (
     EvidencePipeline,
     _synchronize_final_event_state_receipts,
@@ -81,6 +84,8 @@ from .storage import (
     safe_archive_name,
 )
 from .validation import validate_experiment_and_material_quality
+from .yolo_evaluation import evaluate_files as evaluate_yolo_files
+from .yolo_training import build_yolo_training_dataset, train_yolo_model
 
 
 app = typer.Typer(no_args_is_help=True, help="多视角化学实验视频证据流水线")
@@ -851,6 +856,24 @@ def benchmark_local_hardware_command(
     typer.echo(str(result))
 
 
+@app.command("accept-local-models")
+def accept_local_models_command(
+    dataset: Annotated[
+        Path, typer.Option("--dataset", exists=True, file_okay=False)
+    ],
+    output: Annotated[Path, typer.Option("--output", "-o")],
+    config: Annotated[
+        Path, typer.Option("--config", "-c", exists=True, dir_okay=False)
+    ] = Path("configs/rtx3090ti-ubuntu-production.yaml"),
+) -> None:
+    """Run every production CV model on one bounded local public example."""
+
+    receipt = run_local_real_model_acceptance(
+        dataset, output, load_config(config)
+    )
+    typer.echo(str(receipt))
+
+
 @app.command("evaluate-liquid-semantic")
 def evaluate_liquid_semantic_command(
     dataset: Annotated[Path, typer.Option("--dataset", exists=True, file_okay=False)],
@@ -908,6 +931,47 @@ def validate_models_command(
     typer.echo(json.dumps(validate_models(load_config(config)), ensure_ascii=False, indent=2))
 
 
+@app.command("validate-closed-set-models")
+def validate_closed_set_models_command(
+    registry: Annotated[
+        Path, typer.Option("--registry", exists=True, dir_okay=False)
+    ] = Path("configs/models/closed-set-yolo.json"),
+    inspect_ontology: Annotated[
+        bool, typer.Option("--inspect-ontology/--hash-only")
+    ] = True,
+) -> None:
+    """Validate the retained trainable YOLO weights against the registry."""
+
+    payload = validate_model_registry(
+        registry, inspect_ontology=inspect_ontology
+    )
+    typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+@app.command("install-closed-set-models")
+def install_closed_set_models_command(
+    first_person: Annotated[
+        Path, typer.Option("--first-person", exists=True, dir_okay=False)
+    ],
+    third_person: Annotated[
+        Path, typer.Option("--third-person", exists=True, dir_okay=False)
+    ],
+    registry: Annotated[
+        Path, typer.Option("--registry", exists=True, dir_okay=False)
+    ] = Path("configs/models/closed-set-yolo.json"),
+) -> None:
+    """Install hash-verified source weights without overwriting mismatches."""
+
+    payload = install_registered_models(
+        registry,
+        {
+            "first_person": first_person,
+            "third_person": third_person,
+        },
+    )
+    typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
 @app.command("prepare-public-models")
 def prepare_public_models_command(
     config: Annotated[
@@ -954,6 +1018,131 @@ def build_consensus_labels_command(
     )
     write_json(output, payload)
     typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+@app.command("evaluate-yolo-boxes")
+def evaluate_yolo_boxes_command(
+    predictions: Annotated[
+        Path, typer.Option("--predictions", exists=True, dir_okay=False)
+    ],
+    ground_truth: Annotated[
+        Path, typer.Option("--ground-truth", exists=True, dir_okay=False)
+    ],
+    output: Annotated[Path, typer.Option("--output", "-o")],
+    confidence: Annotated[
+        float, typer.Option("--confidence", min=0.0, max=1.0)
+    ] = 0.25,
+) -> None:
+    """Evaluate participant boxes against independent reviewed box truth."""
+
+    payload = evaluate_yolo_files(
+        predictions,
+        ground_truth,
+        output,
+        confidence_threshold=confidence,
+    )
+    typer.echo(
+        json.dumps(
+            {
+                "status": payload["status"],
+                "dataset_id": payload.get("dataset_id"),
+                "image_count": payload["image_count"],
+                "ground_truth_instance_count": payload[
+                    "ground_truth_instance_count"
+                ],
+                "micro": payload["micro"],
+                "macro": payload["macro"],
+                "output": str(output.resolve()),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+
+@app.command("build-yolo-training-dataset")
+def build_yolo_training_dataset_command(
+    ground_truth: Annotated[
+        Path, typer.Option("--ground-truth", exists=True, dir_okay=False)
+    ],
+    image_root: Annotated[
+        Path, typer.Option("--image-root", exists=True, file_okay=False)
+    ],
+    output: Annotated[Path, typer.Option("--output", "-o")],
+    link_mode: Annotated[str, typer.Option("--link-mode")] = "symlink",
+) -> None:
+    """Build a zero-copy YOLO dataset from reviewed box ground truth."""
+
+    payload = build_yolo_training_dataset(
+        ground_truth, image_root, output, link_mode=link_mode
+    )
+    typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+@app.command("train-yolo-model")
+def train_yolo_model_command(
+    dataset: Annotated[
+        Path, typer.Option("--dataset", exists=True, file_okay=False)
+    ],
+    base_model: Annotated[
+        Path, typer.Option("--base-model", exists=True, dir_okay=False)
+    ],
+    output: Annotated[Path, typer.Option("--output", "-o")],
+    epochs: Annotated[int, typer.Option("--epochs", min=1)] = 100,
+    image_size: Annotated[int, typer.Option("--image-size", min=64)] = 1280,
+    batch: Annotated[int, typer.Option("--batch", min=1)] = 8,
+    device: Annotated[str, typer.Option("--device")] = "0",
+) -> None:
+    """Train a real YOLO candidate; deployment remains certification-gated."""
+
+    payload = train_yolo_model(
+        dataset,
+        base_model,
+        output,
+        epochs=epochs,
+        image_size=image_size,
+        batch=batch,
+        device=device,
+    )
+    typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+@app.command("model-certification-readiness")
+def model_certification_readiness_command(
+    config: Annotated[
+        Path, typer.Option("--config", "-c", exists=True, dir_okay=False)
+    ] = Path("configs/rtx3090ti-ubuntu-production.yaml"),
+    output: Annotated[
+        Path,
+        typer.Option("--output", "-o"),
+    ] = Path(
+        "/srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/production-model-certification-readiness.json"
+    ),
+) -> None:
+    """Report exact truth/model deficits without accessing experiment archives."""
+
+    payload = build_model_certification_readiness(
+        load_config(config),
+        repository_root=Path(__file__).resolve().parents[2],
+    )
+    write_json(output, payload)
+    typer.echo(
+        json.dumps(
+            {
+                "status": payload["status"],
+                "ready_for_certification_run": payload[
+                    "ready_for_certification_run"
+                ],
+                "production_certified": payload["production_certified"],
+                "event_truth": payload["event_truth"],
+                "box_truth": payload["box_truth"],
+                "deficits": payload["deficits"],
+                "output": str(output.resolve()),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
 
 
 @app.command("certify-model-quality")

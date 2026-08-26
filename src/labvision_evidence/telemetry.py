@@ -20,6 +20,7 @@ class _NvmlSampler:
         self.module = pynvml
         pynvml.nvmlInit()
         self.handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+        self._errors: list[tuple[str, Exception]] = []
 
     @classmethod
     def create(cls) -> "_NvmlSampler | None":
@@ -33,24 +34,29 @@ class _NvmlSampler:
     def sample(self) -> dict[str, Any]:
         nvml = self.module
 
-        def value(call, scale: float = 1.0) -> float | None:
+        def value(name: str, call, scale: float = 1.0) -> float | None:
             try:
                 return float(call()) / scale
-            except Exception:  # NVML raises different driver-specific subclasses.
+            except Exception as exc:  # NVML raises driver-specific subclasses.
+                self._errors.append((name, exc))
                 return None
 
         utilization = None
         try:
             utilization = nvml.nvmlDeviceGetUtilizationRates(self.handle)
-        except Exception:
-            pass
+        except Exception as exc:
+            self._errors.append(("utilization", exc))
         memory = None
         try:
             memory = nvml.nvmlDeviceGetMemoryInfo(self.handle)
-        except Exception:
-            pass
-        decoder = value(lambda: nvml.nvmlDeviceGetDecoderUtilization(self.handle)[0])
-        encoder = value(lambda: nvml.nvmlDeviceGetEncoderUtilization(self.handle)[0])
+        except Exception as exc:
+            self._errors.append(("memory", exc))
+        decoder = value(
+            "decoder", lambda: nvml.nvmlDeviceGetDecoderUtilization(self.handle)[0]
+        )
+        encoder = value(
+            "encoder", lambda: nvml.nvmlDeviceGetEncoderUtilization(self.handle)[0]
+        )
         return {
             "utilization.gpu": float(utilization.gpu) if utilization is not None else None,
             "utilization.decoder": decoder,
@@ -58,15 +64,24 @@ class _NvmlSampler:
             "memory.used": float(memory.used) / 1024**2 if memory is not None else None,
             "memory.total": float(memory.total) / 1024**2 if memory is not None else None,
             "temperature.gpu": value(
+                "temperature",
                 lambda: nvml.nvmlDeviceGetTemperature(
                     self.handle, nvml.NVML_TEMPERATURE_GPU
                 )
             ),
-            "power.draw": value(lambda: nvml.nvmlDeviceGetPowerUsage(self.handle), 1000.0),
+            "power.draw": value(
+                "power", lambda: nvml.nvmlDeviceGetPowerUsage(self.handle), 1000.0
+            ),
             "clocks.sm": value(
+                "clock",
                 lambda: nvml.nvmlDeviceGetClockInfo(self.handle, nvml.NVML_CLOCK_SM)
             ),
         }
+
+    def drain_errors(self) -> list[tuple[str, Exception]]:
+        errors = list(self._errors)
+        self._errors.clear()
+        return errors
 
     def close(self) -> None:
         try:
@@ -95,8 +110,12 @@ class ResourceMonitor:
         self._previous_network = psutil.net_io_counters()
         self._previous_process_io = self._process_tree_io()
         self._previous_perf = time.perf_counter()
-        self._nvml = _NvmlSampler.create()
         self._sampling_errors: list[dict[str, Any]] = []
+        try:
+            self._nvml = _NvmlSampler()
+        except Exception as exc:
+            self._nvml = None
+            self._record_sampling_error("nvml_initialization", exc)
         self._thread_ended_unexpectedly = False
 
     def set_stage(self, stage: str) -> None:
@@ -199,6 +218,8 @@ class ResourceMonitor:
     def _gpu(self) -> dict[str, Any]:
         if self._nvml is not None:
             values = self._nvml.sample()
+            for component, exc in self._nvml.drain_errors():
+                self._record_sampling_error(f"nvml_{component}", exc)
             if any(value is not None for value in values.values()):
                 return values
         return self._gpu_nvidia_smi()

@@ -5390,10 +5390,10 @@ class EvidencePipeline:
                 self._resource_monitor.stop()
                 if self._publisher is not None:
                     self._publisher.publish_file(layout.json_config / "resource_telemetry.json")
-            try:
-                lock_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+            # A stale run lock blocks all future processing for the same
+            # experiment. Cleanup failure is therefore a pipeline failure, not
+            # an ignorable housekeeping warning.
+            lock_path.unlink(missing_ok=True)
 
     @staticmethod
     def _acquire_lock(lock_path: Path) -> None:

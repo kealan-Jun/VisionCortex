@@ -47,10 +47,12 @@ fi
 export VISIONCORTEX_PYTHON=$python_bin
 "$script_dir/00-Preflight.sh" --install
 
-first_weight="$project_root/models/first_person/best.pt"
-third_weight="$project_root/models/third_person/best.pt"
+first_weight="$runtime_base/Models/ClosedSetYOLO/first_person/best.pt"
+third_weight="$runtime_base/Models/ClosedSetYOLO/third_person/best.pt"
 expected_first='a541c59ef8b09158b9b22851dcada6231dbab0f2f1478ae824bcf609851c58ea'
 expected_third='ef5a867abf21a8d790eaba054e92d114ae4567c1f867c041ed079cde0a01a36b'
+[[ -f $first_weight ]] || { printf 'First-person source model is missing: %s\n' "$first_weight" >&2; exit 1; }
+[[ -f $third_weight ]] || { printf 'Third-person source model is missing: %s\n' "$third_weight" >&2; exit 1; }
 actual_first=$(sha256sum -- "$first_weight" | awk '{print $1}')
 actual_third=$(sha256sum -- "$third_weight" | awk '{print $1}')
 [[ $actual_first == "$expected_first" ]] || { printf '%s\n' 'First-person model checksum mismatch.' >&2; exit 1; }
@@ -80,6 +82,7 @@ SAM2_BUILD_CUDA=0 "$venv_python" -m pip install \
 
 export LABVISION_CONFIG=$config
 export VISIONCORTEX_TENSORRT=required
+export VISIONCORTEX_ULTRALYTICS_CONFIG_DIR="$runtime_root/ThirdParty"
 export VISIONCORTEX_NAS_INDEX_CSV=${VISIONCORTEX_NAS_INDEX_CSV:-'/home/x1/桌面/nas/experiment_record_index.csv'}
 export VISIONCORTEX_NAS_ARCHIVE_ROOT=${VISIONCORTEX_NAS_ARCHIVE_ROOT:-'/home/x1/桌面/nas/VisionCortexExperimentArchive'}
 export VISIONCORTEX_NAS_CACHE_ROOT=${VISIONCORTEX_NAS_CACHE_ROOT:-'/home/x1/桌面/nas/VisionCortexExperimentCache'}

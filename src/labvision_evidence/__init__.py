@@ -1,4 +1,8 @@
 """Multi-view wet-lab video evidence pipeline."""
 
-__version__ = "0.1.0"
+from .runtime_environment import configure_third_party_runtime
 
+
+ULTRALYTICS_CONFIG_DIR = configure_third_party_runtime()
+
+__version__ = "0.1.0"

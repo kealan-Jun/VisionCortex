@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import os
+import uuid
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable
@@ -39,6 +42,37 @@ def load_predictions(path: Path) -> list[dict[str, Any]]:
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
+
+
+def _validate_ground_truth(ground_truth: dict[str, Any]) -> None:
+    schema = str(ground_truth.get("schema_version") or "")
+    if schema and not schema.startswith("visioncortex-yolo-"):
+        raise ValueError("YOLO box ground truth schema_version is missing or invalid")
+    images = ground_truth.get("images") or []
+    annotations = ground_truth.get("annotations") or []
+    image_ids = [str(item.get("image_id") or "") for item in images]
+    if any(not item for item in image_ids) or len(set(image_ids)) != len(image_ids):
+        raise ValueError("YOLO box ground truth image_id values must be unique and non-empty")
+    known_images = set(image_ids)
+    annotation_ids: set[str] = set()
+    for index, annotation in enumerate(annotations, 1):
+        annotation_id = str(annotation.get("annotation_id") or f"annotation-{index}")
+        if annotation_id in annotation_ids:
+            raise ValueError(f"Duplicate YOLO annotation_id: {annotation_id}")
+        annotation_ids.add(annotation_id)
+        if str(annotation.get("image_id") or "") not in known_images:
+            raise ValueError(f"YOLO annotation references unknown image_id: {annotation_id}")
+        class_name = str(annotation.get("class_name") or "").strip()
+        box = annotation.get("xyxy")
+        if not class_name or not isinstance(box, list) or len(box) != 4:
+            raise ValueError(f"Invalid YOLO annotation class or box: {annotation_id}")
+        coordinates = [float(value) for value in box]
+        if (
+            not all(math.isfinite(value) for value in coordinates)
+            or coordinates[2] <= coordinates[0]
+            or coordinates[3] <= coordinates[1]
+        ):
+            raise ValueError(f"Invalid YOLO annotation geometry: {annotation_id}")
 
 
 def _average_precision(points: list[tuple[float, int]], gt_count: int) -> float:
@@ -155,6 +189,7 @@ def evaluate_yolo_predictions(
     confidence_threshold: float = 0.25,
     iou_thresholds: tuple[float, ...] = tuple(round(0.5 + 0.05 * index, 2) for index in range(10)),
 ) -> dict[str, Any]:
+    _validate_ground_truth(ground_truth)
     images = {
         str(image["image_id"]): image for image in ground_truth.get("images", [])
     }
@@ -226,6 +261,10 @@ def evaluate_yolo_predictions(
         "confidence_threshold": confidence_threshold,
         "iou_thresholds": list(iou_thresholds),
         "image_count": len(images),
+        "ground_truth_instance_count": sum(
+            len(items) for items in frame_ground_truth.values()
+        ),
+        "dataset_id": ground_truth.get("dataset_id"),
         "class_count": len(classes),
         "supported_class_count": len(supported),
         "micro": {
@@ -256,6 +295,12 @@ def evaluate_files(
     confidence_threshold: float = 0.25,
 ) -> dict[str, Any]:
     ground_truth = json.loads(ground_truth_path.read_text(encoding="utf-8"))
+    if not str(ground_truth.get("schema_version") or "").startswith(
+        "visioncortex-yolo-"
+    ):
+        raise ValueError(
+            "Formal YOLO box ground truth file must declare schema_version"
+        )
     report = evaluate_yolo_predictions(
         load_predictions(predictions_path),
         ground_truth,
@@ -268,7 +313,11 @@ def evaluate_files(
         "ground_truth_sha256": _sha256(ground_truth_path),
     }
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(
+    temporary = output_path.with_name(
+        f".{output_path.name}.partial-{uuid.uuid4().hex[:8]}"
+    )
+    temporary.write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+    os.replace(temporary, output_path)
     return report

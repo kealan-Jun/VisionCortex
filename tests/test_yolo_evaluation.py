@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from labvision_evidence.yolo_evaluation import evaluate_yolo_predictions
+import json
+
+import pytest
+
+from labvision_evidence.yolo_evaluation import evaluate_files, evaluate_yolo_predictions
 
 
 def test_per_class_metrics_require_box_iou_and_class_match():
@@ -71,3 +75,32 @@ def test_prediction_below_confidence_threshold_remains_false_negative():
     assert bottle["true_positive"] == 0
     assert bottle["false_negative"] == 1
     assert any(item["kind"] == "false_negative" for item in report["errors"])
+
+
+def test_file_evaluation_requires_declared_ground_truth_schema(tmp_path):
+    predictions = tmp_path / "predictions.jsonl"
+    truth = tmp_path / "truth.json"
+    output = tmp_path / "report.json"
+    predictions.write_text("", encoding="utf-8")
+    truth.write_text(json.dumps({"images": [], "annotations": []}), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="schema_version"):
+        evaluate_files(predictions, truth, output)
+
+
+def test_ground_truth_rejects_unknown_image_reference():
+    truth = {
+        "schema_version": "visioncortex-yolo-box-ground-truth/1.0.0",
+        "images": [],
+        "annotations": [
+            {
+                "annotation_id": "ann-1",
+                "image_id": "missing",
+                "class_name": "paper",
+                "xyxy": [0, 0, 10, 10],
+            }
+        ],
+    }
+
+    with pytest.raises(ValueError, match="unknown image_id"):
+        evaluate_yolo_predictions([], truth)

@@ -1,5 +1,10 @@
+import json
+
 from labvision_evidence.model_certification import (
+    CERTIFICATION_SCHEMA,
     _artifact_paths,
+    _certification_input_fingerprint,
+    audit_production_model_certification,
     summarize_certification_metrics,
 )
 
@@ -112,3 +117,46 @@ def test_certification_covers_text_encoder_and_video_segmentation(tmp_path):
         "sam2_video_segmentation",
         "labpics_liquid_semantic",
     }
+
+
+def test_certification_fails_closed_when_target_policy_changes(tmp_path):
+    certification_path = tmp_path / "certification.json"
+    settings = {
+        "models": {},
+        "validation": {
+            "key_event_ground_truth": {},
+            "model_certification": {
+                "required_for_formal_production": True,
+                "path": str(certification_path),
+                "targets": {"minimum_event_recall": 0.95},
+                "box_evaluation_reports": [],
+            },
+        },
+    }
+    fingerprint, inputs = _certification_input_fingerprint(settings, tmp_path)
+    certification_path.write_text(
+        json.dumps(
+            {
+                "schema_version": CERTIFICATION_SCHEMA,
+                "status": "certified",
+                "passed": True,
+                "model_artifacts": [],
+                "metrics": {},
+                "certification_input_fingerprint": fingerprint,
+                "certification_inputs": inputs,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert audit_production_model_certification(settings)["status"] == "certified"
+    settings["validation"]["model_certification"]["targets"][
+        "minimum_event_recall"
+    ] = 0.96
+
+    try:
+        audit_production_model_certification(settings)
+    except RuntimeError as exc:
+        assert "inputs are stale" in str(exc)
+    else:
+        raise AssertionError("stale certification target policy was accepted")

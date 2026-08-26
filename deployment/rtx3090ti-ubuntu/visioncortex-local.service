@@ -9,6 +9,7 @@ WorkingDirectory=/home/x1/Projects/VisionCortex
 Environment=LABVISION_CONFIG=/home/x1/Projects/VisionCortex/configs/rtx3090ti-ubuntu-local.yaml
 Environment=PYTHONUNBUFFERED=1
 Environment=TMPDIR=/srv/sentinel-data/VisionCortex3090Ti/Runtime/tmp
+Environment=VISIONCORTEX_ULTRALYTICS_CONFIG_DIR=/srv/sentinel-data/VisionCortex3090Ti/Runtime/ThirdParty
 Environment=VISIONCORTEX_NAS_INDEX_CSV=/srv/sentinel-data/VisionCortex3090Ti/Runtime/NoNasWeb/local-experiment-index.csv
 Environment=VISIONCORTEX_DEVICE_REGISTRY=/srv/sentinel-data/VisionCortex3090Ti/Runtime/NoNasWeb/local-device-registry.json
 Environment=VISIONCORTEX_NAS_ARCHIVE_ROOT=/srv/sentinel-data/VisionCortex3090Ti/Runtime/NoNasWeb/Archives
