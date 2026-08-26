@@ -27,7 +27,7 @@ def test_core_and_dev_dependencies_do_not_pull_the_gpu_model_stack():
     }
 
     assert not (core | dev) & HEAVY_MODEL_PACKAGES
-    assert dev == {"pytest", "pytest-cov"}
+    assert dev == {"httpx2", "pytest", "pytest-cov"}
     assert {"clip", "transformers", "ultralytics"} <= models
 
 
