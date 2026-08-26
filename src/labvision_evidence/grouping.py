@@ -1482,7 +1482,7 @@ def prepare_formal_experiment_segments(
             item.segment_id: recalled_window(item) for item in ordered_extended
         }
         context_extended: list[ExperimentSegment] = []
-        for position, segment in enumerate(ordered_extended):
+        for segment in ordered_extended:
             window = assignments[segment.segment_id]
             if window is None:
                 context_extended.append(segment)

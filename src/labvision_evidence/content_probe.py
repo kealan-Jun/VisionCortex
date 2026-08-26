@@ -113,7 +113,7 @@ def motion_followup_interval(
     )
     gaps = [
         (left[1], right[0])
-        for left, right in zip(ordered, ordered[1:])
+        for left, right in zip(ordered, ordered[1:], strict=False)
         if right[0] - left[1] > 0.05
     ]
     if not gaps:
@@ -1137,7 +1137,7 @@ def adjudicate_inconclusive_probe_with_cv(
     ]
     probes = [json.loads(path.read_text(encoding="utf-8")) for path in probe_paths]
     eligible_probes: list[tuple[Path, dict[str, Any], str]] = []
-    for path, payload in zip(probe_paths, probes):
+    for path, payload in zip(probe_paths, probes, strict=True):
         third_views = [
             str(view.get("view_id"))
             for view in payload.get("views") or []

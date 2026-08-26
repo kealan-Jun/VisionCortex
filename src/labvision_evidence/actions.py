@@ -337,7 +337,7 @@ def _infer_liquid_transfer_sequences(
         if current:
             runs.append(current)
         runs = [run for run in runs if len(run) >= minimum_observations]
-        for source, target in zip(runs, runs[1:]):
+        for source, target in zip(runs, runs[1:], strict=False):
             source_identity = (
                 str(source[0].evidence.get("vessel_class") or "unknown"),
                 int(source[0].evidence["vessel_track_id"]),

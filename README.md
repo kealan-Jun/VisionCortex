@@ -120,9 +120,17 @@ ZIP，再拒绝路径穿越/软链接并有界解包。模型共识只能通过
 
 ```powershell
 Set-Location -LiteralPath 'C:\Users\Xx7\Documents\ChatGPT\New project'
+# 轻量开发/确定性测试：不会下载 PyTorch、CUDA、YOLO 或 Transformer。
 python -m pip install -e ".[dev]"
+
+# 需要真实模型推理时显式安装模型与 TensorRT 运行栈。
+python -m pip install -e ".[models,tensorrt]"
 $env:ARK_API_KEY = '<在本机安全设置，不要写入 yaml 或 git>'
 ```
+
+`models` 包含固定版本的 Transformer、YOLO 与 CLIP 运行依赖；SAM2 仍通过
+`sam2` 可选项或部署脚本的固定 revision 独立安装。生产部署脚本优先使用各硬件
+目录内的锁定依赖，不会因为轻量开发安装而改变现有模型或 TensorRT 引擎。
 
 聊天中出现过的 API Key 应在火山方舟控制台轮换。代码只读取 `ARK_API_KEY`，不会保存或打印密钥。
 

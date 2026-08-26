@@ -1068,9 +1068,9 @@ def _select_key_material_view_pair_with_peak_fallback(
             pair, receipt = _select_key_material_view_pair(
                 group, event, views, infos, transforms
             )
-        except ValueError:
+        except ValueError as fallback_error:
             event.key_global_ms = selected_key_global_ms
-            raise selected_error
+            raise selected_error from fallback_error
         receipt["key_timestamp_fallback"] = {
             "applied": True,
             "reason": (
@@ -4974,7 +4974,7 @@ def extract_temporal_review_frames(
         samples: list[tuple[str, Path]] = []
         output_dir.mkdir(parents=True, exist_ok=True)
         safe_view = _safe_slug(view_id)
-        for phase, fraction in zip(phases, fractions):
+        for phase, fraction in zip(phases, fractions, strict=True):
             frame_index = min(frame_count - 1, max(0, round((frame_count - 1) * fraction)))
             capture.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
             ok, frame = capture.read()

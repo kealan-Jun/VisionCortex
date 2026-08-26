@@ -15,7 +15,5 @@ tzdata==2025.2
 typer==0.16.0
 ultralytics==8.4.28
 uvicorn[standard]==0.35.0
-pytest==8.4.1
-pytest-cov==6.2.1
 torch==2.6.0+cu124
 torchvision==0.21.0+cu124

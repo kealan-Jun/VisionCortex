@@ -737,11 +737,7 @@ def _validate_pinned_asset(
     expected = str(expected_sha256 or "").strip().lower()
     if not expected:
         raise RuntimeError(f"{name} model SHA-256 is not configured")
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    actual = digest.hexdigest()
+    actual = _sha256_file(path)
     if actual != expected:
         raise RuntimeError(
             f"{name} model hash mismatch: expected={expected} actual={actual}"
@@ -751,6 +747,14 @@ def _validate_pinned_asset(
         "bytes": path.stat().st_size,
         "sha256": actual,
     }
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _validate_open_vocabulary_runtime(config: dict[str, Any]) -> dict[str, Any]:
@@ -805,25 +809,65 @@ def _validate_open_vocabulary_runtime(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def validate_models(config: dict[str, Any]) -> dict[str, Any]:
-    from ultralytics import YOLO
+def _normalized_class_names(names: Any) -> list[str]:
+    if isinstance(names, dict):
+        try:
+            ordered = [
+                value
+                for _, value in sorted(
+                    names.items(), key=lambda item: int(item[0])
+                )
+            ]
+        except (TypeError, ValueError):
+            ordered = [
+                value
+                for _, value in sorted(
+                    names.items(), key=lambda item: str(item[0])
+                )
+            ]
+    elif isinstance(names, (list, tuple)):
+        ordered = list(names)
+    else:
+        return []
+    return [str(value).replace("-", "_") for value in ordered]
 
+
+def _validate_class_names(names: list[str], expected: int, source: Path) -> None:
+    if len(names) != expected:
+        raise ValueError(f"{source} 类别数为 {len(names)}，期望 {expected}")
+    if len(set(names)) != len(names):
+        raise ValueError(f"{source} 的规范化类别表包含重复类别")
+
+
+def validate_models(config: dict[str, Any]) -> dict[str, Any]:
     expected = int(config["models"]["expected_class_count"])
+    mode = str(config["performance"].get("tensor_rt", "auto")).lower()
     report: dict[str, Any] = {}
     class_sets: dict[str, list[str]] = {}
     for role in ViewRole:
         path = Path(config["models"][role.value])
         if not path.is_file():
-            raise FileNotFoundError(f"{role.value} 模型不存在: {path}")
+            if mode not in {"required", "true"}:
+                raise FileNotFoundError(f"{role.value} 模型不存在: {path}")
+            report[role.value] = {
+                "path": str(path),
+                "source_model_available": False,
+                "validation_source": "tensorrt_engine_metadata",
+            }
+            continue
+        from ultralytics import YOLO
+
         model = YOLO(str(path))
-        names = [str(model.names[index]).replace("-", "_") for index in sorted(model.names)]
-        if len(names) != expected:
-            raise ValueError(f"{path} 类别数为 {len(names)}，期望 {expected}")
+        names = _normalized_class_names(model.names)
+        _validate_class_names(names, expected, path)
         class_sets[role.value] = names
-        report[role.value] = {"path": str(path), "class_count": len(names), "classes": names}
-    if class_sets[ViewRole.FIRST_PERSON.value] != class_sets[ViewRole.THIRD_PERSON.value]:
-        raise ValueError("第一/第三人称模型的规范化类别表不一致")
-    mode = str(config["performance"].get("tensor_rt", "auto")).lower()
+        report[role.value] = {
+            "path": str(path),
+            "source_model_available": True,
+            "validation_source": "pytorch_model",
+            "class_count": len(names),
+            "classes": names,
+        }
     runtime: dict[str, Any] = {"mode": mode, "roles": {}}
     if mode in {"required", "true"}:
         try:
@@ -845,14 +889,40 @@ def validate_models(config: dict[str, Any]) -> dict[str, Any]:
             engine = trt_runtime.deserialize_cuda_engine(plan)
             if engine is None:
                 raise RuntimeError(f"TensorRT engine cannot be deserialized: {engine_path}")
+            engine_names = _normalized_class_names(metadata.get("names"))
+            if not engine_names:
+                raise RuntimeError(
+                    f"TensorRT engine has no embedded class metadata: {engine_path}"
+                )
+            _validate_class_names(engine_names, expected, engine_path)
+            source_names = class_sets.get(role.value)
+            if source_names is not None and source_names != engine_names:
+                raise ValueError(
+                    f"{role.value} TensorRT 引擎类别表与源模型不一致"
+                )
+            class_sets[role.value] = engine_names
+            report[role.value].update(
+                {
+                    "validation_source": (
+                        "pytorch_model_and_tensorrt_engine_metadata"
+                        if source_names is not None
+                        else "tensorrt_engine_metadata"
+                    ),
+                    "class_count": len(engine_names),
+                    "classes": engine_names,
+                }
+            )
             build_batch = _metadata_batch(metadata) or _profile_batch(engine)
             runtime["roles"][role.value] = {
                 "backend": "TensorRT",
                 "engine": str(engine_path),
                 "bytes": engine_path.stat().st_size,
+                "sha256": _sha256_file(engine_path),
                 "deserialized": True,
                 "container": container,
                 "build_batch": build_batch,
+                "class_count": len(engine_names),
+                "classes": engine_names,
             }
     else:
         for role in ViewRole:
@@ -861,6 +931,8 @@ def validate_models(config: dict[str, Any]) -> dict[str, Any]:
                 "backend": "TensorRT" if selected.suffix.lower() == ".engine" else "PyTorch",
                 "path": str(selected),
             }
+    if class_sets[ViewRole.FIRST_PERSON.value] != class_sets[ViewRole.THIRD_PERSON.value]:
+        raise ValueError("第一/第三人称模型的规范化类别表不一致")
     runtime["temporal_participant_segmentation"] = (
         validate_temporal_segmentation_runtime(config)
     )

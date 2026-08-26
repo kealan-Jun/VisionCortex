@@ -69,7 +69,7 @@ if (-not (Test-Path -LiteralPath $Python -PathType Leaf)) {
 }
 & $Python -m pip install --no-index --find-links $Wheelhouse --upgrade pip setuptools wheel
 if ($LASTEXITCODE -ne 0) { throw 'Offline packaging-tool installation failed.' }
-& $Python -m pip install --no-index --find-links $Wheelhouse 'labvision-evidence[dev,tensorrt]==0.1.0'
+& $Python -m pip install --no-index --find-links $Wheelhouse 'labvision-evidence[tensorrt]==0.1.0'
 if ($LASTEXITCODE -ne 0) { throw 'Offline VisionCortex dependency installation failed.' }
 
 $env:PATH = "$FfmpegBin;$env:PATH"

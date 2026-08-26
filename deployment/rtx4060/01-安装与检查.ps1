@@ -53,7 +53,7 @@ if (-not (Test-Path -LiteralPath $Python)) {
 if (-not $SkipInstall) {
     & $Python -m pip install --upgrade pip setuptools wheel
     & $Python -m pip install torch torchvision --index-url 'https://download.pytorch.org/whl/cu128'
-    & $Python -m pip install -e '.[dev,tensorrt]'
+    & $Python -m pip install -e '.[models,tensorrt]'
 }
 
 & $Python -c "import torch; assert torch.cuda.is_available(), 'PyTorch CUDA is unavailable'; print('GPU:', torch.cuda.get_device_name(0)); print('CUDA:', torch.version.cuda)"

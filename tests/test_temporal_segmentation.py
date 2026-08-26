@@ -1,13 +1,33 @@
 from __future__ import annotations
 
+import sys
+from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
 import pytest
-import torch
 
 from labvision_evidence import temporal_segmentation as module
+
+
+# The production implementation imports PyTorch lazily.  This deterministic
+# unit test exercises the SAM2 contract and cache without making the complete
+# GPU runtime a mandatory development dependency.
+torch = SimpleNamespace(
+    zeros=lambda shape: np.zeros(shape, dtype=np.float32),
+    full=lambda shape, value: np.full(shape, value, dtype=np.float32),
+    stack=lambda values: np.stack(values),
+    where=np.where,
+    inference_mode=nullcontext,
+    autocast=lambda *_args, **_kwargs: nullcontext(),
+)
+
+
+@pytest.fixture(autouse=True)
+def _fake_torch(monkeypatch):
+    monkeypatch.setitem(sys.modules, "torch", torch)
 
 
 class _FakePredictor:

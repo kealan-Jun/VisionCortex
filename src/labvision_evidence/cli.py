@@ -878,8 +878,8 @@ def calibrate_liquid_semantic_command(
     dataset: Annotated[Path, typer.Option("--dataset", exists=True, file_okay=False)],
     output: Annotated[Path, typer.Option("--output", "-o")],
     thresholds: Annotated[
-        list[float], typer.Option("--threshold")
-    ] = [0.25, 0.35, 0.45, 0.50],
+        list[float] | None, typer.Option("--threshold")
+    ] = None,
     sample_count: Annotated[int, typer.Option("--sample-count")] = 32,
     minimum_precision: Annotated[
         float, typer.Option("--minimum-precision")
@@ -894,7 +894,7 @@ def calibrate_liquid_semantic_command(
         dataset,
         output,
         load_config(config),
-        thresholds=thresholds,
+        thresholds=thresholds or [0.25, 0.35, 0.45, 0.50],
         sample_count=sample_count,
         minimum_precision=minimum_precision,
     )

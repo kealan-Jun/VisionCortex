@@ -191,7 +191,9 @@ def test_long_probe_spans_anchors_and_adds_nonoverlapping_motion_followup():
     ) <= 300.0
     assert all(
         current["start_seconds"] >= previous["end_seconds"]
-        for previous, current in zip(all_intervals, all_intervals[1:])
+        for previous, current in zip(
+            all_intervals, all_intervals[1:], strict=False
+        )
     )
 
 

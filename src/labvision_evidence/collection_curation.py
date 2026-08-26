@@ -265,7 +265,10 @@ def _read_probe(
                 continue
             valid_intervals.append((start, end, reason))
     ordered = sorted(valid_intervals)
-    if any(current[0] < previous[1] - 0.001 for previous, current in zip(ordered, ordered[1:])):
+    if any(
+        current[0] < previous[1] - 0.001
+        for previous, current in zip(ordered, ordered[1:], strict=False)
+    ):
         errors.append("sampled_intervals_overlap")
     sampled_duration = sum(end - start for start, end, _ in valid_intervals)
     if abs(sampled_duration - duration) > 0.1:
