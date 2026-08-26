@@ -323,6 +323,20 @@ key_materials:
   # Strict model relabels may enter the final user-facing Key-Materials tree.
   # Rejected, uncertain and invalid multi-class replies remain in audit/cache.
   semantic_relabel_min_confidence: 0.70
+  # Compatibility-safe feature switch. When disabled, the existing final-frame
+  # supplement behavior is preserved exactly. Hardware profiles may enable the
+  # selective policy after local A/B validation.
+  selective_verification:
+    enabled: false
+    mode: ambiguous_or_high_risk
+    minimum_closed_set_confidence: 0.45
+    high_risk_actions:
+      - liquid_movement
+      - container_state_change
+      - pipette_transfer_operation
+    max_events_per_run: 120
+    max_views_per_event: 2
+    max_wall_seconds_per_run: 900
 
 mllm:
   enabled: true

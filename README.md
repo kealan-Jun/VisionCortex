@@ -41,6 +41,13 @@ ByteTrack 风格的两阶段关联保持对象轨迹；YOLO-World 与 Grounding 
 liquid/solid phase 像素观察。开放词汇框、SAM2 掩码和 LabPics 掩码都不能单独
 确认动作，正式生产仍受事件/参与对象框质量认证的 fail-closed 门禁约束。
 
+RTX 3090 Ti 配置还启用有界选择性复核：液体、容器状态和移液关键帧固定进入
+本地二次复核；其他动作仅在参与对象缺失、低置信、多实例或跨视角冲突时调用
+开放词汇模型。清晰的闭集结果不重复推理。每次运行最多复核 120 个事件、每个
+事件 2 个视角，并写入 `final_key_material_annotation.json` 的决策、模型耗时、
+预算和 `source_copy_bytes=0` 回执。紧急回退可设置
+`VISIONCORTEX_SELECTIVE_KEY_MATERIAL_VERIFICATION=false`，恢复原有行为。
+
 ### NAS 不可用时的本地验收
 
 以下入口全部只使用 `/srv/sentinel-data/VisionCortex3090Ti/Runtime`，不会创建、

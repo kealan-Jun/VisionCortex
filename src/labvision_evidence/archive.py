@@ -31,6 +31,10 @@ from .indexing import (
     stable_event_uid,
     stable_evidence_uid,
 )
+from .key_material_verification import (
+    SelectiveVerificationBudget,
+    plan_selective_key_material_verification,
+)
 from .mllm import (
     ArkStepAnalyzer,
     EVENT_SYSTEM_PROMPT,
@@ -2857,6 +2861,16 @@ def _rerender_curated_participant_annotations(
 ) -> dict[str, Any]:
     """Render final boxes after semantic relabeling corrected participants."""
 
+    verification_started = time.perf_counter()
+    verification_settings = dict(
+        ((config or {}).get("key_materials") or {}).get(
+            "selective_verification"
+        )
+        or {}
+    )
+    verification_budget = SelectiveVerificationBudget.from_settings(
+        verification_settings
+    )
     group_by_event = {
         event_id: group for group in groups for event_id in group.key_event_ids
     }
@@ -2898,8 +2912,30 @@ def _rerender_curated_participant_annotations(
             view_event.objects = _view_specific_participant_objects(
                 event, view_id
             )
+            maximum_interaction_gap_norm = float(
+                (
+                    (config or {})
+                    .get("models", {})
+                    .get("open_vocabulary_key_frame", {})
+                    .get("manipulated_object_max_actor_gap_norm", 0.08)
+                )
+            )
+            _, closed_set_participant_receipt = _event_participant_boxes(
+                view_event,
+                detected_boxes,
+                view_id=view_id,
+                maximum_interaction_gap_norm=maximum_interaction_gap_norm,
+            )
+            verification_decision = plan_selective_key_material_verification(
+                view_event,
+                view_id,
+                detected_boxes,
+                closed_set_participant_receipt,
+                verification_settings,
+                verification_budget,
+            )
             supplement_receipt: dict[str, Any] | None = None
-            if config is not None:
+            if config is not None and verification_decision["should_run"]:
                 supplement_boxes, supplement_receipt = (
                     _open_vocabulary_key_frame_supplement(
                         raw_frame,
@@ -2930,21 +2966,32 @@ def _rerender_curated_participant_annotations(
                         not in replaced_classes
                     ]
                     detected_boxes = [*detected_boxes, *supplement_boxes]
+            elif config is not None:
+                supplement_receipt = {
+                    "schema_version": "visioncortex-open-vocabulary-key-frame/1",
+                    "status": "skipped_by_selective_verification",
+                    "scope": "final accepted key frames only",
+                    "full_timeline_inference": False,
+                    "source_copy_bytes": 0,
+                    "token_usage": 0,
+                    "ark_calls": 0,
+                }
             boxes, receipt = _event_participant_boxes(
                 view_event,
                 detected_boxes,
                 view_id=view_id,
-                maximum_interaction_gap_norm=float(
-                    (
-                        (config or {})
-                        .get("models", {})
-                        .get("open_vocabulary_key_frame", {})
-                        .get("manipulated_object_max_actor_gap_norm", 0.08)
-                    )
-                ),
+                maximum_interaction_gap_norm=maximum_interaction_gap_norm,
             )
+            receipt["selective_verification"] = verification_decision
             if supplement_receipt is not None:
                 receipt["open_vocabulary_supplement"] = supplement_receipt
+            if verification_decision["status"] == "deferred_budget_exhausted":
+                deferred_note = (
+                    "关键素材本地二次复核预算已用尽；保留闭集检测证据，"
+                    f"未执行开放词汇补全（{verification_decision['reason']}）"
+                )
+                if deferred_note not in event.uncertainty:
+                    event.uncertainty.append(deferred_note)
             segmentation_receipt: dict[str, Any] | None = None
             if config is not None:
                 segmentation_settings = (
@@ -3067,12 +3114,79 @@ def _rerender_curated_participant_annotations(
             (first_material_view, third_material_view),
         )
         event.observability["key_material_annotation"] = annotation
+    decisions = [
+        record["selective_verification"]
+        for record in records
+        if isinstance(record.get("selective_verification"), dict)
+    ]
+    decision_status_counts: dict[str, int] = {}
+    for decision in decisions:
+        status = str(decision.get("status") or "unknown")
+        decision_status_counts[status] = decision_status_counts.get(status, 0) + 1
+    supplements = [
+        record["open_vocabulary_supplement"]
+        for record in records
+        if isinstance(record.get("open_vocabulary_supplement"), dict)
+    ]
+    grounding_receipts = [
+        supplement["grounding_dino_fallback"]
+        for supplement in supplements
+        if isinstance(supplement.get("grounding_dino_fallback"), dict)
+    ]
+    verification_summary = {
+        "schema_version": "visioncortex-selective-key-material-verification-index/1",
+        "enabled": bool(verification_settings.get("enabled", False)),
+        "mode": str(
+            verification_settings.get("mode") or "ambiguous_or_high_risk"
+        ),
+        "policy": (
+            "closed-set evidence for every accepted event; expensive local models "
+            "only for high-risk or ambiguous final role frames"
+        ),
+        "decision_count": len(decisions),
+        "decision_status_counts": dict(sorted(decision_status_counts.items())),
+        "open_vocabulary_executed_count": sum(
+            item.get("status") == "executed" for item in supplements
+        ),
+        "grounding_dino_executed_count": sum(
+            item.get("status") == "executed" for item in grounding_receipts
+        ),
+        "open_vocabulary_model_load_seconds": round(
+            sum(float(item.get("model_load_seconds") or 0.0) for item in supplements),
+            6,
+        ),
+        "open_vocabulary_inference_seconds": round(
+            sum(float(item.get("inference_seconds") or 0.0) for item in supplements),
+            6,
+        ),
+        "grounding_dino_model_load_seconds": round(
+            sum(
+                float(item.get("model_load_seconds") or 0.0)
+                for item in grounding_receipts
+            ),
+            6,
+        ),
+        "grounding_dino_inference_seconds": round(
+            sum(
+                float(item.get("inference_seconds") or 0.0)
+                for item in grounding_receipts
+            ),
+            6,
+        ),
+        "wall_seconds": round(time.perf_counter() - verification_started, 6),
+        "budget": verification_budget.summary(),
+        "full_timeline_inference": False,
+        "source_copy_bytes": 0,
+        "ark_calls": 0,
+        "token_usage": 0,
+    }
     report = {
         "schema_version": "visioncortex-final-key-material-annotation/1",
         "mode": "event_participants_only",
         "render_pass": "post_semantic_curation",
         "event_count": len(events),
         "rendered_view_count": len(records),
+        "selective_verification": verification_summary,
         "records": records,
     }
     write_json(layout.json_config / "final_key_material_annotation.json", report)
@@ -3951,11 +4065,15 @@ def _open_vocabulary_key_frame_supplement(
 
     cache_key = str(model_path)
     cached = _OPEN_VOCABULARY_MODEL_CACHE.get(cache_key)
+    model_cache_hit = cached is not None
+    model_load_seconds = 0.0
     if cached is None:
+        model_load_started = time.perf_counter()
         cached = {
             "model": YOLOWorld(str(model_path)),
             "prompts": None,
         }
+        model_load_seconds = time.perf_counter() - model_load_started
         _OPEN_VOCABULARY_MODEL_CACHE[cache_key] = cached
     model = cached["model"]
     if cached.get("prompts") != prompts:
@@ -3967,6 +4085,7 @@ def _open_vocabulary_key_frame_supplement(
         model.to("cpu")
         model.set_classes(prompts)
         cached["prompts"] = list(prompts)
+    inference_started = time.perf_counter()
     result = model.predict(
         frame,
         device=int(settings.get("device", 0)),
@@ -3975,6 +4094,7 @@ def _open_vocabulary_key_frame_supplement(
         iou=float(settings.get("iou", 0.50)),
         verbose=False,
     )[0]
+    inference_seconds = time.perf_counter() - inference_started
     height, width = frame.shape[:2]
     grounded: list[dict[str, Any]] = []
     for class_index, confidence, coordinates in zip(
@@ -4389,6 +4509,9 @@ def _open_vocabulary_key_frame_supplement(
         "full_timeline_inference": False,
         "model": str(model_path),
         "model_sha256": model_sha256,
+        "model_cache_hit": model_cache_hit,
+        "model_load_seconds": round(model_load_seconds, 6),
+        "inference_seconds": round(inference_seconds, 6),
         "clip_model": str(clip_path),
         "clip_model_sha256": clip_sha256,
         "prompts": prompts,

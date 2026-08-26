@@ -126,6 +126,20 @@ def _apply_environment_overrides(config: dict[str, Any]) -> None:
         if value:
             models[key] = value
 
+    selective_verification = os.getenv(
+        "VISIONCORTEX_SELECTIVE_KEY_MATERIAL_VERIFICATION"
+    )
+    if selective_verification is not None:
+        normalized = selective_verification.strip().lower()
+        if normalized not in {"true", "false", "1", "0", "yes", "no"}:
+            raise ValueError(
+                "VISIONCORTEX_SELECTIVE_KEY_MATERIAL_VERIFICATION must be "
+                "true or false"
+            )
+        config.setdefault("key_materials", {}).setdefault(
+            "selective_verification", {}
+        )["enabled"] = normalized in {"true", "1", "yes"}
+
 
 def load_manifest(path: Path) -> RunManifest:
     with path.open("r", encoding="utf-8") as handle:

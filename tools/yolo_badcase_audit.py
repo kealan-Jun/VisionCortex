@@ -185,6 +185,7 @@ def _prediction_record(request: FrameRequest, result: Any) -> dict[str, Any]:
         result.boxes.cls.detach().cpu().tolist(),
         result.boxes.conf.detach().cpu().tolist(),
         result.boxes.xyxy.detach().cpu().tolist(),
+        strict=True,
     ):
         detections.append(
             {
@@ -279,7 +280,7 @@ def run_inference(
             )
             records.extend(
                 _prediction_record(request, result)
-                for request, result in zip(valid_requests, results)
+                for request, result in zip(valid_requests, results, strict=True)
             )
         runtime[role] = {
             "model_path": str(model_path.resolve()),
@@ -526,7 +527,6 @@ def materialize_badcase_images(
         if frame is None:
             continue
         predicted = _draw_detections(frame, record["detections"])
-        height = max(frame.shape[0], predicted.shape[0])
         header = np.full((80, frame.shape[1] * 2, 3), 25, dtype=np.uint8)
         cv2.putText(
             header,

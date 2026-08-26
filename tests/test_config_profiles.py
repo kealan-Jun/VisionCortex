@@ -61,6 +61,11 @@ def test_rtx3090ti_ubuntu_profile_matches_host_and_keeps_view_count_dynamic():
     assert liquid["required_for_selected_actions"] is True
     assert len(liquid["checkpoint_sha256"]) == 64
     assert liquid["license"] == "CC-BY-4.0"
+    verification = config["key_materials"]["selective_verification"]
+    assert verification["enabled"] is True
+    assert verification["mode"] == "ambiguous_or_high_risk"
+    assert verification["max_events_per_run"] == 120
+    assert verification["max_views_per_event"] == 2
 
 
 def test_rtx3090ti_local_profile_has_no_nas_storage_paths():
@@ -70,6 +75,7 @@ def test_rtx3090ti_local_profile_has_no_nas_storage_paths():
 
     assert config["mllm"]["enabled"] is False
     assert config["storage"]["sync_to_nas"] is False
+    assert config["key_materials"]["selective_verification"]["enabled"] is True
     for key in (
         "index_csv",
         "device_registry_path",
@@ -90,6 +96,9 @@ def test_ubuntu_runtime_paths_and_engines_can_be_overridden(monkeypatch):
     monkeypatch.setenv("VISIONCORTEX_LOCAL_STAGING_ROOT", "/runtime/staging")
     monkeypatch.setenv("VISIONCORTEX_FIRST_PERSON_ENGINE", "/cache/fp.engine")
     monkeypatch.setenv("VISIONCORTEX_THIRD_PERSON_ENGINE", "/cache/tp.engine")
+    monkeypatch.setenv(
+        "VISIONCORTEX_SELECTIVE_KEY_MATERIAL_VERIFICATION", "false"
+    )
 
     config = load_config(profile)
 
@@ -97,6 +106,16 @@ def test_ubuntu_runtime_paths_and_engines_can_be_overridden(monkeypatch):
     assert config["storage"]["local_staging_root"] == "/runtime/staging"
     assert config["models"]["first_person_engine"] == "/cache/fp.engine"
     assert config["models"]["third_person_engine"] == "/cache/tp.engine"
+    assert config["key_materials"]["selective_verification"]["enabled"] is False
+
+
+def test_invalid_selective_verification_environment_override_fails(monkeypatch):
+    monkeypatch.setenv(
+        "VISIONCORTEX_SELECTIVE_KEY_MATERIAL_VERIFICATION", "sometimes"
+    )
+
+    with pytest.raises(ValueError, match="must be true or false"):
+        load_config()
 
 
 def test_profile_inheritance_rejects_parent_directory_escape(tmp_path: Path):

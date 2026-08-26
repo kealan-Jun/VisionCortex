@@ -16,8 +16,11 @@ from typing import Any, Callable
 import cv2
 import numpy as np
 
-from .schemas import AlignmentTransform, BoxEvidence, FrameEvidence, VideoInfo, ViewInput, ViewRole
+from .key_material_verification import (
+    validate_selective_key_material_verification,
+)
 from .liquid_semantic import validate_liquid_semantic_runtime
+from .schemas import AlignmentTransform, BoxEvidence, FrameEvidence, VideoInfo, ViewInput, ViewRole
 from .temporal_segmentation import validate_temporal_segmentation_runtime
 from .video_io import (
     PhysicalSegmentDecodeSession,
@@ -940,6 +943,16 @@ def validate_models(config: dict[str, Any]) -> dict[str, Any]:
         config
     )
     runtime["liquid_semantic_sidecar"] = validate_liquid_semantic_runtime(config)
+    runtime["selective_key_material_verification"] = (
+        validate_selective_key_material_verification(
+            dict(
+                (config.get("key_materials") or {}).get(
+                    "selective_verification"
+                )
+                or {}
+            )
+        )
+    )
     report["runtime"] = runtime
     report["consistent"] = True
     return report
