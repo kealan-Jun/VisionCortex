@@ -174,6 +174,12 @@ jobs:
           }
           ffmpeg -version
           ffprobe -version
+      - name: Provision the FFmpeg runtime dependency
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ffmpeg
       - name: Verify the FFmpeg runtime dependency
         if: runner.os != 'Windows'
         shell: bash
