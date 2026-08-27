@@ -1650,6 +1650,137 @@ def _attach_archive_performance_display(
     }
 
 
+def _summarize_key_material_verification(
+    annotation: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+    records = [
+        item for item in annotation.get("records") or [] if isinstance(item, dict)
+    ]
+    by_event: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        event_id = str(record.get("event_id") or "").strip()
+        if event_id:
+            by_event.setdefault(event_id, []).append(record)
+    event_summaries: dict[str, dict[str, Any]] = {}
+    model_execution_counts: dict[str, int] = {}
+    for event_id, event_records in by_event.items():
+        views = []
+        event_models: set[str] = set()
+        confidences: list[float] = []
+        inference_seconds = 0.0
+        model_load_seconds = 0.0
+        statuses: list[str] = []
+        uncertainty_reasons: set[str] = set()
+        for record in event_records:
+            decision = record.get("selective_verification") or {}
+            status = str(decision.get("status") or "not_recorded")
+            statuses.append(status)
+            assessment = decision.get("assessment") or {}
+            uncertainty_reasons.update(str(item) for item in assessment.get("reasons") or [])
+            if status == "deferred_budget_exhausted":
+                uncertainty_reasons.add(str(decision.get("reason") or status))
+            models = ["closed_set_yolo_tensorrt"]
+            supplement = record.get("open_vocabulary_supplement") or {}
+            if supplement.get("status") == "executed":
+                models.append("yolo_world_v2")
+                model_load_seconds += float(supplement.get("model_load_seconds") or 0.0)
+                inference_seconds += float(supplement.get("inference_seconds") or 0.0)
+            grounding = supplement.get("grounding_dino_fallback") or {}
+            if grounding.get("status") == "executed":
+                models.append("grounding_dino_base")
+                model_load_seconds += float(grounding.get("model_load_seconds") or 0.0)
+                inference_seconds += float(grounding.get("inference_seconds") or 0.0)
+            segmentation = record.get("temporal_participant_segmentation") or {}
+            if segmentation.get("status") == "completed":
+                models.append("sam2_temporal_participant")
+                inference_seconds += float(segmentation.get("inference_seconds") or 0.0)
+            liquid = record.get("liquid_semantic_sidecar") or {}
+            if liquid.get("status") == "completed":
+                models.append("labpics_pspnet_liquid_semantic")
+                inference_seconds += float(liquid.get("inference_seconds") or 0.0)
+            for item in record.get("rendered_detections") or []:
+                if item.get("confidence") is not None:
+                    confidences.append(float(item["confidence"]))
+            event_models.update(models)
+            for model in models:
+                model_execution_counts[model] = model_execution_counts.get(model, 0) + 1
+            views.append(
+                {
+                    "view_id": record.get("view_id"),
+                    "role_label": record.get("role_label"),
+                    "status": status,
+                    "models": models,
+                    "rendered_classes": record.get("rendered_classes") or [],
+                    "rendered_detections": record.get("rendered_detections") or [],
+                    "minimum_rendered_confidence": record.get(
+                        "minimum_rendered_confidence"
+                    ),
+                    "uncertainty_reasons": sorted(
+                        str(item) for item in assessment.get("reasons") or []
+                    ),
+                }
+            )
+        if "deferred_budget_exhausted" in statuses:
+            overall_status = "verification_deferred_budget_exhausted"
+        elif "admitted" in statuses:
+            overall_status = "secondary_verification_executed"
+        elif statuses and all(
+            item == "skipped_clear_closed_set_evidence" for item in statuses
+        ):
+            overall_status = "clear_closed_set_evidence"
+        else:
+            overall_status = "verification_recorded"
+        event_summaries[event_id] = {
+            "status": overall_status,
+            "models": sorted(event_models),
+            "view_count": len(views),
+            "views": views,
+            "confidence": {
+                "minimum": round(min(confidences), 6) if confidences else None,
+                "maximum": round(max(confidences), 6) if confidences else None,
+            },
+            "timing": {
+                "model_load_seconds": round(model_load_seconds, 6),
+                "inference_seconds": round(inference_seconds, 6),
+            },
+            "uncertain": bool(uncertainty_reasons),
+            "uncertainty_reasons": sorted(uncertainty_reasons),
+        }
+    selective = annotation.get("selective_verification") or {}
+    summary = {
+        "available": bool(annotation),
+        "mode": annotation.get("mode"),
+        "event_count": annotation.get("event_count", len(event_summaries)),
+        "rendered_view_count": annotation.get("rendered_view_count", len(records)),
+        "policy": selective.get("policy"),
+        "decision_status_counts": selective.get("decision_status_counts") or {},
+        "model_execution_counts": dict(sorted(model_execution_counts.items())),
+        "timing": {
+            "wall_seconds": selective.get("wall_seconds"),
+            "open_vocabulary_model_load_seconds": selective.get(
+                "open_vocabulary_model_load_seconds"
+            ),
+            "open_vocabulary_inference_seconds": selective.get(
+                "open_vocabulary_inference_seconds"
+            ),
+            "grounding_dino_model_load_seconds": selective.get(
+                "grounding_dino_model_load_seconds"
+            ),
+            "grounding_dino_inference_seconds": selective.get(
+                "grounding_dino_inference_seconds"
+            ),
+        },
+        "budget": selective.get("budget") or {},
+        "uncertain_event_count": sum(
+            item["uncertain"] for item in event_summaries.values()
+        ),
+        "source_copy_bytes": selective.get("source_copy_bytes", 0),
+        "ark_calls": selective.get("ark_calls", 0),
+        "token_usage": selective.get("token_usage", 0),
+    }
+    return summary, event_summaries
+
+
 @app.get("/api/archives/{archive_name}")
 def archive_detail(archive_name: str) -> dict[str, Any]:
     root = _resolve_archive(archive_name)
@@ -1666,6 +1797,13 @@ def archive_detail(archive_name: str) -> dict[str, Any]:
         root / "JSON-Config-Files" / "key_material_recall_eval.json"
     )
     key_material_recall_eval = _read_json(recall_eval_path, {}) or {}
+    final_annotation_path = (
+        root / "JSON-Config-Files" / "final_key_material_annotation.json"
+    )
+    final_annotation = _read_json(final_annotation_path, {}) or {}
+    key_material_verification, verification_by_event = (
+        _summarize_key_material_verification(final_annotation)
+    )
     _attach_archive_performance_display(metrics, acceptance)
     key_events = _read_json(
         root / "Key-Materials" / "Key-Materials-Model-Understanding.json", []
@@ -1734,6 +1872,18 @@ def archive_detail(archive_name: str) -> dict[str, Any]:
                 "aligned_frame_url": _file_url(archive_name, frame["path"]) if frame else None,
                 "aligned_clip_url": _file_url(archive_name, clip["path"]) if clip else None,
                 "dual_view_material_ready": bool(frame and clip),
+                "verification": verification_by_event.get(
+                    str(event.get("event_id") or ""),
+                    {
+                        "status": "not_available_historical_archive",
+                        "models": [],
+                        "views": [],
+                        "uncertain": True,
+                        "uncertainty_reasons": [
+                            "final_key_material_annotation_not_available"
+                        ],
+                    },
+                ),
                 "experiment_group": {
                     "group_id": group.get("group_id") or event.get("parent_event_id"),
                     "name": group.get("experiment_name") or event.get("parent_event_id"),
@@ -1787,6 +1937,9 @@ def archive_detail(archive_name: str) -> dict[str, Any]:
         "key_material_recall_eval": _file_url(
             archive_name, "JSON-Config-Files/key_material_recall_eval.json"
         ) if recall_eval_path.is_file() else None,
+        "final_key_material_annotation": _file_url(
+            archive_name, "JSON-Config-Files/final_key_material_annotation.json"
+        ) if final_annotation_path.is_file() else None,
         "daily_report_json": _file_url(archive_name, daily_manifest["json"])
         if daily_manifest.get("json")
         else None,
@@ -1827,6 +1980,7 @@ def archive_detail(archive_name: str) -> dict[str, Any]:
         "metrics": metrics,
         "quality_acceptance": quality_acceptance,
         "key_material_recall_eval": key_material_recall_eval,
+        "key_material_verification": key_material_verification,
         "observability": _run_snapshot_from_root(root),
         "daily_report": daily_report,
         "daily_report_manifest": daily_manifest,

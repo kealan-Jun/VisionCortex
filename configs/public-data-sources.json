@@ -29,6 +29,45 @@
       "automated_acquisition_allowed": false,
       "reason": "metadata-only fallback; V2 is the selected domain source"
     },
+    "WasedaChemicalApparatus": {
+      "title": "Annotated Chemical Apparatus Image Dataset",
+      "license": "CC-BY-4.0",
+      "source_record": "https://data.mendeley.com/datasets/8p2hvgdvpn/1",
+      "scope": "5,078 real chemistry-lab frames with human YOLO boxes for hands, pipettes and six apparatus classes",
+      "annotation_authority": "public_human_annotations",
+      "automated_acquisition_allowed": true,
+      "artifact": {
+        "url": "https://data.mendeley.com/public-files/datasets/8p2hvgdvpn/files/99613858-4378-4f8a-9270-601206f59370/file_downloaded",
+        "filename": "Chemical-Apparatus-Image-Dataset.zip",
+        "bytes": 4822671962,
+        "sha256": "ada167a24f40d2afb50b0179708238344daa7ba45d14e3ff7c6233553869a1f5",
+        "maximum_uncompressed_bytes": 20000000000
+      }
+    },
+    "FineBio": {
+      "title": "FineBio",
+      "license": "non-commercial dataset agreement; signed approval required",
+      "source_record": "https://github.com/aistairc/FineBio",
+      "scope": "multi-view biological protocols, steps, atomic operations, object boxes and manipulation state",
+      "automated_acquisition_allowed": false,
+      "reason": "dataset, annotations and pretrained weights require a signed license agreement and emailed credentials"
+    },
+    "ChemEq25": {
+      "title": "Chemistry Lab Image Dataset Covering 25 Apparatus Categories",
+      "license": "CC-BY-4.0",
+      "source_record": "https://figshare.com/articles/dataset/29110433",
+      "scope": "4,599 real laboratory images with YOLO boxes for 25 apparatus classes including pipette",
+      "automated_acquisition_allowed": false,
+      "reason": "the pinned v3 artifact is RAR; metadata is retained until the fail-closed extractor supports that format"
+    },
+    "TransBiolab": {
+      "title": "TransBiolab",
+      "license": "not stated on the official project page",
+      "source_record": "https://dualtransparency.github.io/TransBiolab/",
+      "scope": "multi-view transparent biomedical objects with masks, RGB-D, calibration and pipette geometry",
+      "automated_acquisition_allowed": false,
+      "reason": "license is not explicit and download is hosted on Google Drive; metadata-only until terms and an immutable artifact are verified"
+    },
     "MatSeg": {
       "title": "MatSeg material segmentation dataset",
       "license": "CC0-1.0",

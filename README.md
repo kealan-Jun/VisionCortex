@@ -64,6 +64,12 @@ labvision benchmark-local-hardware --output <local-output> \
   --media <h264-1> --media <h264-2> --media <h264-3> \
   --media <h264-4> --media <h264-5> --media <h264-6>
 
+# 依次测量每角色 1/2/3 个 TensorRT 压测上下文；只给出容量结论，不自动改生产并发
+labvision tune-local-hardware --output <new-local-output> \
+  --duration-seconds 20 --config configs/rtx3090ti-ubuntu-local.yaml \
+  --media <h264-1> --media <h264-2> --media <h264-3> \
+  --media <h264-4> --media <h264-5> --media <h264-6>
+
 # 真实执行全部本地生产 CV 模型；使用公开人工标注样本，不访问 NAS/豆包
 labvision accept-local-models \
   --dataset /srv/sentinel-data/VisionCortex3090Ti/Runtime/PublicDatasets/LabPicsChemistry/extracted \
@@ -94,6 +100,28 @@ ZIP，再拒绝路径穿越/软链接并有界解包。模型共识只能通过
 `build-yolo-training-dataset` 用软链接或硬链接构建零拷贝训练集；
 `train-yolo-model` 只接受 reviewed ground truth，并把新权重标记为“未认证候选”。
 公开模型、模型共识或训练日志都不能解除生产认证门禁。
+
+Waseda Chemical Apparatus 公共人工框数据已固定 URL、大小与 SHA-256。它可用于
+补充 hand、pipette 和六类实验器具，但不能直接替换项目的 21 类生产本体：
+
+```bash
+labvision prepare-public-dataset --dataset-id WasedaChemicalApparatus \
+  --destination <local-public-dataset-root>
+labvision build-public-yolo-training-view --source <extracted-root> \
+  --dataset-receipt <dataset-receipt.json> --output <new-zero-copy-view>
+labvision train-yolo-model --dataset <new-zero-copy-view> --base-model <best.pt> \
+  --output <new-candidate> --epochs 60 --max-hours 1.5 --patience 15
+labvision evaluate-yolo-model-on-human-truth --dataset <new-zero-copy-view> \
+  --model <new-candidate>/weights/best.pt --split test --output <new-evaluation>
+```
+
+训练与测试均在 epoch 边界强制墙钟上限，记录逐类 P/R/F1/AP、GPU/显存/功耗
+遥测，且固定 `production_certified=false`。Web 的“关键素材模型质量账本”展示每个
+事件实际执行的闭集 YOLO、YOLO-World、Grounding DINO、SAM2/LabPics、框置信度、
+二次核验耗时与保留的不确定性；没有人工真值时不会把模型置信度冒充准确率。
+已完成的公共模型候选及其独立留出集指标登记在
+`configs/models/public-apparatus-candidates.json`；注册不等于上线，只有本体兼容且
+通过内部真实六视角认证的候选才允许写入生产配置。
 
 固定基准不会重复创建实验目录：先启动 Web，再运行 `deployment\rtx4060\04-重跑固定六路基准.ps1`，由常驻 Web 服务异步执行并复用 `Y:\VisionCortexExperimentArchive\CustomFlow_standard_correct_12_ABCFA_0001--exp_20260810_144014_e918b762`。不要在有超时限制的命令包装器里前台运行 `run-fixed-benchmark`。其他用户上传任务仍按实际上传路数动态创建独立档案。
 

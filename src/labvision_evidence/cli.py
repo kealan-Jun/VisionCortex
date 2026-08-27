@@ -44,7 +44,7 @@ from .consensus_labels import build_consensus_box_labels
 from .credentials import ensure_ark_api_key
 from .daily_reports import generate_daily_report_from_archive
 from .detection import validate_models
-from .hardware_acceptance import run_hardware_acceptance
+from .hardware_acceptance import run_hardware_acceptance, tune_hardware_acceptance
 from .labpics_evaluation import (
     calibrate_labpics_threshold,
     evaluate_labpics_heldout,
@@ -85,7 +85,12 @@ from .storage import (
 )
 from .validation import validate_experiment_and_material_quality
 from .yolo_evaluation import evaluate_files as evaluate_yolo_files
-from .yolo_training import build_yolo_training_dataset, train_yolo_model
+from .yolo_training import (
+    build_public_yolo_training_view,
+    build_yolo_training_dataset,
+    evaluate_yolo_model_on_human_truth,
+    train_yolo_model,
+)
 
 
 app = typer.Typer(no_args_is_help=True, help="多视角化学实验视频证据流水线")
@@ -874,6 +879,26 @@ def accept_local_models_command(
     typer.echo(str(receipt))
 
 
+@app.command("tune-local-hardware")
+def tune_local_hardware_command(
+    output: Annotated[Path, typer.Option("--output", "-o")],
+    media: Annotated[list[Path], typer.Option("--media", exists=True, dir_okay=False)],
+    duration: Annotated[float, typer.Option("--duration-seconds")] = 20.0,
+    config: Annotated[
+        Path, typer.Option("--config", "-c", exists=True, dir_okay=False)
+    ] = Path("configs/rtx3090ti-ubuntu-local.yaml"),
+) -> None:
+    """Select the fastest stable bounded six-lane TensorRT worker profile."""
+
+    result = tune_hardware_acceptance(
+        output,
+        load_config(config),
+        media,
+        duration_seconds=duration,
+    )
+    typer.echo(str(result))
+
+
 @app.command("evaluate-liquid-semantic")
 def evaluate_liquid_semantic_command(
     dataset: Annotated[Path, typer.Option("--dataset", exists=True, file_okay=False)],
@@ -1079,6 +1104,22 @@ def build_yolo_training_dataset_command(
     typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+@app.command("build-public-yolo-training-view")
+def build_public_yolo_training_view_command(
+    source: Annotated[
+        Path, typer.Option("--source", exists=True, file_okay=False)
+    ],
+    dataset_receipt: Annotated[
+        Path, typer.Option("--dataset-receipt", exists=True, dir_okay=False)
+    ],
+    output: Annotated[Path, typer.Option("--output", "-o")],
+) -> None:
+    """Validate public human labels and build a zero-copy YOLO training view."""
+
+    payload = build_public_yolo_training_view(source, dataset_receipt, output)
+    typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
 @app.command("train-yolo-model")
 def train_yolo_model_command(
     dataset: Annotated[
@@ -1092,6 +1133,11 @@ def train_yolo_model_command(
     image_size: Annotated[int, typer.Option("--image-size", min=64)] = 1280,
     batch: Annotated[int, typer.Option("--batch", min=1)] = 8,
     device: Annotated[str, typer.Option("--device")] = "0",
+    patience: Annotated[int, typer.Option("--patience", min=0)] = 20,
+    max_hours: Annotated[
+        float, typer.Option("--max-hours", min=0.01, max=24.0)
+    ] = 2.0,
+    workers: Annotated[int, typer.Option("--workers", min=0)] = 8,
 ) -> None:
     """Train a real YOLO candidate; deployment remains certification-gated."""
 
@@ -1103,6 +1149,39 @@ def train_yolo_model_command(
         image_size=image_size,
         batch=batch,
         device=device,
+        patience=patience,
+        max_hours=max_hours,
+        workers=workers,
+    )
+    typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+@app.command("evaluate-yolo-model-on-human-truth")
+def evaluate_yolo_model_on_human_truth_command(
+    dataset: Annotated[
+        Path, typer.Option("--dataset", exists=True, file_okay=False)
+    ],
+    model: Annotated[
+        Path, typer.Option("--model", exists=True, dir_okay=False)
+    ],
+    output: Annotated[Path, typer.Option("--output", "-o")],
+    split: Annotated[str, typer.Option("--split")] = "test",
+    image_size: Annotated[int, typer.Option("--image-size", min=64)] = 640,
+    batch: Annotated[int, typer.Option("--batch", min=1)] = 32,
+    device: Annotated[str, typer.Option("--device")] = "0",
+    workers: Annotated[int, typer.Option("--workers", min=0)] = 8,
+) -> None:
+    """Evaluate a candidate on held-out human labels; never promote it."""
+
+    payload = evaluate_yolo_model_on_human_truth(
+        dataset,
+        model,
+        output,
+        split=split,
+        image_size=image_size,
+        batch=batch,
+        device=device,
+        workers=workers,
     )
     typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
 

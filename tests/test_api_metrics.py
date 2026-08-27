@@ -343,6 +343,85 @@ def test_archived_quality_fallback_uses_evidence_without_fabricating_accuracy():
     assert quality["key_materials"]["cross_view_or_explicit_uncertainty_count"] == 2
 
 
+def test_key_material_verification_summary_exposes_models_timing_and_uncertainty():
+    annotation = {
+        "mode": "event_participants_only",
+        "event_count": 1,
+        "rendered_view_count": 2,
+        "selective_verification": {
+            "policy": "bounded final frames only",
+            "decision_status_counts": {"admitted": 1, "deferred_budget_exhausted": 1},
+            "wall_seconds": 3.5,
+            "budget": {"admitted_event_count": 1, "deferred_count": 1},
+            "source_copy_bytes": 0,
+            "ark_calls": 0,
+            "token_usage": 0,
+        },
+        "records": [
+            {
+                "event_id": "EVENT-1",
+                "view_id": "fp",
+                "role_label": "First-Person",
+                "rendered_classes": ["hand", "pipette"],
+                "rendered_detections": [
+                    {"class_name": "hand", "confidence": 0.91},
+                    {"class_name": "pipette", "confidence": 0.72},
+                ],
+                "minimum_rendered_confidence": 0.72,
+                "selective_verification": {
+                    "status": "admitted",
+                    "assessment": {"reasons": ["low_closed_set_confidence"]},
+                },
+                "open_vocabulary_supplement": {
+                    "status": "executed",
+                    "model_load_seconds": 1.2,
+                    "inference_seconds": 0.3,
+                    "grounding_dino_fallback": {
+                        "status": "executed",
+                        "model_load_seconds": 1.5,
+                        "inference_seconds": 0.4,
+                    },
+                },
+            },
+            {
+                "event_id": "EVENT-1",
+                "view_id": "tp",
+                "role_label": "Third-Person",
+                "rendered_classes": ["hand", "pipette"],
+                "rendered_detections": [
+                    {"class_name": "pipette", "confidence": 0.84}
+                ],
+                "minimum_rendered_confidence": 0.84,
+                "selective_verification": {
+                    "status": "deferred_budget_exhausted",
+                    "reason": "wall_time_budget_exhausted",
+                    "assessment": {"reasons": []},
+                },
+            },
+        ],
+    }
+
+    summary, by_event = api._summarize_key_material_verification(annotation)
+
+    event = by_event["EVENT-1"]
+    assert event["status"] == "verification_deferred_budget_exhausted"
+    assert event["models"] == [
+        "closed_set_yolo_tensorrt",
+        "grounding_dino_base",
+        "yolo_world_v2",
+    ]
+    assert event["confidence"] == {"minimum": 0.72, "maximum": 0.91}
+    assert event["timing"] == {
+        "model_load_seconds": 2.7,
+        "inference_seconds": 0.7,
+    }
+    assert event["uncertain"] is True
+    assert "wall_time_budget_exhausted" in event["uncertainty_reasons"]
+    assert summary["uncertain_event_count"] == 1
+    assert summary["model_execution_counts"]["closed_set_yolo_tensorrt"] == 2
+    assert summary["source_copy_bytes"] == 0
+
+
 def test_archive_performance_display_separates_cold_start_from_reuse_run():
     metrics = {
         "total_duration_seconds": 572.15617,

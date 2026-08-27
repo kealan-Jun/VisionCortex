@@ -289,6 +289,18 @@ svg { display: block; width: 17px; height: 17px; fill: none; stroke: currentColo
 .performance-compare strong { color: var(--brand); font: 750 20px/1.2 ui-monospace,"Cascadia Code",monospace; }
 .fact-list { margin: 5px 0 0; padding-left: 17px; color: var(--text-2); font-size: 9px; line-height: 1.55; }
 .usage-box { border: 1px solid var(--border); border-radius: 10px; padding: 9px 10px; color: var(--text-2); background: #f7fafa; font: 9px ui-monospace,"Cascadia Code",monospace; }
+.verification-trace { border: 1px solid var(--border); border-radius: 12px; background: #f8fbfb; }
+.verification-trace > summary { cursor: pointer; padding: 11px 13px; color: var(--brand); font-size: 10px; font-weight: 780; }
+.verification-grid { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 7px; padding: 0 12px 10px; }
+.verification-grid > div { display: grid; min-width: 0; gap: 3px; border-radius: 8px; padding: 8px; background: #fff; }
+.verification-grid small { color: var(--text-3); font-size: 8px; }
+.verification-grid strong { overflow-wrap: anywhere; font-size: 9px; }
+.model-chip-list { display: flex; flex-wrap: wrap; gap: 5px; padding: 0 12px 10px; }
+.model-chip-list span { border-radius: 999px; padding: 4px 7px; color: var(--brand); background: var(--brand-soft); font-size: 8px; font-weight: 720; }
+.verification-view-table { background: #fff; }
+.verification-warning, .verification-pass { margin: 10px 12px 12px; border-radius: 8px; padding: 8px 10px; font-size: 9px; line-height: 1.55; }
+.verification-warning { color: var(--warning); background: rgba(182,106,36,.08); }
+.verification-pass { color: var(--success); background: rgba(32,138,104,.07); }
 .metric-table { width: 100%; border-collapse: collapse; }
 .metric-table th, .metric-table td { border-bottom: 1px solid var(--border); padding: 11px 13px; font-size: 10px; text-align: left; }
 .metric-table th { color: var(--text-3); font-size: 9px; }

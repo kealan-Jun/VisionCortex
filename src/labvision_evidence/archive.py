@@ -2080,6 +2080,25 @@ def _event_participant_boxes(
         "suppressed_background_box_count": len(detections) - len(rendered),
         "suppressed_same_class_instance_count": same_class_suppressed,
         "rendered_classes": rendered_classes,
+        "rendered_detections": [
+            {
+                "class_name": str(box.get("class_name") or ""),
+                "confidence": round(float(box.get("confidence") or 0.0), 6),
+                "detector_source": str(
+                    box.get("detector_source") or "closed_set_yolo_tensorrt"
+                ),
+                "track_id": box.get("track_id"),
+            }
+            for box in rendered
+        ],
+        "minimum_rendered_confidence": (
+            round(
+                min(float(box.get("confidence") or 0.0) for box in rendered),
+                6,
+            )
+            if rendered
+            else None
+        ),
         "rendered_track_ids": [
             box.get("track_id") for box in rendered if box.get("track_id") is not None
         ],

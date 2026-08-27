@@ -1,0 +1,102 @@
+{
+  "schema_version": "visioncortex-public-apparatus-candidate-registry/1",
+  "candidates": {
+    "waseda-apparatus-yolo26s-v2": {
+      "status": "evaluated_not_promoted",
+      "intended_role": "offline candidate and teacher for a future ontology-aligned training run",
+      "dataset": {
+        "title": "Annotated Chemical Apparatus Image Dataset",
+        "source_record": "https://data.mendeley.com/datasets/8p2hvgdvpn/1",
+        "license": "CC-BY-4.0",
+        "truth_status": "public_human_annotations",
+        "test_images": 205,
+        "test_annotations": 405
+      },
+      "artifact": {
+        "path": "/srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/Waseda-Apparatus-Candidate-v2/weights/best.pt",
+        "sha256": "469d3a402d7f7d62e17db501811472aac211951e10b417364fbb92c853bd8878",
+        "size_bytes": 20305406,
+        "training_receipt": "/srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/Waseda-Apparatus-Candidate-v2/visioncortex-training-receipt.json",
+        "heldout_evaluation_receipt": "/srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/Waseda-Apparatus-Candidate-v2-Test/visioncortex-evaluation-receipt.json"
+      },
+      "heldout_metrics": {
+        "precision": 0.8642116244261722,
+        "recall": 0.7176265934181327,
+        "map50": 0.8329680680059944,
+        "map50_95": 0.7483226049375358,
+        "per_class": {
+          "hand": {
+            "precision": 0.900333,
+            "recall": 0.612482,
+            "f1": 0.729022,
+            "map50": 0.76013,
+            "map50_95": 0.520422
+          },
+          "conical beaker": {
+            "precision": 0.892289,
+            "recall": 0.828125,
+            "f1": 0.859011,
+            "map50": 0.922548,
+            "map50_95": 0.911451
+          },
+          "erlenmeyer flask": {
+            "precision": 0.934446,
+            "recall": 0.891089,
+            "f1": 0.912252,
+            "map50": 0.972385,
+            "map50_95": 0.951202
+          },
+          "reagent bottle": {
+            "precision": 0.598163,
+            "recall": 0.769121,
+            "f1": 0.672954,
+            "map50": 0.799723,
+            "map50_95": 0.730623
+          },
+          "pipette": {
+            "precision": 0.864819,
+            "recall": 0.363636,
+            "f1": 0.511992,
+            "map50": 0.54863,
+            "map50_95": 0.443746
+          },
+          "eggplant shaped flask": {
+            "precision": 0.859432,
+            "recall": 0.788462,
+            "f1": 0.822418,
+            "map50": 0.882074,
+            "map50_95": 0.816906
+          },
+          "separatory funnel": {
+            "precision": 1.0,
+            "recall": 0.770471,
+            "f1": 0.870357,
+            "map50": 0.945286,
+            "map50_95": 0.863908
+          }
+        }
+      },
+      "compatibility": {
+        "candidate_class_count": 7,
+        "production_class_count": 21,
+        "direct_replacement_allowed": false
+      },
+      "policy": {
+        "production_enabled": false,
+        "production_certified": false,
+        "promotion_blockers": [
+          "pipette held-out recall is 0.363636",
+          "hand held-out recall is 0.612482",
+          "the 7-class public ontology is not a drop-in replacement for the 21-class production ontology",
+          "an internal-domain ordered six-view A/B evaluation has not been run while NAS is unavailable"
+        ]
+      },
+      "run_boundary": {
+        "source_copy_bytes": 0,
+        "ark_calls": 0,
+        "token_usage": 0,
+        "nas_accessed": false
+      }
+    }
+  }
+}

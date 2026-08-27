@@ -330,4 +330,10 @@ def test_archive_skips_expensive_model_for_clear_participant_evidence(
     assert all(
         item["rendered_classes"] == ["gloved_hand", "paper"] for item in receipts
     )
+    assert all(item["minimum_rendered_confidence"] == 0.86 for item in receipts)
+    assert all(
+        [box["class_name"] for box in item["rendered_detections"]]
+        == ["gloved_hand", "paper"]
+        for item in receipts
+    )
     assert all("balance" in item["suppressed_background_classes"] for item in receipts)

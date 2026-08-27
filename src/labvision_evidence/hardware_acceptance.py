@@ -18,6 +18,56 @@ from .telemetry import ResourceMonitor
 
 
 HARDWARE_ACCEPTANCE_SCHEMA = "visioncortex-rtx3090ti-hardware-acceptance/1"
+HARDWARE_TUNING_SCHEMA = "visioncortex-rtx3090ti-hardware-tuning/1"
+_NETWORK_FILESYSTEMS = frozenset(
+    {"9p", "cifs", "fuse.sshfs", "nfs", "nfs4", "smb3", "sshfs"}
+)
+
+
+def _mount_filesystem_type(path: Path) -> str:
+    try:
+        lines = Path("/proc/self/mountinfo").read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise RuntimeError("Cannot prove that hardware tuning media is local") from exc
+    matches: list[tuple[int, str]] = []
+    for line in lines:
+        fields = line.split()
+        try:
+            separator = fields.index("-")
+            mount_value = (
+                fields[4]
+                .replace("\\040", " ")
+                .replace("\\011", "\t")
+                .replace("\\012", "\n")
+                .replace("\\134", "\\")
+            )
+            mount_point = Path(mount_value)
+            path.relative_to(mount_point)
+        except (ValueError, IndexError):
+            continue
+        matches.append((len(mount_point.parts), fields[separator + 1].casefold()))
+    if not matches:
+        raise RuntimeError(f"Cannot determine media filesystem type: {path}")
+    return max(matches)[1]
+
+
+def _require_local_media(path: Path) -> Path:
+    resolved = path.resolve()
+    normalized = resolved.as_posix().casefold()
+    forbidden = (
+        "/home/x1/桌面/nas",
+        "/visioncortexexperimentarchive",
+        "/visioncortexexperimentcache",
+    )
+    if any(marker in normalized for marker in forbidden):
+        raise RuntimeError(f"Hardware tuning requires local non-NAS media: {resolved}")
+    filesystem_type = _mount_filesystem_type(resolved)
+    if filesystem_type in _NETWORK_FILESYSTEMS:
+        raise RuntimeError(
+            "Hardware tuning requires local non-NAS media: "
+            f"{resolved} is on {filesystem_type}"
+        )
+    return resolved
 
 
 def _gpu_inventory() -> dict[str, str]:
@@ -192,7 +242,7 @@ def run_hardware_acceptance(
         raise ValueError("Hardware acceptance duration must be between 10 and 300 seconds")
     if workers_per_role < 1 or workers_per_role > 3:
         raise ValueError("Hardware acceptance workers_per_role must be between 1 and 3")
-    resolved_media = [path.resolve() for path in media_paths]
+    resolved_media = [_require_local_media(path) for path in media_paths]
     if len(resolved_media) < 6 or any(not path.is_file() for path in resolved_media):
         raise RuntimeError("Hardware acceptance requires six existing local video files")
     output = output.resolve()
@@ -292,6 +342,14 @@ def run_hardware_acceptance(
             "tensor_rt_role_workers": 2 * workers_per_role,
             "inference": inference,
             "aggregate_tensor_rt_frames_per_second": total_fps,
+            "media": [
+                {
+                    "path": str(path),
+                    "size_bytes": path.stat().st_size,
+                    "codec": codec,
+                }
+                for path, codec in zip(resolved_media[:6], codecs, strict=True)
+            ],
         },
         "peaks": {
             "gpu_compute_percent": gpu_peak,
@@ -326,4 +384,152 @@ def run_hardware_acceptance(
     )
     if not passed:
         raise RuntimeError(f"Hardware acceptance failed: {receipt_path}")
+    return receipt_path
+
+
+def tune_hardware_acceptance(
+    output: Path,
+    config: dict[str, Any],
+    media_paths: list[Path],
+    *,
+    duration_seconds: float = 20.0,
+    worker_candidates: tuple[int, ...] = (1, 2, 3),
+) -> Path:
+    """Measure a bounded worker matrix and retain the fastest stable profile."""
+
+    if duration_seconds < 10.0 or duration_seconds > 120.0:
+        raise ValueError("Hardware tuning duration must be between 10 and 120 seconds")
+    candidates = tuple(dict.fromkeys(worker_candidates))
+    if not candidates or any(item < 1 or item > 3 for item in candidates):
+        raise ValueError("Hardware tuning workers must be unique values from 1 to 3")
+    output = output.resolve()
+    receipt_path = output / "hardware-tuning.json"
+    if output.exists():
+        if receipt_path.is_file():
+            existing = json.loads(receipt_path.read_text(encoding="utf-8"))
+            if existing.get("passed") is True:
+                return receipt_path
+            raise RuntimeError(f"Existing hardware tuning did not pass: {receipt_path}")
+        raise FileExistsError(f"Hardware tuning output already exists: {output}")
+    output.mkdir(parents=True)
+
+    runs: list[dict[str, Any]] = []
+    for workers_per_role in candidates:
+        run_root = output / f"workers-{workers_per_role}"
+        try:
+            run_receipt = run_hardware_acceptance(
+                run_root,
+                config,
+                media_paths,
+                duration_seconds=duration_seconds,
+                workers_per_role=workers_per_role,
+            )
+            payload = json.loads(run_receipt.read_text(encoding="utf-8"))
+            runs.append(
+                {
+                    "workers_per_role": workers_per_role,
+                    "status": "passed",
+                    "receipt": str(run_receipt),
+                    "aggregate_tensor_rt_frames_per_second": payload["workload"][
+                        "aggregate_tensor_rt_frames_per_second"
+                    ],
+                    "peaks": payload.get("peaks") or {},
+                }
+            )
+        except Exception as exc:
+            runs.append(
+                {
+                    "workers_per_role": workers_per_role,
+                    "status": "failed",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
+    passed_runs = [item for item in runs if item["status"] == "passed"]
+    if not passed_runs:
+        failed_payload = {
+            "schema_version": HARDWARE_TUNING_SCHEMA,
+            "status": "failed",
+            "passed": False,
+            "runs": runs,
+            "source_copy_bytes": 0,
+            "ark_calls": 0,
+            "token_usage": 0,
+            "nas_accessed": False,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        receipt_path.write_text(
+            json.dumps(failed_payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        raise RuntimeError(f"Every bounded hardware tuning profile failed: {receipt_path}")
+    maximum_fps = max(
+        float(item["aggregate_tensor_rt_frames_per_second"])
+        for item in passed_runs
+    )
+    near_maximum = [
+        item
+        for item in passed_runs
+        if float(item["aggregate_tensor_rt_frames_per_second"])
+        >= maximum_fps * 0.98
+    ]
+    selected = min(near_maximum, key=lambda item: item["workers_per_role"])
+    baseline = next(
+        (item for item in passed_runs if item["workers_per_role"] == 1), None
+    )
+    baseline_fps = (
+        float(baseline["aggregate_tensor_rt_frames_per_second"])
+        if baseline is not None
+        else None
+    )
+    selected_fps = float(selected["aggregate_tensor_rt_frames_per_second"])
+    gpu_peak = selected["peaks"].get("gpu_compute_percent")
+    payload = {
+        "schema_version": HARDWARE_TUNING_SCHEMA,
+        "status": "completed",
+        "passed": True,
+        "production_quality_claim": False,
+        "selection_rule": (
+            "fewest workers within 2% of maximum measured TensorRT throughput"
+        ),
+        "duration_seconds_per_profile": duration_seconds,
+        "worker_candidates": list(candidates),
+        "runs": runs,
+        "selected_workers_per_role": selected["workers_per_role"],
+        "selected_aggregate_tensor_rt_frames_per_second": selected_fps,
+        "selected_gpu_compute_peak_percent": gpu_peak,
+        "selected_gpu_memory_peak_mib": selected["peaks"].get(
+            "gpu_memory_used_mib"
+        ),
+        "throughput_change_vs_one_worker_percent": (
+            round((selected_fps / baseline_fps - 1.0) * 100.0, 3)
+            if baseline_fps
+            else None
+        ),
+        "hardware_compute_saturated": gpu_peak is not None and float(gpu_peak) >= 90.0,
+        "recommendation": (
+            "benchmark capacity only; keep production concurrency unchanged until "
+            "ordered multi-view tracking is verified by a real six-view A/B run"
+        ),
+        "production_configuration_changed": False,
+        "deployment_status": "benchmark_only_not_promoted",
+        "source_copy_bytes": 0,
+        "ark_calls": 0,
+        "token_usage": 0,
+        "nas_accessed": False,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    receipt_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    (output / "hardware-tuning.md").write_text(
+        "# VisionCortex bounded RTX 3090 Ti tuning\n\n"
+        f"- Selected workers per role: `{selected['workers_per_role']}`\n"
+        f"- Selected TensorRT throughput: `{selected_fps:.3f} frames/s`\n"
+        f"- Selected GPU peak: `{gpu_peak}%`\n"
+        f"- Selected GPU memory peak: `{selected['peaks'].get('gpu_memory_used_mib')} MiB`\n"
+        f"- Candidate profiles: `{list(candidates)}`\n"
+        "- Selection: fewest workers within 2% of maximum measured throughput.\n"
+        "- Scope: synthetic local six-lane stress; no production quality claim.\n"
+        "- NAS/Ark/tokens/source copies: 0.\n",
+        encoding="utf-8",
+    )
     return receipt_path
