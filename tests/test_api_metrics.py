@@ -133,6 +133,22 @@ def test_health_reports_local_storage_without_claiming_nas(monkeypatch, tmp_path
     )
 
 
+def test_model_candidate_api_exposes_quality_without_claiming_production():
+    client = TestClient(api.app)
+
+    response = client.get("/api/model-candidates")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["candidate_count"] >= 1
+    assert payload["production_configuration_changed"] is False
+    assert all(
+        candidate["policy"]["production_enabled"] is False
+        and candidate["policy"]["production_certified"] is False
+        for candidate in payload["candidates"]
+    )
+
+
 def test_collection_api_returns_batch_cards_without_opening_video_paths(
     monkeypatch, tmp_path
 ):

@@ -97,6 +97,111 @@
         "token_usage": 0,
         "nas_accessed": false
       }
+    },
+    "public-apparatus-21class-yolo26m-v4": {
+      "status": "evaluated_not_promoted",
+      "intended_role": "ontology-aligned public-data candidate for offline evaluation; production remains unchanged",
+      "dataset": {
+        "title": "VisionCortex 21-class zero-copy union of Waseda and ChemEq25 public human annotations",
+        "source_records": [
+          "https://data.mendeley.com/datasets/8p2hvgdvpn/1",
+          "https://figshare.com/articles/dataset/_b_Chemistry_Lab_Image_Dataset_Covering_25_Apparatus_Categories_b_/29110433"
+        ],
+        "licenses": [
+          "CC-BY-4.0",
+          "CC-BY-4.0"
+        ],
+        "truth_status": "public_human_annotations",
+        "union_view": "/srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/Public-Apparatus-21Class-Union-v1",
+        "train_materialized_images": 10492,
+        "train_underlying_images": 6985,
+        "validation_images": 1350,
+        "test_images": 589,
+        "test_annotations": 960,
+        "source_copy_bytes": 0
+      },
+      "artifact": {
+        "path": "/srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/Public-Apparatus-21Class-Candidate-v4/weights/best.pt",
+        "sha256": "1c9eed8789625a9297dee9237a77765fdb8a96be0b3197a13e0f7c88a279e721",
+        "size_bytes": 60382099,
+        "training_status": "interrupted_after_five_completed_epochs_no_completion_receipt",
+        "selection_basis": "best validation checkpoint among completed v4 epochs; v5 completed checkpoints were all worse",
+        "combined_heldout_evaluation_receipt": "/srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/Public-Apparatus-21Class-Candidate-v4-Test-Combined-v2/visioncortex-evaluation-receipt.json",
+        "combined_heldout_evaluation_receipt_sha256": "ef4d8e0e99bfae48a7fb57e1293dc53eb2e131a2e5a75e4b80ed64d7b58dc6e5",
+        "waseda_heldout_evaluation_receipt": "/srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/Public-Apparatus-21Class-Candidate-v4-Test-Waseda/visioncortex-evaluation-receipt.json",
+        "waseda_heldout_evaluation_receipt_sha256": "7359cec73f117a5b5acd1ad9ead909ab1ce555f9e54af4771aba6f6b4577c892",
+        "chemeq25_heldout_evaluation_receipt": "/srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/Public-Apparatus-21Class-Candidate-v4-Test-ChemEq25/visioncortex-evaluation-receipt.json",
+        "chemeq25_heldout_evaluation_receipt_sha256": "d6e839618891c2f8e7bb6590d5b8810669c4b1e6f68b6dd6af823bc7806f8eb2",
+        "promotion_decision": "/srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/Public-Apparatus-21Class-Candidate-v4-Promotion/promotion-decision.json",
+        "promotion_decision_sha256": "76b6b76c240e9fd0ef7976a82769dd51e1f0d653f999c68afb2e94a1c9a93fb5"
+      },
+      "heldout_metrics": {
+        "precision": 0.9316971999288083,
+        "recall": 0.8742762689087195,
+        "map50": 0.9249022666922713,
+        "map50_95": 0.6565164011918595,
+        "per_class": {
+          "hand": {
+            "precision": 0.947231,
+            "recall": 0.677966,
+            "f1": 0.790293,
+            "map50": 0.892629,
+            "map50_95": 0.583171
+          },
+          "pipette": {
+            "precision": 0.89235,
+            "recall": 0.702381,
+            "f1": 0.786051,
+            "map50": 0.798746,
+            "map50_95": 0.507449
+          }
+        },
+        "source_breakdown": {
+          "waseda": {
+            "precision": 0.783579954249948,
+            "recall": 0.8118024060665909,
+            "map50": 0.8245895404623195,
+            "map50_95": 0.686310579627373
+          },
+          "chemeq25": {
+            "precision": 0.983279086380661,
+            "recall": 0.9445948257508843,
+            "map50": 0.9844849016657954,
+            "map50_95": 0.6541659058107964
+          }
+        }
+      },
+      "baseline_delta": {
+        "baseline_model_sha256": "a541c59ef8b09158b9b22851dcada6231dbab0f2f1478ae824bcf609851c58ea",
+        "precision": 0.7834516150621202,
+        "recall": 0.6954358519379709,
+        "map50": 0.8114403507967346,
+        "map50_95": 0.6019752477839137
+      },
+      "compatibility": {
+        "candidate_class_count": 21,
+        "production_class_count": 21,
+        "ontology_compatible": true,
+        "direct_replacement_allowed": false
+      },
+      "policy": {
+        "production_enabled": false,
+        "production_certified": false,
+        "public_benchmark_passed": false,
+        "internal_real_six_view_ab_passed": false,
+        "promotion_blockers": [
+          "hand held-out recall is 0.677966 below the 0.80 public gate",
+          "pipette held-out recall is 0.702381 below the 0.80 public gate",
+          "pipette held-out mAP50 is 0.798746 below the 0.80 public gate",
+          "an internal-domain ordered six-view A/B evaluation has not been run while NAS is unavailable"
+        ]
+      },
+      "run_boundary": {
+        "source_copy_bytes": 0,
+        "ark_calls": 0,
+        "token_usage": 0,
+        "nas_accessed": false
+      }
     }
   }
 }

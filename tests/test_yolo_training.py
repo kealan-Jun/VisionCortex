@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from labvision_evidence.yolo_training import (
+    build_mapped_public_yolo_union,
     build_public_yolo_training_view,
     build_yolo_training_dataset,
     evaluate_yolo_model_on_human_truth,
@@ -135,7 +136,29 @@ def test_public_yolo_training_view_validates_labels_and_links_without_copying(tm
     assert report["nas_accessed"] is False
     assert not (output / "images" / "train").is_symlink()
     assert (output / "images" / "train" / "train.jpg").is_symlink()
-    assert (output / "labels" / "val" / "valid.txt").is_symlink()
+    assert not (output / "labels" / "val" / "valid.txt").is_symlink()
+    assert report["source_annotation_formats"] == {
+        "box": 3,
+        "polygon_converted_to_bounding_box": 0,
+    }
+
+
+def test_public_yolo_training_view_converts_polygon_to_bounding_box(tmp_path):
+    source, receipt = _public_yolo_fixture(tmp_path)
+    (source / "Train" / "Labels" / "train.txt").write_text(
+        "1 0.2 0.3 0.8 0.3 0.8 0.9 0.2 0.9\n", encoding="utf-8"
+    )
+    output = tmp_path / "training-view"
+
+    report = build_public_yolo_training_view(source, receipt, output)
+
+    assert report["source_annotation_formats"] == {
+        "box": 2,
+        "polygon_converted_to_bounding_box": 1,
+    }
+    assert (output / "labels" / "train" / "train.txt").read_text().strip() == (
+        "1 0.50000000 0.60000000 0.60000000 0.60000000"
+    )
 
 
 def test_public_yolo_training_view_rejects_invalid_box(tmp_path):
@@ -146,6 +169,64 @@ def test_public_yolo_training_view_rejects_invalid_box(tmp_path):
 
     with pytest.raises(RuntimeError, match="box is invalid"):
         build_public_yolo_training_view(source, receipt, tmp_path / "training-view")
+
+
+def test_public_yolo_training_view_accepts_standard_data_yaml(tmp_path):
+    source, receipt = _public_yolo_fixture(tmp_path)
+    (source / "Classes.names").unlink()
+    (source / "data.yaml").write_text(
+        "names: [hand, pipette]\nnc: 2\n", encoding="utf-8"
+    )
+
+    report = build_public_yolo_training_view(
+        source, receipt, tmp_path / "training-view"
+    )
+
+    assert report["classes"] == ["hand", "pipette"]
+
+
+def test_mapped_public_union_uses_target_ontology_and_train_oversampling(tmp_path):
+    source, receipt = _public_yolo_fixture(tmp_path)
+    view = tmp_path / "public-view"
+    build_public_yolo_training_view(source, receipt, view)
+    target_classes = ["hand", "pipette", *[f"class-{index}" for index in range(19)]]
+    target_registry = tmp_path / "target-registry.json"
+    target_registry.write_text(
+        json.dumps(
+            {
+                "schema_version": "visioncortex-closed-set-model-registry/1",
+                "ontology": {"class_count": 21, "classes": target_classes},
+            }
+        ),
+        encoding="utf-8",
+    )
+    mapping = tmp_path / "mapping.json"
+    mapping.write_text(
+        json.dumps(
+            {
+                "schema_version": "visioncortex-public-yolo-ontology-map/1",
+                "train_oversample_factors": {"pipette": 3},
+                "datasets": {
+                    "fixture": {
+                        "class_mapping": {"hand": "hand", "pipette": "pipette"}
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = build_mapped_public_yolo_union(
+        {"fixture": view}, mapping, target_registry, tmp_path / "union"
+    )
+
+    assert report["class_count"] == 21
+    assert report["split_image_counts"] == {"train": 3, "val": 1, "test": 1}
+    assert report["underlying_image_counts"] == {"train": 1, "val": 1, "test": 1}
+    assert report["class_annotation_counts"]["pipette"] == 5
+    assert report["source_copy_bytes"] == 0
+    assert all((tmp_path / "union" / "images" / "train").iterdir())
+    assert all(path.is_symlink() for path in (tmp_path / "union" / "images" / "train").iterdir())
 
 
 def test_human_truth_evaluation_records_numpy_metrics(monkeypatch, tmp_path):
@@ -165,14 +246,16 @@ def test_human_truth_evaluation_records_numpy_metrics(monkeypatch, tmp_path):
             (tmp_path / kwargs["name"]).mkdir()
             return SimpleNamespace(
                 results_dict={"metrics/precision(B)": np.float32(0.875)},
-                names={0: "hand", 1: "pipette"},
+                names={0: "hand", 1: "pipette", 2: "paper"},
                 box=SimpleNamespace(
                     ap_class_index=np.asarray([0, 1]),
                     p=np.asarray([0.8, 0.9]),
                     r=np.asarray([0.7, 0.85]),
                     f1=np.asarray([0.746667, 0.874286]),
                     ap50=np.asarray([0.7, 0.9]),
-                    maps=np.asarray([0.5, 0.75]),
+                    # Ultralytics fills an absent class slot with the overall
+                    # mAP. The receipt must still expose it as null.
+                    maps=np.asarray([0.5, 0.75, 0.625]),
                 ),
             )
 
@@ -199,6 +282,15 @@ def test_human_truth_evaluation_records_numpy_metrics(monkeypatch, tmp_path):
             "f1": 0.874286,
             "map50": 0.9,
             "map50_95": 0.75,
+        },
+        {
+            "class_id": 2,
+            "class_name": "paper",
+            "precision": None,
+            "recall": None,
+            "f1": None,
+            "map50": None,
+            "map50_95": None,
         },
     ]
     assert report["production_certified"] is False
@@ -242,12 +334,17 @@ def test_training_records_metrics_and_resource_telemetry(monkeypatch, tmp_path):
 
         def train(self, **kwargs):
             assert "time" not in kwargs
+            assert kwargs["optimizer"] == "AdamW"
+            assert kwargs["lr0"] == 0.001
+            assert kwargs["lrf"] == 0.05
+            assert kwargs["cos_lr"] is True
+            assert kwargs["warmup_epochs"] == 1.0
             run = Path(kwargs["project"]) / kwargs["name"]
             (run / "weights").mkdir(parents=True)
             (run / "weights" / "best.pt").write_bytes(b"best")
             (run / "results.csv").write_text(
                 "epoch,metrics/precision(B),metrics/recall(B),metrics/mAP50-95(B)\n"
-                "0,0.8,0.7,0.6\n",
+                "1,0.8,0.7,0.6\n",
                 encoding="utf-8",
             )
             return SimpleNamespace(save_dir=run)
@@ -258,7 +355,16 @@ def test_training_records_metrics_and_resource_telemetry(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "ultralytics", SimpleNamespace(YOLO=FakeYOLO))
 
     report = train_yolo_model(
-        dataset, base_model, output, epochs=1, max_hours=0.1
+        dataset,
+        base_model,
+        output,
+        epochs=1,
+        max_hours=0.1,
+        optimizer="AdamW",
+        learning_rate=0.001,
+        final_learning_rate_fraction=0.05,
+        cosine_schedule=True,
+        warmup_epochs=1.0,
     )
 
     assert report["completed_epoch_count"] == 1
@@ -268,7 +374,13 @@ def test_training_records_metrics_and_resource_telemetry(monkeypatch, tmp_path):
         "metrics/mAP50-95(B)": 0.6,
     }
     assert report["best_validation_completed_epoch_number"] == 1
+    assert report["best_validation_csv_epoch"] == 1
     assert report["best_validation_metrics"]["metrics/mAP50-95(B)"] == 0.6
+    assert report["optimizer"] == "AdamW"
+    assert report["learning_rate"] == 0.001
+    assert report["final_learning_rate_fraction"] == 0.05
+    assert report["cosine_schedule"] is True
+    assert report["warmup_epochs"] == 1.0
     assert (output / "resource-telemetry.json").is_file()
     assert (output / "resource-telemetry_live.json").is_file()
     assert report["production_certified"] is False

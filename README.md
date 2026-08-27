@@ -92,7 +92,9 @@ deployment/rtx3090ti-ubuntu/05-Install-Local-Service.sh
 
 液体语义公共数据由 `configs/public-data-sources.json` 管理；只有许可证明确、
 HTTPS 且 SHA-256 固定的条目允许自动获取。`prepare-public-dataset` 会先验证完整
-ZIP，再拒绝路径穿越/软链接并有界解包。模型共识只能通过
+ZIP/RAR，再拒绝路径穿越、重复成员、链接和特殊文件，并在有界解包、文件数与
+字节数复核全部通过后原子发布目录；失败的 partial 只作审计，绝不冒充完成数据。
+模型共识只能通过
 `build-consensus-labels` 生成 `pseudo_labels_not_ground_truth`，不能冒充人工真值。
 
 双闭集源权重可用 `validate-closed-set-models` 对注册哈希和 21 类本体做双重
@@ -115,13 +117,47 @@ labvision evaluate-yolo-model-on-human-truth --dataset <new-zero-copy-view> \
   --model <new-candidate>/weights/best.pt --split test --output <new-evaluation>
 ```
 
+从已训练候选继续微调时，应显式固定优化器与学习率，避免 `optimizer=auto`
+重新进入高学习率 warmup；这些参数会写入训练回执：
+
+```bash
+labvision train-yolo-model --dataset <mapped-21-class-union> \
+  --base-model <previous-best.pt> --output <fine-tuned-candidate> \
+  --optimizer AdamW --learning-rate 0.001 \
+  --final-learning-rate-fraction 0.05 --cosine-schedule --warmup-epochs 1
+```
+
+ChemEq25 公开人工框数据也已固定 Figshare v3 的 RAR 工件 URL、大小、MD5 与
+SHA-256；157 条多边形标注会在验证后确定性转为其最小外接框。两个来源必须先按
+`configs/models/public-yolo-ontology-map.json` 显式映射进生产 21 类本体；未映射
+类别逐类写明为 `null`，不能靠名称猜测。训练集可对稀缺的 hand/pipette 做有界
+过采样，但 val/test 永不重复：
+
+```bash
+labvision prepare-public-dataset --dataset-id ChemEq25 \
+  --destination <local-public-dataset-root>
+labvision build-public-yolo-training-view --source <chemeq-extracted-root> \
+  --dataset-receipt <chemeq-dataset-receipt.json> --output <chemeq-zero-copy-view>
+labvision build-mapped-public-yolo-union \
+  --source WasedaChemicalApparatus=<waseda-zero-copy-view> \
+  --source ChemEq25=<chemeq-zero-copy-view> --output <mapped-21-class-union>
+```
+
 训练与测试均在 epoch 边界强制墙钟上限，记录逐类 P/R/F1/AP、GPU/显存/功耗
 遥测，且固定 `production_certified=false`。Web 的“关键素材模型质量账本”展示每个
 事件实际执行的闭集 YOLO、YOLO-World、Grounding DINO、SAM2/LabPics、框置信度、
 二次核验耗时与保留的不确定性；没有人工真值时不会把模型置信度冒充准确率。
 已完成的公共模型候选及其独立留出集指标登记在
 `configs/models/public-apparatus-candidates.json`；注册不等于上线，只有本体兼容且
-通过内部真实六视角认证的候选才允许写入生产配置。
+通过内部真实六视角认证的候选才允许写入生产配置。自动判定命令只生成不可变
+决策回执，不会改生产配置；即便公开留出集全部达标，缺少经复核的真实六视角
+A/B 回执也必须 fail-closed：
+
+```bash
+labvision evaluate-yolo-candidate-promotion \
+  --evaluation-receipt <evaluation>/visioncortex-evaluation-receipt.json \
+  --output <promotion>/promotion-decision.json
+```
 
 固定基准不会重复创建实验目录：先启动 Web，再运行 `deployment\rtx4060\04-重跑固定六路基准.ps1`，由常驻 Web 服务异步执行并复用 `Y:\VisionCortexExperimentArchive\CustomFlow_standard_correct_12_ABCFA_0001--exp_20260810_144014_e918b762`。不要在有超时限制的命令包装器里前台运行 `run-fixed-benchmark`。其他用户上传任务仍按实际上传路数动态创建独立档案。
 

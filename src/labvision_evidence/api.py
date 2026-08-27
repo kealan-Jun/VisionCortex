@@ -932,6 +932,40 @@ def health() -> dict[str, Any]:
     }
 
 
+@app.get("/api/model-candidates")
+def model_candidates() -> dict[str, Any]:
+    """Expose the committed, non-production model quality ledger to local Web."""
+
+    registry_path = (
+        Path(__file__).resolve().parents[2]
+        / "configs"
+        / "models"
+        / "public-apparatus-candidates.json"
+    )
+    try:
+        payload = json.loads(registry_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(503, "模型候选质量账本不可用") from exc
+    candidates = payload.get("candidates")
+    if (
+        payload.get("schema_version")
+        != "visioncortex-public-apparatus-candidate-registry/1"
+        or not isinstance(candidates, dict)
+    ):
+        raise HTTPException(503, "模型候选质量账本格式无效")
+    records = []
+    for candidate_id, raw in candidates.items():
+        if not isinstance(raw, dict):
+            raise HTTPException(503, "模型候选质量账本包含无效记录")
+        records.append({**raw, "candidate_id": str(candidate_id)})
+    return {
+        "schema_version": payload["schema_version"],
+        "production_configuration_changed": False,
+        "candidate_count": len(records),
+        "candidates": records,
+    }
+
+
 @app.get("/api/annotation-workspace")
 def annotation_workspace(
     priority: str | None = None,

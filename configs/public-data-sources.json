@@ -55,10 +55,19 @@
     "ChemEq25": {
       "title": "Chemistry Lab Image Dataset Covering 25 Apparatus Categories",
       "license": "CC-BY-4.0",
-      "source_record": "https://figshare.com/articles/dataset/29110433",
+      "source_record": "https://figshare.com/articles/dataset/_b_Chemistry_Lab_Image_Dataset_Covering_25_Apparatus_Categories_b_/29110433",
       "scope": "4,599 real laboratory images with YOLO boxes for 25 apparatus classes including pipette",
-      "automated_acquisition_allowed": false,
-      "reason": "the pinned v3 artifact is RAR; metadata is retained until the fail-closed extractor supports that format"
+      "annotation_authority": "public_human_annotations",
+      "automated_acquisition_allowed": true,
+      "artifact": {
+        "url": "https://ndownloader.figshare.com/files/56271119",
+        "filename": "ChemistryLabApparatus-25.rar",
+        "format": "rar",
+        "bytes": 147082192,
+        "md5": "e26e205a223eb192d03689d8b1a7c49b",
+        "sha256": "44d9e6aa14b1d8469a91dd8f65ad707a5fc8cb46725801d759e949f1832be328",
+        "maximum_uncompressed_bytes": 2000000000
+      }
     },
     "TransBiolab": {
       "title": "TransBiolab",

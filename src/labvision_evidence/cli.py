@@ -56,6 +56,7 @@ from .model_certification import (
     build_model_quality_certification,
 )
 from .model_registry import install_registered_models, validate_model_registry
+from .model_promotion import evaluate_yolo_candidate_promotion
 from .local_acceptance import run_local_six_view_acceptance
 from .local_model_acceptance import run_local_real_model_acceptance
 from .pipeline import (
@@ -86,6 +87,7 @@ from .storage import (
 from .validation import validate_experiment_and_material_quality
 from .yolo_evaluation import evaluate_files as evaluate_yolo_files
 from .yolo_training import (
+    build_mapped_public_yolo_union,
     build_public_yolo_training_view,
     build_yolo_training_dataset,
     evaluate_yolo_model_on_human_truth,
@@ -1120,6 +1122,45 @@ def build_public_yolo_training_view_command(
     typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+@app.command("build-mapped-public-yolo-union")
+def build_mapped_public_yolo_union_command(
+    source: Annotated[
+        list[str],
+        typer.Option(
+            "--source",
+            help="Repeat DATASET_ID=/absolute/standardized-view for every mapped source",
+        ),
+    ],
+    output: Annotated[Path, typer.Option("--output", "-o")],
+    mapping: Annotated[
+        Path, typer.Option("--mapping", exists=True, dir_okay=False)
+    ] = Path("configs/models/public-yolo-ontology-map.json"),
+    target_registry: Annotated[
+        Path, typer.Option("--target-registry", exists=True, dir_okay=False)
+    ] = Path("configs/models/closed-set-yolo.json"),
+) -> None:
+    """Map public human boxes into an exact 21-class zero-copy training union."""
+
+    roots: dict[str, Path] = {}
+    for value in source:
+        dataset_id, separator, raw_path = value.partition("=")
+        if not separator or not dataset_id.strip() or not raw_path.strip():
+            raise typer.BadParameter("--source must use DATASET_ID=/absolute/path")
+        path = Path(raw_path).expanduser()
+        if not path.is_absolute() or not path.is_dir():
+            raise typer.BadParameter(f"Mapped public source does not exist: {path}")
+        if dataset_id in roots:
+            raise typer.BadParameter(f"Duplicate mapped public source: {dataset_id}")
+        roots[dataset_id] = path
+    payload = build_mapped_public_yolo_union(
+        roots,
+        mapping,
+        target_registry,
+        output,
+    )
+    typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
 @app.command("train-yolo-model")
 def train_yolo_model_command(
     dataset: Annotated[
@@ -1138,6 +1179,20 @@ def train_yolo_model_command(
         float, typer.Option("--max-hours", min=0.01, max=24.0)
     ] = 2.0,
     workers: Annotated[int, typer.Option("--workers", min=0)] = 8,
+    optimizer: Annotated[str, typer.Option("--optimizer")] = "auto",
+    learning_rate: Annotated[
+        float, typer.Option("--learning-rate", min=1e-6, max=0.1)
+    ] = 0.01,
+    final_learning_rate_fraction: Annotated[
+        float,
+        typer.Option("--final-learning-rate-fraction", min=0.001, max=1.0),
+    ] = 0.01,
+    cosine_schedule: Annotated[
+        bool, typer.Option("--cosine-schedule/--linear-schedule")
+    ] = False,
+    warmup_epochs: Annotated[
+        float, typer.Option("--warmup-epochs", min=0.0, max=10.0)
+    ] = 3.0,
 ) -> None:
     """Train a real YOLO candidate; deployment remains certification-gated."""
 
@@ -1152,6 +1207,11 @@ def train_yolo_model_command(
         patience=patience,
         max_hours=max_hours,
         workers=workers,
+        optimizer=optimizer,
+        learning_rate=learning_rate,
+        final_learning_rate_fraction=final_learning_rate_fraction,
+        cosine_schedule=cosine_schedule,
+        warmup_epochs=warmup_epochs,
     )
     typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
 
@@ -1182,6 +1242,31 @@ def evaluate_yolo_model_on_human_truth_command(
         batch=batch,
         device=device,
         workers=workers,
+    )
+    typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+@app.command("evaluate-yolo-candidate-promotion")
+def evaluate_yolo_candidate_promotion_command(
+    evaluation_receipt: Annotated[
+        Path, typer.Option("--evaluation-receipt", exists=True, dir_okay=False)
+    ],
+    output: Annotated[Path, typer.Option("--output", "-o")],
+    gate: Annotated[
+        Path, typer.Option("--gate", exists=True, dir_okay=False)
+    ] = Path("configs/models/yolo-candidate-promotion-gate.json"),
+    internal_ab_receipt: Annotated[
+        Path | None,
+        typer.Option("--internal-ab-receipt", exists=True, dir_okay=False),
+    ] = None,
+) -> None:
+    """Fail closed unless public metrics and a real internal six-view A/B pass."""
+
+    payload = evaluate_yolo_candidate_promotion(
+        evaluation_receipt,
+        gate,
+        output,
+        internal_ab_receipt_path=internal_ab_receipt,
     )
     typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
 

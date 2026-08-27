@@ -35,6 +35,7 @@ const ICONS = {
 const state = {
   archives: [],
   health: null,
+  modelCandidates: [],
   runs: [],
   collections: [],
   sources: [],
@@ -252,11 +253,12 @@ function updateServiceChrome() {
 }
 
 async function loadAll() {
-  const results = await Promise.allSettled([api("/api/health"), api("/api/archives"), api("/api/runs"), api("/api/collections?limit=200")]);
+  const results = await Promise.allSettled([api("/api/health"), api("/api/archives"), api("/api/runs"), api("/api/collections?limit=200"), api("/api/model-candidates")]);
   if (results[0].status === "fulfilled") state.health = results[0].value;
   if (results[1].status === "fulfilled") state.archives = results[1].value.archives || [];
   if (results[2].status === "fulfilled") state.runs = results[2].value.runs || [];
   if (results[3].status === "fulfilled") state.collections = results[3].value.collections || [];
+  if (results[4].status === "fulfilled") state.modelCandidates = results[4].value.candidates || [];
   updateServiceChrome();
 }
 
@@ -296,6 +298,19 @@ function archiveRows(archives, target = "experiments") {
     </a>`).join("")}</div>`;
 }
 
+function modelCandidatePanel() {
+  if (!state.modelCandidates.length) return "";
+  const cards = state.modelCandidates.map((candidate) => {
+    const metrics = candidate.heldout_metrics || {};
+    const policy = candidate.policy || {};
+    const ready = policy.production_enabled === true && policy.production_certified === true;
+    const status = ready ? "生产已认证" : "候选未上线";
+    const blockers = (policy.promotion_blockers || []).join("；") || "等待正式认证回执";
+    return `<article><small>${esc(candidate.candidate_id)}</small><strong>${esc(status)}</strong><span>公开留出集 P ${percent(metrics.precision)} · R ${percent(metrics.recall)} · mAP50 ${percent(metrics.map50)}</span><span>${esc(blockers)}</span></article>`;
+  }).join("");
+  return `<section class="panel"><header class="panel-heading"><div><p class="eyebrow">MODEL QUALITY LEDGER</p><h2>模型候选质量与晋级状态</h2><p>只显示已提交的独立留出集指标；公开数据达标不等于生产认证，缺少真实六视角 A/B 时保持未上线。</p></div></header><div class="performance-compare">${cards}</div></section>`;
+}
+
 function renderHome() {
   setChrome("home");
   const archives = filteredArchives();
@@ -307,6 +322,7 @@ function renderHome() {
   main.innerHTML = `<div class="page">
     <header class="page-hero"><div><p class="eyebrow">LABORATORY SITUATIONAL AWARENESS</p><h1>多视角湿实验工作台</h1><p>上传任意实际路数的连续长视频，自动完成原视频留存、时间轴对齐、有界实验筛选、跨视角关键素材和细粒度步骤理解。系统容量已按至少 6 路、每路 3 小时设计。</p></div><div class="hero-actions"><button class="primary-button" id="rerun-benchmark" type="button">${icon("activity")}重跑六路 3 小时基准</button><a class="secondary-button" href="#/new">${icon("upload")}新建其他实验</a></div></header>
     <section class="current-work"><span class="current-icon">${icon(running ? "activity" : "folder")}</span><div><small>${running ? "当前分析" : `最近${archiveName}`}</small><h2>${esc(running ? state.runs.find((run) => !["completed","failed"].includes(run.state))?.experiment_id : state.archives[0]?.name || "等待创建第一个实验")}</h2><p>${running ? `产出会在每个阶段完成时持续写入${archiveName}` : state.archives[0] ? `所有结果均从${archiveName}读取` : "选择多路视频即可开始"}</p></div>${state.archives[0] ? `<a class="secondary-button" href="#/archive/${encodeURIComponent(state.archives[0].name)}/experiments">打开</a>` : ""}</section>
+    ${modelCandidatePanel()}
     <section class="status-grid">
       ${statusCard("folder", `${archiveShortLabel()}实验档案`, number(state.archives.length), archiveName)}
       ${statusCard("flask", "有界实验", number(experimentTotal), "独立或连续实验组")}
@@ -1062,7 +1078,7 @@ function metricsView(data) {
     key_material_recall_eval: "关键素材 Precision / Recall 评估 JSON",
     final_key_material_annotation: "关键素材对象框与二次复核 JSON",
   };
-  const verificationSection = `<section class="panel"><header class="panel-heading"><div><h2>关键素材模型质量账本</h2><p>逐事件显示实际执行的本地模型、对象框置信度、二次复核耗时和明确保留的不确定性；没有人工真值时不展示伪造的准确率。</p></div></header><table class="metric-table"><tbody><tr><td>复核账本</td><td>${verification.available ? "可用" : "历史档案未生成"}</td></tr><tr><td>事件 / 渲染视角</td><td>${number(verification.event_count)} / ${number(verification.rendered_view_count)}</td></tr><tr><td>决策状态</td><td>${esc(Object.entries(verification.decision_status_counts || {}).map(([key,value])=>`${key}: ${value}`).join("；") || "无")}</td></tr><tr><td>实际模型执行</td><td>${esc(Object.entries(verification.model_execution_counts || {}).map(([key,value])=>`${MODEL_LABELS[key] || key}: ${value}`).join("；") || "无")}</td></tr><tr><td>二次复核推理耗时</td><td>YOLO-World ${duration(verification.timing?.open_vocabulary_inference_seconds)}；Grounding DINO ${duration(verification.timing?.grounding_dino_inference_seconds)}；总墙钟 ${duration(verification.timing?.wall_seconds)}</td></tr><tr><td>保留不确定性的事件</td><td>${number(verification.uncertain_event_count)}</td></tr><tr><td>预算使用</td><td>${number(verification.budget?.admitted_event_count)} 事件 / ${number(verification.budget?.admitted_view_count)} 视角；延后 ${number(verification.budget?.deferred_count)}</td></tr></tbody></table></section>`;
+  const verificationSection = `<section class="panel"><header class="panel-heading"><div><h2>关键素材模型质量账本</h2><p>逐事件显示实际执行的本地模型、对象框置信度、二次复核耗时和明确保留的不确定性；没有人工真值时不展示伪造的准确率。</p></div></header><table class="metric-table"><tbody><tr><td>复核账本</td><td>${verification.available ? "可用" : "历史档案未生成"}</td></tr><tr><td>事件 / 渲染视角</td><td>${number(verification.event_count)} / ${number(verification.rendered_view_count)}</td></tr><tr><td>仅渲染动作参与对象</td><td>${number(materials.participant_only_annotation_pass_count)} / ${number(materials.event_count)}（${materials.participant_only_annotation_gate_passed ? "门禁通过" : "未通过或无账本"}）</td></tr><tr><td>动作参与对象可见性</td><td>${number(materials.action_participant_visibility_pass_count)} / ${number(materials.event_count)}（${materials.action_participant_visibility_gate_passed ? "门禁通过" : "未通过或无账本"}）</td></tr><tr><td>决策状态</td><td>${esc(Object.entries(verification.decision_status_counts || {}).map(([key,value])=>`${key}: ${value}`).join("；") || "无")}</td></tr><tr><td>实际模型执行</td><td>${esc(Object.entries(verification.model_execution_counts || {}).map(([key,value])=>`${MODEL_LABELS[key] || key}: ${value}`).join("；") || "无")}</td></tr><tr><td>二次复核推理耗时</td><td>YOLO-World ${duration(verification.timing?.open_vocabulary_inference_seconds)}；Grounding DINO ${duration(verification.timing?.grounding_dino_inference_seconds)}；总墙钟 ${duration(verification.timing?.wall_seconds)}</td></tr><tr><td>保留不确定性的事件</td><td>${number(verification.uncertain_event_count)}</td></tr><tr><td>预算使用</td><td>${number(verification.budget?.admitted_event_count)} 事件 / ${number(verification.budget?.admitted_view_count)} 视角；延后 ${number(verification.budget?.deferred_count)}</td></tr></tbody></table></section>`;
   return `<section class="panel"><header class="panel-heading"><div><h2>耗时口径</h2><p>${performanceSummary} ${reuseNote}</p></div></header><div class="performance-compare"><article><small>历史完整冷启动预处理</small><strong>${duration(fullColdStart.seconds)}</strong><span>${esc(fullColdStart.includes || "预检 + 对齐 + 全量粗扫 + 有界精扫 + 边界审计；不含模型理解")}</span></article><article><small>当前归档运行总耗时</small><strong>${duration(currentRun.total_seconds ?? metrics.total_duration_seconds)}</strong><span>${currentRun.reused_validated_cv_ledgers ? "复用已验收 CV 账本，重新生成理解/媒体/证据包" : "以本次运行账本为准"}</span></article><article><small>当前运行预处理</small><strong>${duration(currentRun.preprocessing_seconds)}</strong><span>${currentRun.reused_validated_cv_ledgers ? "不是冷启动基准" : "当前运行实际值"}</span></article></div><table class="metric-table"><thead><tr><th>阶段</th><th>说明</th><th>耗时</th></tr></thead><tbody>${extraRows}${stages.map((stage)=>`<tr><td>${esc(stage.stage)}</td><td>${esc(STAGE_LABELS[stage.stage] || stage.stage)}</td><td>${duration(stage.duration_seconds)}</td></tr>`).join("")}</tbody></table></section><section class="panel"><header class="panel-heading"><div><h2>Token 用量</h2><p>CV、FFmpeg 与 TensorRT 不消耗模型 Token；断点复用的模型结果不重复计入本次实际消耗。</p></div></header><table class="metric-table"><thead><tr><th>阶段</th><th>执行 / 复用</th><th>输入 Token</th><th>输出 Token</th><th>总 Token</th></tr></thead><tbody><tr><td>实验片段步骤理解</td><td>${number(tokens.experiment_groups?.executed_call_count ?? tokens.experiment_groups?.call_count)} / ${number(tokens.experiment_groups?.reused_call_count)}</td><td>${number(tokens.experiment_groups?.input_tokens)}</td><td>${number(tokens.experiment_groups?.output_tokens)}</td><td>${number(tokens.experiment_groups?.total_tokens)}</td></tr><tr><td>关键素材理解</td><td>${number(tokens.key_materials?.executed_call_count ?? tokens.key_materials?.call_count)} / ${number(tokens.key_materials?.reused_call_count)}</td><td>${number(tokens.key_materials?.input_tokens)}</td><td>${number(tokens.key_materials?.output_tokens)}</td><td>${number(tokens.key_materials?.total_tokens)}</td></tr><tr><td><strong>全任务</strong></td><td>—</td><td><strong>${number(tokens.run_total?.input_tokens)}</strong></td><td><strong>${number(tokens.run_total?.output_tokens)}</strong></td><td><strong>${number(tokens.run_total?.total_tokens)}</strong></td></tr></tbody></table></section><section class="panel"><header class="panel-heading"><div><h2>质量验收</h2><p>${esc(materialEvaluation.displayNote)}</p></div></header><table class="metric-table"><tbody><tr><td>总体状态</td><td>${esc(statusLabel)}</td></tr><tr><td>实验检出 Precision / Recall</td><td>${boundaryAccuracy}</td></tr><tr><td>关键素材 Precision / Recall</td><td>${esc(materialEvaluation.recallLabel)}</td></tr><tr><td>边界通过率 / 连续性准确率</td><td>${boundaryContinuity}</td></tr><tr><td>证据包结构与媒体</td><td>${boundary.evidence_package_eval_passed || materials.evidence_package_eval_passed ? "通过自动验收" : "未通过或无验收记录"}</td></tr><tr><td>关键素材五类覆盖</td><td>${esc(materialEvaluation.categoryCoverageLabel)}</td></tr><tr><td>第一/第三人称成套素材</td><td>${number(materials.dual_view_material_count)} / ${number(materials.event_count)}（${percent(materials.dual_view_material_rate)}）</td></tr><tr><td>双侧共同佐证动作</td><td>${number(materials.cross_view_supported_count)} / ${number(materials.event_count)}（${percent(materials.cross_view_supported_rate)}）</td></tr><tr><td>双视角关联可审计</td><td>${number(materials.cross_view_or_explicit_uncertainty_count)} / ${number(materials.event_count)}</td></tr></tbody></table></section>${verificationSection}<section class="panel"><header class="panel-heading"><div><h2>资源遥测（按阶段）</h2><p>来源：resource_telemetry.json；主机网络包含其他流量，进程树 I/O 单独列出。</p></div></header><table class="metric-table"><thead><tr><th>阶段</th><th>GPU mean/max</th><th>NVDEC mean/max</th><th>CPU mean/max</th><th>网络接收 mean/max</th></tr></thead><tbody>${Object.entries(summaries).map(([stage,item])=>`<tr><td>${esc(STAGE_LABELS[stage]||stage)}</td><td>${metricStat(item.gpu_compute_percent)}/${metricStat(item.gpu_compute_percent,"max","%")}</td><td>${metricStat(item.nvdec_percent)}/${metricStat(item.nvdec_percent,"max","%")}</td><td>${metricStat(item.cpu_percent)}/${metricStat(item.cpu_percent,"max","%")}</td><td>${metricStat(item.host_network_receive_mib_s,"mean"," MiB/s")}/${metricStat(item.host_network_receive_mib_s,"max"," MiB/s")}</td></tr>`).join("")}</tbody></table></section><section class="panel"><header class="panel-heading"><div><h2>模型理解与验收文件</h2><p>这些链接直接指向当前${archiveShortLabel()}档案中的正式文件；历史档案没有的文件不会显示为可点击链接。</p></div></header><div class="result-links" style="padding:20px">${Object.entries(links).map(([key,label])=>data.links[key]?`<a target="_blank" href="${esc(data.links[key])}">${icon("file")}${label}</a>`:"").join("")}</div></section>`;
 }
 
