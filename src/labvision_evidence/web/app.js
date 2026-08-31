@@ -301,14 +301,33 @@ function archiveRows(archives, target = "experiments") {
 function modelCandidatePanel() {
   if (!state.modelCandidates.length) return "";
   const cards = state.modelCandidates.map((candidate) => {
-    const metrics = candidate.heldout_metrics || {};
+    const historicalMetrics = candidate.heldout_metrics || {};
+    const cleanMetrics = candidate.independent_test_metrics
+      || candidate.comparative_test_metrics
+      || {};
     const policy = candidate.policy || {};
     const ready = policy.production_enabled === true && policy.production_certified === true;
-    const status = ready ? "生产已认证" : "候选未上线";
+    const invalidated = String(candidate.status || "").startsWith("invalidated_")
+      || String(historicalMetrics.trust_status || "").startsWith("invalidated_");
+    const status = ready
+      ? "生产已认证"
+      : invalidated
+        ? "历史指标已失效"
+        : candidate.status === "evaluated_not_promoted_public_gate_failed"
+          ? "公开门禁未通过"
+          : "候选未上线";
+    const cleanMetricLabel = cleanMetrics.test_exposure_status === "repeat_comparative_benchmark"
+      ? "无泄漏重复比较"
+      : "无泄漏测试";
+    const metricLine = invalidated
+      ? "旧留出集存在跨 split 内容泄漏；P/R/mAP 不再展示或用于选模"
+      : cleanMetrics.micro_precision != null
+        ? `${cleanMetricLabel} P ${percent(cleanMetrics.micro_precision)} · R ${percent(cleanMetrics.micro_recall)} · mAP50 ${percent(cleanMetrics.macro_map50)}`
+        : `公开留出集 P ${percent(historicalMetrics.precision)} · R ${percent(historicalMetrics.recall)} · mAP50 ${percent(historicalMetrics.map50)}`;
     const blockers = (policy.promotion_blockers || []).join("；") || "等待正式认证回执";
-    return `<article><small>${esc(candidate.candidate_id)}</small><strong>${esc(status)}</strong><span>公开留出集 P ${percent(metrics.precision)} · R ${percent(metrics.recall)} · mAP50 ${percent(metrics.map50)}</span><span>${esc(blockers)}</span></article>`;
+    return `<article><small>${esc(candidate.candidate_id)}</small><strong>${esc(status)}</strong><span>${esc(metricLine)}</span><span>${esc(blockers)}</span></article>`;
   }).join("");
-  return `<section class="panel"><header class="panel-heading"><div><p class="eyebrow">MODEL QUALITY LEDGER</p><h2>模型候选质量与晋级状态</h2><p>只显示已提交的独立留出集指标；公开数据达标不等于生产认证，缺少真实六视角 A/B 时保持未上线。</p></div></header><div class="performance-compare">${cards}</div></section>`;
+  return `<section class="panel"><header class="panel-heading"><div><p class="eyebrow">MODEL QUALITY LEDGER</p><h2>模型候选质量与晋级状态</h2><p>失效指标不参与比较；公开数据达标也不等于生产认证，缺少真实六视角 A/B 时保持未上线。</p></div></header><div class="performance-compare">${cards}</div></section>`;
 }
 
 function renderHome() {

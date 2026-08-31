@@ -147,6 +147,20 @@ def test_model_candidate_api_exposes_quality_without_claiming_production():
         and candidate["policy"]["production_certified"] is False
         for candidate in payload["candidates"]
     )
+    by_id = {item["candidate_id"]: item for item in payload["candidates"]}
+    assert by_id["public-apparatus-21class-yolo26m-v4"]["status"] == (
+        "invalidated_split_leakage_not_promoted"
+    )
+    assert by_id["public-apparatus-21class-yolo26m-v4"]["dataset"][
+        "cross_split_content_hash_count"
+    ] == 35
+    assert by_id["public-apparatus-21class-yolo26s-v6-clean"]["dataset"][
+        "cross_split_content_hash_count"
+    ] == 0
+    v7 = by_id["public-apparatus-21class-yolo26m-v7-clean-augmented"]
+    assert v7["dataset"]["cross_split_content_hash_count"] == 0
+    assert v7["comparative_test_metrics"]["independent_test_claim_allowed"] is False
+    assert v7["policy"]["production_enabled"] is False
 
 
 def test_collection_api_returns_batch_cards_without_opening_video_paths(

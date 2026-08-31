@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -100,7 +101,9 @@ def _public_yolo_fixture(tmp_path):
         labels = source / split / "Labels"
         images.mkdir(parents=True)
         labels.mkdir(parents=True)
-        (images / f"{split.lower()}.jpg").write_bytes(b"image")
+        (images / f"{split.lower()}.jpg").write_bytes(
+            f"{split}-image".encode()
+        )
         (labels / f"{split.lower()}.txt").write_text(
             "1 0.500000 0.500000 0.250000 0.500000\n", encoding="utf-8"
         )
@@ -229,6 +232,54 @@ def test_mapped_public_union_uses_target_ontology_and_train_oversampling(tmp_pat
     assert all(path.is_symlink() for path in (tmp_path / "union" / "images" / "train").iterdir())
 
 
+def test_mapped_public_union_removes_cross_split_content_leakage(tmp_path):
+    source, receipt = _public_yolo_fixture(tmp_path)
+    (source / "Valid" / "Images" / "valid.jpg").write_bytes(
+        (source / "Train" / "Images" / "train.jpg").read_bytes()
+    )
+    (source / "Train" / "Images" / "train-unique.jpg").write_bytes(b"unique-train")
+    (source / "Train" / "Labels" / "train-unique.txt").write_text(
+        "1 0.5 0.5 0.25 0.5\n", encoding="utf-8"
+    )
+    view = tmp_path / "public-view"
+    build_public_yolo_training_view(source, receipt, view)
+    target_classes = ["hand", "pipette", *[f"class-{index}" for index in range(19)]]
+    target_registry = tmp_path / "target-registry.json"
+    target_registry.write_text(
+        json.dumps(
+            {
+                "schema_version": "visioncortex-closed-set-model-registry/1",
+                "ontology": {"class_count": 21, "classes": target_classes},
+            }
+        ),
+        encoding="utf-8",
+    )
+    mapping = tmp_path / "mapping.json"
+    mapping.write_text(
+        json.dumps(
+            {
+                "schema_version": "visioncortex-public-yolo-ontology-map/1",
+                "train_oversample_factors": {"pipette": 3},
+                "datasets": {
+                    "fixture": {
+                        "class_mapping": {"hand": "hand", "pipette": "pipette"}
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = build_mapped_public_yolo_union(
+        {"fixture": view}, mapping, target_registry, tmp_path / "union"
+    )
+
+    assert report["raw_mapped_image_counts"] == {"train": 2, "val": 1, "test": 1}
+    assert report["underlying_image_counts"] == {"train": 1, "val": 1, "test": 1}
+    assert report["excluded_cross_split_duplicate_image_count"] == 1
+    assert report["cross_split_content_policy"] == "keep_test_then_val_then_train"
+
+
 def test_human_truth_evaluation_records_numpy_metrics(monkeypatch, tmp_path):
     source, receipt = _public_yolo_fixture(tmp_path)
     dataset = tmp_path / "training-view"
@@ -301,6 +352,25 @@ def test_training_records_metrics_and_resource_telemetry(monkeypatch, tmp_path):
     source, receipt = _public_yolo_fixture(tmp_path)
     dataset = tmp_path / "training-view"
     build_public_yolo_training_view(source, receipt, dataset)
+    dataset_receipt_path = dataset / "dataset-receipt.json"
+    dataset_receipt = json.loads(dataset_receipt_path.read_text(encoding="utf-8"))
+    dataset_receipt["schema_version"] = "visioncortex-mapped-public-yolo-union/1"
+    dataset_receipt_path.write_text(json.dumps(dataset_receipt), encoding="utf-8")
+    integrity_audit = tmp_path / "dataset-integrity-audit.json"
+    integrity_audit.write_text(
+        json.dumps(
+            {
+                "schema_version": "visioncortex-yolo-dataset-integrity-audit/1",
+                "passed": True,
+                "dataset_receipt_sha256": hashlib.sha256(
+                    dataset_receipt_path.read_bytes()
+                ).hexdigest(),
+                "cross_split_content_hash_count": 0,
+                "nas_accessed": False,
+            }
+        ),
+        encoding="utf-8",
+    )
     base_model = tmp_path / "base.pt"
     base_model.write_bytes(b"base")
     output = tmp_path / "candidate"
@@ -327,6 +397,7 @@ def test_training_records_metrics_and_resource_telemetry(monkeypatch, tmp_path):
     class FakeYOLO:
         def __init__(self, model_path):
             assert model_path == str(base_model)
+            self.trainer = None
 
         def add_callback(self, event, callback):
             assert event == "on_train_epoch_end"
@@ -339,6 +410,7 @@ def test_training_records_metrics_and_resource_telemetry(monkeypatch, tmp_path):
             assert kwargs["lrf"] == 0.05
             assert kwargs["cos_lr"] is True
             assert kwargs["warmup_epochs"] == 1.0
+            assert kwargs["close_mosaic"] == 1
             run = Path(kwargs["project"]) / kwargs["name"]
             (run / "weights").mkdir(parents=True)
             (run / "weights" / "best.pt").write_bytes(b"best")
@@ -346,6 +418,11 @@ def test_training_records_metrics_and_resource_telemetry(monkeypatch, tmp_path):
                 "epoch,metrics/precision(B),metrics/recall(B),metrics/mAP50-95(B)\n"
                 "1,0.8,0.7,0.6\n",
                 encoding="utf-8",
+            )
+            self.trainer = SimpleNamespace(
+                optimizer=SimpleNamespace(
+                    param_groups=[{"initial_lr": 0.0004, "lr": 0.0001}]
+                )
             )
             return SimpleNamespace(save_dir=run)
 
@@ -365,6 +442,8 @@ def test_training_records_metrics_and_resource_telemetry(monkeypatch, tmp_path):
         final_learning_rate_fraction=0.05,
         cosine_schedule=True,
         warmup_epochs=1.0,
+        close_mosaic=1,
+        dataset_integrity_audit=integrity_audit,
     )
 
     assert report["completed_epoch_count"] == 1
@@ -377,12 +456,40 @@ def test_training_records_metrics_and_resource_telemetry(monkeypatch, tmp_path):
     assert report["best_validation_csv_epoch"] == 1
     assert report["best_validation_metrics"]["metrics/mAP50-95(B)"] == 0.6
     assert report["optimizer"] == "AdamW"
+    assert report["requested_optimizer"] == "AdamW"
+    assert report["effective_optimizer"] == "SimpleNamespace"
+    assert report["effective_initial_learning_rates"] == [0.0004]
+    assert report["optimizer_auto_may_override_requested_learning_rate"] is False
     assert report["learning_rate"] == 0.001
     assert report["final_learning_rate_fraction"] == 0.05
     assert report["cosine_schedule"] is True
     assert report["warmup_epochs"] == 1.0
+    assert report["close_mosaic"] == 1
+    assert report["dataset_integrity_gate_passed"] is True
+    assert report["dataset_integrity_audit"] == str(integrity_audit)
     assert (output / "resource-telemetry.json").is_file()
     assert (output / "resource-telemetry_live.json").is_file()
     assert report["production_certified"] is False
     assert report["source_copy_bytes"] == 0
     assert report["nas_accessed"] is False
+
+
+def test_training_rejects_public_union_without_integrity_audit(tmp_path):
+    source, receipt = _public_yolo_fixture(tmp_path)
+    dataset = tmp_path / "training-view"
+    build_public_yolo_training_view(source, receipt, dataset)
+    dataset_receipt_path = dataset / "dataset-receipt.json"
+    dataset_receipt = json.loads(dataset_receipt_path.read_text(encoding="utf-8"))
+    dataset_receipt["schema_version"] = "visioncortex-mapped-public-yolo-union/1"
+    dataset_receipt_path.write_text(json.dumps(dataset_receipt), encoding="utf-8")
+    base_model = tmp_path / "base.pt"
+    base_model.write_bytes(b"base")
+
+    with pytest.raises(RuntimeError, match="integrity audit"):
+        train_yolo_model(
+            dataset,
+            base_model,
+            tmp_path / "candidate",
+            epochs=1,
+            close_mosaic=1,
+        )

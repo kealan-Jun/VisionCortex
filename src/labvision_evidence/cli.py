@@ -86,6 +86,11 @@ from .storage import (
 )
 from .validation import validate_experiment_and_material_quality
 from .yolo_evaluation import evaluate_files as evaluate_yolo_files
+from .yolo_calibration import (
+    audit_yolo_dataset_integrity,
+    calibrate_yolo_confidence_thresholds,
+    evaluate_yolo_with_calibrated_thresholds,
+)
 from .yolo_training import (
     build_mapped_public_yolo_union,
     build_public_yolo_training_view,
@@ -93,6 +98,8 @@ from .yolo_training import (
     evaluate_yolo_model_on_human_truth,
     train_yolo_model,
 )
+from .yolo_candidate_runtime import export_and_benchmark_yolo_candidate
+from .yolo_world_calibration import calibrate_yolo_world_prompts
 
 
 app = typer.Typer(no_args_is_help=True, help="多视角化学实验视频证据流水线")
@@ -871,7 +878,7 @@ def accept_local_models_command(
     output: Annotated[Path, typer.Option("--output", "-o")],
     config: Annotated[
         Path, typer.Option("--config", "-c", exists=True, dir_okay=False)
-    ] = Path("configs/rtx3090ti-ubuntu-production.yaml"),
+    ] = Path("configs/rtx3090ti-ubuntu-local.yaml"),
 ) -> None:
     """Run every production CV model on one bounded local public example."""
 
@@ -1161,6 +1168,199 @@ def build_mapped_public_yolo_union_command(
     typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+@app.command("audit-yolo-dataset-integrity")
+def audit_yolo_dataset_integrity_command(
+    dataset: Annotated[
+        Path, typer.Option("--dataset", exists=True, file_okay=False)
+    ],
+    output: Annotated[Path, typer.Option("--output", "-o")],
+    focus_classes: Annotated[
+        str, typer.Option("--focus-classes", help="Comma-separated ontology classes")
+    ] = "hand,pipette",
+) -> None:
+    """Hash all unique sources and fail closed on train/val/test leakage."""
+
+    focus = [item.strip() for item in focus_classes.split(",") if item.strip()]
+    payload = audit_yolo_dataset_integrity(dataset, output, focus_classes=focus)
+    typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+@app.command("calibrate-yolo-confidence")
+def calibrate_yolo_confidence_command(
+    dataset: Annotated[
+        Path, typer.Option("--dataset", exists=True, file_okay=False)
+    ],
+    model: Annotated[Path, typer.Option("--model", exists=True, dir_okay=False)],
+    audit_receipt: Annotated[
+        Path, typer.Option("--audit-receipt", exists=True, dir_okay=False)
+    ],
+    output: Annotated[Path, typer.Option("--output", "-o")],
+    target_classes: Annotated[
+        str, typer.Option("--target-classes", help="Comma-separated ontology classes")
+    ] = "hand,pipette",
+    thresholds: Annotated[
+        str, typer.Option("--thresholds", help="Comma-separated validation sweep")
+    ] = "0.01,0.02,0.03,0.05,0.075,0.1,0.15,0.2,0.25,0.3,0.35,0.4,0.45,0.5,0.6,0.7,0.8,0.9",
+    minimum_precision: Annotated[
+        float, typer.Option("--minimum-precision", min=0.0, max=1.0)
+    ] = 0.85,
+    minimum_recall: Annotated[
+        float, typer.Option("--minimum-recall", min=0.0, max=1.0)
+    ] = 0.80,
+    image_size: Annotated[int, typer.Option("--image-size", min=64)] = 640,
+    batch: Annotated[int, typer.Option("--batch", min=1)] = 8,
+    device: Annotated[str, typer.Option("--device")] = "0",
+) -> None:
+    """Freeze hand/pipette operating points using validation truth only."""
+
+    targets = [item.strip() for item in target_classes.split(",") if item.strip()]
+    try:
+        candidates = [
+            float(item.strip()) for item in thresholds.split(",") if item.strip()
+        ]
+    except ValueError as exc:
+        raise typer.BadParameter("--thresholds must contain numbers") from exc
+    payload = calibrate_yolo_confidence_thresholds(
+        dataset,
+        model,
+        audit_receipt,
+        output,
+        target_classes=targets,
+        thresholds=candidates,
+        minimum_precision=minimum_precision,
+        minimum_recall=minimum_recall,
+        image_size=image_size,
+        batch=batch,
+        device=device,
+    )
+    typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+@app.command("evaluate-yolo-calibrated")
+def evaluate_yolo_calibrated_command(
+    dataset: Annotated[
+        Path, typer.Option("--dataset", exists=True, file_okay=False)
+    ],
+    model: Annotated[Path, typer.Option("--model", exists=True, dir_okay=False)],
+    calibration_receipt: Annotated[
+        Path, typer.Option("--calibration-receipt", exists=True, dir_okay=False)
+    ],
+    output: Annotated[Path, typer.Option("--output", "-o")],
+    image_size: Annotated[int, typer.Option("--image-size", min=64)] = 640,
+    batch: Annotated[int, typer.Option("--batch", min=1)] = 8,
+    device: Annotated[str, typer.Option("--device")] = "0",
+    test_exposure_status: Annotated[
+        str,
+        typer.Option(
+            "--test-exposure-status",
+            help=(
+                "Use first_use_independent only before any development has seen "
+                "this test split; otherwise use repeat_comparative_benchmark."
+            ),
+        ),
+    ] = "repeat_comparative_benchmark",
+) -> None:
+    """Apply a validation-frozen operating point with explicit test provenance."""
+
+    payload = evaluate_yolo_with_calibrated_thresholds(
+        dataset,
+        model,
+        calibration_receipt,
+        output,
+        image_size=image_size,
+        batch=batch,
+        device=device,
+        test_exposure_status=test_exposure_status,
+    )
+    typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+@app.command("calibrate-yolo-world-prompts")
+def calibrate_yolo_world_prompts_command(
+    dataset: Annotated[
+        Path, typer.Option("--dataset", exists=True, file_okay=False)
+    ],
+    model: Annotated[Path, typer.Option("--model", exists=True, dir_okay=False)],
+    audit_receipt: Annotated[
+        Path, typer.Option("--audit-receipt", exists=True, dir_okay=False)
+    ],
+    prompt_map: Annotated[
+        Path, typer.Option("--prompt-map", exists=True, dir_okay=False)
+    ],
+    output: Annotated[Path, typer.Option("--output", "-o")],
+    target_classes: Annotated[
+        str, typer.Option("--target-classes", help="Comma-separated ontology classes")
+    ] = "hand,pipette",
+    minimum_precision: Annotated[
+        float, typer.Option("--minimum-precision", min=0.0, max=1.0)
+    ] = 0.85,
+    minimum_recall: Annotated[
+        float, typer.Option("--minimum-recall", min=0.0, max=1.0)
+    ] = 0.80,
+    image_size: Annotated[int, typer.Option("--image-size", min=64)] = 640,
+    batch: Annotated[int, typer.Option("--batch", min=1)] = 16,
+    device: Annotated[str, typer.Option("--device")] = "0",
+) -> None:
+    """Measure YOLO-World prompts on validation truth before integration."""
+
+    raw_prompt_map = json.loads(prompt_map.read_text(encoding="utf-8"))
+    if not isinstance(raw_prompt_map, dict):
+        raise typer.BadParameter("--prompt-map must contain one JSON object")
+    targets = [item.strip() for item in target_classes.split(",") if item.strip()]
+    payload = calibrate_yolo_world_prompts(
+        dataset,
+        model,
+        audit_receipt,
+        output,
+        prompt_map={str(key): str(value) for key, value in raw_prompt_map.items()},
+        target_classes=targets,
+        minimum_precision=minimum_precision,
+        minimum_recall=minimum_recall,
+        image_size=image_size,
+        batch=batch,
+        device=device,
+    )
+    typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+@app.command("benchmark-yolo-candidate-tensorrt")
+def benchmark_yolo_candidate_tensorrt_command(
+    model: Annotated[Path, typer.Option("--model", exists=True, dir_okay=False)],
+    dataset: Annotated[
+        Path, typer.Option("--dataset", exists=True, file_okay=False)
+    ],
+    audit_receipt: Annotated[
+        Path, typer.Option("--audit-receipt", exists=True, dir_okay=False)
+    ],
+    output: Annotated[Path, typer.Option("--output", "-o")],
+    split: Annotated[str, typer.Option("--split")] = "val",
+    image_size: Annotated[int, typer.Option("--image-size", min=64)] = 640,
+    export_batch: Annotated[int, typer.Option("--export-batch", min=1)] = 4,
+    benchmark_image_limit: Annotated[
+        int, typer.Option("--benchmark-image-limit", min=1)
+    ] = 256,
+    workspace_gib: Annotated[
+        float, typer.Option("--workspace-gib", min=0.1)
+    ] = 3.0,
+    device: Annotated[str, typer.Option("--device")] = "0",
+) -> None:
+    """Export and benchmark an isolated candidate without changing production."""
+
+    payload = export_and_benchmark_yolo_candidate(
+        model,
+        dataset,
+        audit_receipt,
+        output,
+        split=split,
+        image_size=image_size,
+        export_batch=export_batch,
+        benchmark_image_limit=benchmark_image_limit,
+        workspace_gib=workspace_gib,
+        device=device,
+    )
+    typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
 @app.command("train-yolo-model")
 def train_yolo_model_command(
     dataset: Annotated[
@@ -1170,6 +1370,10 @@ def train_yolo_model_command(
         Path, typer.Option("--base-model", exists=True, dir_okay=False)
     ],
     output: Annotated[Path, typer.Option("--output", "-o")],
+    audit_receipt: Annotated[
+        Path | None,
+        typer.Option("--audit-receipt", exists=True, dir_okay=False),
+    ] = None,
     epochs: Annotated[int, typer.Option("--epochs", min=1)] = 100,
     image_size: Annotated[int, typer.Option("--image-size", min=64)] = 1280,
     batch: Annotated[int, typer.Option("--batch", min=1)] = 8,
@@ -1193,6 +1397,14 @@ def train_yolo_model_command(
     warmup_epochs: Annotated[
         float, typer.Option("--warmup-epochs", min=0.0, max=10.0)
     ] = 3.0,
+    close_mosaic: Annotated[
+        int,
+        typer.Option(
+            "--close-mosaic",
+            min=0,
+            help="Disable mosaic for the final N epochs; must not exceed --epochs.",
+        ),
+    ] = 10,
 ) -> None:
     """Train a real YOLO candidate; deployment remains certification-gated."""
 
@@ -1212,6 +1424,8 @@ def train_yolo_model_command(
         final_learning_rate_fraction=final_learning_rate_fraction,
         cosine_schedule=cosine_schedule,
         warmup_epochs=warmup_epochs,
+        close_mosaic=close_mosaic,
+        dataset_integrity_audit=audit_receipt,
     )
     typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
 

@@ -74,7 +74,7 @@ labvision tune-local-hardware --output <new-local-output> \
 labvision accept-local-models \
   --dataset /srv/sentinel-data/VisionCortex3090Ti/Runtime/PublicDatasets/LabPicsChemistry/extracted \
   --output /srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/<new-run> \
-  --config configs/rtx3090ti-ubuntu-production.yaml
+  --config configs/rtx3090ti-ubuntu-local.yaml
 
 # 只读统计正式认证仍缺多少真值；不扫描生产归档
 labvision model-certification-readiness \
@@ -122,6 +122,7 @@ labvision evaluate-yolo-model-on-human-truth --dataset <new-zero-copy-view> \
 
 ```bash
 labvision train-yolo-model --dataset <mapped-21-class-union> \
+  --audit-receipt <integrity-audit.json> \
   --base-model <previous-best.pt> --output <fine-tuned-candidate> \
   --optimizer AdamW --learning-rate 0.001 \
   --final-learning-rate-fraction 0.05 --cosine-schedule --warmup-epochs 1
@@ -141,13 +142,46 @@ labvision build-public-yolo-training-view --source <chemeq-extracted-root> \
 labvision build-mapped-public-yolo-union \
   --source WasedaChemicalApparatus=<waseda-zero-copy-view> \
   --source ChemEq25=<chemeq-zero-copy-view> --output <mapped-21-class-union>
+labvision audit-yolo-dataset-integrity --dataset <mapped-21-class-union> \
+  --output <new-integrity-audit> --focus-classes hand,pipette
 ```
+
+映射合并会在任何过采样之前按源图 SHA-256 去重；同内容跨 split 时按
+`test > val > train` 只保留一个权威 split，同 split 的重复框做确定性合并。训练、
+阈值校准和 TensorRT 候选实测都必须引用通过的完整性审计，发现跨 split 内容泄漏
+立即 fail-closed。阈值只允许从验证集冻结；精度、召回双门槛通过后优先选择召回率
+最高的候选生成阈值，随后才可读取测试集：
+
+```bash
+labvision calibrate-yolo-confidence --dataset <leakage-free-union> \
+  --model <candidate>/weights/best.pt --audit-receipt <integrity-audit.json> \
+  --output <new-val-calibration> --target-classes hand,pipette
+labvision evaluate-yolo-calibrated --dataset <leakage-free-union> \
+  --model <candidate>/weights/best.pt \
+  --calibration-receipt <new-val-calibration>/threshold-calibration.json \
+  --output <new-test-evaluation> \
+  --test-exposure-status first_use_independent
+labvision calibrate-yolo-world-prompts --dataset <leakage-free-union> \
+  --model <yolo-world-v2.pt> --audit-receipt <integrity-audit.json> \
+  --prompt-map configs/models/yolo-world-hand-pipette-prompts.json \
+  --output <new-yolo-world-val-calibration>
+labvision benchmark-yolo-candidate-tensorrt --dataset <leakage-free-union> \
+  --model <candidate>/weights/best.pt --audit-receipt <integrity-audit.json> \
+  --output <new-candidate-tensorrt-benchmark> \
+  --image-size 960 --export-batch 4 --benchmark-image-limit 256
+```
+
+同一测试 split 一旦参与过候选取舍，后续模型必须显式传
+`--test-exposure-status repeat_comparative_benchmark`，回执会禁止声称它仍是独立
+测试；此时真正的生产泛化结论只能由尚未参与开发的内部六视角 A/B 给出。
+TensorRT 候选基准固定空间尺寸与导出 batch，并显式按完整静态 batch 分块；回执
+只声明该固定形状的端到端吞吐，不外推到未实测 batch 或动态分辨率。
 
 训练与测试均在 epoch 边界强制墙钟上限，记录逐类 P/R/F1/AP、GPU/显存/功耗
 遥测，且固定 `production_certified=false`。Web 的“关键素材模型质量账本”展示每个
 事件实际执行的闭集 YOLO、YOLO-World、Grounding DINO、SAM2/LabPics、框置信度、
 二次核验耗时与保留的不确定性；没有人工真值时不会把模型置信度冒充准确率。
-已完成的公共模型候选及其独立留出集指标登记在
+已完成的公共模型候选及其按曝光状态标记的留出集指标登记在
 `configs/models/public-apparatus-candidates.json`；注册不等于上线，只有本体兼容且
 通过内部真实六视角认证的候选才允许写入生产配置。自动判定命令只生成不可变
 决策回执，不会改生产配置；即便公开留出集全部达标，缺少经复核的真实六视角

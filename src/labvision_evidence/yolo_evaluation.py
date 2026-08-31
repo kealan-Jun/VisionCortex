@@ -187,8 +187,22 @@ def evaluate_yolo_predictions(
     ground_truth: dict[str, Any],
     *,
     confidence_threshold: float = 0.25,
+    class_confidence_thresholds: dict[str, float] | None = None,
     iou_thresholds: tuple[float, ...] = tuple(round(0.5 + 0.05 * index, 2) for index in range(10)),
 ) -> dict[str, Any]:
+    if not math.isfinite(confidence_threshold) or not 0.0 <= confidence_threshold <= 1.0:
+        raise ValueError("YOLO confidence threshold must be between 0 and 1")
+    normalized_class_thresholds = {
+        str(name): float(value)
+        for name, value in (class_confidence_thresholds or {}).items()
+    }
+    if any(
+        not name
+        or not math.isfinite(value)
+        or not 0.0 <= value <= 1.0
+        for name, value in normalized_class_thresholds.items()
+    ):
+        raise ValueError("YOLO class confidence thresholds must be between 0 and 1")
     _validate_ground_truth(ground_truth)
     images = {
         str(image["image_id"]): image for image in ground_truth.get("images", [])
@@ -221,7 +235,9 @@ def evaluate_yolo_predictions(
                 frame_predictions,
                 frame_ground_truth,
                 iou_threshold=iou,
-                confidence_threshold=confidence_threshold,
+                confidence_threshold=normalized_class_thresholds.get(
+                    class_name, confidence_threshold
+                ),
             )
             for iou in iou_thresholds
         }
@@ -259,6 +275,7 @@ def evaluate_yolo_predictions(
         "schema_version": "visioncortex-yolo-ground-truth-evaluation/1.0.0",
         "status": "completed" if images and supported else "not_evaluated_no_ground_truth",
         "confidence_threshold": confidence_threshold,
+        "class_confidence_thresholds": dict(sorted(normalized_class_thresholds.items())),
         "iou_thresholds": list(iou_thresholds),
         "image_count": len(images),
         "ground_truth_instance_count": sum(

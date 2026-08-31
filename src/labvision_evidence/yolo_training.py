@@ -23,6 +23,7 @@ TRAINING_SCHEMA = "visioncortex-yolo-training-run/1"
 EVALUATION_SCHEMA = "visioncortex-yolo-human-truth-evaluation/1"
 PUBLIC_DATASET_SCHEMA = "visioncortex-public-yolo-training-dataset/1"
 PUBLIC_UNION_SCHEMA = "visioncortex-mapped-public-yolo-union/1"
+DATASET_INTEGRITY_AUDIT_SCHEMA = "visioncortex-yolo-dataset-integrity-audit/1"
 TRAINING_TRUTH_STATUSES = frozenset(
     {"reviewed_ground_truth", "public_human_annotations"}
 )
@@ -406,12 +407,16 @@ def build_mapped_public_yolo_union(
     temporary = output.with_name(f".{output.name}.partial-{uuid.uuid4().hex[:8]}")
     split_image_counts = {split: 0 for split in ("train", "val", "test")}
     underlying_image_counts = {split: 0 for split in ("train", "val", "test")}
+    raw_mapped_image_counts = {split: 0 for split in ("train", "val", "test")}
     split_annotation_counts = {split: 0 for split in ("train", "val", "test")}
     class_annotation_counts = {name: 0 for name in target_classes}
     excluded_unmapped_images = 0
     label_materialization_bytes = 0
     source_receipts = []
     destination_names: set[tuple[str, str]] = set()
+    records_by_content_hash: dict[str, list[dict[str, Any]]] = {}
+    source_hash_cache: dict[Path, str] = {}
+    split_priority = {"train": 0, "val": 1, "test": 2}
     try:
         for dataset_id, raw_root in sorted(source_roots.items()):
             root = raw_root.resolve()
@@ -506,41 +511,98 @@ def build_mapped_public_yolo_union(
                     if not mapped_rows:
                         excluded_unmapped_images += 1
                         continue
-                    underlying_image_counts[split] += 1
-                    factor = (
-                        max([oversample.get(name, 1) for name in mapped_classes], default=1)
-                        if split == "train"
-                        else 1
+                    raw_mapped_image_counts[split] += 1
+                    source_image = images[relative_stem].resolve(strict=True)
+                    digest = source_hash_cache.get(source_image)
+                    if digest is None:
+                        digest = _sha256(source_image)
+                        source_hash_cache[source_image] = digest
+                    records_by_content_hash.setdefault(digest, []).append(
+                        {
+                            "dataset_id": dataset_id,
+                            "split": split,
+                            "relative_stem": relative_stem.as_posix(),
+                            "source_image": source_image,
+                            "mapped_rows": mapped_rows,
+                            "mapped_classes": mapped_classes,
+                        }
                     )
-                    source_image = images[relative_stem]
-                    base_name = _safe_name(
-                        f"{dataset_id}__{relative_stem.as_posix()}"
+        excluded_cross_split_duplicate_images = 0
+        merged_same_split_duplicate_images = 0
+        for _digest, records in sorted(records_by_content_hash.items()):
+            winning_split = max(
+                (str(record["split"]) for record in records),
+                key=lambda split: split_priority[split],
+            )
+            winning = sorted(
+                (record for record in records if record["split"] == winning_split),
+                key=lambda record: (
+                    str(record["dataset_id"]),
+                    str(record["relative_stem"]),
+                ),
+            )
+            excluded_cross_split_duplicate_images += len(records) - len(winning)
+            merged_same_split_duplicate_images += max(0, len(winning) - 1)
+            authority = winning[0]
+            mapped_rows = sorted(
+                {
+                    str(row)
+                    for record in winning
+                    for row in record["mapped_rows"]
+                },
+                key=lambda row: (
+                    int(row.split()[0]),
+                    tuple(float(value) for value in row.split()[1:]),
+                ),
+            )
+            mapped_classes = {
+                target_classes[int(row.split()[0])] for row in mapped_rows
+            }
+            underlying_image_counts[winning_split] += 1
+            factor = (
+                max(
+                    [oversample.get(name, 1) for name in mapped_classes],
+                    default=1,
+                )
+                if winning_split == "train"
+                else 1
+            )
+            source_image = Path(authority["source_image"])
+            base_name = _safe_name(
+                f"{authority['dataset_id']}__{authority['relative_stem']}"
+            )
+            for repeat in range(factor):
+                suffix = "" if repeat == 0 else f"__repeat{repeat}"
+                destination_name = (
+                    f"{base_name}{suffix}{source_image.suffix.casefold()}"
+                )
+                identity = (winning_split, destination_name)
+                if identity in destination_names:
+                    raise RuntimeError(f"Mapped public filename collision: {identity}")
+                destination_names.add(identity)
+                image_destination = (
+                    temporary / "images" / winning_split / destination_name
+                )
+                label_destination = (
+                    temporary
+                    / "labels"
+                    / winning_split
+                    / f"{Path(destination_name).stem}.txt"
+                )
+                image_destination.parent.mkdir(parents=True, exist_ok=True)
+                label_destination.parent.mkdir(parents=True, exist_ok=True)
+                os.symlink(source_image, image_destination)
+                label_payload = "\n".join(mapped_rows) + "\n"
+                label_destination.write_text(label_payload, encoding="utf-8")
+                label_materialization_bytes += len(label_payload.encode("utf-8"))
+                split_image_counts[winning_split] += 1
+                split_annotation_counts[winning_split] += len(mapped_rows)
+                for target_name in mapped_classes:
+                    class_annotation_counts[target_name] += sum(
+                        1
+                        for mapped_row in mapped_rows
+                        if int(mapped_row.split()[0]) == target_ids[target_name]
                     )
-                    for repeat in range(factor):
-                        suffix = "" if repeat == 0 else f"__repeat{repeat}"
-                        destination_name = f"{base_name}{suffix}{source_image.suffix.casefold()}"
-                        identity = (split, destination_name)
-                        if identity in destination_names:
-                            raise RuntimeError(f"Mapped public filename collision: {identity}")
-                        destination_names.add(identity)
-                        image_destination = temporary / "images" / split / destination_name
-                        label_destination = (
-                            temporary / "labels" / split / f"{Path(destination_name).stem}.txt"
-                        )
-                        image_destination.parent.mkdir(parents=True, exist_ok=True)
-                        label_destination.parent.mkdir(parents=True, exist_ok=True)
-                        os.symlink(source_image.resolve(), image_destination)
-                        label_payload = "\n".join(mapped_rows) + "\n"
-                        label_destination.write_text(label_payload, encoding="utf-8")
-                        label_materialization_bytes += len(label_payload.encode("utf-8"))
-                        split_image_counts[split] += 1
-                        split_annotation_counts[split] += len(mapped_rows)
-                        for target_name in mapped_classes:
-                            class_annotation_counts[target_name] += sum(
-                                1
-                                for mapped_row in mapped_rows
-                                if int(mapped_row.split()[0]) == target_ids[target_name]
-                            )
         if not split_image_counts["train"] or not split_image_counts["val"] or not split_image_counts["test"]:
             raise RuntimeError("Mapped public union requires non-empty train/val/test splits")
         data_yaml = {
@@ -563,11 +625,20 @@ def build_mapped_public_yolo_union(
             "class_count": len(target_classes),
             "classes": target_classes,
             "source_receipts": source_receipts,
+            "raw_mapped_image_counts": raw_mapped_image_counts,
             "split_image_counts": split_image_counts,
             "underlying_image_counts": underlying_image_counts,
             "split_annotation_counts": split_annotation_counts,
             "class_annotation_counts": class_annotation_counts,
             "excluded_unmapped_image_count": excluded_unmapped_images,
+            "cross_split_content_policy": "keep_test_then_val_then_train",
+            "excluded_cross_split_duplicate_image_count": (
+                excluded_cross_split_duplicate_images
+            ),
+            "merged_same_split_duplicate_image_count": (
+                merged_same_split_duplicate_images
+            ),
+            "unique_content_hash_count": len(records_by_content_hash),
             "train_oversample_factors": oversample,
             "link_mode": "file_symlink",
             "source_copy_bytes": 0,
@@ -775,6 +846,8 @@ def train_yolo_model(
     final_learning_rate_fraction: float = 0.01,
     cosine_schedule: bool = False,
     warmup_epochs: float = 3.0,
+    close_mosaic: int = 10,
+    dataset_integrity_audit: Path | None = None,
 ) -> dict[str, Any]:
     """Run a real Ultralytics training job from reviewed ground truth only."""
 
@@ -804,6 +877,8 @@ def train_yolo_model(
         or not 1e-6 <= learning_rate <= 0.1
         or not 0.001 <= final_learning_rate_fraction <= 1.0
         or not 0.0 <= warmup_epochs <= 10.0
+        or close_mosaic < 0
+        or close_mosaic > epochs
     ):
         raise ValueError("YOLO training limits are invalid")
     receipt_path = dataset_root / "dataset-receipt.json"
@@ -817,8 +892,40 @@ def train_yolo_model(
         or dataset_receipt.get("status") != "completed"
         or dataset_receipt.get("truth_status") not in TRAINING_TRUTH_STATUSES
         or dataset_receipt.get("nas_accessed") is not False
+        or int(dataset_receipt.get("source_copy_bytes") or 0) != 0
     ):
         raise RuntimeError("YOLO training dataset is not trusted human ground truth")
+    integrity_audit_path = (
+        dataset_integrity_audit.resolve()
+        if dataset_integrity_audit is not None
+        else None
+    )
+    integrity_audit: dict[str, Any] | None = None
+    if (
+        dataset_receipt.get("schema_version") == PUBLIC_UNION_SCHEMA
+        and integrity_audit_path is None
+    ):
+        raise RuntimeError(
+            "Mapped public YOLO unions require a passing dataset integrity audit"
+        )
+    if integrity_audit_path is not None:
+        if not integrity_audit_path.is_file():
+            raise RuntimeError("YOLO dataset integrity audit file is missing")
+        integrity_audit = json.loads(
+            integrity_audit_path.read_text(encoding="utf-8-sig")
+        )
+        if (
+            integrity_audit.get("schema_version")
+            != DATASET_INTEGRITY_AUDIT_SCHEMA
+            or integrity_audit.get("passed") is not True
+            or integrity_audit.get("dataset_receipt_sha256") != _sha256(receipt_path)
+            or int(integrity_audit.get("cross_split_content_hash_count") or 0) != 0
+            or int(integrity_audit.get("source_copy_bytes") or 0) != 0
+            or integrity_audit.get("nas_accessed") is not False
+        ):
+            raise RuntimeError(
+                "YOLO dataset integrity audit is failed, unsafe, or mismatched"
+            )
     if not base_model.is_file():
         raise FileNotFoundError(f"YOLO base model is missing: {base_model}")
 
@@ -860,6 +967,7 @@ def train_yolo_model(
             lrf=final_learning_rate_fraction,
             cos_lr=cosine_schedule,
             warmup_epochs=warmup_epochs,
+            close_mosaic=close_mosaic,
         )
     finally:
         telemetry = monitor.stop()
@@ -915,12 +1023,41 @@ def train_yolo_model(
         if best_metric_row.get("epoch") is not None
         else None
     )
+    trainer = getattr(model, "trainer", None)
+    effective_optimizer_instance = getattr(trainer, "optimizer", None)
+    effective_optimizer_name = (
+        type(effective_optimizer_instance).__name__
+        if effective_optimizer_instance is not None
+        else None
+    )
+    effective_initial_learning_rates = sorted(
+        {
+            float(group.get("initial_lr", group.get("lr")))
+            for group in (
+                getattr(effective_optimizer_instance, "param_groups", None) or []
+            )
+            if group.get("initial_lr", group.get("lr")) is not None
+        }
+    )
     receipt = {
         "schema_version": TRAINING_SCHEMA,
         "status": "completed",
         "truth_status": dataset_receipt.get("truth_status"),
         "dataset_receipt": str(receipt_path),
         "dataset_receipt_sha256": _sha256(receipt_path),
+        "dataset_integrity_audit": (
+            str(integrity_audit_path) if integrity_audit_path is not None else None
+        ),
+        "dataset_integrity_audit_sha256": (
+            _sha256(integrity_audit_path)
+            if integrity_audit_path is not None
+            else None
+        ),
+        "dataset_integrity_gate_passed": (
+            integrity_audit.get("passed") is True
+            if integrity_audit is not None
+            else None
+        ),
         "base_model": str(base_model),
         "base_model_sha256": _sha256(base_model),
         "best_model": str(best),
@@ -935,9 +1072,15 @@ def train_yolo_model(
         "workers": workers,
         "optimizer": optimizer,
         "learning_rate": learning_rate,
+        "requested_optimizer": optimizer,
+        "requested_learning_rate": learning_rate,
+        "effective_optimizer": effective_optimizer_name,
+        "effective_initial_learning_rates": effective_initial_learning_rates,
+        "optimizer_auto_may_override_requested_learning_rate": optimizer == "auto",
         "final_learning_rate_fraction": final_learning_rate_fraction,
         "cosine_schedule": cosine_schedule,
         "warmup_epochs": warmup_epochs,
+        "close_mosaic": close_mosaic,
         "started_at": started.isoformat(),
         "ended_at": ended.isoformat(),
         "elapsed_seconds": (ended - started).total_seconds(),
