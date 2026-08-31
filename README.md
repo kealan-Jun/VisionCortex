@@ -165,7 +165,7 @@ labvision calibrate-yolo-world-prompts --dataset <leakage-free-union> \
   --model <yolo-world-v2.pt> --audit-receipt <integrity-audit.json> \
   --prompt-map configs/models/yolo-world-hand-pipette-prompts.json \
   --output <new-yolo-world-val-calibration>
-labvision benchmark-yolo-candidate-tensorrt --dataset <leakage-free-union> \
+labvision measure-yolo-candidate-tensorrt --dataset <leakage-free-union> \
   --model <candidate>/weights/best.pt --audit-receipt <integrity-audit.json> \
   --output <new-candidate-tensorrt-benchmark> \
   --image-size 960 --export-batch 4 --benchmark-image-limit 256

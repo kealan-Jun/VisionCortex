@@ -1323,7 +1323,7 @@ def calibrate_yolo_world_prompts_command(
     typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
-@app.command("benchmark-yolo-candidate-tensorrt")
+@app.command("measure-yolo-candidate-tensorrt")
 def benchmark_yolo_candidate_tensorrt_command(
     model: Annotated[Path, typer.Option("--model", exists=True, dir_okay=False)],
     dataset: Annotated[
