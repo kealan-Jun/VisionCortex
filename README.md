@@ -1,5 +1,34 @@
 # LabVision Evidence
 
+## 用户快速启动
+
+第一次使用时，不需要先判断自己的显卡或操作系统。启动入口会先检查环境，
+只给出中文结果，不会自动安装软件、访问 NAS 或运行模型。
+
+Windows 用户双击仓库根目录的 `Start-VisionCortex.bat`。Linux 用户运行：
+
+```bash
+./start-visioncortex.sh
+```
+
+macOS 用户可以双击 `Start-VisionCortex.command`，也可以执行上面的 Linux 命令。
+默认启动 `configs/development-local.yaml` 本地开发配置，并打开
+`http://127.0.0.1:8000/#/home`。该入口只证明本地网页可以启动；真实模型推理、
+真实视频效果和正式发布能力仍须在对应 NVIDIA GPU 节点单独验收。
+
+只检查、不启动：
+
+```powershell
+# Windows
+.\Start-VisionCortex.ps1 -CheckOnly
+
+# Linux / macOS
+./start-visioncortex.sh --check-only
+
+# 需要机器可读的完整环境结果
+python tools/doctor.py --json
+```
+
 RTX 4060 真实六路运行节点必须先阅读
 [`docs/RTX4060-Codex-真实六路全链路执行任务书.md`](docs/RTX4060-Codex-真实六路全链路执行任务书.md)，
 并在运行结束后填写

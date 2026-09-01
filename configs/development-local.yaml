@@ -13,3 +13,7 @@ storage:
   local_cache_root: ./outputs/development-cache
   local_staging_root: ./outputs/development-runs
   sync_to_nas: false
+  web_upload_retention_mode: local_only
+
+collection_ingest:
+  enabled: false
