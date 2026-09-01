@@ -396,3 +396,13 @@ def test_key_material_roles_export_concurrently_and_write_runtime(monkeypatch, t
     assert runtime["category_index"] == "Key-Materials/Key-Material-Category-Index.json"
     assert len(runtime["records"]) == 3
     assert runtime["total_duration_seconds"] > 0
+
+
+def test_component_budget_applies_classic_path_limit_only_on_windows(monkeypatch, tmp_path):
+    parent = tmp_path / ("long-parent-" * 20)
+
+    monkeypatch.setattr(archive.os, "name", "posix")
+    assert archive._component_budget(parent, 26, maximum_chars=40) == 40
+
+    monkeypatch.setattr(archive.os, "name", "nt")
+    assert archive._component_budget(parent, 26, maximum_chars=40) == 12

@@ -449,6 +449,9 @@ def _bounded_component(value: str, maximum_chars: int) -> str:
 
 
 def _component_budget(parent: Path, reserved_tail_chars: int, maximum_chars: int = 72) -> int:
+    maximum_chars = max(12, int(maximum_chars))
+    if os.name != "nt":
+        return maximum_chars
     # 235 leaves headroom below classic Windows MAX_PATH for FFmpeg/OpenCV
     # temporary suffixes when LongPathsEnabled is disabled.
     return max(
