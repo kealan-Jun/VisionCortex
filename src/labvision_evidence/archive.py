@@ -450,7 +450,11 @@ def _bounded_component(value: str, maximum_chars: int) -> str:
 
 def _component_budget(parent: Path, reserved_tail_chars: int, maximum_chars: int = 72) -> int:
     maximum_chars = max(12, int(maximum_chars))
-    if os.name != "nt":
+    parent_text = str(parent)
+    windows_style_path = bool(re.match(r"^[A-Za-z]:[\\/]", parent_text)) or parent_text.startswith(
+        "\\\\"
+    )
+    if os.name != "nt" and not windows_style_path:
         return maximum_chars
     # 235 leaves headroom below classic Windows MAX_PATH for FFmpeg/OpenCV
     # temporary suffixes when LongPathsEnabled is disabled.

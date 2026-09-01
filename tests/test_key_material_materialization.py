@@ -1,6 +1,7 @@
 import json
 import threading
 import time
+from pathlib import PurePosixPath, PureWindowsPath
 
 import numpy as np
 
@@ -398,11 +399,13 @@ def test_key_material_roles_export_concurrently_and_write_runtime(monkeypatch, t
     assert runtime["total_duration_seconds"] > 0
 
 
-def test_component_budget_applies_classic_path_limit_only_on_windows(monkeypatch, tmp_path):
-    parent = tmp_path / ("long-parent-" * 20)
+def test_component_budget_applies_classic_path_limit_only_on_windows(monkeypatch):
+    parent = PurePosixPath("/tmp") / ("long-parent-" * 20)
+    windows_parent = PureWindowsPath("Y:/" + ("long-parent-" * 20))
 
     monkeypatch.setattr(archive.os, "name", "posix")
     assert archive._component_budget(parent, 26, maximum_chars=40) == 40
+    assert archive._component_budget(windows_parent, 26, maximum_chars=40) == 12
 
     monkeypatch.setattr(archive.os, "name", "nt")
     assert archive._component_budget(parent, 26, maximum_chars=40) == 12

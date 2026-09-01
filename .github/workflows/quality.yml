@@ -169,10 +169,17 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           if ($null -eq (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
-            choco install ffmpeg -y --no-progress
-            $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
-            $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-            $env:Path = "$machinePath;$userPath"
+            for ($attempt = 1; $attempt -le 3; $attempt++) {
+              choco install ffmpeg -y --no-progress
+              $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+              $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+              $env:Path = "$machinePath;$userPath"
+              if ($null -ne (Get-Command ffmpeg -ErrorAction SilentlyContinue)) { break }
+              if ($attempt -lt 3) { Start-Sleep -Seconds 10 }
+            }
+          }
+          if ($null -eq (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+            throw "FFmpeg installation failed after three attempts."
           }
           ffmpeg -version
           ffprobe -version
