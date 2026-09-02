@@ -37,6 +37,33 @@ RTX 4060 真实六路运行节点必须先阅读
 
 > 冻结基线：六路、多视角、3 小时湿实验视频的时间对齐、有界实验筛选、五类关键素材和细粒度步骤理解流水线。RTX 4060 部署、固定 NAS 基准、缓存目录与开发协作方式见 [RTX4060-交接与运行说明.md](RTX4060-交接与运行说明.md)。
 
+## 3090 Ti 局域网服务器
+
+正式使用时，Windows、macOS、Linux 用户都不需要安装本项目，也不需要配置
+CUDA、TensorRT 或模型。管理员只在 Ubuntu 3090 Ti 主机完成一次安装，然后运行：
+
+```bash
+./deployment/rtx3090ti-ubuntu/07-Install-LAN-Server.sh
+```
+
+安装器会要求管理员在终端中设置一次网页登录密码，不回显密码，也不会把密码写入
+Git。完成后会显示类似 `http://192.168.x.x:8000/#/home` 的局域网地址。其他用户
+只需打开该地址，以用户名 `visioncortex` 和管理员设置的密码登录，即可选择 NAS
+批次、提交任务、查看进度和结果。多人同时提交时，3090 Ti 每次只执行一个正式
+GPU 任务，其余任务保留为“排队等待”，避免互相争抢显存。
+
+该服务使用 3090 Ti 正式生产配置，启动前检查 GPU、NAS、固定 Python 环境和本地
+空间；检查不通过时拒绝启动。它只接受回环地址和常见私有局域网地址，并要求每次
+浏览器会话登录，不是公网发布方案。服务状态检查：
+
+```bash
+./deployment/rtx3090ti-ubuntu/08-Server-Status.sh
+```
+
+4060 和 3060 可以继续作为开发或备用机器，但普通用户不再需要在这些机器上拉取
+仓库。真实模型、真实视频质量和正式归档能力仍须在 3090 Ti 主机按下面的生产门禁
+验收，网页能打开本身不代表完整推理已经通过。
+
 ## Ubuntu RTX 3090 Ti 本地结构
 
 ```text
@@ -97,7 +124,7 @@ labvision model-certification-readiness \
   --config configs/rtx3090ti-ubuntu-production.yaml \
   --output /srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/readiness.json
 
-# 安装仅绑定 127.0.0.1、重启自恢复且不继承 NAS 路径的本地 Web
+# 安装仅绑定 127.0.0.1、重启自恢复且不继承 NAS 路径的离线验收 Web
 deployment/rtx3090ti-ubuntu/05-Install-Local-Service.sh
 ```
 

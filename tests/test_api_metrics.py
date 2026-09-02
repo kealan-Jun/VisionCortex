@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import io
 import json
+import threading
 import time
 import csv
 from pathlib import Path
@@ -11,6 +12,45 @@ from starlette.datastructures import UploadFile
 
 from labvision_evidence import api
 from labvision_evidence.collection_catalog import clear_collection_catalog_cache
+
+
+def test_gpu_background_jobs_run_one_at_a_time(monkeypatch, tmp_path):
+    state_lock = threading.Lock()
+    start_barrier = threading.Barrier(3)
+    active = 0
+    maximum_active = 0
+    completed: list[str] = []
+
+    def fake_execute_now(run_id, manifest, settings, nas_root, ingest=None):
+        nonlocal active, maximum_active
+        with state_lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+        time.sleep(0.05)
+        with state_lock:
+            active -= 1
+            completed.append(run_id)
+
+    def worker(run_id: str) -> None:
+        start_barrier.wait()
+        api._execute(run_id, None, {}, tmp_path)
+
+    monkeypatch.setattr(api, "_gpu_job_lock", threading.Lock())
+    monkeypatch.setattr(api, "_execute_now", fake_execute_now)
+    monkeypatch.setattr(api, "_update", lambda *args, **kwargs: None)
+
+    first = threading.Thread(target=worker, args=("run-one",))
+    second = threading.Thread(target=worker, args=("run-two",))
+    first.start()
+    second.start()
+    start_barrier.wait()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert maximum_active == 1
+    assert sorted(completed) == ["run-one", "run-two"]
 
 
 def test_nas_only_upload_does_not_create_persistent_local_copy(tmp_path):
@@ -92,6 +132,9 @@ def test_health_exposes_fixed_benchmark_and_cache_locations(monkeypatch, tmp_pat
     assert "zero-copy" in benchmark["input_mode"]
     assert benchmark["local_cache_root"].endswith("cache")
     assert response.json()["collection_ingest"]["recursive_nas_scan"] is False
+    assert response.json()["execution_queue"]["policy"] == (
+        "single_gpu_one_job_at_a_time"
+    )
 
 
 def test_health_reports_local_storage_without_claiming_nas(monkeypatch, tmp_path):

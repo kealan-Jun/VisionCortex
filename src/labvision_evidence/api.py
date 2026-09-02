@@ -53,10 +53,17 @@ from .storage import (
     promote_fixed_archive,
     safe_archive_name,
 )
+from .web_access import (
+    is_allowed_lan_client,
+    valid_basic_authorization,
+    validate_web_access_configuration,
+    web_access_mode,
+)
 
 
 @asynccontextmanager
 async def _lifespan(_: FastAPI):
+    validate_web_access_configuration()
     _recover_orphaned_tasks()
     yield
 
@@ -69,6 +76,7 @@ app = FastAPI(
 _web_root = Path(__file__).with_name("web")
 app.mount("/ui", StaticFiles(directory=_web_root), name="ui")
 _lock = threading.Lock()
+_gpu_job_lock = threading.Lock()
 _runs: dict[str, dict[str, Any]] = {}
 _BENCHMARK_EXPERIMENT_ID = "exp_20260810_144014_e918b762"
 _BENCHMARK_ARCHIVE_NAME = (
@@ -187,6 +195,39 @@ def _recover_orphaned_tasks() -> None:
             }
         )
         _write_json_atomic(status_path, payload)
+
+
+@app.middleware("http")
+async def enforce_web_access(request: Request, call_next):
+    """Keep the default local service open and fail closed for LAN service mode."""
+
+    try:
+        mode = web_access_mode()
+        if mode == "local":
+            return await call_next(request)
+        client_host = request.client.host if request.client else None
+        if not is_allowed_lan_client(client_host):
+            return Response(
+                "VisionCortex LAN access is not allowed from this network.",
+                status_code=403,
+                headers={"Cache-Control": "no-store"},
+            )
+        if not valid_basic_authorization(request.headers.get("authorization")):
+            return Response(
+                "VisionCortex login required.",
+                status_code=401,
+                headers={
+                    "WWW-Authenticate": 'Basic realm="VisionCortex 3090 Ti", charset="UTF-8"',
+                    "Cache-Control": "no-store",
+                },
+            )
+    except RuntimeError:
+        return Response(
+            "VisionCortex Web access configuration is invalid.",
+            status_code=503,
+            headers={"Cache-Control": "no-store"},
+        )
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -634,7 +675,7 @@ async def _save_upload_to_local_and_nas(
     }
 
 
-def _execute(
+def _execute_now(
     run_id: str,
     manifest: RunManifest,
     settings: dict[str, Any],
@@ -663,7 +704,19 @@ def _execute(
         _update(run_id, state="failed", progress=1.0, error=f"{type(exc).__name__}: {exc}")
 
 
-def _execute_fixed_benchmark(
+def _execute(
+    run_id: str,
+    manifest: RunManifest,
+    settings: dict[str, Any],
+    nas_root: Path,
+    ingest: dict[str, Any] | None = None,
+) -> None:
+    _update(run_id, state="queued", progress=0.0, message="等待 3090 Ti 计算资源")
+    with _gpu_job_lock:
+        _execute_now(run_id, manifest, settings, nas_root, ingest)
+
+
+def _execute_fixed_benchmark_now(
     run_id: str,
     settings: dict[str, Any],
     nas_root: Path,
@@ -733,7 +786,18 @@ def _execute_fixed_benchmark(
         _update(run_id, state="failed", progress=1.0, error=f"{type(exc).__name__}: {exc}")
 
 
-def _execute_index_collection(
+def _execute_fixed_benchmark(
+    run_id: str,
+    settings: dict[str, Any],
+    nas_root: Path,
+    timing: dict[str, Any],
+) -> None:
+    _update(run_id, state="queued", progress=0.0, message="等待 3090 Ti 计算资源")
+    with _gpu_job_lock:
+        _execute_fixed_benchmark_now(run_id, settings, nas_root, timing)
+
+
+def _execute_index_collection_now(
     run_id: str,
     source_experiment_id: str,
     archive_name: str,
@@ -871,6 +935,37 @@ def _execute_index_collection(
         )
 
 
+def _execute_index_collection(
+    run_id: str,
+    source_experiment_id: str,
+    archive_name: str,
+    settings: dict[str, Any],
+    staging_root: Path,
+    fixed_root: Path,
+    history_root: Path,
+    timing: dict[str, Any],
+) -> None:
+    _update(
+        run_id,
+        state="queued",
+        progress=0.0,
+        message="等待 3090 Ti 计算资源",
+        nas_output=str(fixed_root),
+        nas_staging=str(staging_root),
+    )
+    with _gpu_job_lock:
+        _execute_index_collection_now(
+            run_id,
+            source_experiment_id,
+            archive_name,
+            settings,
+            staging_root,
+            fixed_root,
+            history_root,
+            timing,
+        )
+
+
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
     return (_web_root / "index.html").read_text(encoding="utf-8")
@@ -928,6 +1023,10 @@ def health() -> dict[str, Any]:
             "recursive_nas_scan": False,
             "index_csv": str(settings["storage"]["index_csv"]),
             "device_registry_path": settings["storage"].get("device_registry_path"),
+        },
+        "execution_queue": {
+            "policy": "single_gpu_one_job_at_a_time",
+            "gpu_busy": _gpu_job_lock.locked(),
         },
     }
 

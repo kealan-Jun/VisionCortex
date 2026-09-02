@@ -124,8 +124,61 @@ Never add the key to YAML, shell history, receipts, screenshots or Git.
 ./deployment/rtx3090ti-ubuntu/03-Stop-Web.sh
 ```
 
-The service binds only to `127.0.0.1:8000`. PID ownership is checked before a
-process is reused or stopped.
+This manual lifecycle binds only to `127.0.0.1:8000`. PID ownership is checked
+before a process is reused or stopped. It is intended for administrator-side
+validation, not for other computers on the LAN.
+
+## Authenticated LAN server
+
+The normal team entry point is the production LAN service. Team members do not
+clone the repository or install Python, CUDA, TensorRT, or model assets. They
+open the URL printed by the installer and sign in through the browser.
+
+Before the first installation, keep the Ark key in the existing owner-only
+credential file. The commands below do not place the value in shell history:
+
+```bash
+install -d -m 700 /home/x1/.config/VisionCortex
+IFS= read -r -s -p 'Ark API key: ' VISIONCORTEX_ARK_INPUT; printf '\n'
+umask 077
+printf '%s\n' "$VISIONCORTEX_ARK_INPUT" > /home/x1/.config/VisionCortex/ark_api_key
+chmod 600 /home/x1/.config/VisionCortex/ark_api_key
+unset VISIONCORTEX_ARK_INPUT
+```
+
+Install and inspect the server:
+
+```bash
+./deployment/rtx3090ti-ubuntu/07-Install-LAN-Server.sh
+./deployment/rtx3090ti-ubuntu/08-Server-Status.sh
+```
+
+The installer securely prompts twice for the browser password for user
+`visioncortex`, disables the alternative no-NAS service if it would conflict on
+port 8000, runs the production preflight, and starts
+`visioncortex-lan.service`. The service loads the production profile, Ark
+credential, TensorRT engine paths, NAS index/archive/cache roots, and listens on
+`0.0.0.0:8000`. Application middleware then rejects clients outside loopback,
+RFC 1918 IPv4, and local IPv6 ranges and requires HTTP Basic authentication for
+every route, including files and task submission.
+
+All Web-submitted GPU workflows share one in-process execution lock. A second
+upload, fixed benchmark, or indexed collection stays queued until the active
+job releases the 3090 Ti, so multiple users cannot start competing inference
+pipelines on the same GPU.
+
+For startup before the desktop user logs in, enable user-service lingering once:
+
+```bash
+sudo loginctl enable-linger x1
+```
+
+This is a LAN-only contract, not an Internet deployment. Do not add router port
+forwarding or place a local reverse proxy in front of it without a separate
+public TLS, identity, rate-limit, and audit design. The service fails closed if
+the NAS, GPU, production preflight, Ark key, or Web password is unavailable.
+HTTP Basic protects access but does not encrypt LAN traffic; use only a trusted
+wired/VLAN network until a separately reviewed HTTPS endpoint is deployed.
 
 ## Production boundary
 
