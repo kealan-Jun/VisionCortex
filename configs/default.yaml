@@ -28,6 +28,31 @@ performance:
   coarse_refinement_min_candidates: 2
   coarse_refinement_min_span_seconds: 30.0
   coarse_quarantine_objectless_unconfirmed_motion: true
+  coarse_shared_motion_probe_enabled: false
+  coarse_frame_index_enabled: false
+  coarse_coverage_gate_enabled: false
+  coarse_minimum_coverage_ratio: 0.98
+  coarse_maximum_gap_periods: 4.0
+  candidate_discovery_quality_gate_enabled: false
+  coarse_semantic_association_enabled: false
+  coarse_semantic_cluster_margin_seconds: 3.0
+  coarse_max_boundary_expansion_seconds: 0.0
+  coarse_spatial_relation_enabled: false
+  coarse_hand_object_gap_norm: 0.08
+  coarse_hand_object_approach_gap_norm: 0.16
+  coarse_hand_object_approach_delta_norm: 0.025
+  coarse_micro_action_guard_enabled: false
+  coarse_micro_action_min_confidence: 0.72
+  coarse_micro_action_window_seconds: 4.0
+  coarse_rolling_motion_threshold_enabled: false
+  coarse_rolling_motion_window_seconds: 600.0
+  coarse_tracker_motion_prediction_enabled: false
+  coarse_tracker_maximum_center_distance: 0.18
+  coarse_open_vocabulary_recall_enabled: false
+  coarse_open_vocabulary_adaptive_selection_enabled: false
+  coarse_open_vocabulary_diversity_bucket_seconds: 600.0
+  coarse_open_vocabulary_max_frames_per_hour_per_view: 2
+  coarse_open_vocabulary_maximum_error_rate: 0.10
   fine_batch_size: 16
   # A lone first-person source otherwise starves TensorRT between FFmpeg
   # bursts. Decode two adjacent bounded chunks concurrently, but consume them
@@ -116,6 +141,13 @@ performance:
   motion_probe_min_views: 2
   motion_probe_primary_min_seconds: 45.0
   motion_probe_window_padding_seconds: 90.0
+  motion_probe_affine_compensation_enabled: false
+  motion_probe_max_rotation_degrees: 8.0
+  motion_probe_max_scale_delta: 0.12
+  motion_probe_rolling_threshold_enabled: false
+  motion_probe_rolling_window_seconds: 600.0
+  motion_probe_legacy_raw_union_enabled: false
+  motion_probe_max_cluster_seconds: 0.0
   motion_probe_fallback_peaks_per_hour: 8
   motion_probe_fallback_separation_seconds: 120.0
   motion_probe_fallback_window_seconds: 60.0

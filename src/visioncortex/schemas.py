@@ -282,6 +282,12 @@ class FrameEvidence(BaseModel):
     width: int
     height: int
     motion_score: float = 0.0
+    raw_motion_score: float = 0.0
+    motion_probe_score: float | None = None
+    motion_probe_raw_score: float | None = None
+    camera_motion_compensated: bool = False
+    camera_motion_method: str | None = None
+    motion_quality_state: str = "usable"
     detections: list[BoxEvidence] = Field(default_factory=list)
 
 

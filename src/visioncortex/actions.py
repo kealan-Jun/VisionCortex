@@ -12,6 +12,7 @@ from typing import Any, Iterable, Sequence
 import numpy as np
 
 from .detection import iter_frame_evidence
+from .candidate_index import CoarseFrameIndex
 from .decisions import decision_receipt
 from .grouping import select_formal_experiment_start_events
 from .ordering import (
@@ -413,16 +414,90 @@ def generate_candidates(
 
 
 def generate_coarse_activity_candidates(
-    views: Sequence[ViewInput], detection_paths: dict[str, Path], config: dict[str, Any]
+    views: Sequence[ViewInput],
+    detection_paths: dict[str, Path],
+    config: dict[str, Any],
+    frame_index: CoarseFrameIndex | None = None,
 ) -> list[ActionCandidate]:
     """Recall-first activity windows; the fine layer must verify contact and action type."""
     cfg = config["segmentation"]
+    perf = config["performance"]
+    spatial_relation = bool(
+        perf.get("coarse_spatial_relation_enabled", False)
+    )
+    relation_gap = float(
+        perf.get("coarse_hand_object_gap_norm", cfg["contact_distance_norm"])
+    )
+    relaxed_relation_gap = float(
+        perf.get("coarse_hand_object_approach_gap_norm", relation_gap * 2.0)
+    )
+    approach_delta = float(
+        perf.get("coarse_hand_object_approach_delta_norm", 0.025)
+    )
+    micro_action_guard = bool(
+        perf.get("coarse_micro_action_guard_enabled", False)
+    )
+    micro_confidence = float(
+        perf.get("coarse_micro_action_min_confidence", 0.72)
+    )
+    micro_half_window_ms = float(
+        perf.get("coarse_micro_action_window_seconds", 4.0)
+    ) * 500.0
+    rolling_motion = bool(
+        perf.get("coarse_rolling_motion_threshold_enabled", False)
+    )
+    rolling_window_ms = float(
+        perf.get("coarse_rolling_motion_window_seconds", 600.0)
+    ) * 1000.0
     observations_by_view: dict[str, list[_Observation]] = defaultdict(list)
+    micro_observations_by_view: dict[str, list[_Observation]] = defaultdict(list)
     by_id = {view.view_id: view for view in views}
     for view in views:
-        for frame in iter_frame_evidence(detection_paths[view.view_id]):
+        previous_pair_gaps: dict[tuple[Any, ...], float] = {}
+        current_motion_bucket: int | None = None
+        current_motion_scores: list[float] = []
+        previous_motion_threshold = 10.0
+        indexed_motion_thresholds: dict[int, float] = {}
+        if rolling_motion and frame_index is not None:
+            indexed_scores: dict[int, list[float]] = defaultdict(list)
+            for global_ms, motion_score in frame_index.iter_motion_samples(
+                view.view_id
+            ):
+                indexed_scores[
+                    max(0, int(global_ms // max(rolling_window_ms, 1.0)))
+                ].append(motion_score)
+            for bucket, values in indexed_scores.items():
+                scores = np.asarray(values, dtype=np.float64)
+                indexed_motion_thresholds[bucket] = max(
+                    float(np.percentile(scores, 80.0)),
+                    float(np.median(scores) + 2.5),
+                )
+        source_frames = (
+            frame_index.iter_frames(view.view_id, activity_only=True)
+            if frame_index is not None
+            else iter_frame_evidence(detection_paths[view.view_id])
+        )
+        for frame in source_frames:
             if frame.global_ms is None:
                 continue
+            bucket = max(0, int(frame.global_ms // max(rolling_window_ms, 1.0)))
+            if indexed_motion_thresholds:
+                previous_motion_threshold = indexed_motion_thresholds.get(
+                    bucket, 10.0
+                )
+            elif current_motion_bucket is None:
+                current_motion_bucket = bucket
+            elif bucket != current_motion_bucket:
+                if current_motion_scores:
+                    scores = np.asarray(current_motion_scores, dtype=np.float64)
+                    previous_motion_threshold = max(
+                        float(np.percentile(scores, 80.0)),
+                        float(np.median(scores) + 2.5),
+                    )
+                current_motion_scores = []
+                current_motion_bucket = bucket
+            if not indexed_motion_thresholds:
+                current_motion_scores.append(frame.motion_score)
             hands = [box for box in frame.detections if box.class_name in HAND_CLASSES]
             objects = [
                 box
@@ -430,22 +505,119 @@ def generate_coarse_activity_candidates(
                 if box.class_name not in HAND_CLASSES | NON_ACTION_CLASSES | {"paper"}
             ]
             if hands and objects:
-                best_hand = max(hands, key=lambda box: box.confidence)
-                best_object = max(objects, key=lambda box: box.confidence)
-                observations_by_view[view.view_id].append(
-                    _Observation(
-                        action_type=ActionType.HAND_OBJECT_CONTACT,
-                        local_ms=frame.local_ms,
-                        global_ms=frame.global_ms,
-                        objects=tuple(sorted({best_hand.class_name, best_object.class_name})),
-                        confidence=min(best_hand.confidence, best_object.confidence),
-                        evidence={
-                            "frame_index": frame.frame_index,
-                            "coarse_activity": "hand_and_lab_object_cooccurrence",
-                        },
+                legacy_hand = max(hands, key=lambda box: box.confidence)
+                legacy_object = max(objects, key=lambda box: box.confidence)
+                if spatial_relation:
+                    best_hand, best_object = min(
+                        itertools.product(hands, objects),
+                        key=lambda pair: (
+                            _box_distance(pair[0], pair[1]),
+                            -min(pair[0].confidence, pair[1].confidence),
+                        ),
                     )
+                else:
+                    best_hand = legacy_hand
+                    best_object = legacy_object
+                gap = _box_distance(best_hand, best_object)
+                pair_key = (
+                    best_hand.track_id
+                    if best_hand.track_id is not None
+                    else best_hand.class_name,
+                    best_object.track_id
+                    if best_object.track_id is not None
+                    else best_object.class_name,
                 )
-            elif frame.motion_score >= 10.0 and len(objects) >= 2:
+                previous_gap = previous_pair_gaps.get(pair_key)
+                approaching = bool(
+                    previous_gap is not None
+                    and previous_gap - gap >= approach_delta
+                    and gap <= relaxed_relation_gap
+                )
+                previous_pair_gaps[pair_key] = gap
+                relation_confirmed = bool(
+                    not spatial_relation or gap <= relation_gap or approaching
+                )
+                confidence = min(best_hand.confidence, best_object.confidence)
+                if spatial_relation and not relation_confirmed:
+                    confidence *= 0.55
+                observation = _Observation(
+                    action_type=ActionType.HAND_OBJECT_CONTACT,
+                    local_ms=frame.local_ms,
+                    global_ms=frame.global_ms,
+                    objects=tuple(
+                        sorted({best_hand.class_name, best_object.class_name})
+                    ),
+                    confidence=confidence,
+                    evidence={
+                        "frame_index": frame.frame_index,
+                        "coarse_activity": (
+                            "hand_object_spatial_relation"
+                            if relation_confirmed and spatial_relation
+                            else "hand_and_lab_object_cooccurrence"
+                        ),
+                        "hand_object_gap_norm": round(gap, 6),
+                        "approaching": approaching,
+                        "relation_confirmed": relation_confirmed,
+                        "legacy_cooccurrence_retained": bool(
+                            spatial_relation and not relation_confirmed
+                        ),
+                        "hand_track_id": best_hand.track_id,
+                        "object_track_id": best_object.track_id,
+                    },
+                )
+                observations_by_view[view.view_id].append(observation)
+                if spatial_relation and (
+                    legacy_hand is not best_hand
+                    or legacy_object is not best_object
+                ):
+                    observations_by_view[view.view_id].append(
+                        _Observation(
+                            action_type=ActionType.HAND_OBJECT_CONTACT,
+                            local_ms=frame.local_ms,
+                            global_ms=frame.global_ms,
+                            objects=tuple(
+                                sorted(
+                                    {
+                                        legacy_hand.class_name,
+                                        legacy_object.class_name,
+                                    }
+                                )
+                            ),
+                            confidence=(
+                                min(
+                                    legacy_hand.confidence,
+                                    legacy_object.confidence,
+                                )
+                                * 0.55
+                            ),
+                            evidence={
+                                "frame_index": frame.frame_index,
+                                "coarse_activity": (
+                                    "hand_and_lab_object_cooccurrence"
+                                ),
+                                "legacy_cooccurrence_retained": True,
+                                "relation_confirmed": False,
+                                "hand_object_gap_norm": round(
+                                    _box_distance(
+                                        legacy_hand, legacy_object
+                                    ),
+                                    6,
+                                ),
+                                "hand_track_id": legacy_hand.track_id,
+                                "object_track_id": legacy_object.track_id,
+                            },
+                        )
+                    )
+                if (
+                    micro_action_guard
+                    and relation_confirmed
+                    and observation.confidence >= micro_confidence
+                ):
+                    micro_observations_by_view[view.view_id].append(observation)
+            motion_threshold = (
+                min(10.0, previous_motion_threshold) if rolling_motion else 10.0
+            )
+            if not hands and frame.motion_score >= motion_threshold and len(objects) >= 2:
                 selected = sorted(objects, key=lambda box: box.confidence, reverse=True)[:2]
                 observations_by_view[view.view_id].append(
                     _Observation(
@@ -454,31 +626,174 @@ def generate_coarse_activity_candidates(
                         global_ms=frame.global_ms,
                         objects=tuple(sorted(box.class_name for box in selected)),
                         confidence=min(box.confidence for box in selected) * 0.75,
-                        evidence={"frame_index": frame.frame_index, "coarse_motion": frame.motion_score},
+                        evidence={
+                            "frame_index": frame.frame_index,
+                            "coarse_motion": frame.motion_score,
+                            "coarse_motion_threshold": motion_threshold,
+                        },
                     )
                 )
     candidates: list[ActionCandidate] = []
     for view_id, observations in observations_by_view.items():
-        candidates.extend(_merge_observations(observations, by_id[view_id], cfg))
+        merged = _merge_observations(observations, by_id[view_id], cfg)
+        candidates.extend(merged)
+        for observation in micro_observations_by_view.get(view_id, []):
+            if any(
+                candidate.action_type == observation.action_type
+                and candidate.global_start_ms <= observation.global_ms
+                <= candidate.global_end_ms
+                for candidate in merged
+            ):
+                continue
+            if any(
+                candidate.view_id == view_id
+                and abs(candidate.key_global_ms - observation.global_ms)
+                <= micro_half_window_ms
+                and candidate.action_type == observation.action_type
+                for candidate in candidates
+            ):
+                continue
+            candidates.append(
+                ActionCandidate(
+                    candidate_id=(
+                        f"COARSE-MICRO-{view_id}-{len(candidates) + 1:06d}"
+                    ),
+                    action_type=observation.action_type,
+                    view_id=view_id,
+                    role=by_id[view_id].role,
+                    local_start_ms=max(
+                        0.0, observation.local_ms - micro_half_window_ms
+                    ),
+                    local_end_ms=observation.local_ms + micro_half_window_ms,
+                    global_start_ms=max(
+                        0.0, observation.global_ms - micro_half_window_ms
+                    ),
+                    global_end_ms=observation.global_ms + micro_half_window_ms,
+                    key_global_ms=observation.global_ms,
+                    objects=list(observation.objects),
+                    confidence=min(0.89, observation.confidence),
+                    evidence=[
+                        {
+                            **observation.evidence,
+                            "micro_action_guard": True,
+                        }
+                    ],
+                    uncertainty=[
+                        "单帧高置信手物关系仅扩大精扫窗口，不独立确认物理动作"
+                    ],
+                )
+            )
     return sorted(candidates, key=candidate_sort_key)
 
 
+def _motion_probe_frames(
+    view_id: str,
+    path: Path,
+    config: dict[str, Any],
+    frame_index: CoarseFrameIndex | None = None,
+) -> list[FrameEvidence]:
+    """Load the logical probe grid, including scores shared by a coarse pass."""
+
+    frames = list(
+        frame_index.iter_frames(view_id)
+        if frame_index is not None
+        else iter_frame_evidence(path)
+    )
+    if not config["performance"].get(
+        "motion_probe_use_embedded_coarse_scores", False
+    ):
+        return frames
+    return [
+        frame.model_copy(
+            update={
+                "motion_score": float(frame.motion_probe_score),
+                "raw_motion_score": float(
+                    frame.motion_probe_raw_score
+                    if frame.motion_probe_raw_score is not None
+                    else frame.motion_probe_score
+                ),
+            }
+        )
+        for frame in frames
+        if frame.motion_probe_score is not None
+    ]
+
+
+def _adaptive_motion_thresholds(
+    frames: Sequence[FrameEvidence], config: dict[str, Any]
+) -> tuple[float, dict[int, float], float | None]:
+    perf = config["performance"]
+    percentile = float(perf["motion_burst_percentile"])
+    scores = np.asarray([frame.motion_score for frame in frames], dtype=np.float64)
+    global_threshold = max(
+        float(np.percentile(scores, percentile)),
+        float(np.median(scores) + 2.5),
+    )
+    raw_threshold: float | None = None
+    if perf.get("motion_probe_legacy_raw_union_enabled", False):
+        raw_scores = np.asarray(
+            [frame.raw_motion_score for frame in frames], dtype=np.float64
+        )
+        raw_threshold = max(
+            float(np.percentile(raw_scores, percentile)),
+            float(np.median(raw_scores) + 2.5),
+        )
+    rolling: dict[int, float] = {}
+    if perf.get("motion_probe_rolling_threshold_enabled", False):
+        window_ms = max(
+            1_000.0,
+            float(perf.get("motion_probe_rolling_window_seconds", 600.0))
+            * 1000.0,
+        )
+        grouped: dict[int, list[float]] = defaultdict(list)
+        for frame in frames:
+            timeline_ms = float(
+                frame.global_ms if frame.global_ms is not None else frame.local_ms
+            )
+            grouped[max(0, int(timeline_ms // window_ms))].append(
+                frame.motion_score
+            )
+        for bucket, values in grouped.items():
+            array = np.asarray(values, dtype=np.float64)
+            rolling[bucket] = max(
+                float(np.percentile(array, percentile)),
+                float(np.median(array) + 2.5),
+            )
+    return global_threshold, rolling, raw_threshold
+
+
 def generate_motion_burst_candidates(
-    views: Sequence[ViewInput], detection_paths: dict[str, Path], config: dict[str, Any]
+    views: Sequence[ViewInput],
+    detection_paths: dict[str, Path],
+    config: dict[str, Any],
+    frame_index: CoarseFrameIndex | None = None,
 ) -> list[ActionCandidate]:
     """Adaptive per-view motion bursts, optionally gated by detected lab objects."""
     perf = config["performance"]
-    percentile = float(perf["motion_burst_percentile"])
     merge_gap_ms = float(perf["motion_burst_merge_gap_seconds"]) * 1000.0
     min_observations = int(perf["motion_burst_min_observations"])
+    maximum_run_ms = float(
+        perf.get("motion_probe_max_cluster_seconds", 0.0)
+    ) * 1000.0
     require_objects = bool(perf.get("motion_probe_require_objects", True))
     candidates: list[ActionCandidate] = []
     for view in views:
-        frames = list(iter_frame_evidence(detection_paths[view.view_id]))
+        frames = _motion_probe_frames(
+            view.view_id,
+            detection_paths[view.view_id],
+            config,
+            frame_index,
+        )
         if not frames:
             continue
-        scores = np.asarray([frame.motion_score for frame in frames], dtype=np.float64)
-        threshold = max(float(np.percentile(scores, percentile)), float(np.median(scores) + 2.5))
+        threshold, rolling_thresholds, raw_threshold = _adaptive_motion_thresholds(
+            frames, config
+        )
+        rolling_window_ms = max(
+            1_000.0,
+            float(perf.get("motion_probe_rolling_window_seconds", 600.0))
+            * 1000.0,
+        )
         active: list[tuple[FrameEvidence, list[str]]] = []
         for frame in frames:
             objects = sorted(
@@ -488,14 +803,35 @@ def generate_motion_burst_candidates(
                     if box.class_name not in HAND_CLASSES | NON_ACTION_CLASSES | {"paper"}
                 }
             )
-            if frame.motion_score >= threshold and (objects or not require_objects):
+            timeline_ms = float(
+                frame.global_ms if frame.global_ms is not None else frame.local_ms
+            )
+            bucket_threshold = rolling_thresholds.get(
+                max(0, int(timeline_ms // rolling_window_ms)), threshold
+            )
+            adaptive_active = frame.motion_score >= min(
+                threshold, bucket_threshold
+            )
+            raw_active = bool(
+                raw_threshold is not None
+                and frame.raw_motion_score >= raw_threshold
+            )
+            if (adaptive_active or raw_active) and (objects or not require_objects):
                 active.append((frame, objects))
         runs: list[list[tuple[FrameEvidence, list[str]]]] = []
         current: list[tuple[FrameEvidence, list[str]]] = []
         for item in active:
             global_ms = item[0].global_ms or 0.0
             previous_ms = (current[-1][0].global_ms or 0.0) if current else None
-            if current and previous_ms is not None and global_ms - previous_ms > merge_gap_ms:
+            exceeds_run_span = bool(
+                current
+                and maximum_run_ms > 0.0
+                and global_ms - (current[0][0].global_ms or 0.0)
+                > maximum_run_ms
+            )
+            if current and previous_ms is not None and (
+                global_ms - previous_ms > merge_gap_ms or exceeds_run_span
+            ):
                 runs.append(current)
                 current = []
             current.append(item)
@@ -506,7 +842,9 @@ def generate_motion_burst_candidates(
                 continue
             first, last = run[0][0], run[-1][0]
             assert first.global_ms is not None and last.global_ms is not None
-            peak_frame, peak_objects = max(run, key=lambda item: item[0].motion_score)
+            peak_frame, _peak_objects = max(
+                run, key=lambda item: item[0].motion_score
+            )
             assert peak_frame.global_ms is not None
             confidence = min(1.0, 0.55 + 0.05 * len(run) + 0.1 * peak_frame.motion_score / max(threshold, 1e-6))
             candidates.append(
@@ -527,6 +865,21 @@ def generate_motion_burst_candidates(
                             "frame_index": frame.frame_index,
                             "motion_score": frame.motion_score,
                             "threshold": threshold,
+                            "rolling_threshold": rolling_thresholds.get(
+                                max(
+                                    0,
+                                    int(
+                                        float(
+                                            frame.global_ms
+                                            if frame.global_ms is not None
+                                            else frame.local_ms
+                                        )
+                                        // rolling_window_ms
+                                    ),
+                                )
+                            ),
+                            "raw_motion_score": frame.raw_motion_score,
+                            "raw_threshold": raw_threshold,
                             "objects": objects,
                         }
                         for frame, objects in run
@@ -535,6 +888,63 @@ def generate_motion_burst_candidates(
                 )
             )
     return sorted(candidates, key=candidate_sort_key)
+
+
+def _candidate_object_identity(candidate: ActionCandidate) -> set[str]:
+    return {
+        item
+        for item in candidate.objects
+        if item not in HAND_CLASSES | NON_ACTION_CLASSES
+    }
+
+
+def _coarse_candidates_compatible(
+    left: ActionCandidate,
+    right: ActionCandidate,
+    *,
+    temporal_margin_ms: float,
+) -> bool:
+    if (
+        left.global_end_ms + temporal_margin_ms < right.global_start_ms
+        or right.global_end_ms + temporal_margin_ms < left.global_start_ms
+    ):
+        return False
+    left_objects = _candidate_object_identity(left)
+    right_objects = _candidate_object_identity(right)
+    if left_objects and right_objects:
+        return bool(left_objects & right_objects)
+    return bool(
+        left.action_type == right.action_type
+        or ActionType.OBJECT_MOVEMENT in {left.action_type, right.action_type}
+    )
+
+
+def _semantic_coarse_clusters(
+    candidates: Sequence[ActionCandidate], temporal_margin_ms: float
+) -> list[list[ActionCandidate]]:
+    clusters: list[list[ActionCandidate]] = []
+    for candidate in sorted(candidates, key=candidate_sort_key):
+        compatible = [
+            cluster
+            for cluster in clusters
+            if any(
+                _coarse_candidates_compatible(
+                    candidate,
+                    member,
+                    temporal_margin_ms=temporal_margin_ms,
+                )
+                for member in cluster
+            )
+        ]
+        if not compatible:
+            clusters.append([candidate])
+            continue
+        target = compatible[0]
+        target.append(candidate)
+        for extra in compatible[1:]:
+            target.extend(extra)
+            clusters.remove(extra)
+    return clusters
 
 
 def refine_motion_candidates_with_coarse(
@@ -565,26 +975,84 @@ def refine_motion_candidates_with_coarse(
             perf.get("motion_probe_primary_min_seconds", 45.0),
         )
     ) * 1000.0
+    semantic_association = bool(
+        perf.get("coarse_semantic_association_enabled", False)
+    )
+    cluster_margin_ms = float(
+        perf.get("coarse_semantic_cluster_margin_seconds", 3.0)
+    ) * 1000.0
+    maximum_boundary_expansion_ms = float(
+        perf.get("coarse_max_boundary_expansion_seconds", 0.0)
+    ) * 1000.0
+    uncertainty_by_view = {
+        str(key): max(0.0, float(value))
+        for key, value in dict(
+            perf.get("candidate_alignment_uncertainty_ms_by_view") or {}
+        ).items()
+    }
     ordered_coarse_candidates = sorted(coarse_candidates, key=candidate_sort_key)
     used_coarse_ids: set[str] = set()
     refined: list[ActionCandidate] = []
     decisions: list[dict[str, Any]] = []
 
     for motion in sorted(motion_candidates, key=candidate_sort_key):
-        association_start = motion.global_start_ms - association_margin_ms
-        association_end = motion.global_end_ms + association_margin_ms
+        motion_uncertainty_ms = uncertainty_by_view.get(motion.view_id, 0.0)
         matches = [
             coarse
             for coarse in ordered_coarse_candidates
-            if coarse.global_end_ms >= association_start
-            and coarse.global_start_ms <= association_end
+            if coarse.global_end_ms
+            >= motion.global_start_ms
+            - association_margin_ms
+            - motion_uncertainty_ms
+            - uncertainty_by_view.get(coarse.view_id, 0.0)
+            and coarse.global_start_ms
+            <= motion.global_end_ms
+            + association_margin_ms
+            + motion_uncertainty_ms
+            + uncertainty_by_view.get(coarse.view_id, 0.0)
         ]
+        discarded_semantic_match_ids: list[str] = []
+        if semantic_association and len(matches) > 1:
+            clusters = _semantic_coarse_clusters(matches, cluster_margin_ms)
+            motion_objects = _candidate_object_identity(motion)
+
+            def cluster_rank(cluster: Sequence[ActionCandidate]) -> tuple[Any, ...]:
+                objects = {
+                    item
+                    for candidate in cluster
+                    for item in _candidate_object_identity(candidate)
+                }
+                return (
+                    int(bool(motion_objects & objects)),
+                    len({item.view_id for item in cluster}),
+                    len(cluster),
+                    sum(float(item.confidence) for item in cluster),
+                    -min(item.global_start_ms for item in cluster),
+                )
+
+            selected_cluster = max(clusters, key=cluster_rank)
+            selected_ids = {item.candidate_id for item in selected_cluster}
+            discarded_semantic_match_ids = [
+                item.candidate_id
+                for item in matches
+                if item.candidate_id not in selected_ids
+            ]
+            matches = list(selected_cluster)
         coarse_start = min(
             (item.global_start_ms for item in matches), default=motion.global_start_ms
         )
         coarse_end = max(
             (item.global_end_ms for item in matches), default=motion.global_end_ms
         )
+        if maximum_boundary_expansion_ms > 0.0:
+            coarse_start = max(
+                coarse_start,
+                motion.global_start_ms - maximum_boundary_expansion_ms,
+            )
+            coarse_end = min(
+                coarse_end,
+                motion.global_end_ms + maximum_boundary_expansion_ms,
+            )
         supported = (
             len(matches) >= minimum_candidates
             and coarse_end - coarse_start >= minimum_span_ms
@@ -609,6 +1077,7 @@ def refine_motion_candidates_with_coarse(
                         "motion_candidate_id": motion.candidate_id,
                         "decision": "quarantined_objectless_motion_without_coarse_yolo",
                         "coarse_candidate_ids": [],
+                        "discarded_semantic_match_ids": discarded_semantic_match_ids,
                         "reason": (
                             "motion-only interval has no object identity and no "
                             "coarse YOLO match; it cannot form a physical event"
@@ -626,6 +1095,7 @@ def refine_motion_candidates_with_coarse(
                     "motion_candidate_id": motion.candidate_id,
                     "decision": "retained_motion_recall_guard",
                     "coarse_candidate_ids": [item.candidate_id for item in matches],
+                    "discarded_semantic_match_ids": discarded_semantic_match_ids,
                     "reason": (
                         "sustained objectless sentinel motion remains a bounded "
                         "fine-scan recall guard"
@@ -663,6 +1133,7 @@ def refine_motion_candidates_with_coarse(
                         "source": "coarse_yolo_refinement",
                         "motion_candidate_id": motion.candidate_id,
                         "coarse_candidate_ids": [item.candidate_id for item in matches],
+                        "discarded_semantic_match_ids": discarded_semantic_match_ids,
                         "original_global_start_ms": motion.global_start_ms,
                         "original_global_end_ms": motion.global_end_ms,
                     }
@@ -677,6 +1148,7 @@ def refine_motion_candidates_with_coarse(
                 "motion_candidate_id": motion.candidate_id,
                 "decision": "refined_by_coarse_yolo",
                 "coarse_candidate_ids": [item.candidate_id for item in matches],
+                "discarded_semantic_match_ids": discarded_semantic_match_ids,
                 "original_duration_seconds": round(
                     (motion.global_end_ms - motion.global_start_ms) / 1000.0, 3
                 ),
@@ -719,6 +1191,12 @@ def refine_motion_candidates_with_coarse(
             "objectless_recall_guard_min_seconds": (
                 sustained_objectless_recall_ms / 1000.0
             ),
+            "semantic_association_enabled": semantic_association,
+            "semantic_cluster_margin_seconds": cluster_margin_ms / 1000.0,
+            "maximum_boundary_expansion_seconds": (
+                maximum_boundary_expansion_ms / 1000.0
+            ),
+            "alignment_uncertainty_ms_by_view": uncertainty_by_view,
         },
         "decisions": decisions,
     }
@@ -740,11 +1218,23 @@ def fuse_motion_probe_candidates(
     merge_gap_ms = float(perf.get("motion_probe_merge_gap_seconds", 20.0)) * 1000.0
     minimum_views = max(1, int(perf.get("motion_probe_min_views", 2)))
     primary_min_ms = float(perf.get("motion_probe_primary_min_seconds", 45.0)) * 1000.0
+    maximum_cluster_ms = float(
+        perf.get("motion_probe_max_cluster_seconds", 0.0)
+    ) * 1000.0
     clusters: list[list[ActionCandidate]] = []
     current: list[ActionCandidate] = []
     current_end = -1.0
     for candidate in sorted(candidates, key=candidate_sort_key):
-        if current and candidate.global_start_ms > current_end + merge_gap_ms:
+        exceeds_cluster_span = bool(
+            current
+            and maximum_cluster_ms > 0.0
+            and candidate.global_end_ms - current[0].global_start_ms
+            > maximum_cluster_ms
+        )
+        if current and (
+            candidate.global_start_ms > current_end + merge_gap_ms
+            or exceeds_cluster_span
+        ):
             clusters.append(current)
             current = []
             current_end = -1.0
@@ -808,7 +1298,10 @@ def fuse_motion_probe_candidates(
 
 
 def generate_motion_safety_candidates(
-    views: Sequence[ViewInput], detection_paths: dict[str, Path], config: dict[str, Any]
+    views: Sequence[ViewInput],
+    detection_paths: dict[str, Path],
+    config: dict[str, Any],
+    frame_index: CoarseFrameIndex | None = None,
 ) -> list[ActionCandidate]:
     """Select separated motion peaks when adaptive thresholding returns nothing."""
 
@@ -820,7 +1313,12 @@ def generate_motion_safety_candidates(
     for view in views:
         frames = [
             frame
-            for frame in iter_frame_evidence(detection_paths[view.view_id])
+            for frame in _motion_probe_frames(
+                view.view_id,
+                detection_paths[view.view_id],
+                config,
+                frame_index,
+            )
             if frame.global_ms is not None
         ]
         if not frames:
@@ -873,6 +1371,7 @@ def select_fine_scan_views(
     detection_paths: dict[str, Path],
     coarse_candidates: Sequence[ActionCandidate],
     config: dict[str, Any],
+    frame_index: CoarseFrameIndex | None = None,
 ) -> tuple[list[ViewInput], dict[str, dict[str, Any]]]:
     """Select expensive fine-scan views from independent coarse evidence."""
     padding = float(config["performance"]["fine_window_padding_seconds"]) * 1000.0
@@ -901,7 +1400,15 @@ def select_fine_scan_views(
                 "motion_threshold": None,
             }
             continue
-        frames = list(iter_frame_evidence(detection_path))
+        frames = list(
+            frame_index.iter_frames(
+                view.view_id,
+                start_ms=min((item[0] for item in global_windows), default=None),
+                end_ms=max((item[1] for item in global_windows), default=None),
+            )
+            if frame_index is not None
+            else iter_frame_evidence(detection_path)
+        )
         all_motion = np.asarray([frame.motion_score for frame in frames], dtype=np.float64)
         motion_threshold = max(
             float(np.percentile(all_motion, 80.0)) if len(all_motion) else 0.0,

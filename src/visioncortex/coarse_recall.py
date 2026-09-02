@@ -6,6 +6,7 @@ from typing import Any, Sequence
 
 import numpy as np
 
+from .candidate_index import CoarseFrameIndex
 from .detection import iter_frame_evidence
 from .ordering import candidate_sort_key
 from .schemas import ActionCandidate, ActionType, FrameEvidence, VideoInfo, ViewInput
@@ -38,6 +39,7 @@ def select_suspicious_coarse_frames(
     views: Sequence[ViewInput],
     detection_paths: dict[str, Path],
     config: dict[str, Any],
+    frame_index: CoarseFrameIndex | None = None,
 ) -> list[FrameEvidence]:
     """Choose a bounded set of high-motion coarse frames missing an object.
 
@@ -53,6 +55,25 @@ def select_suspicious_coarse_frames(
         0,
         int(perf.get("coarse_open_vocabulary_frames_per_hour_per_view", 2)),
     )
+    adaptive = bool(
+        perf.get("coarse_open_vocabulary_adaptive_selection_enabled", False)
+    )
+    diversity_bucket_ms = max(
+        60_000.0,
+        float(
+            perf.get("coarse_open_vocabulary_diversity_bucket_seconds", 600.0)
+        )
+        * 1000.0,
+    )
+    maximum_per_hour = max(
+        per_hour,
+        int(
+            perf.get(
+                "coarse_open_vocabulary_max_frames_per_hour_per_view",
+                per_hour,
+            )
+        ),
+    )
     selected: list[FrameEvidence] = []
     if per_hour == 0:
         return selected
@@ -60,7 +81,11 @@ def select_suspicious_coarse_frames(
         path = detection_paths.get(view.view_id)
         if path is None:
             continue
-        frames = list(iter_frame_evidence(path))
+        frames = list(
+            frame_index.iter_frames(view.view_id)
+            if frame_index is not None
+            else iter_frame_evidence(path)
+        )
         if not frames:
             continue
         threshold = float(
@@ -71,22 +96,86 @@ def select_suspicious_coarse_frames(
         )
         buckets: dict[int, list[FrameEvidence]] = {}
         for frame in frames:
-            if frame.motion_score < threshold:
-                continue
             classes = {_normalize_class(box.class_name) for box in frame.detections}
             has_actor = bool(classes & _ACTOR_CLASSES)
             has_object = bool(classes - _ACTOR_CLASSES - _NON_ACTION_CLASSES)
+            uncertainty_trigger = bool(
+                has_actor != has_object
+                or any(float(box.confidence) < 0.45 for box in frame.detections)
+                or any(
+                    box.track_id is None
+                    and _normalize_class(box.class_name)
+                    not in _ACTOR_CLASSES | _NON_ACTION_CLASSES
+                    for box in frame.detections
+                )
+            )
+            if frame.motion_score < threshold and not (
+                adaptive and uncertainty_trigger
+            ):
+                continue
             if has_actor and has_object:
                 continue
             global_ms = float(frame.global_ms if frame.global_ms is not None else frame.local_ms)
             bucket = max(0, int(global_ms // 3_600_000.0))
             buckets.setdefault(bucket, []).append(frame)
         for bucket_frames in buckets.values():
+            legacy = sorted(
+                bucket_frames,
+                key=lambda frame: (-float(frame.motion_score), frame.local_ms),
+            )[:per_hour]
+            if not adaptive:
+                selected.extend(legacy)
+                continue
+            diverse: dict[int, list[FrameEvidence]] = {}
+            for frame in bucket_frames:
+                global_ms = float(
+                    frame.global_ms
+                    if frame.global_ms is not None
+                    else frame.local_ms
+                )
+                diverse.setdefault(
+                    max(0, int(global_ms // diversity_bucket_ms)), []
+                ).append(frame)
+
+            def uncertainty_priority(frame: FrameEvidence) -> tuple[Any, ...]:
+                classes = {
+                    _normalize_class(box.class_name) for box in frame.detections
+                }
+                has_actor = bool(classes & _ACTOR_CLASSES)
+                has_object = bool(classes - _ACTOR_CLASSES - _NON_ACTION_CLASSES)
+                low_confidence = any(
+                    float(box.confidence) < 0.45 for box in frame.detections
+                )
+                untracked_object = any(
+                    box.track_id is None
+                    and _normalize_class(box.class_name)
+                    not in _ACTOR_CLASSES | _NON_ACTION_CLASSES
+                    for box in frame.detections
+                )
+                return (
+                    int(has_actor and not has_object),
+                    int(has_object and not has_actor),
+                    int(untracked_object),
+                    int(low_confidence),
+                    float(frame.motion_score),
+                    -float(frame.local_ms),
+                )
+
+            adaptive_frames = [
+                max(items, key=uncertainty_priority)
+                for items in diverse.values()
+                if items
+            ]
+            unique = {
+                (frame.view_id, frame.frame_index, frame.local_ms): frame
+                for frame in [*legacy, *adaptive_frames]
+            }
             selected.extend(
                 sorted(
-                    bucket_frames,
-                    key=lambda frame: (-float(frame.motion_score), frame.local_ms),
-                )[:per_hour]
+                    unique.values(),
+                    key=uncertainty_priority,
+                    reverse=True,
+                )[:maximum_per_hour]
             )
     return sorted(
         selected,
@@ -201,6 +290,7 @@ def generate_open_vocabulary_coarse_candidates(
     infos: dict[str, VideoInfo],
     detection_paths: dict[str, Path],
     config: dict[str, Any],
+    frame_index: CoarseFrameIndex | None = None,
 ) -> tuple[list[ActionCandidate], dict[str, Any]]:
     """Add recall-only candidates to the current coarse funnel stage."""
 
@@ -215,6 +305,24 @@ def generate_open_vocabulary_coarse_candidates(
         "selected_frame_count": 0,
         "candidate_count": 0,
         "frames": [],
+        "formal_evidence_ready": not enabled,
+        "selection": {
+            "motion_percentile": float(
+                config["performance"].get(
+                    "coarse_open_vocabulary_motion_percentile", 90.0
+                )
+            ),
+            "legacy_frames_per_hour_per_view": int(
+                config["performance"].get(
+                    "coarse_open_vocabulary_frames_per_hour_per_view", 2
+                )
+            ),
+            "adaptive_time_diversity_enabled": bool(
+                config["performance"].get(
+                    "coarse_open_vocabulary_adaptive_selection_enabled", False
+                )
+            ),
+        },
     }
     if not enabled:
         report["status"] = "disabled"
@@ -222,11 +330,15 @@ def generate_open_vocabulary_coarse_candidates(
     settings = config.get("models", {}).get("open_vocabulary_key_frame") or {}
     if not settings.get("enabled"):
         report["status"] = "model_disabled"
+        report["formal_evidence_ready"] = False
         return [], report
-    selected = select_suspicious_coarse_frames(views, detection_paths, config)
+    selected = select_suspicious_coarse_frames(
+        views, detection_paths, config, frame_index
+    )
     report["selected_frame_count"] = len(selected)
     if not selected:
         report["status"] = "no_suspicious_frames"
+        report["formal_evidence_ready"] = True
         return [], report
 
     view_by_id = {view.view_id: view for view in views}
@@ -382,5 +494,17 @@ def generate_open_vocabulary_coarse_candidates(
         "completed_with_errors_closed_set_preserved"
         if report["error_count"]
         else "completed"
+    )
+    maximum_error_rate = float(
+        config["performance"].get(
+            "coarse_open_vocabulary_maximum_error_rate", 0.10
+        )
+    )
+    selected_count = int(report["selected_frame_count"])
+    error_rate = report["error_count"] / max(1, selected_count)
+    report["error_rate"] = round(error_rate, 6)
+    report["maximum_error_rate"] = maximum_error_rate
+    report["formal_evidence_ready"] = bool(
+        selected_count == 0 or error_rate <= maximum_error_rate
     )
     return candidates, report

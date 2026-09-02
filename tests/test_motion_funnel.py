@@ -455,6 +455,76 @@ def test_motion_probe_can_run_yolo_on_the_same_sampled_frames(
     assert runtime["inference_frame_count"] == 4
 
 
+def test_coarse_decode_embeds_the_logical_motion_probe_grid(
+    monkeypatch, default_config
+):
+    view = ViewInput(
+        view_id="fp",
+        role=ViewRole.FIRST_PERSON,
+        video=Path("shared.mp4"),
+    )
+    info = VideoInfo(
+        path=Path("shared.mp4"),
+        duration_ms=3_000.0,
+        fps=30.0,
+        width=8,
+        height=8,
+        frame_count=90,
+    )
+
+    def fake_frames(*_args, **_kwargs):
+        for index in range(6):
+            frame = np.full((8, 8, 3), index * 10, dtype=np.uint8)
+            yield index, float(index * 500), frame
+
+    monkeypatch.setattr(
+        "visioncortex.detection.iter_view_sampled_frames", fake_frames
+    )
+    default_config["performance"].update(
+        {
+            "coarse_shared_motion_probe_enabled": True,
+            "motion_probe_fps": 0.5,
+            "motion_probe_camera_motion_compensation": False,
+            "motion_probe_segment_workers": 1,
+        }
+    )
+    output: queue.Queue = queue.Queue()
+
+    _producer(
+        view,
+        info,
+        output,
+        set(),
+        default_config,
+        None,
+        2.0,
+        8,
+        False,
+        "cpu",
+        0.5,
+        (8, 8),
+        None,
+        "coarse",
+    )
+
+    packets = []
+    while not output.empty():
+        item = output.get()
+        if isinstance(item, FramePacket):
+            packets.append(item)
+    assert [item.local_ms for item in packets] == [
+        0.0,
+        500.0,
+        1_000.0,
+        1_500.0,
+        2_000.0,
+        2_500.0,
+    ]
+    assert [
+        item.local_ms for item in packets if item.motion_probe_score is not None
+    ] == [0.0, 2_000.0]
+
+
 def test_role_scanner_records_oom_batch_contraction(default_config):
     class Prediction:
         boxes = None

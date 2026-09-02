@@ -209,6 +209,13 @@ performance:
   coarse_reuse_motion_probe: false
   motion_probe_all_views: true
   motion_probe_camera_motion_compensation: true
+  motion_probe_affine_compensation_enabled: true
+  motion_probe_max_rotation_degrees: 8.0
+  motion_probe_max_scale_delta: 0.12
+  motion_probe_rolling_threshold_enabled: true
+  motion_probe_rolling_window_seconds: 600.0
+  motion_probe_legacy_raw_union_enabled: true
+  motion_probe_max_cluster_seconds: 300.0
   motion_probe_camera_motion_min_response: 0.15
   motion_probe_camera_motion_max_shift_ratio: 0.35
   motion_probe_first_person_quality_fallback: true
@@ -221,10 +228,34 @@ performance:
   coarse_keyframes_only: false
   coarse_all_views: true
   coarse_full_timeline_scan: true
+  coarse_shared_motion_probe_enabled: true
+  coarse_frame_index_enabled: true
+  coarse_coverage_gate_enabled: true
+  coarse_minimum_coverage_ratio: 0.98
+  coarse_maximum_gap_periods: 4.0
+  candidate_discovery_quality_gate_enabled: true
+  coarse_semantic_association_enabled: true
+  coarse_semantic_cluster_margin_seconds: 3.0
+  coarse_max_boundary_expansion_seconds: 15.0
+  coarse_spatial_relation_enabled: true
+  coarse_hand_object_gap_norm: 0.08
+  coarse_hand_object_approach_gap_norm: 0.16
+  coarse_hand_object_approach_delta_norm: 0.025
+  coarse_micro_action_guard_enabled: true
+  coarse_micro_action_min_confidence: 0.72
+  coarse_micro_action_window_seconds: 4.0
+  coarse_rolling_motion_threshold_enabled: true
+  coarse_rolling_motion_window_seconds: 600.0
+  coarse_tracker_motion_prediction_enabled: true
+  coarse_tracker_maximum_center_distance: 0.18
   coarse_comprehensive_candidate_union: true
   coarse_open_vocabulary_recall_enabled: true
   coarse_open_vocabulary_motion_percentile: 90.0
   coarse_open_vocabulary_frames_per_hour_per_view: 2
+  coarse_open_vocabulary_adaptive_selection_enabled: true
+  coarse_open_vocabulary_diversity_bucket_seconds: 600.0
+  coarse_open_vocabulary_max_frames_per_hour_per_view: 8
+  coarse_open_vocabulary_maximum_error_rate: 0.10
   coarse_open_vocabulary_candidate_window_seconds: 4.0
   coarse_open_vocabulary_max_actor_object_gap_norm: 0.08
   # Fine scanning remains the existing stage. All selected third-person views

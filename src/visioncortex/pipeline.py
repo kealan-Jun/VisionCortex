@@ -66,6 +66,7 @@ from .pathing import archive_relative_posix
 from .ordering import candidate_sort_key, event_sort_key
 from .detection import iter_frame_evidence, scan_videos, validate_models
 from .coarse_recall import generate_open_vocabulary_coarse_candidates
+from .candidate_index import CoarseFrameIndex, build_coarse_frame_index
 from .daily_reports import generate_daily_report_archive
 from .decisions import decision_receipt
 from .schema_contracts import write_archive_contract_manifest
@@ -4199,6 +4200,91 @@ class EvidencePipeline:
             )
 
             motion_probe_views = self._motion_probe_views(manifest)
+            preselected_coarse_views = self._coarse_scan_views(manifest)
+            coarse_full_timeline = bool(
+                self.config["performance"].get(
+                    "coarse_full_timeline_scan", False
+                )
+            )
+            shared_coarse_motion_scan = bool(
+                self.config["performance"].get(
+                    "coarse_shared_motion_probe_enabled", False
+                )
+                and coarse_full_timeline
+                and {
+                    view.view_id for view in motion_probe_views
+                }
+                == {view.view_id for view in preselected_coarse_views}
+                and float(
+                    self.config["performance"]["coarse_detection_fps"]
+                )
+                >= float(self.config["performance"]["motion_probe_fps"])
+                and int(self.config["performance"]["coarse_image_size"])
+                >= int(
+                    self.config["performance"].get(
+                        "motion_probe_max_width", 96
+                    )
+                )
+                and not bool(
+                    self.config["performance"].get(
+                        "coarse_keyframes_only", False
+                    )
+                )
+            )
+            coarse_frame_index: CoarseFrameIndex | None = None
+            coarse_index_report: dict[str, Any] | None = None
+
+            def ensure_coarse_frame_index(
+                paths: dict[str, Path], views: Sequence[ViewInput]
+            ) -> CoarseFrameIndex | None:
+                nonlocal coarse_frame_index, coarse_index_report
+                if not self.config["performance"].get(
+                    "coarse_frame_index_enabled", False
+                ):
+                    return None
+                if coarse_frame_index is not None:
+                    return coarse_frame_index
+                coarse_frame_index, coarse_index_report = build_coarse_frame_index(
+                    layout.work / "coarse-frame-index.sqlite3",
+                    views,
+                    infos,
+                    paths,
+                    sample_fps=float(
+                        self.config["performance"]["coarse_detection_fps"]
+                    ),
+                    minimum_coverage_ratio=float(
+                        self.config["performance"].get(
+                            "coarse_minimum_coverage_ratio", 0.98
+                        )
+                    ),
+                    maximum_gap_periods=float(
+                        self.config["performance"].get(
+                            "coarse_maximum_gap_periods", 4.0
+                        )
+                    ),
+                )
+                manifest_report = dict(coarse_index_report)
+                manifest_report["index_path"] = "Work/coarse-frame-index.sqlite3"
+                write_json(
+                    layout.json_config / "coarse_frame_index_manifest.json",
+                    manifest_report,
+                )
+                if (
+                    self.config["performance"].get(
+                        "coarse_coverage_gate_enabled", False
+                    )
+                    and not coarse_index_report["formal_evidence_ready"]
+                ):
+                    failed = [
+                        item["view_id"]
+                        for item in coarse_index_report["views"]
+                        if not item["formal_evidence_ready"]
+                    ]
+                    raise RuntimeError(
+                        "粗扫覆盖门禁失败，以下视角存在采样缺口: "
+                        + ", ".join(failed)
+                    )
+                return coarse_frame_index
             probe_manifest = manifest.model_copy(update={"views": motion_probe_views})
             selected_probe_ids = {view.view_id for view in motion_probe_views}
             for view in manifest.views:
@@ -4211,7 +4297,11 @@ class EvidencePipeline:
                 layout,
                 "motion_probe",
                 0.12,
-                "Selecting and running the fastest real-source sparse motion probe",
+                (
+                    "共享全时间轴粗扫解码并生成运动探针，不重复读取原视频"
+                    if shared_coarse_motion_scan
+                    else "Selecting and running the fastest real-source sparse motion probe"
+                ),
             )
             sparse_strategy_path = layout.json_config / "motion_probe_sparse_strategy.json"
             configured_sparse_strategy = str(
@@ -4300,6 +4390,9 @@ class EvidencePipeline:
                 if configured_sparse_strategy == "auto"
                 else "explicit configuration"
             )
+            sparse_report["shared_with_full_timeline_coarse_scan"] = (
+                shared_coarse_motion_scan
+            )
             write_json(sparse_strategy_path, sparse_report)
             selected_probe_ids = {view.view_id for view in motion_probe_views}
             for view in manifest.views:
@@ -4312,23 +4405,91 @@ class EvidencePipeline:
                 layout,
                 "motion_probe",
                 0.12,
-                "哨兵视角低分辨率运动探针；此阶段CUDA计算低占用属于预期",
-            )
-            motion_paths = self._scan_all_views_concurrently(
-                probe_manifest,
-                infos,
-                transforms,
-                layout.work / "motion-probe",
-                sample_fps=float(self.config["performance"]["motion_probe_fps"]),
-                image_size=int(self.config["performance"].get("motion_probe_max_width", 96)),
-                keyframes_only=bool(
-                    self.config["performance"].get("motion_probe_keyframes_only", True)
+                (
+                    "全路全时间轴粗扫共享同一次解码，并同步生成0.5 FPS运动探针"
+                    if shared_coarse_motion_scan
+                    else "哨兵视角低分辨率运动探针；此阶段CUDA计算低占用属于预期"
                 ),
-                phase="motion_probe",
             )
-            self._archive_scan_runtime(layout, layout.work / "motion-probe", "motion_probe")
+            if shared_coarse_motion_scan:
+                shared_manifest = manifest.model_copy(
+                    update={"views": preselected_coarse_views}
+                )
+                motion_paths = self._scan_all_views_concurrently(
+                    shared_manifest,
+                    infos,
+                    transforms,
+                    layout.work / "detections-coarse",
+                    sample_fps=float(
+                        self.config["performance"]["coarse_detection_fps"]
+                    ),
+                    image_size=int(
+                        self.config["performance"]["coarse_image_size"]
+                    ),
+                    keyframes_only=bool(
+                        self.config["performance"]["coarse_keyframes_only"]
+                    ),
+                    phase="coarse",
+                )
+                self._archive_scan_runtime(
+                    layout, layout.work / "detections-coarse", "coarse"
+                )
+                shared_runtime = json.loads(
+                    (layout.json_config / "scan_runtime_coarse.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                write_json(
+                    layout.json_config / "scan_runtime_motion_probe.json",
+                    {
+                        "schema_version": "visioncortex-shared-motion-probe-runtime/1",
+                        "phase": "motion_probe",
+                        "shared_source_phase": "coarse",
+                        "additional_video_decode_bytes": 0,
+                        "logical_sample_fps": float(
+                            self.config["performance"]["motion_probe_fps"]
+                        ),
+                        "role_motion_scoring": [
+                            {
+                                "role": report.get("role"),
+                                "motion_scoring": report.get("motion_scoring"),
+                            }
+                            for report in shared_runtime.get("role_reports", [])
+                        ],
+                    },
+                )
+                ensure_coarse_frame_index(
+                    motion_paths, preselected_coarse_views
+                )
+            else:
+                motion_paths = self._scan_all_views_concurrently(
+                    probe_manifest,
+                    infos,
+                    transforms,
+                    layout.work / "motion-probe",
+                    sample_fps=float(
+                        self.config["performance"]["motion_probe_fps"]
+                    ),
+                    image_size=int(
+                        self.config["performance"].get(
+                            "motion_probe_max_width", 96
+                        )
+                    ),
+                    keyframes_only=bool(
+                        self.config["performance"].get(
+                            "motion_probe_keyframes_only", True
+                        )
+                    ),
+                    phase="motion_probe",
+                )
+                self._archive_scan_runtime(
+                    layout, layout.work / "motion-probe", "motion_probe"
+                )
             probe_config = json.loads(json.dumps(self.config))
             probe_config["performance"]["motion_probe_require_objects"] = False
+            probe_config["performance"][
+                "motion_probe_use_embedded_coarse_scores"
+            ] = shared_coarse_motion_scan
             probe_config["performance"]["motion_burst_percentile"] = float(
                 self.config["performance"].get(
                     "motion_probe_percentile",
@@ -4348,7 +4509,10 @@ class EvidencePipeline:
                 )
             )
             raw_motion_candidates = generate_motion_burst_candidates(
-                motion_probe_views, motion_paths, probe_config
+                motion_probe_views,
+                motion_paths,
+                probe_config,
+                coarse_frame_index,
             )
             raw_motion_candidates = sorted(
                 raw_motion_candidates,
@@ -4361,7 +4525,10 @@ class EvidencePipeline:
             if not motion_candidates:
                 safety_fallback_used = True
                 motion_candidates = generate_motion_safety_candidates(
-                    motion_probe_views, motion_paths, probe_config
+                    motion_probe_views,
+                    motion_paths,
+                    probe_config,
+                    coarse_frame_index,
                 )
             motion_candidates = sorted(motion_candidates, key=candidate_sort_key)
             if not motion_candidates:
@@ -4400,9 +4567,6 @@ class EvidencePipeline:
                 ],
             )
 
-            coarse_full_timeline = bool(
-                self.config["performance"].get("coarse_full_timeline_scan", False)
-            )
             reuse_motion_probe = (
                 bool(
                     self.config["performance"].get(
@@ -4417,9 +4581,11 @@ class EvidencePipeline:
                 and not coarse_full_timeline
             )
             coarse_scan_views = (
-                motion_probe_views
+                preselected_coarse_views
+                if shared_coarse_motion_scan
+                else motion_probe_views
                 if reuse_motion_probe
-                else self._coarse_scan_views(manifest)
+                else preselected_coarse_views
             )
             coarse_scan_ids = {view.view_id for view in coarse_scan_views}
             coarse_manifest = manifest.model_copy(update={"views": coarse_scan_views})
@@ -4434,12 +4600,34 @@ class EvidencePipeline:
                 "candidate_coarse",
                 0.28,
                 (
-                    f"全时间轴多视角 {self.config['performance']['coarse_detection_fps']} FPS YOLO粗筛"
+                    "复用运动阶段已经完成的全路全时间轴YOLO粗扫"
+                    if shared_coarse_motion_scan
+                    else f"全时间轴多视角 {self.config['performance']['coarse_detection_fps']} FPS YOLO粗筛"
                     if coarse_full_timeline
                     else f"候选窗口内 {self.config['performance']['coarse_detection_fps']} FPS YOLO粗筛"
                 ),
             )
-            if reuse_motion_probe:
+            if shared_coarse_motion_scan:
+                coarse_paths = motion_paths
+                write_json(
+                    layout.json_config / "coarse_reuse_motion_probe.json",
+                    {
+                        "schema_version": "visioncortex-coarse-reuse/1",
+                        "reused": True,
+                        "source_phase": "shared_coarse_motion_decode",
+                        "source_view_ids": [
+                            view.view_id for view in coarse_scan_views
+                        ],
+                        "sample_fps": float(
+                            self.config["performance"]["coarse_detection_fps"]
+                        ),
+                        "logical_motion_probe_fps": float(
+                            self.config["performance"]["motion_probe_fps"]
+                        ),
+                        "additional_video_decode_bytes": 0,
+                    },
+                )
+            elif reuse_motion_probe:
                 coarse_paths = motion_paths
                 for view in manifest.views:
                     self._view_runtime[view.view_id]["state"] = (
@@ -4475,10 +4663,20 @@ class EvidencePipeline:
                 self._archive_scan_runtime(
                     layout, layout.work / "detections-coarse", "coarse"
                 )
+            ensure_coarse_frame_index(coarse_paths, coarse_scan_views)
             coarse_views = [
                 view for view in coarse_scan_views if view.role == ViewRole.FIRST_PERSON
             ]
             coarse_config = json.loads(json.dumps(self.config))
+            coarse_config["performance"][
+                "candidate_alignment_uncertainty_ms_by_view"
+            ] = {
+                view_id: max(
+                    float(transform.uncertainty_ms or 0.0),
+                    float(transform.csv_rmse_ms or 0.0),
+                )
+                for view_id, transform in transforms.items()
+            }
             coarse_config["segmentation"]["event_merge_gap_seconds"] = max(
                 float(coarse_config["segmentation"]["event_merge_gap_seconds"]),
                 1.5
@@ -4492,7 +4690,10 @@ class EvidencePipeline:
             )
             coarse_config["segmentation"]["min_event_observations"] = 2
             coarse_candidates = generate_motion_burst_candidates(
-                coarse_views, coarse_paths, coarse_config
+                coarse_views,
+                coarse_paths,
+                coarse_config,
+                coarse_frame_index,
             )
             comprehensive_coarse = bool(
                 self.config["performance"].get(
@@ -4502,7 +4703,10 @@ class EvidencePipeline:
             if comprehensive_coarse:
                 coarse_candidates.extend(
                     generate_coarse_activity_candidates(
-                        coarse_scan_views, coarse_paths, coarse_config
+                        coarse_scan_views,
+                        coarse_paths,
+                        coarse_config,
+                        coarse_frame_index,
                     )
                 )
             elif not coarse_candidates:
@@ -4511,7 +4715,10 @@ class EvidencePipeline:
                 ]
                 fallback_paths = {view.view_id: coarse_paths[view.view_id] for view in fallback_views}
                 coarse_candidates = generate_coarse_activity_candidates(
-                    fallback_views, fallback_paths, coarse_config
+                    fallback_views,
+                    fallback_paths,
+                    coarse_config,
+                    coarse_frame_index,
                 )
             open_vocabulary_enabled = bool(
                 self.config["performance"].get(
@@ -4525,16 +4732,76 @@ class EvidencePipeline:
                         infos,
                         coarse_paths,
                         self.config,
+                        coarse_frame_index,
                     )
                 )
             else:
                 open_vocabulary_candidates, open_vocabulary_report = [], None
+            coverage_required = bool(
+                self.config["performance"].get(
+                    "coarse_coverage_gate_enabled", False
+                )
+            )
+            coverage_ready = bool(
+                not coverage_required
+                or (
+                    coarse_index_report is not None
+                    and coarse_index_report.get("formal_evidence_ready")
+                )
+            )
+            open_vocabulary_ready = bool(
+                not open_vocabulary_enabled
+                or (
+                    open_vocabulary_report is not None
+                    and open_vocabulary_report.get("formal_evidence_ready")
+                )
+            )
+            candidate_gate_errors = []
+            if not coverage_ready:
+                candidate_gate_errors.append("coarse_frame_coverage_incomplete")
+            if not open_vocabulary_ready:
+                candidate_gate_errors.append(
+                    "open_vocabulary_recall_unavailable_or_error_rate_exceeded"
+                )
+            candidate_discovery_gate = {
+                "schema_version": "visioncortex-candidate-discovery-quality-gate/1",
+                "formal_evidence_ready": not candidate_gate_errors,
+                "errors": candidate_gate_errors,
+                "coarse_coverage_required": coverage_required,
+                "coarse_coverage_ready": coverage_ready,
+                "open_vocabulary_enabled": open_vocabulary_enabled,
+                "open_vocabulary_ready": open_vocabulary_ready,
+                "open_vocabulary_status": (
+                    open_vocabulary_report.get("status")
+                    if open_vocabulary_report is not None
+                    else "disabled"
+                ),
+            }
+            write_json(
+                layout.json_config / "candidate_discovery_quality_gate.json",
+                candidate_discovery_gate,
+            )
+            if open_vocabulary_report is not None:
+                write_json(
+                    layout.json_config / "coarse_open_vocabulary_recall.json",
+                    open_vocabulary_report,
+                )
+            if (
+                self.config["performance"].get(
+                    "candidate_discovery_quality_gate_enabled", False
+                )
+                and candidate_gate_errors
+            ):
+                raise RuntimeError(
+                    "候选发现质量门禁失败: "
+                    + "; ".join(candidate_gate_errors)
+                )
             coarse_candidates.extend(open_vocabulary_candidates)
             coarse_candidates = sorted(coarse_candidates, key=candidate_sort_key)
             boundary_candidates, boundary_report = refine_motion_candidates_with_coarse(
                 motion_candidates,
                 coarse_candidates,
-                self.config,
+                coarse_config,
             )
             boundary_candidates = sorted(
                 boundary_candidates,
@@ -4562,7 +4829,11 @@ class EvidencePipeline:
                     open_vocabulary_report,
                 )
             fine_views, fine_view_report = select_fine_scan_views(
-                manifest.views, coarse_paths, boundary_candidates, self.config
+                manifest.views,
+                coarse_paths,
+                boundary_candidates,
+                self.config,
+                coarse_frame_index,
             )
             progressive_enabled = bool(
                 self.config["performance"].get("fine_progressive_cross_view", False)
@@ -4627,6 +4898,16 @@ class EvidencePipeline:
             reuse_report = layout.json_config / "coarse_reuse_motion_probe.json"
             if reuse_report.exists():
                 coarse_artifacts.append(reuse_report)
+            coarse_index_manifest = (
+                layout.json_config / "coarse_frame_index_manifest.json"
+            )
+            if coarse_index_manifest.exists():
+                coarse_artifacts.append(coarse_index_manifest)
+            candidate_quality_gate = (
+                layout.json_config / "candidate_discovery_quality_gate.json"
+            )
+            if candidate_quality_gate.exists():
+                coarse_artifacts.append(candidate_quality_gate)
             self._complete_stage(layout, "candidate_coarse", coarse_artifacts)
             fine_windows = self._fine_windows(boundary_candidates, infos, transforms)
             fine_windows = {view.view_id: fine_windows[view.view_id] for view in fine_views}
