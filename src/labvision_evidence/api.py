@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
+import math
 import os
 import re
 import shutil
@@ -54,6 +56,7 @@ from .storage import (
     promote_fixed_archive,
     safe_archive_name,
 )
+from .upload_sessions import StorageReservationError, UploadSessionStore
 from .web_access import (
     is_allowed_lan_client,
     valid_basic_authorization,
@@ -65,7 +68,9 @@ from .web_access import (
 @asynccontextmanager
 async def _lifespan(_: FastAPI):
     validate_web_access_configuration()
-    _initialize_persistent_queue(_settings())
+    settings = _settings()
+    _initialize_persistent_queue(settings)
+    _expire_stale_upload_sessions(settings)
     try:
         _recover_orphaned_tasks()
         _start_queue_worker()
@@ -83,8 +88,10 @@ _web_root = Path(__file__).with_name("web")
 app.mount("/ui", StaticFiles(directory=_web_root), name="ui")
 _lock = threading.Lock()
 _gpu_job_lock = threading.Lock()
+_upload_finalize_lock = threading.Lock()
 _runs: dict[str, dict[str, Any]] = {}
 _persistent_queue: DurableRunQueue | None = None
+_upload_sessions: UploadSessionStore | None = None
 _queue_thread: threading.Thread | None = None
 _queue_stop = threading.Event()
 _queue_wakeup = threading.Event()
@@ -292,7 +299,7 @@ def _queue_database_path(settings: dict[str, Any]) -> Path:
 
 
 def _initialize_persistent_queue(settings: dict[str, Any]) -> None:
-    global _persistent_queue
+    global _persistent_queue, _upload_sessions
 
     store = DurableRunQueue(_queue_database_path(settings))
     restored_runs = store.load_runs()
@@ -300,6 +307,7 @@ def _initialize_persistent_queue(settings: dict[str, Any]) -> None:
         _runs.clear()
         _runs.update(restored_runs)
     _persistent_queue = store
+    _upload_sessions = UploadSessionStore(_queue_database_path(settings))
 
 
 def _renew_queue_lease(
@@ -476,6 +484,304 @@ def _reserve_archive(settings: dict[str, Any], experiment_name: str) -> tuple[st
             archive_name = f"{base_name}-{suffix}-{uuid.uuid4().hex[:4]}"
         nas_root = initialize_nas_archive(settings, archive_name)
     return archive_name, nas_root
+
+
+def _require_upload_store(settings: dict[str, Any]) -> UploadSessionStore:
+    global _upload_sessions
+
+    if _upload_sessions is None:
+        # Focused unit calls may not enter the ASGI lifespan. The production
+        # server initializes this same store before accepting requests.
+        _upload_sessions = UploadSessionStore(_queue_database_path(settings))
+    return _upload_sessions
+
+
+def _expire_stale_upload_sessions(settings: dict[str, Any]) -> None:
+    store = _require_upload_store(settings)
+    archive_root = _archive_root(settings).resolve()
+    for expired in store.expire_stale():
+        candidate = Path(expired["archive_root"]).resolve()
+        if candidate.parent != archive_root or not candidate.name:
+            continue
+        if candidate.is_dir():
+            try:
+                shutil.rmtree(candidate)
+            except OSError:
+                # The remaining bytes are still reflected by disk_usage, so a
+                # cleanup failure cannot over-admit the next reservation.
+                continue
+
+
+def _upload_policy(settings: dict[str, Any]) -> dict[str, Any]:
+    configured = settings.get("web_upload") or {}
+    chunk_size_mib = max(1, min(64, int(configured.get("chunk_size_mib", 16))))
+    session_ttl_hours = max(1.0, float(configured.get("session_ttl_hours", 168.0)))
+    processing_ratio = max(
+        0.0, float(configured.get("processing_headroom_ratio", 0.35))
+    )
+    safety_ratio = max(0.0, float(configured.get("safety_headroom_ratio", 0.10)))
+    minimum_safety_gib = max(
+        0.0, float(configured.get("minimum_safety_headroom_gib", 10.0))
+    )
+    return {
+        "chunk_size_bytes": chunk_size_mib * 1024 * 1024,
+        "session_ttl_seconds": session_ttl_hours * 3600.0,
+        "processing_headroom_ratio": processing_ratio,
+        "safety_headroom_ratio": safety_ratio,
+        "minimum_safety_bytes": math.ceil(minimum_safety_gib * 1024**3),
+    }
+
+
+def _upload_retention_mode(settings: dict[str, Any]) -> str:
+    if settings["storage"].get("sync_to_nas"):
+        return "nas_only"
+    return "local_only"
+
+
+def _unique_upload_archive_name(settings: dict[str, Any], experiment_name: str) -> str:
+    base_name = safe_archive_name(experiment_name)
+    archive_root = _archive_root(settings)
+    with _lock:
+        if not (archive_root / base_name).exists():
+            return base_name
+        suffix = datetime.now().strftime("%Y%m%d-%H%M%S")
+        return f"{base_name}-{suffix}-{uuid.uuid4().hex[:4]}"
+
+
+def _parse_upload_session_files(
+    payload: dict[str, Any], archive_path: Path, session_id: str
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
+    specs = payload.get("view_specs")
+    raw_files = payload.get("files")
+    if not isinstance(specs, list) or not specs:
+        raise HTTPException(400, "view_specs 必须是非空数组")
+    if not isinstance(raw_files, list) or not raw_files:
+        raise HTTPException(400, "files 必须是非空数组")
+
+    normalized_files: list[dict[str, Any]] = []
+    file_ids: set[str] = set()
+    by_kind_index: dict[tuple[str, int], dict[str, Any]] = {}
+    for position, item in enumerate(raw_files):
+        if not isinstance(item, dict):
+            raise HTTPException(400, f"files[{position}] 必须是对象")
+        kind = str(item.get("kind") or "")
+        if kind not in {"video", "timestamp_csv"}:
+            raise HTTPException(400, f"files[{position}].kind 无效")
+        try:
+            file_index = int(item.get("file_index"))
+            expected_bytes = int(item.get("size"))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(400, f"files[{position}] 的序号或大小无效") from exc
+        if file_index < 0 or expected_bytes <= 0:
+            raise HTTPException(400, f"files[{position}] 的序号或大小无效")
+        file_id = str(item.get("file_id") or f"{kind}-{file_index}")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", file_id) or file_id in file_ids:
+            raise HTTPException(400, f"files[{position}].file_id 无效或重复")
+        key = (kind, file_index)
+        if key in by_kind_index:
+            raise HTTPException(400, f"files[{position}] 的类型与序号重复")
+        normalized = {
+            "file_id": file_id,
+            "kind": kind,
+            "file_index": file_index,
+            "source_name": str(item.get("name") or f"{kind}-{file_index}"),
+            "expected_bytes": expected_bytes,
+        }
+        file_ids.add(file_id)
+        by_kind_index[key] = normalized
+        normalized_files.append(normalized)
+
+    videos = sorted(
+        (item for item in normalized_files if item["kind"] == "video"),
+        key=lambda item: int(item["file_index"]),
+    )
+    if len(videos) < 2 or [item["file_index"] for item in videos] != list(
+        range(len(videos))
+    ):
+        raise HTTPException(400, "视频至少需要两路，且 video_index 必须从 0 连续编号")
+    if len(specs) != len(videos):
+        raise HTTPException(400, "view_specs 数量必须与视频路数一致")
+
+    validation_views: list[ViewInput] = []
+    normalized_specs: list[dict[str, Any]] = []
+    used_video_indexes: set[int] = set()
+    used_csv_indexes: set[int] = set()
+    used_paths: set[Path] = set()
+    for position, raw_spec in enumerate(specs):
+        if not isinstance(raw_spec, dict):
+            raise HTTPException(400, f"view_specs[{position}] 必须是对象")
+        try:
+            video_index = int(raw_spec.get("video_index", position))
+            csv_value = raw_spec.get("csv_index")
+            csv_index = int(csv_value) if csv_value is not None else None
+            calibration_hint_ms = float(raw_spec.get("calibration_hint_ms", 0.0))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(400, f"view_specs[{position}] 的文件映射无效") from exc
+        video_file = by_kind_index.get(("video", video_index))
+        if video_file is None:
+            raise HTTPException(400, f"view_specs[{position}] 引用了不存在的视频")
+        if video_index in used_video_indexes:
+            raise HTTPException(400, "同一个视频不能映射到多个视角")
+        used_video_indexes.add(video_index)
+        csv_file = (
+            by_kind_index.get(("timestamp_csv", csv_index))
+            if csv_index is not None
+            else None
+        )
+        if csv_index is not None and csv_file is None:
+            raise HTTPException(400, f"view_specs[{position}] 引用了不存在的 CSV")
+        if csv_index is not None:
+            if csv_index in used_csv_indexes:
+                raise HTTPException(400, "同一个 CSV 不能映射到多个视角")
+            used_csv_indexes.add(csv_index)
+        view_id = _safe_file_name(
+            str(raw_spec.get("view_id") or f"view-{position + 1:02d}"),
+            f"view-{position + 1:02d}",
+        )
+        role = str(raw_spec.get("role") or "")
+        normalized_spec = {
+            "view_id": view_id,
+            "role": role,
+            "video_index": video_index,
+            "calibration_hint_ms": calibration_hint_ms,
+        }
+        if csv_index is not None:
+            normalized_spec["csv_index"] = csv_index
+        normalized_specs.append(normalized_spec)
+
+        for file_item in (video_file, csv_file):
+            if file_item is None:
+                continue
+            source_name = _safe_file_name(
+                file_item["source_name"],
+                "video" if file_item["kind"] == "video" else "timestamps",
+            )
+            prefix = (
+                f"video-{int(file_item['file_index']) + 1:02d}-"
+                if file_item["kind"] == "video"
+                else f"timestamps-{int(file_item['file_index']) + 1:02d}-"
+            )
+            stored_name = f"{prefix}{source_name}"
+            final_path = archive_path / "Original-Experiment-Videos" / view_id / stored_name
+            if final_path in used_paths:
+                raise HTTPException(400, "上传文件的目标路径发生冲突")
+            used_paths.add(final_path)
+            file_item.update(
+                {
+                    "view_id": view_id,
+                    "stored_name": stored_name,
+                    "final_path": final_path,
+                    "partial_path": final_path.with_name(
+                        f".{stored_name}.upload-{session_id}.partial"
+                    ),
+                }
+            )
+        try:
+            validation_views.append(
+                ViewInput(
+                    view_id=view_id,
+                    role=role,
+                    video=Path(f"/{view_id}.mp4"),
+                    timestamps_csv=(Path(f"/{view_id}.csv") if csv_file else None),
+                    calibration_hint_ms=calibration_hint_ms,
+                )
+            )
+        except ValueError as exc:
+            raise HTTPException(400, f"view_specs[{position}] 无效: {exc}") from exc
+
+    unused_csvs = {
+        int(item["file_index"])
+        for item in normalized_files
+        if item["kind"] == "timestamp_csv"
+    } - used_csv_indexes
+    if unused_csvs:
+        raise HTTPException(400, f"存在未映射的 CSV: {sorted(unused_csvs)}")
+    unused_videos = {int(item["file_index"]) for item in videos} - used_video_indexes
+    if unused_videos:
+        raise HTTPException(400, f"存在未映射的视频: {sorted(unused_videos)}")
+    try:
+        RunManifest(experiment_id=archive_path.name, views=validation_views)
+    except ValueError as exc:
+        raise HTTPException(400, f"视角配置无效: {exc}") from exc
+
+    return normalized_specs, normalized_files, sum(
+        int(item["expected_bytes"]) for item in normalized_files
+    )
+
+
+def _public_upload_session(session: dict[str, Any]) -> dict[str, Any]:
+    files = [
+        {
+            "file_id": item["file_id"],
+            "kind": item["kind"],
+            "file_index": int(item["file_index"]),
+            "name": item["source_name"],
+            "size": int(item["expected_bytes"]),
+            "uploaded_bytes": int(item["uploaded_bytes"]),
+            "completed": bool(item.get("sha256")),
+            "sha256": item.get("sha256"),
+        }
+        for item in session["files"]
+    ]
+    return {
+        "session_id": session["session_id"],
+        "status": session["status"],
+        "archive_name": session["archive_name"],
+        "retention_mode": session["retention_mode"],
+        "expected_source_bytes": int(session["expected_source_bytes"]),
+        "reserved_bytes": int(session["reserved_bytes"]),
+        "processing_headroom_bytes": int(session["processing_headroom_bytes"]),
+        "safety_headroom_bytes": int(session["safety_headroom_bytes"]),
+        "uploaded_bytes": sum(int(item["uploaded_bytes"]) for item in files),
+        "expires_at_epoch": float(session["expires_at"]),
+        "run_id": session.get("run_id"),
+        "files": files,
+    }
+
+
+def _load_upload_session(
+    settings: dict[str, Any], session_id: str, *, refresh_expiry: bool = False
+) -> dict[str, Any]:
+    if refresh_expiry:
+        _expire_stale_upload_sessions(settings)
+    store = _require_upload_store(settings)
+    session = store.get(session_id)
+    if session is None:
+        raise HTTPException(404, "上传会话不存在")
+    policy = _upload_policy(settings)
+    for item in session["files"]:
+        final_path = Path(item["final_path"])
+        partial_path = Path(item["partial_path"])
+        active_path = final_path if final_path.is_file() else partial_path
+        actual_bytes = active_path.stat().st_size if active_path.is_file() else 0
+        if actual_bytes > int(item["expected_bytes"]):
+            raise HTTPException(500, f"服务器暂存文件超过声明大小: {item['file_id']}")
+        if actual_bytes != int(item["uploaded_bytes"]):
+            store.update_progress(
+                session_id,
+                str(item["file_id"]),
+                actual_bytes,
+                expires_at=time.time() + float(policy["session_ttl_seconds"]),
+            )
+            item["uploaded_bytes"] = actual_bytes
+    if refresh_expiry and session["status"] == "open" and session["files"]:
+        first = session["files"][0]
+        store.update_progress(
+            session_id,
+            str(first["file_id"]),
+            int(first["uploaded_bytes"]),
+            expires_at=time.time() + float(policy["session_ttl_seconds"]),
+        )
+        session = store.get(session_id) or session
+    return session
+
+
+def _sha256_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while block := handle.read(16 * 1024 * 1024):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _reserve_collection_archive(
@@ -938,6 +1244,10 @@ def _execute_now(
         if ingest is not None:
             _append_web_end_to_end_metrics([nas_root], ingest, completed=False)
         _update(run_id, state="failed", progress=1.0, error=f"{type(exc).__name__}: {exc}")
+    finally:
+        upload_session_id = (ingest or {}).get("upload_session_id")
+        if upload_session_id and _upload_sessions is not None:
+            _upload_sessions.release(str(upload_session_id))
 
 
 def _execute(
@@ -1216,6 +1526,8 @@ def favicon() -> Response:
 def health() -> dict[str, Any]:
     settings = _settings()
     queue_stats = _persistent_queue.stats() if _persistent_queue is not None else None
+    upload_stats = _upload_sessions.stats() if _upload_sessions is not None else None
+    upload_policy = _upload_policy(settings)
     storage_mode = "nas" if settings["storage"].get("sync_to_nas") else "local_development"
     archive_root = _archive_root(settings)
     input_mode = (
@@ -1233,6 +1545,15 @@ def health() -> dict[str, Any]:
         "minimum_capacity": "6 views x 3 hours",
         "view_count_policy": "dynamic",
         "minimum_cross_view_sources": 2,
+        "large_uploads": {
+            "protocol": "resumable_chunks_v1",
+            "fixed_total_size_limit": False,
+            "chunk_size_bytes": int(upload_policy["chunk_size_bytes"]),
+            "storage_admission": "dynamic_free_space_with_reservation",
+            "original_media_copies": 1,
+            "inactive_session_ttl_seconds": float(upload_policy["session_ttl_seconds"]),
+            "sessions": upload_stats,
+        },
         "ark_key_configured": bool(os.getenv(settings["mllm"]["api_key_env"])),
         "mllm_enabled": bool(settings["mllm"].get("enabled")),
         "model": settings["mllm"]["model"],
@@ -2228,6 +2549,446 @@ def open_archive_folder(archive_name: str) -> dict[str, str]:
         raise HTTPException(501, str(exc)) from exc
     subprocess.Popen(command, start_new_session=True)
     return {"status": "opened", "path": str(root)}
+
+
+@app.post("/api/upload-sessions", status_code=201)
+def create_upload_session(payload: dict[str, Any]) -> dict[str, Any]:
+    settings = _settings()
+    _expire_stale_upload_sessions(settings)
+    archive_root = _archive_root(settings).resolve()
+    archive_root.mkdir(parents=True, exist_ok=True)
+    experiment_name = str(payload.get("experiment_name") or "").strip()
+    if not experiment_name:
+        raise HTTPException(400, "experiment_name 不能为空")
+
+    session_id = uuid.uuid4().hex
+    archive_name = _unique_upload_archive_name(settings, experiment_name)
+    archive_path = archive_root / archive_name
+    specs, files, expected_source_bytes = _parse_upload_session_files(
+        payload, archive_path, session_id
+    )
+    policy = _upload_policy(settings)
+    processing_headroom = math.ceil(
+        expected_source_bytes * float(policy["processing_headroom_ratio"])
+    )
+    safety_headroom = max(
+        math.ceil(expected_source_bytes * float(policy["safety_headroom_ratio"])),
+        int(policy["minimum_safety_bytes"]),
+    )
+    disk = shutil.disk_usage(archive_root)
+    store = _require_upload_store(settings)
+    try:
+        capacity = store.reserve(
+            session_id=session_id,
+            archive_name=archive_name,
+            archive_root=archive_path,
+            storage_key=str(archive_root),
+            experiment_name=experiment_name,
+            view_specs=specs,
+            retention_mode=_upload_retention_mode(settings),
+            expected_source_bytes=expected_source_bytes,
+            processing_headroom_bytes=processing_headroom,
+            safety_headroom_bytes=safety_headroom,
+            free_bytes=int(disk.free),
+            files=files,
+            expires_at=time.time() + float(policy["session_ttl_seconds"]),
+        )
+    except StorageReservationError as exc:
+        raise HTTPException(
+            507,
+            {
+                "message": "NAS 可用空间不足，任务尚未创建",
+                "required_bytes": exc.required_bytes,
+                "available_bytes": exc.available_bytes,
+                "missing_bytes": exc.missing_bytes,
+                "free_bytes": exc.free_bytes,
+                "already_reserved_bytes": exc.already_reserved_bytes,
+            },
+        ) from exc
+    try:
+        settings["storage"]["active_archive_path"] = str(archive_path)
+        initialize_nas_archive(settings, archive_name)
+    except Exception:
+        store.release(session_id)
+        raise
+    session = store.get(session_id)
+    if session is None:
+        raise HTTPException(500, "上传会话创建后无法读取")
+    return {
+        **_public_upload_session(session),
+        "chunk_size_bytes": int(policy["chunk_size_bytes"]),
+        "capacity": capacity,
+        "resume_url": f"/api/upload-sessions/{session_id}",
+        "finalize_url": f"/api/upload-sessions/{session_id}/finalize",
+    }
+
+
+@app.get("/api/upload-sessions/{session_id}")
+def get_upload_session(session_id: str) -> dict[str, Any]:
+    settings = _settings()
+    session = _load_upload_session(settings, session_id, refresh_expiry=True)
+    return {
+        **_public_upload_session(session),
+        "chunk_size_bytes": int(_upload_policy(settings)["chunk_size_bytes"]),
+    }
+
+
+@app.patch("/api/upload-sessions/{session_id}/files/{file_id}")
+async def upload_session_chunk(
+    request: Request, session_id: str, file_id: str
+) -> dict[str, Any]:
+    settings = _settings()
+    store = _require_upload_store(settings)
+    session = _load_upload_session(settings, session_id)
+    if session["status"] != "open":
+        raise HTTPException(409, "上传会话已经结束，不能继续写入")
+    item = next((entry for entry in session["files"] if entry["file_id"] == file_id), None)
+    if item is None:
+        raise HTTPException(404, "上传文件不存在")
+    if item.get("sha256"):
+        return {
+            "session_id": session_id,
+            "file_id": file_id,
+            "uploaded_bytes": int(item["expected_bytes"]),
+            "completed": True,
+        }
+
+    try:
+        offset = int(request.headers.get("upload-offset", ""))
+    except ValueError as exc:
+        raise HTTPException(400, "Upload-Offset 请求头无效") from exc
+    partial_path = Path(item["partial_path"])
+    final_path = Path(item["final_path"])
+    partial_path.parent.mkdir(parents=True, exist_ok=True)
+    active_path = final_path if final_path.is_file() else partial_path
+    actual_offset = active_path.stat().st_size if active_path.is_file() else 0
+    if offset < 0 or offset > actual_offset:
+        raise HTTPException(
+            409,
+            f"上传位置不一致，服务器应从 {actual_offset} 字节继续",
+            headers={"Upload-Offset": str(actual_offset)},
+        )
+
+    policy = _upload_policy(settings)
+    maximum_chunk = int(policy["chunk_size_bytes"])
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            declared_length = int(content_length)
+        except ValueError as exc:
+            raise HTTPException(400, "Content-Length 请求头无效") from exc
+        if declared_length <= 0 or declared_length > maximum_chunk:
+            raise HTTPException(413, f"单个分块必须在 1 到 {maximum_chunk} 字节之间")
+    expected_bytes = int(item["expected_bytes"])
+    if offset < actual_offset:
+        replay = bytearray()
+        async for block in request.stream():
+            if not block:
+                continue
+            replay.extend(block)
+            if len(replay) > maximum_chunk or offset + len(replay) > actual_offset:
+                raise HTTPException(409, "续传校验范围超过服务器已保存的内容")
+        if not replay:
+            raise HTTPException(400, "续传校验分块不能为空")
+        replay_digest = hashlib.sha256(replay).hexdigest()
+        expected_chunk_sha = request.headers.get("x-chunk-sha256")
+        if expected_chunk_sha and not hmac.compare_digest(
+            expected_chunk_sha.lower(), replay_digest
+        ):
+            raise HTTPException(422, "续传校验分块 SHA-256 无效")
+        with active_path.open("rb") as handle:
+            handle.seek(offset)
+            retained = handle.read(len(replay))
+        if not hmac.compare_digest(bytes(replay), retained):
+            raise HTTPException(409, "重新选择的文件与服务器断点内容不一致")
+        return {
+            "session_id": session_id,
+            "file_id": file_id,
+            "uploaded_bytes": actual_offset,
+            "completed": actual_offset == expected_bytes,
+            "replayed": True,
+        }
+    if actual_offset == expected_bytes:
+        return {
+            "session_id": session_id,
+            "file_id": file_id,
+            "uploaded_bytes": actual_offset,
+            "completed": True,
+        }
+    digest = hashlib.sha256()
+    written = 0
+    try:
+        with partial_path.open("ab") as handle:
+            async for block in request.stream():
+                if not block:
+                    continue
+                written += len(block)
+                if written > maximum_chunk or actual_offset + written > expected_bytes:
+                    raise HTTPException(413, "分块超过服务器声明的大小或文件边界")
+                handle.write(block)
+                digest.update(block)
+            if written <= 0:
+                raise HTTPException(400, "上传分块不能为空")
+            handle.flush()
+            os.fsync(handle.fileno())
+        expected_chunk_sha = request.headers.get("x-chunk-sha256")
+        if expected_chunk_sha and not hmac.compare_digest(
+            expected_chunk_sha.lower(), digest.hexdigest()
+        ):
+            raise HTTPException(422, "上传分块 SHA-256 校验失败，请重试该分块")
+    except Exception:
+        if partial_path.is_file():
+            with partial_path.open("r+b") as handle:
+                handle.truncate(actual_offset)
+                handle.flush()
+                os.fsync(handle.fileno())
+        raise
+
+    uploaded_bytes = actual_offset + written
+    store.update_progress(
+        session_id,
+        file_id,
+        uploaded_bytes,
+        expires_at=time.time() + float(policy["session_ttl_seconds"]),
+    )
+    return {
+        "session_id": session_id,
+        "file_id": file_id,
+        "uploaded_bytes": uploaded_bytes,
+        "completed": uploaded_bytes == expected_bytes,
+    }
+
+
+@app.post("/api/upload-sessions/{session_id}/finalize", status_code=202)
+def finalize_upload_session(
+    session_id: str, background_tasks: BackgroundTasks
+) -> dict[str, Any]:
+    settings = _settings()
+    store = _require_upload_store(settings)
+    with _upload_finalize_lock:
+        session = _load_upload_session(settings, session_id)
+        if session["status"] in {"finalized", "released"} and session.get("run_id"):
+            run_id = str(session["run_id"])
+            run = _runs.get(run_id, {})
+            return {
+                "run_id": run_id,
+                "state": run.get("state", "queued"),
+                "status_url": f"/api/runs/{run_id}",
+                "nas_output": str(session["archive_root"]),
+                "archive_url": f"/?archive={quote(str(session['archive_name']))}",
+                "queue_persistence": "sqlite",
+            }
+        if session["status"] != "open":
+            raise HTTPException(409, "上传会话不能提交分析")
+        incomplete = [
+            item
+            for item in session["files"]
+            if int(item["uploaded_bytes"]) != int(item["expected_bytes"])
+        ]
+        if incomplete:
+            raise HTTPException(
+                409,
+                {
+                    "message": "仍有文件没有上传完成",
+                    "files": [item["file_id"] for item in incomplete],
+                },
+            )
+
+        for item in session["files"]:
+            if item.get("sha256"):
+                continue
+            partial_path = Path(item["partial_path"])
+            final_path = Path(item["final_path"])
+            source_path = final_path if final_path.is_file() else partial_path
+            if not source_path.is_file() or source_path.stat().st_size != int(
+                item["expected_bytes"]
+            ):
+                raise HTTPException(409, f"暂存文件不完整: {item['file_id']}")
+            sha256 = _sha256_path(source_path)
+            if source_path == partial_path:
+                final_path.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(partial_path, final_path)
+            store.complete_file(session_id, str(item["file_id"]), sha256)
+
+        session = store.get(session_id)
+        if session is None:
+            raise HTTPException(500, "上传会话在完成校验后丢失")
+        archive_name = str(session["archive_name"])
+        nas_root = Path(session["archive_root"])
+        files_by_key = {
+            (str(item["kind"]), int(item["file_index"])): item
+            for item in session["files"]
+        }
+        views: list[ViewInput] = []
+        for spec in session["view_specs"]:
+            video = files_by_key[("video", int(spec["video_index"]))]
+            csv_index = spec.get("csv_index")
+            timestamp_csv = (
+                Path(files_by_key[("timestamp_csv", int(csv_index))]["final_path"])
+                if csv_index is not None
+                else None
+            )
+            views.append(
+                ViewInput(
+                    view_id=str(spec["view_id"]),
+                    role=spec["role"],
+                    video=Path(video["final_path"]),
+                    timestamps_csv=timestamp_csv,
+                    calibration_hint_ms=float(spec.get("calibration_hint_ms", 0.0)),
+                )
+            )
+        manifest = RunManifest(experiment_id=archive_name, views=views)
+        manifest_path = nas_root / "JSON-Config-Files" / "input_manifest.yaml"
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(
+            yaml.safe_dump(
+                manifest.model_dump(mode="json"), allow_unicode=True, sort_keys=False
+            ),
+            encoding="utf-8",
+        )
+
+        completed_at = datetime.now().astimezone().isoformat()
+        duration_seconds = max(0.0, time.time() - float(session["created_at"]))
+        retention_mode = str(session["retention_mode"])
+        upload_ledger = [
+            {
+                "filename": item["source_name"],
+                "bytes": int(item["expected_bytes"]),
+                "local_path": (
+                    item["final_path"] if retention_mode == "local_only" else None
+                ),
+                "nas_path": (
+                    item["final_path"] if retention_mode == "nas_only" else None
+                ),
+                "analysis_path": item["final_path"],
+                "retention_mode": retention_mode,
+                "local_write_bytes": (
+                    int(item["expected_bytes"]) if retention_mode == "local_only" else 0
+                ),
+                "nas_write_bytes": (
+                    int(item["expected_bytes"]) if retention_mode == "nas_only" else 0
+                ),
+                "sha256": item["sha256"],
+            }
+            for item in session["files"]
+        ]
+        ingest = {
+            "request_started_perf": None,
+            "request_started_epoch": float(session["created_at"]),
+            "request_received_at": datetime.fromtimestamp(
+                float(session["created_at"])
+            ).astimezone().isoformat(),
+            "original_retention_completed_at": completed_at,
+            "duration_seconds": round(duration_seconds, 6),
+            "file_count": len(upload_ledger),
+            "video_count": sum(item["kind"] == "video" for item in session["files"]),
+            "timestamp_csv_count": sum(
+                item["kind"] == "timestamp_csv" for item in session["files"]
+            ),
+            "total_bytes": int(session["expected_source_bytes"]),
+            "local_write_bytes": sum(
+                int(item["local_write_bytes"]) for item in upload_ledger
+            ),
+            "nas_write_bytes": sum(int(item["nas_write_bytes"]) for item in upload_ledger),
+            "retention_mode": retention_mode,
+            "destinations": [
+                "nas_original_experiment_videos"
+                if retention_mode == "nas_only"
+                else "local_archive_original_experiment_videos"
+            ],
+            "upload_protocol": "resumable_chunks_v1",
+            "upload_session_id": session_id,
+            "storage_reservation_bytes": int(session["reserved_bytes"]),
+        }
+        ingest["effective_source_throughput_mib_s"] = round(
+            ingest["total_bytes"] / max(duration_seconds, 1e-9) / (1024 * 1024), 3
+        )
+        upload_record = {
+            "run_id": f"upload-{session_id[:12]}",
+            "archive_name": archive_name,
+            "uploaded_at": completed_at,
+            "files": upload_ledger,
+            "manifest": manifest.model_dump(mode="json"),
+            "web_ingest": {
+                key: value
+                for key, value in ingest.items()
+                if key not in {"request_started_perf", "request_started_epoch"}
+            },
+        }
+        _write_json_atomic(
+            nas_root / "JSON-Config-Files" / "original_upload_manifest.json",
+            upload_record,
+        )
+        _write_json_atomic(
+            nas_root
+            / "JSON-Config-Files"
+            / "Stage-Receipts"
+            / "original_ingest.json",
+            {
+                "schema_version": "visioncortex-stage-receipt/1",
+                "stage": "original_ingest",
+                "status": "completed",
+                "completed_at": completed_at,
+                "run_elapsed_seconds": round(duration_seconds, 6),
+                "stage_duration_seconds": round(duration_seconds, 6),
+                "archive_mode": settings["storage"].get("run_output_mode", "local"),
+                "archive_root": str(nas_root),
+                "retention_mode": retention_mode,
+                "upload_protocol": "resumable_chunks_v1",
+                "source_copy_bytes": ingest["local_write_bytes"],
+                "storage_reservation_bytes": int(session["reserved_bytes"]),
+                "artifacts": [
+                    "Original-Experiment-Videos",
+                    "JSON-Config-Files/original_upload_manifest.json",
+                ],
+                "token_ledger": "JSON-Config-Files/run_metrics.json",
+            },
+        )
+
+        run_id = str(upload_record["run_id"])
+        settings["storage"]["sync_to_nas"] = retention_mode == "nas_only"
+        settings["storage"]["active_archive_path"] = str(nas_root)
+        store.assign_run(session_id, run_id)
+        existing_job = (
+            _persistent_queue.get_job(run_id) if _persistent_queue is not None else None
+        )
+        if existing_job is None:
+            _update(
+                run_id,
+                state="queued",
+                progress=0.0,
+                experiment_id=manifest.experiment_id,
+                nas_output=str(nas_root),
+            )
+            queue_persistence = _schedule_job(
+                background_tasks,
+                run_id=run_id,
+                kind="run",
+                payload={
+                    "manifest": manifest.model_dump(mode="json"),
+                    "settings": settings,
+                    "nas_root": str(nas_root),
+                    "ingest": ingest,
+                },
+                fallback=_execute,
+                fallback_args=(run_id, manifest, settings, nas_root, ingest),
+            )
+        else:
+            queue_persistence = "sqlite"
+        try:
+            store.finalize(session_id, run_id)
+        except ValueError:
+            refreshed = store.get(session_id)
+            if refreshed is None or refreshed["status"] != "released":
+                raise
+        return {
+            "run_id": run_id,
+            "state": "queued",
+            "status_url": f"/api/runs/{run_id}",
+            "nas_output": str(nas_root),
+            "archive_url": f"/?archive={quote(archive_name)}",
+            "queue_persistence": queue_persistence,
+        }
 
 
 @app.post("/api/runs", status_code=202)

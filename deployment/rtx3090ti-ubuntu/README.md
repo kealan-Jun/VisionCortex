@@ -169,6 +169,23 @@ their Web-visible state survive service or host restarts; a claimed job whose
 lease expires is reclaimed with the same run identity so durable pipeline
 checkpoints can be reused.
 
+Large browser uploads use durable resumable sessions in the same local SQLite
+state database. The browser declares each real file size before sending data;
+the server subtracts outstanding reservations from the live NAS free space and
+reserves source bytes plus configurable processing and safety headroom. There
+is no fixed total-upload-size, duration, or view-count ceiling. Accepted files
+arrive in 16 MiB chunks directly into `Original-Experiment-Videos` on the NAS,
+resume from the server-confirmed byte offset after a disconnect, receive a full
+SHA-256 before the GPU job is queued, and are not duplicated on the local
+runtime volume. An incomplete session expires only after seven days without
+progress; finalized/queued jobs keep their reservation until execution ends.
+The indexed NAS collection path remains the preferred zero-copy path when the
+source files already exist in the recorder collection.
+
+These contracts and deterministic tests do not prove a real seven-view,
+eight-hour transfer or full analysis. Record that scenario as `NOT_PROVEN`
+until it is exercised against the deployed 3090 Ti host and NAS.
+
 For startup before the desktop user logs in, enable user-service lingering once:
 
 ```bash

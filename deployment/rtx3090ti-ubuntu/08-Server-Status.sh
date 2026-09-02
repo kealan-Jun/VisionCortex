@@ -43,6 +43,11 @@ counts = queue.get("counts") or {}
 print(f"queue_persistence={queue.get('persistence')}")
 print(f"queue_waiting={counts.get('queued', 0)}")
 print(f"gpu_job_active={queue.get('gpu_busy')}")
+large_uploads = payload.get("large_uploads") or {}
+upload_sessions = large_uploads.get("sessions") or {}
+print(f"upload_protocol={large_uploads.get('protocol')}")
+print(f"upload_open_sessions={upload_sessions.get('open', 0)}")
+print(f"upload_fixed_total_size_limit={large_uploads.get('fixed_total_size_limit')}")
 PY
 
 lan_ip=$(hostname -I 2>/dev/null | tr ' ' '\n' | awk '

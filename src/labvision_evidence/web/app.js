@@ -177,8 +177,14 @@ async function api(url, options) {
   try { payload = await response.json(); } catch { payload = null; }
   if (!response.ok) {
     const detail = payload?.detail;
-    const message = typeof detail === "string" ? detail : detail?.message || `${response.status} ${response.statusText}`;
-    throw new Error(message);
+    const shortage = Number(detail?.missing_bytes || 0);
+    const message = typeof detail === "string"
+      ? detail
+      : `${detail?.message || `${response.status} ${response.statusText}`}${shortage ? `，还差 ${formatBytes(shortage)}` : ""}`;
+    const error = new Error(message);
+    error.status = response.status;
+    error.payload = payload;
+    throw error;
   }
   return payload;
 }
@@ -520,7 +526,7 @@ function renderNew() {
       <section class="form-section" id="experiment-info"><div class="section-heading"><span>02</span><div><h2>归档名称</h2><p>仅命名 NAS 正式归档；模型理解完成后，内部实验文件夹仍按具体实验名称自动归档。</p></div></div><label class="field-label"><span>英文安全归档名称</span><input id="experiment-name" value="${esc(state.experimentName)}" maxlength="120" placeholder="例如：VisionCortex-Collection-20260810-e918b762" autocomplete="off" /></label></section>
       <section class="form-section manual-upload-fallback ${selected ? "is-secondary" : ""}" id="recorded-videos"><div class="section-heading"><span>备用</span><div><h2>索引外文件上传</h2><p>仅当采集批次尚未进入 index 表时使用；正常采集数据无需选择这些文件。</p></div></div>
         <div class="batch-import-panel"><div><strong>一键选择全部实验文件</strong><p>可选择任意实际路数。支持 MP4/MOV/MKV/AVI/WebM 和时间戳 CSV。</p></div><div class="batch-actions"><label class="primary-button batch-import-button">${icon("upload")}选择视频与 CSV<input id="batch-input" type="file" multiple accept="video/*,.mp4,.mov,.m4v,.mkv,.avi,.webm,.csv,text/csv" /></label><label class="secondary-button batch-import-button">${icon("folder")}选择实验文件夹<input id="folder-input" type="file" multiple webkitdirectory directory /></label></div></div>
-        <div class="batch-notice">备用上传仍按用户实际路数生成，不固定为 6 路；选择 NAS 批次后，本区域不会参与任务。</div>
+        <div class="batch-notice">备用上传按实际路数和文件真实大小处理，不设固定总容量上限；服务器先动态预留 NAS 空间，再以小分块断点续传。选择 NAS 批次后，本区域不会参与任务。</div>
         <div class="role-guidance ${guide.tone}">${esc(guide.text)}</div>
         <div class="source-list">${state.sources.length ? state.sources.map(sourceCard).join("") : `<div class="empty-state"><strong>尚未选择视频</strong><p>点击上方“选择视频与 CSV”，选中几路就会出现几条机位配置。</p></div>`}</div>
         <button class="secondary-button add-source" id="add-source" type="button">${icon("plus")}手动添加一路</button>
@@ -538,7 +544,7 @@ function updateReview() {
   if (!summary) return;
   summary.innerHTML = review.mode === "nas_collection"
     ? `<div class="review-line"><span>采集批次</span><strong>${esc(review.collection.collection_id)}</strong></div><div class="review-line"><span>自动聚合</span><strong>${review.videos} 路 / ${number(review.collection.video_segment_count)} 个 MP4</strong></div><div class="review-line"><span>视角构成</span><strong>${review.first} 第一人称 + ${review.third} 第三人称</strong></div><div class="review-line"><span>源视频复制</span><strong>0 字节</strong></div><div class="review-line"><span>角色解析收据</span><strong>${number(review.collection.approved_override_count)} 个覆盖</strong></div><div class="review-line"><span>自动完整流水线</span><strong>启用</strong></div>`
-    : `<div class="review-line"><span>实际视频路数</span><strong>${review.videos} 路</strong></div><div class="review-line"><span>时间戳 CSV</span><strong>${review.csvs} 个</strong></div><div class="review-line"><span>视角构成</span><strong>${review.first} 第一人称 + ${review.third} 第三人称</strong></div><div class="review-line"><span>NAS 原视频留存</span><strong>启用</strong></div><div class="review-line"><span>自动完整流水线</span><strong>启用</strong></div>`;
+    : `<div class="review-line"><span>实际视频路数</span><strong>${review.videos} 路</strong></div><div class="review-line"><span>时间戳 CSV</span><strong>${review.csvs} 个</strong></div><div class="review-line"><span>视角构成</span><strong>${review.first} 第一人称 + ${review.third} 第三人称</strong></div><div class="review-line"><span>大文件传输</span><strong>动态空间预留 + 断点续传</strong></div><div class="review-line"><span>原视频留存</span><strong>${isNasMode() ? "NAS 单份留存" : "本地开发归档"}</strong></div><div class="review-line"><span>自动完整流水线</span><strong>启用</strong></div>`;
   const button = document.querySelector("#start-run");
   button.disabled = !review.ready || Boolean(state.activeRun && !["completed","failed"].includes(state.activeRun.state));
 }
@@ -585,21 +591,174 @@ function bindNewPage() {
   document.querySelector("#start-run").addEventListener("click", submitRun);
 }
 
-function xhrUpload(formData, progress) {
-  return new Promise((resolve, reject) => {
-    const request = new XMLHttpRequest();
-    request.open("POST", "/api/runs");
-    request.responseType = "json";
-    request.upload.addEventListener("progress", (event) => {
-      if (event.lengthComputable) progress(event.loaded / event.total);
+const UPLOAD_SESSION_CACHE_KEY = "visioncortex.large-upload-session.v1";
+
+const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+function buildUploadPlan(review) {
+  const files = [];
+  const specs = [];
+  let csvIndex = 0;
+  state.sources.forEach((source, videoIndex) => {
+    const videoId = `video-${videoIndex}`;
+    files.push({
+      file_id: videoId,
+      kind: "video",
+      file_index: videoIndex,
+      name: source.video.name,
+      size: source.video.size,
+      last_modified: source.video.lastModified,
+      browser_file: source.video,
     });
-    request.addEventListener("load", () => {
-      if (request.status >= 200 && request.status < 300) resolve(request.response);
-      else reject(new Error(request.response?.detail || `上传失败：HTTP ${request.status}`));
-    });
-    request.addEventListener("error", () => reject(new Error("网络连接中断，上传未完成")));
-    request.send(formData);
+    const spec = {
+      view_id: source.viewId,
+      role: source.role,
+      video_index: videoIndex,
+      calibration_hint_ms: 0,
+    };
+    if (source.csv) {
+      const currentCsvIndex = csvIndex;
+      files.push({
+        file_id: `timestamp-csv-${currentCsvIndex}`,
+        kind: "timestamp_csv",
+        file_index: currentCsvIndex,
+        name: source.csv.name,
+        size: source.csv.size,
+        last_modified: source.csv.lastModified,
+        browser_file: source.csv,
+      });
+      spec.csv_index = currentCsvIndex;
+      csvIndex += 1;
+    }
+    specs.push(spec);
   });
+  const signature = JSON.stringify({
+    experiment_name: review.title,
+    view_specs: specs,
+    files: files.map(({ browser_file, ...metadata }) => metadata),
+  });
+  return { experiment_name: review.title, view_specs: specs, files, signature };
+}
+
+function cachedUploadSession(signature) {
+  try {
+    const cached = JSON.parse(localStorage.getItem(UPLOAD_SESSION_CACHE_KEY) || "null");
+    return cached?.signature === signature ? cached : null;
+  } catch {
+    return null;
+  }
+}
+
+function rememberUploadSession(signature, sessionId) {
+  try {
+    localStorage.setItem(UPLOAD_SESSION_CACHE_KEY, JSON.stringify({ signature, session_id: sessionId }));
+  } catch {
+    // Upload still works when browser storage is disabled; only page-reload resume is lost.
+  }
+}
+
+function forgetUploadSession() {
+  try { localStorage.removeItem(UPLOAD_SESSION_CACHE_KEY); } catch { /* no-op */ }
+}
+
+async function createOrResumeUploadSession(plan) {
+  const cached = cachedUploadSession(plan.signature);
+  if (cached?.session_id) {
+    try {
+      const existing = await api(`/api/upload-sessions/${encodeURIComponent(cached.session_id)}`);
+      if (existing.status === "open") return existing;
+      if (["finalized", "released"].includes(existing.status) && existing.run_id) return existing;
+    } catch (error) {
+      if (![404, 410].includes(Number(error.status))) throw error;
+      forgetUploadSession();
+    }
+  }
+  const created = await api("/api/upload-sessions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      experiment_name: plan.experiment_name,
+      view_specs: plan.view_specs,
+      files: plan.files.map(({ browser_file, ...metadata }) => metadata),
+    }),
+  });
+  rememberUploadSession(plan.signature, created.session_id);
+  return created;
+}
+
+async function chunkSha256(buffer) {
+  if (!globalThis.crypto?.subtle) return null;
+  const hash = await globalThis.crypto.subtle.digest("SHA-256", buffer);
+  return Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function sendUploadChunk(sessionId, fileId, offset, buffer) {
+  const headers = {
+    "Content-Type": "application/octet-stream",
+    "Upload-Offset": String(offset),
+  };
+  const sha256 = await chunkSha256(buffer);
+  if (sha256) headers["X-Chunk-SHA256"] = sha256;
+  const response = await fetch(
+    `/api/upload-sessions/${encodeURIComponent(sessionId)}/files/${encodeURIComponent(fileId)}`,
+    { method: "PATCH", headers, body: buffer },
+  );
+  let payload;
+  try { payload = await response.json(); } catch { payload = null; }
+  if (!response.ok) {
+    const detail = payload?.detail;
+    throw new Error(typeof detail === "string" ? detail : detail?.message || `上传失败：HTTP ${response.status}`);
+  }
+  return payload;
+}
+
+async function uploadPlanFiles(plan, initialSession, onProgress) {
+  let session = initialSession;
+  const totalBytes = plan.files.reduce((total, item) => total + item.size, 0);
+  const uploadedById = new Map(session.files.map((item) => [item.file_id, Number(item.uploaded_bytes || 0)]));
+  const reportProgress = (message) => {
+    const uploaded = [...uploadedById.values()].reduce((total, value) => total + value, 0);
+    onProgress(totalBytes ? uploaded / totalBytes : 1, message);
+  };
+
+  for (const descriptor of plan.files) {
+    let offset = Number(uploadedById.get(descriptor.file_id) || 0);
+    if (offset > descriptor.size) throw new Error(`${descriptor.name} 的服务器续传位置无效`);
+    if (offset > 0) {
+      const probeStart = Math.max(0, offset - 64 * 1024);
+      const probe = await descriptor.browser_file.slice(probeStart, offset).arrayBuffer();
+      try {
+        const verified = await sendUploadChunk(session.session_id, descriptor.file_id, probeStart, probe);
+        offset = Number(verified.uploaded_bytes);
+        uploadedById.set(descriptor.file_id, offset);
+      } catch (error) {
+        throw new Error(`${descriptor.name} 与上次上传的文件不一致，不能从旧断点拼接。${error.message}`);
+      }
+    }
+    let failures = 0;
+    while (offset < descriptor.size) {
+      const chunkSize = Math.max(1, Number(session.chunk_size_bytes || 16 * 1024 * 1024));
+      const end = Math.min(offset + chunkSize, descriptor.size);
+      try {
+        const buffer = await descriptor.browser_file.slice(offset, end).arrayBuffer();
+        const result = await sendUploadChunk(session.session_id, descriptor.file_id, offset, buffer);
+        offset = Number(result.uploaded_bytes);
+        uploadedById.set(descriptor.file_id, offset);
+        failures = 0;
+        reportProgress(`正在断点续传：${descriptor.name}（${formatBytes(offset)} / ${formatBytes(descriptor.size)}）`);
+      } catch (error) {
+        failures += 1;
+        if (failures > 8) throw new Error(`${descriptor.name} 多次重试仍失败；再次点击可从断点继续。${error.message}`);
+        reportProgress(`网络中断，正在恢复 ${descriptor.name}（第 ${failures} 次重试）`);
+        await delay(Math.min(8000, 750 * 2 ** (failures - 1)));
+        session = await api(`/api/upload-sessions/${encodeURIComponent(session.session_id)}`);
+        const remote = session.files.find((item) => item.file_id === descriptor.file_id);
+        offset = Number(remote?.uploaded_bytes || 0);
+        uploadedById.set(descriptor.file_id, offset);
+      }
+    }
+  }
+  return session;
 }
 
 function renderStages(activeStage, progressValue) {
@@ -627,29 +786,30 @@ async function submitRun() {
     await submitCollectionRun(review);
     return;
   }
-  const formData = new FormData();
-  formData.append("experiment_name", review.title);
-  const specs = [];
-  let csvIndex = 0;
-  state.sources.forEach((source, videoIndex) => {
-    formData.append("videos", source.video, source.video.name);
-    const spec = { view_id: source.viewId, role: source.role, video_index: videoIndex, calibration_hint_ms: 0 };
-    if (source.csv) {
-      spec.csv_index = csvIndex;
-      formData.append("timestamp_csvs", source.csv, source.csv.name);
-      csvIndex += 1;
-    }
-    specs.push(spec);
-  });
-  formData.append("view_specs_json", JSON.stringify(specs));
+  const plan = buildUploadPlan(review);
   document.querySelector("#upload-progress").classList.remove("hidden");
   document.querySelector("#start-run").disabled = true;
-  const nasOnly = state.health?.web_upload_retention_mode === "nas_only";
-  setProgress(0, nasOnly ? "正在写入 NAS 原视频留存区并校验文件" : "正在写入本地运行区与 NAS 原视频留存区");
+  setProgress(0, "正在按文件真实大小检查 NAS 空间并预留本次任务容量");
   try {
-    const created = await xhrUpload(formData, (value) => setProgress(value * .15, `正在上传并留存 ${review.videos} 路原视频`));
+    let session = await createOrResumeUploadSession(plan);
+    if (["finalized", "released"].includes(session.status) && session.run_id) {
+      const archiveName = session.archive_name || review.title;
+      state.activeRun = { run_id: session.run_id, state: "queued", progress: .15, experiment_id: archiveName };
+      setPhase(state.activeRun);
+      forgetUploadSession();
+      await pollRun(session.run_id, archiveName);
+      return;
+    }
+    const capacity = session.capacity;
+    if (capacity) {
+      setProgress(.005, `空间已预留 ${formatBytes(capacity.reserved_bytes)}；开始传输 ${formatBytes(session.expected_source_bytes)}`);
+    }
+    session = await uploadPlanFiles(plan, session, (value, message) => setProgress(value * .14, message));
+    setProgress(.145, "所有分块已到达，服务器正在校验文件 SHA-256");
+    const created = await api(`/api/upload-sessions/${encodeURIComponent(session.session_id)}/finalize`, { method: "POST" });
     const archiveName = new URL(created.archive_url, location.origin).searchParams.get("archive") || review.title;
     state.activeRun = { run_id: created.run_id, state: "queued", progress: .15, experiment_id: archiveName };
+    forgetUploadSession();
     setPhase(state.activeRun);
     await pollRun(created.run_id, archiveName);
   } catch (error) {
