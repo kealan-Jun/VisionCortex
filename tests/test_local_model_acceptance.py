@@ -3,7 +3,7 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-from labvision_evidence.local_model_acceptance import (
+from visioncortex.local_model_acceptance import (
     _select_public_example,
     _vessel_seed_box,
 )

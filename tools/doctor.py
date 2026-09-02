@@ -23,7 +23,7 @@ CORE_MODULES = {
     "pydantic": "pydantic",
     "cv2": "opencv-python",
     "numpy": "numpy",
-    "labvision_evidence": "labvision-evidence",
+    "visioncortex": "visioncortex",
 }
 OPTIONAL_GPU_MODULES = {
     "torch": "torch",

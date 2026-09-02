@@ -27,14 +27,14 @@ def inspect_project_runtime(expected_source: Path) -> dict[str, object]:
             getattr(module, "__version__", "available")
         )
 
-    package = importlib.import_module("labvision_evidence")
-    importlib.import_module("labvision_evidence.cli")
-    importlib.import_module("labvision_evidence.replay_acceptance")
+    package = importlib.import_module("visioncortex")
+    importlib.import_module("visioncortex.cli")
+    importlib.import_module("visioncortex.replay_acceptance")
 
     expected = expected_source.resolve()
     package_file = getattr(package, "__file__", None)
     if not package_file:
-        raise RuntimeError("labvision_evidence package has no resolvable source file")
+        raise RuntimeError("visioncortex package has no resolvable source file")
     actual = Path(package_file).resolve()
     if expected not in actual.parents:
         raise RuntimeError(
@@ -65,7 +65,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--expected-source",
         type=Path,
         required=True,
-        help="Frozen checkout src directory that must own labvision_evidence.",
+        help="Frozen checkout src directory that must own visioncortex.",
     )
     args = parser.parse_args(argv)
     result = inspect_project_runtime(args.expected_source)

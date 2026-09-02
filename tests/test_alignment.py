@@ -1,5 +1,5 @@
-from labvision_evidence.alignment import _nearest_pairs, _robust_affine
-from labvision_evidence.schemas import TimestampPoint
+from visioncortex.alignment import _nearest_pairs, _robust_affine
+from visioncortex.schemas import TimestampPoint
 
 
 def test_nearest_neighbor_and_robust_affine_recover_offset_and_drift():

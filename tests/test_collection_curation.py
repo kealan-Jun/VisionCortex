@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from labvision_evidence.collection_curation import (
+from visioncortex.collection_curation import (
     CONTENT_PROBE_DISTRIBUTION_STRATEGY,
     CONTENT_PROBE_SCHEMA_VERSION,
     build_curation_catalog,

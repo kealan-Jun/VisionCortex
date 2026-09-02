@@ -1,12 +1,12 @@
 from pathlib import Path
 
-from labvision_evidence.actions import audit_candidates, build_experiment_segments
-from labvision_evidence.grouping import (
+from visioncortex.actions import audit_candidates, build_experiment_segments
+from visioncortex.grouping import (
     build_experiment_groups,
     normalize_experiment_segments,
     prepare_formal_experiment_segments,
 )
-from labvision_evidence.schemas import (
+from visioncortex.schemas import (
     ActionCandidate,
     ActionType,
     AlignmentTransform,

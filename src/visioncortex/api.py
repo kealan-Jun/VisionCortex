@@ -36,6 +36,7 @@ from .annotation_workspace import (
     resolve_annotation_image,
 )
 from .config import load_config
+from .identity import CONFIG_ENV, PRODUCT_NAME
 from .device_registry import load_device_registry, resolve_view_role
 from .input_preflight import preflight_manifest_inputs
 from .input_seal import build_input_seal, verify_input_seal, write_input_seal
@@ -85,7 +86,7 @@ async def _lifespan(_: FastAPI):
 
 
 app = FastAPI(
-    title="VisionCortex Lab Evidence",
+    title=PRODUCT_NAME,
     version="0.2.0",
     lifespan=_lifespan,
 )
@@ -287,7 +288,7 @@ def _safe_file_name(value: str, fallback_stem: str = "file") -> str:
 
 
 def _settings() -> dict[str, Any]:
-    configured = os.getenv("LABVISION_CONFIG")
+    configured = os.getenv(CONFIG_ENV)
     return load_config(Path(configured)) if configured else load_config()
 
 
@@ -1980,6 +1981,7 @@ def health() -> dict[str, Any]:
     )
     return {
         "status": "ok",
+        "product_name": PRODUCT_NAME,
         "storage_mode": storage_mode,
         "archive_label": "NAS 正式归档" if storage_mode == "nas" else "本地开发归档",
         "web_upload_retention_mode": settings["storage"].get(

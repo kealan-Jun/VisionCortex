@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from labvision_evidence.config import load_config
+from visioncortex.config import load_config
 
 
 @pytest.fixture

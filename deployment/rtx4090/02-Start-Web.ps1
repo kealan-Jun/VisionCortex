@@ -20,7 +20,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $FfmpegBin 'ffmpeg.exe') -PathType L
     throw 'Bundled FFmpeg is missing.'
 }
 $env:PATH = "$FfmpegBin;$env:PATH"
-$env:LABVISION_CONFIG = $Config
+$env:VISIONCORTEX_CONFIG = $Config
 $env:VISIONCORTEX_TENSORRT = 'required'
 $env:VISIONCORTEX_LOCAL_RUNTIME_ROOT = $RuntimeRoot
 $env:VISIONCORTEX_LOCAL_CACHE_ROOT = 'D:\VisionCortex4090\Cache'
@@ -43,7 +43,7 @@ if ($Existing) {
 }
 else {
     $QuotedConfig = '"' + $Config + '"'
-    $Arguments = @('-m', 'labvision_evidence', 'serve', '--host', '127.0.0.1', '--port', "$Port", '--config', $QuotedConfig)
+    $Arguments = @('-m', 'visioncortex', 'serve', '--host', '127.0.0.1', '--port', "$Port", '--config', $QuotedConfig)
     $Process = Start-Process -FilePath $Python -ArgumentList $Arguments -WorkingDirectory $ProjectRoot -WindowStyle Hidden -RedirectStandardOutput $StdoutLog -RedirectStandardError $StderrLog -PassThru
     Set-Content -LiteralPath $PidFile -Value $Process.Id -Encoding ascii
     $Ready = $false

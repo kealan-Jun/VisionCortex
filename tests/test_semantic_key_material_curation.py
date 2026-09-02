@@ -4,12 +4,12 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from labvision_evidence.archive import (
+from visioncortex.archive import (
     ArchiveLayout,
     _key_material_event_folder_name,
     curate_semantically_reviewed_key_materials,
 )
-from labvision_evidence.schemas import (
+from visioncortex.schemas import (
     ActionType,
     EvidenceEvent,
     ExperimentGroup,

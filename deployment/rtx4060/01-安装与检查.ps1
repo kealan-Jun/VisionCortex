@@ -79,9 +79,9 @@ if ([string]::IsNullOrWhiteSpace($env:ARK_API_KEY)) {
 }
 
 if (-not $SkipTensorRTExport) {
-    & $Python -m labvision_evidence prepare-engine --config $Config
+    & $Python -m visioncortex prepare-engine --config $Config
 }
-& $Python -m labvision_evidence validate-models --config $Config
+& $Python -m visioncortex validate-models --config $Config
 
 Write-Host ''
 Write-Host 'RTX4060 node validation completed.'

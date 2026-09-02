@@ -6,13 +6,13 @@ from pathlib import Path
 import pytest
 import yaml
 
-from labvision_evidence.replay_acceptance import (
+from visioncortex.replay_acceptance import (
     build_archive_regression_snapshot,
     compare_archive_snapshot,
     inspect_quality_ledger_inputs,
     replay_quality_decisions_from_ledgers,
 )
-from labvision_evidence.schemas import (
+from visioncortex.schemas import (
     ActionCandidate,
     ActionType,
     EvidenceEvent,

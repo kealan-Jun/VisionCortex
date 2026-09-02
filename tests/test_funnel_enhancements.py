@@ -3,14 +3,14 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from labvision_evidence.coarse_recall import (
+from visioncortex.coarse_recall import (
     generate_open_vocabulary_coarse_candidates,
     select_suspicious_coarse_frames,
 )
-from labvision_evidence.config import load_config
-from labvision_evidence.detection import _camera_compensated_motion_score
-from labvision_evidence.pipeline import EvidencePipeline
-from labvision_evidence.schemas import (
+from visioncortex.config import load_config
+from visioncortex.detection import _camera_compensated_motion_score
+from visioncortex.pipeline import EvidencePipeline
+from visioncortex.schemas import (
     ActionCandidate,
     ActionType,
     AlignmentTransform,
@@ -257,11 +257,11 @@ def test_open_vocabulary_coarse_candidate_only_adds_a_recall_window(
     }
 
     monkeypatch.setattr(
-        "labvision_evidence.coarse_recall.read_view_frame_at",
+        "visioncortex.coarse_recall.read_view_frame_at",
         lambda *_args, **_kwargs: np.zeros((360, 640, 3), dtype=np.uint8),
     )
     monkeypatch.setattr(
-        "labvision_evidence.coarse_recall._yolo_world_detections",
+        "visioncortex.coarse_recall._yolo_world_detections",
         lambda *_args, **_kwargs: (
             [
                 {

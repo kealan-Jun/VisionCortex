@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 import pytest
 
-from labvision_evidence import temporal_segmentation as module
+from visioncortex import temporal_segmentation as module
 
 
 # The production implementation imports PyTorch lazily.  This deterministic

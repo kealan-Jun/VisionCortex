@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from labvision_evidence import api
+from visioncortex import api
 
 
 class _Manifest:

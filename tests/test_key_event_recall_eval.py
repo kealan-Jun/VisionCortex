@@ -3,12 +3,12 @@ from pathlib import Path
 
 import pytest
 
-from labvision_evidence.schemas import (
+from visioncortex.schemas import (
     ActionType,
     EvidenceEvent,
     ViewRole,
 )
-from labvision_evidence.validation import evaluate_key_event_recall
+from visioncortex.validation import evaluate_key_event_recall
 
 
 def prediction(

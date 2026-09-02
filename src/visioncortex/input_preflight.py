@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,7 @@ def preflight_manifest_inputs(
 ) -> dict[str, Any]:
     """Probe media and bounded CSV endpoints before a job can occupy the GPU queue."""
 
+    started = time.perf_counter()
     performance = config.get("performance") or {}
     upload = config.get("web_upload") or {}
     workers = max(
@@ -40,7 +42,10 @@ def preflight_manifest_inputs(
             ),
         ),
     )
+    media_probe_started = time.perf_counter()
     infos = probe_views(manifest.views, workers=workers, prefer_clock_metadata=True)
+    media_probe_seconds = time.perf_counter() - media_probe_started
+    clock_preflight_started = time.perf_counter()
     views: list[dict[str, Any]] = []
     warnings: list[str] = []
     clock_overlap_tolerance_ms = max(
@@ -159,11 +164,17 @@ def preflight_manifest_inputs(
         warnings.append("only_one_view_has_absolute_clock_coverage")
     else:
         warnings.append("visual_alignment_required_no_absolute_clock_coverage")
+    clock_preflight_seconds = time.perf_counter() - clock_preflight_started
     return {
         "schema_version": "visioncortex-prequeue-input-preflight/1",
         "status": "passed",
         "completed_at": datetime.now().astimezone().isoformat(),
         "probe_workers": workers,
+        "runtime": {
+            "media_probe_seconds": round(media_probe_seconds, 6),
+            "clock_preflight_seconds": round(clock_preflight_seconds, 6),
+            "total_seconds": round(time.perf_counter() - started, 6),
+        },
         "clock_overlap_tolerance_ms": clock_overlap_tolerance_ms,
         "view_count": len(views),
         "video_segment_count": sum(view["segment_count"] for view in views),

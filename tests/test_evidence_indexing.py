@@ -4,10 +4,10 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from labvision_evidence import api, indexing
-from labvision_evidence.archive import _artifact_json
-from labvision_evidence.decisions import decision_receipt
-from labvision_evidence.indexing import (
+from visioncortex import api, indexing
+from visioncortex.archive import _artifact_json
+from visioncortex.decisions import decision_receipt
+from visioncortex.indexing import (
     ARTIFACT_REGISTRY_NAME,
     DECISION_REGISTRY_NAME,
     EVIDENCE_REGISTRY_NAME,
@@ -22,7 +22,7 @@ from labvision_evidence.indexing import (
     stable_evidence_uid,
     stable_event_uid,
 )
-from labvision_evidence.schemas import (
+from visioncortex.schemas import (
     ActionCandidate,
     ActionType,
     AlignmentTransform,

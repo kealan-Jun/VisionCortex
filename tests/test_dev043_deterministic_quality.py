@@ -2,13 +2,13 @@ import json
 from itertools import permutations
 from pathlib import Path
 
-from labvision_evidence.actions import (
+from visioncortex.actions import (
     audit_candidates,
     build_experiment_segments,
     refine_motion_candidates_with_coarse,
 )
-from labvision_evidence.grouping import build_experiment_groups
-from labvision_evidence.schemas import (
+from visioncortex.grouping import build_experiment_groups
+from visioncortex.schemas import (
     ActionCandidate,
     ActionType,
     AlignmentTransform,

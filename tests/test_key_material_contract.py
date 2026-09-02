@@ -1,10 +1,10 @@
-from labvision_evidence.archive import (
+from visioncortex.archive import (
     _artifact_json,
     _event_key_frame_score,
     _event_participant_boxes,
     _missing_state_transition_fallback_classes,
 )
-from labvision_evidence.schemas import (
+from visioncortex.schemas import (
     ActionType,
     AlignmentTransform,
     EvidenceEvent,

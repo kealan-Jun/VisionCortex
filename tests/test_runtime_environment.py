@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from labvision_evidence.runtime_environment import configure_third_party_runtime
+from visioncortex.runtime_environment import configure_third_party_runtime
 
 
 def test_ultralytics_config_uses_visioncortex_state_directory(monkeypatch, tmp_path):

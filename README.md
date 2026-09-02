@@ -1,4 +1,6 @@
-# LabVision Evidence
+# VisionCortex
+
+`VisionCortex` 是仓库、安装包、命令行、API、网页、模型与数据注册表、报告和证据产物的唯一项目名称。新增能力和产物必须继续使用该名称及 `visioncortex-` 机器标识前缀。
 
 ## 用户快速启动
 
@@ -114,23 +116,23 @@ liquid/solid phase 像素观察。开放词汇框、SAM2 掩码和 LabPics 掩�
 
 ```bash
 # 六视角媒体、六类关键素材、步骤理解、日报、PDF、JSON/JSONL/SQLite
-labvision run-local-acceptance \
+visioncortex run-local-acceptance \
   --output /srv/sentinel-data/VisionCortex3090Ti/Runtime/LocalAcceptance \
   --config configs/rtx3090ti-ubuntu-local.yaml
 
 # 六路 CUDA 解码 + 双 TensorRT 角色引擎硬件压测
-labvision benchmark-local-hardware --output <local-output> \
+visioncortex benchmark-local-hardware --output <local-output> \
   --media <h264-1> --media <h264-2> --media <h264-3> \
   --media <h264-4> --media <h264-5> --media <h264-6>
 
 # 真实执行全部本地生产 CV 模型；使用公开人工标注样本，不访问 NAS/豆包
-labvision accept-local-models \
+visioncortex accept-local-models \
   --dataset /srv/sentinel-data/VisionCortex3090Ti/Runtime/PublicDatasets/LabPicsChemistry/extracted \
   --output /srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/<new-run> \
   --config configs/rtx3090ti-ubuntu-production.yaml
 
 # 只读统计正式认证仍缺多少真值；不扫描生产归档
-labvision model-certification-readiness \
+visioncortex model-certification-readiness \
   --config configs/rtx3090ti-ubuntu-production.yaml \
   --output /srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/readiness.json
 
@@ -174,6 +176,7 @@ ZIP，再拒绝路径穿越/软链接并有界解包。模型共识只能通过
     run_manifest.json
     time_alignment.json
     aligned_timestamps.csv
+    alignment_quality_gate.json       # 正式证据门禁、逐路可用区间与隔离分片
     evidence_package.json
     physical_change_log.json
     evidence_package_eval.json
@@ -228,27 +231,38 @@ $env:ARK_API_KEY = '<在本机安全设置，不要写入 yaml 或 git>'
 - 时间戳：`timestamp_ms` / `timestamp_s` / `timestamp` / `pts_time`
 - 可选共同时间：`global_timestamp_ms` / `wallclock_ms`
 
-时间戳为 ISO-8601 时也可解析。若 CSV 没有共同时间列，系统以视频起点为粗对齐，并用跨视角运动变化序列进行视觉锚点互相关校准；如果已有共同时间，先做最近邻鲁棒仿射拟合，再用视觉锚点修正残余偏移。
+时间戳为 ISO-8601 时也可解析。对齐阶段对每个物理分片读取有上限的首、中、尾
+分布采样，验证 `clock_sync_valid`、单调性、跳时和漂移，再保存逐分片变换与误差。
+系统优先使用质量最好的时钟作为内部基准，同时保留配置中的第一人称偏好；生产
+任务即使已有高置信度共同时间，也执行开头、中间、结尾的轻量视觉锚点审计。
+若 CSV 没有共同时间列，系统仍保留原有视频起点粗对齐能力并明确标记为
+`local_timeline_assumption`；3090 Ti 正式配置要求该结果获得可靠视觉支持后才能
+进入正式证据。`aligned_timestamps.csv` 使用完整基准时间轴并为每路记录
+`<view>_available`，单路短录或坏分片只会被隔离，不再截断其他视角。
+`alignment_runtime.json` 分别记录共享时钟采样、逐路视觉审计、分片拟合耗时和
+视觉特征缓存规模，便于在真实长视频上核算新增质量检查的速度成本。
+进入 GPU 队列前的 `prequeue_input_preflight.json` 同时记录媒体探测、时钟检查和
+总耗时；NAS 模式只做有界元数据/时钟读取，不复制或完整哈希原始长视频。
 
 ## 运行
 
 ```powershell
-labvision validate-models --config .\configs\default.yaml
-labvision prepare-engine --config .\configs\default.yaml
-labvision run --manifest .\examples\manifest.example.yaml --config .\configs\default.yaml
+visioncortex validate-models --config .\configs\default.yaml
+visioncortex prepare-engine --config .\configs\default.yaml
+visioncortex run --manifest .\examples\manifest.example.yaml --config .\configs\default.yaml
 ```
 
 没有真实视频时可完整验证目录、JSON 契约和评估器：
 
 ```powershell
-labvision dry-run --output .\outputs\dry-run
+visioncortex dry-run --output .\outputs\dry-run
 pytest -q
 ```
 
 上传服务：
 
 ```powershell
-labvision serve --host 127.0.0.1 --port 8000
+visioncortex serve --host 127.0.0.1 --port 8000
 ```
 
 浏览器先以 `POST /api/upload-sessions` 创建动态空间预留，再对
@@ -298,7 +312,7 @@ labvision serve --host 127.0.0.1 --port 8000
 已有档案可以离线复验，不解码视频，也不调用模型：
 
 ```powershell
-labvision validate-archive-quality `
+visioncortex validate-archive-quality `
   --archive <实验档案目录> `
   --baseline configs/acceptance/six-view-three-hour-reviewed-baseline.json `
   --write

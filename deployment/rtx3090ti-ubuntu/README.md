@@ -95,9 +95,9 @@ paths frozen by `configs/models/closed-set-yolo.json`:
 - `/srv/sentinel-data/VisionCortex3090Ti/Models/ClosedSetYOLO/first_person/best.pt`
 - `/srv/sentinel-data/VisionCortex3090Ti/Models/ClosedSetYOLO/third_person/best.pt`
 
-`labvision install-closed-set-models` installs explicit source files only after
+`visioncortex install-closed-set-models` installs explicit source files only after
 hash verification and refuses to overwrite a non-matching destination;
-`labvision validate-closed-set-models` revalidates both the hash and exact
+`visioncortex validate-closed-set-models` revalidates both the hash and exact
 21-class ontology. The installer refuses a checksum mismatch. It then downloads and verifies the pinned public
 YOLO-World, CLIP, Grounding DINO and SAM2.1 assets, builds both TensorRT engines,
 and runs one fail-closed validation covering all six local model artifacts.
@@ -105,7 +105,7 @@ Subsequent installs reuse assets only after rechecking SHA-256.
 
 ```bash
 export VISIONCORTEX_PYTHON='/srv/sentinel-data/VisionCortex3090Ti/.venv/bin/python'
-labvision validate-closed-set-models \
+visioncortex validate-closed-set-models \
   --registry configs/models/closed-set-yolo.json
 ./deployment/rtx3090ti-ubuntu/01-Install-And-Validate.sh --skip-api-key-check
 ```
@@ -211,10 +211,10 @@ Do not run the three real datasets until all of the following pass:
 6. a bounded non-production media acceptance run with telemetry;
 7. an explicit review of NAS staging/promotion paths on Linux.
 
-`labvision accept-local-models` is the bounded real-GPU model-execution gate;
+`visioncortex accept-local-models` is the bounded real-GPU model-execution gate;
 it executes both TensorRT role engines, YOLO-World, Grounding DINO, LabPics and
 SAM2 using a local public annotated image and derived nine-frame clip. Passing
-proves runtime wiring only. `labvision model-certification-readiness` reports
+proves runtime wiring only. `visioncortex model-certification-readiness` reports
 the exact held-out event and participant-box truth deficits without opening a
 production archive. Neither command can certify production-domain quality or
 replace the cold Doubao call required by a formal end-to-end run.

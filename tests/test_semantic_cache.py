@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from labvision_evidence.archive import (
+from visioncortex.archive import (
     _read_semantic_cache,
     _semantic_cache_reads_enabled,
     _semantic_fingerprint,

@@ -1837,8 +1837,8 @@ def serve_command(
     import uvicorn
 
     if config:
-        os.environ["LABVISION_CONFIG"] = str(config.resolve())
-    uvicorn.run("labvision_evidence.api:app", host=host, port=port, reload=False)
+        os.environ["VISIONCORTEX_CONFIG"] = str(config.resolve())
+    uvicorn.run("visioncortex.api:app", host=host, port=port, reload=False)
 
 
 @app.command("refresh-key-json")

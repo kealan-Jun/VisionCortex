@@ -9,12 +9,12 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from labvision_evidence import storage, video_io
-from labvision_evidence.mllm import ArkAnalyzer
-from labvision_evidence.schemas import VideoInfo, ViewInput, ViewRole
-from labvision_evidence.storage import IncrementalArchivePublisher
-from labvision_evidence.telemetry import ResourceMonitor, _NvmlSampler
-from labvision_evidence.video_io import ViewFrameReader
+from visioncortex import storage, video_io
+from visioncortex.mllm import ArkAnalyzer
+from visioncortex.schemas import VideoInfo, ViewInput, ViewRole
+from visioncortex.storage import IncrementalArchivePublisher
+from visioncortex.telemetry import ResourceMonitor, _NvmlSampler
+from visioncortex.video_io import ViewFrameReader
 
 
 def test_mllm_reuses_one_http_connection_pool(monkeypatch, default_config):
@@ -43,7 +43,7 @@ def test_mllm_reuses_one_http_connection_pool(monkeypatch, default_config):
             self.closed = True
 
     monkeypatch.setenv("ARK_API_KEY", "configured-for-test")
-    monkeypatch.setattr("labvision_evidence.mllm.httpx.Client", FakeClient)
+    monkeypatch.setattr("visioncortex.mllm.httpx.Client", FakeClient)
     analyzer = ArkAnalyzer(default_config)
     first = analyzer._call("system", {"event": 1}, [])
     second = analyzer._call("system", {"event": 2}, [])

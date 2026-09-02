@@ -5,7 +5,7 @@ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 project_root=$(cd -- "$script_dir/../.." && pwd -P)
 runtime_base=${VISIONCORTEX_RUNTIME_BASE:-'/srv/sentinel-data/VisionCortex3090Ti'}
 python=${VISIONCORTEX_PYTHON:-"$runtime_base/.venv/bin/python"}
-config=${LABVISION_CONFIG:-"$project_root/configs/rtx3090ti-ubuntu-production.yaml"}
+config=${VISIONCORTEX_CONFIG:-"$project_root/configs/rtx3090ti-ubuntu-production.yaml"}
 ark_key_file=${VISIONCORTEX_ARK_API_KEY_FILE:-'/home/x1/.config/VisionCortex/ark_api_key'}
 port=${VISIONCORTEX_WEB_PORT:-8000}
 
@@ -31,7 +31,7 @@ ARK_API_KEY=$(<"$ark_key_file")
 export ARK_API_KEY
 
 cd -- "$project_root"
-exec "$python" -m labvision_evidence serve \
+exec "$python" -m visioncortex serve \
   --host 0.0.0.0 \
   --port "$port" \
   --config "$config"

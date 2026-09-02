@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from labvision_evidence.config import load_config
+from visioncortex.config import load_config
 
 
 def test_rtx4090_profile_inherits_quality_rules_and_keeps_view_count_dynamic():

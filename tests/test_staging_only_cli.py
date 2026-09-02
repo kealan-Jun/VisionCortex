@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 import typer
 
-from labvision_evidence.cli import (
+from visioncortex.cli import (
     _create_staging_only_run_root,
     _normalized_cache_policy,
 )

@@ -5,8 +5,8 @@ from pathlib import PurePosixPath, PureWindowsPath
 
 import numpy as np
 
-from labvision_evidence import archive
-from labvision_evidence.schemas import (
+from visioncortex import archive
+from visioncortex.schemas import (
     ActionType,
     AlignmentTransform,
     EvidenceEvent,

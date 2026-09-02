@@ -3,8 +3,8 @@ from pathlib import Path
 
 import pytest
 
-from labvision_evidence.daily_reports import build_daily_report, evaluate_daily_report
-from labvision_evidence.schemas import RunSummary, ViewRole
+from visioncortex.daily_reports import build_daily_report, evaluate_daily_report
+from visioncortex.schemas import RunSummary, ViewRole
 
 
 def _summary_with_post_curation_rejection() -> RunSummary:

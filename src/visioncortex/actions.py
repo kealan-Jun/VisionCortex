@@ -1009,15 +1009,41 @@ def audit_candidates(
     config: dict[str, Any],
 ) -> tuple[list[EvidenceEvent], list[dict[str, Any]]]:
     tolerance = float(config["alignment"]["cross_view_event_tolerance_ms"])
+    maximum_tolerance = max(
+        tolerance,
+        float(
+            config["alignment"].get(
+                "cross_view_event_max_tolerance_ms", tolerance
+            )
+        ),
+    )
+
+    def pair_tolerance(left: ActionCandidate, right: ActionCandidate) -> float:
+        if left.view_id == right.view_id:
+            return tolerance
+        left_error = max(0.0, float(transforms[left.view_id].uncertainty_ms))
+        right_error = max(0.0, float(transforms[right.view_id].uncertainty_ms))
+        propagated = math.sqrt(left_error**2 + right_error**2)
+        return min(maximum_tolerance, tolerance + propagated)
+
     seg_cfg = config["segmentation"]
     clusters: list[list[ActionCandidate]] = []
     for candidate in sorted(candidates, key=candidate_sort_key):
         selected: list[ActionCandidate] | None = None
         for cluster in reversed(clusters):
-            if candidate.global_start_ms - max(item.global_end_ms for item in cluster) > tolerance:
+            if (
+                candidate.global_start_ms
+                - max(item.global_end_ms for item in cluster)
+                > maximum_tolerance
+            ):
                 break
             if cluster[0].action_type == candidate.action_type and any(
-                _objects_overlap(candidate, item) for item in cluster
+                _objects_overlap(candidate, item)
+                and candidate.global_start_ms
+                <= item.global_end_ms + pair_tolerance(candidate, item)
+                and candidate.global_end_ms
+                >= item.global_start_ms - pair_tolerance(candidate, item)
+                for item in cluster
             ):
                 selected = cluster
                 break
@@ -1086,8 +1112,12 @@ def audit_candidates(
                 and item.role not in roles
                 and transforms[item.view_id].state == "aligned"
                 and item.confidence >= context_minimum
-                and item.global_start_ms <= cluster_end_ms + tolerance
-                and item.global_end_ms >= cluster_start_ms - tolerance
+                and item.global_start_ms
+                <= cluster_end_ms
+                + max(pair_tolerance(item, member) for member in cluster)
+                and item.global_end_ms
+                >= cluster_start_ms
+                - max(pair_tolerance(item, member) for member in cluster)
             ]
             if context_candidates:
                 semantic_context_candidate = max(
@@ -1139,6 +1169,39 @@ def audit_candidates(
                 reason = "单路持续强物理证据通过门控；未强制其他空/无效视角产出"
         else:
             reason = "候选缺少足够的跨视角或持续强物理证据"
+        observability: dict[str, Any] = {
+            "alignment_association": {
+                "schema_version": "visioncortex-alignment-association/1",
+                "base_tolerance_ms": tolerance,
+                "maximum_tolerance_ms": maximum_tolerance,
+                "view_uncertainty_ms": {
+                    view_id: transforms[view_id].uncertainty_ms
+                    for view_id in views
+                },
+                "effective_cluster_tolerance_ms": max(
+                    (
+                        pair_tolerance(left, right)
+                        for left in cluster
+                        for right in cluster
+                    ),
+                    default=tolerance,
+                ),
+            }
+        }
+        if semantic_context_candidate is not None:
+            observability["semantic_recall_admission"] = {
+                "schema_version": "visioncortex-semantic-recall-admission/1",
+                "mode": "single_view_state_plus_cross_role_activity",
+                "candidate_action_directly_confirmed": False,
+                "mandatory_semantic_review": True,
+                "context_candidate_id": semantic_context_candidate.candidate_id,
+                "context_view_id": semantic_context_candidate.view_id,
+                "context_role": semantic_context_candidate.role.value,
+                "context_action_type": semantic_context_candidate.action_type.value,
+                "context_confidence": semantic_context_candidate.confidence,
+                "context_global_start_ms": semantic_context_candidate.global_start_ms,
+                "context_global_end_ms": semantic_context_candidate.global_end_ms,
+            }
         event = EvidenceEvent(
             event_id=f"EVT-{index:06d}",
             action_type=cluster[0].action_type,
@@ -1153,37 +1216,7 @@ def audit_candidates(
             supporting_roles=roles,
             candidates=cluster,
             uncertainty=uncertainty,
-            observability=(
-                {
-                    "semantic_recall_admission": {
-                        "schema_version": (
-                            "visioncortex-semantic-recall-admission/1"
-                        ),
-                        "mode": "single_view_state_plus_cross_role_activity",
-                        "candidate_action_directly_confirmed": False,
-                        "mandatory_semantic_review": True,
-                        "context_candidate_id": (
-                            semantic_context_candidate.candidate_id
-                        ),
-                        "context_view_id": semantic_context_candidate.view_id,
-                        "context_role": semantic_context_candidate.role.value,
-                        "context_action_type": (
-                            semantic_context_candidate.action_type.value
-                        ),
-                        "context_confidence": (
-                            semantic_context_candidate.confidence
-                        ),
-                        "context_global_start_ms": (
-                            semantic_context_candidate.global_start_ms
-                        ),
-                        "context_global_end_ms": (
-                            semantic_context_candidate.global_end_ms
-                        ),
-                    }
-                }
-                if semantic_context_candidate is not None
-                else {}
-            ),
+            observability=observability,
         )
         events.append(event)
         if not accepted:

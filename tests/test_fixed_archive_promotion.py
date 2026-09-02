@@ -1,13 +1,13 @@
 import json
 from pathlib import Path
 
-from labvision_evidence.archive import (
+from visioncortex.archive import (
     ArchiveLayout,
     _group_folder_name,
     _key_material_event_folder_name,
 )
-from labvision_evidence.schemas import ActionType, EvidenceEvent
-from labvision_evidence.storage import DERIVED_ARCHIVE_DIRECTORIES, promote_fixed_archive
+from visioncortex.schemas import ActionType, EvidenceEvent
+from visioncortex.storage import DERIVED_ARCHIVE_DIRECTORIES, promote_fixed_archive
 
 
 def test_fixed_archive_promotion_replaces_derived_outputs_and_retains_previous(tmp_path):

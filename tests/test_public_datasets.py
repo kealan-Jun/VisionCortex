@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from labvision_evidence.public_datasets import prepare_public_dataset
+from visioncortex.public_datasets import prepare_public_dataset
 
 
 def _sha(path: Path) -> str:

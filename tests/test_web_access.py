@@ -4,8 +4,8 @@ import base64
 
 from fastapi.testclient import TestClient
 
-from labvision_evidence import api
-from labvision_evidence.web_access import (
+from visioncortex import api
+from visioncortex.web_access import (
     is_allowed_lan_client,
     valid_basic_authorization,
     validate_web_access_configuration,

@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from labvision_evidence.schemas import RunManifest, VideoInfo, ViewInput, ViewRole
-from labvision_evidence.content_probe import (
+from visioncortex.schemas import RunManifest, VideoInfo, ViewInput, ViewRole
+from visioncortex.content_probe import (
     ProbeFrame,
     _select_review_frames,
     distributed_probe_intervals,
@@ -9,7 +9,7 @@ from labvision_evidence.content_probe import (
     motion_followup_interval,
     run_full_timeline_content_sweep,
 )
-from labvision_evidence.collection_curation import (
+from visioncortex.collection_curation import (
     evaluate_full_timeline_semantic_consensus,
 )
 
@@ -87,7 +87,7 @@ def test_long_timeline_negative_probe_is_forced_inconclusive(monkeypatch, tmp_pa
     # The end-to-end receipt rule is exercised more cheaply through the
     # explicit gate invariant in collection curation; keep the model-only gate
     # test below focused on direct evidence requirements.
-    from labvision_evidence.collection_curation import _read_probe
+    from visioncortex.collection_curation import _read_probe
 
     config = {
         "storage": {"local_cache_root": str(tmp_path)},
@@ -313,7 +313,7 @@ def test_full_timeline_sweep_covers_every_media_band_and_source_view(
     manifest = RunManifest(experiment_id="long", views=views)
     durations = {"fp": 601.0, "tp-a": 600.0, "tp-b": 500.0}
     monkeypatch.setattr(
-        "labvision_evidence.content_probe.probe_views",
+        "visioncortex.content_probe.probe_views",
         lambda _views: {
             view.view_id: VideoInfo(
                 path=view.video,
@@ -344,7 +344,7 @@ def test_full_timeline_sweep_covers_every_media_band_and_source_view(
             for view in selected
         ]
 
-    monkeypatch.setattr("labvision_evidence.content_probe._decode_probe_frames", frames)
+    monkeypatch.setattr("visioncortex.content_probe._decode_probe_frames", frames)
 
     class Analyzer:
         def __init__(self, _config):
@@ -364,7 +364,7 @@ def test_full_timeline_sweep_covers_every_media_band_and_source_view(
         def close(self):
             pass
 
-    monkeypatch.setattr("labvision_evidence.content_probe.ArkStepAnalyzer", Analyzer)
+    monkeypatch.setattr("visioncortex.content_probe.ArkStepAnalyzer", Analyzer)
     result = run_full_timeline_content_sweep(
         {
             "storage": {"local_cache_root": str(tmp_path)},

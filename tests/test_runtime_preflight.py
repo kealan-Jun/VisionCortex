@@ -6,7 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from labvision_evidence.runtime_preflight import (
+from visioncortex.runtime_preflight import (
     REQUIRED_RUNTIME_MODULES,
     inspect_project_runtime,
 )
@@ -42,7 +42,7 @@ def test_runtime_preflight_module_executes_without_inline_python_source():
             sys.executable,
             "-B",
             "-m",
-            "labvision_evidence.runtime_preflight",
+            "visioncortex.runtime_preflight",
             "--expected-source",
             str(SOURCE_ROOT),
         ],

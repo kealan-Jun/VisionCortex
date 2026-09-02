@@ -1,6 +1,6 @@
 import pytest
 
-from labvision_evidence.pagination import decode_cursor, encode_cursor
+from visioncortex.pagination import decode_cursor, encode_cursor
 
 
 def test_opaque_cursor_round_trip_is_bound_to_namespace_and_filters():

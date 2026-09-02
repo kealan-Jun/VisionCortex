@@ -5,13 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from labvision_evidence.config import load_config
-from labvision_evidence.pipeline import (
+from visioncortex.config import load_config
+from visioncortex.pipeline import (
     EvidencePipeline,
     _merge_frame_evidence_ledgers,
 )
-from labvision_evidence.detection import _accept_unique_frame_timestamp
-from labvision_evidence.schemas import (
+from visioncortex.detection import _accept_unique_frame_timestamp
+from visioncortex.schemas import (
     ActionCandidate,
     ActionType,
     AlignmentTransform,
@@ -25,7 +25,7 @@ from labvision_evidence.schemas import (
     ViewInput,
     ViewRole,
 )
-from labvision_evidence.video_io import (
+from visioncortex.video_io import (
     _aligned_grid_start_ms,
     _ffmpeg_multi_window_iterator,
     _is_reconcilable_terminal_eof_shortfall,
@@ -250,7 +250,7 @@ def test_persistent_ffmpeg_fills_and_records_one_terminal_eof_shortfall(
             return self.returncode
 
     monkeypatch.setattr(
-        "labvision_evidence.video_io.subprocess.Popen",
+        "visioncortex.video_io.subprocess.Popen",
         lambda *args, **kwargs: FakeProcess(),
     )
     info = VideoInfo(
@@ -306,7 +306,7 @@ def test_persistent_ffmpeg_fills_seven_frame_terminal_tail_within_one_second(
             return self.returncode
 
     monkeypatch.setattr(
-        "labvision_evidence.video_io.subprocess.Popen",
+        "visioncortex.video_io.subprocess.Popen",
         lambda *args, **kwargs: FakeProcess(),
     )
     info = VideoInfo(

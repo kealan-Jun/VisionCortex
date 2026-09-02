@@ -1,8 +1,8 @@
-from labvision_evidence.pipeline import (
+from visioncortex.pipeline import (
     normalize_final_group_action_language,
     validate_final_step_action_consistency,
 )
-from labvision_evidence.schemas import (
+from visioncortex.schemas import (
     ActionType,
     EvidenceEvent,
     ExperimentGroup,

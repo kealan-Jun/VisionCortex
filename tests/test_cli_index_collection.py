@@ -4,8 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from labvision_evidence import cli
-from labvision_evidence.archive import ArchiveLayout
+from visioncortex import cli
+from visioncortex.archive import ArchiveLayout
 
 
 class _Manifest:

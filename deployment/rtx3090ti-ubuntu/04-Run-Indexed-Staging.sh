@@ -49,7 +49,7 @@ export TMPDIR="$runtime_tmp"
 export VISIONCORTEX_TENSORRT=required
 
 args=(
-  -m labvision_evidence run-index-staging
+  -m visioncortex run-index-staging
   --experiment-id "$experiment_id"
   --archive-name "$archive_name"
   --cache-mode "$cache_mode"

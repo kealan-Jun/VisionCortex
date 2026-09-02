@@ -4,8 +4,8 @@ import time
 
 from fastapi.testclient import TestClient
 
-from labvision_evidence import api
-from labvision_evidence.run_queue import DurableRunQueue, QueuedRunJob
+from visioncortex import api
+from visioncortex.run_queue import DurableRunQueue, QueuedRunJob
 
 
 def test_durable_queue_preserves_fifo_jobs_and_run_state_across_reopen(tmp_path: Path):

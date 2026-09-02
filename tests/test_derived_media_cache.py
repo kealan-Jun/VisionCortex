@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from labvision_evidence.archive import _materialize_derived_media
+from visioncortex.archive import _materialize_derived_media
 
 
 def _config(tmp_path: Path, mode: str) -> dict:
@@ -25,7 +25,7 @@ def test_derived_media_cache_cold_populates_and_reuse_verifies(monkeypatch, tmp_
         cold_output.write_bytes(b"exact-derived-media")
 
     monkeypatch.setattr(
-        "labvision_evidence.archive.select_video_encoder", lambda preferred: preferred
+        "visioncortex.archive.select_video_encoder", lambda preferred: preferred
     )
     cold = _materialize_derived_media(
         cold_output,
@@ -63,7 +63,7 @@ def test_cold_run_reuses_same_process_idempotent_media(monkeypatch, tmp_path):
     first_output = tmp_path / "first.mp4"
     second_output = tmp_path / "second.mp4"
     monkeypatch.setattr(
-        "labvision_evidence.archive.select_video_encoder", lambda preferred: preferred
+        "visioncortex.archive.select_video_encoder", lambda preferred: preferred
     )
 
     _materialize_derived_media(
@@ -96,7 +96,7 @@ def test_derived_media_cache_changed_bounds_force_new_generation(monkeypatch, tm
     source = tmp_path / "source.mp4"
     source.write_bytes(b"immutable-source-identity")
     monkeypatch.setattr(
-        "labvision_evidence.archive.select_video_encoder", lambda preferred: preferred
+        "visioncortex.archive.select_video_encoder", lambda preferred: preferred
     )
     first = tmp_path / "first.mp4"
     _materialize_derived_media(

@@ -1,5 +1,5 @@
-from labvision_evidence.material_naming import key_material_semantic_name
-from labvision_evidence.schemas import ActionType, EvidenceEvent
+from visioncortex.material_naming import key_material_semantic_name
+from visioncortex.schemas import ActionType, EvidenceEvent
 
 
 def event(action_type: ActionType, objects: list[str]) -> EvidenceEvent:

@@ -3,12 +3,12 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from labvision_evidence.collection_catalog import (
+from visioncortex.collection_catalog import (
     clear_collection_catalog_cache,
     discover_collections,
     get_collection,
 )
-from labvision_evidence.device_registry import (
+from visioncortex.device_registry import (
     DEVICE_REGISTRY_SCHEMA_VERSION,
     load_device_registry,
     resolve_view_role,

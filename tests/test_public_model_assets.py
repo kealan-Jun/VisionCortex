@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from labvision_evidence.public_model_assets import prepare_public_model_assets
+from visioncortex.public_model_assets import prepare_public_model_assets
 
 
 def _sha(path: Path) -> str:

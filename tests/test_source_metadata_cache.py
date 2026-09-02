@@ -2,9 +2,9 @@ from pathlib import Path
 
 import pytest
 
-from labvision_evidence import storage
-from labvision_evidence.alignment import read_timestamp_csv_endpoints
-from labvision_evidence.video_io import _clock_metadata_video_info
+from visioncortex import storage
+from visioncortex.alignment import read_timestamp_csv_endpoints
+from visioncortex.video_io import _clock_metadata_video_info
 
 
 def test_source_stats_are_reused_across_startup_stages(tmp_path, monkeypatch):

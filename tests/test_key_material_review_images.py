@@ -1,5 +1,5 @@
-from labvision_evidence import archive
-from labvision_evidence.schemas import ActionType, EvidenceEvent
+from visioncortex import archive
+from visioncortex.schemas import ActionType, EvidenceEvent
 
 
 def _event(action: ActionType) -> EvidenceEvent:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from labvision_evidence.schema_contracts import (
+from visioncortex.schema_contracts import (
     inspect_archive_contracts,
     validate_event_contract,
     write_archive_contract_manifest,

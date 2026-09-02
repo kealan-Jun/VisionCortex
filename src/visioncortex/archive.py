@@ -31,6 +31,7 @@ from .indexing import (
     stable_event_uid,
     stable_evidence_uid,
 )
+from .identity import PRODUCT_NAME
 from .mllm import (
     ArkStepAnalyzer,
     EVENT_SYSTEM_PROMPT,
@@ -1261,9 +1262,12 @@ def _artifact_json(
         round(
             max(
                 (
-                    transforms[item].csv_rmse_ms
+                    max(
+                        float(transforms[item].uncertainty_ms),
+                        float(transforms[item].csv_rmse_ms or 0.0),
+                    )
                     for item in (first_material_view, third_material_view)
-                    if item in transforms and transforms[item].csv_rmse_ms is not None
+                    if item in transforms
                 ),
                 default=80.0,
             )
@@ -6460,7 +6464,7 @@ def write_screening_notes(
     all_views: Sequence[ViewInput],
 ) -> None:
     lines = [
-        "LabVision 有界实验片段筛选记录",
+        f"{PRODUCT_NAME} 有界实验片段筛选记录",
         "= 输入路数不等于输出路数；仅通过物理动作持续性与边界审计的视角会生成 MP4。",
         f"输入视角: {len(all_views)}",
         f"接受事件: {sum(event.accepted for event in events)}",

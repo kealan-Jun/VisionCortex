@@ -146,21 +146,50 @@ performance:
 
 alignment:
   reference_view: first_person
+  # Keep the configured first-person preference when clock quality ties, but
+  # do not let a recorder with invalid or discontinuous clocks anchor every
+  # other view.
+  reference_strategy: best_clock_quality
+  reference_preference_bonus: 0.15
   nearest_tolerance_ms: 120.0
   visual_anchor_search_seconds: 5.0
   visual_anchor_fps: 4.0
   max_drift_ppm: 2500.0
   minimum_match_ratio: 0.60
   cross_view_event_tolerance_ms: 750.0
+  cross_view_event_max_tolerance_ms: 2500.0
   visual_anchor_count: 3
   visual_anchor_duration_seconds: 10.0
   visual_audit_csv_confidence_threshold: 0.80
   visual_audit_search_seconds: 1.0
-  visual_audit_anchor_count: 2
+  visual_audit_anchor_count: 3
   visual_audit_duration_seconds: 2.0
-  visual_audit_fps: 1.0
+  visual_audit_fps: 2.0
+  mandatory_visual_audit: true
   aligned_timestamps_fps: 2.0
   max_csv_points_per_view: 30000
+  # Read a few distributed rows from every physical clock ledger. This remains
+  # bounded over SMB while detecting mid-segment resets that endpoints miss.
+  csv_sampling_mode: bounded_sparse
+  csv_samples_per_segment: 5
+  csv_bounded_full_read_limit_bytes: 2097152
+  csv_read_workers: 12
+  clock_jump_threshold_ms: 500.0
+  clock_rate_error_ppm: 10000.0
+  maximum_segment_clock_shift_ms: 300000.0
+  minimum_alignment_uncertainty_ms: 25.0
+  maximum_alignment_uncertainty_ms: 5000.0
+  local_timeline_fallback_enabled: true
+  local_timeline_confidence_cap: 0.65
+  local_timeline_uncertainty_ms: 1000.0
+  # Preserve timestamp-less local workflows, but label them degraded. Formal
+  # server profiles may override this to require absolute or visual evidence.
+  allow_local_timeline_formal_evidence: true
+  allow_uncertain_segment_formal_evidence: true
+  quality_gate_enabled: true
+  minimum_required_role_overlap_ms: 1000.0
+  view_coverage_warning_ratio: 0.999
+  # Retained for older profile readers. csv_sampling_mode is authoritative.
   csv_segment_endpoints_only: true
 
 segmentation:

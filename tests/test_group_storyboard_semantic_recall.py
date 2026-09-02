@@ -1,10 +1,10 @@
-from labvision_evidence.pipeline import (
+from visioncortex.pipeline import (
     _recover_group_storyboard_state_events,
 )
-from labvision_evidence.action_state_machine import (
+from visioncortex.action_state_machine import (
     attach_continuous_action_states,
 )
-from labvision_evidence.schemas import (
+from visioncortex.schemas import (
     ActionType,
     EvidenceEvent,
     ExperimentGroup,

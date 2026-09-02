@@ -1,8 +1,8 @@
 import json
 from pathlib import Path
 
-from labvision_evidence.schemas import ActionType, EvidenceEvent, ExperimentGroup, ViewRole
-from labvision_evidence.validation import validate_experiment_and_material_quality
+from visioncortex.schemas import ActionType, EvidenceEvent, ExperimentGroup, ViewRole
+from visioncortex.validation import validate_experiment_and_material_quality
 
 
 def group(group_id: str, start_ms: float, end_ms: float, continuity: str, atomic_count: int):

@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from labvision_evidence.model_registry import (
+from visioncortex.model_registry import (
     install_registered_models,
     validate_model_registry,
 )

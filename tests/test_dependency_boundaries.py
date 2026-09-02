@@ -33,7 +33,7 @@ def test_core_and_dev_dependencies_do_not_pull_the_gpu_model_stack():
 
 def test_heavy_model_imports_remain_lazy_in_production_modules():
     violations: list[str] = []
-    source_root = ROOT / "src" / "labvision_evidence"
+    source_root = ROOT / "src" / "visioncortex"
     for path in source_root.glob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for statement in tree.body:
@@ -56,7 +56,7 @@ def test_production_installers_exclude_development_extras():
         ROOT / "deployment" / "rtx4090" / "01-Install-And-Validate.ps1"
     ).read_text(encoding="utf-8")
     assert ".[models,tensorrt]" in rtx4060_installer
-    assert "labvision-evidence[tensorrt]" in rtx4090_installer
+    assert "visioncortex[tensorrt]" in rtx4090_installer
     assert "[dev" not in rtx4060_installer
     assert "[dev" not in rtx4090_installer
 

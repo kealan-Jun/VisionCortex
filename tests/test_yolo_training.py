@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from labvision_evidence.yolo_training import build_yolo_training_dataset
+from visioncortex.yolo_training import build_yolo_training_dataset
 
 
 def _truth(tmp_path, *, truth_status=None):

@@ -1,5 +1,5 @@
-from labvision_evidence.detection import ByteSortTracker
-from labvision_evidence.schemas import BoxEvidence
+from visioncortex.detection import ByteSortTracker
+from visioncortex.schemas import BoxEvidence
 
 
 def _box(x1: float, confidence: float = 0.9) -> BoxEvidence:

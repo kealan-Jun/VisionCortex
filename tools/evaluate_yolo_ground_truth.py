@@ -4,7 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
-from labvision_evidence.yolo_evaluation import evaluate_files
+from visioncortex.yolo_evaluation import evaluate_files
 
 
 def main() -> None:

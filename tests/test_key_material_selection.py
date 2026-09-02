@@ -1,5 +1,5 @@
-from labvision_evidence.grouping import select_key_events
-from labvision_evidence.schemas import (
+from visioncortex.grouping import select_key_events
+from visioncortex.schemas import (
     ActionCandidate,
     ActionType,
     EvidenceEvent,

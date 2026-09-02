@@ -82,7 +82,7 @@ stdout_log="$runtime_root/visioncortex-web.stdout.log"
 stderr_log="$runtime_root/visioncortex-web.stderr.log"
 pid_file="$runtime_root/visioncortex-web.pid"
 
-export LABVISION_CONFIG="$config"
+export VISIONCORTEX_CONFIG="$config"
 export VISIONCORTEX_NAS_INDEX_CSV="$project_root/examples/development-index.csv"
 export VISIONCORTEX_NAS_ARCHIVE_ROOT="$archive_root"
 export VISIONCORTEX_NAS_CACHE_ROOT="$cache_root"
@@ -93,7 +93,7 @@ export VISIONCORTEX_LOCAL_STAGING_ROOT="$run_root"
 export VISIONCORTEX_OUTPUT_ROOT="$run_root"
 
 cd -- "$project_root"
-nohup "$python" -m labvision_evidence serve --host 127.0.0.1 --port "$port" --config "$config" \
+nohup "$python" -m visioncortex serve --host 127.0.0.1 --port "$port" --config "$config" \
   >"$stdout_log" 2>"$stderr_log" < /dev/null &
 web_pid=$!
 printf '%s\n' "$web_pid" > "$pid_file"

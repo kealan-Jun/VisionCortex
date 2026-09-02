@@ -30,7 +30,7 @@ from .actions import (
     refine_liquid_events_with_context,
     select_fine_scan_views,
 )
-from .alignment import build_alignments
+from .alignment import alignment_quality_report, build_alignments
 from .action_semantics import (
     attach_action_observability,
     build_semantic_review_plan,
@@ -4144,9 +4144,23 @@ class EvidencePipeline:
                 time.perf_counter() - alignment_step_started,
                 6,
             )
+            alignment_runtime["view_runtime"] = {
+                view_id: transform.runtime
+                for view_id, transform in transforms.items()
+            }
             write_json(
                 layout.json_config / "time_alignment.json",
                 [transform.model_dump(mode="json") for transform in transforms.values()],
+            )
+            alignment_gate = alignment_quality_report(
+                manifest.views,
+                infos,
+                transforms,
+                self.config,
+            )
+            write_json(
+                layout.json_config / "alignment_quality_gate.json",
+                alignment_gate,
             )
             alignment_step_started = time.perf_counter()
             write_aligned_csv(
@@ -4165,6 +4179,14 @@ class EvidencePipeline:
                 layout.json_config / "alignment_runtime.json",
                 alignment_runtime,
             )
+            if (
+                bool(self.config["alignment"].get("quality_gate_enabled", True))
+                and not bool(alignment_gate["formal_evidence_ready"])
+            ):
+                raise RuntimeError(
+                    "alignment quality gate failed before GPU scans: "
+                    + "; ".join(str(item) for item in alignment_gate["errors"])
+                )
             self._complete_stage(
                 layout,
                 "alignment",
@@ -4172,6 +4194,7 @@ class EvidencePipeline:
                     layout.json_config / "time_alignment.json",
                     layout.json_config / "aligned_timestamps.csv",
                     layout.json_config / "alignment_runtime.json",
+                    layout.json_config / "alignment_quality_gate.json",
                 ],
             )
 

@@ -1,7 +1,7 @@
 import json
 
-from labvision_evidence.detection import _read_checkpoint, _write_checkpoint
-from labvision_evidence.storage import IncrementalArchivePublisher
+from visioncortex.detection import _read_checkpoint, _write_checkpoint
+from visioncortex.storage import IncrementalArchivePublisher
 
 
 def test_detection_checkpoint_requires_matching_nonempty_ledger(tmp_path):

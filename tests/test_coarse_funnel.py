@@ -1,12 +1,12 @@
 import json
 from pathlib import Path
 
-from labvision_evidence.actions import (
+from visioncortex.actions import (
     refine_motion_candidates_with_coarse,
     select_fine_scan_views,
 )
-from labvision_evidence.pipeline import EvidencePipeline
-from labvision_evidence.schemas import (
+from visioncortex.pipeline import EvidencePipeline
+from visioncortex.schemas import (
     ActionCandidate,
     ActionType,
     RunManifest,
@@ -190,7 +190,7 @@ def test_sequential_role_residency_preserves_original_decode_lanes(
         )
         return {view.view_id: tmp_path / f"{view.view_id}.jsonl" for view in group}
 
-    monkeypatch.setattr("labvision_evidence.pipeline.scan_videos", fake_scan)
+    monkeypatch.setattr("visioncortex.pipeline.scan_videos", fake_scan)
     pipeline = EvidencePipeline(default_config)
     pipeline._scan_all_views_concurrently(
         manifest,

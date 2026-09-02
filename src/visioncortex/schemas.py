@@ -107,6 +107,31 @@ class TimestampPoint(BaseModel):
     frame_index: int
     local_ms: float
     source_ms: float | None = None
+    clock_sync_valid: bool | None = None
+    source_column: str | None = None
+    row_number: int | None = None
+
+
+class AlignmentSegmentTransform(BaseModel):
+    """One physical recorder segment's mapping onto the shared timeline."""
+
+    segment_index: int
+    local_start_ms: float
+    local_end_ms: float
+    scale: float = 1.0
+    offset_ms: float = 0.0
+    csv_sample_count: int = 0
+    csv_rmse_ms: float | None = None
+    confidence: float = 0.0
+    uncertainty_ms: float = 0.0
+    state: Literal["aligned", "uncertain", "failed"] = "uncertain"
+    clock_anomalies: list[str] = Field(default_factory=list)
+
+    def to_global(self, local_ms: float) -> float:
+        return self.scale * local_ms + self.offset_ms
+
+    def to_local(self, global_ms: float) -> float:
+        return (global_ms - self.offset_ms) / self.scale
 
 
 class AlignmentTransform(BaseModel):
@@ -123,12 +148,115 @@ class AlignmentTransform(BaseModel):
     state: Literal["aligned", "uncertain", "failed"] = "uncertain"
     failure_reason: str | None = None
     anchor_details: list[dict[str, Any]] = Field(default_factory=list)
+    alignment_basis: str = "legacy_affine"
+    clock_sample_count: int = 0
+    clock_valid_sample_count: int = 0
+    clock_anomalies: list[str] = Field(default_factory=list)
+    uncertainty_ms: float = 0.0
+    local_coverage_start_ms: float | None = None
+    local_coverage_end_ms: float | None = None
+    segment_transforms: list[AlignmentSegmentTransform] = Field(default_factory=list)
+    runtime: dict[str, Any] = Field(default_factory=dict)
+
+    def _segment_for_local(self, local_ms: float) -> AlignmentSegmentTransform | None:
+        if not self.segment_transforms:
+            return None
+        containing = next(
+            (
+                segment
+                for index, segment in enumerate(self.segment_transforms)
+                if segment.local_start_ms <= local_ms
+                and (
+                    local_ms < segment.local_end_ms
+                    or (
+                        index == len(self.segment_transforms) - 1
+                        and local_ms <= segment.local_end_ms
+                    )
+                )
+                and segment.state != "failed"
+            ),
+            None,
+        )
+        if containing is not None:
+            return containing
+        return min(
+            (segment for segment in self.segment_transforms if segment.state != "failed"),
+            key=lambda segment: min(
+                abs(local_ms - segment.local_start_ms),
+                abs(local_ms - segment.local_end_ms),
+            ),
+            default=None,
+        )
+
+    def _segment_for_global(self, global_ms: float) -> AlignmentSegmentTransform | None:
+        if not self.segment_transforms:
+            return None
+        adjusted = global_ms - self.visual_correction_ms
+        containing = next(
+            (
+                segment
+                for index, segment in enumerate(self.segment_transforms)
+                if min(
+                    segment.to_global(segment.local_start_ms),
+                    segment.to_global(segment.local_end_ms),
+                )
+                <= adjusted
+                and (
+                    adjusted
+                    < max(
+                        segment.to_global(segment.local_start_ms),
+                        segment.to_global(segment.local_end_ms),
+                    )
+                    or (
+                        index == len(self.segment_transforms) - 1
+                        and adjusted
+                        <= max(
+                            segment.to_global(segment.local_start_ms),
+                            segment.to_global(segment.local_end_ms),
+                        )
+                    )
+                )
+                and segment.state != "failed"
+            ),
+            None,
+        )
+        if containing is not None:
+            return containing
+        return min(
+            (segment for segment in self.segment_transforms if segment.state != "failed"),
+            key=lambda segment: min(
+                abs(adjusted - segment.to_global(segment.local_start_ms)),
+                abs(adjusted - segment.to_global(segment.local_end_ms)),
+            ),
+            default=None,
+        )
 
     def to_global(self, local_ms: float) -> float:
+        segment = self._segment_for_local(local_ms)
+        if segment is not None:
+            return segment.to_global(local_ms) + self.visual_correction_ms
         return self.scale * local_ms + self.offset_ms + self.visual_correction_ms
 
     def to_local(self, global_ms: float) -> float:
+        segment = self._segment_for_global(global_ms)
+        if segment is not None:
+            return segment.to_local(global_ms - self.visual_correction_ms)
         return (global_ms - self.offset_ms - self.visual_correction_ms) / self.scale
+
+    def is_available_at_global(self, global_ms: float) -> bool:
+        local_ms = self.to_local(global_ms)
+        if self.segment_transforms:
+            return any(
+                segment.state != "failed"
+                and segment.local_start_ms <= local_ms <= segment.local_end_ms
+                for segment in self.segment_transforms
+            )
+        if self.local_coverage_start_ms is None or self.local_coverage_end_ms is None:
+            return self.state != "failed"
+        return (
+            self.state != "failed"
+            and self.local_coverage_start_ms <= local_ms <= self.local_coverage_end_ms
+        )
 
 
 class BoxEvidence(BaseModel):

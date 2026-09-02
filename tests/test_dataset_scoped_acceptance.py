@@ -1,4 +1,4 @@
-from labvision_evidence.pipeline import EvidencePipeline
+from visioncortex.pipeline import EvidencePipeline
 
 
 def test_six_view_baseline_only_applies_to_declared_experiment_id():

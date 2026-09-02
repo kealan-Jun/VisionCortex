@@ -2,8 +2,8 @@ from pathlib import Path
 
 import pytest
 
-from labvision_evidence.archive import _relative
-from labvision_evidence.pathing import archive_contains, archive_relative_posix
+from visioncortex.archive import _relative
+from visioncortex.pathing import archive_contains, archive_relative_posix
 
 
 NORMAL_ROOT = r"\\192.168.66.149\video_database\VisionCortexExperimentArchive\.VisionCortex-Run-Staging\A\run-001"

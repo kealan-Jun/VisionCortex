@@ -7,6 +7,12 @@ project:
   # the fallback on the same NAS staging filesystem as the formal archive.
   output_root: /home/x1/桌面/nas/VisionCortexExperimentArchive/.VisionCortex-Run-Staging
 
+alignment:
+  # Formal 3090 Ti evidence may use the local timeline as a recall fallback,
+  # but it needs absolute-clock or reliable visual support before promotion.
+  allow_local_timeline_formal_evidence: false
+  allow_uncertain_segment_formal_evidence: false
+
 models:
   first_person: /srv/sentinel-data/VisionCortex3090Ti/Models/ClosedSetYOLO/first_person/best.pt
   third_person: /srv/sentinel-data/VisionCortex3090Ti/Models/ClosedSetYOLO/third_person/best.pt

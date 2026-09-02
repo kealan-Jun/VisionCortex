@@ -1,7 +1,7 @@
 import json
 
-from labvision_evidence.archive import ArchiveLayout
-from labvision_evidence.pipeline import EvidencePipeline
+from visioncortex.archive import ArchiveLayout
+from visioncortex.pipeline import EvidencePipeline
 
 
 def test_scan_runtime_classifies_decode_starvation(tmp_path):
