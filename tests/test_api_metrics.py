@@ -339,7 +339,9 @@ def test_fixed_benchmark_submission_is_owned_by_web_service(monkeypatch, tmp_pat
     assert receipt["run_id"] == response["run_id"]
     assert receipt["execution"]["owner"] == "visioncortex_web_service"
     assert receipt["execution"]["client_process_independent"] is True
-    assert receipt["execution"]["requires_web_service_alive"] is True
+    assert receipt["execution"]["queue_persistence"] == "sqlite"
+    assert receipt["execution"]["survives_web_service_restart"] is True
+    assert receipt["execution"]["requires_web_service_alive_to_execute"] is True
     assert receipt["monitoring"]["status_url"] == f"/api/runs/{response['run_id']}"
 
 

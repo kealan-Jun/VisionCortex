@@ -38,7 +38,11 @@ print(f"storage_mode={payload.get('storage_mode')}")
 print(f"nas_available={payload.get('nas_available')}")
 print(f"mllm_enabled={payload.get('mllm_enabled')}")
 print(f"ark_key_configured={payload.get('ark_key_configured')}")
-print(f"gpu_job_active={(payload.get('execution_queue') or {}).get('gpu_busy')}")
+queue = payload.get("execution_queue") or {}
+counts = queue.get("counts") or {}
+print(f"queue_persistence={queue.get('persistence')}")
+print(f"queue_waiting={counts.get('queued', 0)}")
+print(f"gpu_job_active={queue.get('gpu_busy')}")
 PY
 
 lan_ip=$(hostname -I 2>/dev/null | tr ' ' '\n' | awk '

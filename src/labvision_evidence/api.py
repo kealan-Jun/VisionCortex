@@ -44,6 +44,7 @@ from .indexing import (
 from .pagination import decode_cursor, encode_cursor
 from .pathing import archive_contains, archive_relative_posix
 from .pipeline import EvidencePipeline
+from .run_queue import DurableRunQueue, QueuedRunJob
 from .schemas import RunManifest, ViewInput
 from .storage import (
     ARCHIVE_DIRECTORIES,
@@ -64,8 +65,13 @@ from .web_access import (
 @asynccontextmanager
 async def _lifespan(_: FastAPI):
     validate_web_access_configuration()
-    _recover_orphaned_tasks()
-    yield
+    _initialize_persistent_queue(_settings())
+    try:
+        _recover_orphaned_tasks()
+        _start_queue_worker()
+        yield
+    finally:
+        _stop_queue_worker()
 
 
 app = FastAPI(
@@ -78,6 +84,14 @@ app.mount("/ui", StaticFiles(directory=_web_root), name="ui")
 _lock = threading.Lock()
 _gpu_job_lock = threading.Lock()
 _runs: dict[str, dict[str, Any]] = {}
+_persistent_queue: DurableRunQueue | None = None
+_queue_thread: threading.Thread | None = None
+_queue_stop = threading.Event()
+_queue_wakeup = threading.Event()
+_queue_worker_id = f"web-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+_QUEUE_LEASE_SECONDS = 60.0
+_QUEUE_LEASE_RENEW_SECONDS = 15.0
+_QUEUE_POLL_SECONDS = 1.0
 _BENCHMARK_EXPERIMENT_ID = "exp_20260810_144014_e918b762"
 _BENCHMARK_ARCHIVE_NAME = (
     "CustomFlow_standard_correct_12_ABCFA_0001--exp_20260810_144014_e918b762"
@@ -236,6 +250,7 @@ async def record_web_ingest_start(request: Request, call_next):
 
     if request.method == "POST" and request.url.path == "/api/runs":
         request.state.ingest_started_perf = time.perf_counter()
+        request.state.ingest_started_epoch = time.time()
         request.state.ingest_started_at = datetime.now().astimezone().isoformat()
     return await call_next(request)
 
@@ -266,6 +281,189 @@ def _settings() -> dict[str, Any]:
 
 def _archive_root(settings: dict[str, Any] | None = None) -> Path:
     return Path((settings or _settings())["storage"]["archive_root"])
+
+
+def _queue_database_path(settings: dict[str, Any]) -> Path:
+    return (
+        Path(settings["storage"]["local_runtime_root"])
+        / "state"
+        / "web_run_queue.sqlite3"
+    )
+
+
+def _initialize_persistent_queue(settings: dict[str, Any]) -> None:
+    global _persistent_queue
+
+    store = DurableRunQueue(_queue_database_path(settings))
+    restored_runs = store.load_runs()
+    with _lock:
+        _runs.clear()
+        _runs.update(restored_runs)
+    _persistent_queue = store
+
+
+def _renew_queue_lease(
+    store: DurableRunQueue,
+    run_id: str,
+    worker_id: str,
+    stop: threading.Event,
+) -> None:
+    while not stop.wait(_QUEUE_LEASE_RENEW_SECONDS):
+        if not store.renew_lease(
+            run_id,
+            worker_id,
+            lease_seconds=_QUEUE_LEASE_SECONDS,
+        ):
+            return
+
+
+def _dispatch_persisted_job(job: QueuedRunJob) -> None:
+    payload = job.payload
+    settings = payload["settings"]
+    if job.kind == "run":
+        _execute_now(
+            job.run_id,
+            RunManifest.model_validate(payload["manifest"]),
+            settings,
+            Path(payload["nas_root"]),
+            payload.get("ingest"),
+        )
+        return
+    if job.kind == "fixed_benchmark":
+        _execute_fixed_benchmark_now(
+            job.run_id,
+            settings,
+            Path(payload["nas_root"]),
+            payload["timing"],
+        )
+        return
+    if job.kind == "index_collection":
+        _execute_index_collection_now(
+            job.run_id,
+            payload["source_experiment_id"],
+            payload["archive_name"],
+            settings,
+            Path(payload["staging_root"]),
+            Path(payload["fixed_root"]),
+            Path(payload["history_root"]),
+            payload["timing"],
+        )
+        return
+    raise ValueError(f"Unsupported durable queue job kind: {job.kind}")
+
+
+def _queue_worker_loop(store: DurableRunQueue) -> None:
+    while not _queue_stop.is_set():
+        job = store.claim_next(
+            _queue_worker_id,
+            lease_seconds=_QUEUE_LEASE_SECONDS,
+        )
+        if job is None:
+            _queue_wakeup.wait(_QUEUE_POLL_SECONDS)
+            _queue_wakeup.clear()
+            continue
+
+        with _lock:
+            existing_state = str((_runs.get(job.run_id) or {}).get("state") or "")
+        if existing_state in {"completed", "failed"}:
+            store.finish(job.run_id, _queue_worker_id, existing_state)
+            _queue_wakeup.set()
+            continue
+
+        lease_stop = threading.Event()
+        renewer = threading.Thread(
+            target=_renew_queue_lease,
+            args=(store, job.run_id, _queue_worker_id, lease_stop),
+            name=f"visioncortex-queue-lease-{job.run_id}",
+            daemon=True,
+        )
+        renewer.start()
+        try:
+            if job.reclaimed:
+                _update(
+                    job.run_id,
+                    state="queued",
+                    progress=0.0,
+                    message="服务重启后已恢复任务，等待 3090 Ti 继续执行",
+                    recovered_from_durable_queue=True,
+                )
+            _dispatch_persisted_job(job)
+            with _lock:
+                final_state = str((_runs.get(job.run_id) or {}).get("state") or "")
+                final_error = (_runs.get(job.run_id) or {}).get("error")
+            if final_state not in {"completed", "failed"}:
+                final_state = "failed"
+                final_error = "Durable queue executor returned without a terminal run state"
+                _update(job.run_id, state=final_state, progress=1.0, error=final_error)
+            store.finish(
+                job.run_id,
+                _queue_worker_id,
+                final_state,
+                error=str(final_error) if final_error else None,
+            )
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            _update(job.run_id, state="failed", progress=1.0, error=error)
+            store.finish(
+                job.run_id,
+                _queue_worker_id,
+                "failed",
+                error=error,
+            )
+        finally:
+            lease_stop.set()
+            renewer.join(timeout=1.0)
+            _queue_wakeup.set()
+
+
+def _start_queue_worker() -> None:
+    global _queue_thread
+
+    if _persistent_queue is None:
+        raise RuntimeError("Durable run queue has not been initialized")
+    if _queue_thread is not None and _queue_thread.is_alive():
+        return
+    _queue_stop.clear()
+    _queue_wakeup.set()
+    _queue_thread = threading.Thread(
+        target=_queue_worker_loop,
+        args=(_persistent_queue,),
+        name="visioncortex-durable-run-queue",
+        daemon=True,
+    )
+    _queue_thread.start()
+
+
+def _stop_queue_worker() -> None:
+    global _persistent_queue, _queue_thread
+
+    _queue_stop.set()
+    _queue_wakeup.set()
+    if _queue_thread is not None:
+        _queue_thread.join(timeout=5.0)
+        if _queue_thread.is_alive():
+            return
+    _queue_thread = None
+    _persistent_queue = None
+
+
+def _schedule_job(
+    background_tasks: BackgroundTasks,
+    *,
+    run_id: str,
+    kind: str,
+    payload: dict[str, Any],
+    fallback: Any,
+    fallback_args: tuple[Any, ...],
+) -> str:
+    if _persistent_queue is None:
+        # Direct function calls in focused tests do not enter the ASGI lifespan.
+        # A real Web server always initializes the SQLite queue before accepting requests.
+        background_tasks.add_task(fallback, *fallback_args)
+        return "process_memory_fallback"
+    _persistent_queue.enqueue(run_id, kind, payload)
+    _queue_wakeup.set()
+    return "sqlite"
 
 
 def _reserve_archive(settings: dict[str, Any], experiment_name: str) -> tuple[str, Path]:
@@ -336,7 +534,10 @@ def _reserve_fixed_benchmark(settings: dict[str, Any], run_id: str) -> Path:
 
 def _update(run_id: str, **values: Any) -> None:
     with _lock:
-        _runs.setdefault(run_id, {}).update(values)
+        state = _runs.setdefault(run_id, {})
+        state.update(values)
+        if _persistent_queue is not None:
+            _persistent_queue.save_run(run_id, state)
 
 
 def _write_fixed_benchmark_submission_receipt(
@@ -359,7 +560,9 @@ def _write_fixed_benchmark_submission_receipt(
                 "owner": "visioncortex_web_service",
                 "server_pid": os.getpid(),
                 "client_process_independent": True,
-                "requires_web_service_alive": True,
+                "queue_persistence": "sqlite",
+                "survives_web_service_restart": True,
+                "requires_web_service_alive_to_execute": True,
             },
             "monitoring": {
                 "status_url": f"/api/runs/{run_id}",
@@ -382,12 +585,21 @@ def _append_web_end_to_end_metrics(
     roots: list[Path], ingest: dict[str, Any], completed: bool
 ) -> None:
     ended_at = datetime.now().astimezone().isoformat()
-    total_seconds = round(time.perf_counter() - float(ingest["request_started_perf"]), 6)
+    total_seconds = round(
+        (
+            time.time() - float(ingest["request_started_epoch"])
+            if ingest.get("request_started_epoch") is not None
+            else time.perf_counter() - float(ingest["request_started_perf"])
+        ),
+        6,
+    )
     for root in dict.fromkeys(path.resolve() for path in roots):
         metrics_path = root / "JSON-Config-Files" / "run_metrics.json"
         metrics = _read_json(metrics_path, {}) or {}
         metrics["web_ingest"] = {
-            key: value for key, value in ingest.items() if key != "request_started_perf"
+            key: value
+            for key, value in ingest.items()
+            if key not in {"request_started_perf", "request_started_epoch"}
         }
         metrics["web_end_to_end"] = {
             "definition": "HTTP request arrival + multipart receive + local/NAS original retention + analysis + final NAS archive",
@@ -403,14 +615,26 @@ def _append_fixed_benchmark_metrics(
     roots: list[Path], timing: dict[str, Any], completed: bool
 ) -> None:
     ended_at = datetime.now().astimezone().isoformat()
-    total_seconds = round(time.perf_counter() - float(timing["request_started_perf"]), 6)
+    total_seconds = round(
+        (
+            time.time() - float(timing["request_started_epoch"])
+            if timing.get("request_started_epoch") is not None
+            else time.perf_counter() - float(timing["request_started_perf"])
+        ),
+        6,
+    )
     for root in dict.fromkeys(path.resolve() for path in roots):
         metrics_path = root / "JSON-Config-Files" / "run_metrics.json"
         metrics = _read_json(metrics_path, {}) or {}
         metrics["nas_index_ingest"] = {
             key: value
             for key, value in timing.items()
-            if key not in {"request_started_perf", "request_received_at"}
+            if key
+            not in {
+                "request_started_perf",
+                "request_started_epoch",
+                "request_received_at",
+            }
         }
         metrics["fixed_benchmark_end_to_end"] = {
             "definition": "benchmark request + NAS index staging/reuse + analysis + fixed NAS archive publication",
@@ -428,14 +652,26 @@ def _append_collection_index_metrics(
     roots: list[Path], timing: dict[str, Any], completed: bool
 ) -> None:
     ended_at = datetime.now().astimezone().isoformat()
-    total_seconds = round(time.perf_counter() - float(timing["request_started_perf"]), 6)
+    total_seconds = round(
+        (
+            time.time() - float(timing["request_started_epoch"])
+            if timing.get("request_started_epoch") is not None
+            else time.perf_counter() - float(timing["request_started_perf"])
+        ),
+        6,
+    )
     for root in dict.fromkeys(path.resolve() for path in roots):
         metrics_path = root / "JSON-Config-Files" / "run_metrics.json"
         metrics = _read_json(metrics_path, {}) or {}
         metrics["nas_index_ingest"] = {
             key: value
             for key, value in timing.items()
-            if key not in {"request_started_perf", "request_received_at"}
+            if key
+            not in {
+                "request_started_perf",
+                "request_started_epoch",
+                "request_received_at",
+            }
         }
         metrics["collection_end_to_end"] = {
             "definition": "collection card selection + zero-copy NAS index ingest + analysis + NAS archive",
@@ -979,6 +1215,7 @@ def favicon() -> Response:
 @app.get("/api/health")
 def health() -> dict[str, Any]:
     settings = _settings()
+    queue_stats = _persistent_queue.stats() if _persistent_queue is not None else None
     storage_mode = "nas" if settings["storage"].get("sync_to_nas") else "local_development"
     archive_root = _archive_root(settings)
     input_mode = (
@@ -1026,7 +1263,16 @@ def health() -> dict[str, Any]:
         },
         "execution_queue": {
             "policy": "single_gpu_one_job_at_a_time",
-            "gpu_busy": _gpu_job_lock.locked(),
+            "persistence": "sqlite" if _persistent_queue is not None else "not_initialized",
+            "survives_web_service_restart": _persistent_queue is not None,
+            "database": (
+                str(_persistent_queue.database) if _persistent_queue is not None else None
+            ),
+            "counts": queue_stats,
+            "gpu_busy": bool(
+                _gpu_job_lock.locked()
+                or (queue_stats is not None and queue_stats["running"] > 0)
+            ),
         },
     }
 
@@ -2096,6 +2342,9 @@ async def create_run(
     )
     ingest = {
         "request_started_perf": ingest_started_perf,
+        "request_started_epoch": float(
+            getattr(request.state, "ingest_started_epoch", time.time())
+        ),
         "request_received_at": getattr(
             request.state, "ingest_started_at", datetime.now().astimezone().isoformat()
         ),
@@ -2119,7 +2368,9 @@ async def create_run(
         3,
     )
     upload_record["web_ingest"] = {
-        key: value for key, value in ingest.items() if key != "request_started_perf"
+        key: value
+        for key, value in ingest.items()
+        if key not in {"request_started_perf", "request_started_epoch"}
     }
     record_path = nas_root / "JSON-Config-Files" / "original_upload_manifest.json"
     record_path.write_text(json.dumps(upload_record, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -2153,13 +2404,26 @@ async def create_run(
         experiment_id=manifest.experiment_id,
         nas_output=str(nas_root),
     )
-    background_tasks.add_task(_execute, run_id, manifest, settings, nas_root, ingest)
+    queue_persistence = _schedule_job(
+        background_tasks,
+        run_id=run_id,
+        kind="run",
+        payload={
+            "manifest": manifest.model_dump(mode="json"),
+            "settings": settings,
+            "nas_root": str(nas_root),
+            "ingest": ingest,
+        },
+        fallback=_execute,
+        fallback_args=(run_id, manifest, settings, nas_root, ingest),
+    )
     return {
         "run_id": run_id,
         "state": "queued",
         "status_url": f"/api/runs/{run_id}",
         "nas_output": str(nas_root),
         "archive_url": f"/?archive={quote(archive_name)}",
+        "queue_persistence": queue_persistence,
     }
 
 
@@ -2168,6 +2432,7 @@ def create_fixed_benchmark_run(background_tasks: BackgroundTasks) -> dict[str, A
     """Rerun the registered six-view benchmark into its fixed NAS archive."""
 
     request_started_perf = time.perf_counter()
+    request_started_epoch = time.time()
     request_received_at = datetime.now().astimezone().isoformat()
     settings = _settings()
     settings["storage"]["sync_to_nas"] = True
@@ -2176,6 +2441,7 @@ def create_fixed_benchmark_run(background_tasks: BackgroundTasks) -> dict[str, A
 
     timing = {
         "request_started_perf": request_started_perf,
+        "request_started_epoch": request_started_epoch,
         "request_received_at": request_received_at,
         "experiment_id": _BENCHMARK_EXPERIMENT_ID,
         "archive_name": _BENCHMARK_ARCHIVE_NAME,
@@ -2195,7 +2461,18 @@ def create_fixed_benchmark_run(background_tasks: BackgroundTasks) -> dict[str, A
         run_id,
         request_received_at,
     )
-    background_tasks.add_task(_execute_fixed_benchmark, run_id, settings, nas_root, timing)
+    queue_persistence = _schedule_job(
+        background_tasks,
+        run_id=run_id,
+        kind="fixed_benchmark",
+        payload={
+            "settings": settings,
+            "nas_root": str(nas_root),
+            "timing": timing,
+        },
+        fallback=_execute_fixed_benchmark,
+        fallback_args=(run_id, settings, nas_root, timing),
+    )
     return {
         "run_id": run_id,
         "state": "queued",
@@ -2209,6 +2486,7 @@ def create_fixed_benchmark_run(background_tasks: BackgroundTasks) -> dict[str, A
         "client_process_independent": True,
         "submission_protocol_version": _BENCHMARK_SUBMISSION_PROTOCOL_VERSION,
         "submission_receipt": str(submission_receipt),
+        "queue_persistence": queue_persistence,
     }
 
 
@@ -2219,6 +2497,7 @@ def create_collection_run(
     payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     request_started_perf = time.perf_counter()
+    request_started_epoch = time.time()
     request_received_at = datetime.now().astimezone().isoformat()
     settings = _settings()
     try:
@@ -2262,6 +2541,7 @@ def create_collection_run(
     )
     timing = {
         "request_started_perf": request_started_perf,
+        "request_started_epoch": request_started_epoch,
         "request_received_at": request_received_at,
         "source_experiment_id": experiment_id,
         "archive_name": archive_name,
@@ -2286,16 +2566,30 @@ def create_collection_run(
         state="queued",
         details={"staging": str(staging_root), "source_copy_bytes": 0},
     )
-    background_tasks.add_task(
-        _execute_index_collection,
-        run_id,
-        experiment_id,
-        archive_name,
-        settings,
-        staging_root,
-        fixed_root,
-        history_root,
-        timing,
+    queue_persistence = _schedule_job(
+        background_tasks,
+        run_id=run_id,
+        kind="index_collection",
+        payload={
+            "source_experiment_id": experiment_id,
+            "archive_name": archive_name,
+            "settings": settings,
+            "staging_root": str(staging_root),
+            "fixed_root": str(fixed_root),
+            "history_root": str(history_root),
+            "timing": timing,
+        },
+        fallback=_execute_index_collection,
+        fallback_args=(
+            run_id,
+            experiment_id,
+            archive_name,
+            settings,
+            staging_root,
+            fixed_root,
+            history_root,
+            timing,
+        ),
     )
     return {
         "run_id": run_id,
@@ -2307,6 +2601,7 @@ def create_collection_run(
         "nas_staging": str(staging_root),
         "archive_name": archive_name,
         "archive_url": f"/#/archive/{quote(archive_name)}/experiments",
+        "queue_persistence": queue_persistence,
     }
 
 
@@ -2324,12 +2619,25 @@ def create_run_from_paths(payload: dict[str, Any], background_tasks: BackgroundT
     settings["storage"]["active_archive_path"] = str(nas_root)
     run_id = uuid.uuid4().hex[:12]
     _update(run_id, state="queued", progress=0.0, experiment_id=manifest.experiment_id)
-    background_tasks.add_task(_execute, run_id, manifest, settings, nas_root)
+    queue_persistence = _schedule_job(
+        background_tasks,
+        run_id=run_id,
+        kind="run",
+        payload={
+            "manifest": manifest.model_dump(mode="json"),
+            "settings": settings,
+            "nas_root": str(nas_root),
+            "ingest": None,
+        },
+        fallback=_execute,
+        fallback_args=(run_id, manifest, settings, nas_root),
+    )
     return {
         "run_id": run_id,
         "state": "queued",
         "status_url": f"/api/runs/{run_id}",
         "nas_output": str(nas_root),
+        "queue_persistence": queue_persistence,
     }
 
 

@@ -162,10 +162,12 @@ credential, TensorRT engine paths, NAS index/archive/cache roots, and listens on
 RFC 1918 IPv4, and local IPv6 ranges and requires HTTP Basic authentication for
 every route, including files and task submission.
 
-All Web-submitted GPU workflows share one in-process execution lock. A second
-upload, fixed benchmark, or indexed collection stays queued until the active
-job releases the 3090 Ti, so multiple users cannot start competing inference
-pipelines on the same GPU.
+All Web-submitted GPU workflows first enter a SQLite queue under the configured
+local runtime root. A cross-process lease allows only one upload, fixed
+benchmark, or indexed collection to use the 3090 Ti at a time. Waiting jobs and
+their Web-visible state survive service or host restarts; a claimed job whose
+lease expires is reclaimed with the same run identity so durable pipeline
+checkpoints can be reused.
 
 For startup before the desktop user logs in, enable user-service lingering once:
 
