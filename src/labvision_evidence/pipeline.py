@@ -65,6 +65,7 @@ from .grouping import (
 from .pathing import archive_relative_posix
 from .ordering import candidate_sort_key, event_sort_key
 from .detection import iter_frame_evidence, scan_videos, validate_models
+from .coarse_recall import generate_open_vocabulary_coarse_candidates
 from .daily_reports import generate_daily_report_archive
 from .decisions import decision_receipt
 from .schema_contracts import write_archive_contract_manifest
@@ -1849,6 +1850,8 @@ class EvidencePipeline:
         """Choose sentinel views; bounded YOLO scans still use all eligible views."""
 
         perf = self.config["performance"]
+        if perf.get("motion_probe_all_views", False):
+            return list(manifest.views)
         first_limit = max(1, int(perf.get("motion_probe_first_person_views", 1)))
         third_limit = max(0, int(perf.get("motion_probe_third_person_views", 1)))
         first = [view for view in manifest.views if view.role == ViewRole.FIRST_PERSON]
@@ -1859,6 +1862,8 @@ class EvidencePipeline:
         """Choose boundary sentinels; fine validation still uses required views."""
 
         perf = self.config["performance"]
+        if perf.get("coarse_all_views", False):
+            return list(manifest.views)
         first_limit = max(1, int(perf.get("coarse_first_person_views", 1)))
         third_limit = max(1, int(perf.get("coarse_third_person_views", 1)))
         first = [view for view in manifest.views if view.role == ViewRole.FIRST_PERSON]
@@ -4372,9 +4377,22 @@ class EvidencePipeline:
                 ],
             )
 
-            reuse_motion_probe = bool(
-                self.config["performance"].get("coarse_reuse_motion_probe", False)
-            ) and bool(self.config["performance"].get("motion_probe_run_yolo", False))
+            coarse_full_timeline = bool(
+                self.config["performance"].get("coarse_full_timeline_scan", False)
+            )
+            reuse_motion_probe = (
+                bool(
+                    self.config["performance"].get(
+                        "coarse_reuse_motion_probe", False
+                    )
+                )
+                and bool(
+                    self.config["performance"].get(
+                        "motion_probe_run_yolo", False
+                    )
+                )
+                and not coarse_full_timeline
+            )
             coarse_scan_views = (
                 motion_probe_views
                 if reuse_motion_probe
@@ -4392,7 +4410,11 @@ class EvidencePipeline:
                 layout,
                 "candidate_coarse",
                 0.28,
-                f"候选窗口内 {self.config['performance']['coarse_detection_fps']} FPS YOLO粗筛",
+                (
+                    f"全时间轴多视角 {self.config['performance']['coarse_detection_fps']} FPS YOLO粗筛"
+                    if coarse_full_timeline
+                    else f"候选窗口内 {self.config['performance']['coarse_detection_fps']} FPS YOLO粗筛"
+                ),
             )
             if reuse_motion_probe:
                 coarse_paths = motion_paths
@@ -4421,7 +4443,7 @@ class EvidencePipeline:
                     infos,
                     transforms,
                     layout.work / "detections-coarse",
-                    windows=motion_windows,
+                    windows=None if coarse_full_timeline else motion_windows,
                     sample_fps=float(self.config["performance"]["coarse_detection_fps"]),
                     image_size=int(self.config["performance"]["coarse_image_size"]),
                     keyframes_only=bool(self.config["performance"]["coarse_keyframes_only"]),
@@ -4449,7 +4471,18 @@ class EvidencePipeline:
             coarse_candidates = generate_motion_burst_candidates(
                 coarse_views, coarse_paths, coarse_config
             )
-            if not coarse_candidates:
+            comprehensive_coarse = bool(
+                self.config["performance"].get(
+                    "coarse_comprehensive_candidate_union", False
+                )
+            )
+            if comprehensive_coarse:
+                coarse_candidates.extend(
+                    generate_coarse_activity_candidates(
+                        coarse_scan_views, coarse_paths, coarse_config
+                    )
+                )
+            elif not coarse_candidates:
                 fallback_views = [
                     view for view in coarse_scan_views if view.role == ViewRole.THIRD_PERSON
                 ]
@@ -4457,6 +4490,23 @@ class EvidencePipeline:
                 coarse_candidates = generate_coarse_activity_candidates(
                     fallback_views, fallback_paths, coarse_config
                 )
+            open_vocabulary_enabled = bool(
+                self.config["performance"].get(
+                    "coarse_open_vocabulary_recall_enabled", False
+                )
+            )
+            if open_vocabulary_enabled:
+                open_vocabulary_candidates, open_vocabulary_report = (
+                    generate_open_vocabulary_coarse_candidates(
+                        coarse_scan_views,
+                        infos,
+                        coarse_paths,
+                        self.config,
+                    )
+                )
+            else:
+                open_vocabulary_candidates, open_vocabulary_report = [], None
+            coarse_candidates.extend(open_vocabulary_candidates)
             coarse_candidates = sorted(coarse_candidates, key=candidate_sort_key)
             boundary_candidates, boundary_report = refine_motion_candidates_with_coarse(
                 motion_candidates,
@@ -4470,10 +4520,24 @@ class EvidencePipeline:
             boundary_report["coarse_scan_view_ids"] = [
                 view.view_id for view in coarse_scan_views
             ]
+            if coarse_full_timeline or comprehensive_coarse or open_vocabulary_enabled:
+                boundary_report["enhancements"] = {
+                    "full_timeline_scan": coarse_full_timeline,
+                    "comprehensive_candidate_union": comprehensive_coarse,
+                    "open_vocabulary_candidate_ids": [
+                        item.candidate_id for item in open_vocabulary_candidates
+                    ],
+                    "preserves_established_candidates": True,
+                }
             write_json(
                 layout.json_config / "coarse_boundary_refinement.json",
                 boundary_report,
             )
+            if open_vocabulary_report is not None:
+                write_json(
+                    layout.json_config / "coarse_open_vocabulary_recall.json",
+                    open_vocabulary_report,
+                )
             fine_views, fine_view_report = select_fine_scan_views(
                 manifest.views, coarse_paths, boundary_candidates, self.config
             )
@@ -4529,6 +4593,11 @@ class EvidencePipeline:
                 layout.json_config / "coarse_boundary_refinement.json",
                 layout.json_config / "fine_view_selection.json",
             ]
+            open_vocabulary_path = (
+                layout.json_config / "coarse_open_vocabulary_recall.json"
+            )
+            if open_vocabulary_path.exists():
+                coarse_artifacts.append(open_vocabulary_path)
             coarse_runtime = layout.json_config / "scan_runtime_coarse.json"
             if coarse_runtime.exists():
                 coarse_artifacts.append(coarse_runtime)
@@ -4585,6 +4654,47 @@ class EvidencePipeline:
                     )
                 ),
             }
+            if (
+                self.config["performance"].get(
+                    "fine_risk_window_expansion_enabled", False
+                )
+                or self.config["performance"].get(
+                    "fine_low_alignment_extra_padding_enabled", False
+                )
+            ):
+                fine_window_report["risk_window_expansion"] = {
+                    "mode": "expand_only_preserve_baseline_windows",
+                    "action_types": list(
+                        self.config["performance"].get(
+                            "fine_risk_action_types", []
+                        )
+                    ),
+                    "low_confidence_threshold": float(
+                        self.config["performance"].get(
+                            "fine_risk_low_confidence_threshold", 0.70
+                        )
+                    ),
+                    "extra_padding_seconds": float(
+                        self.config["performance"].get(
+                            "fine_risk_extra_padding_seconds", 30.0
+                        )
+                    ),
+                    "low_alignment_extra_padding_enabled": bool(
+                        self.config["performance"].get(
+                            "fine_low_alignment_extra_padding_enabled", False
+                        )
+                    ),
+                    "low_alignment_confidence_threshold": float(
+                        self.config["performance"].get(
+                            "fine_low_alignment_confidence_threshold", 0.80
+                        )
+                    ),
+                    "low_alignment_extra_padding_seconds": float(
+                        self.config["performance"].get(
+                            "fine_low_alignment_extra_padding_seconds", 30.0
+                        )
+                    ),
+                }
             write_json(layout.json_config / "fine_scan_windows.json", fine_window_report)
             eligible_fine_ids = {view.view_id for view in fine_views}
             for view in manifest.views:
@@ -5439,11 +5549,86 @@ class EvidencePipeline:
             )
             * 1000.0,
         )
+        candidate_list = list(candidates)
+        risk_extra_by_id: dict[str, float] = {}
+        perf = self.config["performance"]
+        if perf.get("fine_risk_window_expansion_enabled", False):
+            configured_actions = {
+                str(item).strip()
+                for item in perf.get("fine_risk_action_types", [])
+                if str(item).strip()
+            }
+            low_confidence_threshold = float(
+                perf.get("fine_risk_low_confidence_threshold", 0.70)
+            )
+            extra_padding_ms = max(
+                0.0,
+                float(perf.get("fine_risk_extra_padding_seconds", 30.0))
+                * 1000.0,
+            )
+            conflict_gap_ms = max(
+                0.0,
+                float(perf.get("fine_risk_conflict_gap_seconds", 15.0))
+                * 1000.0,
+            )
+            for candidate in candidate_list:
+                if (
+                    candidate.action_type.value in configured_actions
+                    or float(candidate.confidence) < low_confidence_threshold
+                ):
+                    risk_extra_by_id[candidate.candidate_id] = extra_padding_ms
+            active_candidates: list[ActionCandidate] = []
+            for current in sorted(
+                candidate_list,
+                key=lambda item: (item.global_start_ms, item.global_end_ms),
+            ):
+                active_candidates = [
+                    previous
+                    for previous in active_candidates
+                    if previous.global_end_ms + conflict_gap_ms
+                    >= current.global_start_ms
+                ]
+                for previous in active_candidates:
+                    if previous.action_type == current.action_type:
+                        continue
+                    risk_extra_by_id[previous.candidate_id] = extra_padding_ms
+                    risk_extra_by_id[current.candidate_id] = extra_padding_ms
+                active_candidates.append(current)
         grouped: dict[str, list[tuple[float, float]]] = {view_id: [] for view_id in infos}
-        for candidate in candidates:
-            global_start = candidate.global_start_ms - padding
-            global_end = candidate.global_end_ms + padding
+        for candidate in candidate_list:
+            candidate_padding = padding + risk_extra_by_id.get(
+                candidate.candidate_id, 0.0
+            )
             for view_id, info in infos.items():
+                alignment_extra = 0.0
+                transform = transforms[view_id]
+                if (
+                    perf.get("fine_low_alignment_extra_padding_enabled", False)
+                    and (
+                        transform.state != "aligned"
+                        or float(transform.confidence)
+                        < float(
+                            perf.get(
+                                "fine_low_alignment_confidence_threshold", 0.80
+                            )
+                        )
+                    )
+                ):
+                    alignment_extra = max(
+                        0.0,
+                        float(
+                            perf.get(
+                                "fine_low_alignment_extra_padding_seconds", 30.0
+                            )
+                        )
+                        * 1000.0,
+                    )
+                global_start = (
+                    candidate.global_start_ms - candidate_padding - alignment_extra
+                )
+                global_end = (
+                    candidate.global_end_ms + candidate_padding + alignment_extra
+                )
                 local_start = max(0.0, transforms[view_id].to_local(global_start))
                 local_end = min(info.duration_ms, transforms[view_id].to_local(global_end))
                 if local_end > local_start:

@@ -137,6 +137,58 @@ class FramePacket:
     gray: np.ndarray
     previous_gray: np.ndarray | None
     motion_score: float
+    raw_motion_score: float = 0.0
+    camera_motion_compensated: bool = False
+    camera_shift_norm: float = 0.0
+    quality_fallback_applied: bool = False
+
+
+def _camera_compensated_motion_score(
+    previous_signature: np.ndarray | None,
+    signature: np.ndarray,
+    *,
+    enabled: bool,
+    minimum_response: float,
+    maximum_shift_ratio: float,
+) -> tuple[float, float, bool, float]:
+    """Return raw and camera-compensated motion without changing legacy callers.
+
+    Phase correlation estimates the dominant whole-frame translation.  The
+    compensated value is admitted only when the estimate is reliable and
+    bounded; otherwise the established absolute-difference score is retained.
+    """
+
+    if previous_signature is None:
+        return 0.0, 0.0, False, 0.0
+    raw_motion = float(cv2.absdiff(signature, previous_signature).mean())
+    if not enabled:
+        return raw_motion, raw_motion, False, 0.0
+    try:
+        (shift_x, shift_y), response = cv2.phaseCorrelate(
+            previous_signature.astype(np.float32),
+            signature.astype(np.float32),
+        )
+    except cv2.error:
+        return raw_motion, raw_motion, False, 0.0
+    height, width = signature.shape[:2]
+    diagonal = max(float(np.hypot(width, height)), 1.0)
+    shift_ratio = float(np.hypot(shift_x, shift_y) / diagonal)
+    if (
+        not np.isfinite(response)
+        or not np.isfinite(shift_ratio)
+        or response < minimum_response
+        or shift_ratio > maximum_shift_ratio
+    ):
+        return raw_motion, raw_motion, False, shift_ratio
+    aligned = cv2.warpAffine(
+        signature,
+        np.asarray([[1.0, 0.0, -shift_x], [0.0, 1.0, -shift_y]], dtype=np.float32),
+        (width, height),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_REFLECT,
+    )
+    compensated = float(cv2.absdiff(aligned, previous_signature).mean())
+    return raw_motion, compensated, True, shift_ratio
 
 
 @dataclass
@@ -435,11 +487,50 @@ def _producer(
         for frame_index, local_ms, frame in frames:
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             signature = cv2.resize(gray, motion_signature_size, interpolation=cv2.INTER_AREA)
-            motion = (
-                float(cv2.absdiff(signature, previous_signature).mean())
-                if previous_signature is not None
-                else 0.0
+            compensation_enabled = bool(
+                phase == "motion_probe"
+                and perf.get("motion_probe_camera_motion_compensation", False)
             )
+            raw_motion, motion, compensated, shift_ratio = (
+                _camera_compensated_motion_score(
+                    previous_signature,
+                    signature,
+                    enabled=compensation_enabled,
+                    minimum_response=float(
+                        perf.get("motion_probe_camera_motion_min_response", 0.15)
+                    ),
+                    maximum_shift_ratio=float(
+                        perf.get("motion_probe_camera_motion_max_shift_ratio", 0.35)
+                    ),
+                )
+            )
+            quality_fallback_applied = False
+            if (
+                phase == "motion_probe"
+                and view.role == ViewRole.FIRST_PERSON
+                and perf.get("motion_probe_first_person_quality_fallback", False)
+                and previous_signature is not None
+            ):
+                blur_score = float(cv2.Laplacian(signature, cv2.CV_64F).var())
+                intensity_mean = float(signature.mean())
+                intensity_std = float(signature.std())
+                unusable = bool(
+                    blur_score < float(
+                        perf.get("motion_probe_first_person_min_laplacian_variance", 8.0)
+                    )
+                    or intensity_mean < float(
+                        perf.get("motion_probe_first_person_min_intensity", 10.0)
+                    )
+                    or intensity_std < float(
+                        perf.get("motion_probe_first_person_min_intensity_std", 4.0)
+                    )
+                )
+                if unusable:
+                    fallback_motion = raw_motion * float(
+                        perf.get("motion_probe_first_person_raw_motion_weight", 0.25)
+                    )
+                    quality_fallback_applied = fallback_motion > motion
+                    motion = max(motion, fallback_motion)
             previous_signature = signature
             if not persistent_sessions and local_ms + 0.5 < next_yolo_ms:
                 previous_gray = gray
@@ -453,6 +544,10 @@ def _producer(
                     gray=gray,
                     previous_gray=previous_gray,
                     motion_score=motion,
+                    raw_motion_score=raw_motion,
+                    camera_motion_compensated=compensated,
+                    camera_shift_norm=shift_ratio,
+                    quality_fallback_applied=quality_fallback_applied,
                 )
             )
             previous_gray = gray
@@ -1312,6 +1407,11 @@ def scan_videos(
         queue_wait_seconds = 0.0
         inference_seconds = 0.0
         postprocess_seconds = 0.0
+        raw_motion_score_sum = 0.0
+        effective_motion_score_sum = 0.0
+        compensated_motion_frame_count = 0
+        quality_fallback_frame_count = 0
+        maximum_camera_shift_norm = 0.0
         batch_wait_seconds = max(
             0.001,
             float(config["performance"].get("inference_batch_wait_ms", 25.0)) / 1000.0,
@@ -1321,6 +1421,9 @@ def scan_videos(
             nonlocal pending_frame_count, motion_sample_count, batch_started_at
             nonlocal microbatch_timeout_flushes, full_batch_flushes, control_only_flushes
             nonlocal inference_seconds, postprocess_seconds
+            nonlocal raw_motion_score_sum, effective_motion_score_sum
+            nonlocal compensated_motion_frame_count, quality_fallback_frame_count
+            nonlocal maximum_camera_shift_norm
             if not pending_items:
                 return
             frames = [item for item in pending_items if isinstance(item, FramePacket)]
@@ -1352,6 +1455,18 @@ def scan_videos(
                     ):
                         duplicate_timestamp_frames[item.view.view_id] += 1
                         continue
+                    raw_motion_score_sum += float(item.raw_motion_score)
+                    effective_motion_score_sum += float(item.motion_score)
+                    compensated_motion_frame_count += int(
+                        item.camera_motion_compensated
+                    )
+                    quality_fallback_frame_count += int(
+                        item.quality_fallback_applied
+                    )
+                    maximum_camera_shift_norm = max(
+                        maximum_camera_shift_norm,
+                        float(item.camera_shift_norm),
+                    )
                     tracked = (
                         trackers[item.view.view_id].update(boxes, item.local_ms)
                         if scanner is not None
@@ -1484,6 +1599,38 @@ def scan_videos(
                     "role_total_seconds": round(time.perf_counter() - role_started, 6),
                 }
             )
+            if phase == "motion_probe" and (
+                config["performance"].get(
+                    "motion_probe_camera_motion_compensation", False
+                )
+                or config["performance"].get(
+                    "motion_probe_first_person_quality_fallback", False
+                )
+            ):
+                sample_count = sum(
+                    len(keys) for keys in emitted_timestamp_keys.values()
+                )
+                runtime_report["motion_scoring"] = {
+                    "camera_motion_compensation_enabled": bool(
+                        config["performance"].get(
+                            "motion_probe_camera_motion_compensation", False
+                        )
+                    ),
+                    "sample_count": sample_count,
+                    "raw_motion_score_mean": round(
+                        raw_motion_score_sum / max(1, sample_count), 6
+                    ),
+                    "effective_motion_score_mean": round(
+                        effective_motion_score_sum / max(1, sample_count), 6
+                    ),
+                    "compensated_frame_count": compensated_motion_frame_count,
+                    "first_person_quality_fallback_frame_count": (
+                        quality_fallback_frame_count
+                    ),
+                    "maximum_camera_shift_norm": round(
+                        maximum_camera_shift_norm, 6
+                    ),
+                }
             runtime_path.write_text(
                 json.dumps(runtime_report, ensure_ascii=False, indent=2), encoding="utf-8"
             )

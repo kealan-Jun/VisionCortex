@@ -257,6 +257,14 @@ labvision serve --host 127.0.0.1 --port 8000
 从 `GET /api/runs/{run_id}` 查询。旧的 `POST /api/runs` 一次性 multipart 接口暂时保留
 用于兼容旧客户端，新页面不再使用它。API 只绑定本机，除非显式改为 `0.0.0.0`。
 
+同一浏览器机位既可上传一个连续视频，也可按顺序上传多个原始分片；两种输入都会
+转换为同一份 `RunManifest`，不会创建另一条分析链。新上传默认以 2 个文件并发、每个
+文件内部顺序分块传输，每块都必须通过 SHA-256；小文件保留完整 SHA-256，大文件用
+持久化有序分块哈希树封存，提交时不再从 NAS 全量重读。上传完成后、进入 GPU 队列前，
+服务会校验设备角色、媒体可读性、分片顺序和 CSV 时钟覆盖，并在
+`JSON-Config-Files/Input-Manifests/input_seal.json` 写入与 NAS 零复制入口一致的输入
+封条。未提交的会话可用 `DELETE /api/upload-sessions/{session_id}` 取消并释放预留空间。
+
 已完成档案不会依赖浏览器加载整份大 JSON 才能查找关键素材：`GET /api/key-events` 支持跨档案或指定档案的全文、动作类型、实验组、双视角和时间范围筛选，并通过与筛选条件绑定的 `cursor` 分页；`GET /api/key-events/{event_uid}` 返回事件及带 SHA-256 的素材引用；`GET /api/evidence/{evidence_uid}` 可一跳回到 `evidence_package.json` 的 JSON Pointer 和原视频物理分片；`GET /api/physical-changes` 查询明确观测到的对象前后状态变化，不会替 unknown 区间补状态。稳定事件 UID 格式为 `{archive_id}:{parent_event_id}:{event_id}`。SQLite/JSONL 都是权威归档 JSON 的派生产物，可随时重建，不会取代原 JSON。
 
 开发仓与稳定发布仓采用单向晋升，具体规则见 [双仓发布策略](docs/DUAL-REPOSITORY-RELEASE-POLICY.md)；旧 RealityLoopAI 仓库的全量只读审计与复用结论见 [旧仓库审计报告](docs/REALITYLOOP-LEGACY-REPOSITORY-AUDIT-20260817.md)。
@@ -281,7 +289,7 @@ labvision serve --host 127.0.0.1 --port 8000
 
 `run_metrics.json` 记录总墙钟耗时、各阶段起止/耗时，以及每个关键素材调用的输入 token、输出 token、总 token、缓存命中 token、延迟和重试次数；随后汇总关键素材阶段与整次运行。Token 只采用服务端 `usage`，缺失时保留 `null`，不做伪精确估算。
 
-运行期间，Web“任务进度”页直接读取归档账本，而不是展示估算值：`source_progress.json` 给出每路解码后端、分块进度与状态，`resource_telemetry_live.json` 给出 GPU/NVDEC、CPU、内存、网络与进程 I/O，`run_metrics_live.json` 给出已执行/已复用模型调用及输入/输出 Token。尚未开始的任务由本地 SQLite 队列在服务重启后继续领取；执行中断的任务会用同一运行身份重新进入执行器，检测分块和已完成的豆包结果按持久账本续用，而不是从零开始。
+运行期间，Web“任务进度”页直接读取归档账本，而不是展示估算值：`source_progress.json` 给出每路解码后端、分块进度与状态，`resource_telemetry_live.json` 给出 GPU/NVDEC、CPU、内存、网络与进程 I/O，`run_metrics_live.json` 给出已执行/已复用模型调用及输入/输出 Token。尚未开始的任务由本地 SQLite 队列在服务重启后继续领取；如果本地 SQLite 整体丢失，服务还会从归档中的已封存输入和 `queue_recovery.json` 重建尚未完成的浏览器/NAS 任务。执行中断的任务会用同一运行身份重新进入执行器，检测分块和已完成的豆包结果按持久账本续用，而不是从零开始。
 
 任务页按“原视频留存 → 预检/对齐 → 有界实验发现 → 实验片段 → 关键素材 → 证据验收 → 日报/PDF”七个用户环节展示。完成状态以 `JSON-Config-Files/Stage-Receipts/*.json` 的原子阶段回执为准，并明确显示每步归档目录、阶段耗时、当前/下一步、逐视角进度和数据更新时间；遥测超过 20 秒没有更新时会显式提示状态可能延迟，而不会误判任务已经停止。
 

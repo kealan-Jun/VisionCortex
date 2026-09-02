@@ -6,9 +6,11 @@ from collections import namedtuple
 from pathlib import Path
 
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 
 from labvision_evidence import api
+from labvision_evidence.run_queue import DurableRunQueue
 from labvision_evidence.upload_sessions import (
     StorageReservationError,
     UploadSessionStore,
@@ -32,6 +34,10 @@ def _settings(tmp_path: Path) -> dict:
         },
         "web_upload": {
             "chunk_size_mib": 1,
+            "parallel_files": 2,
+            "chunk_sha256_required": True,
+            "full_file_sha256_max_gib": 4,
+            "prequeue_media_preflight_enabled": False,
             "session_ttl_hours": 24,
             "processing_headroom_ratio": 0,
             "safety_headroom_ratio": 0,
@@ -97,6 +103,19 @@ def _reset_api_stores(monkeypatch, tmp_path: Path) -> dict:
     monkeypatch.setattr(api, "_schedule_job", lambda *_args, **_kwargs: "sqlite")
     api._runs.clear()
     return settings
+
+
+def _upload_all(client: TestClient, session_id: str, files: dict[str, bytes]) -> None:
+    for file_id, content in files.items():
+        response = client.patch(
+            f"/api/upload-sessions/{session_id}/files/{file_id}",
+            content=content,
+            headers={
+                "Upload-Offset": "0",
+                "X-Chunk-SHA256": hashlib.sha256(content).hexdigest(),
+            },
+        )
+        assert response.status_code == 200
 
 
 def test_storage_reservations_subtract_other_sessions(tmp_path):
@@ -233,7 +252,7 @@ def test_resumable_upload_tracks_offsets_and_finalizes_once(monkeypatch, tmp_pat
     )
     assert manifest.is_file()
     receipt_payload = json.loads(receipt.read_text(encoding="utf-8"))
-    assert receipt_payload["upload_protocol"] == "resumable_chunks_v1"
+    assert receipt_payload["upload_protocol"] == "resumable_chunks_v2"
 
 
 def test_dynamic_capacity_refuses_only_when_current_space_is_insufficient(
@@ -347,3 +366,183 @@ def test_stale_open_session_is_expired_and_scoped_archive_is_removed(
     assert expired is not None
     assert expired["status"] == "expired"
     assert not archive_path.exists()
+
+
+def test_segmented_browser_views_keep_one_manifest_and_input_seal(
+    monkeypatch, tmp_path
+):
+    _reset_api_stores(monkeypatch, tmp_path)
+    client = TestClient(api.app)
+    payload = {
+        "experiment_name": "segmented-upload",
+        "files": [
+            {"file_id": "video-0", "kind": "video", "file_index": 0, "name": "first-001.mp4", "size": 3},
+            {"file_id": "video-1", "kind": "video", "file_index": 1, "name": "first-002.mp4", "size": 3},
+            {"file_id": "video-2", "kind": "video", "file_index": 2, "name": "third.mp4", "size": 3},
+        ],
+        "view_specs": [
+            {
+                "view_id": "first-view",
+                "role": "first_person",
+                "segments": [{"video_index": 0}, {"video_index": 1}],
+            },
+            {
+                "view_id": "third-view",
+                "role": "third_person",
+                "video_index": 2,
+            },
+        ],
+    }
+    created = client.post("/api/upload-sessions", json=payload)
+    assert created.status_code == 201
+    session_id = created.json()["session_id"]
+    _upload_all(client, session_id, {"video-0": b"aaa", "video-1": b"bbb", "video-2": b"ccc"})
+
+    finalized = client.post(f"/api/upload-sessions/{session_id}/finalize")
+
+    assert finalized.status_code == 202
+    session = api._upload_sessions.get(session_id)
+    manifest_path = Path(session["archive_root"]) / "JSON-Config-Files" / "input_manifest.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    assert len(manifest["views"][0]["segments"]) == 2
+    assert manifest["views"][1]["video"].endswith("third.mp4")
+    seal_path = Path(session["archive_root"]) / "JSON-Config-Files" / "Input-Manifests" / "input_seal.json"
+    seal = json.loads(seal_path.read_text(encoding="utf-8"))
+    assert seal["source_mode"] == "browser_resumable_upload"
+    assert seal["source_count"] == 3
+
+
+def test_browser_role_conflict_is_blocked_by_device_registry(monkeypatch, tmp_path):
+    settings = _reset_api_stores(monkeypatch, tmp_path)
+    registry = tmp_path / "registry.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "schema_version": "visioncortex-device-registry/1",
+                "devices": {"first-view": {"expected_role": "third_person"}},
+                "experiment_role_overrides": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    settings["storage"]["device_registry_path"] = str(registry)
+
+    response = TestClient(api.app).post(
+        "/api/upload-sessions", json=_payload(b"first", b"third")
+    )
+
+    assert response.status_code == 400
+    assert "index_registry_role_mismatch" in response.text
+
+
+def test_cancel_open_upload_releases_reservation_and_scoped_files(monkeypatch, tmp_path):
+    _reset_api_stores(monkeypatch, tmp_path)
+    client = TestClient(api.app)
+    created = client.post(
+        "/api/upload-sessions", json=_payload(b"first", b"third")
+    ).json()
+    session_id = created["session_id"]
+    session = api._upload_sessions.get(session_id)
+    archive_path = Path(session["archive_root"])
+
+    cancelled = client.delete(f"/api/upload-sessions/{session_id}")
+
+    assert cancelled.status_code == 200
+    assert cancelled.json()["released_bytes"] == created["reserved_bytes"]
+    assert api._upload_sessions.get(session_id)["status"] == "cancelled"
+    assert not archive_path.exists()
+    assert client.post(f"/api/upload-sessions/{session_id}/finalize").status_code == 409
+
+
+def test_new_chunk_requires_sha256_header(monkeypatch, tmp_path):
+    _reset_api_stores(monkeypatch, tmp_path)
+    client = TestClient(api.app)
+    session_id = client.post(
+        "/api/upload-sessions", json=_payload(b"first", b"third")
+    ).json()["session_id"]
+
+    response = client.patch(
+        f"/api/upload-sessions/{session_id}/files/video-0",
+        content=b"first",
+        headers={"Upload-Offset": "0"},
+    )
+
+    assert response.status_code == 428
+
+
+def test_large_file_mode_finalizes_from_persistent_chunk_tree_without_reread(
+    monkeypatch, tmp_path
+):
+    settings = _reset_api_stores(monkeypatch, tmp_path)
+    settings["web_upload"]["full_file_sha256_max_gib"] = 0
+    monkeypatch.setattr(
+        api,
+        "_sha256_path",
+        lambda _path: (_ for _ in ()).throw(AssertionError("unexpected full reread")),
+    )
+    client = TestClient(api.app)
+    created = client.post(
+        "/api/upload-sessions", json=_payload(b"first", b"third")
+    ).json()
+    _upload_all(
+        client,
+        created["session_id"],
+        {"video-0": b"first", "video-1": b"third"},
+    )
+
+    response = client.post(
+        f"/api/upload-sessions/{created['session_id']}/finalize"
+    )
+
+    assert response.status_code == 202
+    session = api._upload_sessions.get(created["session_id"])
+    assert all(item["sha256"] is None for item in session["files"])
+    assert all(
+        item["content_hash_algorithm"] == "visioncortex-upload-chunk-tree-v1"
+        for item in session["files"]
+    )
+
+
+def test_archive_receipt_rebuilds_queue_after_local_sqlite_loss(monkeypatch, tmp_path):
+    settings = _reset_api_stores(monkeypatch, tmp_path)
+    client = TestClient(api.app)
+    created = client.post(
+        "/api/upload-sessions", json=_payload(b"first", b"third")
+    ).json()
+    _upload_all(
+        client,
+        created["session_id"],
+        {"video-0": b"first", "video-1": b"third"},
+    )
+    finalized = client.post(
+        f"/api/upload-sessions/{created['session_id']}/finalize"
+    ).json()
+    run_id = finalized["run_id"]
+    recovered_queue = DurableRunQueue(tmp_path / "recovered" / "queue.sqlite3")
+    monkeypatch.setattr(api, "_persistent_queue", recovered_queue)
+    api._runs.clear()
+
+    api._recover_jobs_from_archive_receipts(settings)
+
+    recovered = recovered_queue.get_job(run_id)
+    assert recovered is not None
+    assert recovered["status"] == "queued"
+    assert api._runs[run_id]["recovered_from_archive_receipt"] is True
+
+    session = api._upload_sessions.get(created["session_id"])
+    seal_path = (
+        Path(session["archive_root"])
+        / "JSON-Config-Files"
+        / "Input-Manifests"
+        / "input_seal.json"
+    )
+    seal = json.loads(seal_path.read_text(encoding="utf-8"))
+    seal["source_count"] += 1
+    seal_path.write_text(json.dumps(seal), encoding="utf-8")
+    rejected_queue = DurableRunQueue(tmp_path / "tampered" / "queue.sqlite3")
+    monkeypatch.setattr(api, "_persistent_queue", rejected_queue)
+    api._runs.clear()
+
+    api._recover_jobs_from_archive_receipts(settings)
+
+    assert rejected_queue.get_job(run_id) is None

@@ -398,6 +398,14 @@ storage:
 # on current archive-volume free space after subtracting active reservations.
 web_upload:
   chunk_size_mib: 16
+  parallel_files: 2
+  chunk_sha256_required: true
+  # Small uploads retain a conventional whole-file SHA-256. Larger uploads use
+  # the persistent ordered chunk tree so finalization never rereads hundreds of GiB.
+  full_file_sha256_max_gib: 4
+  prequeue_media_preflight_enabled: true
+  prequeue_probe_workers: 4
+  prequeue_clock_overlap_tolerance_ms: 2500
   session_ttl_hours: 168
   processing_headroom_ratio: 0.35
   safety_headroom_ratio: 0.10

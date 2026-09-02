@@ -192,11 +192,56 @@ models:
 performance:
   profile: rtx3090ti-24gb-ubuntu-dynamic-multiview
   tensor_rt: required
+  # Strengthen the existing motion -> coarse -> fine funnel in place. The
+  # 0.5 FPS exact grid contains every former 0.1 FPS timestamp, while all live
+  # views participate and wearable-camera translation is compensated before
+  # motion bursts are ranked.
+  motion_probe_fps: 0.5
+  motion_probe_max_width: 416
+  motion_probe_keyframes_only: false
+  motion_probe_run_yolo: false
+  coarse_reuse_motion_probe: false
+  motion_probe_all_views: true
+  motion_probe_camera_motion_compensation: true
+  motion_probe_camera_motion_min_response: 0.15
+  motion_probe_camera_motion_max_shift_ratio: 0.35
+  motion_probe_first_person_quality_fallback: true
+  motion_probe_first_person_raw_motion_weight: 0.25
+  # The original coarse node now performs its own all-view full-timeline scan.
+  # A 2 FPS grid contains the former 0.1 FPS evidence grid and removes the
+  # early-window blind spot without introducing a parallel pipeline.
+  coarse_detection_fps: 2.0
+  coarse_image_size: 416
+  coarse_keyframes_only: false
+  coarse_all_views: true
+  coarse_full_timeline_scan: true
+  coarse_comprehensive_candidate_union: true
+  coarse_open_vocabulary_recall_enabled: true
+  coarse_open_vocabulary_motion_percentile: 90.0
+  coarse_open_vocabulary_frames_per_hour_per_view: 2
+  coarse_open_vocabulary_candidate_window_seconds: 4.0
+  coarse_open_vocabulary_max_actor_object_gap_norm: 0.08
+  # Fine scanning remains the existing stage. All selected third-person views
+  # enter its first wave, the 20 FPS grid is a strict superset of the former
+  # 10 FPS grid, and risk/alignment rules can only expand existing windows.
+  detection_fps: 20.0
+  fine_initial_third_person_views: 999
+  fine_risk_window_expansion_enabled: true
+  fine_risk_extra_padding_seconds: 30.0
+  fine_risk_low_confidence_threshold: 0.70
+  fine_risk_conflict_gap_seconds: 15.0
+  fine_risk_action_types:
+    - liquid_movement
+    - container_state_change
+    - device_panel_operation
+  fine_low_alignment_extra_padding_enabled: true
+  fine_low_alignment_confidence_threshold: 0.80
+  fine_low_alignment_extra_padding_seconds: 30.0
   # Short recordings can contain one decisive action anywhere in the clip.
-  # Their entire indexed timeline is cheap enough to scan at the normal 10 FPS
-  # on every eligible view, so the 0.1 FPS motion sentinel is never their sole
-  # recall path. Multi-hour sources retain the progressive full-timeline
-  # funnel and are certified separately on held-out action windows.
+  # Their entire indexed timeline is cheap enough to scan at the configured
+  # fine rate on every eligible view. Multi-hour sources retain the same
+  # strengthened motion/coarse/fine funnel and are certified separately on
+  # held-out action windows.
   auto_exhaustive_short_timeline_enabled: true
   auto_exhaustive_short_timeline_seconds: 600
   # Ultralytics expands a dynamic 640 profile up to 1920x1920 while building.

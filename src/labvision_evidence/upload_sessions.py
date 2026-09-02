@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import time
@@ -80,6 +81,7 @@ class UploadSessionStore:
                     kind TEXT NOT NULL CHECK (kind IN ('video', 'timestamp_csv')),
                     file_index INTEGER NOT NULL,
                     view_id TEXT NOT NULL,
+                    segment_ordinal INTEGER,
                     source_name TEXT NOT NULL,
                     stored_name TEXT NOT NULL,
                     expected_bytes INTEGER NOT NULL,
@@ -87,11 +89,50 @@ class UploadSessionStore:
                     final_path TEXT NOT NULL,
                     partial_path TEXT NOT NULL,
                     sha256 TEXT,
+                    content_hash TEXT,
+                    content_hash_algorithm TEXT,
                     completed_at REAL,
                     PRIMARY KEY (session_id, file_id),
                     UNIQUE (session_id, kind, file_index),
                     FOREIGN KEY (session_id) REFERENCES upload_sessions(session_id)
                 );
+
+                CREATE TABLE IF NOT EXISTS upload_chunks (
+                    session_id TEXT NOT NULL,
+                    file_id TEXT NOT NULL,
+                    chunk_offset INTEGER NOT NULL,
+                    chunk_length INTEGER NOT NULL,
+                    sha256 TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    PRIMARY KEY (session_id, file_id, chunk_offset),
+                    FOREIGN KEY (session_id, file_id)
+                        REFERENCES upload_files(session_id, file_id)
+                        ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_upload_chunks_file
+                    ON upload_chunks(session_id, file_id, chunk_offset);
+                """
+            )
+            columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(upload_files)")
+            }
+            if "content_hash" not in columns:
+                connection.execute("ALTER TABLE upload_files ADD COLUMN content_hash TEXT")
+            if "content_hash_algorithm" not in columns:
+                connection.execute(
+                    "ALTER TABLE upload_files ADD COLUMN content_hash_algorithm TEXT"
+                )
+            if "segment_ordinal" not in columns:
+                connection.execute(
+                    "ALTER TABLE upload_files ADD COLUMN segment_ordinal INTEGER"
+                )
+            connection.execute(
+                """
+                UPDATE upload_files
+                SET content_hash = sha256, content_hash_algorithm = 'sha256'
+                WHERE sha256 IS NOT NULL AND content_hash IS NULL
                 """
             )
 
@@ -183,10 +224,10 @@ class UploadSessionStore:
             connection.executemany(
                 """
                 INSERT INTO upload_files(
-                    session_id, file_id, kind, file_index, view_id,
+                    session_id, file_id, kind, file_index, view_id, segment_ordinal,
                     source_name, stored_name, expected_bytes,
                     final_path, partial_path
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -195,6 +236,7 @@ class UploadSessionStore:
                         item["kind"],
                         int(item["file_index"]),
                         item["view_id"],
+                        item.get("segment_ordinal"),
                         item["source_name"],
                         item["stored_name"],
                         int(item["expected_bytes"]),
@@ -260,6 +302,14 @@ class UploadSessionStore:
                 raise ValueError("upload progress exceeds the declared file size")
             connection.execute(
                 """
+                DELETE FROM upload_chunks
+                WHERE session_id = ? AND file_id = ?
+                  AND chunk_offset + chunk_length > ?
+                """,
+                (session_id, file_id, int(uploaded_bytes)),
+            )
+            connection.execute(
+                """
                 UPDATE upload_sessions
                 SET updated_at = ?, expires_at = ?
                 WHERE session_id = ? AND status = 'open'
@@ -267,12 +317,86 @@ class UploadSessionStore:
                 (observed_at, float(expires_at), session_id),
             )
 
+    def record_chunk(
+        self,
+        session_id: str,
+        file_id: str,
+        chunk_offset: int,
+        chunk_length: int,
+        sha256: str,
+        *,
+        now: float | None = None,
+    ) -> None:
+        observed_at = time.time() if now is None else float(now)
+        if chunk_offset < 0 or chunk_length <= 0:
+            raise ValueError("invalid upload chunk range")
+        with self._connect() as connection:
+            existing = connection.execute(
+                """
+                SELECT chunk_length, sha256 FROM upload_chunks
+                WHERE session_id = ? AND file_id = ? AND chunk_offset = ?
+                """,
+                (session_id, file_id, int(chunk_offset)),
+            ).fetchone()
+            if existing is not None:
+                if int(existing["chunk_length"]) != int(chunk_length) or str(
+                    existing["sha256"]
+                ) != str(sha256):
+                    raise ValueError("upload chunk ledger conflicts with retained bytes")
+                return
+            connection.execute(
+                """
+                INSERT INTO upload_chunks(
+                    session_id, file_id, chunk_offset, chunk_length, sha256, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session_id,
+                    file_id,
+                    int(chunk_offset),
+                    int(chunk_length),
+                    str(sha256),
+                    observed_at,
+                ),
+            )
+
+    def chunks(self, session_id: str, file_id: str) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT chunk_offset, chunk_length, sha256
+                FROM upload_chunks
+                WHERE session_id = ? AND file_id = ?
+                ORDER BY chunk_offset
+                """,
+                (session_id, file_id),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def chunk_tree_identity(
+        self, session_id: str, file_id: str, expected_bytes: int
+    ) -> str | None:
+        chunks = self.chunks(session_id, file_id)
+        offset = 0
+        digest = hashlib.sha256(b"visioncortex-upload-chunk-tree-v1\n")
+        for chunk in chunks:
+            chunk_offset = int(chunk["chunk_offset"])
+            chunk_length = int(chunk["chunk_length"])
+            chunk_sha256 = str(chunk["sha256"])
+            if chunk_offset != offset or len(chunk_sha256) != 64:
+                return None
+            digest.update(f"{chunk_offset}:{chunk_length}:{chunk_sha256}\n".encode("ascii"))
+            offset += chunk_length
+        return digest.hexdigest() if offset == int(expected_bytes) else None
+
     def complete_file(
         self,
         session_id: str,
         file_id: str,
-        sha256: str,
+        sha256: str | None,
         *,
+        content_hash: str,
+        content_hash_algorithm: str,
         now: float | None = None,
     ) -> None:
         observed_at = time.time() if now is None else float(now)
@@ -280,11 +404,19 @@ class UploadSessionStore:
             updated = connection.execute(
                 """
                 UPDATE upload_files
-                SET uploaded_bytes = expected_bytes, sha256 = ?, completed_at = ?
+                SET uploaded_bytes = expected_bytes, sha256 = ?, content_hash = ?,
+                    content_hash_algorithm = ?, completed_at = ?
                 WHERE session_id = ? AND file_id = ?
                   AND uploaded_bytes = expected_bytes
                 """,
-                (sha256, observed_at, session_id, file_id),
+                (
+                    sha256,
+                    content_hash,
+                    content_hash_algorithm,
+                    observed_at,
+                    session_id,
+                    file_id,
+                ),
             ).rowcount
             if updated != 1:
                 raise ValueError("file is not fully uploaded")
@@ -319,7 +451,7 @@ class UploadSessionStore:
                 SELECT COUNT(*) AS count
                 FROM upload_files
                 WHERE session_id = ?
-                  AND (uploaded_bytes != expected_bytes OR sha256 IS NULL)
+                  AND (uploaded_bytes != expected_bytes OR content_hash IS NULL)
                 """,
                 (session_id,),
             ).fetchone()
@@ -347,6 +479,19 @@ class UploadSessionStore:
                 UPDATE upload_sessions
                 SET status = 'released', updated_at = ?
                 WHERE session_id = ? AND status IN ('open', 'finalized')
+                """,
+                (observed_at, session_id),
+            ).rowcount
+        return updated == 1
+
+    def cancel(self, session_id: str, *, now: float | None = None) -> bool:
+        observed_at = time.time() if now is None else float(now)
+        with self._connect() as connection:
+            updated = connection.execute(
+                """
+                UPDATE upload_sessions
+                SET status = 'cancelled', updated_at = ?
+                WHERE session_id = ? AND status = 'open' AND run_id IS NULL
                 """,
                 (observed_at, session_id),
             ).rowcount

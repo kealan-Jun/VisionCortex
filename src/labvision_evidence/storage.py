@@ -20,6 +20,7 @@ from typing import Any, Callable, Sequence
 import yaml
 
 from .device_registry import load_device_registry, resolve_view_role
+from .input_seal import build_input_seal, write_input_seal
 from .schemas import RunManifest, VideoSegmentInput, ViewInput, ViewRole
 
 
@@ -169,6 +170,23 @@ def read_source_file_edges(
         int(snapshot["mtime_ns"]),
         max(4096, int(window_bytes)),
     )
+
+
+def _bounded_source_fingerprint(path: Path) -> dict[str, Any]:
+    """Fingerprint a large NAS source with bounded edge reads and explicit strength."""
+
+    head, tail, size_bytes = read_source_file_edges(path, window_bytes=64 * 1024)
+    digest = hashlib.sha256(b"visioncortex-source-edge-fingerprint-v1\n")
+    digest.update(str(size_bytes).encode("ascii"))
+    digest.update(b"\n")
+    digest.update(head)
+    digest.update(b"\n--tail--\n")
+    digest.update(tail)
+    return {
+        "source_fingerprint": digest.hexdigest(),
+        "source_fingerprint_algorithm": "sha256-size-plus-64k-head-tail-v1",
+        "identity_strength": "bounded_fingerprint_not_full_content_hash",
+    }
 
 
 def source_cache_diagnostics() -> dict[str, int]:
@@ -1098,6 +1116,70 @@ def prepare_from_nas_index(
         original_index_path,
         json.dumps(original_index, ensure_ascii=False, indent=2),
     )
+    fingerprint_workers = max(
+        1,
+        min(
+            int(config["performance"].get("source_stat_workers", 24)),
+            len(source_paths),
+        ),
+    )
+    with ThreadPoolExecutor(
+        max_workers=fingerprint_workers,
+        thread_name_prefix="input-seal",
+    ) as executor:
+        fingerprint_futures = {
+            executor.submit(_bounded_source_fingerprint, path): path
+            for path in source_paths
+        }
+        source_fingerprints = {
+            path: future.result()
+            for future, path in fingerprint_futures.items()
+        }
+    seal_sources: list[dict[str, Any]] = []
+    for view in views:
+        for ordinal, segment in enumerate(view.segments, 1):
+            video_snapshot = source_snapshots[segment.video]
+            seal_sources.append(
+                {
+                    "kind": "video",
+                    "view_id": view.view_id,
+                    "segment_ordinal": ordinal,
+                    "path": str(segment.video),
+                    "size_bytes": int(video_snapshot.get("size_bytes") or 0),
+                    "mtime_ns": video_snapshot.get("mtime_ns"),
+                    **source_fingerprints[segment.video],
+                }
+            )
+            if segment.timestamps_csv is not None:
+                clock_snapshot = source_snapshots[segment.timestamps_csv]
+                seal_sources.append(
+                    {
+                        "kind": "timestamp_csv",
+                        "view_id": view.view_id,
+                        "segment_ordinal": ordinal,
+                        "path": str(segment.timestamps_csv),
+                        "size_bytes": int(clock_snapshot.get("size_bytes") or 0),
+                        "mtime_ns": clock_snapshot.get("mtime_ns"),
+                        **source_fingerprints[segment.timestamps_csv],
+                    }
+                )
+    input_seal = build_input_seal(
+        manifest,
+        source_mode="nas_segmented_virtual_timeline",
+        sources=seal_sources,
+        role_resolution=role_receipt_payload,
+        copied_source_bytes=0,
+        preflight={
+            "schema_version": "visioncortex-prequeue-input-preflight/1",
+            "status": "metadata_validated_media_probe_pending",
+            "source_validation": source_validation,
+            "clock_window_omission_count": len(omitted_out_of_window_segments),
+        },
+    )
+    input_seal_path = write_input_seal(
+        manifest_root / "input_seal.json",
+        input_seal,
+    )
     readme_path = original_root / "README.txt"
     _atomic_write_text(
         readme_path,
@@ -1115,6 +1197,8 @@ def prepare_from_nas_index(
         "playlists": [str(path) for path in playlist_paths],
         "readme": str(readme_path),
         "source_copy_bytes": 0,
+        "input_seal": str(input_seal_path),
+        "input_seal_sha256": input_seal["seal_sha256"],
     }
     _atomic_write_text(
         manifest_root / "nas_ingest.json",
@@ -1145,6 +1229,7 @@ def prepare_from_nas_index(
                         str(manifest_path),
                         str(manifest_root / "nas_ingest.json"),
                         str(role_receipt_path),
+                        str(input_seal_path),
                     ],
                 },
                 ensure_ascii=False,

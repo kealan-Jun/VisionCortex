@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import hmac
 import json
@@ -35,6 +36,9 @@ from .annotation_workspace import (
     resolve_annotation_image,
 )
 from .config import load_config
+from .device_registry import load_device_registry, resolve_view_role
+from .input_preflight import preflight_manifest_inputs
+from .input_seal import build_input_seal, verify_input_seal, write_input_seal
 from .indexing import (
     INDEX_DB_NAME,
     INDEX_MANIFEST_NAME,
@@ -47,7 +51,7 @@ from .pagination import decode_cursor, encode_cursor
 from .pathing import archive_contains, archive_relative_posix
 from .pipeline import EvidencePipeline
 from .run_queue import DurableRunQueue, QueuedRunJob
-from .schemas import RunManifest, ViewInput
+from .schemas import RunManifest, VideoSegmentInput, ViewInput
 from .storage import (
     ARCHIVE_DIRECTORIES,
     fixed_archive_staging_paths,
@@ -72,6 +76,7 @@ async def _lifespan(_: FastAPI):
     _initialize_persistent_queue(settings)
     _expire_stale_upload_sessions(settings)
     try:
+        _recover_jobs_from_archive_receipts(settings)
         _recover_orphaned_tasks()
         _start_queue_worker()
         yield
@@ -523,12 +528,24 @@ def _upload_policy(settings: dict[str, Any]) -> dict[str, Any]:
     minimum_safety_gib = max(
         0.0, float(configured.get("minimum_safety_headroom_gib", 10.0))
     )
+    parallel_files = max(1, min(4, int(configured.get("parallel_files", 2))))
+    full_file_sha256_max_gib = max(
+        0.0, float(configured.get("full_file_sha256_max_gib", 4.0))
+    )
     return {
         "chunk_size_bytes": chunk_size_mib * 1024 * 1024,
         "session_ttl_seconds": session_ttl_hours * 3600.0,
         "processing_headroom_ratio": processing_ratio,
         "safety_headroom_ratio": safety_ratio,
         "minimum_safety_bytes": math.ceil(minimum_safety_gib * 1024**3),
+        "parallel_files": parallel_files,
+        "full_file_sha256_max_bytes": math.ceil(full_file_sha256_max_gib * 1024**3),
+        "prequeue_media_preflight_enabled": bool(
+            configured.get("prequeue_media_preflight_enabled", True)
+        ),
+        "chunk_sha256_required": bool(
+            configured.get("chunk_sha256_required", True)
+        ),
     }
 
 
@@ -549,7 +566,10 @@ def _unique_upload_archive_name(settings: dict[str, Any], experiment_name: str) 
 
 
 def _parse_upload_session_files(
-    payload: dict[str, Any], archive_path: Path, session_id: str
+    payload: dict[str, Any],
+    archive_path: Path,
+    session_id: str,
+    settings: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
     specs = payload.get("view_specs")
     raw_files = payload.get("files")
@@ -599,93 +619,203 @@ def _parse_upload_session_files(
         range(len(videos))
     ):
         raise HTTPException(400, "视频至少需要两路，且 video_index 必须从 0 连续编号")
-    if len(specs) != len(videos):
-        raise HTTPException(400, "view_specs 数量必须与视频路数一致")
+    if len(specs) < 2:
+        raise HTTPException(400, "至少需要两个视角")
 
     validation_views: list[ViewInput] = []
     normalized_specs: list[dict[str, Any]] = []
     used_video_indexes: set[int] = set()
     used_csv_indexes: set[int] = set()
     used_paths: set[Path] = set()
+    try:
+        registry = load_device_registry(
+            ((settings or {}).get("storage") or {}).get("device_registry_path")
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(500, f"设备角色注册表不可用: {exc}") from exc
     for position, raw_spec in enumerate(specs):
         if not isinstance(raw_spec, dict):
             raise HTTPException(400, f"view_specs[{position}] 必须是对象")
         try:
-            video_index = int(raw_spec.get("video_index", position))
-            csv_value = raw_spec.get("csv_index")
-            csv_index = int(csv_value) if csv_value is not None else None
             calibration_hint_ms = float(raw_spec.get("calibration_hint_ms", 0.0))
         except (TypeError, ValueError) as exc:
             raise HTTPException(400, f"view_specs[{position}] 的文件映射无效") from exc
-        video_file = by_kind_index.get(("video", video_index))
-        if video_file is None:
-            raise HTTPException(400, f"view_specs[{position}] 引用了不存在的视频")
-        if video_index in used_video_indexes:
-            raise HTTPException(400, "同一个视频不能映射到多个视角")
-        used_video_indexes.add(video_index)
-        csv_file = (
-            by_kind_index.get(("timestamp_csv", csv_index))
-            if csv_index is not None
-            else None
-        )
-        if csv_index is not None and csv_file is None:
-            raise HTTPException(400, f"view_specs[{position}] 引用了不存在的 CSV")
-        if csv_index is not None:
-            if csv_index in used_csv_indexes:
-                raise HTTPException(400, "同一个 CSV 不能映射到多个视角")
-            used_csv_indexes.add(csv_index)
+        raw_segments = raw_spec.get("segments")
+        segmented_layout = raw_segments is not None
+        if segmented_layout:
+            if not isinstance(raw_segments, list) or not raw_segments:
+                raise HTTPException(400, f"view_specs[{position}].segments 必须是非空数组")
+            mapping_items = raw_segments
+        else:
+            mapping_items = [
+                {
+                    "video_index": raw_spec.get("video_index", position),
+                    "csv_index": raw_spec.get("csv_index"),
+                }
+            ]
+        mappings: list[tuple[int, int | None, dict[str, Any], dict[str, Any] | None]] = []
+        for segment_position, raw_mapping in enumerate(mapping_items):
+            if not isinstance(raw_mapping, dict):
+                raise HTTPException(
+                    400,
+                    f"view_specs[{position}].segments[{segment_position}] 必须是对象",
+                )
+            try:
+                video_index = int(raw_mapping.get("video_index"))
+                csv_value = raw_mapping.get("csv_index")
+                csv_index = int(csv_value) if csv_value is not None else None
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(
+                    400,
+                    f"view_specs[{position}] 第 {segment_position + 1} 段映射无效",
+                ) from exc
+            video_file = by_kind_index.get(("video", video_index))
+            if video_file is None:
+                raise HTTPException(
+                    400,
+                    f"view_specs[{position}] 第 {segment_position + 1} 段引用了不存在的视频",
+                )
+            if video_index in used_video_indexes:
+                raise HTTPException(400, "同一个视频不能映射到多个视角或分片")
+            used_video_indexes.add(video_index)
+            csv_file = (
+                by_kind_index.get(("timestamp_csv", csv_index))
+                if csv_index is not None
+                else None
+            )
+            if csv_index is not None and csv_file is None:
+                raise HTTPException(
+                    400,
+                    f"view_specs[{position}] 第 {segment_position + 1} 段引用了不存在的 CSV",
+                )
+            if csv_index is not None:
+                if csv_index in used_csv_indexes:
+                    raise HTTPException(400, "同一个 CSV 不能映射到多个视角或分片")
+                used_csv_indexes.add(csv_index)
+            mappings.append((video_index, csv_index, video_file, csv_file))
         view_id = _safe_file_name(
             str(raw_spec.get("view_id") or f"view-{position + 1:02d}"),
             f"view-{position + 1:02d}",
         )
-        role = str(raw_spec.get("role") or "")
+        requested_role = str(raw_spec.get("role") or "")
+        role_resolution = resolve_view_role(
+            registry,
+            archive_path.name,
+            view_id,
+            requested_role,
+        )
+        role_resolution["input_source"] = "browser_user_declared"
+        if view_id not in (registry.get("devices") or {}):
+            role_resolution["resolution_source"] = "browser_user_declared"
+        elif role_resolution.get("resolution_source") == "experiment_record_index":
+            role_resolution["resolution_source"] = (
+                "browser_user_declared_confirmed_by_device_registry"
+            )
+        if role_resolution.get("blocking_reasons") or not role_resolution.get(
+            "resolved_role"
+        ):
+            raise HTTPException(
+                400,
+                {
+                    "message": f"机位 {view_id} 的视角角色与设备注册表冲突",
+                    "view_id": view_id,
+                    "blocking_reasons": role_resolution.get("blocking_reasons"),
+                    "requested_role": requested_role,
+                    "registry_expected_role": role_resolution.get(
+                        "registry_expected_role"
+                    ),
+                },
+            )
+        role = str(role_resolution["resolved_role"])
         normalized_spec = {
             "view_id": view_id,
             "role": role,
-            "video_index": video_index,
             "calibration_hint_ms": calibration_hint_ms,
+            "source_layout": "segments" if segmented_layout else "single",
+            "role_resolution": role_resolution,
         }
-        if csv_index is not None:
-            normalized_spec["csv_index"] = csv_index
+        normalized_mappings = [
+            {
+                "video_index": video_index,
+                **({"csv_index": csv_index} if csv_index is not None else {}),
+            }
+            for video_index, csv_index, _video_file, _csv_file in mappings
+        ]
+        if segmented_layout:
+            normalized_spec["segments"] = normalized_mappings
+        else:
+            normalized_spec.update(normalized_mappings[0])
         normalized_specs.append(normalized_spec)
 
-        for file_item in (video_file, csv_file):
-            if file_item is None:
-                continue
-            source_name = _safe_file_name(
-                file_item["source_name"],
-                "video" if file_item["kind"] == "video" else "timestamps",
-            )
-            prefix = (
-                f"video-{int(file_item['file_index']) + 1:02d}-"
-                if file_item["kind"] == "video"
-                else f"timestamps-{int(file_item['file_index']) + 1:02d}-"
-            )
-            stored_name = f"{prefix}{source_name}"
-            final_path = archive_path / "Original-Experiment-Videos" / view_id / stored_name
-            if final_path in used_paths:
-                raise HTTPException(400, "上传文件的目标路径发生冲突")
-            used_paths.add(final_path)
-            file_item.update(
-                {
-                    "view_id": view_id,
-                    "stored_name": stored_name,
-                    "final_path": final_path,
-                    "partial_path": final_path.with_name(
-                        f".{stored_name}.upload-{session_id}.partial"
-                    ),
-                }
-            )
-        try:
-            validation_views.append(
-                ViewInput(
-                    view_id=view_id,
-                    role=role,
-                    video=Path(f"/{view_id}.mp4"),
-                    timestamps_csv=(Path(f"/{view_id}.csv") if csv_file else None),
-                    calibration_hint_ms=calibration_hint_ms,
+        for segment_position, (_video_index, _csv_index, video_file, csv_file) in enumerate(
+            mappings, 1
+        ):
+            for file_item in (video_file, csv_file):
+                if file_item is None:
+                    continue
+                source_name = _safe_file_name(
+                    file_item["source_name"],
+                    "video" if file_item["kind"] == "video" else "timestamps",
                 )
-            )
+                prefix = (
+                    f"segment-{segment_position:04d}-video-"
+                    if file_item["kind"] == "video"
+                    else f"segment-{segment_position:04d}-timestamps-"
+                )
+                stored_name = f"{prefix}{source_name}"
+                final_path = (
+                    archive_path
+                    / "Original-Experiment-Videos"
+                    / view_id
+                    / stored_name
+                )
+                if final_path in used_paths:
+                    raise HTTPException(400, "上传文件的目标路径发生冲突")
+                used_paths.add(final_path)
+                file_item.update(
+                    {
+                        "view_id": view_id,
+                        "segment_ordinal": segment_position,
+                        "stored_name": stored_name,
+                        "final_path": final_path,
+                        "partial_path": final_path.with_name(
+                            f".{stored_name}.upload-{session_id}.partial"
+                        ),
+                    }
+                )
+        try:
+            if segmented_layout:
+                validation_views.append(
+                    ViewInput(
+                        view_id=view_id,
+                        role=role,
+                        segments=[
+                            VideoSegmentInput(
+                                video=Path(f"/{view_id}-{index:04d}.mp4"),
+                                timestamps_csv=(
+                                    Path(f"/{view_id}-{index:04d}.csv")
+                                    if csv_file is not None
+                                    else None
+                                ),
+                            )
+                            for index, (_v, _c, _video_file, csv_file) in enumerate(
+                                mappings, 1
+                            )
+                        ],
+                        calibration_hint_ms=calibration_hint_ms,
+                    )
+                )
+            else:
+                _video_index, _csv_index, _video_file, csv_file = mappings[0]
+                validation_views.append(
+                    ViewInput(
+                        view_id=view_id,
+                        role=role,
+                        video=Path(f"/{view_id}.mp4"),
+                        timestamps_csv=(Path(f"/{view_id}.csv") if csv_file else None),
+                        calibration_hint_ms=calibration_hint_ms,
+                    )
+                )
         except ValueError as exc:
             raise HTTPException(400, f"view_specs[{position}] 无效: {exc}") from exc
 
@@ -718,8 +848,10 @@ def _public_upload_session(session: dict[str, Any]) -> dict[str, Any]:
             "name": item["source_name"],
             "size": int(item["expected_bytes"]),
             "uploaded_bytes": int(item["uploaded_bytes"]),
-            "completed": bool(item.get("sha256")),
+            "completed": bool(item.get("content_hash") or item.get("sha256")),
             "sha256": item.get("sha256"),
+            "content_hash": item.get("content_hash"),
+            "content_hash_algorithm": item.get("content_hash_algorithm"),
         }
         for item in session["files"]
     ]
@@ -885,6 +1017,228 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     temporary = path.with_name(f".{path.name}.partial-{uuid.uuid4().hex[:8]}")
     temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(temporary, path)
+
+
+def _queue_recovery_receipt_path(nas_root: Path) -> Path:
+    return (
+        nas_root
+        / "JSON-Config-Files"
+        / "Input-Manifests"
+        / "queue_recovery.json"
+    )
+
+
+def _write_queue_recovery_receipt(
+    nas_root: Path,
+    *,
+    run_id: str,
+    state: str,
+    manifest_path: Path,
+    input_seal_path: Path,
+    ingest: dict[str, Any] | None,
+    error: str | None = None,
+    recovered_from_archive_receipt: bool = False,
+    job_kind: str = "run",
+    recovery_context: dict[str, Any] | None = None,
+) -> Path:
+    receipt_path = _queue_recovery_receipt_path(nas_root)
+    previous = _read_json(receipt_path, {}) or {}
+    payload = {
+        "schema_version": "visioncortex-queue-recovery/1",
+        "run_id": run_id,
+        "job_kind": job_kind,
+        "state": state,
+        "updated_at": datetime.now().astimezone().isoformat(),
+        "archive_root": str(nas_root),
+        "manifest_relative_path": manifest_path.relative_to(nas_root).as_posix(),
+        "input_seal_relative_path": input_seal_path.relative_to(nas_root).as_posix(),
+        "ingest": ingest,
+        "recovery_context": recovery_context,
+        "error": error,
+        "recovered_from_archive_receipt": bool(
+            recovered_from_archive_receipt
+            or previous.get("recovered_from_archive_receipt")
+        ),
+        "recovery_count": int(previous.get("recovery_count") or 0),
+    }
+    if recovered_from_archive_receipt:
+        payload["recovery_count"] += 1
+    _write_json_atomic(receipt_path, payload)
+    return receipt_path
+
+
+def _update_queue_recovery_state(
+    nas_root: Path,
+    state: str,
+    *,
+    error: str | None = None,
+) -> None:
+    receipt_path = _queue_recovery_receipt_path(nas_root)
+    payload = _read_json(receipt_path, {}) or {}
+    if payload.get("schema_version") != "visioncortex-queue-recovery/1":
+        return
+    payload.update(
+        {
+            "state": state,
+            "updated_at": datetime.now().astimezone().isoformat(),
+            "error": error,
+        }
+    )
+    _write_json_atomic(receipt_path, payload)
+
+
+def _recover_jobs_from_archive_receipts(settings: dict[str, Any]) -> None:
+    """Rebuild queued browser jobs when the local SQLite queue is lost."""
+
+    if _persistent_queue is None:
+        return
+    root = _archive_root(settings).resolve()
+    if not root.is_dir():
+        return
+    receipt_paths = sorted(
+        root.glob("*/JSON-Config-Files/Input-Manifests/queue_recovery.json")
+    )
+    staging_root = root / ".VisionCortex-Run-Staging"
+    if staging_root.is_dir():
+        receipt_paths.extend(
+            sorted(
+                staging_root.glob(
+                    "*/*/JSON-Config-Files/Input-Manifests/queue_recovery.json"
+                )
+            )
+        )
+    for receipt_path in receipt_paths:
+        payload = _read_json(receipt_path, {}) or {}
+        if payload.get("schema_version") != "visioncortex-queue-recovery/1":
+            continue
+        job_kind = str(payload.get("job_kind") or "")
+        if job_kind not in {"run", "index_collection"} or payload.get(
+            "state"
+        ) not in {
+            "queued",
+            "running",
+        }:
+            continue
+        run_id = str(payload.get("run_id") or "")
+        if not run_id or _persistent_queue.get_job(run_id) is not None:
+            continue
+        nas_root = receipt_path.parents[2].resolve()
+        if not archive_contains(nas_root, root) or nas_root == root:
+            continue
+        status_path = nas_root / "JSON-Config-Files" / "pipeline_status.json"
+        if status_path.exists():
+            pipeline_status = _read_json(status_path, {}) or {}
+            if pipeline_status.get("stage") in {"completed", "failed"}:
+                _update_queue_recovery_state(
+                    nas_root,
+                    str(pipeline_status["stage"]),
+                    error=pipeline_status.get("error"),
+                )
+                continue
+            if _runtime_activity_receipt(status_path)["active"]:
+                continue
+        manifest_relative = Path(str(payload.get("manifest_relative_path") or ""))
+        seal_relative = Path(str(payload.get("input_seal_relative_path") or ""))
+        if manifest_relative.is_absolute() or seal_relative.is_absolute():
+            continue
+        manifest_path = (nas_root / manifest_relative).resolve()
+        input_seal_path = (nas_root / seal_relative).resolve()
+        try:
+            manifest_path.relative_to(nas_root)
+            input_seal_path.relative_to(nas_root)
+        except ValueError:
+            continue
+        if not manifest_path.is_file() or not input_seal_path.is_file():
+            continue
+        try:
+            manifest = RunManifest.model_validate(
+                yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+            )
+            seal = json.loads(input_seal_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, yaml.YAMLError, json.JSONDecodeError):
+            continue
+        if not verify_input_seal(seal) or seal.get(
+            "experiment_id"
+        ) != manifest.experiment_id:
+            continue
+        sources_available = True
+        for source in seal.get("sources") or []:
+            source_path = Path(str(source.get("path") or ""))
+            try:
+                source_stat = source_path.stat()
+            except OSError:
+                sources_available = False
+                break
+            if int(source.get("size_bytes") or -1) != int(source_stat.st_size):
+                sources_available = False
+                break
+            expected_mtime = source.get("mtime_ns")
+            if expected_mtime is not None and int(expected_mtime) != int(
+                source_stat.st_mtime_ns
+            ):
+                sources_available = False
+                break
+        if not sources_available:
+            continue
+        recovered_settings = copy.deepcopy(settings)
+        recovered_settings["storage"]["active_archive_path"] = str(nas_root)
+        if job_kind == "run":
+            recovered_settings["storage"]["sync_to_nas"] = (
+                str((payload.get("ingest") or {}).get("retention_mode")) == "nas_only"
+            )
+        run_state = {
+            "state": "queued",
+            "progress": 0.0,
+            "message": "本地队列账本丢失后，已从归档输入封条恢复任务",
+            "experiment_id": manifest.experiment_id,
+            "nas_output": str(nas_root),
+            "recovered_from_archive_receipt": True,
+        }
+        _runs[run_id] = run_state
+        _persistent_queue.save_run(run_id, run_state)
+        try:
+            if job_kind == "run":
+                job_payload = {
+                    "manifest": manifest.model_dump(mode="json"),
+                    "settings": recovered_settings,
+                    "nas_root": str(nas_root),
+                    "ingest": payload.get("ingest"),
+                }
+            else:
+                context = payload.get("recovery_context") or {}
+                required = {
+                    "source_experiment_id",
+                    "archive_name",
+                    "staging_root",
+                    "fixed_root",
+                    "history_root",
+                    "timing",
+                }
+                if not required.issubset(context):
+                    continue
+                job_payload = {
+                    "source_experiment_id": context["source_experiment_id"],
+                    "archive_name": context["archive_name"],
+                    "settings": recovered_settings,
+                    "staging_root": context["staging_root"],
+                    "fixed_root": context["fixed_root"],
+                    "history_root": context["history_root"],
+                    "timing": context["timing"],
+                }
+            _persistent_queue.enqueue(run_id, job_kind, job_payload)
+        except ValueError:
+            continue
+        _write_queue_recovery_receipt(
+            nas_root,
+            run_id=run_id,
+            state="queued",
+            manifest_path=manifest_path,
+            input_seal_path=input_seal_path,
+            ingest=payload.get("ingest"),
+            recovered_from_archive_receipt=True,
+            job_kind=job_kind,
+            recovery_context=payload.get("recovery_context"),
+        )
 
 
 def _append_web_end_to_end_metrics(
@@ -1229,6 +1583,7 @@ def _execute_now(
 
     try:
         _update(run_id, state="running", progress=0.0, nas_output=str(nas_root))
+        _update_queue_recovery_state(nas_root, "running")
         output = EvidencePipeline(settings, progress).run(manifest)
         if ingest is not None:
             _append_web_end_to_end_metrics([Path(output), nas_root], ingest, completed=True)
@@ -1240,10 +1595,13 @@ def _execute_now(
             nas_output=str(nas_root),
             archive_url=f"/?archive={quote(nas_root.name)}",
         )
+        _update_queue_recovery_state(nas_root, "completed")
     except Exception as exc:
         if ingest is not None:
             _append_web_end_to_end_metrics([nas_root], ingest, completed=False)
-        _update(run_id, state="failed", progress=1.0, error=f"{type(exc).__name__}: {exc}")
+        error = f"{type(exc).__name__}: {exc}"
+        _update(run_id, state="failed", progress=1.0, error=error)
+        _update_queue_recovery_state(nas_root, "failed", error=error)
     finally:
         upload_session_id = (ingest or {}).get("upload_session_id")
         if upload_session_id and _upload_sessions is not None:
@@ -1343,6 +1701,75 @@ def _execute_fixed_benchmark(
         _execute_fixed_benchmark_now(run_id, settings, nas_root, timing)
 
 
+def _preflight_and_seal_collection_input(
+    *,
+    run_id: str,
+    source_experiment_id: str,
+    archive_name: str,
+    manifest: RunManifest,
+    manifest_path: Path,
+    ingest: dict[str, Any],
+    settings: dict[str, Any],
+    staging_root: Path,
+    fixed_root: Path,
+    history_root: Path,
+    timing: dict[str, Any],
+) -> None:
+    _update(
+        run_id,
+        state="input_preflight",
+        progress=0.015,
+        message="输入已封存，正在读取媒体头与时钟首尾，尚未占用 GPU",
+        nas_output=str(fixed_root),
+        nas_staging=str(staging_root),
+    )
+    input_preflight = preflight_manifest_inputs(manifest, settings)
+    preflight_path = (
+        staging_root
+        / "JSON-Config-Files"
+        / "Input-Manifests"
+        / "prequeue_input_preflight.json"
+    )
+    _write_json_atomic(preflight_path, input_preflight)
+    existing_seal_path = (
+        staging_root / "JSON-Config-Files" / "Input-Manifests" / "input_seal.json"
+    )
+    existing_seal = _read_json(existing_seal_path, {}) or {}
+    refreshed_seal = build_input_seal(
+        manifest,
+        source_mode="nas_segmented_virtual_timeline",
+        sources=list(existing_seal.get("sources") or []),
+        role_resolution=existing_seal.get("role_resolution") or {},
+        copied_source_bytes=0,
+        preflight=input_preflight,
+    )
+    write_input_seal(existing_seal_path, refreshed_seal)
+    ingest["prequeue_input_preflight"] = {
+        "status": input_preflight["status"],
+        "receipt": str(preflight_path),
+    }
+    ingest.setdefault("original_retention", {})["input_seal_sha256"] = refreshed_seal[
+        "seal_sha256"
+    ]
+    _write_queue_recovery_receipt(
+        staging_root,
+        run_id=run_id,
+        state="running",
+        manifest_path=manifest_path,
+        input_seal_path=existing_seal_path,
+        ingest=ingest,
+        job_kind="index_collection",
+        recovery_context={
+            "source_experiment_id": source_experiment_id,
+            "archive_name": archive_name,
+            "staging_root": str(staging_root),
+            "fixed_root": str(fixed_root),
+            "history_root": str(history_root),
+            "timing": timing,
+        },
+    )
+
+
 def _execute_index_collection_now(
     run_id: str,
     source_experiment_id: str,
@@ -1401,6 +1828,20 @@ def _execute_index_collection_now(
                 "ingest_details": ingest,
             }
         )
+        if isinstance(manifest, RunManifest):
+            _preflight_and_seal_collection_input(
+                run_id=run_id,
+                source_experiment_id=source_experiment_id,
+                archive_name=archive_name,
+                manifest=manifest,
+                manifest_path=manifest_path,
+                ingest=ingest,
+                settings=settings,
+                staging_root=staging_root,
+                fixed_root=fixed_root,
+                history_root=history_root,
+                timing=timing,
+            )
         _update(
             run_id,
             state="running",
@@ -1408,11 +1849,13 @@ def _execute_index_collection_now(
             nas_output=str(fixed_root),
             nas_staging=str(staging_root),
         )
-        output = EvidencePipeline(settings, progress).run(manifest)
+        with _gpu_job_lock:
+            output = EvidencePipeline(settings, progress).run(manifest)
         _append_collection_index_metrics(
             [Path(output), staging_root], timing, completed=True
         )
         promotion = promote_fixed_archive(staging_root, fixed_root, history_root)
+        _update_queue_recovery_state(fixed_root, "completed")
         record_collection_state(
             settings,
             source_experiment_id,
@@ -1460,6 +1903,7 @@ def _execute_index_collection_now(
                 f"{type(state_exc).__name__}: {state_exc}"
             )
         error = f"{type(exc).__name__}: {exc}"
+        _update_queue_recovery_state(staging_root, "failed", error=error)
         if timing.get("failure_state_record_error"):
             error += (
                 "; collection_state_audit_failed="
@@ -1499,17 +1943,16 @@ def _execute_index_collection(
         nas_output=str(fixed_root),
         nas_staging=str(staging_root),
     )
-    with _gpu_job_lock:
-        _execute_index_collection_now(
-            run_id,
-            source_experiment_id,
-            archive_name,
-            settings,
-            staging_root,
-            fixed_root,
-            history_root,
-            timing,
-        )
+    _execute_index_collection_now(
+        run_id,
+        source_experiment_id,
+        archive_name,
+        settings,
+        staging_root,
+        fixed_root,
+        history_root,
+        timing,
+    )
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -1546,9 +1989,16 @@ def health() -> dict[str, Any]:
         "view_count_policy": "dynamic",
         "minimum_cross_view_sources": 2,
         "large_uploads": {
-            "protocol": "resumable_chunks_v1",
+            "protocol": "resumable_chunks_v2",
+            "compatible_protocols": ["resumable_chunks_v1"],
             "fixed_total_size_limit": False,
             "chunk_size_bytes": int(upload_policy["chunk_size_bytes"]),
+            "parallel_files": int(upload_policy["parallel_files"]),
+            "chunk_sha256_required": bool(upload_policy["chunk_sha256_required"]),
+            "large_file_identity": "persistent_verified_chunk_tree",
+            "full_file_sha256_max_bytes": int(
+                upload_policy["full_file_sha256_max_bytes"]
+            ),
             "storage_admission": "dynamic_free_space_with_reservation",
             "original_media_copies": 1,
             "inactive_session_ttl_seconds": float(upload_policy["session_ttl_seconds"]),
@@ -1586,6 +2036,7 @@ def health() -> dict[str, Any]:
             "policy": "single_gpu_one_job_at_a_time",
             "persistence": "sqlite" if _persistent_queue is not None else "not_initialized",
             "survives_web_service_restart": _persistent_queue is not None,
+            "archive_receipt_disaster_recovery": True,
             "database": (
                 str(_persistent_queue.database) if _persistent_queue is not None else None
             ),
@@ -2565,7 +3016,7 @@ def create_upload_session(payload: dict[str, Any]) -> dict[str, Any]:
     archive_name = _unique_upload_archive_name(settings, experiment_name)
     archive_path = archive_root / archive_name
     specs, files, expected_source_bytes = _parse_upload_session_files(
-        payload, archive_path, session_id
+        payload, archive_path, session_id, settings
     )
     policy = _upload_policy(settings)
     processing_headroom = math.ceil(
@@ -2617,6 +3068,8 @@ def create_upload_session(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         **_public_upload_session(session),
         "chunk_size_bytes": int(policy["chunk_size_bytes"]),
+        "parallel_files": int(policy["parallel_files"]),
+        "chunk_sha256_required": bool(policy["chunk_sha256_required"]),
         "capacity": capacity,
         "resume_url": f"/api/upload-sessions/{session_id}",
         "finalize_url": f"/api/upload-sessions/{session_id}/finalize",
@@ -2630,7 +3083,42 @@ def get_upload_session(session_id: str) -> dict[str, Any]:
     return {
         **_public_upload_session(session),
         "chunk_size_bytes": int(_upload_policy(settings)["chunk_size_bytes"]),
+        "parallel_files": int(_upload_policy(settings)["parallel_files"]),
+        "chunk_sha256_required": bool(
+            _upload_policy(settings)["chunk_sha256_required"]
+        ),
     }
+
+
+@app.delete("/api/upload-sessions/{session_id}")
+def cancel_upload_session(session_id: str) -> dict[str, Any]:
+    settings = _settings()
+    store = _require_upload_store(settings)
+    with _upload_finalize_lock:
+        session = store.get(session_id)
+        if session is None:
+            raise HTTPException(404, "上传会话不存在")
+        if session["status"] != "open" or session.get("run_id"):
+            raise HTTPException(409, "只有尚未提交分析的上传会话可以取消")
+        archive_root = _archive_root(settings).resolve()
+        candidate = Path(session["archive_root"]).resolve()
+        if candidate.parent != archive_root or not candidate.name:
+            raise HTTPException(500, "上传会话归档路径超出允许清理范围")
+        if not store.cancel(session_id):
+            raise HTTPException(409, "上传会话状态已经变化，未执行清理")
+        cleanup_status = "not_present"
+        if candidate.is_dir():
+            try:
+                shutil.rmtree(candidate)
+                cleanup_status = "removed"
+            except OSError:
+                cleanup_status = "pending_retry"
+        return {
+            "session_id": session_id,
+            "status": "cancelled",
+            "released_bytes": int(session["reserved_bytes"]),
+            "archive_cleanup": cleanup_status,
+        }
 
 
 @app.patch("/api/upload-sessions/{session_id}/files/{file_id}")
@@ -2645,7 +3133,7 @@ async def upload_session_chunk(
     item = next((entry for entry in session["files"] if entry["file_id"] == file_id), None)
     if item is None:
         raise HTTPException(404, "上传文件不存在")
-    if item.get("sha256"):
+    if item.get("content_hash") or item.get("sha256"):
         return {
             "session_id": session_id,
             "file_id": file_id,
@@ -2671,6 +3159,11 @@ async def upload_session_chunk(
 
     policy = _upload_policy(settings)
     maximum_chunk = int(policy["chunk_size_bytes"])
+    expected_chunk_sha = request.headers.get("x-chunk-sha256")
+    if expected_chunk_sha is not None:
+        expected_chunk_sha = expected_chunk_sha.strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_chunk_sha):
+            raise HTTPException(400, "X-Chunk-SHA256 请求头无效")
     content_length = request.headers.get("content-length")
     if content_length is not None:
         try:
@@ -2691,9 +3184,8 @@ async def upload_session_chunk(
         if not replay:
             raise HTTPException(400, "续传校验分块不能为空")
         replay_digest = hashlib.sha256(replay).hexdigest()
-        expected_chunk_sha = request.headers.get("x-chunk-sha256")
         if expected_chunk_sha and not hmac.compare_digest(
-            expected_chunk_sha.lower(), replay_digest
+            expected_chunk_sha, replay_digest
         ):
             raise HTTPException(422, "续传校验分块 SHA-256 无效")
         with active_path.open("rb") as handle:
@@ -2715,6 +3207,8 @@ async def upload_session_chunk(
             "uploaded_bytes": actual_offset,
             "completed": True,
         }
+    if policy["chunk_sha256_required"] and not expected_chunk_sha:
+        raise HTTPException(428, "每个新上传分块必须提供 X-Chunk-SHA256")
     digest = hashlib.sha256()
     written = 0
     try:
@@ -2731,9 +3225,8 @@ async def upload_session_chunk(
                 raise HTTPException(400, "上传分块不能为空")
             handle.flush()
             os.fsync(handle.fileno())
-        expected_chunk_sha = request.headers.get("x-chunk-sha256")
         if expected_chunk_sha and not hmac.compare_digest(
-            expected_chunk_sha.lower(), digest.hexdigest()
+            expected_chunk_sha, digest.hexdigest()
         ):
             raise HTTPException(422, "上传分块 SHA-256 校验失败，请重试该分块")
     except Exception:
@@ -2750,6 +3243,13 @@ async def upload_session_chunk(
         file_id,
         uploaded_bytes,
         expires_at=time.time() + float(policy["session_ttl_seconds"]),
+    )
+    store.record_chunk(
+        session_id,
+        file_id,
+        actual_offset,
+        written,
+        digest.hexdigest(),
     )
     return {
         "session_id": session_id,
@@ -2794,8 +3294,9 @@ def finalize_upload_session(
                 },
             )
 
+        policy = _upload_policy(settings)
         for item in session["files"]:
-            if item.get("sha256"):
+            if item.get("content_hash") or item.get("sha256"):
                 continue
             partial_path = Path(item["partial_path"])
             final_path = Path(item["final_path"])
@@ -2804,11 +3305,34 @@ def finalize_upload_session(
                 item["expected_bytes"]
             ):
                 raise HTTPException(409, f"暂存文件不完整: {item['file_id']}")
-            sha256 = _sha256_path(source_path)
+            expected_bytes = int(item["expected_bytes"])
+            chunk_tree = store.chunk_tree_identity(
+                session_id,
+                str(item["file_id"]),
+                expected_bytes,
+            )
+            sha256 = None
+            if (
+                chunk_tree is None
+                or expected_bytes <= int(policy["full_file_sha256_max_bytes"])
+            ):
+                sha256 = _sha256_path(source_path)
+            content_hash = sha256 or chunk_tree
+            content_hash_algorithm = (
+                "sha256" if sha256 else "visioncortex-upload-chunk-tree-v1"
+            )
+            if not content_hash:
+                raise HTTPException(409, f"上传分块完整性账本不完整: {item['file_id']}")
             if source_path == partial_path:
                 final_path.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(partial_path, final_path)
-            store.complete_file(session_id, str(item["file_id"]), sha256)
+            store.complete_file(
+                session_id,
+                str(item["file_id"]),
+                sha256,
+                content_hash=content_hash,
+                content_hash_algorithm=content_hash_algorithm,
+            )
 
         session = store.get(session_id)
         if session is None:
@@ -2821,22 +3345,59 @@ def finalize_upload_session(
         }
         views: list[ViewInput] = []
         for spec in session["view_specs"]:
-            video = files_by_key[("video", int(spec["video_index"]))]
-            csv_index = spec.get("csv_index")
-            timestamp_csv = (
-                Path(files_by_key[("timestamp_csv", int(csv_index))]["final_path"])
-                if csv_index is not None
-                else None
-            )
-            views.append(
-                ViewInput(
-                    view_id=str(spec["view_id"]),
-                    role=spec["role"],
-                    video=Path(video["final_path"]),
-                    timestamps_csv=timestamp_csv,
-                    calibration_hint_ms=float(spec.get("calibration_hint_ms", 0.0)),
+            if spec.get("source_layout") == "segments" or spec.get("segments"):
+                views.append(
+                    ViewInput(
+                        view_id=str(spec["view_id"]),
+                        role=spec["role"],
+                        segments=[
+                            VideoSegmentInput(
+                                video=Path(
+                                    files_by_key[
+                                        ("video", int(mapping["video_index"]))
+                                    ]["final_path"]
+                                ),
+                                timestamps_csv=(
+                                    Path(
+                                        files_by_key[
+                                            (
+                                                "timestamp_csv",
+                                                int(mapping["csv_index"]),
+                                            )
+                                        ]["final_path"]
+                                    )
+                                    if mapping.get("csv_index") is not None
+                                    else None
+                                ),
+                            )
+                            for mapping in spec["segments"]
+                        ],
+                        calibration_hint_ms=float(
+                            spec.get("calibration_hint_ms", 0.0)
+                        ),
+                    )
                 )
-            )
+            else:
+                video = files_by_key[("video", int(spec["video_index"]))]
+                csv_index = spec.get("csv_index")
+                timestamp_csv = (
+                    Path(
+                        files_by_key[("timestamp_csv", int(csv_index))]["final_path"]
+                    )
+                    if csv_index is not None
+                    else None
+                )
+                views.append(
+                    ViewInput(
+                        view_id=str(spec["view_id"]),
+                        role=spec["role"],
+                        video=Path(video["final_path"]),
+                        timestamps_csv=timestamp_csv,
+                        calibration_hint_ms=float(
+                            spec.get("calibration_hint_ms", 0.0)
+                        ),
+                    )
+                )
         manifest = RunManifest(experiment_id=archive_name, views=views)
         manifest_path = nas_root / "JSON-Config-Files" / "input_manifest.yaml"
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2846,6 +3407,64 @@ def finalize_upload_session(
             ),
             encoding="utf-8",
         )
+        role_resolution = {
+            "schema_version": "visioncortex-view-role-resolution-ledger/1",
+            "experiment_id": archive_name,
+            "input_source": "browser_user_declared_with_device_registry_validation",
+            "status": "resolved",
+            "resolved_first_person_views": sum(
+                spec["role"] == "first_person" for spec in session["view_specs"]
+            ),
+            "resolved_third_person_views": sum(
+                spec["role"] == "third_person" for spec in session["view_specs"]
+            ),
+            "views": [
+                spec.get("role_resolution")
+                or {
+                    "camera_key": spec["view_id"],
+                    "resolved_role": spec["role"],
+                    "status": "legacy_session_without_registry_receipt",
+                }
+                for spec in session["view_specs"]
+            ],
+        }
+        role_resolution_path = (
+            nas_root / "JSON-Config-Files" / "view_role_resolution.json"
+        )
+        _write_json_atomic(role_resolution_path, role_resolution)
+        preflight_path = (
+            nas_root
+            / "JSON-Config-Files"
+            / "Input-Manifests"
+            / "prequeue_input_preflight.json"
+        )
+        if policy["prequeue_media_preflight_enabled"]:
+            try:
+                preflight = preflight_manifest_inputs(manifest, settings)
+            except (OSError, RuntimeError, ValueError) as exc:
+                _write_json_atomic(
+                    preflight_path,
+                    {
+                        "schema_version": "visioncortex-prequeue-input-preflight/1",
+                        "status": "failed",
+                        "completed_at": datetime.now().astimezone().isoformat(),
+                        "error": f"{type(exc).__name__}: {exc}",
+                    },
+                )
+                raise HTTPException(
+                    422,
+                    {
+                        "message": "输入文件未通过媒体或时钟预检，任务未进入 GPU 队列",
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "receipt": str(preflight_path),
+                    },
+                ) from exc
+        else:
+            preflight = {
+                "schema_version": "visioncortex-prequeue-input-preflight/1",
+                "status": "skipped_by_configuration",
+            }
+        _write_json_atomic(preflight_path, preflight)
 
         completed_at = datetime.now().astimezone().isoformat()
         duration_seconds = max(0.0, time.time() - float(session["created_at"]))
@@ -2869,6 +3488,13 @@ def finalize_upload_session(
                     int(item["expected_bytes"]) if retention_mode == "nas_only" else 0
                 ),
                 "sha256": item["sha256"],
+                "content_hash": item.get("content_hash") or item.get("sha256"),
+                "content_hash_algorithm": item.get("content_hash_algorithm")
+                or "sha256",
+                "file_id": item["file_id"],
+                "kind": item["kind"],
+                "view_id": item["view_id"],
+                "segment_ordinal": item.get("segment_ordinal"),
             }
             for item in session["files"]
         ]
@@ -2896,13 +3522,51 @@ def finalize_upload_session(
                 if retention_mode == "nas_only"
                 else "local_archive_original_experiment_videos"
             ],
-            "upload_protocol": "resumable_chunks_v1",
+            "upload_protocol": "resumable_chunks_v2",
+            "protocol_compatibility": ["resumable_chunks_v1"],
+            "chunk_integrity": "persistent_sha256_ledger",
+            "full_file_sha256_max_bytes": int(
+                policy["full_file_sha256_max_bytes"]
+            ),
             "upload_session_id": session_id,
             "storage_reservation_bytes": int(session["reserved_bytes"]),
         }
         ingest["effective_source_throughput_mib_s"] = round(
             ingest["total_bytes"] / max(duration_seconds, 1e-9) / (1024 * 1024), 3
         )
+        input_seal = build_input_seal(
+            manifest,
+            source_mode="browser_resumable_upload",
+            sources=[
+                {
+                    "file_id": item["file_id"],
+                    "kind": item["kind"],
+                    "view_id": item["view_id"],
+                    "segment_ordinal": item.get("segment_ordinal"),
+                    "path": item["analysis_path"],
+                    "size_bytes": item["bytes"],
+                    "sha256": item["sha256"],
+                    "content_hash": item["content_hash"],
+                    "content_hash_algorithm": item["content_hash_algorithm"],
+                }
+                for item in upload_ledger
+            ],
+            role_resolution=role_resolution,
+            copied_source_bytes=int(session["expected_source_bytes"]),
+            preflight=preflight,
+        )
+        input_seal_path = write_input_seal(
+            nas_root
+            / "JSON-Config-Files"
+            / "Input-Manifests"
+            / "input_seal.json",
+            input_seal,
+        )
+        ingest["input_seal"] = {
+            "path": str(input_seal_path),
+            "sha256": input_seal["seal_sha256"],
+            "source_mode": input_seal["source_mode"],
+        }
         upload_record = {
             "run_id": f"upload-{session_id[:12]}",
             "archive_name": archive_name,
@@ -2934,12 +3598,15 @@ def finalize_upload_session(
                 "archive_mode": settings["storage"].get("run_output_mode", "local"),
                 "archive_root": str(nas_root),
                 "retention_mode": retention_mode,
-                "upload_protocol": "resumable_chunks_v1",
-                "source_copy_bytes": ingest["local_write_bytes"],
+                "upload_protocol": "resumable_chunks_v2",
+                "source_copy_bytes": int(session["expected_source_bytes"]),
                 "storage_reservation_bytes": int(session["reserved_bytes"]),
                 "artifacts": [
                     "Original-Experiment-Videos",
                     "JSON-Config-Files/original_upload_manifest.json",
+                    "JSON-Config-Files/Input-Manifests/input_seal.json",
+                    "JSON-Config-Files/Input-Manifests/prequeue_input_preflight.json",
+                    "JSON-Config-Files/view_role_resolution.json",
                 ],
                 "token_ledger": "JSON-Config-Files/run_metrics.json",
             },
@@ -2948,6 +3615,14 @@ def finalize_upload_session(
         run_id = str(upload_record["run_id"])
         settings["storage"]["sync_to_nas"] = retention_mode == "nas_only"
         settings["storage"]["active_archive_path"] = str(nas_root)
+        queue_recovery_path = _write_queue_recovery_receipt(
+            nas_root,
+            run_id=run_id,
+            state="queued",
+            manifest_path=manifest_path,
+            input_seal_path=input_seal_path,
+            ingest=ingest,
+        )
         store.assign_run(session_id, run_id)
         existing_job = (
             _persistent_queue.get_job(run_id) if _persistent_queue is not None else None
@@ -2988,6 +3663,8 @@ def finalize_upload_session(
             "nas_output": str(nas_root),
             "archive_url": f"/?archive={quote(archive_name)}",
             "queue_persistence": queue_persistence,
+            "queue_disaster_recovery": "archive_receipt",
+            "queue_recovery_receipt": str(queue_recovery_path),
         }
 
 

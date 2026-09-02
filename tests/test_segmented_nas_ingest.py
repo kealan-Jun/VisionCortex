@@ -95,6 +95,15 @@ def test_nas_ingest_registers_segments_without_copying(default_config, tmp_path)
     assert role_receipt["status"] == "resolved"
     assert role_receipt["resolved_first_person_views"] == 1
     assert role_receipt["resolved_third_person_views"] == 1
+    input_seal = json.loads(
+        Path(ingest["original_retention"]["input_seal"]).read_text(encoding="utf-8")
+    )
+    assert input_seal["source_mode"] == "nas_segmented_virtual_timeline"
+    assert input_seal["copied_source_bytes"] == 0
+    assert input_seal["source_count"] == 8
+    assert input_seal["identity_algorithms"] == {
+        "sha256-size-plus-64k-head-tail-v1": 8
+    }
     assert not (tmp_path / "runtime" / "Input" / "segmented" / "video.mp4").exists()
     original_root = tmp_path / "archive" / "Original-Experiment-Videos"
     original_index = json.loads(
