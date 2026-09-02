@@ -65,8 +65,18 @@ from .grouping import (
 from .pathing import archive_relative_posix
 from .ordering import candidate_sort_key, event_sort_key
 from .detection import iter_frame_evidence, scan_videos, validate_models
-from .coarse_recall import generate_open_vocabulary_coarse_candidates
-from .candidate_index import CoarseFrameIndex, build_coarse_frame_index
+from .coarse_recall import (
+    generate_open_vocabulary_coarse_candidates,
+    generate_open_vocabulary_fine_candidates,
+)
+from .candidate_index import (
+    CoarseFrameIndex,
+    FineFrameIndex,
+    build_coarse_frame_index,
+    create_fine_frame_index,
+    fine_frame_coverage_report,
+    ingest_fine_frame_ledgers,
+)
 from .daily_reports import generate_daily_report_archive
 from .decisions import decision_receipt
 from .schema_contracts import write_archive_contract_manifest
@@ -80,6 +90,7 @@ from .schemas import (
     FrameEvidence,
     PhysicalChange,
     RunManifest,
+    VideoInfo,
     ViewInput,
     ViewRole,
 )
@@ -1042,46 +1053,83 @@ def _merge_frame_evidence_ledgers(
     *,
     track_id_namespace: int,
 ) -> dict[str, Any]:
-    """Merge a bounded recall pass without duplicating sampled timestamps."""
+    """Streaming-merge a recall pass without loading full ledgers in RAM."""
 
-    frames: dict[tuple[int, int], FrameEvidence] = {}
     existing_count = 0
     supplement_count = 0
-    for frame in iter_frame_evidence(existing_path):
-        frames[(frame.frame_index, round(frame.local_ms * 1000.0))] = frame
-        existing_count += 1
+    deduplicated = 0
+    merged_count = 0
     offset = max(1, int(track_id_namespace)) * 1_000_000
-    for frame in iter_frame_evidence(supplement_path):
-        detections = [
-            detection.model_copy(
+
+    def existing_frames():
+        nonlocal existing_count
+        for frame in iter_frame_evidence(existing_path):
+            existing_count += 1
+            yield frame
+
+    def supplement_frames():
+        nonlocal supplement_count
+        for frame in iter_frame_evidence(supplement_path):
+            supplement_count += 1
+            yield frame.model_copy(
                 update={
-                    "track_id": (
-                        detection.track_id + offset
-                        if detection.track_id is not None
-                        else None
-                    )
+                    "detections": [
+                        detection.model_copy(
+                            update={
+                                "track_id": (
+                                    detection.track_id + offset
+                                    if detection.track_id is not None
+                                    else None
+                                )
+                            }
+                        )
+                        for detection in frame.detections
+                    ]
                 }
             )
-            for detection in frame.detections
-        ]
-        normalized = frame.model_copy(update={"detections": detections})
-        frames[(frame.frame_index, round(frame.local_ms * 1000.0))] = normalized
-        supplement_count += 1
-    ordered = sorted(
-        frames.values(), key=lambda item: (item.local_ms, item.frame_index)
-    )
+
+    def identity(frame: FrameEvidence) -> tuple[int, int]:
+        return frame.frame_index, round(frame.local_ms * 1000.0)
+
+    def ordering(frame: FrameEvidence) -> tuple[float, int]:
+        return frame.local_ms, frame.frame_index
+
+    left_iterator = iter(existing_frames())
+    right_iterator = iter(supplement_frames())
+    left = next(left_iterator, None)
+    right = next(right_iterator, None)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = output_path.with_suffix(output_path.suffix + ".tmp")
     with temporary.open("w", encoding="utf-8", buffering=1024 * 1024) as handle:
-        for frame in ordered:
-            handle.write(frame.model_dump_json() + "\n")
+        while left is not None or right is not None:
+            if left is None:
+                selected = right
+                right = next(right_iterator, None)
+            elif right is None:
+                selected = left
+                left = next(left_iterator, None)
+            elif identity(left) == identity(right):
+                selected = right
+                deduplicated += 1
+                left = next(left_iterator, None)
+                right = next(right_iterator, None)
+            elif ordering(left) < ordering(right):
+                selected = left
+                left = next(left_iterator, None)
+            else:
+                selected = right
+                right = next(right_iterator, None)
+            assert selected is not None
+            handle.write(selected.model_dump_json() + "\n")
+            merged_count += 1
     temporary.replace(output_path)
     return {
         "existing_frames": existing_count,
         "supplement_frames": supplement_count,
-        "merged_frames": len(ordered),
-        "deduplicated_frames": existing_count + supplement_count - len(ordered),
+        "merged_frames": merged_count,
+        "deduplicated_frames": deduplicated,
         "track_id_namespace": offset,
+        "merge_strategy": "streaming_sorted_supplement_overwrites_duplicate",
         "output_path": str(output_path),
     }
 
@@ -3002,6 +3050,12 @@ class EvidencePipeline:
         """Resolve dual-view gaps with optional scout-ranked aligned narrow windows."""
 
         perf = self.config["performance"]
+        fine_frame_index: FineFrameIndex | None = None
+        fine_index_ingest_reports: list[dict[str, Any]] = []
+        if bool(perf.get("fine_frame_index_enabled", False)):
+            fine_frame_index = create_fine_frame_index(
+                work_dir / "fine_frame_index.sqlite3"
+            )
         ordered_initial, ordered_supplemental = self._progressive_fine_view_order(
             fine_views,
             fine_view_report,
@@ -3043,6 +3097,33 @@ class EvidencePipeline:
         actual_windows: dict[str, list[tuple[float, float]]] = {}
         pass_reports: list[dict[str, Any]] = []
         scout_summary: dict[str, Any] = {"enabled": scout_enabled}
+
+        def generate_current_candidates(
+            current_views: list[ViewInput],
+        ) -> list[ActionCandidate]:
+            if fine_frame_index is None:
+                return generate_candidates(
+                    current_views, detection_paths, self.config
+                )
+            return generate_candidates(
+                current_views,
+                detection_paths,
+                self.config,
+                fine_frame_index,
+            )
+
+        def refine_current_liquid_context(
+            current_events: list[EvidenceEvent],
+        ) -> list[dict[str, Any]]:
+            if fine_frame_index is None:
+                return refine_liquid_events_with_context(
+                    current_events, detection_paths
+                )
+            return refine_liquid_events_with_context(
+                current_events,
+                detection_paths,
+                frame_index=fine_frame_index,
+            )
 
         def execute_pass(
             pass_index: int,
@@ -3107,12 +3188,33 @@ class EvidencePipeline:
                 },
             )
             merge_reports: list[dict[str, Any]] = []
+            index_ingest_report: dict[str, Any] | None = None
+            if fine_frame_index is not None:
+                index_ingest_report = ingest_fine_frame_ledgers(
+                    fine_frame_index,
+                    pass_views,
+                    result,
+                    source_pass=pass_name,
+                    stitching_enabled=bool(
+                        perf.get("fine_track_stitching_enabled", False)
+                    ),
+                    maximum_stitch_gap_ms=float(
+                        perf.get("fine_track_stitch_max_gap_seconds", 2.5)
+                    )
+                    * 1000.0,
+                    maximum_center_distance=float(
+                        perf.get(
+                            "fine_track_stitch_max_center_distance", 0.12
+                        )
+                    ),
+                )
+                fine_index_ingest_reports.append(index_ingest_report)
             for view in pass_views:
                 scanned[view.view_id] = view
                 existing_path = detection_paths.get(view.view_id)
                 if existing_path is None:
                     detection_paths[view.view_id] = result[view.view_id]
-                else:
+                elif fine_frame_index is None:
                     merged_path = (
                         work_dir
                         / "merged-detections"
@@ -3139,14 +3241,12 @@ class EvidencePipeline:
             scanned_views = [
                 view for view in fine_views if view.view_id in scanned
             ]
-            current_candidates = generate_candidates(
-                scanned_views, detection_paths, self.config
-            )
+            current_candidates = generate_current_candidates(scanned_views)
             current_events, _ = audit_candidates(
                 current_candidates, transforms, self.config
             )
-            liquid_context_rejections = refine_liquid_events_with_context(
-                current_events, detection_paths
+            liquid_context_rejections = refine_current_liquid_context(
+                current_events
             )
             target_status = self._progressive_target_status(
                 boundary_candidates, current_events
@@ -3174,6 +3274,7 @@ class EvidencePipeline:
                     ],
                     "target_status_after_pass": target_status,
                     "detection_ledger_merges": merge_reports,
+                    "fine_index_ingest": index_ingest_report,
                 }
             )
             return target_status
@@ -3375,13 +3476,11 @@ class EvidencePipeline:
             if formal_state_cache is not None:
                 return formal_state_cache
             state_views = [view for view in fine_views if view.view_id in scanned]
-            state_candidates = generate_candidates(
-                state_views, detection_paths, self.config
-            )
+            state_candidates = generate_current_candidates(state_views)
             state_events, _ = audit_candidates(
                 state_candidates, transforms, self.config
             )
-            refine_liquid_events_with_context(state_events, detection_paths)
+            refine_current_liquid_context(state_events)
             attach_action_observability(state_events)
             raw_state_segments = build_experiment_segments(
                 state_events,
@@ -3578,9 +3677,7 @@ class EvidencePipeline:
             }
 
         scanned_views = [view for view in fine_views if view.view_id in scanned]
-        final_candidates = generate_candidates(
-            scanned_views, detection_paths, self.config
-        )
+        final_candidates = generate_current_candidates(scanned_views)
         quarantined_ids: set[str] = set()
         if local_recall_rounds or unresolved_ids:
             (
@@ -3607,6 +3704,29 @@ class EvidencePipeline:
             )
         all_coverage = self._window_coverage(fine_windows, infos)
         actual_coverage = self._window_coverage(actual_windows, infos)
+        fine_index_report: dict[str, Any] | None = None
+        if fine_frame_index is not None:
+            fine_index_report = fine_frame_coverage_report(
+                fine_frame_index,
+                scanned_views,
+                infos,
+                actual_windows,
+                sample_fps=float(perf["detection_fps"]),
+                minimum_coverage_ratio=float(
+                    perf.get("fine_minimum_coverage_ratio", 0.98)
+                ),
+                maximum_gap_periods=float(
+                    perf.get("fine_maximum_gap_periods", 4.0)
+                ),
+                alignment_scales={
+                    view.view_id: transforms[view.view_id].scale
+                    for view in scanned_views
+                },
+            )
+            detection_paths = fine_frame_index.materialize_ledgers(
+                work_dir / "indexed-detections",
+                scanned_views,
+            )
         all_seconds = sum(float(item["selected_seconds"]) for item in all_coverage.values())
         actual_seconds = sum(
             float(item["selected_seconds"]) for item in actual_coverage.values()
@@ -3622,8 +3742,14 @@ class EvidencePipeline:
         group_recall_quality_complete = bool(
             not local_recall_was_enabled or not unresolved_ids
         )
+        fine_coverage_quality_complete = bool(
+            fine_index_report is None
+            or fine_index_report.get("formal_evidence_ready", False)
+        )
         progressive_quality_complete = bool(
-            not unresolved_ids and group_recall_quality_complete
+            not unresolved_ids
+            and group_recall_quality_complete
+            and fine_coverage_quality_complete
         )
         if local_recall_was_enabled:
             local_recall_summary["post_quarantine_quality_complete"] = (
@@ -3656,6 +3782,8 @@ class EvidencePipeline:
             ],
             "dynamic_cross_view_scout": scout_summary,
             "group_local_recall": local_recall_summary,
+            "fine_frame_index": fine_index_report,
+            "fine_index_ingest_passes": fine_index_ingest_reports,
             "scanned_view_ids": [view.view_id for view in scanned_views],
             "not_scanned_view_ids": [
                 view.view_id for view in fine_views if view.view_id not in scanned
@@ -3668,6 +3796,8 @@ class EvidencePipeline:
             "stopping_reason": (
                 "all_demanded_windows_have_dual_role_anchor"
                 if progressive_quality_complete
+                else "fine_frame_coverage_incomplete"
+                if not fine_coverage_quality_complete
                 else "group_local_evidence_exhausted_with_unresolved_clusters"
                 if not group_recall_quality_complete
                 else "all_eligible_third_person_views_exhausted"
@@ -4835,6 +4965,28 @@ class EvidencePipeline:
                 self.config,
                 coarse_frame_index,
             )
+            short_timeline_ceiling_ms = float(
+                self.config["performance"].get(
+                    "auto_exhaustive_short_timeline_seconds", 0.0
+                )
+                or 0.0
+            ) * 1000.0
+            if (
+                self.config["performance"].get(
+                    "auto_exhaustive_short_timeline_enabled", False
+                )
+                and short_timeline_ceiling_ms > 0.0
+                and infos
+                and max(float(info.duration_ms) for info in infos.values())
+                <= short_timeline_ceiling_ms
+            ):
+                self.config["performance"][
+                    "exhaustive_full_timeline_scan"
+                ] = True
+                self.config["performance"][
+                    "exhaustive_full_timeline_reason"
+                ] = "automatic_short_probed_timeline_recall"
+                self.config["performance"]["fine_progressive_cross_view"] = False
             progressive_enabled = bool(
                 self.config["performance"].get("fine_progressive_cross_view", False)
             )
@@ -4909,8 +5061,35 @@ class EvidencePipeline:
             if candidate_quality_gate.exists():
                 coarse_artifacts.append(candidate_quality_gate)
             self._complete_stage(layout, "candidate_coarse", coarse_artifacts)
-            fine_windows = self._fine_windows(boundary_candidates, infos, transforms)
-            fine_windows = {view.view_id: fine_windows[view.view_id] for view in fine_views}
+            fine_windows = self._fine_windows(
+                boundary_candidates, infos, transforms
+            )
+            fine_windows = {
+                view.view_id: fine_windows[view.view_id]
+                for view in fine_views
+            }
+            fine_windows, fine_availability_report = (
+                self._intersect_fine_windows_with_usable_alignment(
+                    fine_windows,
+                    infos,
+                    transforms,
+                    fine_views,
+                )
+            )
+            for view in list(fine_views):
+                if fine_windows.get(view.view_id):
+                    continue
+                fine_view_report[view.view_id]["selected"] = False
+                fine_view_report[view.view_id]["reason"] = (
+                    "alignment quality gate exposes no usable fine window"
+                )
+            fine_views = [
+                view for view in fine_views if fine_windows.get(view.view_id)
+            ]
+            write_json(
+                layout.json_config / "fine_view_selection.json",
+                fine_view_report,
+            )
             fine_coverage = self._window_coverage(fine_windows, infos)
             fine_sample_fps = float(self.config["performance"]["detection_fps"])
             exhaustive_negative_audit = bool(
@@ -4951,6 +5130,7 @@ class EvidencePipeline:
                     )
                 ),
                 "coverage": fine_coverage,
+                "usable_alignment_windows": fine_availability_report,
                 "estimated_sampled_frames": int(
                     round(
                         sum(float(item["selected_seconds"]) for item in fine_coverage.values())
@@ -5000,6 +5180,16 @@ class EvidencePipeline:
                     ),
                 }
             write_json(layout.json_config / "fine_scan_windows.json", fine_window_report)
+            if (
+                self.config["performance"].get(
+                    "fine_coverage_gate_enabled", False
+                )
+                and not fine_availability_report["formal_evidence_ready"]
+            ):
+                raise RuntimeError(
+                    "精扫没有同时可用的第一/第三人称对齐窗口；查看 "
+                    f"{layout.json_config / 'fine_scan_windows.json'}"
+                )
             eligible_fine_ids = {view.view_id for view in fine_views}
             for view in manifest.views:
                 self._view_runtime[view.view_id]["state"] = (
@@ -5017,6 +5207,8 @@ class EvidencePipeline:
                 ),
             )
             fine_work_dir = layout.work / "detections-fine"
+            fine_frame_index_report: dict[str, Any] | None = None
+            fine_runtime_index: FineFrameIndex | None = None
             if progressive_enabled:
                 detection_paths, scanned_fine_views, candidates, progressive_report = (
                     self._run_progressive_fine_scan(
@@ -5066,6 +5258,13 @@ class EvidencePipeline:
                 write_json(
                     layout.json_config / "fine_scan_windows.json", fine_window_report
                 )
+                fine_frame_index_report = progressive_report.get(
+                    "fine_frame_index"
+                )
+                if fine_frame_index_report is not None:
+                    fine_runtime_index = FineFrameIndex(
+                        Path(str(fine_frame_index_report["index_path"]))
+                    )
             else:
                 fine_manifest = manifest.model_copy(update={"views": fine_views})
                 detection_paths = self._scan_all_views_concurrently(
@@ -5078,8 +5277,99 @@ class EvidencePipeline:
                     phase="fine",
                 )
                 scanned_fine_views = fine_views
-                candidates = generate_candidates(
-                    scanned_fine_views, detection_paths, self.config
+                fine_frame_index: FineFrameIndex | None = None
+                if self.config["performance"].get(
+                    "fine_frame_index_enabled", False
+                ):
+                    fine_frame_index = create_fine_frame_index(
+                        fine_work_dir / "fine_frame_index.sqlite3"
+                    )
+                    fine_runtime_index = fine_frame_index
+                    ingest_report = ingest_fine_frame_ledgers(
+                        fine_frame_index,
+                        scanned_fine_views,
+                        detection_paths,
+                        source_pass="single-pass",
+                        stitching_enabled=bool(
+                            self.config["performance"].get(
+                                "fine_track_stitching_enabled", False
+                            )
+                        ),
+                        maximum_stitch_gap_ms=float(
+                            self.config["performance"].get(
+                                "fine_track_stitch_max_gap_seconds", 2.5
+                            )
+                        )
+                        * 1000.0,
+                        maximum_center_distance=float(
+                            self.config["performance"].get(
+                                "fine_track_stitch_max_center_distance", 0.12
+                            )
+                        ),
+                    )
+                    fine_frame_index_report = fine_frame_coverage_report(
+                        fine_frame_index,
+                        scanned_fine_views,
+                        infos,
+                        fine_windows,
+                        sample_fps=fine_sample_fps,
+                        minimum_coverage_ratio=float(
+                            self.config["performance"].get(
+                                "fine_minimum_coverage_ratio", 0.98
+                            )
+                        ),
+                        maximum_gap_periods=float(
+                            self.config["performance"].get(
+                                "fine_maximum_gap_periods", 4.0
+                            )
+                        ),
+                        alignment_scales={
+                            view.view_id: transforms[view.view_id].scale
+                            for view in scanned_fine_views
+                        },
+                    )
+                    fine_frame_index_report["ingest_passes"] = [
+                        ingest_report
+                    ]
+                    detection_paths = fine_frame_index.materialize_ledgers(
+                        fine_work_dir / "indexed-detections",
+                        scanned_fine_views,
+                    )
+                candidates = (
+                    generate_candidates(
+                        scanned_fine_views,
+                        detection_paths,
+                        self.config,
+                    )
+                    if fine_frame_index is None
+                    else generate_candidates(
+                        scanned_fine_views,
+                        detection_paths,
+                        self.config,
+                        fine_frame_index,
+                    )
+                )
+            fine_roi_candidates, fine_roi_report = (
+                generate_open_vocabulary_fine_candidates(
+                    scanned_fine_views,
+                    infos,
+                    detection_paths,
+                    fine_windows,
+                    self.config,
+                    fine_runtime_index,
+                )
+            )
+            candidates = sorted(
+                [*candidates, *fine_roi_candidates], key=candidate_sort_key
+            )
+            write_json(
+                layout.json_config / "fine_roi_open_vocabulary_recall.json",
+                fine_roi_report,
+            )
+            if fine_frame_index_report is not None:
+                write_json(
+                    layout.json_config / "fine_frame_index_manifest.json",
+                    fine_frame_index_report,
                 )
             scanned_fine_ids = {view.view_id for view in scanned_fine_views}
             for view in fine_views:
@@ -5093,6 +5383,31 @@ class EvidencePipeline:
                 "fine",
                 progressive_report=progressive_report,
             )
+            if (
+                self.config["performance"].get(
+                    "fine_coverage_gate_enabled", False
+                )
+                and (
+                    fine_frame_index_report is None
+                    or not fine_frame_index_report.get(
+                        "formal_evidence_ready", False
+                    )
+                )
+            ):
+                raise RuntimeError(
+                    "精扫实际帧覆盖门禁失败；查看 "
+                    f"{layout.json_config / 'fine_frame_index_manifest.json'}"
+                )
+            if (
+                self.config["performance"].get(
+                    "fine_roi_open_vocabulary_recall_enabled", False
+                )
+                and not fine_roi_report.get("formal_evidence_ready", False)
+            ):
+                raise RuntimeError(
+                    "精扫手部 ROI 开放词汇补救门禁失败；查看 "
+                    f"{layout.json_config / 'fine_roi_open_vocabulary_recall.json'}"
+                )
             scout_work_dir = fine_work_dir / "scout"
             if scout_work_dir.is_dir():
                 self._archive_scan_runtime(
@@ -5109,6 +5424,16 @@ class EvidencePipeline:
                 layout.json_config / "scan_runtime_fine.json",
                 layout.json_config / "fine_scan_windows.json",
             ]
+            fine_index_manifest_path = (
+                layout.json_config / "fine_frame_index_manifest.json"
+            )
+            if fine_index_manifest_path.exists():
+                fine_artifacts.append(fine_index_manifest_path)
+            fine_roi_path = (
+                layout.json_config / "fine_roi_open_vocabulary_recall.json"
+            )
+            if fine_roi_path.exists():
+                fine_artifacts.append(fine_roi_path)
             progressive_path = layout.json_config / "progressive_fine_scan.json"
             if progressive_path.exists():
                 fine_artifacts.append(progressive_path)
@@ -5125,7 +5450,13 @@ class EvidencePipeline:
             self._status(layout, "candidate_audit", 0.68, "持续性、动作密度与跨视角一致性审计")
             candidates = sorted(candidates, key=candidate_sort_key)
             events, rejected = audit_candidates(candidates, transforms, self.config)
-            rejected.extend(refine_liquid_events_with_context(events, detection_paths))
+            rejected.extend(
+                refine_liquid_events_with_context(
+                    events,
+                    detection_paths,
+                    frame_index=fine_runtime_index,
+                )
+            )
             state_machine_ledger = attach_continuous_action_states(events, self.config)
             observability_receipts = attach_action_observability(events)
             semantic_review_plan = build_semantic_review_plan(events, self.config)
@@ -5947,6 +6278,95 @@ class EvidencePipeline:
                     result.append([start, end])
             merged[view_id] = [(item[0], item[1]) for item in result]
         return merged
+
+    def _intersect_fine_windows_with_usable_alignment(
+        self,
+        windows: dict[str, list[tuple[float, float]]],
+        infos: dict[str, VideoInfo],
+        transforms: dict[str, AlignmentTransform],
+        views: Sequence[ViewInput],
+    ) -> tuple[dict[str, list[tuple[float, float]]], dict[str, Any]]:
+        """Remove only intervals already declared unavailable by alignment."""
+
+        view_by_id = {view.view_id: view for view in views}
+        intersected: dict[str, list[tuple[float, float]]] = {}
+        reports: dict[str, dict[str, Any]] = {}
+        for view_id, requested in windows.items():
+            transform = transforms[view_id]
+            info = infos[view_id]
+            if transform.state == "failed":
+                usable: list[tuple[float, float]] = []
+            elif transform.segment_transforms:
+                usable = [
+                    (
+                        max(0.0, float(segment.local_start_ms)),
+                        min(float(info.duration_ms), float(segment.local_end_ms)),
+                    )
+                    for segment in transform.segment_transforms
+                    if segment.state != "failed"
+                    and segment.local_end_ms > segment.local_start_ms
+                ]
+            elif (
+                transform.local_coverage_start_ms is not None
+                and transform.local_coverage_end_ms is not None
+            ):
+                usable = [
+                    (
+                        max(0.0, float(transform.local_coverage_start_ms)),
+                        min(
+                            float(info.duration_ms),
+                            float(transform.local_coverage_end_ms),
+                        ),
+                    )
+                ]
+            else:
+                usable = [(0.0, float(info.duration_ms))]
+            selected = self._merge_time_windows(
+                [
+                    (max(start, usable_start), min(end, usable_end))
+                    for start, end in requested
+                    for usable_start, usable_end in usable
+                    if min(end, usable_end) > max(start, usable_start)
+                ]
+            )
+            requested_seconds = sum(
+                max(0.0, end - start) for start, end in requested
+            ) / 1000.0
+            selected_seconds = sum(
+                max(0.0, end - start) for start, end in selected
+            ) / 1000.0
+            intersected[view_id] = selected
+            reports[view_id] = {
+                "role": view_by_id[view_id].role.value,
+                "alignment_state": transform.state,
+                "requested_window_count": len(requested),
+                "usable_interval_count": len(usable),
+                "selected_window_count": len(selected),
+                "requested_seconds": round(requested_seconds, 6),
+                "selected_seconds": round(selected_seconds, 6),
+                "excluded_unavailable_seconds": round(
+                    max(0.0, requested_seconds - selected_seconds), 6
+                ),
+                "usable_intervals": usable,
+            }
+        first_ready = any(
+            intersected.get(view.view_id)
+            for view in views
+            if view.role == ViewRole.FIRST_PERSON
+        )
+        third_ready = any(
+            intersected.get(view.view_id)
+            for view in views
+            if view.role == ViewRole.THIRD_PERSON
+        )
+        return intersected, {
+            "schema_version": "visioncortex-fine-usable-alignment-windows/1",
+            "policy": "intersect_only_fail_closed_alignment_intervals",
+            "first_person_window_available": first_ready,
+            "third_person_window_available": third_ready,
+            "formal_evidence_ready": bool(first_ready and third_ready),
+            "views": reports,
+        }
 
     def _run_sidecar_validation(self, layout: ArchiveLayout, manifest: RunManifest, groups) -> None:
         if not self.config.get("validation", {}).get("use_sidecar_annotations"):

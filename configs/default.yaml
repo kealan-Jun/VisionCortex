@@ -75,6 +75,31 @@ performance:
   # later dual-view gap. Exhaust remaining views for unresolved temporal
   # clusters before declaring the evidence layer complete.
   fine_group_recall_zero_prior_quality_fallback: true
+  # Optional derived index for the existing fine stage. JSONL remains the
+  # authoritative evidence ledger; hardware profiles may enable incremental
+  # indexing, coverage admission and bounded-memory candidate reduction.
+  fine_frame_index_enabled: false
+  fine_coverage_gate_enabled: false
+  fine_minimum_coverage_ratio: 0.98
+  fine_maximum_gap_periods: 4.0
+  fine_streaming_candidates_enabled: false
+  fine_state_max_entries: 4096
+  fine_instance_association_enabled: false
+  fine_instance_appearance_enabled: false
+  fine_instance_minimum_cosine_similarity: 0.25
+  fine_instance_cross_view_conflict_quarantine_enabled: false
+  fine_track_stitching_enabled: false
+  fine_track_stitch_max_gap_seconds: 2.5
+  fine_track_stitch_max_center_distance: 0.12
+  fine_contact_state_enabled: false
+  fine_affine_object_motion_enabled: false
+  fine_roi_open_vocabulary_recall_enabled: false
+  fine_roi_open_vocabulary_max_frames_per_window: 2
+  fine_roi_open_vocabulary_hand_padding_norm: 0.20
+  fine_roi_open_vocabulary_maximum_error_rate: 0.10
+  # Null inherits the established coarse tracker setting for compatibility.
+  fine_tracker_motion_prediction_enabled: null
+  fine_tracker_maximum_center_distance: null
   # Optional workload-adaptive mode. The default remains the established all-
   # selected-view scan; hardware profiles may enable progressive cross-view
   # supplementation explicitly.

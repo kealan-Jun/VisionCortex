@@ -263,6 +263,29 @@ performance:
   # 10 FPS grid, and risk/alignment rules can only expand existing windows.
   detection_fps: 20.0
   fine_initial_third_person_views: 999
+  # Preserve the same all-view 20 FPS envelope while eliminating repeated
+  # ledger parsing and admitting formal evidence from actual sampled coverage.
+  fine_frame_index_enabled: true
+  fine_coverage_gate_enabled: true
+  fine_minimum_coverage_ratio: 0.98
+  fine_maximum_gap_periods: 4.0
+  fine_streaming_candidates_enabled: true
+  fine_state_max_entries: 4096
+  fine_instance_association_enabled: true
+  fine_instance_appearance_enabled: true
+  fine_instance_minimum_cosine_similarity: 0.25
+  fine_instance_cross_view_conflict_quarantine_enabled: true
+  fine_track_stitching_enabled: true
+  fine_track_stitch_max_gap_seconds: 2.5
+  fine_track_stitch_max_center_distance: 0.12
+  fine_contact_state_enabled: true
+  fine_affine_object_motion_enabled: true
+  fine_roi_open_vocabulary_recall_enabled: true
+  fine_roi_open_vocabulary_max_frames_per_window: 2
+  fine_roi_open_vocabulary_hand_padding_norm: 0.20
+  fine_roi_open_vocabulary_maximum_error_rate: 0.10
+  fine_tracker_motion_prediction_enabled: true
+  fine_tracker_maximum_center_distance: 0.18
   fine_risk_window_expansion_enabled: true
   fine_risk_extra_padding_seconds: 30.0
   fine_risk_low_confidence_threshold: 0.70

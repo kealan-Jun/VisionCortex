@@ -266,6 +266,7 @@ class BoxEvidence(BaseModel):
     xyxy_norm: tuple[float, float, float, float]
     track_id: int | None = None
     roi_motion: float = 0.0
+    appearance_signature: tuple[float, ...] = ()
 
     @field_validator("class_name")
     @classmethod
@@ -305,6 +306,8 @@ class ActionCandidate(BaseModel):
     confidence: float
     evidence: list[dict[str, Any]] = Field(default_factory=list)
     uncertainty: list[str] = Field(default_factory=list)
+    instance_signature: dict[str, Any] = Field(default_factory=dict)
+    provenance: dict[str, Any] = Field(default_factory=dict)
 
 
 class EvidenceEvent(BaseModel):

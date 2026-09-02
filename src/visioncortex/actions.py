@@ -9,10 +9,11 @@ from pathlib import Path
 from statistics import median
 from typing import Any, Iterable, Sequence
 
+import cv2
 import numpy as np
 
 from .detection import iter_frame_evidence
-from .candidate_index import CoarseFrameIndex
+from .candidate_index import CoarseFrameIndex, FineFrameIndex
 from .decisions import decision_receipt
 from .grouping import select_formal_experiment_start_events
 from .ordering import (
@@ -76,29 +77,126 @@ class _Observation:
     objects: tuple[str, ...]
     confidence: float
     evidence: dict[str, Any]
+    instance_key: str | None = None
 
 
-def _observation_key(observation: _Observation) -> tuple[str, str]:
+def _observation_key(
+    observation: _Observation,
+    *,
+    instance_aware: bool = False,
+) -> tuple[str, str, str]:
     relevant = [item for item in observation.objects if item not in HAND_CLASSES]
     primary = sorted(relevant)[0] if relevant else "unknown"
-    return observation.action_type.value, primary
+    instance = observation.instance_key if instance_aware else None
+    return observation.action_type.value, primary, instance or "class_fallback"
+
+
+def _box_area(box: BoxEvidence) -> float:
+    x1, y1, x2, y2 = box.xyxy_norm
+    return max(0.0, x2 - x1) * max(0.0, y2 - y1)
+
+
+def _instance_key(box: BoxEvidence, *, prefix: str = "object") -> str | None:
+    if box.track_id is None:
+        return None
+    return f"{prefix}:{box.class_name}:{box.track_id}"
+
+
+def _instance_evidence(box: BoxEvidence) -> dict[str, Any]:
+    return {
+        "class_name": box.class_name,
+        "track_id": box.track_id,
+        "center_norm": [round(item, 6) for item in _box_center(box)],
+        "area_norm": round(_box_area(box), 8),
+        "appearance_signature": list(box.appearance_signature),
+    }
+
+
+def _container_family(class_name: str) -> str:
+    if class_name in {"tube", "tube_cap"}:
+        return "tube"
+    if class_name in {
+        "reagent_bottle",
+        "reagent_bottle_open",
+        "sample_bottle",
+        "sample_bottle_blue",
+        "bottle_cap",
+    }:
+        return "bottle"
+    if class_name in {"beaker", "container"}:
+        return "open_container"
+    return class_name
+
+
+def _container_state_key(box: BoxEvidence) -> str:
+    center_x, center_y = _box_center(box)
+    return (
+        f"{_container_family(box.class_name)}:"
+        f"{round(center_x, 1):.1f}:{round(center_y, 1):.1f}"
+    )
+
+
+def _container_state(box: BoxEvidence) -> str:
+    if box.class_name == "reagent_bottle_open":
+        return "open_visible"
+    if box.class_name in CAP_CLASSES:
+        return "cap_visible"
+    return "container_visible"
 
 
 def _frame_observations(
     frame: FrameEvidence,
     previous_tracks: dict[int, tuple[float, float, float]],
     cfg: dict[str, Any],
+    interaction_state: dict[tuple[Any, ...], dict[str, Any]] | None = None,
+    container_states: dict[str, str] | None = None,
 ) -> list[_Observation]:
     assert frame.global_ms is not None
     observations: list[_Observation] = []
     hands = [box for box in frame.detections if box.class_name in HAND_CLASSES]
     objects = [box for box in frame.detections if box.class_name not in HAND_CLASSES | NON_ACTION_CLASSES]
     contact_threshold = float(cfg["contact_distance_norm"])
+    interaction_state = interaction_state if interaction_state is not None else {}
+    container_states = container_states if container_states is not None else {}
+    approach_delta = float(cfg.get("contact_approach_delta_norm", 0.01))
+    seen_pairs: set[tuple[Any, ...]] = set()
+    current_container_states = {
+        _container_state_key(obj): _container_state(obj)
+        for obj in objects
+        if obj.class_name in CONTAINER_CLASSES | CAP_CLASSES
+    }
 
     for hand, obj in itertools.product(hands, objects):
         distance = _box_distance(hand, obj)
+        pair_key = (
+            hand.track_id if hand.track_id is not None else hand.class_name,
+            obj.track_id if obj.track_id is not None else obj.class_name,
+        )
+        seen_pairs.add(pair_key)
+        state = interaction_state.setdefault(
+            pair_key,
+            {
+                "previous_gap": None,
+                "approach_confirmed": False,
+                "contact_frames": 0,
+                "released_at_global_ms": None,
+                "last_seen_global_ms": float(frame.global_ms),
+            },
+        )
+        state["last_seen_global_ms"] = float(frame.global_ms)
+        previous_gap = state.get("previous_gap")
+        if previous_gap is not None and float(previous_gap) - distance >= approach_delta:
+            state["approach_confirmed"] = True
+        state["previous_gap"] = distance
         if distance <= contact_threshold:
+            state["contact_frames"] = int(state.get("contact_frames", 0)) + 1
             confidence = min(hand.confidence, obj.confidence) * max(0.5, 1.0 - distance / max(contact_threshold, 1e-9))
+            interaction_receipt = {
+                "phase": "contact",
+                "approach_confirmed": bool(state.get("approach_confirmed")),
+                "contact_frame_count": int(state["contact_frames"]),
+                "previous_release_global_ms": state.get("released_at_global_ms"),
+            }
             observations.append(
                 _Observation(
                     action_type=ActionType.HAND_OBJECT_CONTACT,
@@ -111,7 +209,10 @@ def _frame_observations(
                         "distance_norm": round(distance, 5),
                         "hand_track_id": hand.track_id,
                         "object_track_id": obj.track_id,
+                        "object_instance": _instance_evidence(obj),
+                        "interaction_state": interaction_receipt,
                     },
+                    instance_key=_instance_key(obj),
                 )
             )
             if obj.class_name in DEVICE_CLASSES:
@@ -122,10 +223,19 @@ def _frame_observations(
                         global_ms=frame.global_ms,
                         objects=(hand.class_name, obj.class_name),
                         confidence=min(1.0, confidence + 0.08),
-                        evidence={"frame_index": frame.frame_index, "distance_norm": round(distance, 5)},
+                        evidence={
+                            "frame_index": frame.frame_index,
+                            "distance_norm": round(distance, 5),
+                            "hand_track_id": hand.track_id,
+                            "object_track_id": obj.track_id,
+                            "object_instance": _instance_evidence(obj),
+                            "interaction_state": interaction_receipt,
+                        },
+                        instance_key=_instance_key(obj, prefix="device"),
                     )
                 )
             if obj.class_name in CAP_CLASSES or obj.class_name == "reagent_bottle_open":
+                state_key = _container_state_key(obj)
                 observations.append(
                     _Observation(
                         action_type=ActionType.CONTAINER_STATE_CHANGE,
@@ -133,19 +243,68 @@ def _frame_observations(
                         global_ms=frame.global_ms,
                         objects=tuple(sorted({hand.class_name, obj.class_name})),
                         confidence=min(1.0, confidence + 0.06),
-                        evidence={"frame_index": frame.frame_index, "state_cue": obj.class_name},
+                        evidence={
+                            "frame_index": frame.frame_index,
+                            "state_cue": obj.class_name,
+                            "state_before": container_states.get(state_key, "unknown"),
+                            "state_after": current_container_states.get(
+                                state_key, _container_state(obj)
+                            ),
+                            "state_key": state_key,
+                            "hand_track_id": hand.track_id,
+                            "object_track_id": obj.track_id,
+                            "object_instance": _instance_evidence(obj),
+                            "interaction_state": interaction_receipt,
+                        },
+                        instance_key=(
+                            _instance_key(obj, prefix="container") or state_key
+                        ),
                     )
                 )
+        elif int(state.get("contact_frames", 0)) > 0:
+            state["released_at_global_ms"] = float(frame.global_ms)
+            state["contact_frames"] = 0
+            state["approach_confirmed"] = False
+
+    for pair_key, state in interaction_state.items():
+        if pair_key in seen_pairs:
+            continue
+        if int(state.get("contact_frames", 0)) > 0:
+            state["released_at_global_ms"] = float(frame.global_ms)
+        state["contact_frames"] = 0
+        state["approach_confirmed"] = False
+        state["previous_gap"] = None
+    state_retention_ms = max(
+        2000.0,
+        float(cfg.get("event_merge_gap_seconds", 1.25)) * 2000.0,
+    )
+    for pair_key, state in list(interaction_state.items()):
+        if (
+            int(state.get("contact_frames", 0)) == 0
+            and float(state.get("last_seen_global_ms", frame.global_ms))
+            < float(frame.global_ms) - state_retention_ms
+        ):
+            del interaction_state[pair_key]
+    maximum_state_entries = max(
+        128, int(cfg.get("fine_state_max_entries", 4096))
+    )
+    while len(interaction_state) > maximum_state_entries:
+        interaction_state.pop(next(iter(interaction_state)))
+    for state_key, state_value in current_container_states.items():
+        container_states.pop(state_key, None)
+        container_states[state_key] = state_value
+    while len(container_states) > maximum_state_entries:
+        container_states.pop(next(iter(container_states)))
 
     movement_threshold = float(cfg["movement_threshold_norm"])
     movement_samples: list[
-        tuple[BoxEvidence, float, float, float, float, float]
+        tuple[BoxEvidence, float, float, float, float, float, float, float]
     ] = []
     for obj in objects:
         if obj.track_id is None:
             continue
         center_x, center_y = _box_center(obj)
-        previous = previous_tracks.get(obj.track_id)
+        previous = previous_tracks.pop(obj.track_id, None)
         previous_tracks[obj.track_id] = (center_x, center_y, frame.local_ms)
         if previous is None:
             continue
@@ -154,27 +313,110 @@ def _frame_observations(
             continue
         dx = center_x - previous[0]
         dy = center_y - previous[1]
-        movement_samples.append((obj, center_x, center_y, delta_ms, dx, dy))
+        movement_samples.append(
+            (
+                obj,
+                center_x,
+                center_y,
+                delta_ms,
+                dx,
+                dy,
+                previous[0],
+                previous[1],
+            )
+        )
+    stale_track_cutoff_ms = float(frame.local_ms) - 2000.0
+    for track_id, (_, _, last_seen_ms) in list(previous_tracks.items()):
+        if float(last_seen_ms) < stale_track_cutoff_ms:
+            del previous_tracks[track_id]
+    while len(previous_tracks) > maximum_state_entries:
+        previous_tracks.pop(next(iter(previous_tracks)))
 
     minimum_anchors = max(2, int(cfg.get("camera_motion_compensation_min_anchors", 2)))
     anchor_vectors = [
         (dx, dy)
-        for obj, _, _, _, dx, dy in movement_samples
+        for obj, _, _, _, dx, dy, _, _ in movement_samples
         if obj.class_name in SUPPORT_ANCHOR_CLASSES
     ]
     camera_dx = float(median(item[0] for item in anchor_vectors)) if len(anchor_vectors) >= minimum_anchors else 0.0
     camera_dy = float(median(item[1] for item in anchor_vectors)) if len(anchor_vectors) >= minimum_anchors else 0.0
     camera_compensated = len(anchor_vectors) >= minimum_anchors
+    affine_matrix: np.ndarray | None = None
+    affine_inliers = 0
+    affine_enabled = bool(cfg.get("fine_affine_object_motion_enabled", False))
+    affine_samples = [
+        (previous_x, previous_y, center_x, center_y)
+        for obj, center_x, center_y, _, _, _, previous_x, previous_y in movement_samples
+        if obj.class_name in SUPPORT_ANCHOR_CLASSES
+    ]
+    if affine_enabled and len(affine_samples) >= max(3, minimum_anchors):
+        previous_points = np.asarray(
+            [[item[0], item[1]] for item in affine_samples], dtype=np.float32
+        )
+        current_points = np.asarray(
+            [[item[2], item[3]] for item in affine_samples], dtype=np.float32
+        )
+        candidate_matrix, inliers = cv2.estimateAffinePartial2D(
+            previous_points,
+            current_points,
+            method=cv2.RANSAC,
+            ransacReprojThreshold=0.02,
+        )
+        if candidate_matrix is not None:
+            scale = math.hypot(
+                float(candidate_matrix[0, 0]), float(candidate_matrix[1, 0])
+            )
+            rotation = abs(
+                math.degrees(
+                    math.atan2(
+                        float(candidate_matrix[1, 0]),
+                        float(candidate_matrix[0, 0]),
+                    )
+                )
+            )
+            if (
+                abs(scale - 1.0)
+                <= float(cfg.get("motion_probe_max_scale_delta", 0.12))
+                and rotation
+                <= float(cfg.get("motion_probe_max_rotation_degrees", 8.0))
+            ):
+                affine_matrix = candidate_matrix
+                affine_inliers = int(inliers.sum()) if inliers is not None else 0
     suppress_stationary_devices = bool(
         cfg.get("suppress_stationary_device_movement", True)
     )
-    for obj, _, _, delta_ms, dx, dy in movement_samples:
+    for (
+        obj,
+        center_x,
+        center_y,
+        delta_ms,
+        dx,
+        dy,
+        previous_x,
+        previous_y,
+    ) in movement_samples:
         raw_displacement = math.hypot(dx, dy)
-        displacement = (
-            math.hypot(dx - camera_dx, dy - camera_dy)
-            if camera_compensated
-            else raw_displacement
-        )
+        if affine_matrix is not None:
+            predicted_x = (
+                float(affine_matrix[0, 0]) * previous_x
+                + float(affine_matrix[0, 1]) * previous_y
+                + float(affine_matrix[0, 2])
+            )
+            predicted_y = (
+                float(affine_matrix[1, 0]) * previous_x
+                + float(affine_matrix[1, 1]) * previous_y
+                + float(affine_matrix[1, 2])
+            )
+            displacement = math.hypot(
+                center_x - predicted_x, center_y - predicted_y
+            )
+            compensation_method = "anchor_affine"
+        elif camera_compensated:
+            displacement = math.hypot(dx - camera_dx, dy - camera_dy)
+            compensation_method = "anchor_translation"
+        else:
+            displacement = raw_displacement
+            compensation_method = "none"
         if suppress_stationary_devices and obj.class_name in DEVICE_CLASSES:
             continue
         if displacement >= movement_threshold:
@@ -191,10 +433,14 @@ def _frame_observations(
                         "displacement_norm": round(raw_displacement, 5),
                         "camera_compensated_displacement_norm": round(displacement, 5),
                         "camera_motion_compensated": camera_compensated,
+                        "camera_motion_method": compensation_method,
                         "camera_translation_norm": [round(camera_dx, 5), round(camera_dy, 5)],
                         "camera_anchor_count": len(anchor_vectors),
+                        "camera_affine_inlier_count": affine_inliers,
                         "delta_ms": round(delta_ms, 3),
+                        "object_instance": _instance_evidence(obj),
                     },
+                    instance_key=_instance_key(obj),
                 )
             )
 
@@ -220,8 +466,16 @@ def _frame_observations(
                         "tool_track_id": tool.track_id,
                         "vessel_class": vessel.class_name,
                         "vessel_track_id": vessel.track_id,
+                        "tool_instance": _instance_evidence(tool),
+                        "vessel_instance": _instance_evidence(vessel),
                         "inference": "液体不属于21类标签；这是工具+容器+ROI运动候选，需多模态确认",
                     },
+                    instance_key=(
+                        f"transfer:{tool.track_id}:{vessel.track_id}"
+                        if tool.track_id is not None
+                        and vessel.track_id is not None
+                        else None
+                    ),
                 )
             )
     return observations
@@ -232,9 +486,12 @@ def _merge_observations(
     view: ViewInput,
     cfg: dict[str, Any],
 ) -> list[ActionCandidate]:
-    grouped: dict[tuple[str, str], list[_Observation]] = defaultdict(list)
+    instance_aware = bool(cfg.get("fine_instance_association_enabled", False))
+    grouped: dict[tuple[str, str, str], list[_Observation]] = defaultdict(list)
     for observation in observations:
-        grouped[_observation_key(observation)].append(observation)
+        grouped[
+            _observation_key(observation, instance_aware=instance_aware)
+        ].append(observation)
     candidates: list[ActionCandidate] = []
     merge_gap_ms = float(cfg["event_merge_gap_seconds"]) * 1000.0
     min_duration_ms = float(cfg["min_event_duration_seconds"]) * 1000.0
@@ -264,6 +521,9 @@ def _merge_observations(
             persistence = min(0.15, math.log1p(len(run)) * 0.035)
             confidence = min(1.0, raw_confidence + persistence)
             key_item = max(run, key=lambda item: item.confidence)
+            evidence = _representative_observation_evidence(run, key_item)
+            instance_signature = _observation_instance_signature(run)
+            uncertainty = _observation_state_uncertainty(run, cfg)
             candidates.append(
                 ActionCandidate(
                     candidate_id=f"CAND-{view.view_id}-{counter:06d}",
@@ -277,7 +537,14 @@ def _merge_observations(
                     key_global_ms=key_item.global_ms,
                     objects=object_names,
                     confidence=confidence,
-                    evidence=[item.evidence for item in run[:50]],
+                    evidence=evidence,
+                    uncertainty=uncertainty,
+                    instance_signature=instance_signature,
+                    provenance={
+                        "source_stage": "candidate_fine",
+                        "candidate_reducer": "batch",
+                        "instance_association": bool(instance_signature),
+                    },
                 )
             )
             counter += 1
@@ -399,15 +666,49 @@ def _infer_liquid_transfer_sequences(
 
 
 def generate_candidates(
-    views: Sequence[ViewInput], detection_paths: dict[str, Path], config: dict[str, Any]
+    views: Sequence[ViewInput],
+    detection_paths: dict[str, Path],
+    config: dict[str, Any],
+    frame_index: FineFrameIndex | None = None,
 ) -> list[ActionCandidate]:
     candidates: list[ActionCandidate] = []
-    cfg = config["segmentation"]
+    cfg = dict(config["segmentation"])
+    for key in (
+        "fine_streaming_candidates_enabled",
+        "fine_state_max_entries",
+        "fine_instance_association_enabled",
+        "fine_contact_state_enabled",
+        "fine_affine_object_motion_enabled",
+        "motion_probe_max_scale_delta",
+        "motion_probe_max_rotation_degrees",
+    ):
+        if key in config["performance"]:
+            cfg[key] = config["performance"][key]
     for view in views:
+        frames = (
+            frame_index.iter_frames(view.view_id)
+            if frame_index is not None
+            else iter_frame_evidence(detection_paths[view.view_id])
+        )
+        if cfg.get("fine_streaming_candidates_enabled", False):
+            candidates.extend(
+                _generate_candidates_streaming(view, frames, cfg)
+            )
+            continue
         observations: list[_Observation] = []
         previous_tracks: dict[int, tuple[float, float, float]] = {}
-        for frame in iter_frame_evidence(detection_paths[view.view_id]):
-            observations.extend(_frame_observations(frame, previous_tracks, cfg))
+        interaction_state: dict[tuple[Any, ...], dict[str, Any]] = {}
+        container_states: dict[str, str] = {}
+        for frame in frames:
+            observations.extend(
+                _frame_observations(
+                    frame,
+                    previous_tracks,
+                    cfg,
+                    interaction_state,
+                    container_states,
+                )
+            )
         candidates.extend(_merge_observations(observations, view, cfg))
         candidates.extend(_infer_liquid_transfer_sequences(observations, view, cfg))
     return sorted(candidates, key=candidate_sort_key)
@@ -684,6 +985,603 @@ def generate_coarse_activity_candidates(
                 )
             )
     return sorted(candidates, key=candidate_sort_key)
+
+
+def _representative_observation_evidence(
+    observations: Sequence[_Observation],
+    key_item: _Observation,
+) -> list[dict[str, Any]]:
+    """Keep bounded evidence while always retaining start, peak and end."""
+
+    selected = list(observations[:47])
+    for item in (key_item, observations[-1]):
+        if item not in selected:
+            selected.append(item)
+    if len(observations) > 49:
+        middle = observations[len(observations) // 2]
+        if middle not in selected:
+            selected.append(middle)
+    return [item.evidence for item in selected[:50]]
+
+
+def _observation_instance_signature(
+    observations: Sequence[_Observation],
+) -> dict[str, Any]:
+    instance_keys = sorted(
+        {item.instance_key for item in observations if item.instance_key}
+    )
+    track_ids = sorted(
+        {
+            int(track_id)
+            for item in observations
+            for key in (
+                "object_track_id",
+                "track_id",
+                "tool_track_id",
+                "vessel_track_id",
+            )
+            if isinstance((track_id := item.evidence.get(key)), int)
+        }
+    )
+    instances = [
+        value
+        for item in observations
+        for key in ("object_instance", "tool_instance", "vessel_instance")
+        if isinstance((value := item.evidence.get(key)), dict)
+    ]
+    centers = [
+        value["center_norm"]
+        for value in instances
+        if isinstance(value.get("center_norm"), list)
+        and len(value["center_norm"]) == 2
+    ]
+    areas = [
+        float(value["area_norm"])
+        for value in instances
+        if isinstance(value.get("area_norm"), (int, float))
+    ]
+    appearance_values = [
+        list(value["appearance_signature"])
+        for value in instances
+        if isinstance(value.get("appearance_signature"), list)
+        and value["appearance_signature"]
+    ]
+    appearance_signature = None
+    if appearance_values:
+        width = min(len(item) for item in appearance_values)
+        appearance_signature = [
+            round(
+                float(median(item[index] for item in appearance_values)), 6
+            )
+            for index in range(width)
+        ]
+    if not instance_keys and not track_ids:
+        return {}
+    return {
+        "schema_version": "visioncortex-object-instance-signature/1",
+        "instance_keys": instance_keys,
+        "track_ids": track_ids,
+        "object_classes": sorted(
+            {
+                str(value.get("class_name"))
+                for value in instances
+                if value.get("class_name")
+            }
+        ),
+        "reliable_single_instance": bool(
+            len(instance_keys) == 1 or len(track_ids) == 1
+        ),
+        "median_center_norm": (
+            [
+                round(float(median(item[0] for item in centers)), 6),
+                round(float(median(item[1] for item in centers)), 6),
+            ]
+            if centers
+            else None
+        ),
+        "median_area_norm": (
+            round(float(median(areas)), 8) if areas else None
+        ),
+        "appearance_signature": appearance_signature,
+    }
+
+
+def _observation_state_uncertainty(
+    observations: Sequence[_Observation],
+    cfg: dict[str, Any],
+) -> list[str]:
+    uncertainty: list[str] = []
+    action_type = observations[0].action_type
+    if (
+        cfg.get("fine_contact_state_enabled", False)
+        and action_type
+        in {
+            ActionType.HAND_OBJECT_CONTACT,
+            ActionType.CONTAINER_STATE_CHANGE,
+            ActionType.DEVICE_PANEL_OPERATION,
+        }
+        and not any(
+            bool((item.evidence.get("interaction_state") or {}).get(
+                "approach_confirmed"
+            ))
+            for item in observations
+        )
+    ):
+        uncertainty.append(
+            "未观察到完整接近过程；保留原有接触召回，不能单独确认操作"
+        )
+    if action_type == ActionType.CONTAINER_STATE_CHANGE:
+        transitions = {
+            (
+                str(item.evidence.get("state_before", "unknown")),
+                str(item.evidence.get("state_after", "unknown")),
+            )
+            for item in observations
+        }
+        if not any(left != "unknown" and left != right for left, right in transitions):
+            uncertainty.append(
+                "未形成明确的容器前后状态差异；保留状态线索候选"
+            )
+    return uncertainty
+
+
+@dataclass
+class _RunAccumulator:
+    first: _Observation
+    last: _Observation
+    key_item: _Observation
+    count: int
+    confidence_sum: float
+    objects: set[str]
+    samples: list[_Observation]
+    instance_mode: str
+    release_observed_at_global_ms: float | None
+
+    @classmethod
+    def start(
+        cls, observation: _Observation, *, instance_mode: str
+    ) -> _RunAccumulator:
+        return cls(
+            first=observation,
+            last=observation,
+            key_item=observation,
+            count=1,
+            confidence_sum=float(observation.confidence),
+            objects=set(observation.objects),
+            samples=[observation],
+            instance_mode=instance_mode,
+            release_observed_at_global_ms=None,
+        )
+
+    def add(self, observation: _Observation) -> None:
+        self.last = observation
+        self.count += 1
+        self.confidence_sum += float(observation.confidence)
+        self.objects.update(observation.objects)
+        if observation.confidence > self.key_item.confidence:
+            self.key_item = observation
+        if len(self.samples) < 47:
+            self.samples.append(observation)
+
+    def representative_observations(self) -> list[_Observation]:
+        selected = list(self.samples)
+        for item in (self.key_item, self.last):
+            if item not in selected:
+                selected.append(item)
+        return selected[:50]
+
+    def mark_release(self, global_ms: float) -> None:
+        if self.release_observed_at_global_ms is None:
+            self.release_observed_at_global_ms = float(global_ms)
+
+
+def _candidate_from_accumulator(
+    accumulator: _RunAccumulator,
+    view: ViewInput,
+    cfg: dict[str, Any],
+) -> ActionCandidate | None:
+    duration = accumulator.last.global_ms - accumulator.first.global_ms
+    minimum_observations = int(cfg["min_event_observations"])
+    enough = bool(
+        accumulator.count >= minimum_observations
+        and duration >= float(cfg["min_event_duration_seconds"]) * 1000.0
+    )
+    if accumulator.first.action_type in {
+        ActionType.CONTAINER_STATE_CHANGE,
+        ActionType.DEVICE_PANEL_OPERATION,
+    }:
+        enough = accumulator.count >= max(2, minimum_observations - 1)
+    if not enough:
+        return None
+    persistence = min(0.15, math.log1p(accumulator.count) * 0.035)
+    confidence = min(
+        1.0,
+        accumulator.confidence_sum / accumulator.count + persistence,
+    )
+    representatives = accumulator.representative_observations()
+    signature = _observation_instance_signature(representatives)
+    uncertainty = _observation_state_uncertainty(representatives, cfg)
+    interaction_receipt = {
+        "schema_version": "visioncortex-contact-state/1",
+        "approach_observed": any(
+            bool((item.evidence.get("interaction_state") or {}).get(
+                "approach_confirmed"
+            ))
+            for item in representatives
+        ),
+        "contact_observation_count": accumulator.count,
+        "release_observed": (
+            accumulator.release_observed_at_global_ms is not None
+        ),
+        "release_observed_at_global_ms": (
+            round(accumulator.release_observed_at_global_ms, 3)
+            if accumulator.release_observed_at_global_ms is not None
+            else None
+        ),
+        "release_inferred_from_next_observation_gap": False,
+    }
+    if accumulator.instance_mode == "class_fallback":
+        uncertainty.append(
+            "轨迹身份不足时保留原有类别级召回；不得用于证明同一物体"
+        )
+    return ActionCandidate(
+        candidate_id="CAND-PENDING",
+        action_type=accumulator.first.action_type,
+        view_id=view.view_id,
+        role=view.role,
+        local_start_ms=accumulator.first.local_ms,
+        local_end_ms=accumulator.last.local_ms,
+        global_start_ms=accumulator.first.global_ms,
+        global_end_ms=accumulator.last.global_ms,
+        key_global_ms=accumulator.key_item.global_ms,
+        objects=sorted(accumulator.objects),
+        confidence=confidence,
+        evidence=[item.evidence for item in representatives],
+        uncertainty=uncertainty,
+        instance_signature=signature,
+        provenance={
+            "source_stage": "candidate_fine",
+            "candidate_reducer": "streaming",
+            "instance_mode": accumulator.instance_mode,
+            "observation_count": accumulator.count,
+            "representative_evidence_policy": "start_peak_end_bounded_50",
+            "interaction_state": interaction_receipt,
+        },
+    )
+
+
+@dataclass
+class _LiquidContactRun:
+    first: _Observation
+    last: _Observation
+    count: int
+    confidence_sum: float
+
+    @property
+    def vessel_identity(self) -> tuple[str, int]:
+        return (
+            str(self.first.evidence.get("vessel_class") or "unknown"),
+            int(self.first.evidence["vessel_track_id"]),
+        )
+
+    def add(self, observation: _Observation) -> None:
+        self.last = observation
+        self.count += 1
+        self.confidence_sum += float(observation.confidence)
+
+
+class _StreamingLiquidSequences:
+    def __init__(self, view: ViewInput, cfg: dict[str, Any]):
+        self.view = view
+        self.maximum_gap_ms = float(
+            cfg.get("liquid_transfer_max_sequence_gap_seconds", 20.0)
+        ) * 1000.0
+        self.contact_gap_ms = float(
+            cfg.get("event_merge_gap_seconds", 1.25)
+        ) * 1000.0
+        self.minimum_observations = max(
+            2, int(cfg.get("liquid_transfer_min_contact_observations", 2))
+        )
+        self.active: dict[tuple[str, int], _LiquidContactRun] = {}
+        self.previous: dict[tuple[str, int], _LiquidContactRun] = {}
+        self.output: list[ActionCandidate] = []
+
+    @staticmethod
+    def _tool_key(observation: _Observation) -> tuple[str, int] | None:
+        tool_class = observation.evidence.get("tool_class")
+        tool_track_id = observation.evidence.get("tool_track_id")
+        vessel_track_id = observation.evidence.get("vessel_track_id")
+        if (
+            not isinstance(tool_class, str)
+            or not isinstance(tool_track_id, int)
+            or not isinstance(vessel_track_id, int)
+        ):
+            return None
+        return tool_class, tool_track_id
+
+    def add(self, observation: _Observation) -> None:
+        if observation.action_type != ActionType.LIQUID_MOVEMENT:
+            return
+        key = self._tool_key(observation)
+        if key is None:
+            return
+        current = self.active.get(key)
+        vessel = (
+            str(observation.evidence.get("vessel_class") or "unknown"),
+            int(observation.evidence["vessel_track_id"]),
+        )
+        if current is not None and (
+            vessel != current.vessel_identity
+            or observation.global_ms - current.last.global_ms
+            > self.contact_gap_ms
+        ):
+            self._finalize(key)
+            current = None
+        if current is None:
+            self.active[key] = _LiquidContactRun(
+                first=observation,
+                last=observation,
+                count=1,
+                confidence_sum=float(observation.confidence),
+            )
+        else:
+            current.add(observation)
+
+    def expire(self, global_ms: float) -> None:
+        for key, current in list(self.active.items()):
+            if global_ms - current.last.global_ms > self.contact_gap_ms:
+                self._finalize(key)
+        for key, previous in list(self.previous.items()):
+            if global_ms - previous.last.global_ms > self.maximum_gap_ms:
+                del self.previous[key]
+
+    def finish(self) -> list[ActionCandidate]:
+        for key in list(self.active):
+            self._finalize(key)
+        return self.output
+
+    def _finalize(self, key: tuple[str, int]) -> None:
+        current = self.active.pop(key)
+        if current.count < self.minimum_observations:
+            return
+        previous = self.previous.get(key)
+        if previous is not None:
+            gap_ms = current.first.global_ms - previous.last.global_ms
+            if (
+                previous.vessel_identity != current.vessel_identity
+                and 0.0 <= gap_ms <= self.maximum_gap_ms
+            ):
+                combined_count = previous.count + current.count
+                confidence = min(
+                    1.0,
+                    (
+                        previous.confidence_sum + current.confidence_sum
+                    )
+                    / combined_count
+                    + 0.08,
+                )
+                self.output.append(
+                    ActionCandidate(
+                        candidate_id=(
+                            f"TRANSFER-SEQ-{self.view.view_id}-"
+                            f"{len(self.output) + 1:06d}"
+                        ),
+                        action_type=ActionType.LIQUID_MOVEMENT,
+                        view_id=self.view.view_id,
+                        role=self.view.role,
+                        local_start_ms=previous.first.local_ms,
+                        local_end_ms=current.last.local_ms,
+                        global_start_ms=previous.first.global_ms,
+                        global_end_ms=current.last.global_ms,
+                        key_global_ms=(
+                            previous.last.global_ms + current.first.global_ms
+                        )
+                        / 2.0,
+                        objects=sorted(
+                            {
+                                key[0],
+                                previous.vessel_identity[0],
+                                current.vessel_identity[0],
+                            }
+                        ),
+                        confidence=confidence,
+                        evidence=[
+                            {
+                                "transfer_sequence": "source_transport_target",
+                                "tool_class": key[0],
+                                "tool_track_id": key[1],
+                                "source_class": previous.vessel_identity[0],
+                                "source_track_id": previous.vessel_identity[1],
+                                "target_class": current.vessel_identity[0],
+                                "target_track_id": current.vessel_identity[1],
+                                "source_contact_end_global_ms": (
+                                    previous.last.global_ms
+                                ),
+                                "target_contact_start_global_ms": (
+                                    current.first.global_ms
+                                ),
+                                "transport_gap_ms": gap_ms,
+                                "source_observation_count": previous.count,
+                                "target_observation_count": current.count,
+                                "streaming_state_machine": True,
+                            }
+                        ],
+                        uncertainty=[
+                            "工具完成源到目标的连续轨迹；液体本体仍需时序视觉或多模态确认"
+                        ],
+                        instance_signature={
+                            "schema_version": (
+                                "visioncortex-object-instance-signature/1"
+                            ),
+                            "tool_track_id": key[1],
+                            "source_track_id": previous.vessel_identity[1],
+                            "target_track_id": current.vessel_identity[1],
+                            "reliable_single_instance": True,
+                        },
+                        provenance={
+                            "source_stage": "candidate_fine",
+                            "candidate_reducer": "streaming_transfer_state_machine",
+                        },
+                    )
+                )
+        self.previous[key] = current
+
+
+def _legacy_candidate_covered(
+    legacy: ActionCandidate,
+    precise: Sequence[ActionCandidate],
+) -> bool:
+    legacy_objects = set(legacy.objects) - HAND_CLASSES
+    return any(
+        item.action_type == legacy.action_type
+        and bool(legacy_objects & (set(item.objects) - HAND_CLASSES))
+        and item.global_start_ms <= legacy.global_end_ms
+        and item.global_end_ms >= legacy.global_start_ms
+        for item in precise
+    )
+
+
+def _generate_candidates_streaming(
+    view: ViewInput,
+    frames: Iterable[FrameEvidence],
+    cfg: dict[str, Any],
+) -> list[ActionCandidate]:
+    merge_gap_ms = float(cfg["event_merge_gap_seconds"]) * 1000.0
+    instance_aware = bool(cfg.get("fine_instance_association_enabled", False))
+    active_precise: dict[tuple[str, str, str], _RunAccumulator] = {}
+    active_legacy: dict[tuple[str, str, str], _RunAccumulator] = {}
+    precise: list[ActionCandidate] = []
+    legacy: list[ActionCandidate] = []
+    previous_tracks: dict[int, tuple[float, float, float]] = {}
+    interaction_state: dict[tuple[Any, ...], dict[str, Any]] = {}
+    container_states: dict[str, str] = {}
+    liquid_sequences = _StreamingLiquidSequences(view, cfg)
+
+    def finalize_stale(
+        active: dict[tuple[str, str, str], _RunAccumulator],
+        output: list[ActionCandidate],
+        global_ms: float,
+    ) -> None:
+        for key, accumulator in list(active.items()):
+            if global_ms - accumulator.last.global_ms <= merge_gap_ms:
+                continue
+            candidate = _candidate_from_accumulator(accumulator, view, cfg)
+            if candidate is not None:
+                output.append(candidate)
+            del active[key]
+
+    def add_to(
+        active: dict[tuple[str, str, str], _RunAccumulator],
+        key: tuple[str, str, str],
+        observation: _Observation,
+        *,
+        instance_mode: str,
+    ) -> None:
+        accumulator = active.get(key)
+        if accumulator is None:
+            active[key] = _RunAccumulator.start(
+                observation, instance_mode=instance_mode
+            )
+        else:
+            accumulator.add(observation)
+
+    def mark_observed_releases(global_ms: float) -> None:
+        released_objects = {
+            str(pair_key[1])
+            for pair_key, state in interaction_state.items()
+            if state.get("released_at_global_ms") == global_ms
+        }
+        if not released_objects:
+            return
+        for active in (active_precise, active_legacy):
+            for accumulator in active.values():
+                object_track_id = accumulator.last.evidence.get(
+                    "object_track_id"
+                )
+                object_instance = accumulator.last.evidence.get(
+                    "object_instance"
+                ) or {}
+                object_class = object_instance.get("class_name")
+                if (
+                    str(object_track_id) in released_objects
+                    or str(object_class) in released_objects
+                ):
+                    accumulator.mark_release(global_ms)
+
+    for frame in frames:
+        if frame.global_ms is None:
+            continue
+        finalize_stale(active_precise, precise, float(frame.global_ms))
+        finalize_stale(active_legacy, legacy, float(frame.global_ms))
+        liquid_sequences.expire(float(frame.global_ms))
+        observations = _frame_observations(
+            frame,
+            previous_tracks,
+            cfg,
+            interaction_state,
+            container_states,
+        )
+        mark_observed_releases(float(frame.global_ms))
+        for observation in observations:
+            liquid_sequences.add(observation)
+            if instance_aware and observation.instance_key:
+                add_to(
+                    active_precise,
+                    _observation_key(observation, instance_aware=True),
+                    observation,
+                    instance_mode="track_instance",
+                )
+                add_to(
+                    active_legacy,
+                    _observation_key(observation, instance_aware=False),
+                    observation,
+                    instance_mode="class_fallback",
+                )
+            else:
+                add_to(
+                    active_legacy,
+                    _observation_key(observation, instance_aware=False),
+                    observation,
+                    instance_mode="class_fallback",
+                )
+    for active, output in (
+        (active_precise, precise),
+        (active_legacy, legacy),
+    ):
+        for accumulator in active.values():
+            candidate = _candidate_from_accumulator(accumulator, view, cfg)
+            if candidate is not None:
+                output.append(candidate)
+
+    if instance_aware:
+        candidates = [
+            *precise,
+            *[
+                item
+                for item in legacy
+                if not _legacy_candidate_covered(item, precise)
+            ],
+        ]
+    else:
+        candidates = legacy
+    ordered = sorted(
+        candidates,
+        key=lambda item: (
+            item.global_start_ms,
+            item.global_end_ms,
+            item.action_type.value,
+            item.objects,
+        ),
+    )
+    numbered = [
+        item.model_copy(
+            update={"candidate_id": f"CAND-{view.view_id}-{index:06d}"}
+        )
+        for index, item in enumerate(ordered, 1)
+    ]
+    return sorted(
+        [*numbered, *liquid_sequences.finish()], key=candidate_sort_key
+    )
 
 
 def _motion_probe_frames(
@@ -1474,22 +2372,46 @@ def select_fine_scan_views(
     return selected, report
 
 
-def _objects_overlap(left: ActionCandidate, right: ActionCandidate) -> bool:
+def _appearance_similarity(
+    left: ActionCandidate,
+    right: ActionCandidate,
+) -> float | None:
+    left_values = left.instance_signature.get("appearance_signature")
+    right_values = right.instance_signature.get("appearance_signature")
+    if not isinstance(left_values, list) or not isinstance(right_values, list):
+        return None
+    width = min(len(left_values), len(right_values))
+    if width == 0:
+        return None
+    left_array = np.asarray(left_values[:width], dtype=np.float64)
+    right_array = np.asarray(right_values[:width], dtype=np.float64)
+    denominator = float(np.linalg.norm(left_array) * np.linalg.norm(right_array))
+    if denominator <= 1e-9:
+        return None
+    return float(np.dot(left_array, right_array) / denominator)
+
+
+def _objects_overlap(
+    left: ActionCandidate,
+    right: ActionCandidate,
+    config: dict[str, Any] | None = None,
+) -> bool:
     a = set(left.objects) - HAND_CLASSES
     b = set(right.objects) - HAND_CLASSES
-    if a & b:
-        return True
-    if left.action_type == ActionType.LIQUID_MOVEMENT:
+    compatible = bool(a & b)
+    if not compatible and left.action_type == ActionType.LIQUID_MOVEMENT:
         # Cross-view detectors may call the same transfer tool pipette vs.
         # spearhead and the same vessel tube vs. container. Require both
         # physical families; never merge candidates merely because both are
         # labelled "liquid_movement".
-        return bool(a & TRANSFER_TOOL_CLASSES and b & TRANSFER_TOOL_CLASSES) and bool(
+        compatible = bool(
+            a & TRANSFER_TOOL_CLASSES and b & TRANSFER_TOOL_CLASSES
+        ) and bool(
             a & CONTAINER_CLASSES and b & CONTAINER_CLASSES
         )
-    if left.action_type == ActionType.DEVICE_PANEL_OPERATION:
-        return bool(a & b & DEVICE_CLASSES)
-    if left.action_type == ActionType.CONTAINER_STATE_CHANGE:
+    if not compatible and left.action_type == ActionType.DEVICE_PANEL_OPERATION:
+        compatible = bool(a & b & DEVICE_CLASSES)
+    if not compatible and left.action_type == ActionType.CONTAINER_STATE_CHANGE:
         def families(objects: set[str]) -> set[str]:
             result: set[str] = set()
             if objects & {"tube", "tube_cap"}:
@@ -1506,8 +2428,78 @@ def _objects_overlap(left: ActionCandidate, right: ActionCandidate) -> bool:
                 result.add("open_container")
             return result
 
-        return bool(families(a) & families(b))
-    return False
+        compatible = bool(families(a) & families(b))
+    if not compatible:
+        return False
+
+    left_tracks = set(left.instance_signature.get("track_ids") or [])
+    right_tracks = set(right.instance_signature.get("track_ids") or [])
+    if (
+        left.view_id == right.view_id
+        and left_tracks
+        and right_tracks
+        and not bool(left_tracks & right_tracks)
+    ):
+        return False
+
+    performance = (config or {}).get("performance", {})
+    if (
+        left.view_id != right.view_id
+        and performance.get(
+            "fine_instance_cross_view_conflict_quarantine_enabled", False
+        )
+    ):
+        similarity = _appearance_similarity(left, right)
+        if similarity is not None and similarity < float(
+            performance.get("fine_instance_minimum_cosine_similarity", 0.25)
+        ):
+            return False
+    return True
+
+
+def _instance_association_receipt(
+    candidates: Sequence[ActionCandidate],
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    pairs = []
+    for left, right in itertools.combinations(candidates, 2):
+        if left.view_id == right.view_id:
+            continue
+        similarity = _appearance_similarity(left, right)
+        pairs.append(
+            {
+                "left_candidate_id": left.candidate_id,
+                "right_candidate_id": right.candidate_id,
+                "left_view_id": left.view_id,
+                "right_view_id": right.view_id,
+                "left_instance_signature": left.instance_signature,
+                "right_instance_signature": right.instance_signature,
+                "appearance_cosine_similarity": (
+                    round(similarity, 6) if similarity is not None else None
+                ),
+                "compatible": _objects_overlap(left, right, config),
+                "association_basis": (
+                    "class_time_and_appearance"
+                    if similarity is not None
+                    else "class_time_without_cross_view_appearance"
+                ),
+            }
+        )
+    return {
+        "schema_version": "visioncortex-cross-view-instance-association/1",
+        "pair_count": len(pairs),
+        "appearance_conflict_quarantine_enabled": bool(
+            config["performance"].get(
+                "fine_instance_cross_view_conflict_quarantine_enabled", False
+            )
+        ),
+        "minimum_cosine_similarity": float(
+            config["performance"].get(
+                "fine_instance_minimum_cosine_similarity", 0.25
+            )
+        ),
+        "pairs": pairs,
+    }
 
 
 def audit_candidates(
@@ -1545,7 +2537,7 @@ def audit_candidates(
             ):
                 break
             if cluster[0].action_type == candidate.action_type and any(
-                _objects_overlap(candidate, item)
+                _objects_overlap(candidate, item, config)
                 and candidate.global_start_ms
                 <= item.global_end_ms + pair_tolerance(candidate, item)
                 and candidate.global_end_ms
@@ -1693,7 +2685,10 @@ def audit_candidates(
                     ),
                     default=tolerance,
                 ),
-            }
+            },
+            "object_instance_association": _instance_association_receipt(
+                cluster, config
+            ),
         }
         if semantic_context_candidate is not None:
             observability["semantic_recall_admission"] = {
@@ -1743,6 +2738,7 @@ def refine_liquid_events_with_context(
     events: Sequence[EvidenceEvent],
     detection_paths: dict[str, Path],
     context_ms: float = 1000.0,
+    frame_index: FineFrameIndex | None = None,
 ) -> list[dict[str, Any]]:
     """Reject single-view liquid hypotheses without nearby visible hand evidence.
 
@@ -1759,6 +2755,26 @@ def refine_liquid_events_with_context(
         supported: list[str] = []
         hand_counts: dict[str, int] = {}
         for view_id in event.supporting_views:
+            if frame_index is not None:
+                nearby_frames = list(
+                    frame_index.iter_global_frames(
+                        view_id,
+                        start_ms=event.global_start_ms - context_ms,
+                        end_ms=event.global_end_ms + context_ms,
+                    )
+                )
+                count = sum(
+                    1
+                    for frame in nearby_frames
+                    if any(
+                        box.class_name in HAND_CLASSES
+                        for box in frame.detections
+                    )
+                )
+                hand_counts[view_id] = count
+                if count:
+                    supported.append(view_id)
+                continue
             if view_id not in indexes:
                 frames = [
                     frame

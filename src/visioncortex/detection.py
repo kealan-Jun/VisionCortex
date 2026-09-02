@@ -1016,6 +1016,29 @@ def _roi_motion(previous: np.ndarray | None, current: np.ndarray, box: Sequence[
     return float(cv2.absdiff(current[top:bottom, left:right], previous[top:bottom, left:right]).mean())
 
 
+def _roi_appearance_signature(
+    frame: np.ndarray,
+    box: Sequence[float],
+) -> tuple[float, ...]:
+    """Return a compact color signature for contradiction-only association."""
+
+    height, width = frame.shape[:2]
+    x1, y1, x2, y2 = box
+    left, top = max(0, int(x1 * width)), max(0, int(y1 * height))
+    right = min(width, int(math.ceil(x2 * width)))
+    bottom = min(height, int(math.ceil(y2 * height)))
+    if right - left < 2 or bottom - top < 2:
+        return ()
+    hsv = cv2.cvtColor(frame[top:bottom, left:right], cv2.COLOR_BGR2HSV)
+    means, deviations = cv2.meanStdDev(hsv)
+    scales = (179.0, 255.0, 255.0)
+    return tuple(
+        round(float(value) / scales[index], 6)
+        for values in (means, deviations)
+        for index, value in enumerate(values.reshape(-1))
+    )
+
+
 def _select_model_path(role: ViewRole, config: dict[str, Any]) -> Path:
     models = config["models"]
     role_name = role.value
@@ -1311,6 +1334,7 @@ class RoleScanner:
         config: dict[str, Any],
         image_size: int | None = None,
         batch_size: int | None = None,
+        appearance_enabled: bool = False,
     ):
         from ultralytics import YOLO
 
@@ -1332,6 +1356,7 @@ class RoleScanner:
         self.batch_contractions: list[dict[str, int]] = []
         self.last_inference_batch_sizes: list[int] = []
         self.image_size = int(image_size or config["performance"]["image_size"])
+        self.appearance_enabled = bool(appearance_enabled)
 
     def close(self) -> None:
         del self.model
@@ -1381,6 +1406,13 @@ class RoleScanner:
                                         confidence=float(confidence),
                                         xyxy_norm=coords_tuple,
                                         roi_motion=_roi_motion(packet.previous_gray, packet.gray, coords_tuple),
+                                        appearance_signature=(
+                                            _roi_appearance_signature(
+                                                packet.frame, coords_tuple
+                                            )
+                                            if self.appearance_enabled
+                                            else ()
+                                        ),
                                     )
                                 )
                         results.append(boxes)
@@ -1489,7 +1521,16 @@ def scan_videos(
         )
         model_load_started = time.perf_counter()
         scanner = None if motion_only else RoleScanner(
-            role, config, effective_image_size, phase_batch_size
+            role,
+            config,
+            effective_image_size,
+            phase_batch_size,
+            appearance_enabled=bool(
+                phase == "fine"
+                and config["performance"].get(
+                    "fine_instance_appearance_enabled", False
+                )
+            ),
         )
         model_load_seconds = time.perf_counter() - model_load_started
         runtime_report = {
@@ -1595,19 +1636,29 @@ def scan_videos(
             "model_load_seconds": round(model_load_seconds, 6),
         }
         runtime_path = work_dir / f"runtime_{phase}_{role.value}.json"
+        tracker_motion_prediction = config["performance"].get(
+            "fine_tracker_motion_prediction_enabled"
+            if phase == "fine"
+            else "coarse_tracker_motion_prediction_enabled"
+        )
+        if tracker_motion_prediction is None:
+            tracker_motion_prediction = config["performance"].get(
+                "coarse_tracker_motion_prediction_enabled", False
+            )
+        tracker_center_distance = config["performance"].get(
+            "fine_tracker_maximum_center_distance"
+            if phase == "fine"
+            else "coarse_tracker_maximum_center_distance"
+        )
+        if tracker_center_distance is None:
+            tracker_center_distance = config["performance"].get(
+                "coarse_tracker_maximum_center_distance", 0.18
+            )
         trackers = {
             view.view_id: ByteSortTracker(
                 max_age_ms=max(1750.0, 1500.0 / effective_fps),
-                motion_prediction_enabled=bool(
-                    config["performance"].get(
-                        "coarse_tracker_motion_prediction_enabled", False
-                    )
-                ),
-                maximum_center_distance=float(
-                    config["performance"].get(
-                        "coarse_tracker_maximum_center_distance", 0.18
-                    )
-                ),
+                motion_prediction_enabled=bool(tracker_motion_prediction),
+                maximum_center_distance=float(tracker_center_distance),
             )
             for view in role_views
         } if scanner is not None else {}

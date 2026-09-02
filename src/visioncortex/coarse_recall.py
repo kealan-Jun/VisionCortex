@@ -6,7 +6,7 @@ from typing import Any, Sequence
 
 import numpy as np
 
-from .candidate_index import CoarseFrameIndex
+from .candidate_index import CoarseFrameIndex, FineFrameIndex
 from .detection import iter_frame_evidence
 from .ordering import candidate_sort_key
 from .schemas import ActionCandidate, ActionType, FrameEvidence, VideoInfo, ViewInput
@@ -508,3 +508,311 @@ def generate_open_vocabulary_coarse_candidates(
         selected_count == 0 or error_rate <= maximum_error_rate
     )
     return candidates, report
+
+
+def generate_open_vocabulary_fine_candidates(
+    views: Sequence[ViewInput],
+    infos: dict[str, VideoInfo],
+    detection_paths: dict[str, Path],
+    windows: dict[str, list[tuple[float, float]]],
+    config: dict[str, Any],
+    frame_index: FineFrameIndex | None = None,
+) -> tuple[list[ActionCandidate], dict[str, Any]]:
+    """Add bounded hand-centred recall candidates inside candidate_fine."""
+
+    perf = config["performance"]
+    enabled = bool(
+        perf.get("fine_roi_open_vocabulary_recall_enabled", False)
+    )
+    report: dict[str, Any] = {
+        "schema_version": "visioncortex-fine-roi-open-vocabulary-recall/1",
+        "enabled": enabled,
+        "scope": "hand-centred bounded frames inside candidate_fine",
+        "replaces_closed_set_candidates": False,
+        "selected_frame_count": 0,
+        "candidate_count": 0,
+        "error_count": 0,
+        "frames": [],
+        "formal_evidence_ready": not enabled,
+    }
+    if not enabled:
+        report["status"] = "disabled"
+        return [], report
+    settings = config.get("models", {}).get("open_vocabulary_key_frame") or {}
+    if not settings.get("enabled"):
+        report["status"] = "model_disabled"
+        report["formal_evidence_ready"] = False
+        return [], report
+
+    maximum_per_window = max(
+        0,
+        int(perf.get("fine_roi_open_vocabulary_max_frames_per_window", 2)),
+    )
+    padding = max(
+        0.0,
+        float(perf.get("fine_roi_open_vocabulary_hand_padding_norm", 0.20)),
+    )
+    maximum_gap = float(
+        perf.get("coarse_open_vocabulary_max_actor_object_gap_norm", 0.08)
+    )
+    selected: list[tuple[ViewInput, int, FrameEvidence]] = []
+
+    def admit_suspicious(
+        bucket: list[tuple[float, float, float, int, FrameEvidence]],
+        frame: FrameEvidence,
+    ) -> None:
+        hands = [
+            box
+            for box in frame.detections
+            if box.class_name in _ACTOR_CLASSES
+        ]
+        objects = [
+            box
+            for box in frame.detections
+            if box.class_name not in _ACTOR_CLASSES | _NON_ACTION_CLASSES
+        ]
+        if not hands or objects:
+            return
+        bucket.append(
+            (
+                float(frame.motion_score),
+                max(float(box.confidence) for box in hands),
+                -float(frame.local_ms),
+                -int(frame.frame_index),
+                frame,
+            )
+        )
+        bucket.sort(key=lambda item: item[:4], reverse=True)
+        del bucket[maximum_per_window:]
+
+    for view in views:
+        indexed_windows = list(enumerate(windows.get(view.view_id, [])))
+        buckets: dict[
+            int, list[tuple[float, float, float, int, FrameEvidence]]
+        ] = {window_index: [] for window_index, _ in indexed_windows}
+        if frame_index is not None:
+            for window_index, (start_ms, end_ms) in indexed_windows:
+                for frame in frame_index.iter_frames(
+                    view.view_id,
+                    start_ms=start_ms,
+                    end_ms=end_ms,
+                ):
+                    admit_suspicious(buckets[window_index], frame)
+        else:
+            ordered_windows = sorted(
+                indexed_windows, key=lambda item: (item[1][0], item[1][1])
+            )
+            next_window = 0
+            active_windows: list[
+                tuple[int, tuple[float, float]]
+            ] = []
+            for frame in iter_frame_evidence(detection_paths[view.view_id]):
+                local_ms = float(frame.local_ms)
+                active_windows = [
+                    item for item in active_windows if item[1][1] >= local_ms
+                ]
+                while (
+                    next_window < len(ordered_windows)
+                    and ordered_windows[next_window][1][0] <= local_ms
+                ):
+                    active_windows.append(ordered_windows[next_window])
+                    next_window += 1
+                for window_index, (start_ms, end_ms) in active_windows:
+                    if start_ms <= local_ms <= end_ms:
+                        admit_suspicious(buckets[window_index], frame)
+        for window_index, _ in indexed_windows:
+            for _, _, _, _, frame in buckets[window_index]:
+                selected.append((view, window_index, frame))
+    report["selected_frame_count"] = len(selected)
+    candidates: list[ActionCandidate] = []
+    for view, window_index, selected_frame in selected:
+        frame_report: dict[str, Any] = {
+            "view_id": view.view_id,
+            "window_index": window_index,
+            "frame_index": selected_frame.frame_index,
+            "local_ms": selected_frame.local_ms,
+            "global_ms": selected_frame.global_ms,
+        }
+        frame = read_view_frame_at(
+            view, infos[view.view_id], selected_frame.local_ms
+        )
+        if frame is None:
+            frame_report["status"] = "frame_unreadable"
+            report["frames"].append(frame_report)
+            continue
+        hand = max(
+            (
+                box
+                for box in selected_frame.detections
+                if box.class_name in _ACTOR_CLASSES
+            ),
+            key=lambda box: box.confidence,
+        )
+        x1, y1, x2, y2 = hand.xyxy_norm
+        crop_norm = (
+            max(0.0, x1 - padding),
+            max(0.0, y1 - padding),
+            min(1.0, x2 + padding),
+            min(1.0, y2 + padding),
+        )
+        height, width = frame.shape[:2]
+        left = max(0, int(crop_norm[0] * width))
+        top = max(0, int(crop_norm[1] * height))
+        right = min(width, int(np.ceil(crop_norm[2] * width)))
+        bottom = min(height, int(np.ceil(crop_norm[3] * height)))
+        if right - left < 4 or bottom - top < 4:
+            frame_report["status"] = "invalid_hand_roi"
+            report["frames"].append(frame_report)
+            continue
+        try:
+            grounded, inference = _yolo_world_detections(
+                frame[top:bottom, left:right], settings
+            )
+            crop_width = max(1e-9, crop_norm[2] - crop_norm[0])
+            crop_height = max(1e-9, crop_norm[3] - crop_norm[1])
+            objects = []
+            for box in grounded:
+                if box["class_name"] in _ACTOR_CLASSES | _NON_ACTION_CLASSES:
+                    continue
+                bx1, by1, bx2, by2 = box["xyxy_norm"]
+                normalized = {
+                    **box,
+                    "xyxy_norm": [
+                        crop_norm[0] + float(bx1) * crop_width,
+                        crop_norm[1] + float(by1) * crop_height,
+                        crop_norm[0] + float(bx2) * crop_width,
+                        crop_norm[1] + float(by2) * crop_height,
+                    ],
+                    "detector_source": "yolo_world_v2_fine_hand_roi_recall",
+                }
+                gap = _box_edge_gap_norm(
+                    {
+                        "xyxy_norm": list(hand.xyxy_norm),
+                    },
+                    normalized,
+                )
+                if gap <= maximum_gap:
+                    objects.append((gap, normalized))
+            if not objects:
+                frame_report.update(
+                    {
+                        "status": "no_manipulated_object_in_hand_roi",
+                        "inference": inference,
+                        "crop_norm": crop_norm,
+                    }
+                )
+                report["frames"].append(frame_report)
+                continue
+            gap, obj = min(
+                objects,
+                key=lambda item: (
+                    item[0],
+                    -float(item[1]["confidence"]),
+                ),
+            )
+            global_ms = float(
+                selected_frame.global_ms
+                if selected_frame.global_ms is not None
+                else selected_frame.local_ms
+            )
+            half_window_ms = 2000.0
+            local_start_ms = max(
+                0.0, selected_frame.local_ms - half_window_ms
+            )
+            local_end_ms = min(
+                float(infos[view.view_id].duration_ms),
+                selected_frame.local_ms + half_window_ms,
+            )
+            candidates.append(
+                ActionCandidate(
+                    candidate_id=(
+                        f"FINE-OPEN-VOCAB-{view.view_id}-"
+                        f"{len(candidates) + 1:06d}"
+                    ),
+                    action_type=ActionType.HAND_OBJECT_CONTACT,
+                    view_id=view.view_id,
+                    role=view.role,
+                    local_start_ms=local_start_ms,
+                    local_end_ms=local_end_ms,
+                    global_start_ms=(
+                        global_ms
+                        - (selected_frame.local_ms - local_start_ms)
+                    ),
+                    global_end_ms=(
+                        global_ms
+                        + (local_end_ms - selected_frame.local_ms)
+                    ),
+                    key_global_ms=global_ms,
+                    objects=sorted({hand.class_name, str(obj["class_name"])}),
+                    confidence=min(
+                        float(hand.confidence), float(obj["confidence"])
+                    ),
+                    evidence=[
+                        {
+                            "frame_index": selected_frame.frame_index,
+                            "hand_track_id": hand.track_id,
+                            "hand_box_norm": list(hand.xyxy_norm),
+                            "object": obj,
+                            "actor_object_gap_norm": gap,
+                            "hand_roi_norm": crop_norm,
+                            "source_stage": "candidate_fine",
+                            "recall_only": True,
+                        }
+                    ],
+                    uncertainty=[
+                        "手部ROI开放词汇结果只补充精扫召回，不能单独确认物理动作"
+                    ],
+                    provenance={
+                        "source_stage": "candidate_fine",
+                        "detector_source": (
+                            "yolo_world_v2_fine_hand_roi_recall"
+                        ),
+                        "recall_only": True,
+                    },
+                )
+            )
+            frame_report.update(
+                {
+                    "status": "candidate_added",
+                    "candidate_id": candidates[-1].candidate_id,
+                    "inference": inference,
+                    "crop_norm": crop_norm,
+                }
+            )
+        except Exception as exc:
+            frame_report.update(
+                {
+                    "status": "open_vocabulary_error_closed_set_preserved",
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                }
+            )
+        report["frames"].append(frame_report)
+    report["candidate_count"] = len(candidates)
+    failure_statuses = {"frame_unreadable", "invalid_hand_roi"}
+    report["inference_error_count"] = sum(
+        str(item.get("status") or "").startswith("open_vocabulary_error")
+        for item in report["frames"]
+    )
+    report["error_count"] = sum(
+        str(item.get("status") or "") in failure_statuses
+        or str(item.get("status") or "").startswith(
+            "open_vocabulary_error"
+        )
+        for item in report["frames"]
+    )
+    maximum_error_rate = float(
+        perf.get("fine_roi_open_vocabulary_maximum_error_rate", 0.10)
+    )
+    error_rate = report["error_count"] / max(1, len(selected))
+    report["error_rate"] = round(error_rate, 6)
+    report["maximum_error_rate"] = maximum_error_rate
+    report["formal_evidence_ready"] = bool(
+        not selected or error_rate <= maximum_error_rate
+    )
+    report["status"] = (
+        "completed_with_errors_closed_set_preserved"
+        if report["error_count"]
+        else "completed"
+    )
+    return sorted(candidates, key=candidate_sort_key), report

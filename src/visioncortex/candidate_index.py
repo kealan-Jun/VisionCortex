@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import json
 import sqlite3
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -85,6 +86,595 @@ class CoarseFrameIndex:
                 yield float(global_ms), float(motion_score)
         finally:
             connection.close()
+
+
+class FineFrameIndex:
+    """Incremental, rebuildable index over fine-scan frame shards.
+
+    JSONL ledgers remain the authoritative frame evidence.  This SQLite file is
+    a bounded-memory query and merge layer used only while the existing fine
+    stage is running.
+    """
+
+    def __init__(self, path: Path):
+        self.path = path
+
+    def iter_frames(
+        self,
+        view_id: str,
+        *,
+        start_ms: float | None = None,
+        end_ms: float | None = None,
+    ) -> Iterable[FrameEvidence]:
+        clauses = ["view_id = ?"]
+        parameters: list[Any] = [view_id]
+        if start_ms is not None:
+            clauses.append("local_ms >= ?")
+            parameters.append(float(start_ms))
+        if end_ms is not None:
+            clauses.append("local_ms <= ?")
+            parameters.append(float(end_ms))
+        connection = sqlite3.connect(self.path)
+        try:
+            query = (
+                "SELECT payload_json FROM fine_frames WHERE "
+                + " AND ".join(clauses)
+                + " ORDER BY local_ms, frame_index"
+            )
+            for (payload,) in connection.execute(query, parameters):
+                yield FrameEvidence.model_validate_json(payload)
+        finally:
+            connection.close()
+
+    def materialize_ledgers(
+        self,
+        output_dir: Path,
+        views: Sequence[ViewInput],
+    ) -> dict[str, Path]:
+        """Write one final authoritative-compatible JSONL ledger per view."""
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(self.path)
+        outputs: dict[str, Path] = {}
+        try:
+            for view in views:
+                output = output_dir / f"{view.view_id}.detections.jsonl"
+                temporary = output.with_suffix(output.suffix + ".tmp")
+                with temporary.open(
+                    "w", encoding="utf-8", buffering=1024 * 1024
+                ) as handle:
+                    for (payload,) in connection.execute(
+                        "SELECT payload_json FROM fine_frames "
+                        "WHERE view_id = ? ORDER BY local_ms, frame_index",
+                        (view.view_id,),
+                    ):
+                        handle.write(payload + "\n")
+                temporary.replace(output)
+                outputs[view.view_id] = output
+        finally:
+            connection.close()
+        return outputs
+
+    def iter_global_frames(
+        self,
+        view_id: str,
+        *,
+        start_ms: float,
+        end_ms: float,
+    ) -> Iterable[FrameEvidence]:
+        connection = sqlite3.connect(self.path)
+        try:
+            for (payload,) in connection.execute(
+                "SELECT payload_json FROM fine_frames WHERE view_id = ? "
+                "AND global_ms >= ? AND global_ms <= ? "
+                "ORDER BY global_ms, frame_index",
+                (view_id, float(start_ms), float(end_ms)),
+            ):
+                yield FrameEvidence.model_validate_json(payload)
+        finally:
+            connection.close()
+
+
+def create_fine_frame_index(index_path: Path) -> FineFrameIndex:
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    if index_path.exists():
+        index_path.unlink()
+    connection = sqlite3.connect(index_path)
+    try:
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA synchronous=NORMAL")
+        connection.executescript(
+            """
+            CREATE TABLE fine_frames (
+                view_id TEXT NOT NULL,
+                frame_index INTEGER NOT NULL,
+                local_ms REAL NOT NULL,
+                global_ms REAL NOT NULL,
+                motion_score REAL NOT NULL,
+                has_actor INTEGER NOT NULL,
+                object_count INTEGER NOT NULL,
+                payload_json TEXT NOT NULL,
+                source_pass TEXT NOT NULL,
+                PRIMARY KEY (view_id, local_ms)
+            ) WITHOUT ROWID;
+            CREATE INDEX fine_frames_global
+                ON fine_frames(view_id, global_ms);
+            CREATE INDEX fine_frames_activity
+                ON fine_frames(view_id, has_actor, object_count, global_ms);
+            CREATE TABLE fine_tracks (
+                view_id TEXT NOT NULL,
+                unified_track_id INTEGER NOT NULL,
+                class_name TEXT NOT NULL,
+                first_local_ms REAL NOT NULL,
+                last_local_ms REAL NOT NULL,
+                last_center_x REAL NOT NULL,
+                last_center_y REAL NOT NULL,
+                source_refs_json TEXT NOT NULL,
+                PRIMARY KEY (view_id, unified_track_id)
+            ) WITHOUT ROWID;
+            CREATE INDEX fine_tracks_recent
+                ON fine_tracks(view_id, class_name, last_local_ms);
+            CREATE TABLE fine_track_stitches (
+                source_pass TEXT NOT NULL,
+                view_id TEXT NOT NULL,
+                source_track_id INTEGER NOT NULL,
+                unified_track_id INTEGER NOT NULL,
+                match_method TEXT NOT NULL,
+                match_gap_ms REAL,
+                center_distance REAL,
+                PRIMARY KEY (source_pass, view_id, source_track_id)
+            ) WITHOUT ROWID;
+            CREATE TABLE fine_ingest_passes (
+                source_pass TEXT NOT NULL,
+                view_id TEXT NOT NULL,
+                input_path TEXT NOT NULL,
+                input_frames INTEGER NOT NULL,
+                indexed_frames INTEGER NOT NULL,
+                replaced_frames INTEGER NOT NULL,
+                stitched_tracks INTEGER NOT NULL,
+                new_tracks INTEGER NOT NULL,
+                PRIMARY KEY (source_pass, view_id)
+            ) WITHOUT ROWID;
+            """
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    return FineFrameIndex(index_path)
+
+
+def _box_center_from_norm(box: Sequence[float]) -> tuple[float, float]:
+    return (float(box[0] + box[2]) / 2.0, float(box[1] + box[3]) / 2.0)
+
+
+def _box_iou(left: Sequence[float], right: Sequence[float]) -> float:
+    x1 = max(float(left[0]), float(right[0]))
+    y1 = max(float(left[1]), float(right[1]))
+    x2 = min(float(left[2]), float(right[2]))
+    y2 = min(float(left[3]), float(right[3]))
+    intersection = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+    left_area = max(0.0, float(left[2]) - float(left[0])) * max(
+        0.0, float(left[3]) - float(left[1])
+    )
+    right_area = max(0.0, float(right[2]) - float(right[0])) * max(
+        0.0, float(right[3]) - float(right[1])
+    )
+    return intersection / max(left_area + right_area - intersection, 1e-9)
+
+
+def _next_track_ids(connection: sqlite3.Connection) -> dict[str, int]:
+    return {
+        str(view_id): int(maximum or 0) + 1
+        for view_id, maximum in connection.execute(
+            "SELECT view_id, MAX(unified_track_id) FROM fine_tracks GROUP BY view_id"
+        )
+    }
+
+
+def _existing_frame_at(
+    connection: sqlite3.Connection,
+    view_id: str,
+    local_ms: float,
+) -> FrameEvidence | None:
+    row = connection.execute(
+        "SELECT payload_json FROM fine_frames WHERE view_id = ? AND local_ms = ?",
+        (view_id, float(local_ms)),
+    ).fetchone()
+    return FrameEvidence.model_validate_json(row[0]) if row else None
+
+
+def _select_unified_track(
+    connection: sqlite3.Connection,
+    *,
+    view_id: str,
+    class_name: str,
+    local_ms: float,
+    box: Sequence[float],
+    overlapping: FrameEvidence | None,
+    maximum_gap_ms: float,
+    maximum_center_distance: float,
+    used_tracks: set[int],
+) -> tuple[int | None, str, float | None, float | None]:
+    if overlapping is not None:
+        matches = [
+            (
+                _box_iou(box, item.xyxy_norm),
+                int(item.track_id),
+            )
+            for item in overlapping.detections
+            if item.track_id is not None
+            and item.class_name == class_name
+            and int(item.track_id) not in used_tracks
+        ]
+        if matches:
+            overlap, track_id = max(matches)
+            if overlap >= 0.20:
+                return track_id, "overlap_iou", 0.0, 1.0 - overlap
+
+    center_x, center_y = _box_center_from_norm(box)
+    candidates = []
+    for track_id, last_ms, last_x, last_y in connection.execute(
+        "SELECT unified_track_id, last_local_ms, last_center_x, last_center_y "
+        "FROM fine_tracks WHERE view_id = ? AND class_name = ? "
+        "AND last_local_ms <= ? AND last_local_ms >= ?",
+        (
+            view_id,
+            class_name,
+            float(local_ms),
+            float(local_ms - maximum_gap_ms),
+        ),
+    ):
+        track_id = int(track_id)
+        if track_id in used_tracks:
+            continue
+        distance = math.hypot(center_x - float(last_x), center_y - float(last_y))
+        if distance <= maximum_center_distance:
+            candidates.append(
+                (distance, float(local_ms - last_ms), track_id)
+            )
+    if not candidates:
+        return None, "new_track", None, None
+    distance, gap_ms, track_id = min(candidates)
+    return track_id, "recent_endpoint", gap_ms, distance
+
+
+def ingest_fine_frame_ledgers(
+    index: FineFrameIndex,
+    views: Sequence[ViewInput],
+    detection_paths: dict[str, Path],
+    *,
+    source_pass: str,
+    stitching_enabled: bool = True,
+    maximum_stitch_gap_ms: float = 2500.0,
+    maximum_center_distance: float = 0.12,
+) -> dict[str, Any]:
+    """Append one fine-scan pass and stitch track identities when provable."""
+
+    connection = sqlite3.connect(index.path)
+    next_ids = _next_track_ids(connection)
+    reports: list[dict[str, Any]] = []
+    try:
+        for view in views:
+            path = detection_paths[view.view_id]
+            source_map: dict[int, int] = {}
+            used_by_frame: set[int] = set()
+            input_frames = 0
+            replaced_frames = 0
+            stitched_tracks: set[int] = set()
+            new_tracks: set[int] = set()
+            for frame in iter_frame_evidence(path):
+                input_frames += 1
+                overlapping = _existing_frame_at(
+                    connection, view.view_id, frame.local_ms
+                )
+                if overlapping is not None:
+                    replaced_frames += 1
+                used_by_frame.clear()
+                normalized_detections = []
+                for detection in frame.detections:
+                    source_track_id = detection.track_id
+                    if source_track_id is None:
+                        normalized_detections.append(detection)
+                        continue
+                    unified_track_id = source_map.get(int(source_track_id))
+                    method = "same_pass"
+                    gap_ms: float | None = None
+                    center_distance: float | None = None
+                    if unified_track_id is None:
+                        if stitching_enabled:
+                            (
+                                unified_track_id,
+                                method,
+                                gap_ms,
+                                center_distance,
+                            ) = _select_unified_track(
+                                connection,
+                                view_id=view.view_id,
+                                class_name=detection.class_name,
+                                local_ms=frame.local_ms,
+                                box=detection.xyxy_norm,
+                                overlapping=overlapping,
+                                maximum_gap_ms=maximum_stitch_gap_ms,
+                                maximum_center_distance=maximum_center_distance,
+                                used_tracks=used_by_frame,
+                            )
+                        if unified_track_id is None:
+                            unified_track_id = next_ids.get(view.view_id, 1)
+                            next_ids[view.view_id] = unified_track_id + 1
+                            method = "new_track"
+                            new_tracks.add(unified_track_id)
+                        else:
+                            stitched_tracks.add(unified_track_id)
+                        source_map[int(source_track_id)] = unified_track_id
+                        connection.execute(
+                            "INSERT OR REPLACE INTO fine_track_stitches VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            (
+                                source_pass,
+                                view.view_id,
+                                int(source_track_id),
+                                unified_track_id,
+                                method,
+                                gap_ms,
+                                center_distance,
+                            ),
+                        )
+                    used_by_frame.add(unified_track_id)
+                    normalized_detections.append(
+                        detection.model_copy(
+                            update={"track_id": unified_track_id}
+                        )
+                    )
+                    center_x, center_y = _box_center_from_norm(
+                        detection.xyxy_norm
+                    )
+                    existing_track = connection.execute(
+                        "SELECT first_local_ms, last_local_ms, last_center_x, "
+                        "last_center_y, source_refs_json FROM fine_tracks "
+                        "WHERE view_id = ? AND unified_track_id = ?",
+                        (view.view_id, unified_track_id),
+                    ).fetchone()
+                    source_ref = f"{source_pass}:{int(source_track_id)}"
+                    if existing_track:
+                        refs = set(json.loads(existing_track[4]))
+                        refs.add(source_ref)
+                        existing_last_ms = float(existing_track[1])
+                        update_last = float(frame.local_ms) >= existing_last_ms
+                        connection.execute(
+                            "UPDATE fine_tracks SET first_local_ms = ?, "
+                            "last_local_ms = ?, last_center_x = ?, last_center_y = ?, "
+                            "source_refs_json = ? "
+                            "WHERE view_id = ? AND unified_track_id = ?",
+                            (
+                                min(float(existing_track[0]), float(frame.local_ms)),
+                                (
+                                    float(frame.local_ms)
+                                    if update_last
+                                    else existing_last_ms
+                                ),
+                                center_x if update_last else float(existing_track[2]),
+                                center_y if update_last else float(existing_track[3]),
+                                json.dumps(sorted(refs)),
+                                view.view_id,
+                                unified_track_id,
+                            ),
+                        )
+                    else:
+                        connection.execute(
+                            "INSERT INTO fine_tracks VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                            (
+                                view.view_id,
+                                unified_track_id,
+                                detection.class_name,
+                                float(frame.local_ms),
+                                float(frame.local_ms),
+                                center_x,
+                                center_y,
+                                json.dumps([source_ref]),
+                            ),
+                        )
+                normalized = frame.model_copy(
+                    update={"detections": normalized_detections}
+                )
+                classes = {item.class_name for item in normalized_detections}
+                objects = classes - _ACTOR_CLASSES - _NON_ACTION_CLASSES
+                global_ms = float(
+                    frame.global_ms
+                    if frame.global_ms is not None
+                    else frame.local_ms
+                )
+                connection.execute(
+                    "INSERT OR REPLACE INTO fine_frames VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        view.view_id,
+                        int(frame.frame_index),
+                        float(frame.local_ms),
+                        global_ms,
+                        float(frame.motion_score),
+                        int(bool(classes & _ACTOR_CLASSES)),
+                        len(objects),
+                        normalized.model_dump_json(),
+                        source_pass,
+                    ),
+                )
+            indexed_frames = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM fine_frames WHERE view_id = ?",
+                    (view.view_id,),
+                ).fetchone()[0]
+            )
+            connection.execute(
+                "INSERT OR REPLACE INTO fine_ingest_passes VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    source_pass,
+                    view.view_id,
+                    str(path),
+                    input_frames,
+                    indexed_frames,
+                    replaced_frames,
+                    len(stitched_tracks),
+                    len(new_tracks),
+                ),
+            )
+            reports.append(
+                {
+                    "view_id": view.view_id,
+                    "input_path": str(path),
+                    "input_frames": input_frames,
+                    "indexed_frames": indexed_frames,
+                    "replaced_frames": replaced_frames,
+                    "stitched_tracks": len(stitched_tracks),
+                    "new_tracks": len(new_tracks),
+                }
+            )
+        connection.commit()
+    finally:
+        connection.close()
+    return {
+        "source_pass": source_pass,
+        "views": reports,
+        "input_frames": sum(item["input_frames"] for item in reports),
+        "stitched_tracks": sum(item["stitched_tracks"] for item in reports),
+        "new_tracks": sum(item["new_tracks"] for item in reports),
+    }
+
+
+def _expected_window_samples(
+    info: VideoInfo,
+    start_ms: float,
+    end_ms: float,
+    sample_fps: float,
+) -> int:
+    if end_ms <= start_ms:
+        return 0
+    spans = (
+        [
+            (
+                max(start_ms, float(segment.virtual_start_ms)),
+                min(end_ms, float(segment.virtual_end_ms)),
+            )
+            for segment in info.segments
+        ]
+        if info.segments
+        else [(max(0.0, start_ms), min(float(info.duration_ms), end_ms))]
+    )
+    return sum(
+        max(1, int(math.ceil((right - left) / 1000.0 * sample_fps - 1e-9)))
+        for left, right in spans
+        if right > left
+    )
+
+
+def fine_frame_coverage_report(
+    index: FineFrameIndex,
+    views: Sequence[ViewInput],
+    infos: dict[str, VideoInfo],
+    windows: dict[str, list[tuple[float, float]]],
+    *,
+    sample_fps: float,
+    minimum_coverage_ratio: float = 0.98,
+    maximum_gap_periods: float = 4.0,
+    alignment_scales: dict[str, float] | None = None,
+) -> dict[str, Any]:
+    """Compare intended fine windows with actually indexed frame timestamps."""
+
+    connection = sqlite3.connect(index.path)
+    view_reports: list[dict[str, Any]] = []
+    try:
+        for view in views:
+            info = infos[view.view_id]
+            effective_sample_fps = sample_fps * max(
+                1e-9,
+                float((alignment_scales or {}).get(view.view_id, 1.0)),
+            )
+            period_ms = 1000.0 / max(effective_sample_fps, 1e-9)
+            allowed_gap_ms = period_ms * maximum_gap_periods
+            expected = 0
+            actual_keys: set[int] = set()
+            gaps: list[dict[str, float]] = []
+            for window_index, (start_ms, end_ms) in enumerate(
+                windows.get(view.view_id, [])
+            ):
+                expected += _expected_window_samples(
+                    info, start_ms, end_ms, effective_sample_fps
+                )
+                times = [
+                    float(item[0])
+                    for item in connection.execute(
+                        "SELECT local_ms FROM fine_frames WHERE view_id = ? "
+                        "AND local_ms >= ? AND local_ms <= ? ORDER BY local_ms",
+                        (view.view_id, float(start_ms), float(end_ms)),
+                    )
+                ]
+                actual_keys.update(round(item * 1000.0) for item in times)
+                if not times:
+                    gaps.append(
+                        {
+                            "window_index": float(window_index),
+                            "start_local_ms": float(start_ms),
+                            "end_local_ms": float(end_ms),
+                            "gap_ms": float(end_ms - start_ms),
+                        }
+                    )
+                    continue
+                boundary_pairs = [
+                    (float(start_ms), times[0]),
+                    *zip(times, times[1:], strict=False),
+                    (times[-1], float(end_ms)),
+                ]
+                for left, right in boundary_pairs:
+                    gap_ms = float(right - left)
+                    if gap_ms <= allowed_gap_ms:
+                        continue
+                    if not _same_physical_span(info, left, right):
+                        continue
+                    if len(gaps) < 100:
+                        gaps.append(
+                            {
+                                "window_index": float(window_index),
+                                "start_local_ms": left,
+                                "end_local_ms": right,
+                                "gap_ms": gap_ms,
+                            }
+                        )
+            actual = len(actual_keys)
+            coverage_ratio = (
+                1.0 if expected == 0 else min(1.0, actual / max(1, expected))
+            )
+            formal_ready = bool(
+                (expected == 0 or actual > 0)
+                and coverage_ratio >= minimum_coverage_ratio
+                and not gaps
+            )
+            view_reports.append(
+                {
+                    "view_id": view.view_id,
+                    "window_count": len(windows.get(view.view_id, [])),
+                    "effective_local_sample_fps": round(
+                        effective_sample_fps, 9
+                    ),
+                    "expected_sample_count": expected,
+                    "actual_sample_count": actual,
+                    "coverage_ratio": round(coverage_ratio, 6),
+                    "maximum_allowed_gap_ms": round(allowed_gap_ms, 3),
+                    "unexpected_gap_count": len(gaps),
+                    "unexpected_gaps": gaps,
+                    "formal_evidence_ready": formal_ready,
+                }
+            )
+    finally:
+        connection.close()
+    return {
+        "schema_version": "visioncortex-fine-frame-index/1",
+        "index_path": str(index.path),
+        "sample_fps": sample_fps,
+        "minimum_coverage_ratio": minimum_coverage_ratio,
+        "maximum_gap_periods": maximum_gap_periods,
+        "row_count": sum(item["actual_sample_count"] for item in view_reports),
+        "formal_evidence_ready": all(
+            item["formal_evidence_ready"] for item in view_reports
+        ),
+        "views": view_reports,
+    }
 
 
 def _expected_samples(info: VideoInfo, sample_fps: float) -> int:
