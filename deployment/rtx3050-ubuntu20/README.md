@@ -22,7 +22,9 @@ smoke test writes `Runtime/rtx3050-engine-smoke.json`.
 Format the USB drive as **exFAT or ext4, not FAT32**. The pinned TensorRT
 runtime wheel is 4,304,296,018 bytes, which is slightly larger than FAT32's
 single-file limit. Copy the complete package directory; do not split or omit
-the wheelhouse.
+the wheelhouse. The package builder removes the unused private Python terminfo
+database and rejects any remaining case-insensitive path collision, so an
+exFAT copy cannot silently merge differently-cased payload names.
 
 Run from the USB drive:
 

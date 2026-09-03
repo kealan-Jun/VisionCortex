@@ -215,6 +215,22 @@ def test_package_manifest_rejects_escape(tmp_path):
         builder._safe_manifest_path(tmp_path, "../escape")
 
 
+def test_package_builder_rejects_case_insensitive_path_collisions(tmp_path):
+    path = ROOT / "tools/build_rtx3050_offline_package.py"
+    spec = importlib.util.spec_from_file_location("rtx3050_builder_casefold", path)
+    assert spec and spec.loader
+    builder = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(builder)
+    (tmp_path / "E").mkdir()
+    try:
+        (tmp_path / "e").mkdir()
+    except FileExistsError:
+        pytest.skip("test filesystem is already case-insensitive")
+
+    with pytest.raises(RuntimeError, match="case-insensitive USB filesystem"):
+        builder._assert_case_insensitive_filesystem_compatible(tmp_path)
+
+
 def test_package_builder_fails_closed_on_offline_dependency_resolution():
     builder = (ROOT / "tools/build_rtx3050_offline_package.py").read_text(
         encoding="utf-8"
@@ -227,3 +243,5 @@ def test_package_builder_fails_closed_on_offline_dependency_resolution():
     assert "FAT32_unsupported" in builder
     assert 'output / "app" / source_relative' in builder
     assert '"VisionCortex-RTX3050-交付手册.md"' in builder
+    assert 'output / "vendor/python/share/terminfo"' in builder
+    assert "_assert_case_insensitive_filesystem_compatible(output)" in builder

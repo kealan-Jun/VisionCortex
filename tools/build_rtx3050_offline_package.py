@@ -264,6 +264,33 @@ def _safe_manifest_path(package: Path, relative: str) -> Path:
     return candidate
 
 
+def _assert_case_insensitive_filesystem_compatible(package: Path) -> None:
+    """Reject payload paths that exFAT would silently merge.
+
+    The portable CPython distribution normally contains a private terminfo
+    database with upper/lower-case aliases.  VisionCortex does not use that
+    database, and Ubuntu supplies its own system terminfo, so the builder
+    removes it before applying this whole-package guard.
+    """
+
+    seen: dict[str, str] = {}
+    collisions: list[tuple[str, str]] = []
+    for path in sorted(package.rglob("*")):
+        relative = path.relative_to(package).as_posix()
+        folded = relative.casefold()
+        previous = seen.get(folded)
+        if previous is not None and previous != relative:
+            collisions.append((previous, relative))
+        else:
+            seen[folded] = relative
+    if collisions:
+        details = "; ".join(f"{left} <> {right}" for left, right in collisions[:8])
+        raise RuntimeError(
+            "Package is not safe to copy to a case-insensitive USB filesystem: "
+            f"{details}"
+        )
+
+
 def _write_manifests(
     package: Path,
     commit: str,
@@ -303,6 +330,8 @@ def _write_manifests(
             "usb_filesystem": "exFAT_or_ext4_required; FAT32_unsupported",
             "wheelhouse_remains_on_usb": True,
             "target_builds_own_tensorrt_engines": True,
+            "case_insensitive_usb_path_collisions": 0,
+            "bundled_python_terminfo": "removed; target Ubuntu system database used",
             "engine_batch_candidates": [16, 8, 4, 2, 1],
             "engine_selection": (
                 "first descending candidate passing repeated TensorRT execution "
@@ -370,6 +399,11 @@ def build_package(
     output.mkdir(parents=True)
     _export_app(output / "app", commit)
     shutil.copytree(python_runtime.resolve(), output / "vendor/python")
+    bundled_terminfo = output / "vendor/python/share/terminfo"
+    if bundled_terminfo.exists():
+        if not bundled_terminfo.is_dir() or bundled_terminfo.is_symlink():
+            raise RuntimeError(f"Unsafe bundled terminfo path: {bundled_terminfo}")
+        shutil.rmtree(bundled_terminfo)
     _copy_verified(uv_binary, output / "vendor/uv")
     wheel_count = _copy_wheelhouse(wheelhouse, output / "vendor/wheelhouse")
     ffmpeg = _copy_ffmpeg_runtime(ffmpeg_archive, output / "vendor/ffmpeg")
@@ -401,6 +435,7 @@ def build_package(
         )
         if executable:
             (output / destination_name).chmod(0o755)
+    _assert_case_insensitive_filesystem_compatible(output)
     manifest = _write_manifests(
         output,
         commit,
