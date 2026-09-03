@@ -336,6 +336,8 @@ storage:
   # cache root; do not create a second RTX-specific cache hierarchy.
   local_cache_root: /home/x1/桌面/nas/VisionCortexExperimentCache
   local_staging_root: /home/x1/桌面/nas/VisionCortexExperimentArchive/.VisionCortex-Run-Staging
+  # Browser originals are written once to the NAS archive and analyzed there.
+  web_upload_retention_mode: nas_only
 
 validation:
   acceptance_baseline:

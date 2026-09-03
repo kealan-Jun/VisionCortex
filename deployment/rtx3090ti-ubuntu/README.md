@@ -124,8 +124,80 @@ Never add the key to YAML, shell history, receipts, screenshots or Git.
 ./deployment/rtx3090ti-ubuntu/03-Stop-Web.sh
 ```
 
-The service binds only to `127.0.0.1:8000`. PID ownership is checked before a
-process is reused or stopped.
+This manual lifecycle binds only to `127.0.0.1:8000`. PID ownership is checked
+before a process is reused or stopped. It is intended for administrator-side
+validation, not for other computers on the LAN.
+
+## Authenticated LAN server
+
+The normal team entry point is the production LAN service. Team members do not
+clone the repository or install Python, CUDA, TensorRT, or model assets. They
+open the URL printed by the installer and sign in through the browser.
+
+Before the first installation, keep the Ark key in the existing owner-only
+credential file. The commands below do not place the value in shell history:
+
+```bash
+install -d -m 700 /home/x1/.config/VisionCortex
+IFS= read -r -s -p 'Ark API key: ' VISIONCORTEX_ARK_INPUT; printf '\n'
+umask 077
+printf '%s\n' "$VISIONCORTEX_ARK_INPUT" > /home/x1/.config/VisionCortex/ark_api_key
+chmod 600 /home/x1/.config/VisionCortex/ark_api_key
+unset VISIONCORTEX_ARK_INPUT
+```
+
+Install and inspect the server:
+
+```bash
+./deployment/rtx3090ti-ubuntu/07-Install-LAN-Server.sh
+./deployment/rtx3090ti-ubuntu/08-Server-Status.sh
+```
+
+The installer securely prompts twice for the browser password for user
+`visioncortex`, disables the alternative no-NAS service if it would conflict on
+port 8000, runs the production preflight, and starts
+`visioncortex-lan.service`. The service loads the production profile, Ark
+credential, TensorRT engine paths, NAS index/archive/cache roots, and listens on
+`0.0.0.0:8000`. Application middleware then rejects clients outside loopback,
+RFC 1918 IPv4, and local IPv6 ranges and requires HTTP Basic authentication for
+every route, including files and task submission.
+
+All Web-submitted GPU workflows first enter a SQLite queue under the configured
+local runtime root. A cross-process lease allows only one upload, fixed
+benchmark, or indexed collection to use the 3090 Ti at a time. Waiting jobs and
+their Web-visible state survive service or host restarts; a claimed job whose
+lease expires is reclaimed with the same run identity so durable pipeline
+checkpoints can be reused.
+
+Large browser uploads use durable resumable sessions in the same local SQLite
+state database. The browser declares each real file size before sending data;
+the server subtracts outstanding reservations from the live NAS free space and
+reserves source bytes plus configurable processing and safety headroom. There
+is no fixed total-upload-size, duration, or view-count ceiling. Accepted files
+arrive in 16 MiB chunks directly into `Original-Experiment-Videos` on the NAS,
+resume from the server-confirmed byte offset after a disconnect, receive a full
+SHA-256 before the GPU job is queued, and are not duplicated on the local
+runtime volume. An incomplete session expires only after seven days without
+progress; finalized/queued jobs keep their reservation until execution ends.
+The indexed NAS collection path remains the preferred zero-copy path when the
+source files already exist in the recorder collection.
+
+These contracts and deterministic tests do not prove a real seven-view,
+eight-hour transfer or full analysis. Record that scenario as `NOT_PROVEN`
+until it is exercised against the deployed 3090 Ti host and NAS.
+
+For startup before the desktop user logs in, enable user-service lingering once:
+
+```bash
+sudo loginctl enable-linger x1
+```
+
+This is a LAN-only contract, not an Internet deployment. Do not add router port
+forwarding or place a local reverse proxy in front of it without a separate
+public TLS, identity, rate-limit, and audit design. The service fails closed if
+the NAS, GPU, production preflight, Ark key, or Web password is unavailable.
+HTTP Basic protects access but does not encrypt LAN traffic; use only a trusted
+wired/VLAN network until a separately reviewed HTTPS endpoint is deployed.
 
 ## Production boundary
 

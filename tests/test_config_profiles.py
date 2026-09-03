@@ -44,6 +44,9 @@ def test_rtx3090ti_ubuntu_profile_matches_host_and_keeps_view_count_dynamic():
     assert config["storage"]["archive_root"] == "/home/x1/桌面/nas/VisionCortexExperimentArchive"
     assert config["storage"]["local_cache_root"] == "/home/x1/桌面/nas/VisionCortexExperimentCache"
     assert config["storage"]["local_staging_root"].endswith("/.VisionCortex-Run-Staging")
+    assert config["storage"]["web_upload_retention_mode"] == "nas_only"
+    assert config["web_upload"]["chunk_size_mib"] == 16
+    assert config["web_upload"]["session_ttl_hours"] == 168
     assert config["archive"]["include_empty_action_categories"] is False
     assert config["models"]["first_person_engine"].startswith(
         "/srv/sentinel-data/VisionCortex3090Ti/Engines/"

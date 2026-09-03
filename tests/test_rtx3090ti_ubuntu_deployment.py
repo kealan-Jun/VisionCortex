@@ -22,6 +22,9 @@ def test_ubuntu_shell_scripts_are_syntactically_valid_and_gpu_scoped():
         "02-Start-Web.sh",
         "03-Stop-Web.sh",
         "05-Install-Local-Service.sh",
+        "06-Run-LAN-Server.sh",
+        "07-Install-LAN-Server.sh",
+        "08-Server-Status.sh",
     ):
         path = DEPLOYMENT / name
         subprocess.run(["bash", "-n", str(path)], check=True)
@@ -99,6 +102,32 @@ def test_local_systemd_service_is_reboot_resilient_and_nas_independent():
     assert "/srv/sentinel-data/VisionCortex3090Ti/Runtime/NoNasWeb" in service
     assert "/home/x1/桌面/nas" not in service
     assert "systemctl --user enable --now visioncortex-local.service" in installer
+
+
+def test_lan_systemd_service_is_authenticated_private_and_production_scoped():
+    service = (DEPLOYMENT / "visioncortex-lan.service").read_text(encoding="utf-8")
+    runner = (DEPLOYMENT / "06-Run-LAN-Server.sh").read_text(encoding="utf-8")
+    installer = (DEPLOYMENT / "07-Install-LAN-Server.sh").read_text(
+        encoding="utf-8"
+    )
+    status = (DEPLOYMENT / "08-Server-Status.sh").read_text(encoding="utf-8")
+
+    assert "rtx3090ti-ubuntu-production.yaml" in service
+    assert "VISIONCORTEX_WEB_ACCESS_MODE=lan" in service
+    assert "VISIONCORTEX_WEB_PASSWORD_FILE=" in service
+    assert "VISIONCORTEX_WEB_ALLOWED_NETWORKS=" in service
+    assert "VISIONCORTEX_NAS_ARCHIVE_ROOT=/home/x1/桌面/nas/" in service
+    assert "ExecStartPre=" in service and "--production" in service
+    assert "Restart=on-failure" in service
+    assert "--host 0.0.0.0" in runner
+    assert "ARK_API_KEY=$(<\"$ark_key_file\")" in runner
+    assert "permissions must be 600" in runner
+    assert "read -r -s" in installer
+    assert "systemctl --user enable --now visioncortex-lan.service" in installer
+    assert "sudo loginctl enable-linger" in installer
+    assert "api/health" in status
+    assert 'cat "$password_file"' not in status
+    assert "url=http://%s:8000/#/home" in status
 
 
 def test_linux_archive_folder_uses_xdg_open(monkeypatch, tmp_path):

@@ -1,5 +1,34 @@
 # LabVision Evidence
 
+## 用户快速启动
+
+第一次使用时，不需要先判断自己的显卡或操作系统。启动入口会先检查环境，
+只给出中文结果，不会自动安装软件、访问 NAS 或运行模型。
+
+Windows 用户双击仓库根目录的 `Start-VisionCortex.bat`。Linux 用户运行：
+
+```bash
+./start-visioncortex.sh
+```
+
+macOS 用户可以双击 `Start-VisionCortex.command`，也可以执行上面的 Linux 命令。
+默认启动 `configs/development-local.yaml` 本地开发配置，并打开
+`http://127.0.0.1:8000/#/home`。该入口只证明本地网页可以启动；真实模型推理、
+真实视频效果和正式发布能力仍须在对应 NVIDIA GPU 节点单独验收。
+
+只检查、不启动：
+
+```powershell
+# Windows
+.\Start-VisionCortex.ps1 -CheckOnly
+
+# Linux / macOS
+./start-visioncortex.sh --check-only
+
+# 需要机器可读的完整环境结果
+python tools/doctor.py --json
+```
+
 RTX 4060 真实六路运行节点必须先阅读
 [`docs/RTX4060-Codex-真实六路全链路执行任务书.md`](docs/RTX4060-Codex-真实六路全链路执行任务书.md)，
 并在运行结束后填写
@@ -7,6 +36,43 @@ RTX 4060 真实六路运行节点必须先阅读
 运行节点只同步冻结提交并执行真实全链路，不修改代码、不运行开发测试。
 
 > 冻结基线：六路、多视角、3 小时湿实验视频的时间对齐、有界实验筛选、五类关键素材和细粒度步骤理解流水线。RTX 4060 部署、固定 NAS 基准、缓存目录与开发协作方式见 [RTX4060-交接与运行说明.md](RTX4060-交接与运行说明.md)。
+
+## 3090 Ti 局域网服务器
+
+正式使用时，Windows、macOS、Linux 用户都不需要安装本项目，也不需要配置
+CUDA、TensorRT 或模型。管理员只在 Ubuntu 3090 Ti 主机完成一次安装，然后运行：
+
+```bash
+./deployment/rtx3090ti-ubuntu/07-Install-LAN-Server.sh
+```
+
+安装器会要求管理员在终端中设置一次网页登录密码，不回显密码，也不会把密码写入
+Git。完成后会显示类似 `http://192.168.x.x:8000/#/home` 的局域网地址。其他用户
+只需打开该地址，以用户名 `visioncortex` 和管理员设置的密码登录，即可选择 NAS
+批次、提交任务、查看进度和结果。多人同时提交时，3090 Ti 每次只执行一个正式
+GPU 任务，其余任务保留为“排队等待”，避免互相争抢显存。排队内容与页面任务
+状态先写入服务器本地 `Runtime/state/web_run_queue.sqlite3`；Web 服务或服务器重启
+后会自动恢复等待任务，不需要用户重新提交。
+
+浏览器上传不再使用一次性大请求，也不按路数、时长或固定总 GB 数拒绝任务。页面先
+把本次全部文件的真实字节数交给服务器；服务器结合 NAS 当前剩余空间、其他上传
+尚未消耗的预留量、预计处理产出和安全余量，决定是否接收。通过后以 16 MiB 小块
+续传，网络中断会从服务器确认的字节位置继续；重新选择同一批文件后也会核对断点
+内容，避免把不同文件拼在一起。3090 Ti 生产配置只在 NAS 正式档案保存一份原片，
+不在服务器本地再复制一份。连续 7 天没有继续的未完成会话会在服务启动或下一次
+容量检查时过期并清理；已经进入任务队列的会话不受该规则影响。
+
+该服务使用 3090 Ti 正式生产配置，启动前检查 GPU、NAS、固定 Python 环境和本地
+空间；检查不通过时拒绝启动。它只接受回环地址和常见私有局域网地址，并要求每次
+浏览器会话登录，不是公网发布方案。服务状态检查：
+
+```bash
+./deployment/rtx3090ti-ubuntu/08-Server-Status.sh
+```
+
+4060 和 3060 可以继续作为开发或备用机器，但普通用户不再需要在这些机器上拉取
+仓库。真实模型、真实视频质量和正式归档能力仍须在 3090 Ti 主机按下面的生产门禁
+验收，网页能打开本身不代表完整推理已经通过。
 
 ## Ubuntu RTX 3090 Ti 本地结构
 
@@ -81,7 +147,7 @@ labvision model-certification-readiness \
   --config configs/rtx3090ti-ubuntu-production.yaml \
   --output /srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/readiness.json
 
-# 安装仅绑定 127.0.0.1、重启自恢复且不继承 NAS 路径的本地 Web
+# 安装仅绑定 127.0.0.1、重启自恢复且不继承 NAS 路径的离线验收 Web
 deployment/rtx3090ti-ubuntu/05-Install-Local-Service.sh
 ```
 
@@ -290,13 +356,23 @@ pytest -q
 labvision serve --host 127.0.0.1 --port 8000
 ```
 
-`POST /api/runs` 以 `videos[] + view_specs_json` 接收任意多路视频及 CSV，后台运行后从 `GET /api/runs/{run_id}` 查询状态。API 只绑定本机，除非显式改为 `0.0.0.0`。
+浏览器先以 `POST /api/upload-sessions` 创建动态空间预留，再对
+`PATCH /api/upload-sessions/{session_id}/files/{file_id}` 发送可恢复小分块，最后调用
+`POST /api/upload-sessions/{session_id}/finalize` 完整校验并进入后台队列；任务状态仍
+从 `GET /api/runs/{run_id}` 查询。旧的 `POST /api/runs` 一次性 multipart 接口暂时保留
+用于兼容旧客户端，新页面不再使用它。API 只绑定本机，除非显式改为 `0.0.0.0`。
 
 已完成档案不会依赖浏览器加载整份大 JSON 才能查找关键素材：`GET /api/key-events` 支持跨档案或指定档案的全文、动作类型、实验组、双视角和时间范围筛选，并通过与筛选条件绑定的 `cursor` 分页；`GET /api/key-events/{event_uid}` 返回事件及带 SHA-256 的素材引用；`GET /api/evidence/{evidence_uid}` 可一跳回到 `evidence_package.json` 的 JSON Pointer 和原视频物理分片；`GET /api/physical-changes` 查询明确观测到的对象前后状态变化，不会替 unknown 区间补状态。稳定事件 UID 格式为 `{archive_id}:{parent_event_id}:{event_id}`。SQLite/JSONL 都是权威归档 JSON 的派生产物，可随时重建，不会取代原 JSON。
 
 开发仓与稳定发布仓采用单向晋升，具体规则见 [双仓发布策略](docs/DUAL-REPOSITORY-RELEASE-POLICY.md)；旧 RealityLoopAI 仓库的全量只读审计与复用结论见 [旧仓库审计报告](docs/REALITYLOOP-LEGACY-REPOSITORY-AUDIT-20260817.md)。
 
-容量目标按至少 **6 路 × 每路 3 小时** 设计：600 秒一个可恢复分块，最多 6 路并行解码，但同一角色的帧合并成有界 GPU batch；检测结果逐行落盘，重启后跳过已完成分块，因此内存/显存占用不随视频时长增长。磁盘预检会在开始前估算原片、临时候选和交付片段所需空间，不足时拒绝启动并给出缺口。
+已验证的容量基线是至少 **6 路 × 每路 3 小时**，它不是上传上限。上传路数、单路
+时长和总字节数不设固定小上限；能否接收由当时真实 NAS 剩余空间和活动任务预留量
+决定，不足时在传输前给出缺口。分析阶段以 600 秒为可恢复分块，最多 6 路并行
+解码，但同一角色的帧合并成有界 GPU batch；检测结果逐行落盘，重启后跳过已完成
+分块，因此内存/显存占用不随视频时长增长。**7 路 × 8 小时的真实 NAS 上传与完整
+推理尚未实测，当前状态为 `NOT_PROVEN`；代码与确定性测试只证明其不会被固定路数、
+时长或总容量阈值拦截。**
 
 6 路输入不等于 6 路输出。系统逐路做“有效实验视角门控”：只有持续手—物体操作、容器/设备状态变化或物料转移等证据达到阈值，且边界内动作密度合格的视角才会生成实验 MP4。空镜、纯走动/穿戴、等待、长静止、无实际实验操作的视角会在筛选备注中记录拒绝原因，不进入后续关键素材提取。
 
@@ -310,7 +386,7 @@ labvision serve --host 127.0.0.1 --port 8000
 
 `run_metrics.json` 记录总墙钟耗时、各阶段起止/耗时，以及每个关键素材调用的输入 token、输出 token、总 token、缓存命中 token、延迟和重试次数；随后汇总关键素材阶段与整次运行。Token 只采用服务端 `usage`，缺失时保留 `null`，不做伪精确估算。
 
-运行期间，Web“任务进度”页直接读取归档账本，而不是展示估算值：`source_progress.json` 给出每路解码后端、分块进度与状态，`resource_telemetry_live.json` 给出 GPU/NVDEC、CPU、内存、网络与进程 I/O，`run_metrics_live.json` 给出已执行/已复用模型调用及输入/输出 Token。服务重启后，未完成任务会标记为 `interrupted`，检测分块和已完成的豆包结果按同一运行身份续用。
+运行期间，Web“任务进度”页直接读取归档账本，而不是展示估算值：`source_progress.json` 给出每路解码后端、分块进度与状态，`resource_telemetry_live.json` 给出 GPU/NVDEC、CPU、内存、网络与进程 I/O，`run_metrics_live.json` 给出已执行/已复用模型调用及输入/输出 Token。尚未开始的任务由本地 SQLite 队列在服务重启后继续领取；执行中断的任务会用同一运行身份重新进入执行器，检测分块和已完成的豆包结果按持久账本续用，而不是从零开始。
 
 任务页按“原视频留存 → 预检/对齐 → 有界实验发现 → 实验片段 → 关键素材 → 证据验收 → 日报/PDF”七个用户环节展示。完成状态以 `JSON-Config-Files/Stage-Receipts/*.json` 的原子阶段回执为准，并明确显示每步归档目录、阶段耗时、当前/下一步、逐视角进度和数据更新时间；遥测超过 20 秒没有更新时会显式提示状态可能延迟，而不会误判任务已经停止。
 

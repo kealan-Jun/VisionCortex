@@ -404,9 +404,18 @@ storage:
   run_output_mode: local
   manifest_storage: local
   require_nas_source_paths: false
-  # Web multipart uploads are durably retained in both places by default.
-  # Production NAS-direct profiles can opt out of the persistent local copy.
+  # Compatibility policy for the legacy one-shot multipart endpoint. The new
+  # resumable browser path always keeps one original in the active archive.
   web_upload_retention_mode: local_and_nas
+
+# Browser uploads have no fixed total-size or duration cap. Admission is based
+# on current archive-volume free space after subtracting active reservations.
+web_upload:
+  chunk_size_mib: 16
+  session_ttl_hours: 168
+  processing_headroom_ratio: 0.35
+  safety_headroom_ratio: 0.10
+  minimum_safety_headroom_gib: 10
 
 validation:
   use_sidecar_annotations: true
