@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import gc
 import threading
 import time
 from importlib.metadata import PackageNotFoundError, version
@@ -17,6 +18,23 @@ SEGMENTATION_SCHEMA = "visioncortex-sam2-participant-continuity/1"
 _MODEL_CACHE: dict[tuple[str, ...], dict[str, Any]] = {}
 _MODEL_LOCK = threading.RLock()
 _VALIDATED_ASSETS: set[tuple[str, str]] = set()
+
+
+def release_temporal_segmentation_model_cache() -> int:
+    """Release cached SAM2 predictors between events on low-memory hosts."""
+
+    with _MODEL_LOCK:
+        released = len(_MODEL_CACHE)
+        _MODEL_CACHE.clear()
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass
+    return released
 
 
 def _sha256(path: Path) -> str:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import gc
 import hashlib
 import json
 import math
@@ -46,7 +47,10 @@ from .material_naming import (
     key_material_action_folder,
     key_material_semantic_name as _key_material_semantic_name,
 )
-from .liquid_semantic import analyze_liquid_semantics
+from .liquid_semantic import (
+    analyze_liquid_semantics,
+    release_liquid_semantic_model_cache,
+)
 from .pathing import archive_relative_posix
 from .schemas import (
     ActionType,
@@ -62,7 +66,10 @@ from .schemas import (
     ViewInput,
     ViewRole,
 )
-from .temporal_segmentation import audit_participant_continuity
+from .temporal_segmentation import (
+    audit_participant_continuity,
+    release_temporal_segmentation_model_cache,
+)
 from .video_io import (
     ViewFrameReader,
     create_grid_video,
@@ -3140,6 +3147,12 @@ def _rerender_curated_participant_annotations(
             (first_material_view, third_material_view),
         )
         event.observability["key_material_annotation"] = annotation
+        if bool(
+            ((config or {}).get("performance") or {}).get(
+                "release_auxiliary_models_after_event", False
+            )
+        ):
+            _release_auxiliary_model_caches()
     decisions = [
         record["selective_verification"]
         for record in records
@@ -3252,6 +3265,41 @@ _OPEN_VOCABULARY_MODEL_CACHE: dict[str, Any] = {}
 _OPEN_VOCABULARY_ASSET_VALIDATION: set[tuple[str, str, str, str]] = set()
 _GROUNDING_DINO_MODEL_CACHE: dict[str, Any] = {}
 _GROUNDING_DINO_ASSET_VALIDATION: set[tuple[str, str]] = set()
+
+
+def _release_auxiliary_model_caches() -> dict[str, int]:
+    """Bound peak RAM/VRAM by dropping event-scoped auxiliary model caches."""
+
+    open_vocabulary = len(_OPEN_VOCABULARY_MODEL_CACHE)
+    grounding_dino = len(_GROUNDING_DINO_MODEL_CACHE)
+    for cached in [
+        *_OPEN_VOCABULARY_MODEL_CACHE.values(),
+        *_GROUNDING_DINO_MODEL_CACHE.values(),
+    ]:
+        model = cached.get("model") if isinstance(cached, dict) else None
+        if model is not None and hasattr(model, "to"):
+            try:
+                model.to("cpu")
+            except (RuntimeError, TypeError, ValueError):
+                pass
+    _OPEN_VOCABULARY_MODEL_CACHE.clear()
+    _GROUNDING_DINO_MODEL_CACHE.clear()
+    temporal = release_temporal_segmentation_model_cache()
+    liquid = release_liquid_semantic_model_cache()
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass
+    return {
+        "open_vocabulary": open_vocabulary,
+        "grounding_dino": grounding_dino,
+        "temporal_segmentation": temporal,
+        "liquid_semantic": liquid,
+    }
 
 
 def _box_edge_gap_norm(

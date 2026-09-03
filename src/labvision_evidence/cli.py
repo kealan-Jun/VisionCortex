@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 import shutil
@@ -133,9 +134,7 @@ def _configure_index_full_timeline_scan(
     )
     recording_hours = ingest.get("recording_hours")
     duration_seconds = (
-        float(recording_hours) * 3600.0
-        if recording_hours is not None
-        else None
+        float(recording_hours) * 3600.0 if recording_hours is not None else None
     )
     automatic = bool(
         performance.get("auto_exhaustive_short_timeline_enabled", False)
@@ -187,9 +186,7 @@ def _audit_true_cold_doubao_execution(archive: Path) -> dict[str, object]:
     metrics = json.loads(metrics_path.read_text(encoding="utf-8-sig"))
     calls = list(metrics.get("mllm_calls") or [])
     if not calls:
-        raise RuntimeError(
-            "Cold Doubao promotion audit found no executed MLLM calls"
-        )
+        raise RuntimeError("Cold Doubao promotion audit found no executed MLLM calls")
     invalid_calls = [
         {
             "stage": call.get("stage"),
@@ -220,12 +217,12 @@ def _audit_true_cold_doubao_execution(archive: Path) -> dict[str, object]:
     reported_call_count = int(experiment_usage.get("call_count") or 0) + int(
         material_usage.get("call_count") or 0
     )
-    executed_call_count = int(
-        experiment_usage.get("executed_call_count") or 0
-    ) + int(material_usage.get("executed_call_count") or 0)
-    reused_call_count = int(
-        experiment_usage.get("reused_call_count") or 0
-    ) + int(material_usage.get("reused_call_count") or 0)
+    executed_call_count = int(experiment_usage.get("executed_call_count") or 0) + int(
+        material_usage.get("executed_call_count") or 0
+    )
+    reused_call_count = int(experiment_usage.get("reused_call_count") or 0) + int(
+        material_usage.get("reused_call_count") or 0
+    )
     if (
         reported_call_count != len(calls)
         or executed_call_count != len(calls)
@@ -343,12 +340,8 @@ def _refresh_repaired_quality_acceptance(
         key_events,
         baseline,
         boundary_match_iou=float(validation.get("boundary_match_iou", 0.50)),
-        max_start_error_seconds=float(
-            validation.get("max_start_error_seconds", 8.0)
-        ),
-        max_end_error_seconds=float(
-            validation.get("max_end_error_seconds", 8.0)
-        ),
+        max_start_error_seconds=float(validation.get("max_start_error_seconds", 8.0)),
+        max_end_error_seconds=float(validation.get("max_end_error_seconds", 8.0)),
         minimum_cross_view_event_rate=float(
             validation.get("minimum_cross_view_event_rate", 0.25)
         ),
@@ -368,15 +361,9 @@ def _refresh_repaired_quality_acceptance(
     recall_gate = {
         "evaluated": bool(recall_report.get("evaluated")),
         "passed": None,
-        "temporal_iou_threshold": float(
-            validation.get("key_event_recall_iou", 0.50)
-        ),
-        "minimum_precision": float(
-            validation.get("minimum_key_event_precision", 0.80)
-        ),
-        "minimum_recall": float(
-            validation.get("minimum_key_event_recall", 0.80)
-        ),
+        "temporal_iou_threshold": float(validation.get("key_event_recall_iou", 0.50)),
+        "minimum_precision": float(validation.get("minimum_key_event_precision", 0.80)),
+        "minimum_recall": float(validation.get("minimum_key_event_recall", 0.80)),
         "precision": None,
         "recall": None,
         "small_sample_warning": recall_report.get("small_sample_warning"),
@@ -403,14 +390,10 @@ def _refresh_repaired_quality_acceptance(
         recall_gate["passed"] = bool(
             recall_gate["precision"] is not None
             and recall_gate["recall"] is not None
-            and float(recall_gate["precision"])
-            >= recall_gate["minimum_precision"]
-            and float(recall_gate["recall"])
-            >= recall_gate["minimum_recall"]
+            and float(recall_gate["precision"]) >= recall_gate["minimum_precision"]
+            and float(recall_gate["recall"]) >= recall_gate["minimum_recall"]
         )
-        report["passed"] = bool(report.get("passed")) and bool(
-            recall_gate["passed"]
-        )
+        report["passed"] = bool(report.get("passed")) and bool(recall_gate["passed"])
         if not recall_gate["passed"]:
             report["status"] = "failed"
     report["key_event_recall"] = recall_gate
@@ -420,9 +403,7 @@ def _refresh_repaired_quality_acceptance(
         report["passed"] = False
         report["status"] = "failed"
     write_json(layout.json_config / "quality_acceptance.json", report)
-    write_json(
-        layout.json_config / "key_material_recall_eval.json", recall_report
-    )
+    write_json(layout.json_config / "key_material_recall_eval.json", recall_report)
     return report
 
 
@@ -478,7 +459,9 @@ def probe_index_content_command(
         None,
     )
     if item is None:
-        raise typer.BadParameter(f"Experiment is absent from the NAS index: {experiment_id}")
+        raise typer.BadParameter(
+            f"Experiment is absent from the NAS index: {experiment_id}"
+        )
     failed_real_prefix = bool(
         item.get("metadata_classification") == "real_experiment"
         and item.get("processing_state") == "failed"
@@ -574,9 +557,7 @@ def adjudicate_probe_with_cv_command(
     """Resolve an inconclusive short probe only with independent Ark+CV consensus."""
 
     settings = load_config(config)
-    result = adjudicate_inconclusive_probe_with_cv(
-        settings, experiment_id, staging
-    )
+    result = adjudicate_inconclusive_probe_with_cv(settings, experiment_id, staging)
     refreshed = build_curation_catalog(
         discover_collections(settings, limit=1000), settings
     )
@@ -625,7 +606,9 @@ def sweep_index_content_command(
         None,
     )
     if item is None:
-        raise typer.BadParameter(f"Experiment is absent from the NAS index: {experiment_id}")
+        raise typer.BadParameter(
+            f"Experiment is absent from the NAS index: {experiment_id}"
+        )
     if item.get("metadata_classification") != "ambiguous":
         raise typer.BadParameter(
             "Full-timeline content sweep is permitted only for ambiguous recordings"
@@ -642,7 +625,9 @@ def sweep_index_content_command(
             "content_probe_max_seconds", 300.0
         )
     ):
-        raise typer.BadParameter("Full-timeline sweep requires a timeline over five minutes")
+        raise typer.BadParameter(
+            "Full-timeline sweep requires a timeline over five minutes"
+        )
     try:
         manifest, manifest_path, ingest = prepare_from_nas_index(
             settings,
@@ -705,9 +690,7 @@ def adjudicate_full_sweep_with_cv_command(
     """Resolve a long negative only with full semantic and exhaustive CV evidence."""
 
     settings = load_config(config)
-    result = adjudicate_full_timeline_sweep_with_cv(
-        settings, experiment_id, staging
-    )
+    result = adjudicate_full_timeline_sweep_with_cv(settings, experiment_id, staging)
     refreshed = build_curation_catalog(
         discover_collections(settings, limit=1000), settings
     )
@@ -723,9 +706,7 @@ def adjudicate_full_sweep_with_cv_command(
                 "experiment_id": experiment_id,
                 "verdict": result["verdict"],
                 "receipt": result["receipt_path"],
-                "full_timeline_adjudication": result[
-                    "full_timeline_adjudication"
-                ],
+                "full_timeline_adjudication": result["full_timeline_adjudication"],
                 "curation_disposition": item["disposition"],
                 "catalog_artifacts": artifacts,
             },
@@ -751,7 +732,9 @@ def _create_staging_only_run_root(
         staging_root = configured.resolve(strict=True)
         expected_root = expected.resolve(strict=True)
     except OSError as exc:
-        raise typer.BadParameter(f"Unable to resolve existing NAS staging root: {exc}") from exc
+        raise typer.BadParameter(
+            f"Unable to resolve existing NAS staging root: {exc}"
+        ) from exc
     if staging_root != expected_root:
         raise typer.BadParameter(
             "Staging-only execution requires the existing archive-local "
@@ -774,7 +757,9 @@ def _create_staging_only_run_root(
     target.mkdir()
     resolved_target = target.resolve(strict=True)
     if not resolved_target.is_relative_to(staging_root):
-        raise typer.BadParameter(f"Staging run escaped configured root: {resolved_target}")
+        raise typer.BadParameter(
+            f"Staging run escaped configured root: {resolved_target}"
+        )
     return resolved_target
 
 
@@ -798,8 +783,12 @@ def _normalized_cache_policy(
 
 @app.command("generate-daily-report")
 def generate_daily_report_command(
-    archive: Annotated[Path, typer.Option("--archive", "-a", exists=True, file_okay=False)],
-    config: Annotated[Path | None, typer.Option("--config", "-c", exists=True, dir_okay=False)] = None,
+    archive: Annotated[
+        Path, typer.Option("--archive", "-a", exists=True, file_okay=False)
+    ],
+    config: Annotated[
+        Path | None, typer.Option("--config", "-c", exists=True, dir_okay=False)
+    ] = None,
 ) -> None:
     """Generate or refresh a zero-additional-token report from an accepted archive."""
 
@@ -809,8 +798,12 @@ def generate_daily_report_command(
 
 @app.command("run")
 def run_command(
-    manifest: Annotated[Path, typer.Option("--manifest", "-m", exists=True, dir_okay=False)],
-    config: Annotated[Path | None, typer.Option("--config", "-c", exists=True, dir_okay=False)] = None,
+    manifest: Annotated[
+        Path, typer.Option("--manifest", "-m", exists=True, dir_okay=False)
+    ],
+    config: Annotated[
+        Path | None, typer.Option("--config", "-c", exists=True, dir_okay=False)
+    ] = None,
     output: Annotated[Path | None, typer.Option("--output", "-o")] = None,
 ) -> None:
     settings = load_config(config)
@@ -823,7 +816,9 @@ def run_command(
 @app.command("dry-run")
 def dry_run_command(
     output: Annotated[Path, typer.Option("--output", "-o")] = Path("outputs/dry-run"),
-    config: Annotated[Path | None, typer.Option("--config", "-c", exists=True, dir_okay=False)] = None,
+    config: Annotated[
+        Path | None, typer.Option("--config", "-c", exists=True, dir_okay=False)
+    ] = None,
 ) -> None:
     result = create_dry_run(output, load_config(config))
     typer.echo(str(result))
@@ -831,9 +826,7 @@ def dry_run_command(
 
 @app.command("run-local-acceptance")
 def run_local_acceptance_command(
-    output: Annotated[
-        Path, typer.Option("--output", "-o")
-    ] = Path(
+    output: Annotated[Path, typer.Option("--output", "-o")] = Path(
         "/srv/sentinel-data/VisionCortex3090Ti/Runtime/LocalAcceptance"
     ),
     config: Annotated[
@@ -851,9 +844,7 @@ def benchmark_local_hardware_command(
     output: Annotated[Path, typer.Option("--output", "-o")],
     media: Annotated[list[Path], typer.Option("--media", exists=True, dir_okay=False)],
     duration: Annotated[float, typer.Option("--duration-seconds")] = 60.0,
-    workers_per_role: Annotated[
-        int, typer.Option("--workers-per-role")
-    ] = 1,
+    workers_per_role: Annotated[int, typer.Option("--workers-per-role")] = 1,
     config: Annotated[
         Path, typer.Option("--config", "-c", exists=True, dir_okay=False)
     ] = Path("configs/rtx3090ti-ubuntu-local.yaml"),
@@ -872,9 +863,7 @@ def benchmark_local_hardware_command(
 
 @app.command("accept-local-models")
 def accept_local_models_command(
-    dataset: Annotated[
-        Path, typer.Option("--dataset", exists=True, file_okay=False)
-    ],
+    dataset: Annotated[Path, typer.Option("--dataset", exists=True, file_okay=False)],
     output: Annotated[Path, typer.Option("--output", "-o")],
     config: Annotated[
         Path, typer.Option("--config", "-c", exists=True, dir_okay=False)
@@ -882,9 +871,7 @@ def accept_local_models_command(
 ) -> None:
     """Run every production CV model on one bounded local public example."""
 
-    receipt = run_local_real_model_acceptance(
-        dataset, output, load_config(config)
-    )
+    receipt = run_local_real_model_acceptance(dataset, output, load_config(config))
     typer.echo(str(receipt))
 
 
@@ -934,13 +921,9 @@ def evaluate_liquid_semantic_command(
 def calibrate_liquid_semantic_command(
     dataset: Annotated[Path, typer.Option("--dataset", exists=True, file_okay=False)],
     output: Annotated[Path, typer.Option("--output", "-o")],
-    thresholds: Annotated[
-        list[float] | None, typer.Option("--threshold")
-    ] = None,
+    thresholds: Annotated[list[float] | None, typer.Option("--threshold")] = None,
     sample_count: Annotated[int, typer.Option("--sample-count")] = 32,
-    minimum_precision: Annotated[
-        float, typer.Option("--minimum-precision")
-    ] = 0.90,
+    minimum_precision: Annotated[float, typer.Option("--minimum-precision")] = 0.90,
     config: Annotated[
         Path, typer.Option("--config", "-c", exists=True, dir_okay=False)
     ] = Path("configs/rtx3090ti-ubuntu-local.yaml"),
@@ -960,9 +943,13 @@ def calibrate_liquid_semantic_command(
 
 @app.command("validate-models")
 def validate_models_command(
-    config: Annotated[Path | None, typer.Option("--config", "-c", exists=True, dir_okay=False)] = None,
+    config: Annotated[
+        Path | None, typer.Option("--config", "-c", exists=True, dir_okay=False)
+    ] = None,
 ) -> None:
-    typer.echo(json.dumps(validate_models(load_config(config)), ensure_ascii=False, indent=2))
+    typer.echo(
+        json.dumps(validate_models(load_config(config)), ensure_ascii=False, indent=2)
+    )
 
 
 @app.command("validate-closed-set-models")
@@ -976,9 +963,7 @@ def validate_closed_set_models_command(
 ) -> None:
     """Validate the retained trainable YOLO weights against the registry."""
 
-    payload = validate_model_registry(
-        registry, inspect_ontology=inspect_ontology
-    )
+    payload = validate_model_registry(registry, inspect_ontology=inspect_ontology)
     typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
@@ -1021,17 +1006,15 @@ def prepare_public_models_command(
 @app.command("prepare-public-dataset")
 def prepare_public_dataset_command(
     dataset_id: Annotated[str, typer.Option("--dataset-id")],
-    destination: Annotated[
-        Path, typer.Option("--destination")
-    ] = Path("/srv/sentinel-data/VisionCortex3090Ti/Runtime/PublicDatasets"),
+    destination: Annotated[Path, typer.Option("--destination")] = Path(
+        "/srv/sentinel-data/VisionCortex3090Ti/Runtime/PublicDatasets"
+    ),
     registry: Annotated[
         Path, typer.Option("--registry", exists=True, dir_okay=False)
     ] = Path("configs/public-data-sources.json"),
     extract: Annotated[bool, typer.Option("--extract/--no-extract")] = True,
 ) -> None:
-    payload = prepare_public_dataset(
-        registry, dataset_id, destination, extract=extract
-    )
+    payload = prepare_public_dataset(registry, dataset_id, destination, extract=extract)
     typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
@@ -1063,9 +1046,7 @@ def evaluate_yolo_boxes_command(
         Path, typer.Option("--ground-truth", exists=True, dir_okay=False)
     ],
     output: Annotated[Path, typer.Option("--output", "-o")],
-    confidence: Annotated[
-        float, typer.Option("--confidence", min=0.0, max=1.0)
-    ] = 0.25,
+    confidence: Annotated[float, typer.Option("--confidence", min=0.0, max=1.0)] = 0.25,
 ) -> None:
     """Evaluate participant boxes against independent reviewed box truth."""
 
@@ -1081,9 +1062,7 @@ def evaluate_yolo_boxes_command(
                 "status": payload["status"],
                 "dataset_id": payload.get("dataset_id"),
                 "image_count": payload["image_count"],
-                "ground_truth_instance_count": payload[
-                    "ground_truth_instance_count"
-                ],
+                "ground_truth_instance_count": payload["ground_truth_instance_count"],
                 "micro": payload["micro"],
                 "macro": payload["macro"],
                 "output": str(output.resolve()),
@@ -1115,9 +1094,7 @@ def build_yolo_training_dataset_command(
 
 @app.command("build-public-yolo-training-view")
 def build_public_yolo_training_view_command(
-    source: Annotated[
-        Path, typer.Option("--source", exists=True, file_okay=False)
-    ],
+    source: Annotated[Path, typer.Option("--source", exists=True, file_okay=False)],
     dataset_receipt: Annotated[
         Path, typer.Option("--dataset-receipt", exists=True, dir_okay=False)
     ],
@@ -1170,9 +1147,7 @@ def build_mapped_public_yolo_union_command(
 
 @app.command("audit-yolo-dataset-integrity")
 def audit_yolo_dataset_integrity_command(
-    dataset: Annotated[
-        Path, typer.Option("--dataset", exists=True, file_okay=False)
-    ],
+    dataset: Annotated[Path, typer.Option("--dataset", exists=True, file_okay=False)],
     output: Annotated[Path, typer.Option("--output", "-o")],
     focus_classes: Annotated[
         str, typer.Option("--focus-classes", help="Comma-separated ontology classes")
@@ -1187,9 +1162,7 @@ def audit_yolo_dataset_integrity_command(
 
 @app.command("calibrate-yolo-confidence")
 def calibrate_yolo_confidence_command(
-    dataset: Annotated[
-        Path, typer.Option("--dataset", exists=True, file_okay=False)
-    ],
+    dataset: Annotated[Path, typer.Option("--dataset", exists=True, file_okay=False)],
     model: Annotated[Path, typer.Option("--model", exists=True, dir_okay=False)],
     audit_receipt: Annotated[
         Path, typer.Option("--audit-receipt", exists=True, dir_okay=False)
@@ -1238,9 +1211,7 @@ def calibrate_yolo_confidence_command(
 
 @app.command("evaluate-yolo-calibrated")
 def evaluate_yolo_calibrated_command(
-    dataset: Annotated[
-        Path, typer.Option("--dataset", exists=True, file_okay=False)
-    ],
+    dataset: Annotated[Path, typer.Option("--dataset", exists=True, file_okay=False)],
     model: Annotated[Path, typer.Option("--model", exists=True, dir_okay=False)],
     calibration_receipt: Annotated[
         Path, typer.Option("--calibration-receipt", exists=True, dir_okay=False)
@@ -1277,9 +1248,7 @@ def evaluate_yolo_calibrated_command(
 
 @app.command("calibrate-yolo-world-prompts")
 def calibrate_yolo_world_prompts_command(
-    dataset: Annotated[
-        Path, typer.Option("--dataset", exists=True, file_okay=False)
-    ],
+    dataset: Annotated[Path, typer.Option("--dataset", exists=True, file_okay=False)],
     model: Annotated[Path, typer.Option("--model", exists=True, dir_okay=False)],
     audit_receipt: Annotated[
         Path, typer.Option("--audit-receipt", exists=True, dir_okay=False)
@@ -1326,9 +1295,7 @@ def calibrate_yolo_world_prompts_command(
 @app.command("measure-yolo-candidate-tensorrt")
 def benchmark_yolo_candidate_tensorrt_command(
     model: Annotated[Path, typer.Option("--model", exists=True, dir_okay=False)],
-    dataset: Annotated[
-        Path, typer.Option("--dataset", exists=True, file_okay=False)
-    ],
+    dataset: Annotated[Path, typer.Option("--dataset", exists=True, file_okay=False)],
     audit_receipt: Annotated[
         Path, typer.Option("--audit-receipt", exists=True, dir_okay=False)
     ],
@@ -1339,9 +1306,7 @@ def benchmark_yolo_candidate_tensorrt_command(
     benchmark_image_limit: Annotated[
         int, typer.Option("--benchmark-image-limit", min=1)
     ] = 256,
-    workspace_gib: Annotated[
-        float, typer.Option("--workspace-gib", min=0.1)
-    ] = 3.0,
+    workspace_gib: Annotated[float, typer.Option("--workspace-gib", min=0.1)] = 3.0,
     device: Annotated[str, typer.Option("--device")] = "0",
 ) -> None:
     """Export and benchmark an isolated candidate without changing production."""
@@ -1363,9 +1328,7 @@ def benchmark_yolo_candidate_tensorrt_command(
 
 @app.command("train-yolo-model")
 def train_yolo_model_command(
-    dataset: Annotated[
-        Path, typer.Option("--dataset", exists=True, file_okay=False)
-    ],
+    dataset: Annotated[Path, typer.Option("--dataset", exists=True, file_okay=False)],
     base_model: Annotated[
         Path, typer.Option("--base-model", exists=True, dir_okay=False)
     ],
@@ -1379,9 +1342,7 @@ def train_yolo_model_command(
     batch: Annotated[int, typer.Option("--batch", min=1)] = 8,
     device: Annotated[str, typer.Option("--device")] = "0",
     patience: Annotated[int, typer.Option("--patience", min=0)] = 20,
-    max_hours: Annotated[
-        float, typer.Option("--max-hours", min=0.01, max=24.0)
-    ] = 2.0,
+    max_hours: Annotated[float, typer.Option("--max-hours", min=0.01, max=24.0)] = 2.0,
     workers: Annotated[int, typer.Option("--workers", min=0)] = 8,
     optimizer: Annotated[str, typer.Option("--optimizer")] = "auto",
     learning_rate: Annotated[
@@ -1432,12 +1393,8 @@ def train_yolo_model_command(
 
 @app.command("evaluate-yolo-model-on-human-truth")
 def evaluate_yolo_model_on_human_truth_command(
-    dataset: Annotated[
-        Path, typer.Option("--dataset", exists=True, file_okay=False)
-    ],
-    model: Annotated[
-        Path, typer.Option("--model", exists=True, dir_okay=False)
-    ],
+    dataset: Annotated[Path, typer.Option("--dataset", exists=True, file_okay=False)],
+    model: Annotated[Path, typer.Option("--model", exists=True, dir_okay=False)],
     output: Annotated[Path, typer.Option("--output", "-o")],
     split: Annotated[str, typer.Option("--split")] = "test",
     image_size: Annotated[int, typer.Option("--image-size", min=64)] = 640,
@@ -1466,9 +1423,9 @@ def evaluate_yolo_candidate_promotion_command(
         Path, typer.Option("--evaluation-receipt", exists=True, dir_okay=False)
     ],
     output: Annotated[Path, typer.Option("--output", "-o")],
-    gate: Annotated[
-        Path, typer.Option("--gate", exists=True, dir_okay=False)
-    ] = Path("configs/models/yolo-candidate-promotion-gate.json"),
+    gate: Annotated[Path, typer.Option("--gate", exists=True, dir_okay=False)] = Path(
+        "configs/models/yolo-candidate-promotion-gate.json"
+    ),
     internal_ab_receipt: Annotated[
         Path | None,
         typer.Option("--internal-ab-receipt", exists=True, dir_okay=False),
@@ -1508,9 +1465,7 @@ def model_certification_readiness_command(
         json.dumps(
             {
                 "status": payload["status"],
-                "ready_for_certification_run": payload[
-                    "ready_for_certification_run"
-                ],
+                "ready_for_certification_run": payload["ready_for_certification_run"],
                 "production_certified": payload["production_certified"],
                 "event_truth": payload["event_truth"],
                 "box_truth": payload["box_truth"],
@@ -1536,9 +1491,7 @@ def certify_model_quality_command(
     payload = build_model_quality_certification(
         settings, repository_root=repository_root
     )
-    configured = (settings.get("validation") or {}).get(
-        "model_certification"
-    ) or {}
+    configured = (settings.get("validation") or {}).get("model_certification") or {}
     output = Path(str(configured.get("path") or ""))
     if not str(output):
         raise typer.BadParameter("validation.model_certification.path is required")
@@ -1551,17 +1504,11 @@ def certify_model_quality_command(
                 "status": payload["status"],
                 "passed": payload["passed"],
                 "failures": payload["failures"],
-                "event_ground_truth_count": metrics[
-                    "event_ground_truth_count"
-                ],
+                "event_ground_truth_count": metrics["event_ground_truth_count"],
                 "event_precision": metrics["events"]["precision"],
                 "event_recall": metrics["events"]["recall"],
-                "box_precision": metrics["participant_boxes_iou_0_5"][
-                    "precision"
-                ],
-                "box_recall": metrics["participant_boxes_iou_0_5"][
-                    "recall"
-                ],
+                "box_precision": metrics["participant_boxes_iou_0_5"]["precision"],
+                "box_recall": metrics["participant_boxes_iou_0_5"]["recall"],
                 "output": str(output),
             },
             ensure_ascii=False,
@@ -1572,7 +1519,9 @@ def certify_model_quality_command(
 
 @app.command("validate-archive-quality")
 def validate_archive_quality_command(
-    archive: Annotated[Path, typer.Option("--archive", "-a", exists=True, file_okay=False)],
+    archive: Annotated[
+        Path, typer.Option("--archive", "-a", exists=True, file_okay=False)
+    ],
     baseline: Annotated[
         Path | None, typer.Option("--baseline", "-b", exists=True, dir_okay=False)
     ] = None,
@@ -1585,7 +1534,9 @@ def validate_archive_quality_command(
 
     settings = load_config(config)
     package_path = archive / "JSON-Config-Files" / "evidence_package.json"
-    package = RunSummary.model_validate_json(package_path.read_text(encoding="utf-8-sig"))
+    package = RunSummary.model_validate_json(
+        package_path.read_text(encoding="utf-8-sig")
+    )
     repository_root = Path(__file__).resolve().parents[2]
     if baseline is not None:
         baseline_payload = json.loads(baseline.read_text(encoding="utf-8-sig"))
@@ -1604,7 +1555,9 @@ def validate_archive_quality_command(
             repository_root=repository_root,
             artifact_label="验收基线",
         )
-    key_events = [event for event in package.events if event.key_frames or event.key_clips]
+    key_events = [
+        event for event in package.events if event.key_frames or event.key_clips
+    ]
     validation = settings.get("validation") or {}
     report = validate_experiment_and_material_quality(
         package.experiment_groups,
@@ -1625,9 +1578,7 @@ def validate_archive_quality_command(
         key_events,
     )
     report["step_action_consistency"] = step_consistency
-    report["passed"] = bool(report.get("passed")) and bool(
-        step_consistency["passed"]
-    )
+    report["passed"] = bool(report.get("passed")) and bool(step_consistency["passed"])
     if report.get("baseline", {}).get("available"):
         report["status"] = "passed" if report["passed"] else "failed"
     report["baseline_selection"] = baseline_selection
@@ -1706,7 +1657,9 @@ def validate_archive_quality_command(
 
 @app.command("replay-quality-ledger")
 def replay_quality_ledger_command(
-    archive: Annotated[Path, typer.Option("--archive", "-a", exists=True, file_okay=False)],
+    archive: Annotated[
+        Path, typer.Option("--archive", "-a", exists=True, file_okay=False)
+    ],
     config: Annotated[
         Path | None, typer.Option("--config", "-c", exists=True, dir_okay=False)
     ] = None,
@@ -1726,7 +1679,9 @@ def replay_quality_ledger_command(
 
 @app.command("inspect-quality-ledger-inputs")
 def inspect_quality_ledger_inputs_command(
-    archive: Annotated[Path, typer.Option("--archive", "-a", exists=True, file_okay=False)],
+    archive: Annotated[
+        Path, typer.Option("--archive", "-a", exists=True, file_okay=False)
+    ],
 ) -> None:
     """Validate bounded replay inputs without opening source video or clock CSV."""
 
@@ -1737,8 +1692,12 @@ def inspect_quality_ledger_inputs_command(
 @app.command("register-archived-collection")
 def register_archived_collection_command(
     experiment_id: Annotated[str, typer.Option("--experiment-id")],
-    archive: Annotated[Path, typer.Option("--archive", "-a", exists=True, file_okay=False)],
-    config: Annotated[Path | None, typer.Option("--config", "-c", exists=True, dir_okay=False)] = None,
+    archive: Annotated[
+        Path, typer.Option("--archive", "-a", exists=True, file_okay=False)
+    ],
+    config: Annotated[
+        Path | None, typer.Option("--config", "-c", exists=True, dir_okay=False)
+    ] = None,
 ) -> None:
     """Register an existing accepted archive in the central collection ledger."""
 
@@ -1799,11 +1758,104 @@ def register_archived_collection_command(
 
 @app.command("prepare-engine")
 def prepare_engine_command(
-    config: Annotated[Path | None, typer.Option("--config", "-c", exists=True, dir_okay=False)] = None,
+    config: Annotated[
+        Path | None, typer.Option("--config", "-c", exists=True, dir_okay=False)
+    ] = None,
 ) -> None:
     settings = load_config(config)
     perf = settings["performance"]
     from ultralytics import YOLO
+
+    configured_candidates = perf.get("engine_batch_candidates")
+    if configured_candidates is None:
+        configured_candidates = [perf.get("engine_batch_size", perf["batch_size"])]
+    if not isinstance(configured_candidates, list):
+        raise typer.BadParameter("engine_batch_candidates must be a list")
+    batch_candidates: list[int] = []
+    for value in configured_candidates:
+        try:
+            batch = int(value)
+        except (TypeError, ValueError) as exc:
+            raise typer.BadParameter(
+                "engine_batch_candidates must contain positive integers"
+            ) from exc
+        if batch <= 0:
+            raise typer.BadParameter(
+                "engine_batch_candidates must contain positive integers"
+            )
+        if batch not in batch_candidates:
+            batch_candidates.append(batch)
+    dynamic = bool(perf.get("engine_dynamic", True))
+    workspace = float(perf.get("engine_workspace_gib", 3.0))
+    if workspace <= 0:
+        raise typer.BadParameter("engine_workspace_gib must be positive")
+    autotune_iterations = int(perf.get("engine_autotune_iterations", 4))
+    if autotune_iterations <= 0:
+        raise typer.BadParameter("engine_autotune_iterations must be positive")
+    autotune_memory_fraction = float(
+        perf.get(
+            "engine_autotune_max_gpu_memory_fraction",
+            perf.get("max_gpu_memory_fraction", 0.9),
+        )
+    )
+    if not 0.0 < autotune_memory_fraction <= 1.0:
+        raise typer.BadParameter(
+            "engine_autotune_max_gpu_memory_fraction must be in (0, 1]"
+        )
+
+    def benchmark_engine(engine: Path, batch: int) -> dict[str, object]:
+        import numpy as np
+        import torch
+
+        image_size = int(perf["image_size"])
+        frame = np.zeros((image_size, image_size, 3), dtype=np.uint8)
+        engine_model = YOLO(str(engine))
+        try:
+            engine_model.predict(
+                [frame] * batch,
+                imgsz=image_size,
+                device=perf["device"],
+                half=bool(perf["half"]),
+                verbose=False,
+            )
+            torch.cuda.synchronize(int(perf["device"]))
+            started = time.perf_counter()
+            memory_samples: list[float] = []
+            for _ in range(autotune_iterations):
+                results = engine_model.predict(
+                    [frame] * batch,
+                    imgsz=image_size,
+                    device=perf["device"],
+                    half=bool(perf["half"]),
+                    verbose=False,
+                )
+                if len(results) != batch:
+                    raise RuntimeError(
+                        "TensorRT autotune returned fewer predictions than input frames"
+                    )
+                torch.cuda.synchronize(int(perf["device"]))
+                free_bytes, total_bytes = torch.cuda.mem_get_info(int(perf["device"]))
+                memory_samples.append((total_bytes - free_bytes) / total_bytes)
+            elapsed = time.perf_counter() - started
+            peak_fraction = max(memory_samples)
+            if peak_fraction > autotune_memory_fraction:
+                raise RuntimeError(
+                    "TensorRT autotune exceeded reserved-memory contract: "
+                    f"peak={peak_fraction:.4f} limit={autotune_memory_fraction:.4f}"
+                )
+            return {
+                "iterations": autotune_iterations,
+                "frames": batch * autotune_iterations,
+                "elapsed_seconds": round(elapsed, 6),
+                "images_per_second": round(batch * autotune_iterations / elapsed, 6),
+                "gpu_memory_fraction_peak": round(peak_fraction, 6),
+                "gpu_memory_contract_fraction": autotune_memory_fraction,
+            }
+        finally:
+            del engine_model
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     for role in ("first_person", "third_person"):
         source = Path(settings["models"][role])
@@ -1811,35 +1863,122 @@ def prepare_engine_command(
         if destination.is_file():
             typer.echo(f"{role}: 已存在 {destination}")
             continue
-        typer.echo(f"{role}: 从 {source} 导出 TensorRT，首次导出可能较久")
-        temporary_root = Path(tempfile.mkdtemp(prefix=f"labvision-{role}-"))
-        try:
-            temporary_source = temporary_root / "model.pt"
-            shutil.copy2(source, temporary_source)
-            model = YOLO(str(temporary_source))
-            exported = Path(
-                model.export(
-                    format="engine",
-                    imgsz=int(perf["image_size"]),
-                    half=bool(perf["half"]),
-                    dynamic=True,
-                    batch=int(perf.get("engine_batch_size", perf["batch_size"])),
-                    workspace=3,
-                    device=perf["device"],
-                )
+        typer.echo(f"{role}: 从 {source} 导出 TensorRT；候选 batch={batch_candidates}")
+        failures: list[dict[str, object]] = []
+        selected_batch: int | None = None
+        selected_benchmark: dict[str, object] | None = None
+        build_started = time.perf_counter()
+        for batch in batch_candidates:
+            temporary_root = Path(
+                tempfile.mkdtemp(prefix=f"labvision-{role}-batch{batch}-")
             )
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(exported), str(destination))
-        finally:
-            shutil.rmtree(temporary_root, ignore_errors=True)
+            model = None
+            partial: Path | None = None
+            try:
+                temporary_source = temporary_root / "model.pt"
+                shutil.copy2(source, temporary_source)
+                model = YOLO(str(temporary_source))
+                exported = Path(
+                    model.export(
+                        format="engine",
+                        imgsz=int(perf["image_size"]),
+                        half=bool(perf["half"]),
+                        dynamic=dynamic,
+                        batch=batch,
+                        workspace=workspace,
+                        device=perf["device"],
+                    )
+                )
+                if not exported.is_file():
+                    raise RuntimeError(
+                        f"TensorRT exporter returned a missing artifact: {exported}"
+                    )
+                del model
+                model = None
+                gc.collect()
+                try:
+                    import torch
+
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except ImportError:
+                    pass
+                benchmark = benchmark_engine(exported, batch)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if destination.exists():
+                    raise RuntimeError(
+                        f"TensorRT destination appeared during export: {destination}"
+                    )
+                partial = destination.with_name(
+                    f".{destination.name}.partial-{uuid.uuid4().hex}"
+                )
+                shutil.move(str(exported), str(partial))
+                if destination.exists():
+                    raise RuntimeError(
+                        f"TensorRT destination appeared during export: {destination}"
+                    )
+                partial.replace(destination)
+                selected_batch = batch
+                selected_benchmark = benchmark
+                break
+            except Exception as exc:
+                failures.append(
+                    {
+                        "batch": batch,
+                        "error_type": type(exc).__name__,
+                        "message": str(exc)[-1000:],
+                    }
+                )
+                typer.echo(
+                    f"{role}: batch={batch} 导出失败，尝试更小候选：{type(exc).__name__}",
+                    err=True,
+                )
+            finally:
+                if partial is not None and partial.exists():
+                    partial.unlink()
+                del model
+                shutil.rmtree(temporary_root, ignore_errors=True)
+                gc.collect()
+                try:
+                    import torch
+
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except ImportError:
+                    pass
+        if selected_batch is None:
+            raise RuntimeError(
+                f"{role} TensorRT export failed for all batch candidates: "
+                f"{[item['batch'] for item in failures]}"
+            )
+        receipt = {
+            "schema_version": "visioncortex-tensorrt-engine-build/1",
+            "role": role,
+            "source": str(source.resolve()),
+            "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+            "engine": str(destination.resolve()),
+            "engine_sha256": hashlib.sha256(destination.read_bytes()).hexdigest(),
+            "image_size": int(perf["image_size"]),
+            "half": bool(perf["half"]),
+            "dynamic": dynamic,
+            "batch_candidates": batch_candidates,
+            "selected_batch": selected_batch,
+            "selected_benchmark": selected_benchmark,
+            "workspace_gib": workspace,
+            "autotune_iterations": autotune_iterations,
+            "autotune_max_gpu_memory_fraction": autotune_memory_fraction,
+            "failed_candidates": failures,
+            "elapsed_seconds": round(time.perf_counter() - build_started, 6),
+        }
+        write_json(destination.with_suffix(destination.suffix + ".build.json"), receipt)
         typer.echo(f"{role}: {destination}")
 
 
 @app.command("run-fixed-benchmark")
 def run_fixed_benchmark_command(
-    config: Annotated[Path, typer.Option("--config", "-c", exists=True, dir_okay=False)] = Path(
-        "configs/rtx4060-laptop-production.yaml"
-    ),
+    config: Annotated[
+        Path, typer.Option("--config", "-c", exists=True, dir_okay=False)
+    ] = Path("configs/rtx4060-laptop-production.yaml"),
     preprocessing_only: Annotated[
         bool,
         typer.Option(
@@ -1876,7 +2015,9 @@ def run_fixed_benchmark_command(
         settings, experiment_id, lambda message: typer.echo(f"[NAS] {message}")
     )
     manifest_path.write_text(
-        yaml.safe_dump(manifest.model_dump(mode="json"), allow_unicode=True, sort_keys=False),
+        yaml.safe_dump(
+            manifest.model_dump(mode="json"), allow_unicode=True, sort_keys=False
+        ),
         encoding="utf-8",
     )
     typer.echo(
@@ -1904,9 +2045,9 @@ def run_fixed_benchmark_command(
 def run_index_collection_command(
     experiment_id: Annotated[str, typer.Option("--experiment-id")],
     archive_name: Annotated[str, typer.Option("--archive-name")],
-    config: Annotated[Path, typer.Option("--config", "-c", exists=True, dir_okay=False)] = Path(
-        "configs/rtx4060-laptop-production.yaml"
-    ),
+    config: Annotated[
+        Path, typer.Option("--config", "-c", exists=True, dir_okay=False)
+    ] = Path("configs/rtx4060-laptop-production.yaml"),
     exhaustive_negative_audit: Annotated[
         bool,
         typer.Option(
@@ -2208,7 +2349,9 @@ def run_index_staging_command(
 def serve_command(
     host: Annotated[str, typer.Option("--host")] = "127.0.0.1",
     port: Annotated[int, typer.Option("--port")] = 8000,
-    config: Annotated[Path | None, typer.Option("--config", "-c", exists=True, dir_okay=False)] = None,
+    config: Annotated[
+        Path | None, typer.Option("--config", "-c", exists=True, dir_okay=False)
+    ] = None,
 ) -> None:
     import os
 
@@ -2221,7 +2364,9 @@ def serve_command(
 
 @app.command("refresh-key-json")
 def refresh_key_json_command(
-    archive: Annotated[Path, typer.Option("--archive", "-a", exists=True, file_okay=False)],
+    archive: Annotated[
+        Path, typer.Option("--archive", "-a", exists=True, file_okay=False)
+    ],
 ) -> None:
     """Rewrite key-material JSON sidecars using the normalized event contract."""
     layout = ArchiveLayout(archive.resolve())
@@ -2229,7 +2374,9 @@ def refresh_key_json_command(
         (layout.json_config / "evidence_package.json").read_text(encoding="utf-8")
     )
     transforms = {item.view_id: item for item in package.alignments}
-    key_events = [event for event in package.events if event.key_frames or event.key_clips]
+    key_events = [
+        event for event in package.events if event.key_frames or event.key_clips
+    ]
     refresh_key_material_metadata(
         layout,
         key_events,
@@ -2253,7 +2400,9 @@ def refresh_key_json_command(
         )
         for event in key_events
     ]
-    write_json(layout.key_materials / "Key-Materials-Model-Understanding.json", normalized)
+    write_json(
+        layout.key_materials / "Key-Materials-Model-Understanding.json", normalized
+    )
     probe_path = layout.json_config / "video_probe.json"
     infos = (
         {
@@ -2281,7 +2430,9 @@ def refresh_key_json_command(
 
 @app.command("repair-key-material-presentation")
 def repair_key_material_presentation_command(
-    archive: Annotated[Path, typer.Option("--archive", "-a", exists=True, file_okay=False)],
+    archive: Annotated[
+        Path, typer.Option("--archive", "-a", exists=True, file_okay=False)
+    ],
     config: Annotated[
         Path, typer.Option("--config", "-c", exists=True, dir_okay=False)
     ] = Path("configs/rtx3090ti-ubuntu-production.yaml"),
@@ -2302,7 +2453,9 @@ def repair_key_material_presentation_command(
     settings = load_config(config)
     package_path = layout.json_config / "evidence_package.json"
     package_before_sha256 = hashlib.sha256(package_path.read_bytes()).hexdigest()
-    summary = RunSummary.model_validate_json(package_path.read_text(encoding="utf-8-sig"))
+    summary = RunSummary.model_validate_json(
+        package_path.read_text(encoding="utf-8-sig")
+    )
     manifest = RunManifest.model_validate_json(
         (layout.json_config / "run_manifest.json").read_text(encoding="utf-8-sig")
     )
@@ -2322,14 +2475,14 @@ def repair_key_material_presentation_command(
         / str(cache_identity["cache_key"])
     )
     key_event_ids = {
-        event_id for group in summary.experiment_groups for event_id in group.key_event_ids
+        event_id
+        for group in summary.experiment_groups
+        for event_id in group.key_event_ids
     }
     reviewed_key_events = [
         event for event in summary.events if event.event_id in key_event_ids
     ]
-    prior_curation_path = (
-        layout.json_config / "semantic_key_material_curation.json"
-    )
+    prior_curation_path = layout.json_config / "semantic_key_material_curation.json"
     prior_curation = (
         json.loads(prior_curation_path.read_text(encoding="utf-8-sig"))
         if prior_curation_path.is_file()
@@ -2360,9 +2513,7 @@ def repair_key_material_presentation_command(
             if event.action_type.value == "liquid_movement"
             else event.action_type.value
         )
-        current_state_action = str(
-            (event.state_machine or {}).get("action_type") or ""
-        )
+        current_state_action = str((event.state_machine or {}).get("action_type") or "")
         if (
             pre_curation_action == event.action_type.value
             or current_state_action == expected_state_action
@@ -2407,7 +2558,9 @@ def repair_key_material_presentation_command(
         view_id: layout.work / "detections-fine" / f"{view_id}.detections.jsonl"
         for view_id in sorted(required_view_ids)
     }
-    missing_ledgers = [str(path) for path in detection_paths.values() if not path.is_file()]
+    missing_ledgers = [
+        str(path) for path in detection_paths.values() if not path.is_file()
+    ]
     if missing_ledgers:
         raise typer.BadParameter(
             "Immutable fine-scan ledger is missing: " + "; ".join(missing_ledgers)
@@ -2432,10 +2585,8 @@ def repair_key_material_presentation_command(
         publisher=None,
         archive_id=summary.experiment_id,
     )
-    obsolete_media_relocated = (
-        _relocate_unreferenced_key_material_event_directories(
-            layout, key_events
-        )
+    obsolete_media_relocated = _relocate_unreferenced_key_material_event_directories(
+        layout, key_events
     )
     final_state_receipt_repairs = _synchronize_final_event_state_receipts(
         key_events, settings
@@ -2474,9 +2625,7 @@ def repair_key_material_presentation_command(
                 "event_id": event.event_id,
                 "pre_curation_action_type": pre_curation_action,
                 "pre_curation_state_action": str(
-                    (review.get("pre_curation_state_machine") or {}).get(
-                        "action_type"
-                    )
+                    (review.get("pre_curation_state_machine") or {}).get("action_type")
                     or ""
                 ),
                 "final_action_type": event.action_type.value,
@@ -2521,7 +2670,9 @@ def repair_key_material_presentation_command(
             "schema_version": "visioncortex-experiment-group-understanding/2",
             "refinement_pass": "post_event_semantic_curation",
             "presentation_repair": True,
-            "groups": [group.model_dump(mode="json") for group in summary.experiment_groups],
+            "groups": [
+                group.model_dump(mode="json") for group in summary.experiment_groups
+            ],
         },
     )
     key_understanding_path = (
@@ -2555,9 +2706,7 @@ def repair_key_material_presentation_command(
             if str(record.get("event_id")) in repaired_ids:
                 record["semantic_state_machine_rebuilt"] = True
         curation["final_annotation"] = {
-            key: value
-            for key, value in final_annotation.items()
-            if key != "records"
+            key: value for key, value in final_annotation.items() if key != "records"
         }
         curation["presentation_repair"] = {
             "schema_version": "visioncortex-semantic-presentation-repair/1",

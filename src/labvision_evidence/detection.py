@@ -20,7 +20,14 @@ from .key_material_verification import (
     validate_selective_key_material_verification,
 )
 from .liquid_semantic import validate_liquid_semantic_runtime
-from .schemas import AlignmentTransform, BoxEvidence, FrameEvidence, VideoInfo, ViewInput, ViewRole
+from .schemas import (
+    AlignmentTransform,
+    BoxEvidence,
+    FrameEvidence,
+    VideoInfo,
+    ViewInput,
+    ViewRole,
+)
 from .temporal_segmentation import validate_temporal_segmentation_runtime
 from .video_io import (
     PhysicalSegmentDecodeSession,
@@ -82,7 +89,9 @@ class ByteSortTracker:
         self.next_id = 1
         self.tracks: dict[int, _Track] = {}
 
-    def _associate(self, track_ids: list[int], detections: list[BoxEvidence]) -> tuple[set[int], set[int]]:
+    def _associate(
+        self, track_ids: list[int], detections: list[BoxEvidence]
+    ) -> tuple[set[int], set[int]]:
         options: list[tuple[float, int, int]] = []
         for track_id in track_ids:
             track = self.tracks[track_id]
@@ -102,15 +111,25 @@ class ByteSortTracker:
             matched_detections.add(det_index)
         return matched_tracks, matched_detections
 
-    def update(self, detections: list[BoxEvidence], local_ms: float) -> list[BoxEvidence]:
+    def update(
+        self, detections: list[BoxEvidence], local_ms: float
+    ) -> list[BoxEvidence]:
         self.tracks = {
-            key: value for key, value in self.tracks.items() if local_ms - value.last_ms <= self.max_age_ms
+            key: value
+            for key, value in self.tracks.items()
+            if local_ms - value.last_ms <= self.max_age_ms
         }
         high = [d for d in detections if d.confidence >= self.high_threshold]
-        low = [d for d in detections if self.low_threshold <= d.confidence < self.high_threshold]
+        low = [
+            d
+            for d in detections
+            if self.low_threshold <= d.confidence < self.high_threshold
+        ]
         active = list(self.tracks)
         matched_tracks, matched_high = self._associate(active, high)
-        remaining_tracks = [track_id for track_id in active if track_id not in matched_tracks]
+        remaining_tracks = [
+            track_id for track_id in active if track_id not in matched_tracks
+        ]
         matched_low_tracks, _ = self._associate(remaining_tracks, low)
         matched_tracks |= matched_low_tracks
         for index, detection in enumerate(high):
@@ -208,7 +227,9 @@ def _write_checkpoint(path: Path, completed: set[int], output_path: Path) -> Non
                 "schema_version": "visioncortex-detection-checkpoint/2",
                 "completed_chunks": sorted(completed),
                 "output_path": str(output_path),
-                "output_size_bytes": output_path.stat().st_size if output_path.is_file() else 0,
+                "output_size_bytes": output_path.stat().st_size
+                if output_path.is_file()
+                else 0,
             },
             ensure_ascii=False,
             indent=2,
@@ -272,7 +293,8 @@ def _producer(
         )
     ):
         work_units = [
-            (segment.virtual_start_ms, segment.virtual_end_ms) for segment in info.segments
+            (segment.virtual_start_ms, segment.virtual_end_ms)
+            for segment in info.segments
         ]
     else:
         work_units: list[tuple[float, float]] = []
@@ -297,7 +319,9 @@ def _producer(
     global_decode_period_ms = 1000.0 / max(decode_fps, 1e-9)
     local_decode_period_ms = global_decode_period_ms / transform.scale
     local_grid_origin_ms = transform.to_local(0.0)
-    activity_path = output_queue.activity_path if hasattr(output_queue, "activity_path") else None
+    activity_path = (
+        output_queue.activity_path if hasattr(output_queue, "activity_path") else None
+    )
     session_decode_receipts: dict[int, dict[str, Any]] = {}
 
     def source_unit_paths(chunk_index: int | None) -> list[str]:
@@ -344,9 +368,10 @@ def _producer(
         if persistent_sessions and chunk_index is not None:
             session = persistent_sessions[chunk_index]
             decoder_receipt = session_decode_receipts.get(chunk_index)
-            if decoder_receipt and decoder_receipt.get(
-                "aligned_session_start_virtual_ms"
-            ) is not None:
+            if (
+                decoder_receipt
+                and decoder_receipt.get("aligned_session_start_virtual_ms") is not None
+            ):
                 first_global_ms = transform.to_global(
                     float(decoder_receipt["aligned_session_start_virtual_ms"])
                 )
@@ -363,7 +388,9 @@ def _producer(
             payload.update(
                 {
                     "target_window_count": len(session.target_virtual_windows),
-                    "target_windows_ms": [list(item) for item in session.target_virtual_windows],
+                    "target_windows_ms": [
+                        list(item) for item in session.target_virtual_windows
+                    ],
                     "selected_duration_ms": session.selected_duration_ms,
                     "decode_session_span_ms": (
                         session.virtual_end_ms - session.virtual_start_ms
@@ -407,8 +434,7 @@ def _producer(
                 int(perf.get("cpu_decode_threads", 0))
                 if decode_backend == "cpu"
                 else None,
-                bool(perf.get("ffmpeg_cuda_scale", False))
-                and decode_backend == "cuda",
+                bool(perf.get("ffmpeg_cuda_scale", False)) and decode_backend == "cuda",
                 receipt,
                 local_grid_origin_ms,
                 local_decode_period_ms,
@@ -432,12 +458,16 @@ def _producer(
     ) -> list[tuple[int, float, np.ndarray]]:
         return list(iter_decoded_frames(start_ms, end_ms, chunk_index))
 
-    def emit_frames(frames: Iterable[tuple[int, float, np.ndarray]], start_ms: float) -> None:
+    def emit_frames(
+        frames: Iterable[tuple[int, float, np.ndarray]], start_ms: float
+    ) -> None:
         nonlocal previous_gray, previous_signature
         next_yolo_ms = start_ms
         for frame_index, local_ms, frame in frames:
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            signature = cv2.resize(gray, motion_signature_size, interpolation=cv2.INTER_AREA)
+            signature = cv2.resize(
+                gray, motion_signature_size, interpolation=cv2.INTER_AREA
+            )
             motion = (
                 float(cv2.absdiff(signature, previous_signature).mean())
                 if previous_signature is not None
@@ -539,9 +569,7 @@ def _producer(
             return
 
         if ordered_decode:
-            prefetch_frames = max(
-                1, int(perf.get("fine_decode_prefetch_frames", 12))
-            )
+            prefetch_frames = max(1, int(perf.get("fine_decode_prefetch_frames", 12)))
             stop_event = threading.Event()
             unit_queues: dict[int, queue.Queue[Any]] = {}
 
@@ -635,29 +663,42 @@ def _producer(
             emit_frames(iter_decoded_frames(start_ms, end_ms, chunk_index), start_ms)
             finish_unit(chunk_index, len(work_units))
             if wave_barrier is not None:
-                wave_barrier.wait(timeout=float(perf.get("segment_wave_timeout_seconds", 3600)))
+                wave_barrier.wait(
+                    timeout=float(perf.get("segment_wave_timeout_seconds", 3600))
+                )
     except Exception as exc:  # producer errors must cross the thread boundary
         if wave_barrier is not None:
             try:
                 wave_barrier.abort()
             except threading.BrokenBarrierError:
                 pass
-        output_queue.put(ProducerError(view_id=view.view_id, message=f"{type(exc).__name__}: {exc}"))
+        output_queue.put(
+            ProducerError(view_id=view.view_id, message=f"{type(exc).__name__}: {exc}")
+        )
     finally:
         activity("source_worker_ended")
         output_queue.put(ProducerEnd(view_id=view.view_id))
 
 
-def _roi_motion(previous: np.ndarray | None, current: np.ndarray, box: Sequence[float]) -> float:
+def _roi_motion(
+    previous: np.ndarray | None, current: np.ndarray, box: Sequence[float]
+) -> float:
     if previous is None or previous.shape != current.shape:
         return 0.0
     height, width = current.shape
     x1, y1, x2, y2 = box
     left, top = max(0, int(x1 * width)), max(0, int(y1 * height))
-    right, bottom = min(width, int(math.ceil(x2 * width))), min(height, int(math.ceil(y2 * height)))
+    right, bottom = (
+        min(width, int(math.ceil(x2 * width))),
+        min(height, int(math.ceil(y2 * height))),
+    )
     if right - left < 2 or bottom - top < 2:
         return 0.0
-    return float(cv2.absdiff(current[top:bottom, left:right], previous[top:bottom, left:right]).mean())
+    return float(
+        cv2.absdiff(
+            current[top:bottom, left:right], previous[top:bottom, left:right]
+        ).mean()
+    )
 
 
 def _select_model_path(role: ViewRole, config: dict[str, Any]) -> Path:
@@ -668,7 +709,9 @@ def _select_model_path(role: ViewRole, config: dict[str, Any]) -> Path:
     if mode in {"auto", "true", "required"} and engine.is_file():
         return engine
     if mode == "required":
-        raise FileNotFoundError(f"TensorRT engine 不存在: {engine}；请先运行 prepare-engine")
+        raise FileNotFoundError(
+            f"TensorRT engine 不存在: {engine}；请先运行 prepare-engine"
+        )
     return Path(models[role_name])
 
 
@@ -709,11 +752,32 @@ def _metadata_batch(metadata: dict[str, Any]) -> int | None:
     return None
 
 
+def _metadata_dynamic(metadata: dict[str, Any]) -> bool | None:
+    containers = [metadata]
+    for key in ("args", "export", "engine"):
+        nested = metadata.get(key)
+        if isinstance(nested, dict):
+            containers.append(nested)
+    for container in containers:
+        value = container.get("dynamic")
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"true", "1", "yes"}:
+                return True
+            if normalized in {"false", "0", "no"}:
+                return False
+    return None
+
+
 def _profile_batch(engine: Any) -> int | None:
     """Read the maximum explicit batch from the first TensorRT input profile."""
 
     try:
-        tensor_names = [engine.get_tensor_name(index) for index in range(engine.num_io_tensors)]
+        tensor_names = [
+            engine.get_tensor_name(index) for index in range(engine.num_io_tensors)
+        ]
         input_name = next(
             name
             for name in tensor_names
@@ -730,6 +794,15 @@ def _engine_build_batch(path: Path) -> int | None:
         return None
     _plan, metadata, _container = _tensorrt_plan_and_metadata(path)
     return _metadata_batch(metadata)
+
+
+def _engine_requires_exact_batch(path: Path) -> bool:
+    if path.suffix.lower() != ".engine" or not path.is_file():
+        return False
+    _plan, metadata, _container = _tensorrt_plan_and_metadata(path)
+    return (
+        _metadata_dynamic(metadata) is False and _metadata_batch(metadata) is not None
+    )
 
 
 def _validate_pinned_asset(
@@ -817,16 +890,12 @@ def _normalized_class_names(names: Any) -> list[str]:
         try:
             ordered = [
                 value
-                for _, value in sorted(
-                    names.items(), key=lambda item: int(item[0])
-                )
+                for _, value in sorted(names.items(), key=lambda item: int(item[0]))
             ]
         except (TypeError, ValueError):
             ordered = [
                 value
-                for _, value in sorted(
-                    names.items(), key=lambda item: str(item[0])
-                )
+                for _, value in sorted(names.items(), key=lambda item: str(item[0]))
             ]
     elif isinstance(names, (list, tuple)):
         ordered = list(names)
@@ -891,7 +960,9 @@ def validate_models(config: dict[str, Any]) -> dict[str, Any]:
             plan, metadata, container = _tensorrt_plan_and_metadata(engine_path)
             engine = trt_runtime.deserialize_cuda_engine(plan)
             if engine is None:
-                raise RuntimeError(f"TensorRT engine cannot be deserialized: {engine_path}")
+                raise RuntimeError(
+                    f"TensorRT engine cannot be deserialized: {engine_path}"
+                )
             engine_names = _normalized_class_names(metadata.get("names"))
             if not engine_names:
                 raise RuntimeError(
@@ -900,9 +971,7 @@ def validate_models(config: dict[str, Any]) -> dict[str, Any]:
             _validate_class_names(engine_names, expected, engine_path)
             source_names = class_sets.get(role.value)
             if source_names is not None and source_names != engine_names:
-                raise ValueError(
-                    f"{role.value} TensorRT 引擎类别表与源模型不一致"
-                )
+                raise ValueError(f"{role.value} TensorRT 引擎类别表与源模型不一致")
             class_sets[role.value] = engine_names
             report[role.value].update(
                 {
@@ -931,25 +1000,25 @@ def validate_models(config: dict[str, Any]) -> dict[str, Any]:
         for role in ViewRole:
             selected = _select_model_path(role, config)
             runtime["roles"][role.value] = {
-                "backend": "TensorRT" if selected.suffix.lower() == ".engine" else "PyTorch",
+                "backend": "TensorRT"
+                if selected.suffix.lower() == ".engine"
+                else "PyTorch",
                 "path": str(selected),
             }
-    if class_sets[ViewRole.FIRST_PERSON.value] != class_sets[ViewRole.THIRD_PERSON.value]:
+    if (
+        class_sets[ViewRole.FIRST_PERSON.value]
+        != class_sets[ViewRole.THIRD_PERSON.value]
+    ):
         raise ValueError("第一/第三人称模型的规范化类别表不一致")
     runtime["temporal_participant_segmentation"] = (
         validate_temporal_segmentation_runtime(config)
     )
-    runtime["open_vocabulary_key_frame"] = _validate_open_vocabulary_runtime(
-        config
-    )
+    runtime["open_vocabulary_key_frame"] = _validate_open_vocabulary_runtime(config)
     runtime["liquid_semantic_sidecar"] = validate_liquid_semantic_runtime(config)
     runtime["selective_key_material_verification"] = (
         validate_selective_key_material_verification(
             dict(
-                (config.get("key_materials") or {}).get(
-                    "selective_verification"
-                )
-                or {}
+                (config.get("key_materials") or {}).get("selective_verification") or {}
             )
         )
     )
@@ -972,12 +1041,18 @@ class RoleScanner:
         self.config = config
         self.model_path = _select_model_path(role, config)
         self.model = YOLO(str(self.model_path))
-        self.names = {int(key): str(value).replace("-", "_") for key, value in self.model.names.items()}
+        self.names = {
+            int(key): str(value).replace("-", "_")
+            for key, value in self.model.names.items()
+        }
         expected = int(config["models"]["expected_class_count"])
         if len(self.names) != expected:
             raise ValueError(f"{self.model_path} 不是 {expected} 类模型")
-        self.requested_batch_size = int(batch_size or config["performance"]["batch_size"])
+        self.requested_batch_size = int(
+            batch_size or config["performance"]["batch_size"]
+        )
         self.engine_build_batch = _engine_build_batch(self.model_path)
+        self.engine_requires_exact_batch = _engine_requires_exact_batch(self.model_path)
         self.batch_size = min(
             self.requested_batch_size,
             self.engine_build_batch or self.requested_batch_size,
@@ -985,6 +1060,8 @@ class RoleScanner:
         self.initial_batch_size = self.batch_size
         self.batch_contractions: list[dict[str, int]] = []
         self.last_inference_batch_sizes: list[int] = []
+        self.last_engine_batch_sizes: list[int] = []
+        self.exact_batch_padding_frames = 0
         self.image_size = int(image_size or config["performance"]["image_size"])
 
     def close(self) -> None:
@@ -1007,11 +1084,25 @@ class RoleScanner:
             try:
                 results: list[list[BoxEvidence]] = []
                 actual_batch_sizes: list[int] = []
+                engine_batch_sizes: list[int] = []
                 for start in range(0, len(packets), batch_size):
                     sub_batch = packets[start : start + batch_size]
                     actual_batch_sizes.append(len(sub_batch))
+                    execution_batch = list(sub_batch)
+                    if (
+                        getattr(self, "engine_requires_exact_batch", False)
+                        and self.engine_build_batch
+                        and len(execution_batch) < self.engine_build_batch
+                    ):
+                        padding = self.engine_build_batch - len(execution_batch)
+                        execution_batch.extend([execution_batch[-1]] * padding)
+                        self.exact_batch_padding_frames = (
+                            int(getattr(self, "exact_batch_padding_frames", 0))
+                            + padding
+                        )
+                    engine_batch_sizes.append(len(execution_batch))
                     predictions = self.model.predict(
-                        source=[packet.frame for packet in sub_batch],
+                        source=[packet.frame for packet in execution_batch],
                         imgsz=self.image_size,
                         conf=float(model_cfg["confidence"]),
                         iou=float(model_cfg["iou"]),
@@ -1020,25 +1111,42 @@ class RoleScanner:
                         half=bool(perf["half"]),
                         verbose=False,
                     )
-                    for packet, prediction in zip(sub_batch, predictions, strict=True):
+                    if len(predictions) < len(sub_batch):
+                        raise RuntimeError(
+                            "TensorRT inference returned fewer predictions than source frames"
+                        )
+                    for packet, prediction in zip(
+                        sub_batch, predictions[: len(sub_batch)], strict=True
+                    ):
                         boxes: list[BoxEvidence] = []
                         if prediction.boxes is not None:
                             xyxy = prediction.boxes.xyxyn.detach().cpu().numpy()
                             confidences = prediction.boxes.conf.detach().cpu().numpy()
-                            classes = prediction.boxes.cls.detach().cpu().numpy().astype(int)
-                            for coords, confidence, class_id in zip(xyxy, confidences, classes, strict=True):
-                                coords_tuple = tuple(float(np.clip(item, 0.0, 1.0)) for item in coords)
+                            classes = (
+                                prediction.boxes.cls.detach().cpu().numpy().astype(int)
+                            )
+                            for coords, confidence, class_id in zip(
+                                xyxy, confidences, classes, strict=True
+                            ):
+                                coords_tuple = tuple(
+                                    float(np.clip(item, 0.0, 1.0)) for item in coords
+                                )
                                 boxes.append(
                                     BoxEvidence(
                                         class_id=int(class_id),
                                         class_name=self.names[int(class_id)],
                                         confidence=float(confidence),
                                         xyxy_norm=coords_tuple,
-                                        roi_motion=_roi_motion(packet.previous_gray, packet.gray, coords_tuple),
+                                        roi_motion=_roi_motion(
+                                            packet.previous_gray,
+                                            packet.gray,
+                                            coords_tuple,
+                                        ),
                                     )
                                 )
                         results.append(boxes)
                 self.last_inference_batch_sizes = actual_batch_sizes
+                self.last_engine_batch_sizes = engine_batch_sizes
                 return results
             except RuntimeError as exc:
                 if "out of memory" not in str(exc).lower() or batch_size <= 1:
@@ -1047,7 +1155,10 @@ class RoleScanner:
                 batch_size = max(1, batch_size // 2)
                 self.batch_size = min(self.batch_size, batch_size)
                 self.batch_contractions.append(
-                    {"from_batch_size": previous_batch_size, "to_batch_size": batch_size}
+                    {
+                        "from_batch_size": previous_batch_size,
+                        "to_batch_size": batch_size,
+                    }
                 )
                 try:
                     import torch
@@ -1073,8 +1184,12 @@ def scan_videos(
     progress_callback: Callable[[str, int, int], None] | None = None,
 ) -> dict[str, Path]:
     work_dir.mkdir(parents=True, exist_ok=True)
-    output_paths = {view.view_id: work_dir / f"{view.view_id}.detections.jsonl" for view in views}
-    checkpoint_paths = {view.view_id: work_dir / f"{view.view_id}.checkpoint.json" for view in views}
+    output_paths = {
+        view.view_id: work_dir / f"{view.view_id}.detections.jsonl" for view in views
+    }
+    checkpoint_paths = {
+        view.view_id: work_dir / f"{view.view_id}.checkpoint.json" for view in views
+    }
     completed = {
         view.view_id: _read_checkpoint(
             checkpoint_paths[view.view_id], output_paths[view.view_id]
@@ -1092,13 +1207,19 @@ def scan_videos(
         import torch
 
         if torch.cuda.is_available():
-            torch.cuda.set_per_process_memory_fraction(float(config["performance"]["max_gpu_memory_fraction"]), 0)
+            torch.cuda.set_per_process_memory_fraction(
+                float(config["performance"]["max_gpu_memory_fraction"]), 0
+            )
             torch.backends.cudnn.benchmark = True
     except (ImportError, RuntimeError):
         pass
 
-    effective_fps = float(sample_fps if sample_fps is not None else config["performance"]["detection_fps"])
-    effective_image_size = int(image_size if image_size is not None else config["performance"]["image_size"])
+    effective_fps = float(
+        sample_fps if sample_fps is not None else config["performance"]["detection_fps"]
+    )
+    effective_image_size = int(
+        image_size if image_size is not None else config["performance"]["image_size"]
+    )
     phase_batch_size = int(
         config["performance"].get(
             f"{phase}_batch_size", config["performance"].get("batch_size", 16)
@@ -1142,8 +1263,10 @@ def scan_videos(
             config["performance"].get("motion_probe_run_yolo", False)
         )
         model_load_started = time.perf_counter()
-        scanner = None if motion_only else RoleScanner(
-            role, config, effective_image_size, phase_batch_size
+        scanner = (
+            None
+            if motion_only
+            else RoleScanner(role, config, effective_image_size, phase_batch_size)
         )
         model_load_seconds = time.perf_counter() - model_load_started
         runtime_report = {
@@ -1153,7 +1276,9 @@ def scan_videos(
             "backend": (
                 "motion_only"
                 if scanner is None
-                else "TensorRT" if scanner.model_path.suffix.lower() == ".engine" else "PyTorch"
+                else "TensorRT"
+                if scanner.model_path.suffix.lower() == ".engine"
+                else "PyTorch"
             ),
             "requested_batch_size": phase_batch_size,
             "effective_batch_size": scanner.batch_size if scanner is not None else 0,
@@ -1162,7 +1287,9 @@ def scan_videos(
                 if scanner is not None
                 else 0
             ),
-            "engine_build_batch": scanner.engine_build_batch if scanner is not None else None,
+            "engine_build_batch": scanner.engine_build_batch
+            if scanner is not None
+            else None,
             "image_size": effective_image_size,
             "yolo_sample_fps": effective_fps,
             "motion_probe_fps": probe_fps,
@@ -1189,16 +1316,16 @@ def scan_videos(
                 )
             ),
             "sparse_decode_strategy": str(
-                config["performance"].get("motion_probe_sparse_strategy", "indexed_seek")
+                config["performance"].get(
+                    "motion_probe_sparse_strategy", "indexed_seek"
+                )
             ),
             "ffmpeg_cuda_scale": bool(
                 config["performance"].get("ffmpeg_cuda_scale", False)
             ),
             "persistent_physical_segment_decode": bool(
                 phase == "fine"
-                and config["performance"].get(
-                    "fine_persistent_segment_decode", False
-                )
+                and config["performance"].get("fine_persistent_segment_decode", False)
             ),
             "sampling_grid_by_view": {
                 view.view_id: {
@@ -1212,7 +1339,8 @@ def scan_videos(
                         and bool(infos[view.view_id].segments)
                         else "decoder_default"
                     ),
-                    "global_period_ms": 1000.0 / max(
+                    "global_period_ms": 1000.0
+                    / max(
                         effective_fps,
                         float(config["performance"].get("motion_probe_fps", 0.0)),
                         1e-9,
@@ -1221,9 +1349,7 @@ def scan_videos(
                         1000.0
                         / max(
                             effective_fps,
-                            float(
-                                config["performance"].get("motion_probe_fps", 0.0)
-                            ),
+                            float(config["performance"].get("motion_probe_fps", 0.0)),
                             1e-9,
                         )
                         / transforms[view.view_id].scale
@@ -1249,12 +1375,20 @@ def scan_videos(
             "model_load_seconds": round(model_load_seconds, 6),
         }
         runtime_path = work_dir / f"runtime_{phase}_{role.value}.json"
-        trackers = {
-            view.view_id: ByteSortTracker(max_age_ms=max(1750.0, 1500.0 / effective_fps))
-            for view in role_views
-        } if scanner is not None else {}
+        trackers = (
+            {
+                view.view_id: ByteSortTracker(
+                    max_age_ms=max(1750.0, 1500.0 / effective_fps)
+                )
+                for view in role_views
+            }
+            if scanner is not None
+            else {}
+        )
         writers = {
-            view.view_id: output_paths[view.view_id].open("a", encoding="utf-8", buffering=1024 * 1024)
+            view.view_id: output_paths[view.view_id].open(
+                "a", encoding="utf-8", buffering=1024 * 1024
+            )
             for view in role_views
         }
         emitted_timestamp_keys: dict[str, set[int]] = {
@@ -1276,7 +1410,9 @@ def scan_videos(
             )
         )
         frame_queue: queue.Queue[Any] = queue.Queue(maxsize=max(1, queue_depth))
-        frame_queue.activity_path = work_dir / f"source_activity_{phase}_{role.value}.jsonl"
+        frame_queue.activity_path = (
+            work_dir / f"source_activity_{phase}_{role.value}.jsonl"
+        )
         frame_queue.activity_lock = threading.Lock()
         threads = [
             threading.Thread(
@@ -1293,7 +1429,9 @@ def scan_videos(
                     keyframes_only,
                     (decode_backends or {}).get(
                         view.view_id,
-                        "cuda" if config["performance"].get("ffmpeg_hwaccel") else "cpu",
+                        "cuda"
+                        if config["performance"].get("ffmpeg_hwaccel")
+                        else "cpu",
                     ),
                     probe_fps,
                     signature_size,
@@ -1315,6 +1453,7 @@ def scan_videos(
         pending_frame_count = 0
         errors: list[str] = []
         batch_sizes: list[int] = []
+        engine_batch_sizes: list[int] = []
         motion_sample_count = 0
         max_queue_size = 0
         microbatch_timeout_flushes = 0
@@ -1332,7 +1471,10 @@ def scan_videos(
 
         def flush_pending(reason: str) -> None:
             nonlocal pending_frame_count, motion_sample_count, batch_started_at
-            nonlocal microbatch_timeout_flushes, full_batch_flushes, control_only_flushes
+            nonlocal \
+                microbatch_timeout_flushes, \
+                full_batch_flushes, \
+                control_only_flushes
             nonlocal inference_seconds, postprocess_seconds
             if not pending_items:
                 return
@@ -1347,6 +1489,9 @@ def scan_videos(
                 inference_seconds += time.perf_counter() - inference_started
                 if frames:
                     batch_sizes.extend(scanner.last_inference_batch_sizes)
+                    engine_batch_sizes.extend(
+                        getattr(scanner, "last_engine_batch_sizes", [])
+                    )
             if reason == "full_batch":
                 full_batch_flushes += 1
             elif reason == "timeout":
@@ -1375,7 +1520,9 @@ def scan_videos(
                         role=item.view.role,
                         frame_index=item.frame_index,
                         local_ms=item.local_ms,
-                        global_ms=transforms[item.view.view_id].to_global(item.local_ms),
+                        global_ms=transforms[item.view.view_id].to_global(
+                            item.local_ms
+                        ),
                         width=item.frame.shape[1],
                         height=item.frame.shape[0],
                         motion_score=item.motion_score,
@@ -1408,8 +1555,15 @@ def scan_videos(
         try:
             while len(received_ends) < len(role_views):
                 timeout = None
-                if scanner is not None and pending_frame_count and batch_started_at is not None:
-                    timeout = max(0.0, batch_wait_seconds - (time.perf_counter() - batch_started_at))
+                if (
+                    scanner is not None
+                    and pending_frame_count
+                    and batch_started_at is not None
+                ):
+                    timeout = max(
+                        0.0,
+                        batch_wait_seconds - (time.perf_counter() - batch_started_at),
+                    )
                 try:
                     queue_wait_started = time.perf_counter()
                     item = frame_queue.get(timeout=timeout)
@@ -1446,11 +1600,30 @@ def scan_videos(
                     "completed_source_workers": len(ended),
                     "inference_call_count": len(batch_sizes),
                     "inference_frame_count": sum(batch_sizes),
+                    "engine_execution_frame_count": sum(engine_batch_sizes),
                     "motion_sample_count": motion_sample_count,
                     "actual_batch_size_min": min(batch_sizes) if batch_sizes else 0,
                     "actual_batch_size_max": max(batch_sizes) if batch_sizes else 0,
                     "actual_batch_size_mean": (
-                        round(sum(batch_sizes) / len(batch_sizes), 4) if batch_sizes else 0.0
+                        round(sum(batch_sizes) / len(batch_sizes), 4)
+                        if batch_sizes
+                        else 0.0
+                    ),
+                    "engine_execution_batch_size_min": (
+                        min(engine_batch_sizes) if engine_batch_sizes else 0
+                    ),
+                    "engine_execution_batch_size_max": (
+                        max(engine_batch_sizes) if engine_batch_sizes else 0
+                    ),
+                    "engine_execution_batch_size_mean": (
+                        round(sum(engine_batch_sizes) / len(engine_batch_sizes), 4)
+                        if engine_batch_sizes
+                        else 0.0
+                    ),
+                    "exact_batch_padding_frames": (
+                        int(getattr(scanner, "exact_batch_padding_frames", 0))
+                        if scanner is not None
+                        else 0
                     ),
                     "requested_batch_fill_ratio": (
                         round(sum(batch_sizes) / len(batch_sizes) / phase_batch_size, 4)
@@ -1458,7 +1631,9 @@ def scan_videos(
                         else 0.0
                     ),
                     "effective_batch_fill_ratio": (
-                        round(sum(batch_sizes) / len(batch_sizes) / scanner.batch_size, 4)
+                        round(
+                            sum(batch_sizes) / len(batch_sizes) / scanner.batch_size, 4
+                        )
                         if batch_sizes and scanner is not None
                         else 0.0
                     ),
@@ -1498,7 +1673,8 @@ def scan_videos(
                 }
             )
             runtime_path.write_text(
-                json.dumps(runtime_report, ensure_ascii=False, indent=2), encoding="utf-8"
+                json.dumps(runtime_report, ensure_ascii=False, indent=2),
+                encoding="utf-8",
             )
             if scanner is not None:
                 scanner.close()
@@ -1512,7 +1688,9 @@ def iter_frame_evidence(path: Path):
                 yield FrameEvidence.model_validate_json(line)
 
 
-def nearest_frame_evidence(path: Path, global_ms: float, tolerance_ms: float = 1500.0) -> FrameEvidence | None:
+def nearest_frame_evidence(
+    path: Path, global_ms: float, tolerance_ms: float = 1500.0
+) -> FrameEvidence | None:
     best: FrameEvidence | None = None
     best_distance = float("inf")
     for frame in iter_frame_evidence(path):
@@ -1537,7 +1715,9 @@ def nearest_frame_evidence_many(
     results: dict[float, FrameEvidence | None] = {value: None for value in queries}
     if not queries:
         return results
-    frames = (frame for frame in iter_frame_evidence(path) if frame.global_ms is not None)
+    frames = (
+        frame for frame in iter_frame_evidence(path) if frame.global_ms is not None
+    )
     previous: FrameEvidence | None = None
     current = next(frames, None)
     for query in queries:
