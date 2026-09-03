@@ -109,3 +109,11 @@ storage:
   manifest_storage: nas
   require_nas_source_paths: true
   web_upload_retention_mode: nas_only
+
+# Do not inherit the 3090 Ti host's local certification receipt path.  The
+# receipt is deliberately not bundled: formal production stays fail-closed
+# until an independently reviewed receipt for the packaged model hashes is
+# installed on this RTX 3050 node.
+validation:
+  model_certification:
+    path: /opt/visioncortex-rtx3050/Runtime/Model-Quality/production_model_certification.json

@@ -1,5 +1,8 @@
 # RTX 3050 6GB / Ubuntu 20.04 offline deployment
 
+Chinese operator and end-user instructions are consolidated in
+[`docs/VisionCortex-RTX3050-离线部署与使用交付手册.md`](../../docs/VisionCortex-RTX3050-离线部署与使用交付手册.md).
+
 This profile targets the provided machine contract only: Ubuntu 20.04, kernel
 5.15 or newer, RTX 3050 with 6 GiB VRAM, NVIDIA driver 570 or newer, 15 GiB
 system RAM, and at least 2 GiB swap.
@@ -58,3 +61,9 @@ actual model execution, not real-video quality or end-to-end throughput. Those
 claims require a cold target-machine run over representative six-view media,
 with the normal run metrics, Token usage, GPU/RAM telemetry, and archive
 receipts retained.
+
+Formal production additionally requires a current independently reviewed model
+certification receipt at
+`/opt/visioncortex-rtx3050/Runtime/Model-Quality/production_model_certification.json`.
+It is intentionally not fabricated or inferred from model confidence and is
+not part of the generic USB payload.

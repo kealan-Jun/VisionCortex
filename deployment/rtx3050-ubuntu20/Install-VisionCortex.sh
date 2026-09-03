@@ -62,7 +62,8 @@ mkdir -p -- "$app_root" "$install_root/python" "$install_root/bin" \
   "$install_root/Models/ClosedSetYOLO/first_person" \
   "$install_root/Models/ClosedSetYOLO/third_person" \
   "$install_root/Engines/grounding-dino-base" \
-  "$runtime_root/Input-Manifests" "$runtime_root/PublicModels/LabPicsSemantic" \
+  "$runtime_root/Input-Manifests" "$runtime_root/Model-Quality" \
+  "$runtime_root/PublicModels/LabPicsSemantic" \
   "$runtime_root/ThirdParty" "$runtime_root/tmp"
 
 cp -a -- "$package_root/app/." "$app_root/"

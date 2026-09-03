@@ -375,15 +375,32 @@ def build_package(
     ffmpeg = _copy_ffmpeg_runtime(ffmpeg_archive, output / "vendor/ffmpeg")
     _copy_runtime_models(output, runtime)
     candidates = _copy_research_candidates(output, runtime)
-    for source_name, destination_name in (
-        ("Install-VisionCortex.sh", "Install-VisionCortex.sh"),
-        ("Verify-Package.sh", "Verify-Package.sh"),
+    # Copy every top-level handoff file from the immutable git archive, not
+    # from the live worktree.  This keeps source_commit truthful even when the
+    # operator has unrelated local edits while assembling a package.
+    for source_relative, destination_name, executable in (
+        (
+            "deployment/rtx3050-ubuntu20/Install-VisionCortex.sh",
+            "Install-VisionCortex.sh",
+            True,
+        ),
+        (
+            "deployment/rtx3050-ubuntu20/Verify-Package.sh",
+            "Verify-Package.sh",
+            True,
+        ),
+        (
+            "docs/VisionCortex-RTX3050-离线部署与使用交付手册.md",
+            "VisionCortex-RTX3050-交付手册.md",
+            False,
+        ),
     ):
         _copy_verified(
-            ROOT / "deployment/rtx3050-ubuntu20" / source_name,
+            output / "app" / source_relative,
             output / destination_name,
         )
-        (output / destination_name).chmod(0o755)
+        if executable:
+            (output / destination_name).chmod(0o755)
     manifest = _write_manifests(
         output,
         commit,

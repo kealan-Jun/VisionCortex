@@ -47,6 +47,12 @@ def test_rtx3050_profile_preserves_full_chain_with_bounded_memory():
     assert config["models"]["temporal_participant_segmentation"]["enabled"] is True
     assert config["models"]["liquid_semantic_sidecar"]["enabled"] is True
     assert config["models"]["liquid_semantic_sidecar"]["device"] == "cpu"
+    certification_path = config["validation"]["model_certification"]["path"]
+    assert certification_path == (
+        "/opt/visioncortex-rtx3050/Runtime/Model-Quality/"
+        "production_model_certification.json"
+    )
+    assert "3090" not in certification_path
 
 
 def test_rtx3050_local_profile_cannot_inherit_nas_paths():
@@ -190,6 +196,7 @@ def test_rtx3050_usb_scripts_are_offline_and_fail_closed():
     assert 'cache clean --cache-dir "$uv_install_cache"' in installer
     assert "prepare-engine" in installer
     assert "rtx3050-engine-smoke.json" in installer
+    assert '"$runtime_root/Model-Quality"' in installer
     assert "libnvinfer_builder_resource_" in installer
     assert "RTX 3050" in preflight
     assert "minimum_free_gib=18" in preflight
@@ -218,3 +225,5 @@ def test_package_builder_fails_closed_on_offline_dependency_resolution():
     assert '"--no-index"' in builder
     assert "resolved_distribution_count" in builder
     assert "FAT32_unsupported" in builder
+    assert 'output / "app" / source_relative' in builder
+    assert '"VisionCortex-RTX3050-交付手册.md"' in builder
