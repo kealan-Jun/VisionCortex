@@ -1615,6 +1615,7 @@ def scan_videos(
         runtime_report = {
             "phase": phase,
             "role": role.value,
+            "scanner_id": scanner_id,
             "model_path": str(scanner.model_path) if scanner is not None else None,
             "backend": (
                 "motion_only"

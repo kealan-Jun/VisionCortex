@@ -4214,9 +4214,21 @@ class EvidencePipeline:
         progressive_report: dict[str, Any] | None = None,
     ) -> None:
         role_reports = []
+        role_values = {role.value for role in ViewRole}
+
+        def scanner_role(value: str) -> str | None:
+            return next(
+                (
+                    role
+                    for role in role_values
+                    if value == role or value.startswith(f"{role}_")
+                ),
+                None,
+            )
+
         for path in sorted(work_dir.rglob(f"runtime_{phase}_*.json")):
             runtime_role = path.stem.removeprefix(f"runtime_{phase}_")
-            if runtime_role not in {role.value for role in ViewRole}:
+            if scanner_role(runtime_role) is None:
                 continue
             report = json.loads(path.read_text(encoding="utf-8"))
             report["scan_pass"] = str(path.parent.relative_to(work_dir)).replace("\\", "/")
@@ -4224,7 +4236,7 @@ class EvidencePipeline:
         source_activity = []
         for path in sorted(work_dir.rglob(f"source_activity_{phase}_*.jsonl")):
             activity_role = path.stem.removeprefix(f"source_activity_{phase}_")
-            if activity_role not in {role.value for role in ViewRole}:
+            if scanner_role(activity_role) is None:
                 continue
             with path.open("r", encoding="utf-8") as handle:
                 for line in handle:

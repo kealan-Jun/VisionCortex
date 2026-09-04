@@ -93,6 +93,58 @@ def test_scan_runtime_aggregates_progressive_passes(tmp_path):
     assert report["bottleneck_diagnosis"]["inference_milliseconds_per_call"] == 600.0
 
 
+def test_scan_runtime_aggregates_parallel_workers_of_same_role(tmp_path):
+    layout = ArchiveLayout(tmp_path / "archive")
+    layout.create()
+    work = tmp_path / "scan"
+    work.mkdir()
+    for worker in ("worker_01", "worker_02"):
+        (work / f"runtime_fine_third_person_{worker}.json").write_text(
+            json.dumps(
+                {
+                    "role": "third_person",
+                    "scanner_id": worker,
+                    "role_total_seconds": 10.0,
+                    "queue_wait_seconds": 1.0,
+                    "inference_seconds": 8.0,
+                    "tracking_and_ledger_seconds": 0.5,
+                    "inference_call_count": 10,
+                    "inference_frame_count": 40,
+                    "final_effective_batch_size": 4,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (work / f"source_activity_fine_third_person_{worker}.jsonl").write_text(
+            json.dumps(
+                {
+                    "timestamp": 1.0,
+                    "event": "source_unit_completed",
+                    "phase": "fine",
+                    "decoder_receipt": {
+                        "frame_accounting_mismatch": 0,
+                        "frame_accounting_reconciled": False,
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    EvidencePipeline._archive_scan_runtime(layout, work, "fine")
+
+    report = json.loads(
+        (layout.json_config / "scan_runtime_fine.json").read_text(encoding="utf-8")
+    )
+    assert len(report["role_reports"]) == 2
+    assert {item["scanner_id"] for item in report["role_reports"]} == {
+        "worker_01",
+        "worker_02",
+    }
+    assert report["frame_accounting"]["session_count"] == 2
+    assert report["bottleneck_diagnosis"]["inference_frame_count"] == 80
+
+
 def test_scan_runtime_summarizes_terminal_eof_reconciliation(tmp_path):
     layout = ArchiveLayout(tmp_path / "archive")
     layout.create()
