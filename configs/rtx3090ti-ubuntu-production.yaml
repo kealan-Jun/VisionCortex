@@ -411,6 +411,15 @@ performance:
   # retain parallel contexts and use progressive windows to remove work.
   yolo_inference_workers: 3
   materialization_workers: 3
+  # Keep one bounded decoder cache per physical view during key-material
+  # generation. The same verified experiment clip is otherwise reopened for
+  # every event even though event processing is ordered by the archive.
+  key_material_frame_reader_max_open: 2
+  # Experiment role clips for group N+1 can encode while group N's aligned
+  # delivery clip is assembled. Two aligned workers plus the two role workers
+  # stay inside the six-session NVENC boundary measured on this host.
+  overlap_aligned_experiment_clips: true
+  aligned_experiment_clip_workers: 2
   # Role clips for event N+1 can encode while the aligned clip for event N is
   # assembled. Media paths and event objects are disjoint, and publication is
   # still delayed until every future has completed successfully.

@@ -641,6 +641,88 @@ def materialize_experiment_clips(
     encoder = config["performance"]["ffmpeg_video_encoder"]
     workers = max(1, min(2, int(config["performance"].get("materialization_workers", 2))))
     runtime_records: list[dict[str, Any]] = []
+    overlap_aligned = bool(
+        publisher is None
+        and config.get("performance", {}).get(
+            "overlap_aligned_experiment_clips", False
+        )
+    )
+    aligned_executor = (
+        ThreadPoolExecutor(
+            max_workers=max(
+                1,
+                int(
+                    config.get("performance", {}).get(
+                        "aligned_experiment_clip_workers", 1
+                    )
+                ),
+            ),
+            thread_name_prefix="experiment-aligned",
+        )
+        if overlap_aligned
+        else None
+    )
+    aligned_jobs: list[Any] = []
+
+    def materialize_aligned(
+        group: ExperimentGroup,
+        aligned: Path,
+        aligned_json: Path,
+        aligned_inputs: list[tuple[str, Path]],
+    ) -> dict[str, Any]:
+        aligned_started = time.perf_counter()
+        aligned_cache = _materialize_derived_media(
+            aligned,
+            "experiment-aligned-clip",
+            {
+                "group_id": group.group_id,
+                "global_start_ms": group.global_start_ms,
+                "global_end_ms": group.global_end_ms,
+                "layout": "first_person_left,third_person_right",
+                "grid_shape": "2x1@640x360_each",
+            },
+            [path for _, path in aligned_inputs],
+            config,
+            lambda: create_grid_video(aligned_inputs, aligned, encoder),
+            content_address_inputs=True,
+        )
+        write_json(
+            aligned_json,
+            {
+                "schema_version": "2.0.0",
+                "artifact_type": "aligned_first_third_experiment_video",
+                "group": group.model_dump(mode="json", exclude={"video_json"}),
+                "video_file": _relative(aligned, layout.root),
+                "layout": "first_person_left, third_person_right",
+                "global_start_ms": group.global_start_ms,
+                "global_end_ms": group.global_end_ms,
+                "views": [group.first_person_view, group.third_person_view],
+                "alignments": {
+                    view_id: transforms[view_id].model_dump(mode="json")
+                    for view_id in (
+                        group.first_person_view,
+                        group.third_person_view,
+                    )
+                },
+                "atomic_experiments": [
+                    by_segment[item].model_dump(mode="json")
+                    for item in group.atomic_experiment_ids
+                ],
+            },
+        )
+        if publisher is not None:
+            publisher.publish_file(aligned)
+            publisher.publish_file(aligned_json)
+        return {
+            "group_id": group.group_id,
+            "role_label": "Aligned-First-Third",
+            "view_id": "aligned_first_third",
+            "duration_seconds": round(time.perf_counter() - aligned_started, 6),
+            "output_bytes": aligned.stat().st_size,
+            "overlapped_with_next_group": overlap_aligned,
+            **aligned_cache,
+        }
+
     for index, group in enumerate(groups, 1):
         folder_name = _group_folder_name(
             layout,
@@ -753,62 +835,13 @@ def materialize_experiment_clips(
             group.video_json[role_label.lower()] = _relative(json_path, layout.root)
 
         aligned = videos_dir / "Aligned_First+Third.mp4"
-        aligned_started = time.perf_counter()
         aligned_inputs = [
             (f"First-Person {role_paths['First-Person'][0]}", role_paths["First-Person"][1]),
             (f"Third-Person {role_paths['Third-Person'][0]}", role_paths["Third-Person"][1]),
         ]
-        aligned_cache = _materialize_derived_media(
-            aligned,
-            "experiment-aligned-clip",
-            {
-                "group_id": group.group_id,
-                "global_start_ms": group.global_start_ms,
-                "global_end_ms": group.global_end_ms,
-                "layout": "first_person_left,third_person_right",
-                "grid_shape": "2x1@640x360_each",
-            },
-            [path for _, path in aligned_inputs],
-            config,
-            lambda: create_grid_video(aligned_inputs, aligned, encoder),
-            content_address_inputs=True,
-        )
-        runtime_records.append(
-            {
-                "group_id": group.group_id,
-                "role_label": "Aligned-First-Third",
-                "view_id": "aligned_first_third",
-                "duration_seconds": round(time.perf_counter() - aligned_started, 6),
-                "output_bytes": aligned.stat().st_size,
-                **aligned_cache,
-            }
-        )
         group.videos["aligned_first_third"] = _relative(aligned, layout.root)
         aligned_json = json_dir / "Aligned_First+Third.json"
-        write_json(
-            aligned_json,
-            {
-                "schema_version": "2.0.0",
-                "artifact_type": "aligned_first_third_experiment_video",
-                "group": group.model_dump(mode="json", exclude={"video_json"}),
-                "video_file": _relative(aligned, layout.root),
-                "layout": "first_person_left, third_person_right",
-                "global_start_ms": group.global_start_ms,
-                "global_end_ms": group.global_end_ms,
-                "views": [group.first_person_view, group.third_person_view],
-                "alignments": {
-                    view_id: transforms[view_id].model_dump(mode="json")
-                    for view_id in (group.first_person_view, group.third_person_view)
-                },
-                "atomic_experiments": [
-                    by_segment[item].model_dump(mode="json") for item in group.atomic_experiment_ids
-                ],
-            },
-        )
         group.video_json["aligned_first_third"] = _relative(aligned_json, layout.root)
-        if publisher is not None:
-            publisher.publish_file(aligned)
-            publisher.publish_file(aligned_json)
         for segment_id in group.atomic_experiment_ids:
             segment = by_segment[segment_id]
             segment.clips = {
@@ -816,6 +849,36 @@ def materialize_experiment_clips(
                 group.third_person_view: group.videos["third-person"],
             }
             segment.aligned_multiview_clip = group.videos["aligned_first_third"]
+        aligned_arguments = (
+            group,
+            aligned,
+            aligned_json,
+            list(aligned_inputs),
+        )
+        if aligned_executor is None:
+            runtime_records.append(materialize_aligned(*aligned_arguments))
+        else:
+            aligned_jobs.append(
+                aligned_executor.submit(materialize_aligned, *aligned_arguments)
+            )
+
+    if aligned_executor is not None:
+        try:
+            runtime_records.extend(job.result() for job in aligned_jobs)
+        finally:
+            aligned_executor.shutdown(wait=True, cancel_futures=True)
+        group_order = {group.group_id: index for index, group in enumerate(groups)}
+        role_order = {
+            "First-Person": 0,
+            "Third-Person": 1,
+            "Aligned-First-Third": 2,
+        }
+        runtime_records.sort(
+            key=lambda item: (
+                group_order.get(str(item.get("group_id")), len(group_order)),
+                role_order.get(str(item.get("role_label")), len(role_order)),
+            )
+        )
 
     runtime_path = layout.json_config / "experiment_clip_materialization_runtime.json"
     write_json(
@@ -823,6 +886,16 @@ def materialize_experiment_clips(
         {
             "schema_version": "visioncortex-materialization-runtime/1",
             "workers": workers,
+            "aligned_workers": (
+                int(
+                    config.get("performance", {}).get(
+                        "aligned_experiment_clip_workers", 1
+                    )
+                )
+                if overlap_aligned
+                else 0
+            ),
+            "overlap_aligned": overlap_aligned,
             "records": runtime_records,
         },
     )
@@ -5792,6 +5865,22 @@ def materialize_key_materials(
                     source_view,
                     probe_video(path),
                 )
+    frame_reader_max_open = max(
+        1,
+        int(
+            config.get("performance", {}).get(
+                "key_material_frame_reader_max_open", 2
+            )
+        ),
+    )
+    # Event clips are processed in stable order, and each role maps to a
+    # distinct physical view. Reusing one bounded decoder per view avoids
+    # reopening the same experiment clip for every key frame while preserving
+    # exact timestamp seeks and the original-source fallback path.
+    frame_readers = {
+        view_id: ViewFrameReader(max_open=frame_reader_max_open)
+        for view_id in by_view
+    }
     overlap_aligned = bool(
         publisher is None
         and config.get("performance", {}).get(
@@ -5970,20 +6059,17 @@ def materialize_key_materials(
             frame_started = time.perf_counter()
             frame = None
             used_offset_ms = 0.0
-            frame_reader = ViewFrameReader(max_open=1)
-            try:
-                for offset_ms in (0.0, -100.0, 100.0, -250.0, 250.0):
-                    candidate_ms = local_key_ms + offset_ms
-                    if not 0.0 <= candidate_ms <= material_info.duration_ms:
-                        continue
-                    frame = frame_reader.read(
-                        material_view, material_info, candidate_ms
-                    )
-                    if frame is not None:
-                        used_offset_ms = offset_ms
-                        break
-            finally:
-                frame_reader.close()
+            frame_reader = frame_readers[view_id]
+            for offset_ms in (0.0, -100.0, 100.0, -250.0, 250.0):
+                candidate_ms = local_key_ms + offset_ms
+                if not 0.0 <= candidate_ms <= material_info.duration_ms:
+                    continue
+                frame = frame_reader.read(
+                    material_view, material_info, candidate_ms
+                )
+                if frame is not None:
+                    used_offset_ms = offset_ms
+                    break
             if frame is None:
                 raise RuntimeError(f"{event.event_id}/{view_id} key frame decode failed")
             frame_seconds = time.perf_counter() - frame_started
@@ -6213,6 +6299,8 @@ def materialize_key_materials(
                 role_order.get(str(item.get("role_label")), len(role_order)),
             )
         )
+    for frame_reader in frame_readers.values():
+        frame_reader.close()
 
     category_index_path = write_key_material_category_index(
         layout,
@@ -6269,6 +6357,9 @@ def materialize_key_materials(
         {
             "schema_version": "visioncortex-key-materialization-runtime/1",
             "workers": workers,
+            "frame_reader_reuse": True,
+            "frame_reader_count": len(frame_readers),
+            "frame_reader_max_open": frame_reader_max_open,
             "total_duration_seconds": round(
                 sum(
                     float(item.get("duration_seconds") or 0.0)

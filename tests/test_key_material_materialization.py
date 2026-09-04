@@ -493,6 +493,119 @@ def test_group_storyboard_sampling_covers_boundaries_segments_and_actions():
     assert len(times) == 8
 
 
+def test_experiment_aligned_clips_overlap_next_group_roles(monkeypatch, tmp_path):
+    layout = archive.ArchiveLayout(tmp_path / "archive")
+    layout.create()
+    views = [
+        ViewInput(view_id="fp", role=ViewRole.FIRST_PERSON, video=tmp_path / "fp.mp4"),
+        ViewInput(view_id="tp", role=ViewRole.THIRD_PERSON, video=tmp_path / "tp.mp4"),
+    ]
+    for view in views:
+        view.video.write_bytes(view.view_id.encode("utf-8"))
+    infos = {
+        view.view_id: VideoInfo(
+            path=view.video,
+            duration_ms=10_000,
+            fps=30,
+            width=1280,
+            height=720,
+            frame_count=300,
+        )
+        for view in views
+    }
+    transforms = {
+        view.view_id: AlignmentTransform(
+            view_id=view.view_id,
+            reference_view_id="fp",
+        )
+        for view in views
+    }
+    segments = [
+        ExperimentSegment(
+            segment_id=f"EXP-{index}",
+            global_start_ms=start,
+            global_end_ms=start + 1_000,
+            event_ids=[],
+            participating_views=["fp", "tp"],
+        )
+        for index, start in enumerate((0.0, 2_000.0), 1)
+    ]
+    groups = [
+        ExperimentGroup(
+            group_id=f"GROUP-{index}",
+            continuity_type="independent",
+            atomic_experiment_ids=[segment.segment_id],
+            global_start_ms=segment.global_start_ms,
+            global_end_ms=segment.global_end_ms,
+            participating_views=["fp", "tp"],
+            first_person_view="fp",
+            third_person_view="tp",
+            continuity_reason="test",
+        )
+        for index, segment in enumerate(segments, 1)
+    ]
+    state = {"aligned_active": 0, "overlap_seen": False}
+    lock = threading.Lock()
+
+    def fake_extract(_view, _info, destination, *_args):
+        with lock:
+            state["overlap_seen"] |= state["aligned_active"] > 0
+        time.sleep(0.03)
+        destination.write_bytes(b"role")
+
+    def fake_grid(_clips, destination, _encoder):
+        with lock:
+            state["aligned_active"] += 1
+        time.sleep(0.08)
+        destination.write_bytes(b"aligned")
+        with lock:
+            state["aligned_active"] -= 1
+
+    monkeypatch.setattr(archive, "extract_view_clip", fake_extract)
+    monkeypatch.setattr(archive, "create_grid_video", fake_grid)
+
+    archive.materialize_experiment_clips(
+        layout,
+        groups,
+        segments,
+        [],
+        views,
+        infos,
+        transforms,
+        {
+            "performance": {
+                "ffmpeg_video_encoder": "h264_nvenc",
+                "materialization_workers": 2,
+                "overlap_aligned_experiment_clips": True,
+                "aligned_experiment_clip_workers": 2,
+                "derived_media_cache_enabled": False,
+            }
+        },
+    )
+
+    assert state["overlap_seen"] is True
+    runtime = json.loads(
+        (
+            layout.json_config
+            / "experiment_clip_materialization_runtime.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert runtime["overlap_aligned"] is True
+    assert runtime["aligned_workers"] == 2
+    assert [
+        (item["group_id"], item["role_label"])
+        for item in runtime["records"]
+    ] == [
+        ("GROUP-1", "First-Person"),
+        ("GROUP-1", "Third-Person"),
+        ("GROUP-1", "Aligned-First-Third"),
+        ("GROUP-2", "First-Person"),
+        ("GROUP-2", "Third-Person"),
+        ("GROUP-2", "Aligned-First-Third"),
+    ]
+    assert all(segment.aligned_multiview_clip for segment in segments)
+
+
 def test_key_material_roles_export_concurrently_and_write_runtime(monkeypatch, tmp_path):
     layout = archive.ArchiveLayout(tmp_path / "archive")
     layout.create()
@@ -710,6 +823,9 @@ def test_key_material_roles_export_concurrently_and_write_runtime(monkeypatch, t
     runtime_path = layout.json_config / "key_material_materialization_runtime.json"
     runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
     assert runtime["workers"] == 2
+    assert runtime["frame_reader_reuse"] is True
+    assert runtime["frame_reader_count"] == 2
+    assert runtime["frame_reader_max_open"] == 2
     assert runtime["accepted_event_count"] == 1
     assert runtime["archive_hierarchy_version"] == "2.0.0"
     assert runtime["category_index"] == "Key-Materials/Key-Material-Category-Index.json"
