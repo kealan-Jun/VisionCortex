@@ -1509,14 +1509,49 @@ def benchmark_sparse_decode_strategy(
     }
 
 
+def _read_frame_at_ffmpeg(path: Path, local_ms: float) -> np.ndarray | None:
+    """Decode one seek target when OpenCV cannot seek a valid VFR derivative."""
+
+    try:
+        result = _run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-ss",
+                f"{max(0.0, local_ms) / 1000.0:.6f}",
+                "-i",
+                str(path),
+                "-frames:v",
+                "1",
+                "-an",
+                "-sn",
+                "-f",
+                "image2pipe",
+                "-vcodec",
+                "mjpeg",
+                "pipe:1",
+            ],
+            timeout=30.0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0 or not result.stdout:
+        return None
+    frame = cv2.imdecode(np.frombuffer(result.stdout, dtype=np.uint8), cv2.IMREAD_COLOR)
+    return frame if frame is not None and frame.size else None
+
+
 def read_frame_at(path: Path, local_ms: float) -> np.ndarray | None:
     capture = cv2.VideoCapture(str(path))
     if not capture.isOpened():
-        return None
+        capture.release()
+        return _read_frame_at_ffmpeg(path, local_ms)
     capture.set(cv2.CAP_PROP_POS_MSEC, max(0.0, local_ms))
     ok, frame = capture.read()
     capture.release()
-    return frame if ok else None
+    return frame if ok else _read_frame_at_ffmpeg(path, local_ms)
 
 
 def read_view_frame_at(view: ViewInput, info: VideoInfo, local_ms: float) -> np.ndarray | None:
@@ -1565,7 +1600,11 @@ class ViewFrameReader:
             old_capture.release()
         capture.set(cv2.CAP_PROP_POS_MSEC, max(0.0, source_ms))
         ok, frame = capture.read()
-        return frame if ok else None
+        if ok:
+            return frame
+        capture.release()
+        self._captures.pop(path, None)
+        return _read_frame_at_ffmpeg(path, source_ms)
 
     def close(self) -> None:
         captures = getattr(self, "_captures", None)

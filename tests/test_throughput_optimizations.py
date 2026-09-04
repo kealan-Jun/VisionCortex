@@ -450,6 +450,61 @@ def test_frame_reader_reuses_decoder_for_same_segment(monkeypatch):
     assert opened[0].released is True
 
 
+def test_frame_reader_falls_back_to_bounded_ffmpeg_seek(monkeypatch):
+    class FailedCapture:
+        def __init__(self, _path):
+            self.released = False
+
+        def isOpened(self):
+            return True
+
+        def set(self, *_args):
+            return True
+
+        def read(self):
+            return False, None
+
+        def release(self):
+            self.released = True
+
+    encoded, jpeg = video_io.cv2.imencode(
+        ".jpg", np.full((8, 12, 3), 127, dtype=np.uint8)
+    )
+    assert encoded
+    commands = []
+
+    def fake_run(command, timeout=None):
+        commands.append((command, timeout))
+        return subprocess.CompletedProcess(command, 0, jpeg.tobytes(), b"")
+
+    monkeypatch.setattr(video_io.cv2, "VideoCapture", FailedCapture)
+    monkeypatch.setattr(video_io, "_run", fake_run)
+    path = Path("vfr-derived.mp4")
+    view = ViewInput(view_id="fp", role=ViewRole.FIRST_PERSON, video=path)
+    info = VideoInfo(
+        path=path,
+        duration_ms=10_000.0,
+        fps=30.0,
+        width=12,
+        height=8,
+        frame_count=300,
+        size_bytes=100,
+    )
+
+    with ViewFrameReader(max_open=1) as reader:
+        frame = reader.read(view, info, 2_500.0)
+
+    assert frame is not None
+    assert frame.shape == (8, 12, 3)
+    assert commands[0][0][:4] == [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+    ]
+    assert commands[0][1] == 30.0
+
+
 def test_nvml_sampler_uses_persistent_driver_handle(monkeypatch):
     calls = {"init": 0, "shutdown": 0}
     fake = SimpleNamespace(
