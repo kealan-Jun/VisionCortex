@@ -15,6 +15,38 @@ from .schemas import (
 )
 
 
+def finalize_quality_acceptance_claims(
+    report: dict[str, Any],
+    recall_gate: dict[str, Any],
+    step_consistency: dict[str, Any],
+) -> dict[str, Any]:
+    """Apply the single evidence-level policy to every quality receipt writer."""
+
+    boundary_evaluated = bool(
+        report.get("experiment_boundaries", {}).get("evaluated")
+    )
+    recall_evaluated = bool(recall_gate.get("evaluated"))
+    report["structural_passed"] = bool(
+        report.get("key_materials", {}).get("passed")
+        and step_consistency.get("passed")
+    )
+    report["evidence_level"] = (
+        "dataset_measured"
+        if boundary_evaluated and recall_evaluated
+        else "partially_measured"
+        if boundary_evaluated or recall_evaluated
+        else "structural_only"
+    )
+    report["formal_accuracy_claim_allowed"] = bool(
+        boundary_evaluated
+        and recall_evaluated
+        and report.get("experiment_boundaries", {}).get("passed") is True
+        and recall_gate.get("passed") is True
+        and report.get("passed") is True
+    )
+    return report
+
+
 def _iou(left: tuple[float, float], right: tuple[float, float]) -> float:
     intersection = max(0.0, min(left[1], right[1]) - max(left[0], right[0]))
     union = max(left[1], right[1]) - min(left[0], right[0])

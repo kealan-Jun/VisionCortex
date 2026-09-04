@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -77,6 +78,26 @@ ARCHIVE_CONTRACTS = (
         "visioncortex-evidence-index/",
     ),
     JsonContract(
+        "daily-report-manifest",
+        "JSON-Config-Files/daily_report_manifest.json",
+        False,
+        ("report_date", "json", "html", "evaluation", "passed", "checksums"),
+    ),
+    JsonContract(
+        "professional-report-manifest",
+        "JSON-Config-Files/professional_report_manifest.json",
+        False,
+        ("schema_version", "template_id", "renderer_sha256", "status"),
+        "visioncortex-professional-report-manifest/",
+    ),
+    JsonContract(
+        "run-provenance",
+        "JSON-Config-Files/run_provenance.json",
+        False,
+        ("schema_version", "passed", "repository", "configuration", "artifacts"),
+        "visioncortex-run-provenance/",
+    ),
+    JsonContract(
         "physical-change-log",
         "JSON-Config-Files/physical_change_log.json",
         False,
@@ -84,6 +105,13 @@ ARCHIVE_CONTRACTS = (
         root_types=(list,),
     ),
 )
+
+RELEASE_REQUIRED_CONTRACTS = {
+    "evidence-index-manifest",
+    "daily-report-manifest",
+    "professional-report-manifest",
+    "run-provenance",
+}
 
 
 EVENT_REQUIRED_FIELDS = (
@@ -137,28 +165,37 @@ def _validate_material_references(
     return failures
 
 
-def inspect_archive_contracts(archive_root: Path) -> dict[str, Any]:
+def inspect_archive_contracts(
+    archive_root: Path, *, require_release_contracts: bool = False
+) -> dict[str, Any]:
     archive_root = archive_root.resolve()
     results: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
     for contract in ARCHIVE_CONTRACTS:
+        required = bool(
+            contract.required
+            or (
+                require_release_contracts
+                and contract.contract_id in RELEASE_REQUIRED_CONTRACTS
+            )
+        )
         path = archive_root / contract.relative_path
         result = {
             "contract_id": contract.contract_id,
             "path": contract.relative_path,
-            "required": contract.required,
+            "required": required,
             "present": path.is_file(),
             "status": "missing",
             "schema_version": None,
             "missing_fields": [],
         }
         if not path.is_file():
-            target = failures if contract.required else warnings
+            target = failures if required else warnings
             target.append(
                 {
                     "contract_id": contract.contract_id,
-                    "reason": "required_file_missing" if contract.required else "optional_file_missing",
+                    "reason": "required_file_missing" if required else "optional_file_missing",
                     "path": contract.relative_path,
                 }
             )
@@ -248,13 +285,144 @@ def inspect_archive_contracts(archive_root: Path) -> dict[str, Any]:
                     }
                 )
         results.append(result)
+    cross_file_issues: list[str] = []
+    try:
+        package = _read_json(
+            archive_root / "JSON-Config-Files" / "evidence_package.json"
+        )
+        ledger = _read_json(
+            archive_root
+            / "Key-Materials"
+            / "Key-Materials-Model-Understanding.json"
+        )
+        allow_virtual_artifacts = bool(
+            (package.get("stats", {}).get("run_metrics") or {}).get("dry_run")
+        )
+        package_event_ids = [
+            str(event_id)
+            for group in package.get("experiment_groups") or []
+            for event_id in group.get("key_event_ids") or []
+        ]
+        ledger_event_ids = [str(item.get("event_id") or "") for item in ledger]
+        if sorted(package_event_ids) != sorted(ledger_event_ids):
+            cross_file_issues.append("package_and_key_material_event_ids_differ")
+        if len(ledger_event_ids) != len(set(ledger_event_ids)):
+            cross_file_issues.append("key_material_event_ids_not_unique")
+        for event in ledger:
+            core = {
+                key: event.get(key)
+                for key in (
+                    "event_id",
+                    "action_type",
+                    "start_us",
+                    "end_us",
+                    "peak_timestamp_us",
+                )
+            }
+            for collection_name in ("key_frames", "key_clips"):
+                for reference in event.get(collection_name) or []:
+                    relative = str((reference or {}).get("path") or "")
+                    if not relative or relative.startswith("dry-run://"):
+                        continue
+                    if allow_virtual_artifacts:
+                        continue
+                    sidecar = (archive_root / relative).with_suffix(".json")
+                    try:
+                        sidecar_payload = _read_json(sidecar)
+                    except (OSError, ValueError, TypeError):
+                        cross_file_issues.append(
+                            f"sidecar_invalid:{event.get('event_id')}:{relative}"
+                        )
+                        continue
+                    if any(sidecar_payload.get(key) != value for key, value in core.items()):
+                        cross_file_issues.append(
+                            f"sidecar_event_mismatch:{event.get('event_id')}:{relative}"
+                        )
+        index_manifest_path = (
+            archive_root
+            / "JSON-Config-Files"
+            / "evidence_index_manifest.json"
+        )
+        if index_manifest_path.is_file():
+            index_manifest = _read_json(index_manifest_path)
+            if index_manifest.get("validation", {}).get("passed") is not True:
+                cross_file_issues.append("evidence_index_validation_not_passed")
+            if int(index_manifest.get("counts", {}).get("key_events", -1)) != len(
+                ledger_event_ids
+            ):
+                cross_file_issues.append("evidence_index_key_event_count_mismatch")
+        database = (
+            archive_root / "JSON-Config-Files" / "evidence_index.sqlite"
+        )
+        if database.is_file():
+            with sqlite3.connect(str(database)) as connection:
+                indexed_count = int(
+                    connection.execute("SELECT COUNT(*) FROM key_events").fetchone()[0]
+                )
+            if indexed_count != len(ledger_event_ids):
+                cross_file_issues.append("sqlite_key_event_count_mismatch")
+        daily_manifest_path = (
+            archive_root / "JSON-Config-Files" / "daily_report_manifest.json"
+        )
+        if daily_manifest_path.is_file():
+            daily_manifest = _read_json(daily_manifest_path)
+            report_path = archive_root / str(daily_manifest.get("json") or "")
+            report = _read_json(report_path)
+            report_event_ids = [
+                str(event.get("event_id") or "")
+                for group in report.get("experiment_timeline") or []
+                for event in group.get("key_events") or []
+            ]
+            if sorted(report_event_ids) != sorted(ledger_event_ids):
+                cross_file_issues.append(
+                    "daily_report_and_key_material_event_ids_differ"
+                )
+            quality = _read_json(
+                archive_root / "JSON-Config-Files" / "quality_acceptance.json"
+            )
+            if report.get("quality_acceptance", {}).get("passed") is not True:
+                cross_file_issues.append("daily_report_quality_gate_not_passed")
+            if report.get("quality_acceptance", {}).get("status") != quality.get(
+                "status"
+            ):
+                cross_file_issues.append("daily_report_quality_status_mismatch")
+    except (OSError, ValueError, TypeError, KeyError, sqlite3.DatabaseError) as exc:
+        cross_file_issues.append(
+            f"cross_file_validation_error:{type(exc).__name__}"
+        )
+    cross_file_result = {
+        "contract_id": "cross-file-evidence-consistency",
+        "path": None,
+        "required": True,
+        "present": True,
+        "status": "passed" if not cross_file_issues else "contract_failed",
+        "issues": cross_file_issues,
+    }
+    results.append(cross_file_result)
+    if cross_file_issues:
+        failures.append(
+            {
+                "contract_id": "cross-file-evidence-consistency",
+                "reason": "cross_file_consistency_failed",
+                "issues": cross_file_issues,
+            }
+        )
     return {
         "schema_version": CONTRACT_MANIFEST_VERSION,
         "archive_root": str(archive_root),
         "status": "passed" if not failures else "failed",
         "passed": not failures,
         "contract_count": len(results),
-        "required_contract_count": sum(contract.required for contract in ARCHIVE_CONTRACTS),
+        "required_contract_count": sum(
+            contract.required
+            or (
+                require_release_contracts
+                and contract.contract_id in RELEASE_REQUIRED_CONTRACTS
+            )
+            for contract in ARCHIVE_CONTRACTS
+        )
+        + 1,
+        "release_contracts_required": require_release_contracts,
         "failures": failures,
         "warnings": warnings,
         "contracts": results,
@@ -266,7 +434,9 @@ def inspect_archive_contracts(archive_root: Path) -> dict[str, Any]:
 
 
 def write_archive_contract_manifest(archive_root: Path) -> Path:
-    payload = inspect_archive_contracts(archive_root)
+    payload = inspect_archive_contracts(
+        archive_root, require_release_contracts=True
+    )
     path = archive_root / "JSON-Config-Files" / "schema_contract_manifest.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.partial-{uuid.uuid4().hex[:8]}")
@@ -275,3 +445,18 @@ def write_archive_contract_manifest(archive_root: Path) -> Path:
     )
     os.replace(temporary, path)
     return path
+
+
+def validate_archive_contracts_or_raise(archive_root: Path) -> dict[str, Any]:
+    """Recompute the formal archive contract and fail closed on any mismatch."""
+
+    payload = inspect_archive_contracts(
+        archive_root, require_release_contracts=True
+    )
+    if not payload["passed"]:
+        failures = ", ".join(
+            f"{item.get('contract_id')}:{item.get('reason')}"
+            for item in payload.get("failures") or []
+        )
+        raise RuntimeError(f"Archive contract validation failed: {failures}")
+    return payload

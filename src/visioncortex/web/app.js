@@ -121,6 +121,7 @@ const STAGE_LABELS = {
   mllm: "关键素材模型理解",
   package: "证据包与指标归档",
   daily_report: "实验室日报生成与校验",
+  finalizing: "封存溯源并正式发布",
   completed: "分析完成",
   failed: "分析失败",
   interrupted: "服务重启后待续跑",
@@ -171,7 +172,7 @@ const GUIDED_PIPELINE = [
   },
   {
     id: "reports", number: "07", title: "日报、PDF 与正式归档",
-    stages: ["daily_report", "completed"], completedBy: ["daily_report", "completed"],
+    stages: ["daily_report", "finalizing", "completed"], completedBy: ["daily_report", "finalizing", "completed"],
     folder: "Lab-Daily-Reports / Professional-PDFs",
     doing: "基于已验收证据填充固定日报模板，生成并校验 PDF，最后提升为正式档案。",
     outcome: "实验室日报、专业 PDF 和完整 NAS 正式归档。",
@@ -915,7 +916,7 @@ async function uploadPlanFiles(plan, initialSession, onProgress) {
 }
 
 function renderStages(activeStage, progressValue) {
-  const stages = ["capacity_reservation","source_transfer","original_ingest","nas_ingest","input_seal","input_preflight","queued","preflight","alignment","motion_probe","candidate_coarse","candidate_fine","candidate_audit","experiment_understanding","experiment_clips","key_materials","mllm","package","daily_report"];
+  const stages = ["capacity_reservation","source_transfer","original_ingest","nas_ingest","input_seal","input_preflight","queued","preflight","alignment","motion_probe","candidate_coarse","candidate_fine","candidate_audit","experiment_understanding","experiment_clips","key_materials","mllm","package","daily_report","finalizing"];
   const activeIndex = stages.indexOf(activeStage);
   const element = document.querySelector("#run-stages");
   if (!element) return;
@@ -1294,6 +1295,15 @@ function dailyReportView(data) {
   const performance = report.performance || {};
   const actions = report.action_summary || [];
   const timeline = report.experiment_timeline || [];
+  const quality = report.quality_acceptance || {};
+  const qualityPassed = quality.passed === true || (quality.passed == null && overview.evidence_package_eval_passed);
+  const evidenceLevelLabel = quality.evidence_level === "dataset_measured"
+    ? "本实验质量已测量"
+    : quality.evidence_level === "partially_measured"
+      ? "部分质量已测量"
+      : quality.evidence_level == null && overview.evidence_package_eval_passed
+        ? "历史证据包已验收 · 质量层级未记录"
+      : "结构已验收 · 本实验准确率未测量";
   const fullRunPreprocessing = performance.full_run_preprocessing || {};
   if (!report.report_id) return `<section class="panel"><div class="empty-state"><strong>该历史档案尚未生成实验室日报</strong><p>下一次运行流水线会自动生成；也可使用 CLI 对已验收档案补生成。</p></div></section>`;
   const links = [
@@ -1303,10 +1313,10 @@ function dailyReportView(data) {
     ["daily_report_json", "事实源 JSON"],
     ["daily_report_eval", "日报验收 JSON"],
   ].filter(([key]) => data.links?.[key]);
-  return `<section class="daily-report-cover"><div><p class="eyebrow">EVIDENCE-BACKED DAILY REPORT</p><h2>实验室日报 · ${esc(report.report_date)}</h2><p>${esc(report.experiment_id)}</p></div><span class="badge">${overview.evidence_package_eval_passed ? "证据包已验收" : "待验收"}</span><div class="daily-report-links">${links.map(([key,label])=>`<a class="secondary-button" target="_blank" href="${esc(data.links[key])}">${icon("file")}${label}</a>`).join("")}</div></section>
+  return `<section class="daily-report-cover"><div><p class="eyebrow">EVIDENCE-BACKED DAILY REPORT</p><h2>实验室日报 · ${esc(report.report_date)}</h2><p>${esc(report.experiment_id)}</p></div><span class="badge">${overview.evidence_package_eval_passed && qualityPassed ? esc(evidenceLevelLabel) : "待验收"}</span><div class="daily-report-links">${links.map(([key,label])=>`<a class="secondary-button" target="_blank" href="${esc(data.links[key])}">${icon("file")}${label}</a>`).join("")}</div></section>
   <section class="status-grid">${statusCard("video","输入视角",number(overview.input_view_count),`${number(overview.first_person_views)} 第一人称 + ${number(overview.third_person_views)} 第三人称`)}${statusCard("flask","有界实验",number(overview.experiment_group_count),"独立/连续实验组")}${statusCard("image","关键事件",number(overview.key_event_count),`${number(overview.physical_change_count)} 项状态变化`)}${statusCard("token","日报新增 Token",number(report.source_policy?.additional_model_tokens?.total_tokens),"复用已有模型理解")}</section>
   <section class="panel"><header class="panel-heading"><div><h2>实验时间线与步骤理解</h2><p>时间均为统一实验相对时间；每项保留证据事件与跨视角素材链接。</p></div></header><div class="daily-timeline">${timeline.map((group,index)=>`<article><span class="daily-index">${String(index+1).padStart(2,"0")}</span><div><header><h3>${esc(group.experiment_name)}</h3><span class="badge">${group.continuity_type === "continuous" ? "连续实验" : "独立实验"}</span></header><p class="timecode">${esc(group.start_timecode)} → ${esc(group.end_timecode)}</p><p>${esc(group.overall_summary || "无模型摘要")}</p><details><summary>查看 ${number(group.steps?.length)} 个细粒度步骤</summary><div class="step-list">${(group.steps||[]).map((step)=>`<article class="step-card"><span class="step-number">步骤 ${esc(step.step_index)}<small>${esc(step.start_timecode)}<br/>${esc(step.end_timecode)}</small></span><div class="step-body"><strong>当前：${esc(step.current_step || "未说明")}</strong><p class="step-next"><b>${esc(nextStepLabel(step))}：</b>${esc(step.next_step || "证据不足")}</p><span class="step-meta">对象：${esc((step.objects||[]).join("、") || "未明确")} · ${number(step.supporting_views?.length)} 路证据</span></div></article>`).join("")}</div></details></div></article>`).join("")}</div></section>
-  <section class="panel"><header class="panel-heading"><div><h2>六类动作、质量与成本</h2><p>观察事实、证据支持的模型理解和不确定项在 JSON 中分别保存。</p></div></header><div class="daily-action-grid">${actions.map((item)=>`<article><strong>${number(item.event_count)}</strong><span>${esc(item.action_label)}</span></article>`).join("")}</div><table class="metric-table"><tbody><tr><td>时间对齐</td><td>${number(alignment.aligned)}/${number(alignment.view_count)} 路 aligned，平均置信度 ${alignment.mean_confidence ?? "—"}</td></tr><tr><td>不确定性 / 矛盾</td><td>${number(report.uncertainties?.length)} 组 / ${number(report.contradictions?.length)} 项</td></tr><tr><td>本次流水线总耗时</td><td>${duration(performance.total_duration_seconds)}</td></tr><tr><td>本次流水线预处理</td><td>${duration(performance.preprocessing_sla?.actual_seconds)}（不含模型理解；可能复用已验收 CV 账本）</td></tr>${fullRunPreprocessing.seconds != null ? `<tr><td>全量六路预处理验收</td><td>${duration(fullRunPreprocessing.seconds)}（${esc(fullRunPreprocessing.includes || "完整预处理") }）</td></tr>` : ""}<tr><td>总 Token</td><td>${number(performance.total_input_tokens)} 输入 + ${number(performance.total_output_tokens)} 输出 = ${number(performance.total_tokens)}</td></tr><tr><td>自动验收</td><td>${esc(report.human_review?.status || "not_required")}</td></tr></tbody></table></section>`;
+  <section class="panel"><header class="panel-heading"><div><h2>六类动作、质量与成本</h2><p>观察事实、证据支持的模型理解和不确定项在 JSON 中分别保存。</p></div></header><div class="daily-action-grid">${actions.map((item)=>`<article><strong>${number(item.event_count)}</strong><span>${esc(item.action_label)}</span></article>`).join("")}</div><table class="metric-table"><tbody><tr><td>时间对齐</td><td>${number(alignment.aligned)}/${number(alignment.view_count)} 路 aligned，平均置信度 ${alignment.mean_confidence ?? "—"}</td></tr><tr><td>不确定性 / 矛盾</td><td>${number(report.uncertainties?.length)} 组 / ${number(report.contradictions?.length)} 项</td></tr><tr><td>本次流水线总耗时</td><td>${duration(performance.total_duration_seconds)}</td></tr><tr><td>本次流水线预处理</td><td>${duration(performance.preprocessing_sla?.actual_seconds)}（不含模型理解；可能复用已验收 CV 账本）</td></tr>${fullRunPreprocessing.seconds != null ? `<tr><td>全量六路预处理验收</td><td>${duration(fullRunPreprocessing.seconds)}（${esc(fullRunPreprocessing.includes || "完整预处理") }）</td></tr>` : ""}<tr><td>总 Token</td><td>${number(performance.total_input_tokens)} 输入 + ${number(performance.total_output_tokens)} 输出 = ${number(performance.total_tokens)}</td></tr><tr><td>自动验收</td><td>${esc(evidenceLevelLabel)}；不依赖人工审批</td></tr></tbody></table></section>`;
 }
 
 function keyMaterialEvaluationSummary(data) {
@@ -1368,9 +1378,13 @@ function metricsView(data) {
   const performance = metrics.preprocessing_display || {};
   const fullColdStart = performance.full_cold_start || {};
   const currentRun = performance.current_run || {};
-  const statusLabel = quality.status === "evidence_package_passed_no_boundary_ground_truth"
-    ? "证据包结构与媒体已验收；没有人工边界真值"
-    : quality.status || "未生成质量账本";
+  const statusLabel = quality.evidence_level === "dataset_measured"
+    ? "结构验收与本实验质量测量均已通过"
+    : quality.evidence_level === "partially_measured"
+      ? "结构已验收；仅部分质量指标具备独立真值"
+      : quality.passed
+        ? "结构与媒体已验收；本实验准确率未逐任务测量"
+        : quality.status || "未生成质量账本";
   const boundaryAccuracy = boundary.evaluated
     ? `${percent(boundary.precision)} / ${percent(boundary.recall)}`
     : "未评估（历史档案无人工边界基线）";
@@ -1392,6 +1406,7 @@ function metricsView(data) {
     quality_acceptance: "自动质量验收 JSON",
     evidence_package_eval: "证据包结构/媒体验收 JSON",
     key_material_recall_eval: "关键素材 Precision / Recall 评估 JSON",
+    run_provenance: "代码、配置、模型与证据溯源 JSON",
   };
   return `<section class="panel"><header class="panel-heading"><div><h2>耗时口径</h2><p>${performanceSummary} ${reuseNote}</p></div></header><div class="performance-compare"><article><small>历史完整冷启动预处理</small><strong>${duration(fullColdStart.seconds)}</strong><span>${esc(fullColdStart.includes || "预检 + 对齐 + 全量粗扫 + 有界精扫 + 边界审计；不含模型理解")}</span></article><article><small>当前归档运行总耗时</small><strong>${duration(currentRun.total_seconds ?? metrics.total_duration_seconds)}</strong><span>${currentRun.reused_validated_cv_ledgers ? "复用已验收 CV 账本，重新生成理解/媒体/证据包" : "以本次运行账本为准"}</span></article><article><small>当前运行预处理</small><strong>${duration(currentRun.preprocessing_seconds)}</strong><span>${currentRun.reused_validated_cv_ledgers ? "不是冷启动基准" : "当前运行实际值"}</span></article></div><table class="metric-table"><thead><tr><th>阶段</th><th>说明</th><th>耗时</th></tr></thead><tbody>${extraRows}${stages.map((stage)=>`<tr><td>${esc(stage.stage)}</td><td>${esc(STAGE_LABELS[stage.stage] || stage.stage)}</td><td>${duration(stage.duration_seconds)}</td></tr>`).join("")}</tbody></table></section><section class="panel"><header class="panel-heading"><div><h2>Token 用量</h2><p>CV、FFmpeg 与 TensorRT 不消耗模型 Token；断点复用的模型结果不重复计入本次实际消耗。</p></div></header><table class="metric-table"><thead><tr><th>阶段</th><th>执行 / 复用</th><th>输入 Token</th><th>输出 Token</th><th>总 Token</th></tr></thead><tbody><tr><td>实验片段步骤理解</td><td>${number(tokens.experiment_groups?.executed_call_count ?? tokens.experiment_groups?.call_count)} / ${number(tokens.experiment_groups?.reused_call_count)}</td><td>${number(tokens.experiment_groups?.input_tokens)}</td><td>${number(tokens.experiment_groups?.output_tokens)}</td><td>${number(tokens.experiment_groups?.total_tokens)}</td></tr><tr><td>关键素材理解</td><td>${number(tokens.key_materials?.executed_call_count ?? tokens.key_materials?.call_count)} / ${number(tokens.key_materials?.reused_call_count)}</td><td>${number(tokens.key_materials?.input_tokens)}</td><td>${number(tokens.key_materials?.output_tokens)}</td><td>${number(tokens.key_materials?.total_tokens)}</td></tr><tr><td><strong>全任务</strong></td><td>—</td><td><strong>${number(tokens.run_total?.input_tokens)}</strong></td><td><strong>${number(tokens.run_total?.output_tokens)}</strong></td><td><strong>${number(tokens.run_total?.total_tokens)}</strong></td></tr></tbody></table></section><section class="panel"><header class="panel-heading"><div><h2>质量验收</h2><p>${esc(materialEvaluation.displayNote)}</p></div></header><table class="metric-table"><tbody><tr><td>总体状态</td><td>${esc(statusLabel)}</td></tr><tr><td>实验检出 Precision / Recall</td><td>${boundaryAccuracy}</td></tr><tr><td>关键素材 Precision / Recall</td><td>${esc(materialEvaluation.recallLabel)}</td></tr><tr><td>边界通过率 / 连续性准确率</td><td>${boundaryContinuity}</td></tr><tr><td>证据包结构与媒体</td><td>${boundary.evidence_package_eval_passed || materials.evidence_package_eval_passed ? "通过自动验收" : "未通过或无验收记录"}</td></tr><tr><td>关键素材六类覆盖</td><td>${esc(materialEvaluation.categoryCoverageLabel)}</td></tr><tr><td>第一/第三人称成套素材</td><td>${number(materials.dual_view_material_count)} / ${number(materials.event_count)}（${percent(materials.dual_view_material_rate)}）</td></tr><tr><td>双侧共同佐证动作</td><td>${number(materials.cross_view_supported_count)} / ${number(materials.event_count)}（${percent(materials.cross_view_supported_rate)}）</td></tr><tr><td>双视角关联可审计</td><td>${number(materials.cross_view_or_explicit_uncertainty_count)} / ${number(materials.event_count)}</td></tr></tbody></table></section><section class="panel"><header class="panel-heading"><div><h2>资源遥测（按阶段）</h2><p>来源：resource_telemetry.json；主机网络包含其他流量，进程树 I/O 单独列出。</p></div></header><table class="metric-table"><thead><tr><th>阶段</th><th>GPU mean/max</th><th>NVDEC mean/max</th><th>CPU mean/max</th><th>网络接收 mean/max</th></tr></thead><tbody>${Object.entries(summaries).map(([stage,item])=>`<tr><td>${esc(STAGE_LABELS[stage]||stage)}</td><td>${metricStat(item.gpu_compute_percent)}/${metricStat(item.gpu_compute_percent,"max","%")}</td><td>${metricStat(item.nvdec_percent)}/${metricStat(item.nvdec_percent,"max","%")}</td><td>${metricStat(item.cpu_percent)}/${metricStat(item.cpu_percent,"max","%")}</td><td>${metricStat(item.host_network_receive_mib_s,"mean"," MiB/s")}/${metricStat(item.host_network_receive_mib_s,"max"," MiB/s")}</td></tr>`).join("")}</tbody></table></section><section class="panel"><header class="panel-heading"><div><h2>模型理解与验收文件</h2><p>这些链接直接指向当前 NAS 档案中的正式文件；历史档案没有的文件不会显示为可点击链接。</p></div></header><div class="result-links" style="padding:20px">${Object.entries(links).map(([key,label])=>data.links[key]?`<a target="_blank" href="${esc(data.links[key])}">${icon("file")}${label}</a>`:"").join("")}</div></section>`;
 }

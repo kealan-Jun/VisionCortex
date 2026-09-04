@@ -166,10 +166,16 @@ def _artifact_record(
         and cached.get("path") == relative
         and cached.get("size_bytes") == media_stat.st_size
         and cached.get("mtime_ns") == media_stat.st_mtime_ns
+        and cached.get("ctime_ns") == media_stat.st_ctime_ns
+        and cached.get("file_identity") == media_stat.st_ino
         and cached.get("sidecar_size_bytes")
         == (sidecar_stat.st_size if sidecar_stat else None)
         and cached.get("sidecar_mtime_ns")
         == (sidecar_stat.st_mtime_ns if sidecar_stat else None)
+        and cached.get("sidecar_ctime_ns")
+        == (sidecar_stat.st_ctime_ns if sidecar_stat else None)
+        and cached.get("sidecar_file_identity")
+        == (sidecar_stat.st_ino if sidecar_stat else None)
         and cached.get("sha256")
         and (cached.get("sidecar_sha256") if sidecar_available else True)
     )
@@ -190,9 +196,13 @@ def _artifact_record(
         "mime_type": mimetypes.guess_type(media.name)[0] or "application/octet-stream",
         "size_bytes": media_stat.st_size,
         "mtime_ns": media_stat.st_mtime_ns,
+        "ctime_ns": media_stat.st_ctime_ns,
+        "file_identity": media_stat.st_ino,
         "sha256": cached["sha256"] if cache_matches else _sha256(media),
         "sidecar_size_bytes": sidecar_stat.st_size if sidecar_stat else None,
         "sidecar_mtime_ns": sidecar_stat.st_mtime_ns if sidecar_stat else None,
+        "sidecar_ctime_ns": sidecar_stat.st_ctime_ns if sidecar_stat else None,
+        "sidecar_file_identity": sidecar_stat.st_ino if sidecar_stat else None,
         "sidecar_sha256": (
             cached["sidecar_sha256"]
             if cache_matches and sidecar_available
@@ -744,16 +754,14 @@ def build_archive_index(
     previous_artifacts: dict[str, dict[str, Any]] = {}
     if previous_registry_path.is_file():
         try:
-            previous_artifacts = {
-                item["artifact_uid"]: item
-                for item in (
-                    json.loads(line)
-                    for line in previous_registry_path.read_text(
-                        encoding="utf-8-sig"
-                    ).splitlines()
-                    if line.strip()
-                )
-            }
+            with previous_registry_path.open(
+                "r", encoding="utf-8-sig"
+            ) as previous_registry:
+                for line in previous_registry:
+                    if not line.strip():
+                        continue
+                    item = json.loads(line)
+                    previous_artifacts[str(item["artifact_uid"])] = item
         except (OSError, json.JSONDecodeError, KeyError):
             previous_artifacts = {}
     allow_incomplete = any(

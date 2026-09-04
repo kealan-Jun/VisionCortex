@@ -17,13 +17,17 @@ def _write(path: Path, payload: object) -> None:
 
 def _minimum_archive(root: Path) -> None:
     json_root = root / "JSON-Config-Files"
-    _write(json_root / "evidence_package.json", {"schema_version": "2.0.0"})
+    _write(
+        json_root / "evidence_package.json",
+        {"schema_version": "2.0.0", "experiment_groups": []},
+    )
     _write(json_root / "evidence_package_eval.json", {"passed": True})
     _write(
         json_root / "quality_acceptance.json",
         {
             "schema_version": "visioncortex-quality-acceptance/1",
-            "status": "passed",
+            "status": "structural_only",
+            "passed": True,
             "experiment_boundaries": {},
             "key_materials": {},
         },
@@ -35,6 +39,54 @@ def _minimum_archive(root: Path) -> None:
     )
     _write(json_root / "physical_change_log.json", [])
     _write(root / "Key-Materials" / "Key-Materials-Model-Understanding.json", [])
+    _write(
+        json_root / "evidence_index_manifest.json",
+        {
+            "schema_version": "visioncortex-evidence-index/1",
+            "counts": {"key_events": 0},
+            "files": {},
+            "integrity": {},
+            "validation": {"passed": True},
+        },
+    )
+    report_path = root / "Lab-Daily-Reports" / "2026-09-04" / "Lab-Daily-Report-2026-09-04.json"
+    _write(
+        report_path,
+        {
+            "experiment_timeline": [],
+            "quality_acceptance": {"passed": True, "status": "structural_only"},
+        },
+    )
+    _write(
+        json_root / "daily_report_manifest.json",
+        {
+            "report_date": "2026-09-04",
+            "json": report_path.relative_to(root).as_posix(),
+            "html": "Lab-Daily-Reports/2026-09-04/report.html",
+            "evaluation": "Lab-Daily-Reports/2026-09-04/Daily-Report-Eval.json",
+            "passed": True,
+            "checksums": {},
+        },
+    )
+    _write(
+        json_root / "professional_report_manifest.json",
+        {
+            "schema_version": "visioncortex-professional-report-manifest/1",
+            "template_id": "test",
+            "renderer_sha256": "test",
+            "status": "generated",
+        },
+    )
+    _write(
+        json_root / "run_provenance.json",
+        {
+            "schema_version": "visioncortex-run-provenance/1",
+            "passed": True,
+            "repository": {},
+            "configuration": {},
+            "artifacts": {},
+        },
+    )
 
 
 def test_archive_contracts_accept_current_package_and_list_change_log(tmp_path: Path):
@@ -46,7 +98,6 @@ def test_archive_contracts_accept_current_package_and_list_change_log(tmp_path: 
     assert not result["failures"]
     assert {item["contract_id"] for item in result["warnings"]} == {
         "continuous-action-state",
-        "evidence-index-manifest",
     }
 
 

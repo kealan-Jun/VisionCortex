@@ -21,7 +21,11 @@ from .archive import (
 )
 from .daily_reports import generate_daily_report_archive
 from .detection import validate_models
-from .schema_contracts import write_archive_contract_manifest
+from .provenance import write_run_provenance
+from .schema_contracts import (
+    validate_archive_contracts_or_raise,
+    write_archive_contract_manifest,
+)
 from .schemas import (
     ActionCandidate,
     ActionType,
@@ -519,6 +523,7 @@ def run_local_six_view_acceptance(
                         "physical_change": {
                             "change_type": f"synthetic_{event.action_type.value}"
                         },
+                        "supporting_event_ids": [event.event_id],
                         "supporting_views": event.supporting_views,
                         "confidence": event.confidence,
                     }
@@ -669,9 +674,15 @@ def run_local_six_view_acceptance(
         write_json(
             layout.json_config / "quality_acceptance.json",
             {
-                "schema_version": "visioncortex-synthetic-quality-contract/1",
+                "schema_version": "visioncortex-quality-acceptance/1",
                 "status": "synthetic_contract_only",
+                "passed": True,
+                "structural_passed": True,
+                "evidence_level": "synthetic_structural_only",
+                "formal_accuracy_claim_allowed": False,
                 "experiment_boundaries": {"precision": 1.0, "recall": 1.0},
+                "key_materials": {},
+                "truth_scope": "deterministic_synthetic_contract_only",
                 "production_domain_claim": False,
             },
         )
@@ -703,6 +714,20 @@ def run_local_six_view_acceptance(
             {
                 "schema_version": "visioncortex-key-material-understanding/1",
                 "events": [event.model_dump(mode="json") for event in events],
+            },
+        )
+        write_json(
+            layout.json_config / "audit_layer.json",
+            {
+                "schema_version": "visioncortex-audit-layer/1",
+                "events": [event.model_dump(mode="json") for event in events],
+                "rejected": [],
+                "raw_segments": [segment.model_dump(mode="json")],
+                "normalized_segments": [segment.model_dump(mode="json")],
+                "segments": [segment.model_dump(mode="json")],
+                "formal_segment_receipts": [],
+                "experiment_groups": [group.model_dump(mode="json")],
+                "synthetic": True,
             },
         )
         monitor.set_stage("package")
@@ -753,23 +778,40 @@ def run_local_six_view_acceptance(
         reports_started = time.perf_counter()
         generate_daily_report_archive(layout, summary, metrics, local_config)
         reports_duration = time.perf_counter() - reports_started
-        contract_started = time.perf_counter()
-        write_archive_contract_manifest(layout.root)
-        contract_duration = time.perf_counter() - contract_started
         acceptance_elapsed = time.perf_counter() - started
         post_pipeline_stages = [
             {
                 "stage": "reports",
                 "duration_seconds": round(reports_duration, 6),
-            },
-            {
-                "stage": "contract_manifest",
-                "duration_seconds": round(contract_duration, 6),
-            },
+            }
         ]
         metrics["acceptance_end_to_end_seconds"] = round(acceptance_elapsed, 6)
         metrics["post_pipeline_stage_durations"] = post_pipeline_stages
         write_json(layout.json_config / "run_metrics.json", metrics)
+        summary.stats["run_metrics"] = metrics
+        summary.stats["run_provenance"] = {
+            "path": "JSON-Config-Files/run_provenance.json"
+        }
+        write_json(
+            layout.json_config / "evidence_package.json",
+            summary.model_dump(mode="json"),
+        )
+        write_run_provenance(
+            layout.root,
+            local_config,
+            {"required": False, "status": "not_required_by_profile"},
+            repository_root=Path(__file__).resolve().parents[2],
+        )
+        contract_started = time.perf_counter()
+        write_archive_contract_manifest(layout.root)
+        validate_archive_contracts_or_raise(layout.root)
+        contract_duration = time.perf_counter() - contract_started
+        post_pipeline_stages.append(
+            {
+                "stage": "contract_manifest",
+                "duration_seconds": round(contract_duration, 6),
+            }
+        )
         required = {
             "experiment_clips": any(layout.experiment_clips.rglob("*.mp4")),
             "key_frames": any(layout.key_frames.rglob("*.jpg")),

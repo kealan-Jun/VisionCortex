@@ -180,7 +180,11 @@ ZIP，再拒绝路径穿越/软链接并有界解包。模型共识只能通过
     evidence_package.json
     physical_change_log.json
     evidence_package_eval.json
+    quality_acceptance.json            # 自动门禁与证据等级；结构通过不等于准确率已测量
     run_metrics.json
+    run_provenance.json                # 代码、配置、模型认证与关键产物哈希绑定
+    schema_contract_manifest.json      # 跨文件契约与事件引用一致性
+    delivery_metrics.json              # Web/NAS 请求到发布门禁的交付耗时，不改写运行指标
     evidence_index.sqlite              # 可重建的事件检索索引（JSON 仍是权威数据）
     evidence_index_manifest.json       # 数量、FTS 能力与文件 SHA-256
     artifact_registry.jsonl            # 事件 → 素材/sidecar/大小/SHA-256
@@ -196,12 +200,13 @@ ZIP，再拒绝路径穿越/软链接并有界解包。模型共识只能通过
   Lab-Daily-Reports/<YYYY-MM-DD>/
     Lab-Daily-Report-<date>.json, .md, .html
     Daily-Report-Eval.json
-    Human-Review.json
+    Automatic-Acceptance.json
   Professional-PDFs/
-    Lab-Daily-Report-<date>.pdf
+    VisionCortex-Professional-Evidence-Report-<date>.pdf
+  .VisionCortex-Current-Release.json    # 全部门禁通过后才原子切换的当前正式版本
 ```
 
-日报采用固定的 `VC-LAB-DAILY-REPORT-V1`：模型只产出结构化实验理解，确定性渲染器填充固定栏目，日报阶段不新增模型调用或 Token。模板栏目、版本策略和本地开发方式见 [实验室日报固定模板 V1](docs/daily-report-template-v1.md)。
+日报采用固定的 `VC-LAB-DAILY-REPORT-V2`：模型只产出结构化实验理解，确定性渲染器填充固定栏目，日报阶段不新增模型调用或 Token；不确定证据由算法自动隔离，不设置人工审批兜底。
 
 六类动作是 `hand_object_contact`（手与明确物体接触）、`object_movement`、`liquid_movement`、`container_state_change`、`device_panel_operation` 和 `pipette_transfer_operation`。每个记录保留候选、接受/拒绝理由、视角支持、对齐置信度和不确定性，YOLO 框不会被直接当成最终证据。
 

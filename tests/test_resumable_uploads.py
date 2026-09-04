@@ -529,9 +529,8 @@ def test_archive_receipt_rebuilds_queue_after_local_sqlite_loss(monkeypatch, tmp
     assert recovered["status"] == "queued"
     assert api._runs[run_id]["recovered_from_archive_receipt"] is True
 
-    session = api._upload_sessions.get(created["session_id"])
     seal_path = (
-        Path(session["archive_root"])
+        Path(finalized["nas_staging"])
         / "JSON-Config-Files"
         / "Input-Manifests"
         / "input_seal.json"

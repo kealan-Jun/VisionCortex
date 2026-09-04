@@ -68,22 +68,33 @@ from .pipeline import (
 )
 from .public_model_assets import prepare_public_model_assets
 from .public_datasets import prepare_public_dataset
+from .provenance import write_run_provenance
 from .replay_acceptance import (
     inspect_quality_ledger_inputs,
     replay_quality_decisions_from_ledgers,
 )
 from .recall_evaluation import evaluate_key_event_recall
 from .reviewed_artifacts import load_dataset_scoped_json
-from .schema_contracts import write_archive_contract_manifest
+from .schema_contracts import (
+    validate_archive_contracts_or_raise,
+    write_archive_contract_manifest,
+)
 from .schemas import RunManifest, RunSummary, VideoInfo, event_is_formal
 from .storage import (
+    DERIVED_ARCHIVE_DIRECTORIES,
+    ORIGINAL_REFERENCE_NAMES,
     fixed_archive_staging_paths,
     initialize_nas_archive,
     prepare_from_nas_index,
     promote_fixed_archive,
+    read_current_release_pointer,
     safe_archive_name,
+    validate_formal_archive_release,
 )
-from .validation import validate_experiment_and_material_quality
+from .validation import (
+    finalize_quality_acceptance_claims,
+    validate_experiment_and_material_quality,
+)
 from .yolo_evaluation import evaluate_files as evaluate_yolo_files
 from .yolo_training import build_yolo_training_dataset, train_yolo_model
 
@@ -405,6 +416,7 @@ def _refresh_repaired_quality_acceptance(
     if not step_consistency["passed"]:
         report["passed"] = False
         report["status"] = "failed"
+    finalize_quality_acceptance_claims(report, recall_gate, step_consistency)
     write_json(layout.json_config / "quality_acceptance.json", report)
     write_json(
         layout.json_config / "key_material_recall_eval.json", recall_report
@@ -1364,15 +1376,10 @@ def register_archived_collection_command(
 ) -> None:
     """Register an existing accepted archive in the central collection ledger."""
 
-    accepted_files = (
-        archive / "JSON-Config-Files" / "evidence_package_eval.json",
-        archive / "JSON-Config-Files" / "quality_acceptance.json",
-    )
-    for path in accepted_files:
-        if not path.is_file():
-            raise typer.BadParameter(f"Acceptance receipt is missing: {path}")
-        if not json.loads(path.read_text(encoding="utf-8-sig")).get("passed"):
-            raise typer.BadParameter(f"Acceptance receipt did not pass: {path}")
+    try:
+        formal_gate = validate_formal_archive_release(archive)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise typer.BadParameter(f"Formal archive gate failed: {exc}") from exc
     report_evaluations = list(
         (archive / "Lab-Daily-Reports").glob("*/Daily-Report-Eval.json")
     )
@@ -1401,6 +1408,7 @@ def register_archived_collection_command(
             "registration_only": True,
             "daily_report_evaluations": len(report_evaluations),
             "professional_pdf_count": len(professional_pdfs),
+            "formal_gate": formal_gate,
         },
     )
     typer.echo(
@@ -1901,6 +1909,36 @@ def refresh_key_json_command(
     )
 
 
+def _stage_published_archive_for_repair(archive: Path) -> tuple[Path, Path]:
+    """Copy one committed release into an isolated repair candidate."""
+
+    run_id = f"repair-{datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}"
+    archive_name = safe_archive_name(archive.name)
+    staging_root = (
+        archive.parent / ".VisionCortex-Run-Staging" / archive_name / run_id
+    )
+    history_root = (
+        archive.parent / ".VisionCortex-Run-History" / archive_name / run_id
+    )
+    for directory in DERIVED_ARCHIVE_DIRECTORIES:
+        source = archive / directory
+        if not source.is_dir():
+            raise typer.BadParameter(
+                f"Published archive directory is missing: {source}"
+            )
+        shutil.copytree(source, staging_root / directory)
+    source_references = archive / "Original-Experiment-Videos"
+    staged_references = staging_root / "Original-Experiment-Videos"
+    staged_references.mkdir(parents=True, exist_ok=True)
+    for source in sorted(source_references.iterdir()):
+        if source.is_file() and (
+            source.name in ORIGINAL_REFERENCE_NAMES
+            or source.suffix.lower() == ".ffconcat"
+        ):
+            shutil.copy2(source, staged_references / source.name)
+    return staging_root, history_root
+
+
 @app.command("repair-key-material-presentation")
 def repair_key_material_presentation_command(
     archive: Annotated[Path, typer.Option("--archive", "-a", exists=True, file_okay=False)],
@@ -1922,6 +1960,35 @@ def repair_key_material_presentation_command(
     if lock_path.exists():
         raise typer.BadParameter(f"Archive is currently locked: {lock_path}")
     settings = load_config(config)
+    if read_current_release_pointer(archive) is not None:
+        try:
+            validate_formal_archive_release(archive)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise typer.BadParameter(
+                f"Published archive integrity failed before repair: {exc}"
+            ) from exc
+        staging_root, history_root = _stage_published_archive_for_repair(archive)
+        typer.echo(f"published_archive_repair_staging={staging_root}")
+        repair_key_material_presentation_command(staging_root, config)
+        promotion = promote_fixed_archive(staging_root, archive, history_root)
+        typer.echo(
+            json.dumps(
+                {
+                    "status": "published",
+                    "formal_archive": str(archive),
+                    "repair_staging": str(staging_root),
+                    "previous_release_history": str(history_root),
+                    "promotion_verification": promotion.get("verification"),
+                    "release_manifest_sha256": promotion.get(
+                        "release_manifest_sha256"
+                    ),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return
+    model_certification = audit_production_model_certification(settings)
     package_path = layout.json_config / "evidence_package.json"
     package_before_sha256 = hashlib.sha256(package_path.read_bytes()).hexdigest()
     summary = RunSummary.model_validate_json(package_path.read_text(encoding="utf-8-sig"))
@@ -2280,7 +2347,14 @@ def repair_key_material_presentation_command(
     write_json(layout.json_config / "evidence_package_eval.json", evaluation)
     write_json(package_path, summary.model_dump(mode="json"))
     report_manifest = generate_daily_report_from_archive(archive, settings)
+    write_run_provenance(
+        archive,
+        settings,
+        model_certification,
+        repository_root=Path(__file__).resolve().parents[2],
+    )
     write_archive_contract_manifest(archive)
+    validate_archive_contracts_or_raise(archive)
     receipt = {
         "schema_version": "visioncortex-key-material-presentation-repair/1",
         "status": (

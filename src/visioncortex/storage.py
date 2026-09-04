@@ -11,6 +11,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from functools import lru_cache
@@ -21,6 +22,8 @@ import yaml
 
 from .device_registry import load_device_registry, resolve_view_role
 from .input_seal import build_input_seal, write_input_seal
+from .provenance import verify_run_provenance
+from .schema_contracts import inspect_archive_contracts
 from .schemas import RunManifest, VideoSegmentInput, ViewInput, ViewRole
 
 
@@ -42,6 +45,9 @@ DERIVED_ARCHIVE_DIRECTORIES = (
 )
 
 ORIGINAL_REFERENCE_NAMES = {"Original-Video-Index.json", "README.txt"}
+CURRENT_RELEASE_POINTER_NAME = ".VisionCortex-Current-Release.json"
+RELEASE_MANIFEST_DIRECTORY = ".VisionCortex-Release-Manifests"
+PROMOTION_STATE_DIRECTORY = ".VisionCortex-Promotion-State"
 
 
 _SOURCE_STAT_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -228,6 +234,265 @@ def _directory_manifest(root: Path) -> list[dict[str, Any]]:
     ]
 
 
+def _manifest_sha256(manifests: dict[str, list[dict[str, Any]]]) -> str:
+    canonical = json.dumps(
+        manifests,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _promotion_state_path(fixed_root: Path) -> Path:
+    return (
+        fixed_root.parent
+        / PROMOTION_STATE_DIRECTORY
+        / f"{safe_archive_name(fixed_root.name)}.json"
+    )
+
+
+def archive_promotion_in_progress(fixed_root: Path) -> bool:
+    state_path = _promotion_state_path(fixed_root)
+    if not state_path.is_file():
+        return False
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError, TypeError):
+        return True
+    pointer = read_current_release_pointer(fixed_root)
+    release_id = Path(str(state.get("staging_root") or "")).name
+    return not bool(
+        release_id
+        and pointer
+        and str(pointer.get("release_id") or "") == release_id
+    )
+
+
+def read_current_release_pointer(fixed_root: Path) -> dict[str, Any] | None:
+    path = fixed_root / CURRENT_RELEASE_POINTER_NAME
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError, TypeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def verify_current_release(fixed_root: Path) -> dict[str, Any]:
+    """Verify the current pointer and every file in the committed release."""
+
+    fixed_root = fixed_root.resolve()
+    failures: list[str] = []
+    if archive_promotion_in_progress(fixed_root):
+        return {"passed": False, "failures": ["promotion_in_progress"]}
+    pointer = read_current_release_pointer(fixed_root)
+    if pointer is None:
+        return {"passed": False, "failures": ["current_release_pointer_missing"]}
+    relative = Path(str(pointer.get("release_manifest") or ""))
+    manifest_path = (fixed_root / relative).resolve()
+    try:
+        manifest_path.relative_to(fixed_root / RELEASE_MANIFEST_DIRECTORY)
+    except ValueError:
+        failures.append("release_manifest_path_outside_authority")
+    if not manifest_path.is_file():
+        failures.append("release_manifest_missing")
+        return {"passed": False, "failures": failures}
+    if _sha256_file(manifest_path) != str(
+        pointer.get("release_manifest_file_sha256") or ""
+    ):
+        failures.append("release_manifest_file_hash_mismatch")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError, TypeError):
+        failures.append("release_manifest_invalid")
+        return {"passed": False, "failures": failures}
+    if manifest.get("release_id") != pointer.get("release_id"):
+        failures.append("release_id_mismatch")
+    recorded = manifest.get("manifests") or {}
+    observed = {
+        directory: _directory_manifest(fixed_root / directory)
+        for directory in DERIVED_ARCHIVE_DIRECTORIES
+        if (fixed_root / directory).is_dir()
+    }
+    reference_records = list(recorded.get("Original-Experiment-References") or [])
+    observed["Original-Experiment-References"] = []
+    for receipt in reference_records:
+        path = (
+            fixed_root
+            / "Original-Experiment-Videos"
+            / str(receipt.get("path") or "")
+        )
+        if not path.is_file():
+            failures.append(f"original_reference_missing:{receipt.get('path')}")
+            continue
+        observed["Original-Experiment-References"].append(
+            {
+                "path": str(receipt.get("path") or ""),
+                "size_bytes": path.stat().st_size,
+                "sha256": _sha256_file(path),
+            }
+        )
+    if observed != recorded:
+        failures.append("release_file_manifest_mismatch")
+    observed_digest = _manifest_sha256(observed)
+    if observed_digest != str(pointer.get("release_manifest_sha256") or ""):
+        failures.append("release_manifest_digest_mismatch")
+    provenance = verify_run_provenance(fixed_root)
+    if provenance.get("passed") is not True:
+        failures.extend(
+            f"provenance:{item}" for item in provenance.get("failures") or []
+        )
+    if provenance.get("provenance_sha256") != pointer.get("provenance_sha256"):
+        failures.append("pointer_provenance_mismatch")
+    return {
+        "passed": not failures,
+        "failures": failures,
+        "release_id": pointer.get("release_id"),
+        "release_manifest_sha256": observed_digest,
+        "file_count": sum(len(items) for items in observed.values()),
+    }
+
+
+@contextmanager
+def _archive_promotion_lock(fixed_root: Path):
+    lock_root = fixed_root.parent / ".VisionCortex-Promotion-Locks"
+    lock_root.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_root / f"{safe_archive_name(fixed_root.name)}.lock"
+    handle = lock_path.open("a+b")
+    try:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"0")
+            handle.flush()
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0)
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError as exc:
+                raise RuntimeError(
+                    f"Archive promotion is already running: {fixed_root}"
+                ) from exc
+        else:
+            import fcntl
+
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                raise RuntimeError(
+                    f"Archive promotion is already running: {fixed_root}"
+                ) from exc
+        yield
+    finally:
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+
+
+def _validate_staged_release(staging_root: Path) -> dict[str, Any]:
+    evaluation_path = staging_root / "JSON-Config-Files" / "evidence_package_eval.json"
+    if not evaluation_path.is_file():
+        raise RuntimeError(f"Staged evidence evaluation is missing: {evaluation_path}")
+    evaluation = json.loads(evaluation_path.read_text(encoding="utf-8-sig"))
+    if evaluation.get("passed") is not True:
+        raise RuntimeError("Staged evidence package did not pass evaluation; promotion refused")
+    quality_path = staging_root / "JSON-Config-Files" / "quality_acceptance.json"
+    if not quality_path.is_file():
+        raise RuntimeError(f"Staged quality acceptance is missing: {quality_path}")
+    quality = json.loads(quality_path.read_text(encoding="utf-8-sig"))
+    if quality.get("passed") is not True:
+        raise RuntimeError("Staged experiment/material quality did not pass; promotion refused")
+    report_evaluations = list(
+        (staging_root / "Lab-Daily-Reports").glob("*/Daily-Report-Eval.json")
+    )
+    if not report_evaluations:
+        raise RuntimeError("Staged daily report evaluation is missing; promotion refused")
+    if not all(
+        json.loads(path.read_text(encoding="utf-8-sig")).get("passed") is True
+        for path in report_evaluations
+    ):
+        raise RuntimeError("Staged daily report did not pass evaluation; promotion refused")
+    professional_manifest_path = (
+        staging_root / "JSON-Config-Files" / "professional_report_manifest.json"
+    )
+    if not professional_manifest_path.is_file():
+        raise RuntimeError("Staged professional report manifest is missing; promotion refused")
+    professional_manifest = json.loads(
+        professional_manifest_path.read_text(encoding="utf-8-sig")
+    )
+    pdf_relative = professional_manifest.get("pdf")
+    pdf_path = staging_root / str(pdf_relative or "")
+    if (
+        professional_manifest.get("status") != "generated"
+        or not pdf_relative
+        or not pdf_path.is_file()
+        or _sha256_file(pdf_path)
+        != str(professional_manifest.get("checksum_sha256") or "")
+    ):
+        raise RuntimeError("Staged professional evidence PDF integrity failed; promotion refused")
+    contract = inspect_archive_contracts(
+        staging_root, require_release_contracts=True
+    )
+    if contract.get("passed") is not True:
+        raise RuntimeError(
+            "Staged archive contract did not pass; promotion refused: "
+            + ", ".join(
+                str(item.get("contract_id")) for item in contract.get("failures") or []
+            )
+        )
+    provenance = verify_run_provenance(staging_root)
+    if provenance.get("passed") is not True:
+        raise RuntimeError(
+            "Staged run provenance did not pass; promotion refused: "
+            + ", ".join(provenance.get("failures") or [])
+        )
+    return {
+        "evidence_package": evaluation,
+        "quality_acceptance": {
+            "passed": True,
+            "status": quality.get("status"),
+            "evidence_level": quality.get("evidence_level") or "structural_only",
+            "formal_accuracy_claim_allowed": bool(
+                quality.get("formal_accuracy_claim_allowed")
+            ),
+        },
+        "daily_report_count": len(report_evaluations),
+        "archive_contract": {
+            "passed": True,
+            "contract_count": contract.get("contract_count"),
+        },
+        "run_provenance": provenance,
+    }
+
+
+def validate_formal_archive_release(archive_root: Path) -> dict[str, Any]:
+    """Apply the same fail-closed gate used immediately before promotion."""
+
+    archive_root = archive_root.resolve()
+    gate = _validate_staged_release(archive_root)
+    if read_current_release_pointer(archive_root) is not None:
+        current_release = verify_current_release(archive_root)
+        if current_release.get("passed") is not True:
+            raise RuntimeError(
+                "Current release integrity failed: "
+                + ", ".join(current_release.get("failures") or [])
+            )
+        gate["current_release"] = current_release
+    return gate
+
+
 def safe_archive_name(value: str) -> str:
     """Return a deterministic ASCII-only component for SMB/tool compatibility."""
 
@@ -256,15 +521,57 @@ def _original_reference_files(root: Path) -> list[Path]:
     )
 
 
-def _publish_original_references(staging_root: Path, fixed_root: Path) -> list[str]:
-    """Merge zero-copy source references without touching retained source media."""
+def _planned_original_reference_operations(
+    staging_root: Path, fixed_root: Path
+) -> list[dict[str, Any]]:
+    destination_root = fixed_root / "Original-Experiment-Videos"
+    return [
+        {
+            "name": source.name,
+            "had_previous": (destination_root / source.name).is_file(),
+        }
+        for source in _original_reference_files(
+            staging_root / "Original-Experiment-Videos"
+        )
+    ]
+
+
+def _restore_original_references(
+    fixed_root: Path,
+    history_root: Path,
+    operations: list[dict[str, Any]],
+) -> None:
+    destination_root = fixed_root / "Original-Experiment-Videos"
+    backup_root = history_root / "Original-Experiment-Videos"
+    for operation in reversed(operations):
+        name = str(operation["name"])
+        destination = destination_root / name
+        backup = backup_root / name
+        if backup.is_file():
+            destination.unlink(missing_ok=True)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(backup, destination)
+        elif not operation.get("had_previous"):
+            destination.unlink(missing_ok=True)
+
+
+def _publish_original_references(
+    staging_root: Path,
+    fixed_root: Path,
+    history_root: Path,
+    operations: list[dict[str, Any]],
+) -> list[str]:
+    """Transactionally merge zero-copy references without touching source media."""
 
     source_root = staging_root / "Original-Experiment-Videos"
     destination_root = fixed_root / "Original-Experiment-Videos"
+    backup_root = history_root / "Original-Experiment-Videos"
     published: list[str] = []
-    for source in _original_reference_files(source_root):
+    for operation in operations:
+        source = source_root / str(operation["name"])
         destination_root.mkdir(parents=True, exist_ok=True)
         destination = destination_root / source.name
+        backup = backup_root / source.name
         temporary = destination.with_name(
             f".{destination.name}.partial-{uuid.uuid4().hex[:8]}"
         )
@@ -275,12 +582,73 @@ def _publish_original_references(staging_root: Path, fixed_root: Path) -> list[s
                 or _sha256_file(temporary) != _sha256_file(source)
             ):
                 raise IOError(f"Original reference verification failed: {destination}")
+            if destination.is_file():
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(destination, backup)
             os.replace(temporary, destination)
         except Exception:
             temporary.unlink(missing_ok=True)
             raise
         published.append(destination.relative_to(fixed_root).as_posix())
     return published
+
+
+def _rollback_interrupted_promotion(
+    fixed_root: Path,
+    staging_root: Path,
+    history_root: Path,
+    reference_operations: list[dict[str, Any]],
+) -> None:
+    """Restore the last committed release after a process interruption."""
+
+    _restore_original_references(fixed_root, history_root, reference_operations)
+    for directory in reversed(DERIVED_ARCHIVE_DIRECTORIES):
+        source = staging_root / directory
+        destination = fixed_root / directory
+        backup = history_root / directory
+        if backup.is_dir():
+            if destination.is_dir():
+                if source.exists():
+                    raise RuntimeError(
+                        f"Interrupted promotion has ambiguous directory state: {directory}"
+                    )
+                source.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(destination, source)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(backup, destination)
+        elif destination.is_dir() and not source.exists():
+            source.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(destination, source)
+
+
+def _recover_interrupted_promotion(fixed_root: Path) -> None:
+    state_path = _promotion_state_path(fixed_root)
+    if not state_path.is_file():
+        return
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8-sig"))
+        staging_root = Path(str(state["staging_root"])).resolve()
+        history_root = Path(str(state["history_root"])).resolve()
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        raise RuntimeError(
+            f"Promotion recovery state is invalid: {state_path}"
+        ) from exc
+    pointer = read_current_release_pointer(fixed_root)
+    if pointer and str(pointer.get("release_id") or "") == staging_root.name:
+        state_path.unlink(missing_ok=True)
+        return
+    _rollback_interrupted_promotion(
+        fixed_root,
+        staging_root,
+        history_root,
+        list(state.get("original_reference_operations") or []),
+    )
+    (
+        fixed_root
+        / RELEASE_MANIFEST_DIRECTORY
+        / f"{staging_root.name}.json"
+    ).unlink(missing_ok=True)
+    state_path.unlink(missing_ok=True)
 
 
 def initialize_nas_archive(config: dict[str, Any], experiment_name: str) -> Path:
@@ -304,59 +672,96 @@ def fixed_archive_staging_paths(
     return fixed_root, staging_root, history_root
 
 
-def promote_fixed_archive(
+def _promote_fixed_archive_unlocked(
     staging_root: Path,
     fixed_root: Path,
     history_root: Path,
+    publication_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Promote one validated run while retaining the previous derived package."""
 
-    evaluation_path = staging_root / "JSON-Config-Files" / "evidence_package_eval.json"
-    if not evaluation_path.is_file():
-        raise RuntimeError(f"Staged evidence evaluation is missing: {evaluation_path}")
-    evaluation = json.loads(evaluation_path.read_text(encoding="utf-8-sig"))
-    if not evaluation.get("passed"):
-        raise RuntimeError("Staged evidence package did not pass evaluation; promotion refused")
-    quality_path = staging_root / "JSON-Config-Files" / "quality_acceptance.json"
-    if not quality_path.is_file():
-        raise RuntimeError(f"Staged quality acceptance is missing: {quality_path}")
-    quality = json.loads(quality_path.read_text(encoding="utf-8-sig"))
-    if not quality.get("passed"):
-        raise RuntimeError("Staged experiment/material quality did not pass; promotion refused")
-    report_evaluations = list(
-        (staging_root / "Lab-Daily-Reports").glob("*/Daily-Report-Eval.json")
+    gate = _validate_staged_release(staging_root)
+    fixed_root.mkdir(parents=True, exist_ok=True)
+    history_root.mkdir(parents=True, exist_ok=True)
+    reference_operations = _planned_original_reference_operations(
+        staging_root, fixed_root
     )
-    if not report_evaluations:
-        raise RuntimeError("Staged daily report evaluation is missing; promotion refused")
-    if not all(
-        json.loads(path.read_text(encoding="utf-8-sig")).get("passed")
-        for path in report_evaluations
-    ):
-        raise RuntimeError("Staged daily report did not pass evaluation; promotion refused")
-    professional_pdfs = staging_root / "Professional-PDFs"
-    if not (
-        any(
-            professional_pdfs.glob(
-                "VisionCortex-Professional-Evidence-Report-*.pdf"
-            )
-        )
-        or any(professional_pdfs.glob("Lab-Daily-Report-*.pdf"))
-    ):
-        raise RuntimeError("Staged professional evidence PDF is missing; promotion refused")
-
+    previous_package_retained = any(
+        (fixed_root / directory).is_dir()
+        for directory in DERIVED_ARCHIVE_DIRECTORIES
+    )
+    receipt = {
+        "schema_version": "visioncortex-fixed-archive-promotion/1",
+        "status": "candidate_validated",
+        "publication_state": "pending_current_release_pointer",
+        "fixed_root": str(fixed_root),
+        "staging_root": str(staging_root),
+        "history_root": str(history_root),
+        "promoted_directories": list(DERIVED_ARCHIVE_DIRECTORIES),
+        "promoted_original_references": [
+            f"Original-Experiment-Videos/{item['name']}"
+            for item in reference_operations
+        ],
+        "original_media_preserved": True,
+        "previous_package_retained": previous_package_retained,
+        "release_id": staging_root.name,
+        "current_release_pointer": CURRENT_RELEASE_POINTER_NAME,
+        "final_publication_authority": CURRENT_RELEASE_POINTER_NAME,
+        "release_manifest_authority": (
+            f"{RELEASE_MANIFEST_DIRECTORY}/{staging_root.name}.json"
+        ),
+        "gate": gate,
+    }
+    receipt_path = (
+        staging_root / "JSON-Config-Files" / "fixed_archive_promotion.json"
+    )
+    _atomic_write_text(
+        receipt_path, json.dumps(receipt, ensure_ascii=False, indent=2)
+    )
     staged_manifests = {
         directory: _directory_manifest(staging_root / directory)
         for directory in DERIVED_ARCHIVE_DIRECTORIES
         if (staging_root / directory).is_dir()
     }
     missing_manifests = [
-        directory for directory in DERIVED_ARCHIVE_DIRECTORIES if directory not in staged_manifests
+        directory
+        for directory in DERIVED_ARCHIVE_DIRECTORIES
+        if directory not in staged_manifests
     ]
     if missing_manifests:
         raise RuntimeError(f"Staged directories are missing: {missing_manifests}")
+    staged_manifests["Original-Experiment-References"] = [
+        {
+            "path": source.name,
+            "size_bytes": source.stat().st_size,
+            "sha256": _sha256_file(source),
+        }
+        for source in _original_reference_files(
+            staging_root / "Original-Experiment-Videos"
+        )
+    ]
+    release_manifest_sha256 = _manifest_sha256(staged_manifests)
 
-    fixed_root.mkdir(parents=True, exist_ok=True)
-    history_root.mkdir(parents=True, exist_ok=True)
+    state_path = _promotion_state_path(fixed_root)
+    _atomic_write_text(
+        state_path,
+        json.dumps(
+            {
+                "schema_version": "visioncortex-promotion-state/1",
+                "status": "in_progress",
+                "archive": fixed_root.name,
+                "staging_root": str(staging_root),
+                "history_root": str(history_root),
+                "original_reference_operations": reference_operations,
+                "started_at": datetime.now().astimezone().isoformat(),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+    )
+    release_manifest_path = (
+        fixed_root / RELEASE_MANIFEST_DIRECTORY / f"{staging_root.name}.json"
+    )
     moved: list[tuple[Path, Path, Path, bool]] = []
     try:
         for directory in DERIVED_ARCHIVE_DIRECTORIES:
@@ -382,38 +787,133 @@ def promote_fixed_archive(
                     os.replace(backup, destination)
                 raise RuntimeError(f"Promoted directory checksum mismatch: {directory}")
             moved.append((source, destination, backup, had_previous))
+        promoted_original_references = _publish_original_references(
+            staging_root,
+            fixed_root,
+            history_root,
+            reference_operations,
+        )
+
+        publication = None
+        if publication_context:
+            publication = {
+                key: value
+                for key, value in publication_context.items()
+                if key != "request_started_epoch"
+            }
+            request_epoch = publication_context.get("request_started_epoch")
+            if request_epoch is not None:
+                publication["total_duration_seconds"] = round(
+                    max(0.0, time.time() - float(request_epoch)), 6
+                )
+            publication.update(
+                {
+                    "completed": True,
+                    "published_at": datetime.now().astimezone().isoformat(),
+                }
+            )
+        release_manifest = {
+            "schema_version": "visioncortex-formal-release-manifest/1",
+            "archive_name": fixed_root.name,
+            "release_id": staging_root.name,
+            "release_manifest_sha256": release_manifest_sha256,
+            "manifests": staged_manifests,
+            "generated_at": datetime.now().astimezone().isoformat(),
+        }
+        _atomic_write_text(
+            release_manifest_path,
+            json.dumps(release_manifest, ensure_ascii=False, indent=2),
+        )
+        pointer = {
+            "schema_version": "visioncortex-current-release-pointer/1",
+            "archive_name": fixed_root.name,
+            "release_id": staging_root.name,
+            "release_manifest_sha256": release_manifest_sha256,
+            "release_manifest": release_manifest_path.relative_to(
+                fixed_root
+            ).as_posix(),
+            "release_manifest_file_sha256": _sha256_file(release_manifest_path),
+            "promotion_receipt": "JSON-Config-Files/fixed_archive_promotion.json",
+            "promotion_preparation_receipt": (
+                "JSON-Config-Files/fixed_archive_promotion.json"
+            ),
+            "provenance_sha256": gate["run_provenance"].get(
+                "provenance_sha256"
+            ),
+            "quality_status": gate["quality_acceptance"].get("status"),
+            "evidence_level": gate["quality_acceptance"].get("evidence_level"),
+            "formal_accuracy_claim_allowed": gate["quality_acceptance"].get(
+                "formal_accuracy_claim_allowed", False
+            ),
+            "publication": publication,
+            "status": "published",
+            "verification": {
+                "algorithm": "sha256",
+                "release_file_manifest_verified_before_publication": True,
+            },
+            "published_at": datetime.now().astimezone().isoformat(),
+        }
+        _atomic_write_text(
+            fixed_root / CURRENT_RELEASE_POINTER_NAME,
+            json.dumps(pointer, ensure_ascii=False, indent=2),
+        )
+        receipt.update(
+            {
+                "promoted_original_references": promoted_original_references,
+                "release_manifest_sha256": release_manifest_sha256,
+                "publication": publication,
+                "verification": {
+                    "algorithm": "sha256",
+                    "status": "verified",
+                    "directory_file_counts": {
+                        directory: len(manifest)
+                        for directory, manifest in staged_manifests.items()
+                    },
+                },
+            }
+        )
+        return receipt
     except Exception:
+        release_manifest_path.unlink(missing_ok=True)
+        _restore_original_references(
+            fixed_root, history_root, reference_operations
+        )
         for source, destination, backup, had_previous in reversed(moved):
             if destination.is_dir() and not source.exists():
                 os.replace(destination, source)
             if had_previous and backup.is_dir() and not destination.exists():
                 os.replace(backup, destination)
+        state_path.unlink(missing_ok=True)
         raise
 
-    promoted_original_references = _publish_original_references(staging_root, fixed_root)
 
-    receipt = {
-        "schema_version": "visioncortex-fixed-archive-promotion/1",
-        "fixed_root": str(fixed_root),
-        "staging_root": str(staging_root),
-        "history_root": str(history_root),
-        "promoted_directories": list(DERIVED_ARCHIVE_DIRECTORIES),
-        "promoted_original_references": promoted_original_references,
-        "original_media_preserved": True,
-        "previous_package_retained": any(item[3] for item in moved),
-        "verification": {
-            "algorithm": "sha256",
-            "status": "verified",
-            "directory_file_counts": {
-                directory: len(manifest) for directory, manifest in staged_manifests.items()
-            },
-        },
-    }
-    receipt_path = fixed_root / "JSON-Config-Files" / "fixed_archive_promotion.json"
-    temporary = receipt_path.with_name(f".{receipt_path.name}.partial-{uuid.uuid4().hex[:8]}")
-    temporary.write_text(json.dumps(receipt, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(temporary, receipt_path)
-    return receipt
+def promote_fixed_archive(
+    staging_root: Path,
+    fixed_root: Path,
+    history_root: Path,
+    publication_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Validate and serialize one formal archive publication per archive name."""
+
+    staging_root = staging_root.resolve()
+    fixed_root = fixed_root.resolve()
+    history_root = history_root.resolve()
+    state_path = _promotion_state_path(fixed_root)
+    with _archive_promotion_lock(fixed_root):
+        _recover_interrupted_promotion(fixed_root)
+        receipt = _promote_fixed_archive_unlocked(
+            staging_root,
+            fixed_root,
+            history_root,
+            publication_context,
+        )
+        try:
+            state_path.unlink(missing_ok=True)
+        except OSError:
+            # The pointer is already authoritative. A stale committed marker is
+            # harmless and will be cleared by the next recovery pass.
+            pass
+        return receipt
 
 
 class IncrementalArchivePublisher:
