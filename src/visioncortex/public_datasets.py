@@ -26,14 +26,23 @@ def _sha256(path: Path) -> str:
 
 
 def _require_local_destination(path: Path) -> Path:
+    lexical = path.expanduser().absolute()
     resolved = path.resolve()
-    normalized = resolved.as_posix().casefold()
+    normalized_candidates = (
+        lexical.as_posix().casefold(),
+        resolved.as_posix().casefold(),
+    )
     forbidden = (
         "/home/x1/桌面/nas",
+        "/mnt/realityloop-nas",
         "/visioncortexexperimentarchive",
         "/visioncortexexperimentcache",
     )
-    if any(marker in normalized for marker in forbidden):
+    if any(
+        marker in candidate
+        for candidate in normalized_candidates
+        for marker in forbidden
+    ):
         raise RuntimeError(f"Public datasets require a local non-NAS path: {resolved}")
     return resolved
 
