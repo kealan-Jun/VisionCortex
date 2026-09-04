@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import gc
 import threading
 import time
 from importlib.metadata import PackageNotFoundError, version
@@ -17,6 +18,23 @@ SEGMENTATION_SCHEMA = "visioncortex-sam2-participant-continuity/1"
 _MODEL_CACHE: dict[tuple[str, ...], dict[str, Any]] = {}
 _MODEL_LOCK = threading.RLock()
 _VALIDATED_ASSETS: set[tuple[str, str]] = set()
+
+
+def release_temporal_segmentation_model_cache() -> int:
+    """Release cached SAM2 predictors between events on low-memory hosts."""
+
+    with _MODEL_LOCK:
+        released = len(_MODEL_CACHE)
+        _MODEL_CACHE.clear()
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass
+    return released
 
 
 def _sha256(path: Path) -> str:
@@ -160,16 +178,20 @@ def _sample_clip(
         seed_position = source_indices.index(seed_source_index)
         output_dir.mkdir(parents=True, exist_ok=True)
         output_shape: tuple[int, int] | None = None
+        next_source_index = 0
         for output_index, source_index in enumerate(source_indices):
-            if output_index == seed_position:
-                frame = seed_frame.copy()
-            else:
-                capture.set(cv2.CAP_PROP_POS_FRAMES, source_index)
+            # Seeking by frame number can land beyond EOF for valid fractional-
+            # rate H.264 clips with nonzero start PTS. Decode in ordinal order,
+            # retaining only the requested sample instead of trusting seeks.
+            while next_source_index <= source_index:
                 ok, frame = capture.read()
                 if not ok or frame is None:
                     raise RuntimeError(
-                        f"SAM2 frame decode failed: {clip_path} frame={source_index}"
+                        f"SAM2 frame decode failed: {clip_path} frame={next_source_index}"
                     )
+                next_source_index += 1
+            if output_index == seed_position:
+                frame = seed_frame.copy()
             if output_shape is None:
                 output_shape = (int(frame.shape[0]), int(frame.shape[1]))
             elif frame.shape[:2] != output_shape:
@@ -331,6 +353,7 @@ def audit_participant_continuity(
 
     fingerprint_payload = {
         "schema_version": SEGMENTATION_SCHEMA,
+        "frame_decode_policy": "sequential_ordinal_v2",
         "event_id": event_id,
         "view_id": view_id,
         "action_type": action_type,
@@ -504,6 +527,7 @@ def audit_participant_continuity(
         "token_usage": 0,
         "sampled_frame_count": len(source_indices),
         "source_frame_indices": source_indices,
+        "frame_decode_policy": "sequential_ordinal_v2",
         "seed_sample_position": seed_position,
         "minimum_presence_ratio": minimum_presence,
         "objects": continuity_objects,

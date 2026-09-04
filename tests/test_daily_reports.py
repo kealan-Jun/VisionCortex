@@ -5,6 +5,20 @@ import pytest
 
 from labvision_evidence.daily_reports import build_daily_report, evaluate_daily_report
 from labvision_evidence.schemas import RunSummary, ViewRole
+from labvision_evidence.report_presentations import _headline_status
+
+
+@pytest.mark.parametrize("quality,human,expected", [
+    ({"passed": False, "status": "structural_only"}, "pending", "待质量复核"),
+    ({}, "pending", "待质量复核"),
+    ({"passed": True}, "pending", "自动检查通过，待人工复核"),
+    ({"passed": True}, "rejected", "人工复核未通过"),
+    ({"passed": True}, "approved", "证据验收通过"),
+])
+def test_structure_pass_does_not_imply_quality_approval(quality, human, expected):
+    report = {"overview": {"evidence_package_eval_passed": True},
+              "quality_acceptance": quality, "human_review": {"status": human}}
+    assert _headline_status(report)[0] == expected
 
 
 def _summary_with_post_curation_rejection() -> RunSummary:

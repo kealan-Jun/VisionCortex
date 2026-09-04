@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any, Sequence
 
+from .action_semantics import action_participant_visibility
 from .recall_evaluation import (
     evaluate_key_event_recall as evaluate_key_event_recall,
 )
@@ -238,6 +239,17 @@ def validate_experiment_and_material_quality(
                 if isinstance(item, dict)
             )
         )
+        visual_review = annotation.get("participant_visual_review") or {}
+        if visual_review:
+            annotation_passed = annotation_passed and bool(
+                visual_review.get("status") == "completed"
+                and int(visual_review.get("localized_view_count") or 0) > 0
+                and all(
+                    item.get("status") == "completed"
+                    and int(item.get("localized_view_count") or 0) > 0
+                    for item in visual_review.get("reviews") or []
+                )
+            )
         rendered_classes_by_view = {
             str(view_id): {
                 str(class_name)
@@ -265,64 +277,15 @@ def validate_experiment_and_material_quality(
         interaction_pair_annotation_passed = bool(
             interaction_pair_view_ids
         )
-        normalized_event_objects = {
-            str(class_name)
-            .strip()
-            .lower()
-            .replace("-", "_")
-            .replace(" ", "_")
-            for class_name in event.objects
-        }
-        expected_closure_classes = normalized_event_objects & {
-            "bottle_cap",
-            "tube_cap",
-        }
-        if not expected_closure_classes:
-            # A container-state claim without an explicit closure participant is
-            # itself incomplete.  Keep both supported closure classes here so
-            # the final-view evidence can still prove the physical slot, while
-            # preventing an arbitrary bottle box from satisfying the claim.
-            expected_closure_classes = {"bottle_cap", "tube_cap"}
-        expected_container_classes: set[str] = set()
-        if "bottle_cap" in expected_closure_classes:
-            expected_container_classes.update(
-                {
-                    "container",
-                    "sample_bottle",
-                    "sample_bottle_blue",
-                    "reagent_bottle",
-                }
-            )
-        if "tube_cap" in expected_closure_classes:
-            expected_container_classes.update({"container", "tube"})
-        state_transition_complete_view_ids = sorted(
-            view_id
-            for view_id, classes in rendered_classes_by_view.items()
-            if (
-                classes & actor_classes
-                and classes & expected_closure_classes
-                and classes & expected_container_classes
-            )
+        action_visibility = action_participant_visibility(
+            event.action_type, event.objects, rendered_classes_by_view
         )
-        actor_required_for_action = event.action_type in {
-            ActionType.HAND_OBJECT_CONTACT,
-            ActionType.CONTAINER_STATE_CHANGE,
-            ActionType.DEVICE_PANEL_OPERATION,
-            ActionType.PIPETTE_TRANSFER_OPERATION,
-        }
-        if event.action_type == ActionType.CONTAINER_STATE_CHANGE:
-            action_participant_visibility_passed = bool(
-                state_transition_complete_view_ids
-            )
-        else:
-            action_participant_visibility_passed = bool(
-                manipulated_object_visible
-                and (
-                    interaction_pair_annotation_passed
-                    if actor_required_for_action
-                    else True
-                )
-            )
+        action_participant_visibility_passed = bool(action_visibility["passed"])
+        state_transition_complete_view_ids = (
+            action_visibility["complete_view_ids"]
+            if event.action_type == ActionType.CONTAINER_STATE_CHANGE
+            else []
+        )
         participant_only_annotation_count += int(annotation_present)
         participant_only_annotation_pass_count += int(annotation_passed)
         interaction_pair_annotation_pass_count += int(
@@ -355,13 +318,13 @@ def validate_experiment_and_material_quality(
                     if annotation_present
                     else None
                 ),
-                "action_participant_visibility_rule": (
-                    "actor_closure_container_same_view"
-                    if event.action_type == ActionType.CONTAINER_STATE_CHANGE
-                    else "actor_and_manipulated_object"
-                    if actor_required_for_action
-                    else "manipulated_object"
-                ),
+                "action_participant_visibility_rule": action_visibility["rule"],
+                "action_participant_complete_view_ids": action_visibility[
+                    "complete_view_ids"
+                ],
+                "action_participant_missing_slots": action_visibility[
+                    "missing_slots"
+                ],
                 "action_participant_visibility_passed": (
                     action_participant_visibility_passed
                     if annotation_present
@@ -504,10 +467,11 @@ def validate_experiment_and_material_quality(
             ),
             "action_participant_visibility_contract": (
                 "Container-state events require actor, the corresponding closure, "
-                "and the corresponding container in the same final view. Contact, "
-                "device-panel, and pipette-transfer events require actor plus "
-                "manipulated object; object or liquid movement requires the "
-                "manipulated object and may be actor-occluded."
+                "and the corresponding container in the same final view. Device "
+                "panel events require actor plus device; pipette-transfer events "
+                "require actor plus pipette; contact events require actor plus a "
+                "claimed object. Object or liquid movement requires the claimed "
+                "object and may be actor-occluded."
             ),
             "participant_only_annotation_is_acceptance_gate": bool(
                 require_participant_only_annotations

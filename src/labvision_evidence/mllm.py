@@ -6,6 +6,7 @@ import os
 import random
 import re
 import time
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -14,12 +15,22 @@ import httpx
 from .schemas import ActionType, EvidenceEvent, ExperimentGroup, ExperimentSegment
 
 
-EVENT_SYSTEM_PROMPT = """你是化学湿实验视频证据审计模型。你会收到严格对齐的第一人称和第三人称动作前、峰值、动作后关键帧，以及传统 CV 证据。
+OBJECT_IDENTITY_RULES = """物体辨识规则，适用于当前步骤、下一步骤、交互列表、物理变化及摘要的全部描述：
+先区分被操作的物体、外包装和包装内物。白色外观、透明袋或包装鼓起，不能单独证明里面是粉末、液体或试剂；纸张、耗材和包装反光都可能造成相似外观。
+有可读标签时，可以写“标有某文字的包装”，不能把标签名称当作已验证的实际内容物。内容形态须有独立可见依据，例如散落颗粒、连续液面或被抽出的纸片；没有依据时写“包装”或“内容物不可辨认”，不得猜测物质成分。
+同类对象可能有多个实例。仅描述与手或工具实际交互的实例；把背景物体与被操作物体分开，不得根据邻近、颜色相似或既有CV类别补写接触。
+逐只手核对直接接触：双手出现在画面中不等于双手都在操作同一对象。只看见一只手按键时就描述该只手，不能概括成“双手按键”或给另一只手补记面板接触；左右无法辨明时使用 unknown。
+"""
+
+
+EVENT_SYSTEM_PROMPT = OBJECT_IDENTITY_RULES + """你是化学湿实验视频证据审计模型。你会收到第一人称和第三人称片段的时序采样，以及传统 CV 证据。
+sample_scope=clip_timeline 的图片仅表示片段采样位置，clip_middle 不是动作峰值，也不代表 key_global_ms。nominal_clip_time_ms 是该片段内的近似时间，不能当全局时间。
+sample_scope=selected_keyframe 的图片才是选定关键画面，requested_global_ms 是请求时刻，decoded_global_ms 是解码定位目标，帧的精确PTS与跨视角同步精度未在此验证。仅在收到这类图片时填写 selected_keyframe_observations，且只记录该张图中实际可见的交互；不得把片段较早或较晚的接触套用到关键帧。未收到时返回空列表，不得猜测。current_step 和 hand_object_interactions 描述整个片段，不能因此宣称全部对象在关键帧同时被操作。
 只描述画面可观察事实，不补写未出现的试剂名、剂量、读数或实验目的。第一/第三人称冲突时必须指出。
 候选动作是否存在，与两个视角是否拍到同一操作者/同一对象，是两个独立判断：只要至少一个视角清晰直接证明候选动作，就按该动作填写 action_type_confirmed，并在 candidate_action_support_by_view 对该视角标 true；另一个视角拍到并行动作时在 cross_view_consistency 标 conflict，不得仅因视角冲突把已清晰可见的动作改成 unknown。
 液体移动是高风险类别，必须 fail-closed：只有看到液流/液面变化、伴随可见液体变化的倾倒，或完整的移液闭环才能确认。移液闭环必须清晰看到源容器接触、抽离/运输、目标容器接触，再加可见的排液/推杆变化；仅当 cv_observability.measurements.dual_role_transfer_sequence_verified 为 true 且故事板未反证时，才可用结构化双视角路径替代不可见的推杆细节，并把 dual_role_cv_sequence_verified 填 true。cv_observability 中的 repeated_pipette_path 只是选择密集审阅主视角的召回候选，跟踪碎片不能证明重复循环或液体移动。容器倾斜姿态、移液器靠近、仅伸入一个容器或重复轨迹候选都不能单独确认液体已移动。
 pipette_transfer_operation 与 liquid_movement 是两个证据层级。只有同一个连续时序中清晰看到移液器吸头进入源容器、抽离/运输、再进入一个不同目标容器，才可确认 pipette_transfer_operation；它只声明可见的源到目标移液器操作链，不声明微量液体实际移动可见。此时 proof_type 必须为 pipette_operational_transfer_chain，source_contact_visible、withdrawal_or_transport_visible、target_contact_visible 必须都为 true；液体和柱塞相关字段仍须按画面如实填写。若液体候选只能证明该操作链，必须 relabel_suggested 为 pipette_transfer_operation，而不是放宽 liquid_movement。
-必须按时间比较动作前、峰值和动作后；单帧中手与物体框接近不能直接证明接触，设备框出现不能直接证明面板操作，工具和容器同时出现不能直接证明液体转移。
+必须按采样顺序比较可见状态变化；单帧中手与物体框接近不能直接证明接触，设备框出现不能直接证明面板操作，工具和容器同时出现不能直接证明液体转移。
 CV 可观测性收据会明确21类检测器能直接证明什么、仍缺什么。不要把收据中的“间接候选”复述成已观察事实。
 输出单个 JSON 对象，字段固定为：
 {
@@ -35,7 +46,8 @@ CV 可观测性收据会明确21类检测器能直接证明什么、仍缺什么
   "action_proof": {"proof_type":"visible_liquid_flow/visible_liquid_level_change/pour_with_visible_liquid_change/pipette_closed_transfer_cycle/pipette_operational_transfer_chain/posture_only/direct_other/none", "visible_liquid_or_level_change":false, "source_contact_visible":false, "withdrawal_or_transport_visible":false, "target_contact_visible":false, "release_or_plunger_change_visible":false, "dual_role_cv_sequence_verified":false, "container_before_state_visible":false, "container_after_state_visible":false, "container_state_transition_completed":false, "reason":"可审计的直接证据"},
   "cross_view_consistency": "consistent/partial/conflict/single_view",
   "evidence_verdict": "confirmed/relabel_suggested/uncertain/rejected",
-  "temporal_support": {"before":"动作前可见事实", "peak":"峰值可见事实", "after":"动作后可见事实"},
+  "temporal_support": {"early":"片段较早采样事实", "middle":"片段中部采样事实，不代表动作峰值", "late":"片段较晚采样事实"},
+  "selected_keyframe_observations": [{"view_id":"提供的单视角ID", "decoded_global_ms":0, "directly_interacting_objects":["当前关键帧直接交互的对象"], "observation":"只描述此关键帧中可见的事实", "uncertainties":["不可辨认或被遮挡的交互"]}],
   "confidence": 0.0,
   "uncertainties": ["无法确认项"]
 }
@@ -44,7 +56,7 @@ evidence_verdict 的含义只针对候选动作本身：至少一个视角直接
 禁止输出 Markdown。"""
 
 
-GROUP_SYSTEM_PROMPT = """你是化学湿实验有界视频的步骤级理解与命名模型。输入是一个有界实验组按时间顺序采样的第一/第三人称对齐故事板、原子边界和传统 CV 事件。
+GROUP_SYSTEM_PROMPT = OBJECT_IDENTITY_RULES + """你是化学湿实验有界视频的步骤级理解与命名模型。输入是一个有界实验组按时间顺序采样的第一/第三人称对齐故事板、原子边界和传统 CV 事件。
 任务：
 1. 判断这是单个独立实验，还是多个无中断承接的连续实验；时间接近本身不代表连续，必须看到人员、对象或物理状态承接。
 2. 给出具体、保守的实验名称，例如“固体称量实验”“移液实验”“固体称量与移液连续实验”，禁止使用“实验片段一”等泛名。
@@ -133,6 +145,71 @@ def _usage(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def normalize_uncalibrated_hand_identity(result: dict[str, Any]) -> dict[str, Any]:
+    """Keep action evidence without claiming uncalibrated operator handedness.
+
+    Camera-left and operator-left are not interchangeable. The current input
+    contract has no calibrated hand identity. Preserve provider wording for
+    audit and expose unknown identity rather than conflicting left/right tags.
+    """
+    if result.get("hand_identity_review") or result.get("status") != "completed":
+        return result
+    normalized = deepcopy(result)
+    originals: dict[str, str] = {}
+
+    def neutralize(value: Any, path: str) -> Any:
+        if isinstance(value, str):
+            text = re.sub(r"(?:左|右)手(?!边|侧|柄)", "手", value)
+            text = re.sub(r"\b(?:left|right)[ -]hand\b(?![ -]side)", "hand", text, flags=re.IGNORECASE)
+            if text != value:
+                originals[path] = value
+            return text
+        if isinstance(value, list):
+            return [neutralize(item, f"{path}/{index}") for index, item in enumerate(value)]
+        if isinstance(value, dict):
+            return {key: neutralize(item, f"{path}/{key}") for key, item in value.items()}
+        return value
+
+    for key in ("current_step", "next_step", "objects", "physical_change",
+                "per_view_observations", "selected_keyframe_observations", "candidate_action_support_by_view",
+                "confirmed_action_support_by_view", "action_proof", "temporal_support",
+                "uncertainties", "steps", "overall_summary", "experiment_name",
+                "experiment_name_en", "atomic_experiments"):
+        if key in normalized:
+            normalized[key] = neutralize(normalized[key], key)
+    original_interactions = deepcopy(result.get("hand_object_interactions") or [])
+    interactions = []
+    grouped = {}
+    for interaction in original_interactions:
+        if not isinstance(interaction, dict):
+            interactions.append(interaction)
+            continue
+        item = neutralize(deepcopy(interaction), "hand_object_interactions")
+        item["hand"] = "unknown"
+        # Repeated cross-view assignments do not establish two different hands.
+        # The narrative's explicit one-hand/two-hand count remains unchanged.
+        key = str(item.get("object") or "")
+        if key and key in grouped:
+            prior = grouped[key]
+            contacts = list(dict.fromkeys(str(prior.get("contact") or "").split("/") + str(item.get("contact") or "").split("/")))
+            prior["contact"] = "/".join(value for value in contacts if value)
+        else:
+            interactions.append(item)
+            if key:
+                grouped[key] = item
+    if "hand_object_interactions" in normalized:
+        normalized["hand_object_interactions"] = interactions
+    if originals or interactions != original_interactions:
+        normalized["hand_identity_review"] = {
+            "status": "uncalibrated_identity",
+            "policy": "Retain visible interactions; do not assert operator left/right from screen position",
+            "original_hand_object_interactions": original_interactions,
+            "original_text_fields": originals,
+            "human_ground_truth": False,
+        }
+    return normalized
+
+
 class ArkAnalyzer:
     def __init__(self, config: dict[str, Any]):
         self.config = config["mllm"]
@@ -219,7 +296,7 @@ class ArkAnalyzer:
                         "attempts": attempt + 1,
                     }
                 )
-                return result
+                return normalize_uncalibrated_hand_identity(result)
             except (httpx.HTTPError, ValueError, json.JSONDecodeError) as exc:
                 last_error = exc
                 if (
@@ -283,6 +360,7 @@ class ArkAnalyzer:
                 "supporting_views": event.supporting_views,
                 "audit_reason": event.audit_reason,
                 "cv_observability": event.observability,
+                "review_image_labels": [label for label, _ in image_paths[:max_images]],
                 "task": "逐视角核实当前细步骤，并描述画面支持的下一步",
             },
             image_paths,

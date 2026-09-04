@@ -244,8 +244,52 @@ def test_container_state_annotation_requires_actor_closure_and_container_same_vi
     ] == []
 
 
+def test_device_panel_annotation_requires_device_identity_in_same_view():
+    candidate = event(1, ActionType.DEVICE_PANEL_OPERATION)
+    candidate.objects = ["gloved_hand", "tube", "tube_rack"]
+    candidate.observability["key_material_annotation"] = {
+        "mode": "event_participants_only",
+        "views": {
+            "fp01": {
+                "rendered_classes": ["gloved_hand", "tube"],
+                "extraneous_rendered_classes": [],
+            },
+            "tp01": {
+                "rendered_classes": ["gloved_hand", "tube_rack"],
+                "extraneous_rendered_classes": [],
+            },
+        },
+    }
+
+    report = validate_experiment_and_material_quality(
+        [group("GROUP-1", 1000, 2000, "independent", 1)],
+        [candidate],
+        None,
+    )
+
+    check = report["key_materials"]["events"][0]
+    assert report["passed"] is False
+    assert check["action_participant_visibility_rule"] == "actor_device_same_view"
+    assert check["action_participant_missing_slots"] == ["event_device_object"]
+
+    candidate.objects = ["gloved_hand", "balance"]
+    candidate.observability["key_material_annotation"]["views"]["fp01"][
+        "rendered_classes"
+    ] = ["gloved_hand", "balance"]
+    report = validate_experiment_and_material_quality(
+        [group("GROUP-1", 1000, 2000, "independent", 1)],
+        [candidate],
+        None,
+    )
+
+    check = report["key_materials"]["events"][0]
+    assert report["passed"] is True
+    assert check["action_participant_complete_view_ids"] == ["fp01"]
+
+
 def test_object_movement_allows_actor_occlusion_when_object_is_visible():
     candidate = event(1, ActionType.OBJECT_MOVEMENT)
+    candidate.objects = ["pipette"]
     candidate.observability["key_material_annotation"] = {
         "mode": "event_participants_only",
         "views": {

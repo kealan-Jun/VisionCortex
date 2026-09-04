@@ -416,3 +416,40 @@ def test_negated_and_positive_liquid_mentions_do_not_mask_each_other():
 
     assert report["passed"] is False
     assert report["violations"][0]["unsupported_action_type"] == "liquid_movement"
+
+
+def test_long_unobserved_action_enumeration_is_not_positive_claims():
+    report = validate_final_step_action_consistency(
+        [
+            _group(
+                "整个有界段内未观察到包装开启、内容物取出、液体或固体转移、"
+                "天平面板操作或可读称量读数"
+            )
+        ],
+        [_event()],
+    )
+
+    assert report["passed"] is True
+
+
+def test_no_clear_readout_is_not_a_positive_panel_claim():
+    report = validate_final_step_action_consistency(
+        [_group("截至片段结束，天平显示屏无清晰可读读数")],
+        [_event()],
+    )
+
+    assert report["passed"] is True
+
+
+def test_unconfirmed_long_list_with_open_close_is_not_positive_claims():
+    report = validate_final_step_action_consistency(
+        [
+            _group(
+                "由于未确认面板操作、容器状态变化和液体转移事件，"
+                "也无法确认称量读数、开合盖或物料转移是否完成"
+            )
+        ],
+        [_event()],
+    )
+
+    assert report["passed"] is True

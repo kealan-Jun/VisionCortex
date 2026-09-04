@@ -23,7 +23,7 @@ from urllib.parse import quote
 
 import yaml
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 
@@ -39,6 +39,14 @@ from .config import load_config
 from .device_registry import load_device_registry, resolve_view_role
 from .input_preflight import preflight_manifest_inputs
 from .input_seal import build_input_seal, verify_input_seal, write_input_seal
+from .model_certification import audit_production_model_certification
+from .nas_recordings import (
+    create_selection,
+    enabled as directory_ingest_enabled,
+    scan_recordings,
+    selection_path,
+    validate_selection,
+)
 from .indexing import (
     INDEX_DB_NAME,
     INDEX_MANIFEST_NAME,
@@ -58,6 +66,7 @@ from .storage import (
     initialize_nas_archive,
     prepare_from_nas_index,
     promote_fixed_archive,
+    run_staging_roots,
     safe_archive_name,
 )
 from .upload_sessions import StorageReservationError, UploadSessionStore
@@ -79,8 +88,10 @@ async def _lifespan(_: FastAPI):
         _recover_jobs_from_archive_receipts(settings)
         _recover_orphaned_tasks()
         _start_queue_worker()
+        _start_nas_monitor(settings)
         yield
     finally:
+        _stop_nas_monitor()
         _stop_queue_worker()
 
 
@@ -94,12 +105,17 @@ app.mount("/ui", StaticFiles(directory=_web_root), name="ui")
 _lock = threading.Lock()
 _gpu_job_lock = threading.Lock()
 _upload_finalize_lock = threading.Lock()
+_nas_batch_submission_lock = threading.Lock()
 _runs: dict[str, dict[str, Any]] = {}
 _persistent_queue: DurableRunQueue | None = None
 _upload_sessions: UploadSessionStore | None = None
 _queue_thread: threading.Thread | None = None
 _queue_stop = threading.Event()
 _queue_wakeup = threading.Event()
+_nas_monitor_lock = threading.Lock()
+_nas_monitor_stop = threading.Event()
+_nas_monitor_thread: threading.Thread | None = None
+_nas_monitor_snapshot: dict[str, Any] | None = None
 _queue_worker_id = f"web-{os.getpid()}-{uuid.uuid4().hex[:8]}"
 _QUEUE_LEASE_SECONDS = 60.0
 _QUEUE_LEASE_RENEW_SECONDS = 15.0
@@ -122,6 +138,106 @@ _RUNTIME_HEARTBEAT_FILES = (
     "source_progress.json",
     "run_metrics_live.json",
 )
+
+
+def _nas_monitor_receipt_path(settings: dict[str, Any]) -> Path:
+    return (
+        Path(settings["storage"]["local_runtime_root"])
+        / "state"
+        / "nas-recording-monitor.json"
+    )
+
+
+def _publish_nas_monitor_snapshot(
+    settings: dict[str, Any], payload: dict[str, Any]
+) -> None:
+    global _nas_monitor_snapshot
+    with _nas_monitor_lock:
+        _nas_monitor_snapshot = payload
+    path = _nas_monitor_receipt_path(settings)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".partial")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    os.replace(temporary, path)
+
+
+def _nas_monitor_loop(settings: dict[str, Any]) -> None:
+    failures = 0
+    last_success: dict[str, Any] | None = None
+    interval = max(
+        5.0,
+        float((settings.get("collection_ingest") or {}).get("poll_seconds", 30)),
+    )
+    while not _nas_monitor_stop.is_set():
+        observed_at = datetime.now().astimezone().isoformat()
+        try:
+            inventory = scan_recordings(settings)
+            failures = 0
+            last_success = inventory | {
+                "monitor": {
+                    "status": "watching",
+                    "observed_at": observed_at,
+                    "poll_seconds": interval,
+                    "consecutive_failures": 0,
+                }
+            }
+            _publish_nas_monitor_snapshot(settings, last_success)
+        except (OSError, ValueError, TypeError) as exc:
+            failures += 1
+            degraded = dict(
+                last_success
+                or {
+                    "mode": "directory_metadata",
+                    "recordings": [],
+                    "recording_count": 0,
+                    "batches": [],
+                    "errors": [],
+                    "truncated": False,
+                }
+            )
+            degraded["monitor"] = {
+                "status": "retrying",
+                "observed_at": observed_at,
+                "poll_seconds": interval,
+                "consecutive_failures": failures,
+                "message": "NAS 暂时不可用，后台会继续重试。",
+                "error_type": type(exc).__name__,
+            }
+            try:
+                _publish_nas_monitor_snapshot(settings, degraded)
+            except OSError:
+                with _nas_monitor_lock:
+                    global _nas_monitor_snapshot
+                    _nas_monitor_snapshot = degraded
+        _nas_monitor_stop.wait(interval)
+
+
+def _start_nas_monitor(settings: dict[str, Any]) -> None:
+    global _nas_monitor_snapshot, _nas_monitor_thread
+    if not directory_ingest_enabled(settings):
+        return
+    if _nas_monitor_thread is not None and _nas_monitor_thread.is_alive():
+        return
+    with _nas_monitor_lock:
+        _nas_monitor_snapshot = None
+    _nas_monitor_stop.clear()
+    _nas_monitor_thread = threading.Thread(
+        target=_nas_monitor_loop,
+        args=(settings,),
+        name="nas-recording-monitor",
+        daemon=True,
+    )
+    _nas_monitor_thread.start()
+
+
+def _stop_nas_monitor() -> None:
+    global _nas_monitor_thread
+    _nas_monitor_stop.set()
+    if _nas_monitor_thread is not None:
+        _nas_monitor_thread.join(timeout=5)
+    _nas_monitor_thread = None
 
 
 def _runtime_activity_receipt(
@@ -170,11 +286,16 @@ def _recover_orphaned_tasks() -> None:
     if not root.is_dir():
         return
     status_paths = list(root.glob("*/JSON-Config-Files/pipeline_status.json"))
-    staging_root = root / ".VisionCortex-Run-Staging"
-    if staging_root.is_dir():
-        status_paths.extend(
-            staging_root.glob("*/*/JSON-Config-Files/pipeline_status.json")
-        )
+    settings = _settings()
+    resolved_settings = {
+        **settings,
+        "storage": {**settings.get("storage", {}), "archive_root": str(root)},
+    }
+    for staging_root in run_staging_roots(resolved_settings):
+        if staging_root.is_dir():
+            status_paths.extend(
+                staging_root.glob("*/*/JSON-Config-Files/pipeline_status.json")
+            )
     for status_path in status_paths:
         payload = _read_json(status_path, {}) or {}
         stage = str(payload.get("stage") or "")
@@ -267,6 +388,56 @@ async def record_web_ingest_start(request: Request, call_next):
     return await call_next(request)
 
 
+@app.middleware("http")
+async def require_analysis_certification(request: Request, call_next):
+    path = request.url.path
+    starts_analysis = (
+        path in {"/api/runs", "/api/runs/from-paths", "/api/upload-sessions"}
+        or bool(re.fullmatch(r"/api/(collections|benchmarks)/[^/]+/runs", path))
+        or bool(re.fullmatch(r"/api/nas-batches/[^/]+/runs", path))
+        or bool(re.fullmatch(r"/api/upload-sessions/[^/]+/finalize", path))
+    )
+    if request.method == "POST" and starts_analysis:
+        settings = _settings()
+        if settings["storage"].get("sync_to_nas"):
+            try:
+                audit_production_model_certification(settings)
+            except (OSError, RuntimeError, ValueError, KeyError, TypeError):
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "detail": {
+                            "code": "model_certification_required",
+                            "message": "分析模型尚未完成质量验收，当前可浏览和整理 NAS 素材。",
+                        }
+                    },
+                )
+            if not _nas_storage_available(settings):
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "detail": {
+                            "code": "nas_unavailable",
+                            "message": "NAS 归档或缓存目录不可用，请检查连接后重试。",
+                        }
+                    },
+                )
+    return await call_next(request)
+
+
+def _nas_storage_available(settings: dict[str, Any]) -> bool:
+    """A readiness probe must never create replacement storage directories."""
+
+    try:
+        return all(
+            Path(settings["storage"][key]).is_dir()
+            and os.access(settings["storage"][key], os.W_OK | os.X_OK)
+            for key in ("archive_root", "local_cache_root")
+        )
+    except OSError:
+        return False
+
+
 def _safe_file_name(value: str, fallback_stem: str = "file") -> str:
     original = Path(value).name
     suffix = Path(original).suffix
@@ -333,6 +504,8 @@ def _renew_queue_lease(
 def _dispatch_persisted_job(job: QueuedRunJob) -> None:
     payload = job.payload
     settings = payload["settings"]
+    if settings["storage"].get("sync_to_nas"):
+        audit_production_model_certification(settings)
     if job.kind == "run":
         _execute_now(
             job.run_id,
@@ -1098,15 +1271,15 @@ def _recover_jobs_from_archive_receipts(settings: dict[str, Any]) -> None:
     receipt_paths = sorted(
         root.glob("*/JSON-Config-Files/Input-Manifests/queue_recovery.json")
     )
-    staging_root = root / ".VisionCortex-Run-Staging"
-    if staging_root.is_dir():
-        receipt_paths.extend(
-            sorted(
-                staging_root.glob(
-                    "*/*/JSON-Config-Files/Input-Manifests/queue_recovery.json"
+    for staging_root in run_staging_roots(settings):
+        if staging_root.is_dir():
+            receipt_paths.extend(
+                sorted(
+                    staging_root.glob(
+                        "*/*/JSON-Config-Files/Input-Manifests/queue_recovery.json"
+                    )
                 )
             )
-        )
     for receipt_path in receipt_paths:
         payload = _read_json(receipt_path, {}) or {}
         if payload.get("schema_version") != "visioncortex-queue-recovery/1":
@@ -1367,11 +1540,32 @@ def _stage_receipts_from_root(root: Path) -> list[dict[str, Any]]:
         for raw in payload.get("artifacts") or []:
             artifact_path = Path(str(raw))
             resolved = artifact_path if artifact_path.is_absolute() else root / artifact_path
+            if artifact_path.is_absolute():
+                # Stage receipts are written before the staging tree is promoted.
+                # Resolve their archive-relative suffix against the final archive.
+                parts = artifact_path.parts
+                for directory in ARCHIVE_DIRECTORIES:
+                    if directory not in parts:
+                        continue
+                    suffix = Path(*parts[parts.index(directory) :])
+                    promoted = root / suffix
+                    if promoted.exists():
+                        resolved = promoted
+                        break
+            relative_path = None
+            try:
+                relative_path = (
+                    resolved.resolve().relative_to(root.resolve()).as_posix()
+                )
+            except (OSError, ValueError):
+                pass
             artifacts.append(
                 {
                     "path": str(raw),
                     "name": artifact_path.name,
                     "available": resolved.exists(),
+                    "relative_path": relative_path,
+                    "kind": "directory" if resolved.is_dir() else "file",
                 }
             )
         receipts.append(
@@ -1472,15 +1666,12 @@ def _hydrate_run_snapshot(run: dict[str, Any]) -> dict[str, Any]:
 
 
 def _find_staging_run(settings: dict[str, Any], run_id: str) -> Path | None:
-    staging_root = Path(settings["storage"]["archive_root"]) / ".VisionCortex-Run-Staging"
-    if not staging_root.is_dir():
-        return None
-    matches = []
-    for path in staging_root.glob("*/*/JSON-Config-Files/pipeline_status.json"):
-        archive_run_root = path.parent.parent
-        if archive_run_root.name == run_id:
-            matches.append(archive_run_root)
-    return matches[0] if matches else None
+    for staging_root in run_staging_roots(settings):
+        for path in staging_root.glob("*/*/JSON-Config-Files/pipeline_status.json"):
+            archive_run_root = path.parent.parent
+            if archive_run_root.name == run_id:
+                return archive_run_root
+    return None
 
 
 def _file_url(archive_name: str, relative: str | Path) -> str:
@@ -1791,6 +1982,8 @@ def _execute_index_collection_now(
         )
 
     try:
+        if directory_ingest_enabled(settings):
+            validate_selection(settings, source_experiment_id)
         record_collection_state(
             settings,
             source_experiment_id,
@@ -1971,21 +2164,38 @@ def health() -> dict[str, Any]:
     queue_stats = _persistent_queue.stats() if _persistent_queue is not None else None
     upload_stats = _upload_sessions.stats() if _upload_sessions is not None else None
     upload_policy = _upload_policy(settings)
-    storage_mode = "nas" if settings["storage"].get("sync_to_nas") else "local_development"
+    storage_mode = "nas" if settings["storage"].get("sync_to_nas") else "local"
     archive_root = _archive_root(settings)
     input_mode = (
-        "NAS 15-minute segments / zero-copy virtual timeline"
+        "NAS 采集批次 / zero-copy virtual timeline"
         if storage_mode == "nas"
         else "local files / zero-copy source references"
     )
+    analysis_ready = True
+    if storage_mode == "nas":
+        try:
+            audit_production_model_certification(settings)
+        except (OSError, RuntimeError, ValueError, KeyError, TypeError):
+            analysis_ready = False
+    analysis_blocker = "分析模型待质量验收" if not analysis_ready else None
+    if storage_mode == "nas" and not _nas_storage_available(settings):
+        analysis_ready = False
+        analysis_blocker = "NAS 归档或缓存目录不可用"
+    with _nas_monitor_lock:
+        monitor = dict((_nas_monitor_snapshot or {}).get("monitor") or {})
     return {
         "status": "ok",
+        "analysis_ready": analysis_ready,
+        "run_purpose": settings.get("project", {}).get(
+            "run_purpose", "production"
+        ),
+        "analysis_blocker": analysis_blocker,
         "storage_mode": storage_mode,
-        "archive_label": "NAS 正式归档" if storage_mode == "nas" else "本地开发归档",
+        "archive_label": "NAS 正式归档" if storage_mode == "nas" else "任务归档",
         "web_upload_retention_mode": settings["storage"].get(
             "web_upload_retention_mode", "local_and_nas"
         ),
-        "minimum_capacity": "6 views x 3 hours",
+        "capacity_policy": "dynamic_by_submitted_files",
         "view_count_policy": "dynamic",
         "minimum_cross_view_sources": 2,
         "large_uploads": {
@@ -2024,11 +2234,25 @@ def health() -> dict[str, Any]:
         },
         "collection_ingest": {
             "enabled": bool((settings.get("collection_ingest") or {}).get("enabled", True)),
-            "mode": "index_metadata_poll",
+            "mode": (
+                "directory_metadata"
+                if directory_ingest_enabled(settings)
+                else "index_metadata_poll"
+            ),
             "poll_seconds": float(
                 (settings.get("collection_ingest") or {}).get("poll_seconds", 30.0)
             ),
             "recursive_nas_scan": False,
+            "camera_directories": list(
+                (settings.get("collection_ingest") or {}).get(
+                    "camera_directories", []
+                )
+            ),
+            "monitor_status": monitor.get("status", "starting"),
+            "monitor_observed_at": monitor.get("observed_at"),
+            "monitor_consecutive_failures": int(
+                monitor.get("consecutive_failures") or 0
+            ),
             "index_csv": str(settings["storage"]["index_csv"]),
             "device_registry_path": settings["storage"].get("device_registry_path"),
         },
@@ -2261,6 +2485,14 @@ def collection_detail(experiment_id: str) -> dict[str, Any]:
         raise HTTPException(404, str(exc)) from exc
     except (OSError, ValueError) as exc:
         raise HTTPException(503, f"无法读取采集批次索引: {exc}") from exc
+    if directory_ingest_enabled(settings):
+        try:
+            validate_selection(settings, experiment_id)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+        settings["storage"]["index_csv"] = str(
+            selection_path(settings, experiment_id, ".csv")
+        )
 
 
 def _search_archive_roots(archive_name: str | None) -> list[tuple[str, Path]]:
@@ -2767,13 +2999,161 @@ def _attach_archive_performance_display(
     }
 
 
+def _summarize_key_material_verification(
+    annotation: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+    records = [
+        item for item in annotation.get("records") or [] if isinstance(item, dict)
+    ]
+    by_event: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        event_id = str(record.get("event_id") or "").strip()
+        if event_id:
+            by_event.setdefault(event_id, []).append(record)
+    event_summaries: dict[str, dict[str, Any]] = {}
+    model_execution_counts: dict[str, int] = {}
+    for event_id, event_records in by_event.items():
+        views = []
+        event_models: set[str] = set()
+        confidences: list[float] = []
+        inference_seconds = 0.0
+        model_load_seconds = 0.0
+        statuses: list[str] = []
+        uncertainty_reasons: set[str] = set()
+        for record in event_records:
+            decision = record.get("selective_verification") or {}
+            status = str(decision.get("status") or "not_recorded")
+            statuses.append(status)
+            assessment = decision.get("assessment") or {}
+            uncertainty_reasons.update(str(item) for item in assessment.get("reasons") or [])
+            if status == "deferred_budget_exhausted":
+                uncertainty_reasons.add(str(decision.get("reason") or status))
+            models = ["closed_set_yolo_tensorrt"]
+            supplement = record.get("open_vocabulary_supplement") or {}
+            if supplement.get("status") == "executed":
+                models.append("yolo_world_v2")
+                model_load_seconds += float(supplement.get("model_load_seconds") or 0.0)
+                inference_seconds += float(supplement.get("inference_seconds") or 0.0)
+            grounding = supplement.get("grounding_dino_fallback") or {}
+            if grounding.get("status") == "executed":
+                models.append("grounding_dino_base")
+                model_load_seconds += float(grounding.get("model_load_seconds") or 0.0)
+                inference_seconds += float(grounding.get("inference_seconds") or 0.0)
+            segmentation = record.get("temporal_participant_segmentation") or {}
+            if segmentation.get("status") == "completed":
+                models.append("sam2_temporal_participant")
+                inference_seconds += float(segmentation.get("inference_seconds") or 0.0)
+            liquid = record.get("liquid_semantic_sidecar") or {}
+            if liquid.get("status") == "completed":
+                models.append("labpics_pspnet_liquid_semantic")
+                inference_seconds += float(liquid.get("inference_seconds") or 0.0)
+            for item in record.get("rendered_detections") or []:
+                if item.get("confidence") is not None:
+                    confidences.append(float(item["confidence"]))
+            event_models.update(models)
+            for model in models:
+                model_execution_counts[model] = model_execution_counts.get(model, 0) + 1
+            views.append(
+                {
+                    "view_id": record.get("view_id"),
+                    "role_label": record.get("role_label"),
+                    "status": status,
+                    "models": models,
+                    "rendered_classes": record.get("rendered_classes") or [],
+                    "rendered_detections": record.get("rendered_detections") or [],
+                    "minimum_rendered_confidence": record.get(
+                        "minimum_rendered_confidence"
+                    ),
+                    "uncertainty_reasons": sorted(
+                        str(item) for item in assessment.get("reasons") or []
+                    ),
+                }
+            )
+        if "deferred_budget_exhausted" in statuses:
+            overall_status = "verification_deferred_budget_exhausted"
+        elif "admitted" in statuses:
+            overall_status = "secondary_verification_executed"
+        elif statuses and all(
+            item == "skipped_clear_closed_set_evidence" for item in statuses
+        ):
+            overall_status = "clear_closed_set_evidence"
+        else:
+            overall_status = "verification_recorded"
+        event_summaries[event_id] = {
+            "status": overall_status,
+            "models": sorted(event_models),
+            "view_count": len(views),
+            "views": views,
+            "confidence": {
+                "minimum": round(min(confidences), 6) if confidences else None,
+                "maximum": round(max(confidences), 6) if confidences else None,
+            },
+            "timing": {
+                "model_load_seconds": round(model_load_seconds, 6),
+                "inference_seconds": round(inference_seconds, 6),
+            },
+            "uncertain": bool(uncertainty_reasons),
+            "uncertainty_reasons": sorted(uncertainty_reasons),
+        }
+    selective = annotation.get("selective_verification") or {}
+    summary = {
+        "available": bool(annotation),
+        "mode": annotation.get("mode"),
+        "event_count": annotation.get("event_count", len(event_summaries)),
+        "rendered_view_count": annotation.get("rendered_view_count", len(records)),
+        "policy": selective.get("policy"),
+        "decision_status_counts": selective.get("decision_status_counts") or {},
+        "model_execution_counts": dict(sorted(model_execution_counts.items())),
+        "timing": {
+            "wall_seconds": selective.get("wall_seconds"),
+            "open_vocabulary_model_load_seconds": selective.get(
+                "open_vocabulary_model_load_seconds"
+            ),
+            "open_vocabulary_inference_seconds": selective.get(
+                "open_vocabulary_inference_seconds"
+            ),
+            "grounding_dino_model_load_seconds": selective.get(
+                "grounding_dino_model_load_seconds"
+            ),
+            "grounding_dino_inference_seconds": selective.get(
+                "grounding_dino_inference_seconds"
+            ),
+        },
+        "budget": selective.get("budget") or {},
+        "uncertain_event_count": sum(
+            item["uncertain"] for item in event_summaries.values()
+        ),
+        "source_copy_bytes": selective.get("source_copy_bytes", 0),
+        "ark_calls": selective.get("ark_calls", 0),
+        "token_usage": selective.get("token_usage", 0),
+    }
+    return summary, event_summaries
+
 @app.get("/api/archives/{archive_name}")
 def archive_detail(archive_name: str) -> dict[str, Any]:
     root = _resolve_archive(archive_name)
+    return _archive_detail_from_root(root, archive_name)
+
+@app.get("/api/staging-runs/{run_id}/archive")
+def staging_archive_detail(run_id: str) -> dict[str, Any]:
+    root = _resolve_staging_run(run_id)
+    return _archive_detail_from_root(root, root.parent.name, staging_run_id=run_id)
+
+def _archive_detail_from_root(
+    root: Path, archive_name: str, *, staging_run_id: str | None = None
+) -> dict[str, Any]:
+    def file_url(name: str, relative: str | Path) -> str:
+        return (
+            _staging_file_url(staging_run_id, relative)
+            if staging_run_id else _file_url(name, relative)
+        )
+
     index_manifest_path = root / "JSON-Config-Files" / INDEX_MANIFEST_NAME
     index_manifest = _read_json(index_manifest_path, {}) or {}
     package = _read_json(root / "JSON-Config-Files" / "evidence_package.json", {}) or {}
     metrics = _read_json(root / "JSON-Config-Files" / "run_metrics.json", {}) or {}
+    if not metrics:
+        metrics = _read_json(root / "JSON-Config-Files" / "run_metrics_live.json", {}) or {}
     acceptance = _read_json(root / "JSON-Config-Files" / "acceptance_report.json", {}) or {}
     quality_path = root / "JSON-Config-Files" / "quality_acceptance.json"
     quality_acceptance = _read_json(quality_path, {}) or {}
@@ -2783,6 +3163,13 @@ def archive_detail(archive_name: str) -> dict[str, Any]:
         root / "JSON-Config-Files" / "key_material_recall_eval.json"
     )
     key_material_recall_eval = _read_json(recall_eval_path, {}) or {}
+    final_annotation_path = (
+        root / "JSON-Config-Files" / "final_key_material_annotation.json"
+    )
+    final_annotation = _read_json(final_annotation_path, {}) or {}
+    key_material_verification, verification_by_event = (
+        _summarize_key_material_verification(final_annotation)
+    )
     _attach_archive_performance_display(metrics, acceptance)
     key_events = _read_json(
         root / "Key-Materials" / "Key-Materials-Model-Understanding.json", []
@@ -2796,6 +3183,11 @@ def archive_detail(archive_name: str) -> dict[str, Any]:
         else {}
     ) or {}
     package_groups = package.get("experiment_groups", [])
+    if not package_groups:
+        stage_groups = _read_json(
+            root / "JSON-Config-Files" / "experiment_group_understanding.json", {}
+        ) or {}
+        package_groups = stage_groups.get("groups", [])
     group_by_folder = {
         str(group.get("archive_folder")): group for group in package_groups
     }
@@ -2810,6 +3202,8 @@ def archive_detail(archive_name: str) -> dict[str, Any]:
         for folder in sorted(item for item in experiment_root.iterdir() if item.is_dir()):
             group = group_by_folder.get(folder.name, {})
             understanding = group.get("model_understanding") or {}
+            first_person = folder / "First-Person.mp4"
+            third_person = folder / "Third-Person.mp4"
             aligned = folder / "Aligned_First+Third.mp4"
             experiments.append(
                 {
@@ -2821,7 +3215,19 @@ def archive_detail(archive_name: str) -> dict[str, Any]:
                     "summary": understanding.get("overall_summary"),
                     "steps": understanding.get("steps") or [],
                     "uncertainties": understanding.get("uncertainties") or [],
-                    "aligned_video_url": _file_url(
+                    "first_person_video_url": file_url(
+                        archive_name,
+                        Path(archive_relative_posix(first_person, root)),
+                    )
+                    if first_person.is_file()
+                    else None,
+                    "third_person_video_url": file_url(
+                        archive_name,
+                        Path(archive_relative_posix(third_person, root)),
+                    )
+                    if third_person.is_file()
+                    else None,
+                    "aligned_video_url": file_url(
                         archive_name, Path(archive_relative_posix(aligned, root))
                     )
                     if aligned.is_file()
@@ -2848,9 +3254,21 @@ def archive_detail(archive_name: str) -> dict[str, Any]:
         normalized_events.append(
             {
                 **event,
-                "aligned_frame_url": _file_url(archive_name, frame["path"]) if frame else None,
-                "aligned_clip_url": _file_url(archive_name, clip["path"]) if clip else None,
+                "aligned_frame_url": file_url(archive_name, frame["path"]) if frame else None,
+                "aligned_clip_url": file_url(archive_name, clip["path"]) if clip else None,
                 "dual_view_material_ready": bool(frame and clip),
+                "verification": verification_by_event.get(
+                    str(event.get("event_id") or ""),
+                    {
+                        "status": "not_available_historical_archive",
+                        "models": [],
+                        "views": [],
+                        "uncertain": True,
+                        "uncertainty_reasons": [
+                            "final_key_material_annotation_not_available"
+                        ],
+                    },
+                ),
                 "experiment_group": {
                     "group_id": group.get("group_id") or event.get("parent_event_id"),
                     "name": group.get("experiment_name") or event.get("parent_event_id"),
@@ -2882,50 +3300,78 @@ def archive_detail(archive_name: str) -> dict[str, Any]:
         len(normalized_events) - dual_view_material_count,
     )
     links = {
-        "experiment_understanding": _file_url(
+        "experiment_understanding": file_url(
             archive_name, "JSON-Config-Files/Experiment-Groups-Step-Level-Analysis.json"
         ),
-        "key_material_understanding": _file_url(
+        "key_material_understanding": file_url(
             archive_name, "Key-Materials/Key-Materials-Model-Understanding.json"
         ),
-        "key_material_category_index": _file_url(
+        "key_material_category_index": file_url(
             archive_name, "Key-Materials/Key-Material-Category-Index.json"
         )
         if (root / "Key-Materials" / "Key-Material-Category-Index.json").is_file()
         else None,
-        "metrics": _file_url(archive_name, "JSON-Config-Files/run_metrics.json"),
-        "acceptance": _file_url(archive_name, "JSON-Config-Files/acceptance_report.json"),
-        "quality_acceptance": _file_url(
+        "metrics": file_url(archive_name, "JSON-Config-Files/run_metrics.json"),
+        "acceptance": file_url(archive_name, "JSON-Config-Files/acceptance_report.json"),
+        "quality_acceptance": file_url(
             archive_name, "JSON-Config-Files/quality_acceptance.json"
         ) if quality_path.is_file() else None,
-        "evidence_package_eval": _file_url(
+        "evidence_package_eval": file_url(
             archive_name, "JSON-Config-Files/evidence_package_eval.json"
         ) if evidence_eval_path.is_file() else None,
-        "key_material_recall_eval": _file_url(
+        "key_material_recall_eval": file_url(
             archive_name, "JSON-Config-Files/key_material_recall_eval.json"
         ) if recall_eval_path.is_file() else None,
-        "daily_report_json": _file_url(archive_name, daily_manifest["json"])
+        "final_key_material_annotation": file_url(
+            archive_name, "JSON-Config-Files/final_key_material_annotation.json"
+        ) if final_annotation_path.is_file() else None,
+        "daily_report_json": file_url(archive_name, daily_manifest["json"])
         if daily_manifest.get("json")
         else None,
-        "daily_report_markdown": _file_url(archive_name, daily_manifest["markdown"])
+        "daily_report_markdown": file_url(archive_name, daily_manifest["markdown"])
         if daily_manifest.get("markdown")
         else None,
-        "daily_report_html": _file_url(archive_name, daily_manifest["html"])
+        "daily_report_html": file_url(archive_name, daily_manifest["html"])
         if daily_manifest.get("html")
         else None,
-        "daily_report_pdf": _file_url(archive_name, daily_manifest["pdf"])
+        "daily_report_pdf": file_url(archive_name, daily_manifest["pdf"])
         if daily_manifest.get("pdf")
         else None,
-        "daily_report_eval": _file_url(archive_name, daily_manifest["evaluation"])
+        "daily_report_eval": file_url(archive_name, daily_manifest["evaluation"])
         if daily_manifest.get("evaluation")
         else None,
-        "evidence_index_manifest": _file_url(
+        "evidence_index_manifest": file_url(
             archive_name, f"JSON-Config-Files/{INDEX_MANIFEST_NAME}"
         ) if index_manifest_path.is_file() else None,
     }
+    snapshot = _run_snapshot_from_root(root)
+    preliminary_materials = []
+    if not normalized_events and snapshot.get("status", {}).get("stage") != "completed":
+        completed = {item.get("stage") for item in snapshot.get("stage_receipts", []) if item.get("status") == "completed"}
+        category_index = _read_json(root / "Key-Materials/Key-Material-Category-Index.json", {}) or {}
+        if "key_materials" in completed:
+            for group in category_index.get("experiments", []):
+                for category in group.get("action_categories", []):
+                    for event in category.get("events", []):
+                        media = {}
+                        for field, source in (("frame_url", "key_frames"), ("clip_url", "key_clips")):
+                            relative = (event.get(source) or {}).get("aligned_first_third")
+                            if relative:
+                                candidate = (root / relative).resolve()
+                                if archive_contains(candidate, root.resolve()) and candidate.is_file():
+                                    media[field] = file_url(archive_name, relative)
+                        if media:
+                            preliminary_materials.append({
+                                "event_id": event.get("event_id"),
+                                "group_name": group.get("experiment_name"),
+                                "timestamp_ms": event.get("peak_timestamp_us", 0) / 1000,
+                                "review_status": "pending_semantic_review",
+                                **media,
+                            })
     return {
         "name": archive_name,
-        "path": str(_archive_root() / archive_name),
+        "path": str(root),
+        "staging_run_id": staging_run_id,
         "network_path": str(root),
         "experiments": experiments,
         "experiment_groups": [
@@ -2941,15 +3387,18 @@ def archive_detail(archive_name: str) -> dict[str, Any]:
             for group in package_groups
         ],
         "key_events": normalized_events,
+        "preliminary_materials": preliminary_materials,
         "metrics": metrics,
         "quality_acceptance": quality_acceptance,
         "key_material_recall_eval": key_material_recall_eval,
-        "observability": _run_snapshot_from_root(root),
+        "key_material_verification": key_material_verification,
+        "observability": snapshot,
         "daily_report": daily_report,
         "daily_report_manifest": daily_manifest,
         "evidence_index": {
             **index_manifest,
-            "search_url": f"/api/key-events?archive={quote(archive_name)}",
+            "search_url": (f"/api/staging-runs/{quote(staging_run_id)}/key-events"
+                           if staging_run_id else f"/api/key-events?archive={quote(archive_name)}"),
         } if index_manifest else None,
         "links": links,
     }
@@ -4109,3 +4558,138 @@ def get_run(run_id: str) -> dict[str, Any]:
             "recovered_from_durable_status": True,
         }
     return _hydrate_run_snapshot({"run_id": run_id, **state})
+
+
+@app.get("/api/nas-recordings")
+def nas_recordings() -> dict[str, Any]:
+    settings = _settings()
+    if not directory_ingest_enabled(settings):
+        return {"mode": "disabled", "recordings": [], "recording_count": 0}
+    with _nas_monitor_lock:
+        monitored = (
+            json.loads(json.dumps(_nas_monitor_snapshot))
+            if _nas_monitor_snapshot is not None
+            else None
+        )
+    if monitored is not None:
+        return monitored
+    try:
+        inventory = scan_recordings(settings)
+        return inventory | {
+            "monitor": {
+                "status": "starting",
+                "observed_at": datetime.now().astimezone().isoformat(),
+                "poll_seconds": float(
+                    (settings.get("collection_ingest") or {}).get(
+                        "poll_seconds", 30.0
+                    )
+                ),
+                "consecutive_failures": 0,
+            }
+        }
+    except (OSError, ValueError) as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+@app.post("/api/nas-selections", status_code=201)
+def select_nas_recordings(payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        receipt = create_selection(_settings(), payload)
+        return {"collection_id": receipt["collection_id"], "source_copy_bytes": 0}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(503, "无法读取 NAS 素材或保存实验清单") from exc
+
+@app.post("/api/nas-batches/{batch_id}/runs", status_code=202)
+def create_nas_batch_run(
+    batch_id: str,
+    background_tasks: BackgroundTasks,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Turn one recorder-native batch into a queued full-chain run."""
+
+    if not re.fullmatch(r"nas-batch-[a-f0-9]{24}", batch_id):
+        raise HTTPException(400, "无效的 NAS 采集批次编号")
+    with _nas_batch_submission_lock:
+        settings = _settings()
+        try:
+            inventory = scan_recordings(settings)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(503, str(exc)) from exc
+        batch = next(
+            (item for item in inventory.get("batches") or [] if item["batch_id"] == batch_id),
+            None,
+        )
+        if batch is None:
+            raise HTTPException(404, "NAS 采集批次不存在或内容已经变化，请刷新后重试")
+        if not batch.get("available"):
+            raise HTTPException(
+                409,
+                {
+                    "message": "该采集批次尚未完成",
+                    "issues": batch.get("issues") or [],
+                },
+            )
+        request = payload or {}
+        default_name = datetime.fromtimestamp(
+            int(batch["recording_start_us"]) / 1_000_000
+        ).strftime("采集批次-%Y%m%d-%H%M%S")
+        experiment_name = str(request.get("experiment_name") or default_name).strip()
+        collection_id = "nas-" + hashlib.sha256(batch_id.encode()).hexdigest()[:24]
+        try:
+            receipt = create_selection(
+                settings,
+                {
+                    "experiment_name": experiment_name,
+                    "recordings": [
+                        {"recording_id": item["recording_id"]}
+                        for item in batch["recordings"]
+                    ],
+                    "_collection_id": collection_id,
+                    "_batch_id": batch_id,
+                },
+            )
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        result = create_collection_run(
+            receipt["collection_id"],
+            background_tasks,
+            {"experiment_name": experiment_name},
+        )
+        return result | {
+            "batch_id": batch_id,
+            "collection_id": receipt["collection_id"],
+        }
+
+@app.get("/api/model-candidates")
+def model_candidates() -> dict[str, Any]:
+    """Expose the committed, non-production model quality ledger to local Web."""
+
+    registry_path = (
+        Path(__file__).resolve().parents[2]
+        / "configs"
+        / "models"
+        / "public-apparatus-candidates.json"
+    )
+    try:
+        payload = json.loads(registry_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(503, "模型候选质量账本不可用") from exc
+    candidates = payload.get("candidates")
+    if (
+        payload.get("schema_version")
+        != "visioncortex-public-apparatus-candidate-registry/1"
+        or not isinstance(candidates, dict)
+    ):
+        raise HTTPException(503, "模型候选质量账本格式无效")
+    records = []
+    for candidate_id, raw in candidates.items():
+        if not isinstance(raw, dict):
+            raise HTTPException(503, "模型候选质量账本包含无效记录")
+        records.append({**raw, "candidate_id": str(candidate_id)})
+    return {
+        "schema_version": payload["schema_version"],
+        "production_configuration_changed": False,
+        "candidate_count": len(records),
+        "candidates": records,
+    }

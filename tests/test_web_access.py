@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -78,3 +79,29 @@ def test_lan_middleware_requires_login_and_rejects_public_clients(monkeypatch):
             },
         )
         assert rejected.status_code == 403
+
+
+def test_frontend_keeps_polling_when_one_progress_read_fails():
+    app_js = (
+        Path(api.__file__).parent / "web" / "app.js"
+    ).read_text(encoding="utf-8")
+
+    poller = app_js.split("async function pollRun", 1)[1].split(
+        "function renderTasks", 1
+    )[0]
+    assert "consecutiveReadFailures += 1" in poller
+    assert "任务仍在后台运行" in poller
+    assert "continue;" in poller
+    assert "run.state === \"failed\"" in poller
+
+
+def test_frontend_refreshes_grouped_nas_batches_and_monitor_state():
+    app_js = (
+        Path(api.__file__).parent / "web" / "app.js"
+    ).read_text(encoding="utf-8")
+
+    assert "state.nasBatches = payload.batches || []" in app_js
+    assert "state.nasMonitor = payload.monitor || null" in app_js
+    assert 'document.querySelector("#nas-batches")' in app_js
+    assert "batchPicker.outerHTML = nasBatchPicker()" in app_js
+    assert "持续监控中" in app_js

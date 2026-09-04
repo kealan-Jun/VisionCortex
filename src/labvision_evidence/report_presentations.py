@@ -23,7 +23,16 @@ def _duration(seconds: float | int | None) -> str:
 def _headline_status(report: dict[str, Any]) -> tuple[str, str]:
     overview = report["overview"]
     if not overview.get("evidence_package_eval_passed"):
-        return "未通过", "danger"
+        return "结构检查未通过", "danger"
+    if (report.get("human_review") or {}).get("status") == "rejected":
+        return "人工复核未通过", "danger"
+    quality = report.get("quality_acceptance") or {}
+    if quality.get("passed") is not True:
+        if quality.get("status") in {"failed", "rejected"}:
+            return "质量检查未通过", "danger"
+        return "待质量复核", "warning"
+    if (report.get("human_review") or {}).get("status") != "approved":
+        return "自动检查通过，待人工复核", "warning"
     if report.get("contradictions") or report.get("uncertainties"):
         return "通过，含需关注项", "warning"
     return "证据验收通过", "success"
@@ -44,7 +53,7 @@ def render_daily_markdown(report: dict[str, Any]) -> str:
         f"- {overview['experiment_group_count']} 个有界实验，{overview['input_view_count']} 路输入视角",
         f"- {overview['key_event_count']} 个关键事件，{overview['physical_change_count']} 项物理状态变化",
         f"- 流水线耗时 {_duration(performance.get('total_duration_seconds'))}，总 Token {performance.get('total_tokens') or 0:,}",
-        "- 日报复用已验收理解，不新增模型调用或 Token",
+        "- 日报复用已有理解，不新增模型调用或 Token",
         "",
         "> “当前步骤/下一步骤”属于双视角证据支持的模型理解；直接观察事实和不确定项在 JSON 中分别保留。",
         "",
@@ -85,7 +94,7 @@ def render_daily_markdown(report: dict[str, Any]) -> str:
             for item in group.get("key_action_summary") or []
             if item["event_count"]
         )
-        lines.extend([f"- 动作类别：{action_text or '无已验收动作'}", ""])
+        lines.extend([f"- 动作类别：{action_text or '无保留动作'}", ""])
     lines.extend(
         [
             "## 关注事项与交接",
@@ -133,7 +142,7 @@ def render_daily_html(report: dict[str, Any]) -> str:
             for item in group.get("key_action_summary") or []
             if item["event_count"]
         )
-        empty_actions = '<span class="pill">无已验收动作</span>'
+        empty_actions = '<span class="pill">无保留动作</span>'
         first_step = group["steps"][0] if group.get("steps") else {}
         last_step = group["steps"][-1] if group.get("steps") else {}
         continuity = "连续实验" if group["continuity_type"] == "continuous" else "独立实验"
@@ -158,7 +167,7 @@ def render_daily_html(report: dict[str, Any]) -> str:
 <header class="hero"><div class="brandbar"></div><div class="hero-body"><div class="brand"><img src="{brand_logo_data_url()}" alt="VisionCortex Logo"><div><div class="brand-name">VISIONCORTEX</div><h1>实验室日报 · {e(report['report_date'])}</h1></div></div>
 <p class="meta">档案：{e(report['experiment_id'])}</p><span class="status">{e(status)}</span>
 <div class="stats"><div class="stat"><b>{overview['experiment_group_count']}</b><span>有界实验</span></div><div class="stat"><b>{overview['input_view_count']}</b><span>输入视角</span></div><div class="stat"><b>{overview['key_event_count']}</b><span>关键事件</span></div><div class="stat"><b>{overview['physical_change_count']}</b><span>状态变化</span></div><div class="stat"><b>{performance.get('total_tokens') or 0:,}</b><span>总 Token</span></div></div>
-<p class="note">本日报面向日常查看与交接，只呈现已验收结论和代表性双视角证据。完整技术账本保留在同一档案中。</p></div></header>
+<p class="note">本日报面向日常查看与交接，呈现已归档分析和代表性双视角证据，质量状态以复核记录为准。完整技术账本保留在同一档案中。</p></div></header>
 <h2 class="section-title">实验简报</h2>{''.join(experiment_cards)}
 <section class="panel attention"><h2>关注事项与交接</h2><p>质量状态：<b>{e(status)}</b>。时间对齐完成 {report['alignment_summary']['aligned']}/{report['alignment_summary']['view_count']} 路；记录不确定性 {len(report['uncertainties'])} 组、跨视角矛盾 {len(report['contradictions'])} 项。</p><p>流水线总耗时 {_duration(performance.get('total_duration_seconds'))}；预处理 {_duration((performance.get('preprocessing_sla') or {}).get('actual_seconds'))}；模型用量 {performance.get('total_input_tokens') or 0:,} 输入 + {performance.get('total_output_tokens') or 0:,} 输出 = {performance.get('total_tokens') or 0:,} Token。</p></section>
 <section class="panel"><h2>确认与备注</h2><p>状态：待确认　确认人：__________　确认时间：__________</p><p>备注：____________________________________________________________</p></section>
@@ -305,7 +314,7 @@ def render_professional_pdf(path: Path, report: dict[str, Any], archive_root: Pa
             [37 * mm, 118 * mm],
         ),
         Spacer(1, 20 * mm),
-        Paragraph("本报告由已通过质量门的实验片段、双视角关键素材、步骤理解和运行账本自动生成。完整机器可读证据与媒体文件保留在同一实验档案中。", cover_subtitle),
+        Paragraph("本报告由归档的实验片段、双视角素材、步骤理解和运行记录自动生成。质量状态见上表；完整证据与媒体文件保留在同一实验档案中。", cover_subtitle),
         PageBreak(),
         Paragraph("1. 结论摘要", h1),
         Paragraph(
@@ -330,7 +339,7 @@ def render_professional_pdf(path: Path, report: dict[str, Any], archive_root: Pa
             Spacer(1, 4 * mm),
             styled_table(matrix, [53 * mm, 39 * mm, 17 * mm, 16 * mm, 20 * mm, 20 * mm]),
             Paragraph("2. 报告范围与证据口径", h1),
-            Paragraph("本报告只使用已通过流水线质量门的证据。图片必须来自第一人称与第三人称对齐产物；模型生成的“当前步骤、下一步骤和实验摘要”作为证据支持的解释呈现，不替代直接观察事实。任何不确定或矛盾内容都保留为显式记录。", body),
+            Paragraph("本报告使用已归档的分析证据，结构检查不能替代内容质量复核。图片必须来自第一人称与第三人称对齐产物；模型生成的“当前步骤、下一步骤和实验摘要”作为证据支持的解释呈现，不替代直接观察事实。任何不确定或矛盾内容都保留为显式记录。", body),
             Paragraph("阅读方式", h2),
             Paragraph("先阅读本节结论，再按实验查看过程与图片。质量负责人可在最后的附录中核对时间对齐、耗时、Token 和来源路径；无需理解检测模型、解码队列等工程细节即可使用正文。", body),
         ]
@@ -367,7 +376,7 @@ def render_professional_pdf(path: Path, report: dict[str, Any], archive_root: Pa
         else:
             story.append(image_flowable("", 165 * mm, 30 * mm))
         story.extend([Paragraph("实验结果摘要", h2), Paragraph(html.escape(group.get("overall_summary") or "暂无摘要"), body)])
-        action_text = "；".join(f"{item['action_label']} {item['event_count']}" for item in group.get("key_action_summary") or [] if item["event_count"]) or "无已验收动作"
+        action_text = "；".join(f"{item['action_label']} {item['event_count']}" for item in group.get("key_action_summary") or [] if item["event_count"]) or "无保留动作"
         story.append(Paragraph(f"动作类别分布：{html.escape(action_text)}。", body))
         step_rows = [["步骤", "时间", "当前在做什么", "下一步"]]
         for step in group["steps"]:
@@ -458,7 +467,7 @@ def render_professional_pdf(path: Path, report: dict[str, Any], archive_root: Pa
         ["质量真值", p(f"边界 P/R={metric_text(quality_audit.get('boundary_precision'))}/{metric_text(quality_audit.get('boundary_recall'))}；关键素材 @IoU0.5 P/R/F1={metric_text(quality_audit.get('key_material_precision_at_iou_0_5'))}/{metric_text(quality_audit.get('key_material_recall_at_iou_0_5'))}/{metric_text(quality_audit.get('key_material_f1_at_iou_0_5'))}；状态={quality_audit.get('status') or '-'}", small)],
     ]
     story.extend([Spacer(1, 3*mm), styled_table(audit_rows, [43*mm,122*mm])])
-    provenance_rows = [["用途", "归档相对路径"]] + [[key.replace("_", " "), p(value, small)] for key, value in report.get("provenance", {}).items()]
+    provenance_rows = [["用途", "归档相对路径"]] + [[p(key.replace("_", " "), small), p(value, small)] for key, value in report.get("provenance", {}).items()]
     provenance_rows.extend([["可检索数据库", p("JSON-Config-Files/evidence_index.sqlite", small)], ["关键素材", p("Key-Materials/", small)], ["实验片段", p("Experiment-Clips/", small)]])
     story.append(
         KeepTogether(

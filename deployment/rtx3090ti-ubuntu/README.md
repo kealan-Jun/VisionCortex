@@ -218,3 +218,11 @@ proves runtime wiring only. `labvision model-certification-readiness` reports
 the exact held-out event and participant-box truth deficits without opening a
 production archive. Neither command can certify production-domain quality or
 replace the cold Doubao call required by a formal end-to-end run.
+
+Final participant grounding is selective and bounded in the 3090 Ti profile.
+Liquid, container-state and pipette events are always verified; other events
+escalate only when closed-set participant evidence is ambiguous. The decision,
+budget and measured local-model time are persisted in
+`JSON-Config-Files/final_key_material_annotation.json`. Set
+`VISIONCORTEX_SELECTIVE_KEY_MATERIAL_VERIFICATION=false` to preserve the prior
+supplement path without changing models or archive schemas.

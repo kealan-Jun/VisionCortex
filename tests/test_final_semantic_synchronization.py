@@ -1,6 +1,8 @@
 from labvision_evidence.archive import (
+    _canonical_grounding_label,
     _filter_grounded_actor_boxes,
     _relabel_participant_objects,
+    _semantic_participant_conflicts,
     _select_manipulated_object_candidate,
     _select_state_container_candidate,
     _view_specific_participant_objects,
@@ -16,6 +18,63 @@ from labvision_evidence.schemas import (
     ExperimentSegment,
     ViewRole,
 )
+
+
+def test_grounding_label_keeps_complete_merged_bottle_prompts():
+    prompts = {
+        "brown bottle": "reagent_bottle",
+        "brown reagent bottle": "reagent_bottle",
+        "glass reagent bottle": "reagent_bottle",
+    }
+    # Actual DINO label from both views of a held bottle; exact-only lookup
+    # previously discarded it and retained a background glass bottle instead.
+    assert _canonical_grounding_label(
+        "brown reagent bottle brown bottle", prompts
+    ) == "reagent_bottle"
+    assert _canonical_grounding_label("glass reagent bottle", prompts) == "reagent_bottle"
+
+
+def test_grounding_label_rejects_partial_or_unconfigured_words():
+    prompts = {"red bottle cap": "bottle_cap", "bottle cap": "bottle_cap"}
+    assert _canonical_grounding_label("red bottle cap bottle cap", prompts) == "bottle_cap"
+    assert _canonical_grounding_label("red bottle cap bottle", prompts) is None
+    assert _canonical_grounding_label("blue bottle cap", prompts) is None
+    assert _canonical_grounding_label("", prompts) is None
+
+
+def test_grounding_label_rejects_merged_classes_and_ambiguous_parses():
+    prompts = {
+        "gloved hand": "gloved_hand",
+        "brown bottle": "reagent_bottle",
+        "brown": "paper",
+        "bottle": "paper",
+    }
+    assert _canonical_grounding_label("gloved hand brown bottle", prompts) is None
+    # There is a same-class parse and a mixed-class parse. Neither can silently
+    # win just because of the prompt dictionary's insertion order.
+    assert _canonical_grounding_label("brown bottle brown bottle", prompts) is None
+
+
+def test_weak_bottle_guess_does_not_suppress_second_detector():
+    actor = {"xyxy_norm": [0.35, 0.4, 0.55, 0.8]}
+    weak_background = {
+        "class_name": "reagent_bottle", "confidence": 0.04,
+        "xyxy_norm": [0.35, 0.4, 0.55, 0.6],
+    }
+    settings = {
+        "canonical_class": "reagent_bottle", "maximum_actor_gap": 0.08,
+        "pipette_minimum_aspect_ratio": 1.7, "minimum_confidence": 0.12,
+    }
+    selected, receipt = _select_manipulated_object_candidate(
+        [weak_background], [actor], **settings
+    )
+    assert selected is None
+    assert receipt["confidence_rejected_count"] == 1
+    held_bottle = {**weak_background, "confidence": 0.44}
+    selected, _ = _select_manipulated_object_candidate(
+        [weak_background, held_bottle], [actor], **settings
+    )
+    assert selected is held_bottle
 
 
 def _event(event_id: str, *, action: ActionType, start: float, end: float, peak: float):
@@ -40,6 +99,175 @@ def _event(event_id: str, *, action: ActionType, start: float, end: float, peak:
             }
         },
     )
+
+
+def test_canonical_paper_label_is_a_supported_participant():
+    event = _event("paper", action=ActionType.HAND_OBJECT_CONTACT, start=0, end=2, peak=1)
+    event.objects = ["gloved_hand", "paper"]
+    event.model_understanding = {
+        "hand_object_interactions": [{"object": "paper", "contact": "grasp"}],
+        "current_step": "Holding a sheet beside the balance",
+    }
+    assert _relabel_participant_objects(event) == ["gloved_hand", "paper"]
+
+
+def test_bottle_description_does_not_create_separate_cap_contact():
+    event = _event("bottle", action=ActionType.OBJECT_MOVEMENT, start=0, end=2, peak=1)
+    event.model_understanding = {
+        "hand_object_interactions": [{"object": "带红色瓶盖的试剂瓶", "contact": "抓取/释放"}],
+        "current_step": "手移动带红色瓶盖的试剂瓶",
+    }
+    assert _relabel_participant_objects(event) == ["gloved_hand", "reagent_bottle"]
+    event.model_understanding["hand_object_interactions"].append({"object": "红色瓶盖", "contact": "抓取"})
+    assert set(_relabel_participant_objects(event)) == {"gloved_hand", "reagent_bottle", "bottle_cap"}
+    event.model_understanding["hand_object_interactions"] = [{"object": "棕色试剂瓶/红色瓶盖", "contact": "抓取"}]
+    assert set(_relabel_participant_objects(event)) == {"gloved_hand", "reagent_bottle", "bottle_cap"}
+
+
+def test_solid_transfer_proof_excludes_incidental_cap_contact():
+    event = _event("solid", action=ActionType.OBJECT_MOVEMENT, start=0, end=2, peak=1)
+    event.objects = ["gloved_hand", "paper", "spatula", "reagent_bottle", "bottle_cap"]
+    event.model_understanding = {
+        "hand_object_interactions": [
+            {"object": "metal spatula", "contact": "grasp"},
+            {"object": "brown reagent bottle", "contact": "hold"},
+            {"object": "red bottle cap", "contact": "release"},
+            {"object": "weighing_paper_package", "contact": "接触"},
+        ],
+        "action_proof": {
+            "source_contact_visible": True,
+            "withdrawal_or_transport_visible": True,
+            "target_contact_visible": True,
+            "reason": "药匙从棕色试剂瓶运输物料并在称量纸上释放。",
+        },
+    }
+    assert _relabel_participant_objects(event) == [
+        "gloved_hand", "spatula", "reagent_bottle"
+    ]
+
+
+def test_solid_transfer_keeps_directly_manipulated_paper_sheet():
+    event = _event("solid-paper", action=ActionType.OBJECT_MOVEMENT, start=0, end=2, peak=1)
+    event.objects = ["gloved_hand", "paper", "spatula", "reagent_bottle"]
+    event.model_understanding = {
+        "hand_object_interactions": [
+            {"object": "metal spatula", "contact": "grasp"},
+            {"object": "brown reagent bottle", "contact": "hold"},
+            {"object": "weighing paper", "contact": "hold"},
+        ],
+        "action_proof": {
+            "source_contact_visible": True,
+            "withdrawal_or_transport_visible": True,
+            "target_contact_visible": True,
+            "reason": "The spatula transports material from the brown reagent bottle to weighing paper.",
+        },
+    }
+    assert _relabel_participant_objects(event) == [
+        "gloved_hand", "spatula", "reagent_bottle", "paper"
+    ]
+
+
+def test_contact_participant_cannot_also_be_background_only():
+    event = _event("conflict", action=ActionType.HAND_OBJECT_CONTACT, start=0, end=2, peak=1)
+    event.objects = ["gloved_hand", "balance", "tube"]
+    event.model_understanding = {
+        "hand_object_interactions": [
+            {"object": "balance", "contact": "接触"},
+            {"object": "tube", "contact": "握持"},
+        ],
+        "action_proof": {"reason": "手与试管接触明确；天平仅作为背景或接近对象出现"},
+    }
+    assert _relabel_participant_objects(event) == ["gloved_hand", "tube"]
+    conflicts = _semantic_participant_conflicts(event)
+    assert [item["class_name"] for item in conflicts] == ["balance"]
+    assert conflicts[0]["source"] == "action_proof.reason"
+
+
+def test_missing_display_change_or_negated_background_does_not_refute_contact():
+    event = _event("contact", action=ActionType.HAND_OBJECT_CONTACT, start=0, end=2, peak=1)
+    event.objects = ["gloved_hand", "balance"]
+    event.model_understanding = {
+        "hand_object_interactions": [{"object": "balance", "contact": "接触"}],
+    }
+    for reason in (
+        "手与天平接触明确，但未见显示状态变化",
+        "天平并非仅作为背景，手指与表面接触可见",
+        "The balance is not only background; the hand touches its surface",
+    ):
+        event.model_understanding["action_proof"] = {"reason": reason}
+        assert _semantic_participant_conflicts(event) == []
+        assert _relabel_participant_objects(event) == ["gloved_hand", "balance"]
+
+
+def test_selected_keyframe_participants_override_later_window_contact():
+    event = _event(
+        "selected-frame",
+        action=ActionType.HAND_OBJECT_CONTACT,
+        start=0,
+        end=20,
+        peak=5,
+    )
+    event.objects = ["gloved_hand", "balance"]
+    event.model_understanding = {
+        "selected_keyframe_observations": [
+            {
+                "view_id": "fp",
+                "directly_interacting_objects": ["蓝色手套", "手套包装盒"],
+            }
+        ],
+        "hand_object_interactions": [
+            {"object": "蓝色手套", "contact": "抓取"},
+            {"object": "电子天平", "contact": "片段较晚时接触"},
+        ],
+    }
+
+    # The selected-frame participant is outside the configured ontology.  A
+    # mapped device touched later in the interval cannot replace it.
+    assert _relabel_participant_objects(event) == ["gloved_hand"]
+
+
+def test_selected_keyframe_single_character_paper_label_is_mapped():
+    event = _event(
+        "selected-paper",
+        action=ActionType.OBJECT_MOVEMENT,
+        start=0,
+        end=20,
+        peak=5,
+    )
+    event.objects = ["paper"]
+    event.model_understanding = {
+        "selected_keyframe_observations": [
+            {"view_id": "fp", "directly_interacting_objects": ["纸"]}
+        ],
+        "hand_object_interactions": [{"object": "纸", "contact": "抓取"}],
+    }
+
+    assert _relabel_participant_objects(event) == ["hand", "paper"]
+
+
+def test_device_participant_refinement_keeps_only_selected_frame_device():
+    event = _event(
+        "device",
+        action=ActionType.DEVICE_PANEL_OPERATION,
+        start=0,
+        end=20,
+        peak=5,
+    )
+    event.objects = ["gloved_hand", "tube", "tube_rack"]
+    event.model_understanding = {
+        "selected_keyframe_observations": [
+            {
+                "view_id": "fp",
+                "directly_interacting_objects": ["电子天平", "离心管架"],
+            }
+        ],
+        "hand_object_interactions": [
+            {"object": "电子天平", "contact": "按压面板"},
+            {"object": "离心管架", "contact": "接触"},
+        ],
+    }
+
+    assert _relabel_participant_objects(event) == ["gloved_hand", "balance"]
 
 
 def test_final_segment_contains_only_curated_semantic_events():
@@ -124,6 +352,40 @@ def test_final_key_timestamp_resynchronizes_semantic_state_receipt():
         ]
         is True
     )
+
+
+def test_final_participant_pruning_resynchronizes_state_identity():
+    event = _event(
+        "EVT-PRUNED",
+        action=ActionType.HAND_OBJECT_CONTACT,
+        start=4300.0,
+        end=12500.0,
+        peak=8300.0,
+    )
+    event.objects = ["gloved_hand", "paper", "reagent_bottle"]
+    event.state_machine = {
+        "action_type": "hand_object_contact",
+        "peak_timestamp_us": 8300000,
+        "object_identity": {
+            "object_classes": ["bottle_cap", "paper", "reagent_bottle"],
+            "track_tokens": ["old-cap-track"],
+            "identity_status": "tracked",
+        },
+    }
+
+    repairs = _synchronize_final_event_state_receipts([event], {})
+
+    assert repairs[0]["participant_identity_resynchronized"] is True
+    assert repairs[0]["previous_object_classes"] == [
+        "bottle_cap",
+        "paper",
+        "reagent_bottle",
+    ]
+    assert repairs[0]["final_object_classes"] == ["paper", "reagent_bottle"]
+    assert event.state_machine["object_identity"]["object_classes"] == [
+        "paper",
+        "reagent_bottle",
+    ]
 
 
 def test_participant_refinement_excludes_explicit_noncontact_object():
@@ -272,6 +534,50 @@ def test_view_participants_ignore_objects_mentioned_only_in_negation():
     assert _view_specific_participant_objects(event, "tp") == [
         "gloved_hand",
         "reagent_bottle",
+    ]
+
+
+def test_view_participants_recognize_generic_paper_sheet_in_scoped_support():
+    event = _event(
+        "EVT-PAPER-SHEET",
+        action=ActionType.HAND_OBJECT_CONTACT,
+        start=1000.0,
+        end=2000.0,
+        peak=1500.0,
+    )
+    event.objects = ["gloved_hand", "paper", "reagent_bottle"]
+    event.model_understanding = {
+        "confirmed_action_support_by_view": [{
+            "view_id": "tp", "supports_confirmed_action": True,
+            "reason": "该视角清晰可见双手共同捏住并展开纸片。",
+        }],
+    }
+
+    assert _view_specific_participant_objects(event, "tp") == [
+        "gloved_hand",
+        "paper",
+    ]
+
+
+def test_view_participants_recognize_spoon_shaped_metal_spatula():
+    event = _event(
+        "EVT-SPATULA",
+        action=ActionType.OBJECT_MOVEMENT,
+        start=1000.0,
+        end=2000.0,
+        peak=1500.0,
+    )
+    event.objects = ["gloved_hand", "spatula", "reagent_bottle"]
+    event.model_understanding = {
+        "confirmed_action_support_by_view": [{
+            "view_id": "tp",
+            "supports_confirmed_action": True,
+            "reason": "俯视画面可见右手持勺状金属工具从棕色瓶取物。",
+        }],
+    }
+
+    assert _view_specific_participant_objects(event, "tp") == [
+        "gloved_hand", "spatula", "reagent_bottle",
     ]
 
 

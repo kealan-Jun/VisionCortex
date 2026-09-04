@@ -1381,61 +1381,114 @@ def benchmark_sparse_decode_strategy(
 ) -> dict[str, Any]:
     """Choose a sparse decoder from a short read of the active storage path."""
 
+    segmented_source = bool(info.segments)
+    benchmark_view = view
+    benchmark_info = info
+    benchmark_segment: dict[str, Any] | None = None
+    if info.segments:
+        # Motion-probe workers open physical files independently. Benchmark a
+        # representative physical file as well: crossing a segment boundary in
+        # this small preflight can make a healthy second SMB file look absent
+        # even though both decoders can read it when opened directly.
+        segment_index, segment = max(
+            enumerate(info.segments), key=lambda item: item[1].duration_ms
+        )
+        benchmark_view = ViewInput(
+            view_id=view.view_id,
+            role=view.role,
+            video=segment.path,
+            calibration_hint_ms=view.calibration_hint_ms,
+        )
+        benchmark_info = VideoInfo(
+            path=segment.path,
+            duration_ms=segment.duration_ms,
+            fps=segment.fps,
+            width=segment.width,
+            height=segment.height,
+            frame_count=segment.frame_count,
+            size_bytes=segment.size_bytes,
+            source_clock_duration_ms=segment.source_clock_duration_ms,
+            media_timing_source=segment.media_timing_source,
+        )
+        benchmark_segment = {
+            "index": segment_index,
+            "path": str(segment.path),
+            "duration_ms": round(segment.duration_ms, 3),
+            "selection": "longest_physical_segment",
+        }
     duration_ms = min(
-        float(info.duration_ms),
+        float(benchmark_info.duration_ms),
         max(10.0, float(benchmark_seconds)) * 1000.0,
     )
     if duration_ms <= 0.0:
         raise ValueError(f"view has no benchmarkable duration: {view.view_id}")
     expected_frames = max(1, int(math.floor(duration_ms * sample_fps / 1000.0)))
     reports: list[dict[str, Any]] = []
-    for strategy in ("indexed_seek", "sequential_keyframes"):
-        started = time.perf_counter()
-        frame_count = 0
-        error: str | None = None
-        try:
-            for _frame_index, _local_ms, _frame in iter_view_sampled_frames(
-                view,
-                info,
-                0.0,
-                duration_ms,
-                sample_fps,
-                max_width,
-                hwaccel,
-                True,
-                decoder_threads,
-                strategy,
-                cuda_scale,
-            ):
-                frame_count += 1
-        except Exception as exc:
-            error = f"{type(exc).__name__}: {exc}"
-        elapsed_seconds = time.perf_counter() - started
-        sample_ratio = min(1.0, frame_count / expected_frames)
-        usable = error is None and frame_count > 0 and sample_ratio >= 0.50
-        # Penalize strategies that return too few samples. A fast but sparse
-        # decoder is not a valid motion sentinel.
-        score_seconds = (
-            elapsed_seconds / max(sample_ratio, 0.01) if usable else None
-        )
-        reports.append(
-            {
-                "strategy": strategy,
-                "usable": usable,
-                "elapsed_seconds": round(elapsed_seconds, 6),
-                "frame_count": frame_count,
-                "expected_frames": expected_frames,
-                "sample_ratio": round(sample_ratio, 6),
-                "score_seconds": (
-                    round(score_seconds, 6) if score_seconds is not None else None
-                ),
-                "error": error,
-            }
-        )
-    usable_reports = [item for item in reports if item["usable"]]
+    usable_reports: list[dict[str, Any]] = []
+    # A newly accessed SMB segment can briefly return a partial first read
+    # while the share opens the next physical file.  Benchmarking is a
+    # preflight decision, so retry the bounded read instead of failing an
+    # otherwise healthy multi-segment experiment.  Each attempt still has to
+    # satisfy the original sample-coverage gate.
+    maximum_attempts = 3 if segmented_source else 1
+    for attempt in range(1, maximum_attempts + 1):
+        attempt_reports: list[dict[str, Any]] = []
+        for strategy in ("indexed_seek", "sequential_keyframes"):
+            started = time.perf_counter()
+            frame_count = 0
+            error: str | None = None
+            try:
+                for _frame_index, _local_ms, _frame in iter_view_sampled_frames(
+                    benchmark_view,
+                    benchmark_info,
+                    0.0,
+                    duration_ms,
+                    sample_fps,
+                    max_width,
+                    hwaccel,
+                    True,
+                    decoder_threads,
+                    strategy,
+                    cuda_scale,
+                ):
+                    frame_count += 1
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+            elapsed_seconds = time.perf_counter() - started
+            sample_ratio = min(1.0, frame_count / expected_frames)
+            usable = error is None and frame_count > 0 and sample_ratio >= 0.50
+            # Penalize strategies that return too few samples. A fast but
+            # sparse decoder is not a valid motion sentinel.
+            score_seconds = (
+                elapsed_seconds / max(sample_ratio, 0.01) if usable else None
+            )
+            attempt_reports.append(
+                {
+                    "attempt": attempt,
+                    "strategy": strategy,
+                    "usable": usable,
+                    "elapsed_seconds": round(elapsed_seconds, 6),
+                    "frame_count": frame_count,
+                    "expected_frames": expected_frames,
+                    "sample_ratio": round(sample_ratio, 6),
+                    "score_seconds": (
+                        round(score_seconds, 6)
+                        if score_seconds is not None
+                        else None
+                    ),
+                    "error": error,
+                }
+            )
+        reports.extend(attempt_reports)
+        usable_reports = [item for item in attempt_reports if item["usable"]]
+        if usable_reports:
+            break
+        if attempt < maximum_attempts:
+            time.sleep(0.25 * attempt)
     if not usable_reports:
         raise RuntimeError(
-            f"no sparse decode strategy is usable for {view.view_id}: {reports}"
+            f"no sparse decode strategy is usable for {view.view_id} "
+            f"after {maximum_attempts} attempt(s): {reports}"
         )
     selected = min(
         usable_reports,
@@ -1444,10 +1497,13 @@ def benchmark_sparse_decode_strategy(
     return {
         "schema_version": "visioncortex-sparse-decode-benchmark/1",
         "view_id": view.view_id,
-        "source_mode": "segmented_virtual_timeline" if info.segments else "continuous_file",
+        "source_mode": "segmented_virtual_timeline" if segmented_source else "continuous_file",
+        "benchmark_segment": benchmark_segment,
         "benchmark_seconds": round(duration_ms / 1000.0, 3),
         "sample_fps": sample_fps,
         "max_width": max_width,
+        "attempt_count": int(selected["attempt"]),
+        "transient_retry_used": int(selected["attempt"]) > 1,
         "selected_strategy": selected["strategy"],
         "strategies": reports,
     }

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import time
+import gc
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +44,22 @@ REPORT_CLASSES = (
 
 _MODEL_CACHE: dict[tuple[str, str, str, str], Any] = {}
 _VALIDATED: dict[tuple[str, str], tuple[int, int]] = {}
+
+
+def release_liquid_semantic_model_cache() -> int:
+    """Release cached LabPics networks between events on low-memory hosts."""
+
+    released = len(_MODEL_CACHE)
+    _MODEL_CACHE.clear()
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass
+    return released
 
 
 def _sha256(path: Path) -> str:

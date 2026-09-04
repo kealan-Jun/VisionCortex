@@ -771,6 +771,12 @@ def generate_daily_report_archive(
         except (json.JSONDecodeError, OSError):
             pass
     report = build_daily_report(summary, effective_metrics, evidence_eval, config)
+    quality_path = layout.json_config / "quality_acceptance.json"
+    report["quality_acceptance"] = (
+        json.loads(quality_path.read_text(encoding="utf-8-sig"))
+        if quality_path.is_file()
+        else {"status": "not_evaluated", "passed": False}
+    )
     report_date = report["report_date"]
     report_dir = layout.daily_reports / report_date
     report_dir.mkdir(parents=True, exist_ok=True)

@@ -102,6 +102,7 @@ class ResourceMonitor:
         self.destination = destination
         self.live_destination = destination.with_name(f"{destination.stem}_live.json")
         self.live_mirror_destination = live_mirror_destination
+        self.journal_destination = destination.with_suffix(".jsonl")
         self.interval = max(0.25, interval_seconds)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -334,6 +335,12 @@ class ResourceMonitor:
                     self._previous_network = network
                     self._previous_process_io = process_io
                     self._previous_perf = now_perf
+                    try:
+                        self.journal_destination.parent.mkdir(parents=True, exist_ok=True)
+                        with self.journal_destination.open("a", encoding="utf-8") as journal:
+                            journal.write(json.dumps(sample, ensure_ascii=False) + "\n")
+                    except OSError as exc:
+                        self._record_sampling_error("sample_journal", exc)
                     self._write_live_payload(
                         {
                             "schema_version": "visioncortex-resource-telemetry-live/1",

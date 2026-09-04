@@ -1,0 +1,50 @@
+{
+  "schema_version": "visioncortex-public-yolo-ontology-map/1",
+  "target_ontology": "configs/models/closed-set-yolo.json#ontology",
+  "train_oversample_factors": {
+    "hand": 2,
+    "pipette": 3
+  },
+  "datasets": {
+    "ChemEq25": {
+      "class_mapping": {
+        "Beaker": "beaker",
+        "Buchner_Funnel": "container",
+        "Burette_Stands": null,
+        "Calorimeter": "container",
+        "Conical_Flask": "container",
+        "Funnel": "container",
+        "Glass_Rod": null,
+        "Measuring_Cylinder": "container",
+        "Mechanical_Balance_Scale": "balance",
+        "Nessler_Reagent_Bottle": "reagent_bottle",
+        "Pipette": "pipette",
+        "Porcelain_Mortar Pestle": null,
+        "Precision_Weight_Scale": "balance",
+        "Reagent_Bottle": "reagent_bottle",
+        "Round_Bottom_Flask_Borosilicate_Glass_1_Neck": "container",
+        "Round_Bottom_Flask_Borosilicate_Glass_2_Neck": "container",
+        "Round_Bottom_Flask_Borosilicate_Glass_3_Neck": "container",
+        "Separating_Funnel": "container",
+        "Spirit_Lamp": null,
+        "TestTube_Holder": null,
+        "Test_Tube": "tube",
+        "Volumetric_Flask": "container",
+        "Volumetric_Pipet": "pipette",
+        "Wash_Bottle": "reagent_bottle",
+        "Weighing_Bottle": "sample_bottle"
+      }
+    },
+    "WasedaChemicalApparatus": {
+      "class_mapping": {
+        "hand": "hand",
+        "conical beaker": "beaker",
+        "erlenmeyer flask": "container",
+        "reagent bottle": "reagent_bottle",
+        "pipette": "pipette",
+        "eggplant shaped flask": "container",
+        "separatory funnel": "container"
+      }
+    }
+  }
+}

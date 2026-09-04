@@ -1,0 +1,157 @@
+extends: ./rtx3090ti-ubuntu-production.yaml
+
+# Ubuntu 20.04 / RTX 3050 6 GiB deployment. The full evidence chain remains
+# enabled, but only one full-timeline role engine is resident at a time and
+# heavyweight key-material sidecars are staged to avoid overlapping VRAM use.
+project:
+  output_root: /mnt/visioncortex-nas/VisionCortexExperimentArchive/.VisionCortex-Run-Staging
+
+models:
+  first_person: /opt/visioncortex-rtx3050/Models/ClosedSetYOLO/first_person/best.pt
+  third_person: /opt/visioncortex-rtx3050/Models/ClosedSetYOLO/third_person/best.pt
+  first_person_engine: /opt/visioncortex-rtx3050/Engines/first_person.engine
+  third_person_engine: /opt/visioncortex-rtx3050/Engines/third_person.engine
+  open_vocabulary_key_frame:
+    model_path: /opt/visioncortex-rtx3050/Engines/yolov8s-worldv2.pt
+    clip_model_path: /opt/visioncortex-rtx3050/Engines/ViT-B-32.pt
+    device: 0
+    image_size: 960
+    minimum_manipulated_object_confidence:
+      # Weak bottle guesses must not suppress the bounded DINO fallback.
+      reagent_bottle: 0.12
+    grounding_dino_fallback:
+      model_path: /opt/visioncortex-rtx3050/Engines/grounding-dino-base
+      # Grounding DINO is only a bounded fallback. Keeping the 0.9 GiB model
+      # on CPU preserves the six-GiB GPU for YOLO-World and SAM2.
+      device: cpu
+      # The isolated temporal rescue phase was measured on this 6 GiB GPU.
+      # Keep final DINO annotation on CPU to avoid overlapping with SAM2.
+      temporal_rescue_device: cuda
+  temporal_participant_segmentation:
+    checkpoint_path: /opt/visioncortex-rtx3050/Engines/sam2.1_hiera_base_plus.pt
+    device: cuda
+    offload_video_to_cpu: true
+    offload_state_to_cpu: true
+    maximum_frames_per_clip: 9
+  liquid_semantic_sidecar:
+    checkpoint_path: /opt/visioncortex-rtx3050/Engines/labpics-semantic-materials.torch
+    source_archive_path: /opt/visioncortex-rtx3050/Runtime/PublicModels/LabPicsSemantic/LabPicsSemantic.zip
+    # The published ResNet101 sidecar is bounded to final frames and runs on
+    # CPU so it cannot collide with the cached SAM2 predictor.
+    device: cpu
+    half: false
+    maximum_image_size: 640
+
+performance:
+  profile: rtx3050-6gb-ubuntu20-full-chain
+  tensor_rt: required
+  # A static 640 px engine avoids the dynamic exporter's 1920 px builder
+  # expansion. Export tries the highest useful batch first and records any
+  # fallback; the scanner pads only a final short microbatch without dropping
+  # source frames.
+  engine_dynamic: false
+  # Target-side bounded autotuning starts at 16 and accepts the first engine
+  # that completes repeated real TensorRT execution while leaving at least
+  # 22% VRAM for four hardware-decode lanes and the desktop compositor.
+  engine_batch_candidates: [16, 8, 4, 2, 1]
+  engine_batch_size: 16
+  engine_workspace_gib: 1.0
+  engine_autotune_iterations: 6
+  engine_autotune_max_gpu_memory_fraction: 0.78
+  batch_size: 16
+  coarse_batch_size: 16
+  motion_probe_batch_size: 16
+  fine_batch_size: 16
+  # The packaged TensorRT engines have a fixed 640 x 640 input.
+  coarse_image_size: 640
+  fine_scout_image_size: 640
+  motion_probe_max_width: 640
+  image_size: 640
+  fine_active_decode_slots: 4
+  fine_first_person_decode_workers: 2
+  fine_third_person_decode_workers: 3
+  fine_decode_prefetch_frames: 8
+  fine_supplemental_view_batch_size: 2
+  motion_probe_indexed_segment_workers: 2
+  motion_probe_sequential_segment_workers: 3
+  coarse_decode_lanes: [cuda, cuda, cuda, cuda, cpu, cpu]
+  fine_decode_lanes: [cuda, cuda, cuda, cuda, cpu, cpu]
+  source_workers: 6
+  decode_queue_depth: 32
+  cpu_decode_threads: 4
+  yolo_inference_workers: 1
+  inference_batch_wait_ms: 35
+  materialization_workers: 1
+  io_workers: 2
+  max_gpu_memory_fraction: 0.86
+  concurrent_role_scanners: false
+  release_auxiliary_models_after_event: true
+  preflight_probe_workers: 6
+  source_stat_workers: 12
+
+mllm:
+  group_workers: 2
+  workers: 2
+
+key_materials:
+  selective_verification:
+    max_wall_seconds_per_run: 1800
+  participant_visual_review:
+    # Review paper and cap instances; never treat localization as action proof.
+    # Reuse content-matched receipts and stop on uncertain or invalid responses.
+    enabled: true
+    classes: [paper, bottle_cap, balance]
+    # A 24-event run can require 24 final participant checks plus as many as
+    # 40 bounded cap-frame checks (8 cap events x 5 candidate frames).
+    max_calls_per_run: 64
+    max_candidates_per_view: 20
+    max_output_tokens: 1800
+    timeout_seconds: 60
+    temporal_keyframe_review:
+      enabled: true
+      max_frames_per_event: 5
+
+resource_limits:
+  gpu_memory_normal_fraction: 0.68
+  gpu_memory_warning_fraction: 0.78
+  gpu_memory_contract_fraction: 0.88
+  system_memory_normal_fraction: 0.65
+  system_memory_warning_fraction: 0.75
+  system_memory_contract_fraction: 0.86
+  gpu_temperature_warning_c: 78
+
+storage:
+  staging_directory_name: Processing
+  index_csv: /mnt/visioncortex-nas/VisionCortexExperimentCache/Collection-Catalog/selected-recordings.csv
+  archive_root: /mnt/visioncortex-nas/VisionCortexExperimentArchive
+  local_input_root: /opt/visioncortex-rtx3050/Runtime/Input-Manifests
+  local_runtime_root: /opt/visioncortex-rtx3050/Runtime
+  local_cache_root: /mnt/visioncortex-nas/VisionCortexExperimentCache
+  local_staging_root: /mnt/visioncortex-nas/VisionCortexExperimentArchive/.VisionCortex-Run-Staging
+  sync_to_nas: true
+  run_output_mode: nas_direct
+  manifest_storage: nas
+  require_nas_source_paths: true
+  web_upload_retention_mode: nas_only
+
+# Do not inherit the 3090 Ti host's local certification receipt path.  The
+# receipt is deliberately not bundled: formal production stays fail-closed
+# until an independently reviewed receipt for the packaged model hashes is
+# installed on this RTX 3050 node.
+validation:
+  model_certification:
+    path: /opt/visioncortex-rtx3050/Runtime/Model-Quality/production_model_certification.json
+
+# Read the recorder's own MP4/CSV/JSON sidecars. Internal selection manifests
+# are generated only when the user groups sources into an experiment.
+collection_ingest:
+  discover_plain_video_csv: true
+  max_scan_depth: 6
+  enabled: true
+  mode: directory_metadata
+  source_root: /mnt/visioncortex-nas
+  camera_directory_glob: '*_cam*'
+  settle_seconds: 120
+  max_scan_directories: 20000
+  max_recordings: 5000
+  persist_snapshot: true

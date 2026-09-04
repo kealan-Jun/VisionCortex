@@ -16,6 +16,7 @@ from typing import Any, Callable
 import cv2
 import numpy as np
 
+from .key_material_verification import validate_selective_key_material_verification
 from .schemas import AlignmentTransform, BoxEvidence, FrameEvidence, VideoInfo, ViewInput, ViewRole
 from .liquid_semantic import validate_liquid_semantic_runtime
 from .temporal_segmentation import validate_temporal_segmentation_runtime
@@ -801,6 +802,25 @@ def _metadata_batch(metadata: dict[str, Any]) -> int | None:
     return None
 
 
+def _metadata_dynamic(metadata: dict[str, Any]) -> bool | None:
+    containers = [metadata]
+    for key in ("args", "export", "engine"):
+        nested = metadata.get(key)
+        if isinstance(nested, dict):
+            containers.append(nested)
+    for container in containers:
+        value = container.get("dynamic")
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"true", "1", "yes"}:
+                return True
+            if normalized in {"false", "0", "no"}:
+                return False
+    return None
+
+
 def _profile_batch(engine: Any) -> int | None:
     """Read the maximum explicit batch from the first TensorRT input profile."""
 
@@ -822,6 +842,15 @@ def _engine_build_batch(path: Path) -> int | None:
         return None
     _plan, metadata, _container = _tensorrt_plan_and_metadata(path)
     return _metadata_batch(metadata)
+
+
+def _engine_requires_exact_batch(path: Path) -> bool:
+    if path.suffix.lower() != ".engine" or not path.is_file():
+        return False
+    _plan, metadata, _container = _tensorrt_plan_and_metadata(path)
+    return (
+        _metadata_dynamic(metadata) is False and _metadata_batch(metadata) is not None
+    )
 
 
 def _validate_pinned_asset(
@@ -1035,6 +1064,13 @@ def validate_models(config: dict[str, Any]) -> dict[str, Any]:
         config
     )
     runtime["liquid_semantic_sidecar"] = validate_liquid_semantic_runtime(config)
+    runtime["selective_key_material_verification"] = (
+        validate_selective_key_material_verification(
+            dict(
+                (config.get("key_materials") or {}).get("selective_verification") or {}
+            )
+        )
+    )
     report["runtime"] = runtime
     report["consistent"] = True
     return report
@@ -1054,12 +1090,18 @@ class RoleScanner:
         self.config = config
         self.model_path = _select_model_path(role, config)
         self.model = YOLO(str(self.model_path))
-        self.names = {int(key): str(value).replace("-", "_") for key, value in self.model.names.items()}
+        self.names = {
+            int(key): str(value).replace("-", "_")
+            for key, value in self.model.names.items()
+        }
         expected = int(config["models"]["expected_class_count"])
         if len(self.names) != expected:
             raise ValueError(f"{self.model_path} 不是 {expected} 类模型")
-        self.requested_batch_size = int(batch_size or config["performance"]["batch_size"])
+        self.requested_batch_size = int(
+            batch_size or config["performance"]["batch_size"]
+        )
         self.engine_build_batch = _engine_build_batch(self.model_path)
+        self.engine_requires_exact_batch = _engine_requires_exact_batch(self.model_path)
         self.batch_size = min(
             self.requested_batch_size,
             self.engine_build_batch or self.requested_batch_size,
@@ -1067,6 +1109,8 @@ class RoleScanner:
         self.initial_batch_size = self.batch_size
         self.batch_contractions: list[dict[str, int]] = []
         self.last_inference_batch_sizes: list[int] = []
+        self.last_engine_batch_sizes: list[int] = []
+        self.exact_batch_padding_frames = 0
         self.image_size = int(image_size or config["performance"]["image_size"])
 
     def close(self) -> None:
@@ -1089,11 +1133,25 @@ class RoleScanner:
             try:
                 results: list[list[BoxEvidence]] = []
                 actual_batch_sizes: list[int] = []
+                engine_batch_sizes: list[int] = []
                 for start in range(0, len(packets), batch_size):
                     sub_batch = packets[start : start + batch_size]
                     actual_batch_sizes.append(len(sub_batch))
+                    execution_batch = list(sub_batch)
+                    if (
+                        getattr(self, "engine_requires_exact_batch", False)
+                        and self.engine_build_batch
+                        and len(execution_batch) < self.engine_build_batch
+                    ):
+                        padding = self.engine_build_batch - len(execution_batch)
+                        execution_batch.extend([execution_batch[-1]] * padding)
+                        self.exact_batch_padding_frames = (
+                            int(getattr(self, "exact_batch_padding_frames", 0))
+                            + padding
+                        )
+                    engine_batch_sizes.append(len(execution_batch))
                     predictions = self.model.predict(
-                        source=[packet.frame for packet in sub_batch],
+                        source=[packet.frame for packet in execution_batch],
                         imgsz=self.image_size,
                         conf=float(model_cfg["confidence"]),
                         iou=float(model_cfg["iou"]),
@@ -1102,25 +1160,42 @@ class RoleScanner:
                         half=bool(perf["half"]),
                         verbose=False,
                     )
-                    for packet, prediction in zip(sub_batch, predictions, strict=True):
+                    if len(predictions) < len(sub_batch):
+                        raise RuntimeError(
+                            "TensorRT inference returned fewer predictions than source frames"
+                        )
+                    for packet, prediction in zip(
+                        sub_batch, predictions[: len(sub_batch)], strict=True
+                    ):
                         boxes: list[BoxEvidence] = []
                         if prediction.boxes is not None:
                             xyxy = prediction.boxes.xyxyn.detach().cpu().numpy()
                             confidences = prediction.boxes.conf.detach().cpu().numpy()
-                            classes = prediction.boxes.cls.detach().cpu().numpy().astype(int)
-                            for coords, confidence, class_id in zip(xyxy, confidences, classes, strict=True):
-                                coords_tuple = tuple(float(np.clip(item, 0.0, 1.0)) for item in coords)
+                            classes = (
+                                prediction.boxes.cls.detach().cpu().numpy().astype(int)
+                            )
+                            for coords, confidence, class_id in zip(
+                                xyxy, confidences, classes, strict=True
+                            ):
+                                coords_tuple = tuple(
+                                    float(np.clip(item, 0.0, 1.0)) for item in coords
+                                )
                                 boxes.append(
                                     BoxEvidence(
                                         class_id=int(class_id),
                                         class_name=self.names[int(class_id)],
                                         confidence=float(confidence),
                                         xyxy_norm=coords_tuple,
-                                        roi_motion=_roi_motion(packet.previous_gray, packet.gray, coords_tuple),
+                                        roi_motion=_roi_motion(
+                                            packet.previous_gray,
+                                            packet.gray,
+                                            coords_tuple,
+                                        ),
                                     )
                                 )
                         results.append(boxes)
                 self.last_inference_batch_sizes = actual_batch_sizes
+                self.last_engine_batch_sizes = engine_batch_sizes
                 return results
             except RuntimeError as exc:
                 if "out of memory" not in str(exc).lower() or batch_size <= 1:
@@ -1129,7 +1204,10 @@ class RoleScanner:
                 batch_size = max(1, batch_size // 2)
                 self.batch_size = min(self.batch_size, batch_size)
                 self.batch_contractions.append(
-                    {"from_batch_size": previous_batch_size, "to_batch_size": batch_size}
+                    {
+                        "from_batch_size": previous_batch_size,
+                        "to_batch_size": batch_size,
+                    }
                 )
                 try:
                     import torch

@@ -20,6 +20,92 @@ CONTAINER_CLASSES = {
     "container",
 }
 
+
+def normalize_participant_class(value: Any) -> str:
+    return str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def action_participant_visibility(
+    action_type: ActionType,
+    event_objects: Iterable[Any],
+    rendered_classes_by_view: dict[str, Iterable[Any]],
+) -> dict[str, Any]:
+    """Evaluate the object-identity contract for a final key frame.
+
+    A generic actor-plus-object pair is insufficient for actions whose name
+    identifies the manipulated object.  The result is intentionally shared by
+    final curation and quality acceptance so an event cannot pass one gate and
+    fail the other under a different rule.
+    """
+
+    objects = {normalize_participant_class(item) for item in event_objects}
+    rendered = {
+        str(view_id): {
+            normalize_participant_class(item) for item in classes
+        }
+        for view_id, classes in rendered_classes_by_view.items()
+    }
+    non_actors = objects - HAND_CLASSES
+    required_sets: list[set[str]] = []
+    rule = "manipulated_object"
+
+    if action_type == ActionType.CONTAINER_STATE_CHANGE:
+        rule = "actor_closure_container_same_view"
+        closures = objects & {"bottle_cap", "tube_cap"}
+        containers: set[str] = set()
+        if "bottle_cap" in closures:
+            containers.update(
+                {
+                    "container",
+                    "sample_bottle",
+                    "sample_bottle_blue",
+                    "reagent_bottle",
+                }
+            )
+        if "tube_cap" in closures:
+            containers.update({"container", "tube"})
+        required_sets = [HAND_CLASSES, closures, containers]
+    elif action_type == ActionType.DEVICE_PANEL_OPERATION:
+        rule = "actor_device_same_view"
+        required_sets = [HAND_CLASSES, objects & DEVICE_CLASSES]
+    elif action_type == ActionType.PIPETTE_TRANSFER_OPERATION:
+        rule = "actor_pipette_same_view"
+        required_sets = [HAND_CLASSES, objects & {"pipette", "spearhead"}]
+    elif action_type == ActionType.HAND_OBJECT_CONTACT:
+        rule = "actor_and_claimed_object_same_view"
+        required_sets = [HAND_CLASSES, non_actors]
+    else:
+        required_sets = [non_actors]
+
+    complete_view_ids = sorted(
+        view_id
+        for view_id, classes in rendered.items()
+        if required_sets and all(required and classes & required for required in required_sets)
+    )
+    missing_slots: list[str] = []
+    if not non_actors:
+        missing_slots.append("event_manipulated_object")
+    if action_type == ActionType.CONTAINER_STATE_CHANGE:
+        if not required_sets[1]:
+            missing_slots.append("event_closure_object")
+        if not required_sets[2]:
+            missing_slots.append("event_container_object")
+    elif action_type == ActionType.DEVICE_PANEL_OPERATION and not required_sets[1]:
+        missing_slots.append("event_device_object")
+    elif action_type == ActionType.PIPETTE_TRANSFER_OPERATION and not required_sets[1]:
+        missing_slots.append("event_pipette_object")
+
+    return {
+        "passed": bool(complete_view_ids) and not missing_slots,
+        "rule": rule,
+        "complete_view_ids": complete_view_ids,
+        "missing_slots": missing_slots,
+        "event_objects": sorted(objects),
+        "rendered_classes_by_view": {
+            view_id: sorted(classes) for view_id, classes in rendered.items()
+        },
+    }
+
 LIQUID_DIRECT_PROOF_TYPES = {
     "visible_liquid_flow",
     "visible_liquid_level_change",

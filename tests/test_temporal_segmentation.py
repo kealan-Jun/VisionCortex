@@ -118,6 +118,47 @@ def test_sample_indices_are_bounded_and_keep_seed():
     assert 63 in indices
 
 
+@pytest.mark.parametrize("missing_tail", [False, True])
+def test_sampling_keeps_frame_ordinals_when_random_seek_is_unreliable(
+    tmp_path, monkeypatch, missing_tail
+):
+    clip = tmp_path / "fractional-seek-contract.mp4"
+    seed = _video(clip)
+    open_capture = cv2.VideoCapture
+
+    class UnreliableSeekCapture:
+        def __init__(self, path):
+            self.capture = open_capture(path)
+
+        def get(self, property_id):
+            value = self.capture.get(property_id)
+            return value + int(missing_tail) if property_id == cv2.CAP_PROP_FRAME_COUNT else value
+
+        def set(self, *_args):
+            raise AssertionError("Random frame seeking is unreliable for this clip")
+
+        def read(self):
+            return self.capture.read()
+
+        def release(self):
+            self.capture.release()
+
+    monkeypatch.setattr(module.cv2, "VideoCapture", UnreliableSeekCapture)
+    if missing_tail:
+        with pytest.raises(RuntimeError, match="frame=6"):
+            module._sample_clip(clip, seed, tmp_path / "frames", seed_fraction=0.6,
+                                maximum_frames=5, jpeg_quality=95)
+    else:
+        indices, seed_position, shape = module._sample_clip(
+            clip, seed, tmp_path / "frames", seed_fraction=0.6,
+            maximum_frames=5, jpeg_quality=95
+        )
+        assert indices == [0, 1, 3, 4, 5]
+        assert seed_position == 2
+        assert shape == (96, 160)
+        assert len(list((tmp_path / "frames").glob("*.jpg"))) == 5
+
+
 def test_bounded_sam2_receipt_refines_boxes_and_reuses_cache(
     tmp_path: Path, monkeypatch
 ):

@@ -1,3 +1,5 @@
+import json
+
 from labvision_evidence import archive
 from labvision_evidence.schemas import ActionType, EvidenceEvent
 
@@ -34,7 +36,7 @@ def test_common_action_uses_three_aligned_temporal_frames(monkeypatch, tmp_path)
         calls.append((clip, view_id, samples_per_view))
         return [
             (f"view_id={view_id}; temporal_phase={phase}", output / f"{phase}.jpg")
-            for phase in ("before", "peak", "after")
+            for phase in ("clip_early", "clip_middle", "clip_late")
         ]
 
     monkeypatch.setattr(archive, "extract_temporal_review_frames", fake_extract)
@@ -137,3 +139,59 @@ def test_liquid_review_candidate_selects_dense_primary_view_without_becoming_pro
         (layout.root / "tp.mp4", "tp", 15),
         (layout.root / "fp.mp4", "fp", 3),
     ]
+
+
+def _retained_frames(layout, event):
+    root = layout.work / "key-material-annotation-inputs" / event.event_id
+    root.mkdir(parents=True)
+    for view in ("fp", "tp"):
+        (root / f"{view}.jpg").write_bytes(b"retained frame")
+        (root / f"{view}.json").write_text(json.dumps({
+            "event_id": event.event_id, "view_id": view,
+            "requested_key_global_ms": event.key_global_ms,
+            "decoded_key_global_ms": event.key_global_ms + 100,
+        }))
+    return root
+
+
+def test_selected_frames_have_own_times_and_preserve_sequence(tmp_path):
+    layout = archive.ArchiveLayout(tmp_path)
+    event = _event(ActionType.HAND_OBJECT_CONTACT)
+    _retained_frames(layout, event)
+    temporal = [("clip_timeline", tmp_path / f"frame-{index}.jpg") for index in range(3)]
+    result = archive._with_selected_keyframe_review_images(layout, event, {"mllm": {}}, temporal)
+    assert result[:3] == temporal and len(result) == 5
+    assert all("sample_scope=selected_keyframe" in label and "requested_global_ms=1500.000; decoded_global_ms=1600.000" in label for label, _ in result[3:])
+
+
+def test_stale_or_legacy_raw_frames_are_not_claimed_as_selected(tmp_path):
+    layout = archive.ArchiveLayout(tmp_path)
+    event = _event(ActionType.HAND_OBJECT_CONTACT)
+    root = _retained_frames(layout, event)
+    temporal = [("clip_timeline", tmp_path / "frame.jpg")]
+    event.key_global_ms += 500
+    assert archive._with_selected_keyframe_review_images(layout, event, {"mllm": {}}, temporal) == temporal
+    event.key_global_ms -= 500
+    (root / "tp.json").write_text(json.dumps({"event_id": event.event_id, "view_id": "tp"}))
+    assert archive._with_selected_keyframe_review_images(layout, event, {"mllm": {}}, temporal) == temporal
+
+
+def test_selected_frames_do_not_evict_dense_liquid_context_or_one_view(tmp_path):
+    layout = archive.ArchiveLayout(tmp_path)
+    event = _event(ActionType.LIQUID_MOVEMENT)
+    _retained_frames(layout, event)
+    temporal = [("clip_timeline", tmp_path / f"frame-{index}.jpg") for index in range(18)]
+    config = {"mllm": {"max_images_per_event": 8, "max_images_per_event_by_action": {"liquid_movement": 18}}}
+    assert archive._with_selected_keyframe_review_images(layout, event, config, temporal) == temporal
+
+
+def test_five_sample_dual_view_sequence_stays_in_order(monkeypatch, tmp_path):
+    layout = archive.ArchiveLayout(tmp_path)
+    phases = ["clip_early", "clip_mid_early", "clip_middle", "clip_mid_late", "clip_late"]
+
+    def fake_extract(clip, output, view_id, samples_per_view=3):
+        return [(f"view_id={view_id}; temporal_phase={phase}; key_clip_frame={index}", output / f"{phase}.jpg") for index, phase in enumerate(phases)]
+
+    monkeypatch.setattr(archive, "extract_temporal_review_frames", fake_extract)
+    images = archive.key_material_review_images(layout, _event(ActionType.DEVICE_PANEL_OPERATION), {"mllm": {"temporal_samples_per_view": 5}})
+    assert [label.split("temporal_phase=", 1)[1].split(";", 1)[0] for label, _ in images] == [phase for phase in phases for _ in range(2)]

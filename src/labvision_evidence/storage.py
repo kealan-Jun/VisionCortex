@@ -22,6 +22,7 @@ import yaml
 from .device_registry import load_device_registry, resolve_view_role
 from .input_seal import build_input_seal, write_input_seal
 from .schemas import RunManifest, VideoSegmentInput, ViewInput, ViewRole
+from .source_path_migrations import SourcePathResolver
 
 
 ARCHIVE_DIRECTORIES = (
@@ -232,6 +233,8 @@ def safe_archive_name(value: str) -> str:
     """Return a deterministic ASCII-only component for SMB/tool compatibility."""
 
     cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip(" .-_")
+    if cleaned.casefold() == "processing":
+        cleaned = "Experiment-Processing"
     if cleaned:
         return cleaned[:120]
     digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:10]
@@ -291,7 +294,32 @@ def initialize_nas_archive(config: dict[str, Any], experiment_name: str) -> Path
     root.mkdir(parents=True, exist_ok=True)
     for directory in ARCHIVE_DIRECTORIES:
         (root / directory).mkdir(parents=True, exist_ok=True)
+    if explicit:
+        (root / "处理状态.txt").write_text(
+            "处理中：各环节完成后，产出会出现在对应文件夹。\n"
+            "这里的阶段产出仍可能在后续复核中更新，不代表整份实验已验收。\n"
+            "任务进度请在网页的“分析进度”中查看。\n",
+            encoding="utf-8",
+        )
     return root
+
+
+def run_staging_roots(config: dict[str, Any]) -> list[Path]:
+    """Use the configured visible folder and retain access to older runs."""
+
+    name = str(
+        config["storage"].get("staging_directory_name")
+        or ".VisionCortex-Run-Staging"
+    )
+    if name not in {"Processing", ".VisionCortex-Run-Staging"}:
+        raise ValueError("Unsupported staging directory name")
+    archive_root = Path(config["storage"]["archive_root"])
+    return [
+        archive_root / item
+        for item in dict.fromkeys(
+            [name, ".VisionCortex-Run-Staging", "Processing"]
+        )
+    ]
 
 
 def fixed_archive_staging_paths(
@@ -299,7 +327,7 @@ def fixed_archive_staging_paths(
 ) -> tuple[Path, Path, Path]:
     archive_root = Path(config["storage"]["archive_root"])
     fixed_root = archive_root / safe_archive_name(archive_name)
-    staging_root = archive_root / ".VisionCortex-Run-Staging" / archive_name / run_id
+    staging_root = run_staging_roots(config)[0] / archive_name / run_id
     history_root = archive_root / ".VisionCortex-Run-History" / archive_name / run_id
     return fixed_root, staging_root, history_root
 
@@ -413,6 +441,11 @@ def promote_fixed_archive(
     temporary = receipt_path.with_name(f".{receipt_path.name}.partial-{uuid.uuid4().hex[:8]}")
     temporary.write_text(json.dumps(receipt, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(temporary, receipt_path)
+    if (staging_root / "处理状态.txt").is_file():
+        _atomic_write_text(
+            staging_root / "处理状态.txt",
+            f"已归档。完整产出位置：\n{fixed_root}\n",
+        )
     return receipt
 
 
@@ -715,6 +748,10 @@ def prepare_from_nas_index(
     progress = progress or (lambda _: None)
     storage = config["storage"]
     index_csv = Path(storage["index_csv"])
+    migration_receipt_values = storage.get("source_path_migration_receipts") or []
+    if isinstance(migration_receipt_values, (str, Path)):
+        migration_receipt_values = [migration_receipt_values]
+    migration_resolver = SourcePathResolver(migration_receipt_values)
     rows = read_index_experiment(index_csv, experiment_id)
     description = describe_index_experiment(index_csv, experiment_id, rows)
     usable_rows = [row for row in rows if _parts(row.get("rgb_file"))]
@@ -820,8 +857,14 @@ def prepare_from_nas_index(
     def prepare(row: dict[str, str]) -> ViewInput:
         camera_key = str(row["camera_key"])
         progress(f"Registering NAS segments without copying: {camera_key}")
-        videos = [_resolve_nas_path(item, index_csv) for item in _parts(row.get("rgb_file"))]
-        clocks = [_resolve_nas_path(item, index_csv) for item in _parts(row.get("frames_file"))]
+        videos = [
+            migration_resolver.resolve(_resolve_nas_path(item, index_csv))
+            for item in _parts(row.get("rgb_file"))
+        ]
+        clocks = [
+            migration_resolver.resolve(_resolve_nas_path(item, index_csv))
+            for item in _parts(row.get("frames_file"))
+        ]
         if clocks and len(clocks) != len(videos):
             raise ValueError(
                 f"NAS segment/clock count mismatch for {camera_key}: "
@@ -1011,6 +1054,14 @@ def prepare_from_nas_index(
         yaml.safe_dump(manifest.model_dump(mode="json"), allow_unicode=True, sort_keys=False),
         encoding="utf-8",
     )
+    migration_resolution_path = manifest_root / "source_path_resolution.json"
+    migration_resolution = migration_resolver.resolution_receipt(
+        subject=f"nas-index:{experiment_id}"
+    )
+    _atomic_write_text(
+        migration_resolution_path,
+        json.dumps(migration_resolution, ensure_ascii=False, indent=2),
+    )
     ingest = {
         **description,
         "indexed_camera_count": len(rows),
@@ -1032,6 +1083,14 @@ def prepare_from_nas_index(
         "manifest": str(manifest_path),
         "segment_counts": segment_counts,
         "source_validation": source_validation,
+        "source_path_resolution": {
+            "status": migration_resolution["status"],
+            "resolved_path_count": migration_resolution["resolved_path_count"],
+            "receipt": str(migration_resolution_path),
+            "records_digest_sha256": migration_resolution[
+                "records_digest_sha256"
+            ],
+        },
         "view_role_resolution": {
             "status": role_receipt_payload["status"],
             "receipt": str(role_receipt_path),

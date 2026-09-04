@@ -309,6 +309,8 @@ def test_resource_monitor_survives_one_sampling_failure(monkeypatch, tmp_path):
     report = monitor.stop()
 
     assert report["sample_count"] >= 1
+    journal = [json.loads(line) for line in monitor.journal_destination.read_text().splitlines()]
+    assert journal == report["samples"]
     assert report["monitor_health"]["sampling_error_count"] >= 1
     assert report["monitor_health"]["thread_ended_unexpectedly"] is False
     assert report["monitor_health"]["thread_alive_after_stop"] is False

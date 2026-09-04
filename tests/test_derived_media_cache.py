@@ -1,6 +1,20 @@
 from pathlib import Path
 
-from labvision_evidence.archive import _materialize_derived_media
+from labvision_evidence.archive import (
+    _link_or_copy_immutable,
+    _materialize_derived_media,
+)
+
+
+def test_immutable_materialization_cleans_noop_replace_hardlink(tmp_path):
+    source = tmp_path / "cache.mp4"
+    destination = tmp_path / "result.mp4"
+    source.write_bytes(b"same-derived-media")
+    destination.hardlink_to(source)
+
+    assert _link_or_copy_immutable(source, destination) == "hardlink"
+    assert destination.read_bytes() == b"same-derived-media"
+    assert list(tmp_path.glob(".*.cache-*")) == []
 
 
 def _config(tmp_path: Path, mode: str) -> dict:

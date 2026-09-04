@@ -50,6 +50,7 @@ from .archive import (
     materialize_key_materials,
     key_material_action_folder,
     prepare_key_material_category_layout,
+    reconcile_visually_reviewed_participants,
     refresh_key_material_metadata,
     write_aligned_csv,
     write_key_material_category_index,
@@ -574,10 +575,25 @@ def _synchronize_final_event_state_receipts(
             else event.action_type.value
         )
         expected_peak_us = round(event.key_global_ms * 1000.0)
+        expected_object_classes = {
+            str(item).strip().lower().replace("-", "_").replace(" ", "_")
+            for item in event.objects
+        } - {"hand", "gloved_hand", "lab_coat"}
+        previous_object_classes = {
+            str(item).strip().lower().replace("-", "_").replace(" ", "_")
+            for item in (
+                ((previous.get("object_identity") or {}).get("object_classes"))
+                or []
+            )
+        }
+        participant_identity_mismatch = bool(
+            expected_object_classes != previous_object_classes
+        )
         if (
             str(previous.get("action_type") or "") == expected_action
             and int(previous.get("peak_timestamp_us") or -1)
             == expected_peak_us
+            and not participant_identity_mismatch
         ):
             continue
         rebuilt = build_event_state_receipt(event, config)
@@ -604,6 +620,11 @@ def _synchronize_final_event_state_receipts(
                 "final_action_type": rebuilt.get("action_type"),
                 "previous_peak_timestamp_us": previous.get("peak_timestamp_us"),
                 "final_peak_timestamp_us": rebuilt.get("peak_timestamp_us"),
+                "previous_object_classes": sorted(previous_object_classes),
+                "final_object_classes": sorted(expected_object_classes),
+                "participant_identity_resynchronized": (
+                    participant_identity_mismatch
+                ),
             }
         )
     return repairs
@@ -723,16 +744,24 @@ def validate_final_step_action_consistency(
         )
         clause_start = max(text.rfind(mark, 0, start) for mark in "，。；！？") + 1
         clause_before = text[clause_start:start]
+        # A denial often governs a long Chinese enumeration separated with
+        # ``、``/``或`` rather than clause punctuation.  Bind the marker to
+        # every later item in the same clause, while the transition check
+        # below still exposes a later positive claim such as ``但随后...``.
+        # Keep the marker vocabulary explicit so ``无菌液体转移`` is never
+        # mistaken for a denial.
         scoped_marker = re.search(
-            r"(?:无(?:经(?:最终审核)?确认的|已确认的|可见的|明确的)?|"
-            r"无已审核通过的事件支持|"
+            r"(?:无已审核通过的事件支持|"
+            r"无(?:经(?:最终审核)?确认的|已确认的|可见的|明确的|任何|"
+            r"实际|清晰(?:可读|可见)?)|"
             r"未确认(?:存在|发生)?(?:其他)?|"
             r"未发生(?:经证实的|已确认的)?|"
-            r"未(?:观察到|观测到)(?:实际|任何|其他|明确的|完整的)?|"
-            r"没有确认(?:其他)?|"
-            r"无法(?:证实|确认|认定)(?:存在|发生)?(?:完整的)?)"
-                r"(?:天平|读数|液体|容器|设备|面板|按键|按钮|开盖|合盖|"
-            r"拿取|旋盖|移液|吸液|排液|加液|倾倒)",
+            r"未(?:观察到|观测到|看见|见到|证明)(?:实际|任何|其他|"
+            r"明确的|完整的)?|"
+            r"没有(?:观察到|看见|确认|证明)(?:任何|其他)?|"
+            r"无法(?:证实|确认|认定)(?:存在|发生)?(?:完整的)?|"
+            r"不能确认|不可确认)"
+            r"[^，。；！？]{0,96}$",
             clause_before,
         )
         scoped_list_denial = False
@@ -1327,6 +1356,16 @@ class EvidencePipeline:
         )
         if self.config.get("storage", {}).get("run_output_mode") == "nas_direct":
             write_json(layout.json_config / "pipeline_status.json", status_payload)
+            stage_note = "处理中" if stage not in {"completed", "failed"} else (
+                "分析已结束，等待归档校验" if stage == "completed" else "处理失败，已完成的阶段产出保留"
+            )
+            note_path = layout.root / "处理状态.txt"
+            temporary_note = note_path.with_suffix(".txt.partial")
+            temporary_note.write_text(
+                f"{stage_note}\n{message}\n更新时间：{now_iso}\n"
+                "各阶段产出位于对应文件夹；最终结果以归档校验为准。\n", encoding="utf-8"
+            )
+            temporary_note.replace(note_path)
         if self._publisher is not None:
             self._publisher.publish_status(status_payload)
 
@@ -1381,6 +1420,44 @@ class EvidencePipeline:
         if self._publisher is not None:
             self._publisher.publish_file(receipt_path)
         return receipt_path
+
+    def _checkpoint_key_material_understanding(
+        self,
+        layout: ArchiveLayout,
+        stage: str,
+        events: list[EvidenceEvent],
+        groups: list[ExperimentGroup],
+        semantic_curation: dict[str, Any] | None = None,
+    ) -> list[Path]:
+        """Keep each completed understanding pass before later passes mutate it."""
+
+        review_status = {
+            "mllm": "pending_material_refinement",
+            "material_refinement": "pending_semantic_refinement",
+            "semantic_refinement": "pending_quality_acceptance",
+        }[stage]
+        understanding = {
+            "schema_version": "visioncortex-key-material-understanding/1",
+            "refinement_stage": stage,
+            "review_status": review_status,
+            "events": [event.model_dump(mode="json") for event in events],
+            "semantic_curation": {
+                key: value
+                for key, value in (semantic_curation or {}).items()
+                if key != "records"
+            },
+        }
+        metrics = self._metrics(events, groups)
+        snapshots = layout.json_config / "Stage-Outputs"
+        payloads = {
+            snapshots / f"{stage}.json": understanding,
+            snapshots / f"{stage}-metrics.json": metrics,
+            layout.json_config / "key_material_model_understanding.json": understanding,
+            layout.json_config / "run_metrics_live.json": metrics,
+        }
+        for path, payload in payloads.items():
+            write_json(path, payload)
+        return list(payloads)
 
     def _acceptance_baseline(self) -> dict[str, Any] | None:
         configured = self.config.get("validation", {}).get("acceptance_baseline")
@@ -1569,6 +1646,7 @@ class EvidencePipeline:
 
     def _metrics(self, events, groups=()) -> dict[str, Any]:
         key_calls = []
+        visual_calls_by_fingerprint: dict[str, dict[str, Any]] = {}
         for event in events:
             understanding = event.model_understanding or {}
             if "usage" in understanding or understanding.get("status") in {"completed", "failed"}:
@@ -1584,6 +1662,23 @@ class EvidencePipeline:
                         "usage": understanding.get("usage", {}),
                     }
                 )
+            for fingerprint, review in (event.observability.get("participant_visual_review") or {}).items():
+                if not review.get("request_attempted"):
+                    continue
+                call = {
+                    "stage": "participant_visual_review",
+                    "event_id": event.event_id,
+                    "input_fingerprint": fingerprint,
+                    "model": review.get("model", self.config["mllm"]["model"]),
+                    "status": review.get("status"),
+                    "latency_seconds": review.get("latency_seconds"),
+                    "attempts": review.get("attempts"),
+                    "cache_reused": bool(review.get("cache_reused")),
+                    "usage": review.get("usage") or {},
+                }
+                prior = visual_calls_by_fingerprint.get(fingerprint)
+                if prior is None or (prior["cache_reused"] and not call["cache_reused"]):
+                    visual_calls_by_fingerprint[fingerprint] = call
 
         group_calls = []
         for group in groups:
@@ -1647,7 +1742,20 @@ class EvidencePipeline:
             "server_reported_for_all_calls": bool(group_calls)
             and all(call.get("usage", {}).get("server_reported") for call in group_calls),
         }
-        all_calls = group_calls + key_calls
+        visual_calls = list(visual_calls_by_fingerprint.values())
+        visual_review_metrics = {
+            "input_tokens": token_sum(visual_calls, "input_tokens"),
+            "output_tokens": token_sum(visual_calls, "output_tokens"),
+            "total_tokens": token_sum(visual_calls, "total_tokens"),
+            "call_count": len(visual_calls),
+            "executed_call_count": sum(not call["cache_reused"] for call in visual_calls),
+            "reused_call_count": sum(call["cache_reused"] for call in visual_calls),
+            "unknown_usage_call_count": sum(
+                not call["cache_reused"] and call["usage"].get("total_tokens") is None
+                for call in visual_calls
+            ),
+        }
+        all_calls = group_calls + key_calls + visual_calls
         return {
             "run_started_at": self._run_started_iso,
             "run_ended_at": datetime.now(timezone.utc).isoformat(),
@@ -1668,6 +1776,7 @@ class EvidencePipeline:
             "tokens": {
                 "experiment_groups": experiment_groups,
                 "key_materials": key_materials,
+                "participant_visual_review": visual_review_metrics,
                 "daily_report": {
                     "input_tokens": 0,
                     "output_tokens": 0,
@@ -1679,7 +1788,7 @@ class EvidencePipeline:
                     "input_tokens": token_sum(all_calls, "input_tokens"),
                     "output_tokens": token_sum(all_calls, "output_tokens"),
                     "total_tokens": token_sum(all_calls, "total_tokens"),
-                    "note": "Only MLLM step analysis consumes model tokens; CV and FFmpeg consume no tokens.",
+                    "note": "MLLM step analysis and participant visual review consume model tokens; CV and FFmpeg consume no tokens.",
                 },
             },
             "mllm_calls": all_calls,
@@ -5226,6 +5335,14 @@ class EvidencePipeline:
             self._status(layout, "mllm", 0.92, "调用豆包理解去重后的关键动作当前/下一步骤")
             analyze_key_materials(layout, key_events, self.config)
             reviewed_key_events = list(key_events)
+            self._complete_stage(
+                layout,
+                "mllm",
+                self._checkpoint_key_material_understanding(
+                    layout, "mllm", reviewed_key_events, groups
+                ),
+            )
+            self._status(layout, "material_refinement", 0.93, "复核关键画面与动作参与对象")
             key_events, semantic_curation = curate_semantically_reviewed_key_materials(
                 layout,
                 reviewed_key_events,
@@ -5257,13 +5374,61 @@ class EvidencePipeline:
                 self.config,
                 publisher=self._publisher,
                 archive_id=manifest.experiment_id,
+                progress_callback=lambda done, total: self._status(
+                    layout, "material_refinement", 0.93 + 0.01 * done / max(1, total),
+                    f"复核关键画面：{done}/{total}",
+                ),
             )
             state_receipt_repairs = _synchronize_final_event_state_receipts(
                 key_events, self.config
             )
+            self._status(layout, "material_refinement", 0.94, "校验参与对象标注与连续性")
             final_annotation = _rerender_curated_participant_annotations(
                 layout, key_events, groups, self.config
             )
+            key_events, semantic_curation = (
+                reconcile_visually_reviewed_participants(
+                    layout,
+                    key_events,
+                    groups,
+                    semantic_curation,
+                )
+            )
+            visual_reconciliation = semantic_curation.get(
+                "visual_participant_reconciliation"
+            ) or {}
+            if (
+                int(visual_reconciliation.get("pruned_event_count") or 0)
+                or int(visual_reconciliation.get("excluded_event_count") or 0)
+            ):
+                # The first render is the evidence used to adjudicate unstable
+                # paper/cap participants.  Rebuild the surviving user tree from
+                # the reconciled participant sets.  All cloud requests are
+                # content-addressed and reused; removed events stay in the
+                # formal Review-Candidates tree.
+                state_receipt_repairs.extend(
+                    _synchronize_final_event_state_receipts(
+                        key_events, self.config
+                    )
+                )
+                segment_semantic_repairs.extend(
+                    _synchronize_segments_with_final_key_events(
+                        segments, groups, key_events
+                    )
+                )
+                write_key_material_category_index(
+                    layout,
+                    groups,
+                    key_events,
+                    include_empty_categories=bool(
+                        self.config.get("archive", {}).get(
+                            "include_empty_action_categories", True
+                        )
+                    ),
+                )
+                final_annotation = _rerender_curated_participant_annotations(
+                    layout, key_events, groups, self.config
+                )
             semantic_curation["final_annotation"] = {
                 key: value
                 for key, value in final_annotation.items()
@@ -5300,10 +5465,24 @@ class EvidencePipeline:
                 layout.json_config / "semantic_key_material_curation.json",
                 semantic_curation,
             )
+            self._complete_stage(
+                layout,
+                "material_refinement",
+                [
+                    layout.key_materials,
+                    layout.json_config / "semantic_key_material_curation.json",
+                    layout.json_config / "final_key_material_annotation.json",
+                    *self._checkpoint_key_material_understanding(
+                        layout, "material_refinement", reviewed_key_events,
+                        groups, semantic_curation,
+                    ),
+                ],
+            )
             # The initial group pass is needed to name/materialize bounded
             # experiments. Refine its steps after event-level adjudication so
             # rejected CV hypotheses (for example, a nearby balance mistaken
             # for a panel operation) cannot leak into the final step narrative.
+            self._status(layout, "semantic_refinement", 0.95, "核对实验步骤与最终动作证据")
             group_identity = {
                 group.group_id: {
                     "experiment_name": group.experiment_name,
@@ -5374,27 +5553,6 @@ class EvidencePipeline:
                     "groups": [group.model_dump(mode="json") for group in groups],
                 },
             )
-            key_understanding_path = (
-                layout.json_config / "key_material_model_understanding.json"
-            )
-            write_json(
-                key_understanding_path,
-                {
-                    "schema_version": "visioncortex-key-material-understanding/1",
-                    "events": [
-                        event.model_dump(mode="json") for event in reviewed_key_events
-                    ],
-                    "semantic_curation": {
-                        key: value
-                        for key, value in semantic_curation.items()
-                        if key != "records"
-                    },
-                },
-            )
-            write_json(
-                layout.json_config / "run_metrics_live.json",
-                self._metrics(key_events, groups),
-            )
             refresh_key_material_metadata(
                 layout,
                 key_events,
@@ -5404,14 +5562,14 @@ class EvidencePipeline:
             )
             self._complete_stage(
                 layout,
-                "mllm",
+                "semantic_refinement",
                 [
                     layout.key_materials,
                     group_understanding_path,
-                    key_understanding_path,
-                    layout.json_config / "semantic_key_material_curation.json",
-                    layout.json_config / "final_key_material_annotation.json",
-                    layout.json_config / "run_metrics_live.json",
+                    *self._checkpoint_key_material_understanding(
+                        layout, "semantic_refinement", reviewed_key_events,
+                        groups, semantic_curation,
+                    ),
                 ],
             )
             # Only semantically curated formal key events may create durable

@@ -1,0 +1,30 @@
+extends: ./rtx3050-6gb-ubuntu20-production.yaml
+
+# No-NAS smoke-test/Web profile. It never inherits a production NAS path.
+project:
+  output_root: /opt/visioncortex-rtx3050/Runtime/NoNasWeb/Archives/.VisionCortex-Run-Staging
+
+mllm:
+  enabled: false
+
+storage:
+  index_csv: /opt/visioncortex-rtx3050/Runtime/NoNasWeb/local-experiment-index.csv
+  device_registry_path: /opt/visioncortex-rtx3050/Runtime/NoNasWeb/local-device-registry.json
+  archive_root: /opt/visioncortex-rtx3050/Runtime/NoNasWeb/Archives
+  local_input_root: /opt/visioncortex-rtx3050/Runtime/NoNasWeb/Input-Manifests
+  local_runtime_root: /opt/visioncortex-rtx3050/Runtime/NoNasWeb/Runtime
+  local_cache_root: /opt/visioncortex-rtx3050/Runtime/NoNasWeb/Cache
+  local_staging_root: /opt/visioncortex-rtx3050/Runtime/NoNasWeb/Archives/.VisionCortex-Run-Staging
+  sync_to_nas: false
+  run_output_mode: local
+  manifest_storage: local
+  require_nas_source_paths: false
+  web_upload_retention_mode: local_only
+
+collection_ingest:
+  enabled: false
+  mode: index_metadata
+  source_root: /opt/visioncortex-rtx3050/Runtime/NoNasWeb/Input-Manifests
+
+validation:
+  require_model_certification: false

@@ -14,6 +14,19 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = PACKAGE_ROOT / "configs" / "default.yaml"
 
 
+def _resolve_default_config(profile: Path | None) -> Path:
+    configured = os.getenv("VISIONCORTEX_DEFAULT_CONFIG")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    if DEFAULT_CONFIG.is_file():
+        return DEFAULT_CONFIG.resolve()
+    if profile is not None:
+        sibling = profile.resolve().parent / "default.yaml"
+        if sibling.is_file():
+            return sibling.resolve()
+    return DEFAULT_CONFIG.resolve()
+
+
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     result = deepcopy(base)
     for key, value in override.items():
@@ -39,19 +52,24 @@ def _load_profile(path: Path, seen: set[Path] | None = None) -> dict[str, Any]:
     if extends is None:
         return payload
     if not isinstance(extends, str) or not extends.strip():
-        raise ValueError(f"Configuration extends must be a non-empty relative path: {resolved}")
+        raise ValueError(
+            f"Configuration extends must be a non-empty relative path: {resolved}"
+        )
     candidate = Path(extends)
     if candidate.is_absolute():
         raise ValueError(f"Configuration extends must be relative: {resolved}")
     base_path = (resolved.parent / candidate).resolve()
     if base_path.parent != resolved.parent:
-        raise ValueError(f"Configuration extends must stay in {resolved.parent}: {base_path}")
+        raise ValueError(
+            f"Configuration extends must stay in {resolved.parent}: {base_path}"
+        )
     return _deep_merge(_load_profile(base_path, visited), payload)
 
 
 def load_config(path: Path | None = None) -> dict[str, Any]:
-    config = _load_profile(DEFAULT_CONFIG)
-    if path and path.resolve() != DEFAULT_CONFIG.resolve():
+    default_config = _resolve_default_config(path)
+    config = _load_profile(default_config)
+    if path and path.resolve() != default_config:
         config = _deep_merge(config, _load_profile(path))
     _apply_environment_overrides(config)
     return config
@@ -110,6 +128,14 @@ def _apply_environment_overrides(config: dict[str, Any]) -> None:
         if value:
             storage[key] = value
 
+    migration_receipts = os.getenv("VISIONCORTEX_SOURCE_PATH_MIGRATION_RECEIPTS")
+    if migration_receipts:
+        storage["source_path_migration_receipts"] = [
+            item.strip()
+            for item in migration_receipts.split(os.pathsep)
+            if item.strip()
+        ]
+
     output_root = os.getenv("VISIONCORTEX_OUTPUT_ROOT")
     if output_root:
         config.setdefault("project", {})["output_root"] = output_root
@@ -125,6 +151,19 @@ def _apply_environment_overrides(config: dict[str, Any]) -> None:
         value = os.getenv(name)
         if value:
             models[key] = value
+
+    selective_verification = os.getenv(
+        "VISIONCORTEX_SELECTIVE_KEY_MATERIAL_VERIFICATION"
+    )
+    if selective_verification is not None:
+        normalized = selective_verification.strip().lower()
+        if normalized not in {"true", "false", "1", "0", "yes", "no"}:
+            raise ValueError(
+                "VISIONCORTEX_SELECTIVE_KEY_MATERIAL_VERIFICATION must be true or false"
+            )
+        config.setdefault("key_materials", {}).setdefault("selective_verification", {})[
+            "enabled"
+        ] = normalized in {"true", "1", "yes"}
 
 
 def load_manifest(path: Path) -> RunManifest:

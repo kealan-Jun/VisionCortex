@@ -1,0 +1,528 @@
+{
+  "schema_version": "visioncortex-public-apparatus-candidate-registry/1",
+  "candidates": {
+    "waseda-apparatus-yolo26s-v2": {
+      "status": "evaluated_not_promoted",
+      "intended_role": "offline candidate and teacher for a future ontology-aligned training run",
+      "dataset": {
+        "title": "Annotated Chemical Apparatus Image Dataset",
+        "source_record": "https://data.mendeley.com/datasets/8p2hvgdvpn/1",
+        "license": "CC-BY-4.0",
+        "truth_status": "public_human_annotations",
+        "test_images": 205,
+        "test_annotations": 405
+      },
+      "artifact": {
+        "path": "/srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/Waseda-Apparatus-Candidate-v2/weights/best.pt",
+        "sha256": "469d3a402d7f7d62e17db501811472aac211951e10b417364fbb92c853bd8878",
+        "size_bytes": 20305406,
+        "training_receipt": "/srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/Waseda-Apparatus-Candidate-v2/visioncortex-training-receipt.json",
+        "heldout_evaluation_receipt": "/srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/Waseda-Apparatus-Candidate-v2-Test/visioncortex-evaluation-receipt.json"
+      },
+      "heldout_metrics": {
+        "precision": 0.8642116244261722,
+        "recall": 0.7176265934181327,
+        "map50": 0.8329680680059944,
+        "map50_95": 0.7483226049375358,
+        "per_class": {
+          "hand": {
+            "precision": 0.900333,
+            "recall": 0.612482,
+            "f1": 0.729022,
+            "map50": 0.76013,
+            "map50_95": 0.520422
+          },
+          "conical beaker": {
+            "precision": 0.892289,
+            "recall": 0.828125,
+            "f1": 0.859011,
+            "map50": 0.922548,
+            "map50_95": 0.911451
+          },
+          "erlenmeyer flask": {
+            "precision": 0.934446,
+            "recall": 0.891089,
+            "f1": 0.912252,
+            "map50": 0.972385,
+            "map50_95": 0.951202
+          },
+          "reagent bottle": {
+            "precision": 0.598163,
+            "recall": 0.769121,
+            "f1": 0.672954,
+            "map50": 0.799723,
+            "map50_95": 0.730623
+          },
+          "pipette": {
+            "precision": 0.864819,
+            "recall": 0.363636,
+            "f1": 0.511992,
+            "map50": 0.54863,
+            "map50_95": 0.443746
+          },
+          "eggplant shaped flask": {
+            "precision": 0.859432,
+            "recall": 0.788462,
+            "f1": 0.822418,
+            "map50": 0.882074,
+            "map50_95": 0.816906
+          },
+          "separatory funnel": {
+            "precision": 1.0,
+            "recall": 0.770471,
+            "f1": 0.870357,
+            "map50": 0.945286,
+            "map50_95": 0.863908
+          }
+        }
+      },
+      "compatibility": {
+        "candidate_class_count": 7,
+        "production_class_count": 21,
+        "direct_replacement_allowed": false
+      },
+      "policy": {
+        "production_enabled": false,
+        "production_certified": false,
+        "promotion_blockers": [
+          "pipette held-out recall is 0.363636",
+          "hand held-out recall is 0.612482",
+          "the 7-class public ontology is not a drop-in replacement for the 21-class production ontology",
+          "an internal-domain ordered six-view A/B evaluation has not been run while NAS is unavailable"
+        ]
+      },
+      "run_boundary": {
+        "source_copy_bytes": 0,
+        "ark_calls": 0,
+        "token_usage": 0,
+        "nas_accessed": false
+      }
+    },
+    "public-apparatus-21class-yolo26m-v4": {
+      "status": "invalidated_split_leakage_not_promoted",
+      "intended_role": "ontology-aligned public-data candidate for offline evaluation; production remains unchanged",
+      "dataset": {
+        "title": "VisionCortex 21-class zero-copy union of Waseda and ChemEq25 public human annotations",
+        "source_records": [
+          "https://data.mendeley.com/datasets/8p2hvgdvpn/1",
+          "https://figshare.com/articles/dataset/_b_Chemistry_Lab_Image_Dataset_Covering_25_Apparatus_Categories_b_/29110433"
+        ],
+        "licenses": [
+          "CC-BY-4.0",
+          "CC-BY-4.0"
+        ],
+        "truth_status": "public_human_annotations",
+        "union_view": "/srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/Public-Apparatus-21Class-Union-v1",
+        "integrity_status": "failed_cross_split_content_hash_audit",
+        "integrity_audit": "/srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/Public-Apparatus-21Class-Union-v1-Audit-v1/dataset-integrity-audit.json",
+        "integrity_audit_sha256": "d896bf1ea75f92b909d9341056c63a5d3c4f3c4e1bd541ec8f46363e76ad3426",
+        "cross_split_content_hash_count": 35,
+        "train_materialized_images": 10492,
+        "train_underlying_images": 6985,
+        "validation_images": 1350,
+        "test_images": 589,
+        "test_annotations": 960,
+        "source_copy_bytes": 0
+      },
+      "artifact": {
+        "path": "/srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/Public-Apparatus-21Class-Candidate-v4/weights/best.pt",
+        "sha256": "1c9eed8789625a9297dee9237a77765fdb8a96be0b3197a13e0f7c88a279e721",
+        "size_bytes": 60382099,
+        "training_status": "interrupted_after_five_completed_epochs_no_completion_receipt",
+        "selection_basis": "best validation checkpoint among completed v4 epochs; v5 completed checkpoints were all worse",
+        "combined_heldout_evaluation_receipt": "/srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/Public-Apparatus-21Class-Candidate-v4-Test-Combined-v2/visioncortex-evaluation-receipt.json",
+        "combined_heldout_evaluation_receipt_sha256": "ef4d8e0e99bfae48a7fb57e1293dc53eb2e131a2e5a75e4b80ed64d7b58dc6e5",
+        "waseda_heldout_evaluation_receipt": "/srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/Public-Apparatus-21Class-Candidate-v4-Test-Waseda/visioncortex-evaluation-receipt.json",
+        "waseda_heldout_evaluation_receipt_sha256": "7359cec73f117a5b5acd1ad9ead909ab1ce555f9e54af4771aba6f6b4577c892",
+        "chemeq25_heldout_evaluation_receipt": "/srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/Public-Apparatus-21Class-Candidate-v4-Test-ChemEq25/visioncortex-evaluation-receipt.json",
+        "chemeq25_heldout_evaluation_receipt_sha256": "d6e839618891c2f8e7bb6590d5b8810669c4b1e6f68b6dd6af823bc7806f8eb2",
+        "promotion_decision": "/srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/Public-Apparatus-21Class-Candidate-v4-Promotion/promotion-decision.json",
+        "promotion_decision_sha256": "76b6b76c240e9fd0ef7976a82769dd51e1f0d653f999c68afb2e94a1c9a93fb5"
+      },
+      "heldout_metrics": {
+        "trust_status": "invalidated_by_cross_split_content_leakage",
+        "precision": 0.9316971999288083,
+        "recall": 0.8742762689087195,
+        "map50": 0.9249022666922713,
+        "map50_95": 0.6565164011918595,
+        "per_class": {
+          "hand": {
+            "precision": 0.947231,
+            "recall": 0.677966,
+            "f1": 0.790293,
+            "map50": 0.892629,
+            "map50_95": 0.583171
+          },
+          "pipette": {
+            "precision": 0.89235,
+            "recall": 0.702381,
+            "f1": 0.786051,
+            "map50": 0.798746,
+            "map50_95": 0.507449
+          }
+        },
+        "source_breakdown": {
+          "waseda": {
+            "precision": 0.783579954249948,
+            "recall": 0.8118024060665909,
+            "map50": 0.8245895404623195,
+            "map50_95": 0.686310579627373
+          },
+          "chemeq25": {
+            "precision": 0.983279086380661,
+            "recall": 0.9445948257508843,
+            "map50": 0.9844849016657954,
+            "map50_95": 0.6541659058107964
+          }
+        }
+      },
+      "baseline_delta": {
+        "baseline_model_sha256": "a541c59ef8b09158b9b22851dcada6231dbab0f2f1478ae824bcf609851c58ea",
+        "precision": 0.7834516150621202,
+        "recall": 0.6954358519379709,
+        "map50": 0.8114403507967346,
+        "map50_95": 0.6019752477839137
+      },
+      "compatibility": {
+        "candidate_class_count": 21,
+        "production_class_count": 21,
+        "ontology_compatible": true,
+        "direct_replacement_allowed": false
+      },
+      "policy": {
+        "production_enabled": false,
+        "production_certified": false,
+        "public_benchmark_passed": false,
+        "internal_real_six_view_ab_passed": false,
+        "promotion_blockers": [
+          "the original union has 35 identical image hashes crossing train/validation/test, so all v4 held-out metrics are invalidated",
+          "hand held-out recall is 0.677966 below the 0.80 public gate",
+          "pipette held-out recall is 0.702381 below the 0.80 public gate",
+          "pipette held-out mAP50 is 0.798746 below the 0.80 public gate",
+          "an internal-domain ordered six-view A/B evaluation has not been run while NAS is unavailable"
+        ]
+      },
+      "run_boundary": {
+        "source_copy_bytes": 0,
+        "ark_calls": 0,
+        "token_usage": 0,
+        "nas_accessed": false
+      }
+    },
+    "public-apparatus-21class-yolo26s-v6-clean": {
+      "status": "evaluated_not_promoted_public_gate_failed",
+      "intended_role": "leakage-free 21-class development baseline; production remains unchanged",
+      "dataset": {
+        "title": "Leakage-free VisionCortex 21-class zero-copy union of Waseda and ChemEq25 public human annotations",
+        "truth_status": "public_human_annotations",
+        "union_view": "/srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/Public-Apparatus-21Class-Union-v2-Leakage-Free",
+        "integrity_status": "passed",
+        "integrity_audit": "/srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/Public-Apparatus-21Class-Union-v2-Leakage-Free-Audit-v1/dataset-integrity-audit.json",
+        "integrity_audit_sha256": "d2c7568f24d44dfaf28cc9eb06e8e9aee7eba4392d57459638492401c85e37d4",
+        "cross_split_content_hash_count": 0,
+        "unique_source_images": 8838,
+        "train_underlying_images": 6910,
+        "train_materialized_images": 10275,
+        "validation_images": 1340,
+        "test_images": 588,
+        "source_copy_bytes": 0
+      },
+      "artifact": {
+        "path": "/srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/Public-Apparatus-21Class-Candidate-v6-Clean/weights/best.pt",
+        "sha256": "b9628c2e3d17eb12784d338ce327888e49bd3e89dcf5957ab5d20bae450a986c",
+        "size_bytes": 20402494,
+        "training_receipt": "/srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/Public-Apparatus-21Class-Candidate-v6-Clean/visioncortex-training-receipt.json",
+        "training_receipt_sha256": "d961cb865606537f6dad1fc7b5c24176978f4325ac6e9e6e41a0a1879bd55e9b",
+        "validation_calibration_receipt": "/srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/Public-Apparatus-21Class-Candidate-v6-Clean-Val-Calibration-v1/threshold-calibration.json",
+        "validation_calibration_receipt_sha256": "f5a6d96b52e35d35b89359d2564cc7cbf45b8cd37d21730f94c9e2fc3dece20b",
+        "independent_test_receipt": "/srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/Public-Apparatus-21Class-Candidate-v6-Clean-Test-Calibrated-v1/calibrated-test-evaluation.json",
+        "independent_test_receipt_sha256": "3ac3fae68a1d708483bc409a15708957cae02674ac96224c43889538338e8129"
+      },
+      "validation_operating_point": {
+        "selection_split": "val",
+        "test_labels_inspected": false,
+        "minimum_precision": 0.85,
+        "minimum_recall": 0.8,
+        "gate_passed": false,
+        "per_class": {
+          "hand": {
+            "threshold": 0.45,
+            "precision": 0.8660714285714286,
+            "recall": 0.8508771929824561,
+            "f1": 0.8584070796460177,
+            "gate_passed": true
+          },
+          "pipette": {
+            "threshold": 0.25,
+            "precision": 0.8080229226361032,
+            "recall": 0.734375,
+            "f1": 0.7694406548431105,
+            "gate_passed": false
+          }
+        }
+      },
+      "independent_test_metrics": {
+        "thresholds_frozen_before_test": true,
+        "micro_precision": 0.8404850746268657,
+        "micro_recall": 0.9385416666666667,
+        "micro_f1": 0.8868110236220473,
+        "macro_map50": 0.8880916010771478,
+        "macro_map50_95": 0.6430528202241479,
+        "per_class": {
+          "hand": {
+            "precision": 0.8653846153846154,
+            "recall": 0.7627118644067796,
+            "f1": 0.8108108108108109,
+            "map50": 0.72790391821137,
+            "map50_95": 0.5062034373890116
+          },
+          "pipette": {
+            "precision": 0.868421052631579,
+            "recall": 0.7857142857142857,
+            "f1": 0.825,
+            "map50": 0.7697358432198689,
+            "map50_95": 0.5494555753448327
+          }
+        }
+      },
+      "compatibility": {
+        "candidate_class_count": 21,
+        "production_class_count": 21,
+        "ontology_compatible": true,
+        "direct_replacement_allowed": false
+      },
+      "policy": {
+        "production_enabled": false,
+        "production_certified": false,
+        "public_benchmark_passed": false,
+        "internal_real_six_view_ab_passed": false,
+        "promotion_blockers": [
+          "pipette validation precision and recall miss the public operating-point gate",
+          "hand independent-test recall is 0.762712 below the 0.80 public gate",
+          "pipette independent-test recall is 0.785714 below the 0.80 public gate",
+          "an internal-domain ordered six-view A/B evaluation has not been run while NAS is unavailable"
+        ]
+      },
+      "run_boundary": {
+        "source_copy_bytes": 0,
+        "ark_calls": 0,
+        "token_usage": 0,
+        "nas_accessed": false
+      }
+    },
+    "public-apparatus-21class-yolo26m-v7-clean-augmented": {
+      "status": "evaluated_not_promoted_public_gate_failed",
+      "intended_role": "leakage-free high-recall 21-class candidate and offline teacher; production remains unchanged",
+      "dataset": {
+        "title": "Leakage-free VisionCortex 21-class zero-copy union of Waseda and ChemEq25 public human annotations",
+        "truth_status": "public_human_annotations",
+        "union_view": "/srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/Public-Apparatus-21Class-Union-v2-Leakage-Free",
+        "integrity_status": "passed",
+        "integrity_audit": "/srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/Public-Apparatus-21Class-Union-v2-Leakage-Free-Audit-v1/dataset-integrity-audit.json",
+        "integrity_audit_sha256": "d2c7568f24d44dfaf28cc9eb06e8e9aee7eba4392d57459638492401c85e37d4",
+        "cross_split_content_hash_count": 0,
+        "unique_source_images": 8838,
+        "train_underlying_images": 6910,
+        "train_materialized_images": 10275,
+        "validation_images": 1340,
+        "test_images": 588,
+        "source_copy_bytes": 0
+      },
+      "artifact": {
+        "path": "/srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/Public-Apparatus-21Class-Candidate-v7-YOLO26m-Clean-Augmented/weights/best.pt",
+        "sha256": "6b7ae8572355d8a3365081859857beb1764147fc9757083a9f671d72059fc60e",
+        "size_bytes": 44143506,
+        "training_receipt": "/srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/Public-Apparatus-21Class-Candidate-v7-YOLO26m-Clean-Augmented/visioncortex-training-receipt.json",
+        "training_receipt_sha256": "489f79f822bddddceed70594d281521a867c77fd2b25b935a35e2891a8b91a7e",
+        "validation_calibration_receipt": "/srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/Public-Apparatus-21Class-Candidate-v7-YOLO26m-Clean-Augmented-Val-Calibration-v2-Recall-First/threshold-calibration.json",
+        "validation_calibration_receipt_sha256": "9e160bdcf2abbe42c06fb8b896d47595e8dd4d4ea3257bb62b2aa0e1f0ebde60",
+        "comparative_test_receipt": "/srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/Public-Apparatus-21Class-Candidate-v7-YOLO26m-Clean-Augmented-Test-Calibrated-Comparative-v2-Recall-First/calibrated-test-evaluation.json",
+        "comparative_test_receipt_sha256": "0090e435db5545f05388a16c6738e5c3a0bb4f56ded891434d4f7105699ab723",
+        "tensorrt_runtime_receipt": "/srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/Public-Apparatus-21Class-Candidate-v7-TensorRT-v4-Static960-Batch4-Chunked/candidate-runtime-receipt.json",
+        "tensorrt_runtime_receipt_sha256": "543b0ac50b959a8b1645253967911e78a7fee6e4f24309dcd490379c0cb63065",
+        "tensorrt_engine_sha256": "26ea17e94a15b8cf7f3ddd87f7b7724fd8c27f5e5406882774f8149c2673750e"
+      },
+      "training_metrics": {
+        "epochs": 12,
+        "image_size": 960,
+        "elapsed_seconds": 5084.500199,
+        "precision": 0.91254,
+        "recall": 0.88303,
+        "map50": 0.94136,
+        "map50_95": 0.72324,
+        "gpu_compute_mean_percent": 98.825,
+        "gpu_compute_max_percent": 100.0,
+        "gpu_memory_max_mib": 24509.562
+      },
+      "validation_operating_point": {
+        "selection_split": "val",
+        "selection_policy": "highest recall meeting precision and recall gates",
+        "minimum_precision": 0.85,
+        "minimum_recall": 0.8,
+        "gate_passed": false,
+        "per_class": {
+          "hand": {
+            "threshold": 0.2,
+            "precision": 0.8503937007874016,
+            "recall": 0.9473684210526315,
+            "gate_passed": true
+          },
+          "pipette": {
+            "threshold": 0.35,
+            "precision": 0.8100558659217877,
+            "recall": 0.7552083333333334,
+            "gate_passed": false
+          }
+        }
+      },
+      "comparative_test_metrics": {
+        "test_exposure_status": "repeat_comparative_benchmark",
+        "independent_test_claim_allowed": false,
+        "thresholds_frozen_before_test": true,
+        "micro_precision": 0.8315018315018315,
+        "micro_recall": 0.9458333333333333,
+        "macro_map50": 0.9076860813583839,
+        "macro_map50_95": 0.681818713703247,
+        "per_class": {
+          "hand": {
+            "precision": 0.8333333333333334,
+            "recall": 0.7627118644067796
+          },
+          "pipette": {
+            "precision": 0.9295774647887324,
+            "recall": 0.7857142857142857
+          }
+        }
+      },
+      "tensorrt_benchmark": {
+        "version": "10.16.1.11",
+        "precision": "FP16",
+        "static_image_size": 960,
+        "static_batch": 4,
+        "image_count": 256,
+        "images_per_second": 90.264,
+        "milliseconds_per_image": 11.079,
+        "benchmark_gpu_compute_max_percent": 89.0,
+        "benchmark_gpu_memory_max_mib": 8158.75
+      },
+      "compatibility": {
+        "candidate_class_count": 21,
+        "production_class_count": 21,
+        "ontology_compatible": true,
+        "direct_replacement_allowed": false
+      },
+      "policy": {
+        "production_enabled": false,
+        "production_certified": false,
+        "public_benchmark_passed": false,
+        "internal_real_six_view_ab_passed": false,
+        "promotion_blockers": [
+          "pipette validation precision and recall miss the public operating-point gate",
+          "repeat-comparative hand recall is 0.762712 below the 0.80 public gate",
+          "repeat-comparative pipette recall is 0.785714 below the 0.80 public gate",
+          "the test split has prior development exposure and cannot support a fresh independent-test claim",
+          "an internal-domain ordered six-view A/B evaluation has not been run while NAS is unavailable"
+        ]
+      },
+      "run_boundary": {
+        "source_copy_bytes": 0,
+        "ark_calls": 0,
+        "token_usage": 0,
+        "nas_accessed": false
+      }
+    },
+    "waseda-apparatus-yolo26m-v3-clean": {
+      "status": "evaluated_not_promoted_public_gate_failed",
+      "intended_role": "Waseda-domain specialist research candidate; production remains unchanged",
+      "dataset": {
+        "title": "Annotated Chemical Apparatus Image Dataset leakage-audited local view",
+        "truth_status": "public_human_annotations",
+        "integrity_audit": "/srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/WasedaChemicalApparatus-YOLO-View-v2-Audit-v1/dataset-integrity-audit.json",
+        "integrity_audit_sha256": "b84d692845dd773a09ea9fc9c6bb64f2abadeb9c47322516d10685f3012b65d0",
+        "cross_split_content_hash_count": 0,
+        "train_images": 4303,
+        "validation_images": 570,
+        "test_images": 205,
+        "source_copy_bytes": 0
+      },
+      "artifact": {
+        "path": "/srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/Waseda-Apparatus-Candidate-v3-YOLO26m-960-Clean/weights/best.pt",
+        "sha256": "2c5404b0c3b8bd03ebc9b3c2d44677b6f1169bc4906060122663c1e36497643a",
+        "size_bytes": 44049874,
+        "training_receipt": "/srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/Waseda-Apparatus-Candidate-v3-YOLO26m-960-Clean/visioncortex-training-receipt.json",
+        "training_receipt_sha256": "35bb7620d91881ccf7a83a93cf9982a3d450c386df6ae88b62128cfafe09f93c",
+        "validation_calibration_receipt": "/srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/Waseda-Apparatus-Candidate-v3-YOLO26m-960-Clean-Val-Calibration-v1/threshold-calibration.json",
+        "validation_calibration_receipt_sha256": "38130983e207ec35ac445e4737bf200d6f995cdb4f95fd12c5ae497662733d9a",
+        "comparative_test_receipt": "/srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/Waseda-Apparatus-Candidate-v3-YOLO26m-960-Clean-Test-Calibrated-Comparative-v1/calibrated-test-evaluation.json",
+        "comparative_test_receipt_sha256": "cbdd23135232c4088ef77dd6364c35a508ba5d61b1c6164fe24e96a17e2af17e"
+      },
+      "training_metrics": {
+        "epochs": 15,
+        "image_size": 960,
+        "elapsed_seconds": 2605.672894,
+        "precision": 0.82972,
+        "recall": 0.78274,
+        "map50": 0.86691,
+        "map50_95": 0.74698,
+        "gpu_compute_mean_percent": 98.728,
+        "gpu_compute_max_percent": 100.0,
+        "gpu_memory_max_mib": 23959.062
+      },
+      "validation_operating_point": {
+        "selection_split": "val",
+        "minimum_precision": 0.85,
+        "minimum_recall": 0.8,
+        "gate_passed": false,
+        "per_class": {
+          "hand": {
+            "threshold": 0.3,
+            "precision": 0.8508771929824561,
+            "recall": 0.8508771929824561,
+            "gate_passed": true
+          },
+          "pipette": {
+            "threshold": 0.3,
+            "precision": 0.722007722007722,
+            "recall": 0.6925925925925925,
+            "gate_passed": false
+          }
+        }
+      },
+      "comparative_test_metrics": {
+        "test_exposure_status": "repeat_comparative_benchmark",
+        "independent_test_claim_allowed": false,
+        "micro_precision": 0.7553191489361702,
+        "micro_recall": 0.8765432098765432,
+        "macro_map50": 0.8324098196428189,
+        "macro_map50_95": 0.7518076847847813,
+        "hand_precision": 0.9148936170212766,
+        "hand_recall": 0.7288135593220338,
+        "pipette_precision": 0.8666666666666667,
+        "pipette_recall": 0.5909090909090909
+      },
+      "compatibility": {
+        "candidate_class_count": 7,
+        "production_class_count": 21,
+        "direct_replacement_allowed": false
+      },
+      "policy": {
+        "production_enabled": false,
+        "production_certified": false,
+        "public_benchmark_passed": false,
+        "internal_real_six_view_ab_passed": false,
+        "promotion_blockers": [
+          "pipette validation precision and recall miss the public operating-point gate",
+          "repeat-comparative hand and pipette recall miss the 0.80 public gate",
+          "the 7-class specialist ontology is not a drop-in replacement for production",
+          "an internal-domain ordered six-view A/B evaluation has not been run while NAS is unavailable"
+        ]
+      },
+      "run_boundary": {
+        "source_copy_bytes": 0,
+        "ark_calls": 0,
+        "token_usage": 0,
+        "nas_accessed": false
+      }
+    }
+  }
+}

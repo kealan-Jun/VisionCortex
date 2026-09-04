@@ -14,6 +14,7 @@ from typing import Any, Iterable
 
 from .collection_state import read_collection_states
 from .device_registry import load_device_registry, resolve_view_role
+from .nas_recordings import enabled as directory_ingest_enabled, selected_rows
 
 
 COLLECTION_CATALOG_SCHEMA_VERSION = "visioncortex-collection-catalog/1"
@@ -371,8 +372,11 @@ def discover_collections(
 ) -> dict[str, Any]:
     settings = config.get("collection_ingest") or {}
     index_csv = Path(config["storage"]["index_csv"])
-    rows, index_meta = _load_index_rows(index_csv)
-    index_meta["path"] = str(index_csv)
+    if directory_ingest_enabled(config):
+        rows, index_meta = selected_rows(config)
+    else:
+        rows, index_meta = _load_index_rows(index_csv)
+        index_meta["path"] = str(index_csv)
     registry = load_device_registry(config["storage"].get("device_registry_path"))
     processing_registry = (
         read_collection_states(config)

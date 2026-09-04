@@ -189,6 +189,22 @@ models:
       - container_state_change
       - pipette_transfer_operation
 
+key_materials:
+  # The closed-set TensorRT ledger remains authoritative for every accepted
+  # event. Expensive local grounding is admitted only for high-risk actions or
+  # incomplete/ambiguous final participant evidence, with deterministic caps.
+  selective_verification:
+    enabled: true
+    mode: ambiguous_or_high_risk
+    minimum_closed_set_confidence: 0.45
+    high_risk_actions:
+      - liquid_movement
+      - container_state_change
+      - pipette_transfer_operation
+    max_events_per_run: 120
+    max_views_per_event: 2
+    max_wall_seconds_per_run: 900
+
 performance:
   profile: rtx3090ti-24gb-ubuntu-dynamic-multiview
   tensor_rt: required

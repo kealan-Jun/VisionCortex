@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import gc
 import hashlib
 import json
 import math
@@ -21,6 +22,8 @@ from openpyxl import Workbook
 from .action_state_machine import build_event_state_receipt
 from .alignment import iter_aligned_rows
 from .action_semantics import (
+    DEVICE_CLASSES,
+    action_participant_visibility,
     record_semantic_review,
     semantic_action_proof_contradictions,
 )
@@ -31,19 +34,28 @@ from .indexing import (
     stable_event_uid,
     stable_evidence_uid,
 )
+from .key_material_verification import (
+    SelectiveVerificationBudget,
+    plan_selective_key_material_verification,
+)
 from .mllm import (
     ArkStepAnalyzer,
     EVENT_SYSTEM_PROMPT,
     FINAL_GROUP_SYSTEM_PROMPT,
     GROUP_SYSTEM_PROMPT,
+    normalize_uncalibrated_hand_identity,
 )
 from .material_naming import (
     ACTION_CATEGORY_FOLDERS,
     key_material_action_folder,
     key_material_semantic_name as _key_material_semantic_name,
 )
-from .liquid_semantic import analyze_liquid_semantics
+from .liquid_semantic import (
+    analyze_liquid_semantics,
+    release_liquid_semantic_model_cache,
+)
 from .pathing import archive_relative_posix
+from .participant_visual_review import ParticipantVisualReviewer
 from .schemas import (
     ActionType,
     AlignmentTransform,
@@ -58,7 +70,10 @@ from .schemas import (
     ViewInput,
     ViewRole,
 )
-from .temporal_segmentation import audit_participant_continuity
+from .temporal_segmentation import (
+    audit_participant_continuity,
+    release_temporal_segmentation_model_cache,
+)
 from .video_io import (
     ViewFrameReader,
     create_grid_video,
@@ -263,8 +278,12 @@ def _link_or_copy_immutable(source: Path, destination: Path) -> str:
             method = "verified_copy"
         os.replace(temporary, destination)
     except Exception:
-        temporary.unlink(missing_ok=True)
         raise
+    finally:
+        # POSIX permits rename/replace to be a no-op when both paths already
+        # name the same inode.  That happens during idempotent cache reuse and
+        # otherwise leaves our temporary hard-link visible on NAS shares.
+        temporary.unlink(missing_ok=True)
     return method
 
 
@@ -2083,6 +2102,25 @@ def _event_participant_boxes(
         "suppressed_background_box_count": len(detections) - len(rendered),
         "suppressed_same_class_instance_count": same_class_suppressed,
         "rendered_classes": rendered_classes,
+        "rendered_detections": [
+            {
+                "class_name": str(box.get("class_name") or ""),
+                "confidence": round(float(box.get("confidence") or 0.0), 6),
+                "detector_source": str(
+                    box.get("detector_source") or "closed_set_yolo_tensorrt"
+                ),
+                "track_id": box.get("track_id"),
+            }
+            for box in rendered
+        ],
+        "minimum_rendered_confidence": (
+            round(
+                min(float(box.get("confidence") or 0.0) for box in rendered),
+                6,
+            )
+            if rendered
+            else None
+        ),
         "rendered_track_ids": [
             box.get("track_id") for box in rendered if box.get("track_id") is not None
         ],
@@ -2196,6 +2234,12 @@ def _bounded_grounding_dino_temporal_rescue(
 
     settings = config.get("models", {}).get("open_vocabulary_key_frame") or {}
     fallback = dict(settings.get("grounding_dino_fallback") or {})
+    # Temporal rescue runs separately from the final annotation model stack.
+    # A small GPU can accelerate this phase without keeping DINO resident
+    # alongside YOLO-World and SAM2 during final annotation.
+    if fallback.get("temporal_rescue_device"):
+        fallback["device"] = fallback["temporal_rescue_device"]
+        settings = {**settings, "grounding_dino_fallback": fallback}
     if not (
         settings.get("enabled")
         and fallback.get("enabled")
@@ -2617,8 +2661,19 @@ RELABEL_OBJECT_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
             r"(?:blue|red)[_ -]?cap",
         ),
     ),
-    ("paper", (r"称量纸", r"白色纸片", r"纸张", r"weighing[_ -]?paper")),
-    ("spatula", (r"药匙", r"药勺", r"spatula")),
+    (
+        "paper",
+        (
+            r"称量纸",
+            r"白色纸片",
+            r"纸片",
+            r"纸张",
+            r"持纸",
+            r"^纸$",
+            r"weighing[_ -]?paper",
+        ),
+    ),
+    ("spatula", (r"药匙", r"药勺", r"勺状(?:金属)?工具", r"spatula")),
     ("pipette", (r"移液器", r"移液枪", r"pipette")),
     ("spearhead", (r"枪头", r"吸头", r"pipette[_ -]?tip", r"spearhead")),
     (
@@ -2688,6 +2743,85 @@ def _semantic_interaction_is_direct(item: dict[str, Any]) -> bool:
     return any(term in contact for term in positive_terms)
 
 
+def _participant_class_mentions(text: str) -> list[tuple[str, int, int]]:
+    """Recognize canonical structured labels as well as natural-language aliases."""
+
+    mentions: list[tuple[str, int, int]] = []
+    for class_name, patterns in RELABEL_OBJECT_PATTERNS:
+        canonical_pattern = rf"(?<!\w){re.escape(class_name)}(?!\w)"
+        for pattern in (canonical_pattern, *patterns):
+            mentions.extend(
+                (class_name, match.start(), match.end())
+                for match in re.finditer(pattern, text.lower())
+            )
+    return mentions
+
+
+def _semantic_participant_conflicts(event: EvidenceEvent) -> list[dict[str, str]]:
+    """Record explicit background-only claims contradicting a contact record.
+
+    Use the model's aggregate action proof, not one occluded view or an absent
+    device state change. The result marks an internal contradiction; it does
+    not establish that physical contact never occurred in the source video.
+    """
+
+    understanding = event.model_understanding or {}
+    direct_classes = {
+        class_name
+        for item in understanding.get("hand_object_interactions") or []
+        if isinstance(item, dict) and _semantic_interaction_is_direct(item)
+        for class_name, _start, _end in _participant_class_mentions(
+            str(item.get("object") or "")
+        )
+    }
+    reason = str((understanding.get("action_proof") or {}).get("reason") or "")
+    conflicts: list[dict[str, str]] = []
+    for clause in re.split(r"[，,。；;.!?\n]", reason):
+        background = re.search(
+            r"(?:仅|只)(?:作为|是|在|出现在)?[^，,。；;\n]{0,6}背景"
+            r"|\bonly\s+(?:(?:as|in)\s+(?:a\s+|the\s+)?)?background\b",
+            clause.lower(),
+        )
+        if background is None:
+            continue
+        prefix = clause[:background.start()].lower()
+        if re.search(r"(?:并非|不是|不仅|不只是|不|not)\s*$", prefix):
+            continue
+        mentions = [
+            (class_name, end)
+            for class_name, _start, end in _participant_class_mentions(prefix)
+            if len(prefix) - end <= 24
+        ]
+        if not mentions:
+            continue
+        nearest_end = max(end for _class_name, end in mentions)
+        for class_name in sorted({name for name, end in mentions if end == nearest_end}):
+            if class_name in direct_classes:
+                conflicts.append({
+                    "class_name": class_name,
+                    "source": "action_proof.reason",
+                    "statement": clause.strip(),
+                    "reason": "direct_contact_and_background_only_claims_conflict",
+                })
+    return conflicts
+
+
+def _interaction_participant_classes(text: str) -> list[str]:
+    classes = list(dict.fromkeys(
+        name for name, _start, _end in _participant_class_mentions(text.lower())
+    ))
+    # A cap used to describe a bottle is not a separately manipulated cap.
+    # Match a whole, single noun phrase; explicit lists retain both objects.
+    capped_bottle = bool(re.fullmatch(
+        r"(?:带(?:有)?|装有|配有|盖有)?[^/，,。；;和与及、]{0,12}"
+        r"(?:瓶盖|盖子|盖)的(?:棕色|玻璃|塑料|透明)?"
+        r"(?:试剂瓶|样品瓶|棕色瓶子|瓶子|瓶)", text.strip()
+    ))
+    if capped_bottle and set(classes) & {"reagent_bottle", "sample_bottle", "sample_bottle_blue", "container"}:
+        classes = [name for name in classes if name != "bottle_cap"]
+    return classes
+
+
 def _relabel_participant_objects(event: EvidenceEvent) -> list[str]:
     """Map model-described interaction participants back to detector classes."""
 
@@ -2708,17 +2842,50 @@ def _relabel_participant_objects(event: EvidenceEvent) -> list[str]:
         str(understanding.get(key) or "")
         for key in ("current_step",)
     ).lower()
-    interaction_matches: list[str] = []
-    step_matches: list[str] = []
-    for class_name, patterns in RELABEL_OBJECT_PATTERNS:
-        if any(re.search(pattern, primary_text) for pattern in patterns):
-            interaction_matches.append(class_name)
-        if any(re.search(pattern, fallback_text) for pattern in patterns):
-            step_matches.append(class_name)
+    interaction_matches = list(dict.fromkeys(
+        name for text in interaction_objects for name in _interaction_participant_classes(text)
+    ))
+    selected_observations = [
+        item
+        for item in understanding.get("selected_keyframe_observations") or []
+        if isinstance(item, dict)
+    ]
+    selected_interaction_labels = [
+        str(label)
+        for item in selected_observations
+        for label in item.get("directly_interacting_objects") or []
+        if str(label).strip()
+    ]
+    selected_interaction_matches = list(dict.fromkeys(
+        name
+        for text in selected_interaction_labels
+        for name in _interaction_participant_classes(text)
+        if name not in {"hand", "gloved_hand"}
+    ))
+    if event.action_type == ActionType.DEVICE_PANEL_OPERATION:
+        selected_interaction_matches = [
+            item for item in selected_interaction_matches if item in DEVICE_CLASSES
+        ]
+    elif event.action_type == ActionType.PIPETTE_TRANSFER_OPERATION:
+        selected_interaction_matches = [
+            item
+            for item in selected_interaction_matches
+            if item in {"pipette", "spearhead"}
+        ]
+    step_matches = list(dict.fromkeys(
+        name for name, _start, _end in _participant_class_mentions(fallback_text)
+    ))
     # Structured hand-object interactions are already participant-scoped.
     # Do not drop one explicit participant merely because the free-text step
     # repeats another participant but omits this one's class name.
     matched = interaction_matches if structured_interactions else step_matches
+    if selected_observations:
+        # Final annotations explain the selected key frame, so the explicit
+        # selected-frame interaction list outranks objects touched elsewhere
+        # in a long event window.  An unmapped selected-frame object remains
+        # empty and is quarantined downstream; a convenient mapped background
+        # object must never substitute for it.
+        matched = selected_interaction_matches
     # Ark may use a deliberately generic structured label such as
     # ``red small container`` while the participant-scoped current-step text
     # identifies the same object as a cap.  Refine only a generic container
@@ -2741,6 +2908,44 @@ def _relabel_participant_objects(event: EvidenceEvent) -> list[str]:
         if refinements:
             matched = [item for item in matched if item != "container"]
             matched = list(dict.fromkeys([*matched, *refinements]))
+    proof = understanding.get("action_proof") or {}
+    if (
+        event.action_type == ActionType.OBJECT_MOVEMENT
+        and proof.get("source_contact_visible")
+        and proof.get("withdrawal_or_transport_visible")
+        and proof.get("target_contact_visible")
+    ):
+        # Long solid-transfer windows can mention incidental cap or package
+        # touches. Keep only classes named by the proof of the confirmed
+        # source-to-target movement. If the proof cannot be mapped, retain the
+        # structured interactions and fail closed downstream.
+        proof_classes = _interaction_participant_classes(
+            str(proof.get("reason") or "")
+        )
+        if proof_classes:
+            matched = [item for item in matched if item in proof_classes]
+        paper_interactions = [
+            text
+            for text in interaction_objects
+            if "paper" in _interaction_participant_classes(text)
+        ]
+        package_pattern = r"(?:package|packaging|packet|wrapper|包装|纸包)"
+        if (
+            "paper" in matched
+            and paper_interactions
+            and all(re.search(package_pattern, text.lower()) for text in paper_interactions)
+            and not re.search(package_pattern, str(proof.get("reason") or "").lower())
+        ):
+            # A transfer window may contain a direct touch of the weighing-
+            # paper package while the confirmed movement ends on a separate
+            # sheet. Both phrases map to ``paper`` but they are different
+            # physical instances. The receiving sheet is not a hand-object
+            # participant unless a direct interaction names the sheet itself.
+            matched = [item for item in matched if item != "paper"]
+    conflicting_classes = {
+        item["class_name"] for item in _semantic_participant_conflicts(event)
+    }
+    matched = [item for item in matched if item not in conflicting_classes]
     actor_classes = [
         item
         for item in event.objects
@@ -2864,12 +3069,30 @@ def _rerender_curated_participant_annotations(
 ) -> dict[str, Any]:
     """Render final boxes after semantic relabeling corrected participants."""
 
+    verification_started = time.perf_counter()
+    verification_settings = dict(
+        ((config or {}).get("key_materials") or {}).get(
+            "selective_verification"
+        )
+        or {}
+    )
+    verification_budget = SelectiveVerificationBudget.from_settings(
+        verification_settings
+    )
     group_by_event = {
         event_id: group for group in groups for event_id in group.key_event_ids
     }
     records: list[dict[str, Any]] = []
     segmentation_records: list[dict[str, Any]] = []
     liquid_semantic_records: list[dict[str, Any]] = []
+    visual_reviewer = (
+        ParticipantVisualReviewer(
+            config, layout.work, layout.json_config,
+            _grounding_dino_key_frame_detections,
+        )
+        if config is not None and config.get("key_materials", {}).get("participant_visual_review", {}).get("enabled")
+        else None
+    )
     for event in events:
         input_root = layout.work / "key-material-annotation-inputs" / event.event_id
         if not input_root.is_dir():
@@ -2878,6 +3101,116 @@ def _rerender_curated_participant_annotations(
         first_material_view, third_material_view = _key_material_view_pair(
             group, event
         )
+        visual_plan: dict[str, dict[str, Any]] = {}
+        visual_receipts: list[dict[str, Any]] = []
+        review_classes = visual_reviewer.eligible_classes(event) if visual_reviewer is not None else []
+        if review_classes:
+            if config.get("performance", {}).get("release_auxiliary_models_between_stages"):
+                _release_auxiliary_model_caches()
+            for participant_class in review_classes:
+                visual_views = []
+                for role_label, view_id in (("First-Person", first_material_view), ("Third-Person", third_material_view)):
+                    if participant_class not in _view_specific_participant_objects(event, view_id):
+                        continue
+                    visual_views.append({
+                        "view_id": view_id, "role_label": role_label,
+                        "raw_path": input_root / f"{role_label}.jpg",
+                        "detections": json.loads((input_root / f"{role_label}.json").read_text())["detections"],
+                    })
+                if not visual_views:
+                    continue
+                try:
+                    visual_receipt, class_plan = visual_reviewer.review(
+                        event, visual_views, participant_class=participant_class
+                    )
+                except RuntimeError as exc:
+                    message = str(exc)
+                    if not message.startswith((
+                        "Participant visual review ",
+                        "Invalid cached participant review",
+                    )):
+                        raise
+                    review_records = [
+                        row
+                        for row in (
+                            event.observability.get("participant_visual_review")
+                            or {}
+                        ).values()
+                        if isinstance(row, dict)
+                        and row.get("participant_class") == participant_class
+                    ]
+                    if not review_records:
+                        raise
+                    visual_receipt = review_records[-1]
+                    fingerprint = str(
+                        visual_receipt.get("input_fingerprint") or "unrecorded"
+                    )
+                    class_plan = {}
+                    for view in visual_views:
+                        actors = [
+                            dict(box)
+                            for box in view["detections"]
+                            if str(box.get("class_name") or "")
+                            .strip()
+                            .lower()
+                            .replace("-", "_")
+                            .replace(" ", "_")
+                            in {"hand", "gloved_hand"}
+                        ]
+                        class_plan[view["view_id"]] = {
+                            "boxes": [],
+                            "actors": actors,
+                            "selected_candidate_ids": [],
+                            "target_visible": False,
+                            "reason": (
+                                "参与对象视觉复核未产生可验证选择；该对象从已确认"
+                                "画面中移除并交由待复核素材处理。"
+                            ),
+                            "input_fingerprint": fingerprint,
+                            "review_status": visual_receipt.get("status"),
+                            "failure_reason": message,
+                        }
+                    visual_receipt = {
+                        **visual_receipt,
+                        "input_fingerprint": fingerprint,
+                        "status": "review_failed_quarantined",
+                        "source_status": visual_receipt.get("status"),
+                        "failure_reason": message,
+                    }
+                    note = (
+                        f"{participant_class} 参与对象视觉复核未完成；"
+                        "相关候选已从已确认素材中移除并保留待复核记录。"
+                    )
+                    if note not in event.uncertainty:
+                        event.uncertainty.append(note)
+                visual_receipts.append({
+                    "input_fingerprint": visual_receipt["input_fingerprint"],
+                    "status": visual_receipt["status"],
+                    "participant_class": participant_class,
+                    "localized_view_count": sum(bool(item["boxes"]) for item in class_plan.values()),
+                    **(
+                        {
+                            "source_status": visual_receipt.get("source_status"),
+                            "failure_reason": visual_receipt.get("failure_reason"),
+                        }
+                        if visual_receipt["status"]
+                        == "review_failed_quarantined"
+                        else {}
+                    ),
+                })
+                for view_id, selected in class_plan.items():
+                    plan = visual_plan.setdefault(view_id, {
+                        "boxes": [], "actors": selected["actors"],
+                        "input_fingerprint": selected["input_fingerprint"],
+                        "input_fingerprints": [], "reviewed_classes": [], "reviews": [],
+                    })
+                    plan["boxes"].extend(selected["boxes"])
+                    plan["input_fingerprints"].append(selected["input_fingerprint"])
+                    plan["reviewed_classes"].append(participant_class)
+                    plan["reviews"].append({
+                        "participant_class": participant_class,
+                        **{key: value for key, value in selected.items() if key not in {"boxes", "actors"}},
+                    })
         rendered_frames: dict[str, Path] = {}
         annotation = {
             "schema_version": "visioncortex-key-material-annotation/1",
@@ -2885,6 +3218,23 @@ def _rerender_curated_participant_annotations(
             "render_pass": "post_semantic_curation",
             "views": {},
         }
+        if visual_receipts:
+            failed_review_count = sum(
+                item["status"] == "review_failed_quarantined"
+                for item in visual_receipts
+            )
+            annotation["participant_visual_review"] = {
+                "input_fingerprint": visual_receipts[0]["input_fingerprint"],
+                "status": (
+                    "completed_with_quarantined_review_failures"
+                    if failed_review_count
+                    else "completed"
+                ),
+                "participant_class": visual_receipts[0]["participant_class"] if len(visual_receipts) == 1 else "multiple",
+                "reviews": visual_receipts,
+                "localized_view_count": sum(bool(item["boxes"]) for item in visual_plan.values()),
+                "quarantined_review_failure_count": failed_review_count,
+            }
         for role_label, view_id in (
             ("First-Person", first_material_view),
             ("Third-Person", third_material_view),
@@ -2905,8 +3255,42 @@ def _rerender_curated_participant_annotations(
             view_event.objects = _view_specific_participant_objects(
                 event, view_id
             )
+            maximum_interaction_gap_norm = float(
+                (
+                    (config or {})
+                    .get("models", {})
+                    .get("open_vocabulary_key_frame", {})
+                    .get("manipulated_object_max_actor_gap_norm", 0.08)
+                )
+            )
+            _, closed_set_participant_receipt = _event_participant_boxes(
+                view_event,
+                detected_boxes,
+                view_id=view_id,
+                maximum_interaction_gap_norm=maximum_interaction_gap_norm,
+            )
+            verification_decision = plan_selective_key_material_verification(
+                view_event,
+                view_id,
+                detected_boxes,
+                closed_set_participant_receipt,
+                verification_settings,
+                verification_budget,
+            )
             supplement_receipt: dict[str, Any] | None = None
-            if config is not None:
+            phase_isolation = bool(
+                (config or {}).get("performance", {}).get("release_auxiliary_models_between_stages")
+            )
+            if phase_isolation:
+                _release_auxiliary_model_caches()
+            if view_id in visual_plan and set(view_event.objects) <= {"hand", "gloved_hand", *visual_plan[view_id]["reviewed_classes"]}:
+                supplement_receipt = {
+                    "status": "replaced_by_visual_candidate_review",
+                    "input_fingerprint": visual_plan[view_id]["input_fingerprint"],
+                    "input_fingerprints": visual_plan[view_id]["input_fingerprints"],
+                    "purpose": "Use the reviewed DINO proposal without redundant YOLO-World inference",
+                }
+            elif config is not None and verification_decision["should_run"]:
                 supplement_boxes, supplement_receipt = (
                     _open_vocabulary_key_frame_supplement(
                         raw_frame,
@@ -2937,21 +3321,47 @@ def _rerender_curated_participant_annotations(
                         not in replaced_classes
                     ]
                     detected_boxes = [*detected_boxes, *supplement_boxes]
+            elif config is not None:
+                supplement_receipt = {
+                    "schema_version": "visioncortex-open-vocabulary-key-frame/1",
+                    "status": "skipped_by_selective_verification",
+                    "scope": "final accepted key frames only",
+                    "full_timeline_inference": False,
+                    "source_copy_bytes": 0,
+                    "token_usage": 0,
+                    "ark_calls": 0,
+                }
+            if view_id in visual_plan:
+                selected = visual_plan[view_id]
+                # A validated empty selection also replaces the old target box;
+                # SAM2 must never propagate a rejected background instance.
+                detected_boxes = [box for box in detected_boxes if box.get("class_name") not in selected["reviewed_classes"]]
+                detected_boxes.extend(selected["boxes"])
+                if "bottle_cap" in selected["reviewed_classes"] or not any(box.get("class_name") in {"hand", "gloved_hand"} for box in detected_boxes):
+                    detected_boxes.extend(actor for actor in selected["actors"] if actor not in detected_boxes)
             boxes, receipt = _event_participant_boxes(
                 view_event,
                 detected_boxes,
                 view_id=view_id,
-                maximum_interaction_gap_norm=float(
-                    (
-                        (config or {})
-                        .get("models", {})
-                        .get("open_vocabulary_key_frame", {})
-                        .get("manipulated_object_max_actor_gap_norm", 0.08)
-                    )
-                ),
+                maximum_interaction_gap_norm=maximum_interaction_gap_norm,
             )
+            receipt["selective_verification"] = verification_decision
+            if view_id in visual_plan:
+                receipt["participant_visual_review"] = {
+                    key: value for key, value in visual_plan[view_id].items()
+                    if key not in {"boxes", "actors"}
+                }
             if supplement_receipt is not None:
                 receipt["open_vocabulary_supplement"] = supplement_receipt
+            if verification_decision["status"] == "deferred_budget_exhausted":
+                deferred_note = (
+                    "关键素材本地二次复核预算已用尽；保留闭集检测证据，"
+                    f"未执行开放词汇补全（{verification_decision['reason']}）"
+                )
+                if deferred_note not in event.uncertainty:
+                    event.uncertainty.append(deferred_note)
+            if phase_isolation:
+                _release_auxiliary_model_caches()
             segmentation_receipt: dict[str, Any] | None = None
             if config is not None:
                 segmentation_settings = (
@@ -3054,6 +3464,8 @@ def _rerender_curated_participant_annotations(
                     )
             destination = layout.root / event.key_frames[view_id]
             write_annotated_frame(raw_frame, boxes, destination)
+            receipt["rendered_classes"] = sorted({box["class_name"] for box in boxes})
+            receipt["rendered_box_count"] = len(boxes)
             rendered_frames[role_label] = destination
             annotation["views"][view_id] = receipt
             records.append(
@@ -3073,13 +3485,102 @@ def _rerender_curated_participant_annotations(
             aligned,
             (first_material_view, third_material_view),
         )
+        if visual_receipts:
+            for review in visual_receipts:
+                review["reviewed_localized_view_count"] = review["localized_view_count"]
+                review["localized_view_count"] = sum(
+                    review["participant_class"] in item.get("rendered_classes", [])
+                    for item in annotation["views"].values()
+                )
+            annotation["participant_visual_review"]["localized_view_count"] = sum(
+                bool(set(item.get("rendered_classes", [])) & set(review_classes))
+                for item in annotation["views"].values()
+            )
         event.observability["key_material_annotation"] = annotation
+        if bool(
+            ((config or {}).get("performance") or {}).get(
+                "release_auxiliary_models_after_event", False
+            )
+        ):
+            _release_auxiliary_model_caches()
+    decisions = [
+        record["selective_verification"]
+        for record in records
+        if isinstance(record.get("selective_verification"), dict)
+    ]
+    decision_status_counts: dict[str, int] = {}
+    for decision in decisions:
+        status = str(decision.get("status") or "unknown")
+        decision_status_counts[status] = decision_status_counts.get(status, 0) + 1
+    supplements = [
+        record["open_vocabulary_supplement"]
+        for record in records
+        if isinstance(record.get("open_vocabulary_supplement"), dict)
+    ]
+    grounding_receipts = [
+        supplement["grounding_dino_fallback"]
+        for supplement in supplements
+        if isinstance(supplement.get("grounding_dino_fallback"), dict)
+    ]
+    verification_summary = {
+        "schema_version": "visioncortex-selective-key-material-verification-index/1",
+        "enabled": bool(verification_settings.get("enabled", False)),
+        "mode": str(
+            verification_settings.get("mode") or "ambiguous_or_high_risk"
+        ),
+        "policy": (
+            "closed-set evidence for every accepted event; expensive local models "
+            "only for high-risk or ambiguous final role frames"
+        ),
+        "decision_count": len(decisions),
+        "decision_status_counts": dict(sorted(decision_status_counts.items())),
+        "open_vocabulary_executed_count": sum(
+            item.get("status") == "executed" for item in supplements
+        ),
+        "grounding_dino_executed_count": sum(
+            item.get("status") == "executed" for item in grounding_receipts
+        ),
+        "open_vocabulary_model_load_seconds": round(
+            sum(float(item.get("model_load_seconds") or 0.0) for item in supplements),
+            6,
+        ),
+        "open_vocabulary_inference_seconds": round(
+            sum(float(item.get("inference_seconds") or 0.0) for item in supplements),
+            6,
+        ),
+        "grounding_dino_model_load_seconds": round(
+            sum(
+                float(item.get("model_load_seconds") or 0.0)
+                for item in grounding_receipts
+            ),
+            6,
+        ),
+        "grounding_dino_inference_seconds": round(
+            sum(
+                float(item.get("inference_seconds") or 0.0)
+                for item in grounding_receipts
+            ),
+            6,
+        ),
+        "wall_seconds": round(time.perf_counter() - verification_started, 6),
+        "budget": verification_budget.summary(),
+        "full_timeline_inference": False,
+        "source_copy_bytes": 0,
+        "ark_calls": 0,
+        "token_usage": 0,
+    }
     report = {
         "schema_version": "visioncortex-final-key-material-annotation/1",
         "mode": "event_participants_only",
         "render_pass": "post_semantic_curation",
         "event_count": len(events),
         "rendered_view_count": len(records),
+        "selective_verification": verification_summary,
+        "participant_visual_review": {
+            "enabled": bool(visual_reviewer is not None and visual_reviewer.enabled),
+            "requests": visual_reviewer.records if visual_reviewer is not None else {},
+            "purpose": "participant localization only; not action or quality certification",
+        },
         "records": records,
     }
     write_json(layout.json_config / "final_key_material_annotation.json", report)
@@ -3117,8 +3618,43 @@ def _rerender_curated_participant_annotations(
 
 _OPEN_VOCABULARY_MODEL_CACHE: dict[str, Any] = {}
 _OPEN_VOCABULARY_ASSET_VALIDATION: set[tuple[str, str, str, str]] = set()
-_GROUNDING_DINO_MODEL_CACHE: dict[str, Any] = {}
+_GROUNDING_DINO_MODEL_CACHE: dict[tuple[str, str, str], Any] = {}
 _GROUNDING_DINO_ASSET_VALIDATION: set[tuple[str, str]] = set()
+
+
+def _release_auxiliary_model_caches() -> dict[str, int]:
+    """Bound peak RAM/VRAM by dropping event-scoped auxiliary model caches."""
+
+    open_vocabulary = len(_OPEN_VOCABULARY_MODEL_CACHE)
+    grounding_dino = len(_GROUNDING_DINO_MODEL_CACHE)
+    for cached in [
+        *_OPEN_VOCABULARY_MODEL_CACHE.values(),
+        *_GROUNDING_DINO_MODEL_CACHE.values(),
+    ]:
+        model = cached.get("model") if isinstance(cached, dict) else None
+        if model is not None and hasattr(model, "to"):
+            try:
+                model.to("cpu")
+            except (RuntimeError, TypeError, ValueError):
+                pass
+    _OPEN_VOCABULARY_MODEL_CACHE.clear()
+    _GROUNDING_DINO_MODEL_CACHE.clear()
+    temporal = release_temporal_segmentation_model_cache()
+    liquid = release_liquid_semantic_model_cache()
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass
+    return {
+        "open_vocabulary": open_vocabulary,
+        "grounding_dino": grounding_dino,
+        "temporal_segmentation": temporal,
+        "liquid_semantic": liquid,
+    }
 
 
 def _box_edge_gap_norm(
@@ -3569,6 +4105,42 @@ def _select_state_container_candidate(
     }
 
 
+def _canonical_grounding_label(
+    label: str, prompt_map: dict[str, str]
+) -> str | None:
+    """Resolve complete prompt phrases, including same-class merged labels.
+
+    Grounding DINO can return several activated phrases for one box, such as
+    ``brown reagent bottle brown bottle``. Keep that box only when every word
+    is covered by configured prompts and all possible matches name one class.
+    Partial phrases and combinations of different classes remain unresolved.
+    """
+
+    tokens = tuple(re.findall(r"\w+", str(label).lower()))
+    if not tokens:
+        return None
+    phrases = [
+        (tuple(re.findall(r"\w+", str(prompt).lower())), canonical)
+        for prompt, canonical in prompt_map.items()
+        if str(prompt).strip()
+    ]
+    exact_classes = {canonical for phrase, canonical in phrases if phrase == tokens}
+    if exact_classes:
+        return next(iter(exact_classes)) if len(exact_classes) == 1 else None
+    resolved: dict[int, set[str]] = {0: set()}
+    for start in range(len(tokens)):
+        if start not in resolved:
+            continue
+        for phrase, canonical in phrases:
+            end = start + len(phrase)
+            if phrase and tokens[start:end] == phrase:
+                resolved.setdefault(end, set()).update(
+                    resolved[start] | {canonical}
+                )
+    classes = resolved.get(len(tokens), set())
+    return next(iter(classes)) if len(classes) == 1 else None
+
+
 def _grounding_dino_key_frame_detections(
     frame: np.ndarray,
     canonical_classes: set[str],
@@ -3620,7 +4192,8 @@ def _grounding_dino_key_frame_detections(
         AutoProcessor,
     )
 
-    cache_key = str(model_path)
+    device = str(fallback.get("device") or "cuda")
+    cache_key = (str(model_path), model_sha256, device)
     cached = _GROUNDING_DINO_MODEL_CACHE.get(cache_key)
     model_load_seconds = 0.0
     if cached is None:
@@ -3633,7 +4206,6 @@ def _grounding_dino_key_frame_detections(
             local_files_only=True,
             dtype=torch.float32,
         )
-        device = str(fallback.get("device") or "cuda")
         if device.startswith("cuda") and not torch.cuda.is_available():
             raise RuntimeError("Grounding DINO requires CUDA but CUDA is unavailable")
         model = model.to(device).eval()
@@ -3676,6 +4248,7 @@ def _grounding_dino_key_frame_detections(
     admitted: list[dict[str, Any]] = []
     rejected_area = 0
     rejected_label = 0
+    recovered_composite_label_count = 0
     for confidence, label, coordinates in zip(
         result["scores"], labels, result["boxes"], strict=True
     ):
@@ -3683,6 +4256,10 @@ def _grounding_dino_key_frame_detections(
         canonical = prompt_map.get(grounded_prompt)
         if canonical is None:
             canonical = prompt_map.get(grounded_prompt.lower())
+        if canonical is None:
+            canonical = _canonical_grounding_label(grounded_prompt, prompt_map)
+            if canonical is not None:
+                recovered_composite_label_count += 1
         if canonical is None:
             rejected_label += 1
             continue
@@ -3720,10 +4297,13 @@ def _grounding_dino_key_frame_detections(
         "model_sha256": model_sha256,
         "requested_classes": sorted(requested_classes),
         "prompts": prompts,
+        "device": device,
+        "precision": "float32",
         "raw_detection_count": len(result["scores"]),
         "admitted_area_bounded_count": len(admitted),
         "rejected_box_area_count": rejected_area,
         "rejected_label_count": rejected_label,
+        "recovered_composite_label_count": recovered_composite_label_count,
         "maximum_box_area_norm": maximum_area,
         "model_load_seconds": round(model_load_seconds, 6),
         "inference_seconds": round(inference_seconds, 6),
@@ -3958,11 +4538,15 @@ def _open_vocabulary_key_frame_supplement(
 
     cache_key = str(model_path)
     cached = _OPEN_VOCABULARY_MODEL_CACHE.get(cache_key)
+    model_cache_hit = cached is not None
+    model_load_seconds = 0.0
     if cached is None:
+        model_load_started = time.perf_counter()
         cached = {
             "model": YOLOWorld(str(model_path)),
             "prompts": None,
         }
+        model_load_seconds = time.perf_counter() - model_load_started
         _OPEN_VOCABULARY_MODEL_CACHE[cache_key] = cached
     model = cached["model"]
     if cached.get("prompts") != prompts:
@@ -3974,6 +4558,7 @@ def _open_vocabulary_key_frame_supplement(
         model.to("cpu")
         model.set_classes(prompts)
         cached["prompts"] = list(prompts)
+    inference_started = time.perf_counter()
     result = model.predict(
         frame,
         device=int(settings.get("device", 0)),
@@ -3982,6 +4567,7 @@ def _open_vocabulary_key_frame_supplement(
         iou=float(settings.get("iou", 0.50)),
         verbose=False,
     )[0]
+    inference_seconds = time.perf_counter() - inference_started
     height, width = frame.shape[:2]
     grounded: list[dict[str, Any]] = []
     for class_index, confidence, coordinates in zip(
@@ -4396,6 +4982,9 @@ def _open_vocabulary_key_frame_supplement(
         "full_timeline_inference": False,
         "model": str(model_path),
         "model_sha256": model_sha256,
+        "model_cache_hit": model_cache_hit,
+        "model_load_seconds": round(model_load_seconds, 6),
+        "inference_seconds": round(inference_seconds, 6),
         "clip_model": str(clip_path),
         "clip_model_sha256": clip_sha256,
         "prompts": prompts,
@@ -4447,6 +5036,107 @@ def _open_vocabulary_key_frame_supplement(
     }
 
 
+def _review_bounded_cap_keyframe(
+    layout: ArchiveLayout,
+    event: EvidenceEvent,
+    pair: tuple[str, str],
+    views: Sequence[ViewInput],
+    infos: dict[str, VideoInfo],
+    transforms: dict[str, AlignmentTransform],
+    detection_paths: dict[str, Path],
+    config: dict[str, Any],
+) -> tuple[float | None, dict[str, Any]]:
+    """Validate the cap instance on a few neighboring event frames.
+
+    A missing visible cap does not justify deleting a real sequence-level
+    action. Keep the current frame first, then inspect bounded alternatives;
+    only the reviewer may admit an existing cap proposal. All requests share
+    the final-annotation budget and content-addressed cache.
+    """
+    settings = config.get("key_materials", {}).get("participant_visual_review") or {}
+    temporal = settings.get("temporal_keyframe_review") or {}
+    if not (
+        settings.get("enabled") and temporal.get("enabled")
+        and "bottle_cap" in settings.get("classes", ["paper"])
+        and "bottle_cap" in event.objects
+        and config.get("mllm", {}).get("enabled")
+        and (event.model_understanding or {}).get("status") == "completed"
+    ):
+        return None, {"status": "not_applicable"}
+    maximum = int(temporal.get("max_frames_per_event", 5))
+    if not 1 <= maximum <= 5:
+        raise ValueError("Cap keyframe review accepts one to five candidate times")
+    span = max(0.0, event.global_end_ms - event.global_start_ms)
+    candidates = []
+    values = (
+        event.key_global_ms,
+        event.key_global_ms + 0.25 * span,
+        event.key_global_ms - 0.25 * span,
+        event.global_end_ms,
+        event.global_start_ms,
+    )
+    for value in values:
+        timestamp = round(min(event.global_end_ms, max(event.global_start_ms, value)), 3)
+        if timestamp not in candidates:
+            candidates.append(timestamp)
+    candidates = candidates[:maximum]
+    nearest = {
+        view_id: nearest_frame_evidence_many(detection_paths[view_id], candidates)
+        for view_id in pair
+    }
+    by_view = {view.view_id: view for view in views}
+    reviewer = ParticipantVisualReviewer(
+        config, layout.work, layout.json_config, _grounding_dino_key_frame_detections
+    )
+    receipt: dict[str, Any] = {
+        "status": "no_verified_candidate", "participant_class": "bottle_cap",
+        "original_key_global_ms": float(event.key_global_ms),
+        "maximum_candidate_times": maximum, "candidates": [],
+        "full_scan_repeated": False, "source_copy_bytes": 0,
+        "purpose": "instance-localized representative frame; not action certification",
+    }
+    reader = ViewFrameReader(max_open=2)
+    try:
+        for timestamp in candidates:
+            prepared = []
+            root = layout.work / "participant-keyframe-candidates" / event.event_id / f"{timestamp:.3f}"
+            root.mkdir(parents=True, exist_ok=True)
+            for role, view_id in zip(("First-Person", "Third-Person"), pair, strict=True):
+                local_ms = transforms[view_id].to_local(timestamp)
+                if not 0 <= local_ms <= infos[view_id].duration_ms:
+                    break
+                frame = reader.read(by_view[view_id], infos[view_id], local_ms)
+                if frame is None:
+                    break
+                path = root / f"{role}.jpg"
+                if not cv2.imwrite(str(path), frame, [cv2.IMWRITE_JPEG_QUALITY, 95]):
+                    raise OSError("Could not retain cap keyframe candidate")
+                evidence = nearest[view_id].get(timestamp)
+                prepared.append({
+                    "view_id": view_id, "role_label": role, "raw_path": path,
+                    "detections": [box.model_dump() for box in evidence.detections] if evidence else [],
+                })
+            if len(prepared) != 2:
+                receipt["candidates"].append({"global_ms": timestamp, "status": "missing_view"})
+                continue
+            record, plan = reviewer.review(
+                event, prepared, participant_class="bottle_cap"
+            )
+            visible = [view for view, item in plan.items() if item["boxes"]]
+            receipt["candidates"].append({
+                "global_ms": timestamp, "status": record["status"],
+                "input_fingerprint": record["input_fingerprint"],
+                "localized_view_ids": visible,
+                "images": {view["view_id"]: str(view["raw_path"]) for view in prepared},
+            })
+            if visible:
+                receipt.update(status="selected", selected_global_ms=timestamp)
+                return timestamp, receipt
+    finally:
+        reader.close()
+    return None, receipt
+
+
 def materialize_key_materials(
     layout: ArchiveLayout,
     events: Sequence[EvidenceEvent],
@@ -4458,6 +5148,7 @@ def materialize_key_materials(
     config: dict[str, Any],
     publisher: Any | None = None,
     archive_id: str | None = None,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> None:
     by_view = {view.view_id: view for view in views}
     before = float(config["segmentation"]["key_clip_pre_seconds"]) * 1000.0
@@ -4489,7 +5180,9 @@ def materialize_key_materials(
     }
     material_view_pairs: dict[str, tuple[str, str]] = {}
     key_frame_selection_records: list[dict[str, Any]] = []
-    for event in accepted_events:
+    for event_index, event in enumerate(accepted_events):
+        if progress_callback is not None:
+            progress_callback(event_index, len(accepted_events))
         group = group_by_event[event.event_id]
         ranked: list[tuple[float, int, str, FrameEvidence, dict[str, Any]]] = []
         for role_rank, view_id in enumerate(
@@ -4595,6 +5288,28 @@ def materialize_key_materials(
             )
         material_view_pairs[event.event_id] = pair
         event.observability["key_material_view_selection"] = pair_receipt
+        reviewed_key_ms, cap_review = _review_bounded_cap_keyframe(
+            layout, event, pair, views, infos, transforms, detection_paths, config
+        )
+        if cap_review["status"] != "not_applicable":
+            event.observability.setdefault("key_frame_selection", {})[
+                "cap_visual_candidate_review"
+            ] = cap_review
+        if reviewed_key_ms is not None:
+            event.key_global_ms = reviewed_key_ms
+            selection = event.observability["key_frame_selection"]
+            selection["prior_cv_selection"] = {
+                key: selection[key] for key in ("source_view_id", "selection_score", "selection_receipt")
+                if key in selection
+            }
+            selection.pop("selection_score", None)
+            event.observability["key_frame_selection"].update({
+                "policy": "visually reviewed bottle-cap instance on bounded event frames",
+                "source_view_id": cap_review["candidates"][-1]["localized_view_ids"][0],
+                "selection_receipt": cap_review["candidates"][-1],
+                "selected_key_global_ms": reviewed_key_ms,
+                "selection_offset_ms": round(reviewed_key_ms - previous_key_global_ms, 3),
+            })
         key_frame_selection_records.append(
             {
                 "event_id": event.event_id,
@@ -4602,6 +5317,10 @@ def materialize_key_materials(
                 "key_material_view_selection": pair_receipt,
             }
         )
+    if progress_callback is not None:
+        progress_callback(len(accepted_events), len(accepted_events))
+    if bool(config.get("performance", {}).get("release_auxiliary_models_after_event")):
+        _release_auxiliary_model_caches()
     write_json(
         layout.json_config / "key_frame_selection.json",
         {
@@ -4686,6 +5405,12 @@ def materialize_key_materials(
                     "event_id": event.event_id,
                     "view_id": view_id,
                     "role_label": role_label,
+                    "requested_key_global_ms": float(event.key_global_ms),
+                    "decoded_key_global_ms": transform.to_global(
+                        local_key_ms + used_offset_ms
+                    ),
+                    "key_frame_time_basis": "decoder_seek_target; source_frame_pts_not_recorded",
+                    "frame_decode_offset_ms": used_offset_ms,
                     "detections": detected_boxes,
                     "retention": "existing_persistent_run_cache",
                     "formally_published": False,
@@ -4941,7 +5666,7 @@ def extract_temporal_review_frames(
     view_id: str,
     samples_per_view: int = 3,
 ) -> list[tuple[str, Path]]:
-    """Sample a tiny before/peak/after storyboard from an already-made key clip.
+    """Sample a bounded timeline from an already-made key clip.
 
     This avoids another seek through the original NAS video and gives the MLLM
     temporal evidence instead of asking it to infer an action from one still.
@@ -4958,27 +5683,31 @@ def extract_temporal_review_frames(
             return []
         if count == 1:
             fractions = [0.5]
-            phases = ["peak"]
+            phases = ["clip_middle"]
         elif count == 2:
             fractions = [0.2, 0.8]
-            phases = ["before", "after"]
+            phases = ["clip_early", "clip_late"]
         elif count == 3:
             fractions = [0.15, 0.5, 0.85]
-            phases = ["before", "peak", "after"]
+            phases = ["clip_early", "clip_middle", "clip_late"]
         elif count in {4, 5}:
             fractions = [0.1 + 0.8 * index / (count - 1) for index in range(count)]
-            # Preserve explicit temporal semantics when high-risk actions ask
-            # for more than the ordinary before/peak/after triplet.  Generic
-            # labels such as ``temporal_01`` made it needlessly hard for the
-            # semantic reviewer to prove a closed pipette transfer cycle.
+            # These are positions in a clip, not observed action phases.
+            # Its midpoint need not coincide with the selected key frame.
             if count == 4:
-                phases = ["before", "early", "late", "after"]
+                phases = [
+                    "clip_early", "clip_mid_early", "clip_mid_late", "clip_late"
+                ]
             else:
-                phases = ["before", "early", "peak", "late", "after"]
+                phases = [
+                    "clip_early", "clip_mid_early", "clip_middle",
+                    "clip_mid_late", "clip_late",
+                ]
         else:
             fractions = [0.1 + 0.8 * index / (count - 1) for index in range(count)]
             phases = [f"timeline_{index:02d}" for index in range(1, count + 1)]
         samples: list[tuple[str, Path]] = []
+        fps = float(capture.get(cv2.CAP_PROP_FPS) or 0)
         output_dir.mkdir(parents=True, exist_ok=True)
         safe_view = _safe_slug(view_id)
         for phase, fraction in zip(phases, fractions, strict=True):
@@ -4990,15 +5719,75 @@ def extract_temporal_review_frames(
             path = output_dir / f"{safe_view}_{phase}.jpg"
             if not cv2.imwrite(str(path), frame, [cv2.IMWRITE_JPEG_QUALITY, 88]):
                 continue
+            nominal_ms = (
+                round(frame_index * 1000 / fps, 3)
+                if math.isfinite(fps) and fps > 0
+                else "unknown"
+            )
             samples.append(
                 (
-                    f"view_id={view_id}; temporal_phase={phase}; key_clip_frame={frame_index}",
+                    f"view_id={view_id}; sample_scope=clip_timeline; "
+                    f"temporal_phase={phase}; key_clip_frame={frame_index}; "
+                    f"nominal_clip_time_ms={nominal_ms}",
                     path,
                 )
             )
         return samples
     finally:
         capture.release()
+
+
+def _with_selected_keyframe_review_images(
+    layout: ArchiveLayout,
+    event: EvidenceEvent,
+    config: dict[str, Any],
+    timeline_images: list[tuple[str, Path]],
+) -> list[tuple[str, Path]]:
+    """Add the actual retained key frames without truncating temporal evidence.
+
+    Raw-frame sidecars bind the image to its requested and decoder-seek time. Old
+    caches without that binding remain usable as timeline evidence only.
+    Never silently append one view or evict liquid-cycle context to fit a limit.
+    """
+    settings = config["mllm"]
+    limit = int((settings.get("max_images_per_event_by_action") or {}).get(
+        event.action_type.value, settings.get("max_images_per_event", 8)
+    ))
+    views = [view for view in event.key_frames if view != "aligned_first_third"]
+    if not views or len(timeline_images) + len(views) > limit:
+        return timeline_images
+    root = layout.work / "key-material-annotation-inputs" / event.event_id
+    selected = {}
+    for sidecar in sorted(root.glob("*.json")):
+        try:
+            meta = json.loads(sidecar.read_text(encoding="utf-8"))
+            requested = float(meta["requested_key_global_ms"])
+            decoded = float(meta["decoded_key_global_ms"])
+        except (OSError, ValueError, TypeError, KeyError):
+            continue
+        view_id = meta.get("view_id")
+        image_path = sidecar.with_suffix(".jpg")
+        if (
+            meta.get("event_id") != event.event_id
+            or view_id not in views
+            or not math.isfinite(requested)
+            or not math.isfinite(decoded)
+            or abs(requested - event.key_global_ms) > 0.001
+            or not image_path.is_file()
+        ):
+            continue
+        if view_id in selected:
+            # Multiple candidate files cannot establish which raw image is current.
+            return timeline_images
+        selected[view_id] = (
+            f"view_id={view_id}; sample_scope=selected_keyframe; "
+            f"requested_global_ms={requested:.3f}; decoded_global_ms={decoded:.3f}; "
+            "time_basis=decoder_seek_target; exact_frame_pts=unverified",
+            image_path,
+        )
+    if set(selected) != set(views):
+        return timeline_images
+    return [*timeline_images, *(selected[view] for view in views)]
 
 
 def key_material_review_images(
@@ -5008,9 +5797,8 @@ def key_material_review_images(
 ) -> list[tuple[str, Path]]:
     """Select bounded temporal evidence without discarding dual-view context.
 
-    Common contact/movement actions use three frames from the already-aligned
-    dual-view clip, halving image count while retaining both cameras in every
-    phase. Observability-sensitive actions keep full per-view samples.
+    Timeline positions never claim an action peak. When image budget permits,
+    separately include both retained key frames with their recorded times.
     """
 
     fallback_images = [
@@ -5051,7 +5839,7 @@ def key_material_review_images(
             primary = extract_temporal_review_frames(
                 layout.root / primary_relative,
                 layout.work
-                / "mllm-temporal-samples"
+                / "mllm-temporal-samples-v2"
                 / event.event_id
                 / "liquid-dense-primary",
                 primary_view,
@@ -5071,7 +5859,7 @@ def key_material_review_images(
                         extract_temporal_review_frames(
                             layout.root / relative,
                             layout.work
-                            / "mllm-temporal-samples"
+                            / "mllm-temporal-samples-v2"
                             / event.event_id
                             / "liquid-context",
                             view_id,
@@ -5081,27 +5869,26 @@ def key_material_review_images(
                         )
                     )
                     break
-                return primary + context
+                return _with_selected_keyframe_review_images(
+                    layout, event, config, primary + context
+                )
 
     if event.action_type.value in compact_actions:
         aligned_relative = event.key_clips.get("aligned_first_third")
         if aligned_relative:
             aligned = extract_temporal_review_frames(
                 layout.root / aligned_relative,
-                layout.work / "mllm-temporal-samples" / event.event_id / "aligned",
+                layout.work / "mllm-temporal-samples-v2" / event.event_id / "aligned",
                 "aligned_first_third",
                 samples_per_view=samples_per_view,
             )
             if aligned:
-                return aligned
+                return _with_selected_keyframe_review_images(
+                    layout, event, config, aligned
+                )
 
-    sample_dir = layout.work / "mllm-temporal-samples" / event.event_id
-    by_phase: dict[str, list[tuple[str, Path]]] = {
-        "before": [],
-        "peak": [],
-        "after": [],
-    }
-    remaining: list[tuple[str, Path]] = []
+    sample_dir = layout.work / "mllm-temporal-samples-v2" / event.event_id
+    images: list[tuple[str, Path]] = []
     for view_id, relative in event.key_clips.items():
         if view_id == "aligned_first_third":
             continue
@@ -5111,23 +5898,25 @@ def key_material_review_images(
             view_id,
             samples_per_view=samples_per_view,
         ):
-            phase = next(
-                (
-                    item
-                    for item in ("before", "peak", "after")
-                    if f"temporal_phase={item}" in label
-                ),
-                None,
-            )
-            if phase is None:
-                remaining.append((label, path))
-            else:
-                by_phase[phase].append((label, path))
-    images: list[tuple[str, Path]] = []
-    for phase in ("before", "peak", "after"):
-        images.extend(sorted(by_phase[phase], key=lambda item: item[0]))
-    images.extend(sorted(remaining, key=lambda item: item[0]))
-    return images or fallback_images
+            images.append((label, path))
+
+    def sample_order(item: tuple[str, Path]) -> tuple[int, str]:
+        label = item[0]
+        match = re.search(r"temporal_phase=([^;]+)", label)
+        phase = match.group(1) if match else ""
+        phases = [
+            "clip_early", "clip_mid_early", "clip_middle", "clip_mid_late", "clip_late"
+        ]
+        if phase in phases:
+            return phases.index(phase), label
+        if phase.startswith("timeline_") and phase[9:].isdigit():
+            return int(phase[9:]), label
+        return 999, label
+
+    images.sort(key=sample_order)
+    return _with_selected_keyframe_review_images(
+        layout, event, config, images
+    ) if images else fallback_images
 
 
 def analyze_key_materials(layout: ArchiveLayout, events: Sequence[EvidenceEvent], config: dict[str, Any]) -> None:
@@ -5171,10 +5960,94 @@ def analyze_key_materials(layout: ArchiveLayout, events: Sequence[EvidenceEvent]
             futures = [executor.submit(analyze, event) for event in accepted]
             for future in as_completed(futures):
                 event, result = future.result()
+                result = normalize_uncalibrated_hand_identity(result)
                 event.model_understanding = result
                 record_semantic_review(event, result)
     finally:
         analyzer.close()
+
+
+def _move_curated_event_media(
+    layout: ArchiveLayout,
+    event: EvidenceEvent,
+    group: ExperimentGroup,
+    quarantine_root: Path,
+    *,
+    destination_action: ActionType | None,
+) -> dict[str, Any]:
+    """Move one event atomically between formal and review material trees."""
+
+    moved: list[dict[str, str]] = []
+    retained: list[dict[str, str]] = []
+    experiment_folder = group.archive_folder or _safe_folder_name(group.group_id)
+    for attribute, media_root, media_kind in (
+        ("key_frames", layout.key_frames, "Key-Frames"),
+        ("key_clips", layout.key_clips, "Key-Clips"),
+    ):
+        collection = dict(getattr(event, attribute))
+        if not collection:
+            continue
+        source_files = [layout.root / relative for relative in collection.values()]
+        source_directories = {path.parent.resolve(strict=True) for path in source_files}
+        if len(source_directories) != 1:
+            raise RuntimeError(
+                f"{event.event_id} {attribute} spans multiple event directories"
+            )
+        source_directory = source_directories.pop()
+        if not source_directory.is_relative_to(media_root.resolve(strict=True)):
+            raise RuntimeError(
+                f"{event.event_id} media escaped the formal key-material root"
+            )
+        if destination_action is None:
+            destination_directory = quarantine_root / event.event_id / media_kind
+        else:
+            destination_directory = (
+                media_root
+                / experiment_folder
+                / key_material_action_folder(destination_action)
+                / _key_material_event_folder_name(
+                    layout, experiment_folder, event
+                )
+            )
+        if destination_directory.exists():
+            resolved_destination = destination_directory.resolve(strict=True)
+            if resolved_destination == source_directory:
+                retained.append(
+                    {
+                        "media_kind": media_kind,
+                        "path": _relative(source_directory, layout.root),
+                        "operation": "retained_in_place",
+                    }
+                )
+                continue
+            raise RuntimeError(
+                "Semantic curation destination already exists: "
+                f"{destination_directory}"
+            )
+        destination_directory.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(source_directory), str(destination_directory))
+        if destination_action is None:
+            setattr(event, attribute, {})
+        else:
+            setattr(
+                event,
+                attribute,
+                {
+                    view_id: _relative(
+                        destination_directory / Path(relative).name,
+                        layout.root,
+                    )
+                    for view_id, relative in collection.items()
+                },
+            )
+        moved.append(
+            {
+                "media_kind": media_kind,
+                "from": _relative(source_directory, layout.root),
+                "to": _relative(destination_directory, layout.root),
+            }
+        )
+    return {"moved_media": moved, "retained_media": retained}
 
 
 def curate_semantically_reviewed_key_materials(
@@ -5215,85 +6088,13 @@ def curate_semantically_reviewed_key_materials(
         *,
         destination_action: ActionType | None,
     ) -> dict[str, Any]:
-        moved: list[dict[str, str]] = []
-        retained: list[dict[str, str]] = []
-        group = group_by_event[event.event_id]
-        experiment_folder = group.archive_folder or _safe_folder_name(group.group_id)
-        for attribute, media_root, media_kind in (
-            ("key_frames", layout.key_frames, "Key-Frames"),
-            ("key_clips", layout.key_clips, "Key-Clips"),
-        ):
-            collection = dict(getattr(event, attribute))
-            if not collection:
-                continue
-            source_files = [layout.root / relative for relative in collection.values()]
-            source_directories = {path.parent.resolve(strict=True) for path in source_files}
-            if len(source_directories) != 1:
-                raise RuntimeError(
-                    f"{event.event_id} {attribute} spans multiple event directories"
-                )
-            source_directory = source_directories.pop()
-            if not source_directory.is_relative_to(media_root.resolve(strict=True)):
-                raise RuntimeError(
-                    f"{event.event_id} media escaped the formal key-material root"
-                )
-            if destination_action is None:
-                destination_directory = quarantine_root / event.event_id / media_kind
-            else:
-                destination_directory = (
-                    media_root
-                    / experiment_folder
-                    / key_material_action_folder(destination_action)
-                    / _key_material_event_folder_name(layout, experiment_folder, event)
-                )
-            if destination_directory.exists():
-                resolved_destination = destination_directory.resolve(strict=True)
-                if resolved_destination == source_directory:
-                    # A same-action participant refinement can change the
-                    # normalized object token without changing its readable
-                    # semantic name (for example ``paper`` ->
-                    # ``weighing_paper``).  The content-addressed event folder
-                    # is then already the correct destination.  Treat that
-                    # exact identity as an audited in-place update; a
-                    # different existing destination remains a hard conflict.
-                    retained.append(
-                        {
-                            "media_kind": media_kind,
-                            "path": _relative(source_directory, layout.root),
-                            "operation": "retained_in_place",
-                        }
-                    )
-                    continue
-                raise RuntimeError(
-                    f"Semantic curation destination already exists: {destination_directory}"
-                )
-            destination_directory.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(source_directory), str(destination_directory))
-            if destination_action is None:
-                setattr(event, attribute, {})
-            else:
-                setattr(
-                    event,
-                    attribute,
-                    {
-                        view_id: _relative(
-                            destination_directory / Path(relative).name,
-                            layout.root,
-                        )
-                        for view_id, relative in collection.items()
-                    },
-                )
-            moved.append(
-                {
-                    "media_kind": media_kind,
-                    "from": _relative(source_directory, layout.root),
-                    "to": _relative(destination_directory, layout.root),
-                }
-            )
-        return {
-            "moved_media": moved,
-            "retained_media": retained,
-        }
+        return _move_curated_event_media(
+            layout,
+            event,
+            group_by_event[event.event_id],
+            quarantine_root,
+            destination_action=destination_action,
+        )
 
     for event in events:
         review = event.semantic_review or {}
@@ -5337,6 +6138,7 @@ def curate_semantically_reviewed_key_materials(
         model_confidence = float(review.get("model_confidence") or 0.0)
         review_verdict = str(review.get("verdict") or "")
         raw_model_verdict = str(review.get("model_evidence_verdict") or "")
+        participant_conflicts = _semantic_participant_conflicts(event)
         relabel_objects = _relabel_participant_objects(event)
         relabel_non_actor_objects = {
             item for item in relabel_objects if item not in {"hand", "gloved_hand"}
@@ -5618,7 +6420,33 @@ def curate_semantically_reviewed_key_materials(
         )
         final_action: ActionType | None = None
         disposition = "excluded_semantically_unconfirmed"
-        if safe_state_to_contact_fallback:
+        unmapped_interaction_participants = bool(
+            proposed_action == ActionType.HAND_OBJECT_CONTACT
+            and model_action_value == ActionType.HAND_OBJECT_CONTACT.value
+            and str(review.get("model_status") or "") == "completed"
+            and model_confidence >= relabel_min_confidence
+            and original_non_actor_objects
+            and not relabel_non_actor_objects
+            and any(
+                isinstance(item, dict)
+                and str(item.get("object") or "").strip()
+                and _semantic_interaction_is_direct(item)
+                for item in (event.model_understanding or {}).get(
+                    "hand_object_interactions", []
+                ) or []
+            )
+        )
+        if unmapped_interaction_participants:
+            # A known action type does not confirm the CV target's identity.
+            # For example, handling gloves cannot validate a nearby paper box.
+            # Preserve the media for review instead of retaining unrelated CV
+            # targets when the explicit semantic participants are unmapped.
+            disposition = (
+                "review_candidate_conflicting_interaction_participants"
+                if participant_conflicts
+                else "review_candidate_unmapped_interaction_participants"
+            )
+        elif safe_state_to_contact_fallback:
             # A hand visibly manipulating a cap can safely establish contact
             # even when the before/after evidence is too weak to publish the
             # higher-risk open/close state transition.  Keep only the CV
@@ -5846,6 +6674,7 @@ def curate_semantically_reviewed_key_materials(
                 "curation_relabel_min_confidence": relabel_min_confidence,
                 "semantic_state_machine_rebuilt": semantic_state_machine_rebuilt,
                 "semantic_proof_contradictions": proof_contradictions,
+                "semantic_participant_conflicts": participant_conflicts,
                 "relabel_safety_gate": {
                     "source_direct_dual_role_cv": source_direct_cv,
                     "strong_dual_role_contact": strong_dual_role_contact,
@@ -6371,6 +7200,286 @@ def curate_semantically_reviewed_key_materials(
     }
     write_json(layout.json_config / "semantic_key_material_curation.json", report)
     return curated, report
+
+
+def _annotation_supports_curated_action(
+    event: EvidenceEvent,
+    annotation: dict[str, Any],
+) -> bool:
+    """Apply the final same-view participant contract before publication."""
+
+    rendered_by_view = {
+        str(view_id): {
+            str(item).strip().lower().replace("-", "_").replace(" ", "_")
+            for item in (receipt.get("rendered_classes") or [])
+        }
+        for view_id, receipt in (annotation.get("views") or {}).items()
+        if isinstance(receipt, dict)
+    }
+    return bool(
+        action_participant_visibility(
+            event.action_type, event.objects, rendered_by_view
+        )["passed"]
+    )
+
+
+def reconcile_visually_reviewed_participants(
+    layout: ArchiveLayout,
+    events: Sequence[EvidenceEvent],
+    groups: Sequence[ExperimentGroup],
+    semantic_curation: dict[str, Any],
+) -> tuple[list[EvidenceEvent], dict[str, Any]]:
+    """Prune unsupported optional participants and quarantine invalid events.
+
+    Semantic understanding can name several objects observed across a long
+    event.  Final participant review is tied to the selected key frame.  A
+    paper or cap that cannot be rendered there must not remain a claimed final
+    participant.  If other rendered objects still satisfy the action contract,
+    retain the event with the unsupported class removed.  Otherwise move the
+    event to the formal review-candidate tree instead of failing the complete
+    archive or publishing an unverifiable key material.
+    """
+
+    group_by_event = {
+        event_id: group for group in groups for event_id in group.key_event_ids
+    }
+    record_by_event = {
+        str(record.get("event_id")): record
+        for record in semantic_curation.get("records") or []
+        if isinstance(record, dict) and record.get("event_id")
+    }
+    quarantine_root = layout.key_materials / "Review-Candidates"
+    retained: list[EvidenceEvent] = []
+    pruned_records: list[dict[str, Any]] = []
+    excluded_records: list[dict[str, Any]] = []
+
+    for event in events:
+        annotation = (event.observability or {}).get(
+            "key_material_annotation"
+        ) or {}
+        visual_review = annotation.get("participant_visual_review") or {}
+        unsupported_classes = sorted(
+            {
+                str(review.get("participant_class") or "")
+                for review in visual_review.get("reviews") or []
+                if isinstance(review, dict)
+                and (
+                    (
+                        review.get("status") == "completed"
+                        and int(review.get("localized_view_count") or 0) == 0
+                        and str(review.get("participant_class") or "")
+                        in {"paper", "bottle_cap"}
+                    )
+                    or (
+                        review.get("status") == "review_failed_quarantined"
+                        and str(review.get("participant_class") or "")
+                        in {"paper", "bottle_cap", "balance"}
+                    )
+                )
+            }
+        )
+        previous_objects = list(event.objects)
+        event.objects = [
+            item for item in event.objects if item not in unsupported_classes
+        ]
+        supported = _annotation_supports_curated_action(event, annotation)
+        if not unsupported_classes and supported:
+            retained.append(event)
+            continue
+        group = group_by_event[event.event_id]
+        destination_action = event.action_type if supported else None
+        movement = _move_curated_event_media(
+            layout,
+            event,
+            group,
+            quarantine_root,
+            destination_action=destination_action,
+        )
+        receipt = {
+            "schema_version": "visioncortex-visual-participant-reconciliation/1",
+            "event_id": event.event_id,
+            "unsupported_classes": unsupported_classes,
+            "previous_participant_objects": previous_objects,
+            "final_participant_objects": list(event.objects) if supported else [],
+            "action_participant_visibility_after_pruning": supported,
+            "disposition": (
+                "accepted_after_visual_participant_pruning"
+                if supported
+                else "review_candidate_missing_required_visual_participant"
+            ),
+            "policy": (
+                "remove only visually unsupported reviewed classes; retain the "
+                "event only when remaining rendered objects satisfy its action contract"
+            ),
+            **movement,
+        }
+        review = event.semantic_review or {}
+        review["visual_participant_reconciliation"] = receipt
+        review["final_participant_objects"] = receipt[
+            "final_participant_objects"
+        ]
+        record = record_by_event.get(event.event_id)
+        if record is not None:
+            record["visual_participant_reconciliation"] = receipt
+            record["final_participant_objects"] = receipt[
+                "final_participant_objects"
+            ]
+            record["post_annotation_disposition"] = receipt["disposition"]
+            record["moved_media"] = [
+                *(record.get("moved_media") or []),
+                *(movement.get("moved_media") or []),
+            ]
+            record["retained_media"] = [
+                *(record.get("retained_media") or []),
+                *(movement.get("retained_media") or []),
+            ]
+        if supported:
+            event.accepted = True
+            review["final_delivery_accepted"] = True
+            review["post_annotation_disposition"] = receipt["disposition"]
+            if record is not None:
+                record["final_delivery_accepted"] = True
+            pruned_records.append(receipt)
+            retained.append(event)
+        else:
+            event.accepted = False
+            review.update(
+                {
+                    "verdict": "visually_unconfirmed",
+                    "final_delivery_accepted": False,
+                    "final_action_type": None,
+                    "curation_disposition": receipt["disposition"],
+                }
+            )
+            if record is not None:
+                record.update(
+                    {
+                        "disposition": receipt["disposition"],
+                        "final_delivery_accepted": False,
+                        "final_action_type": None,
+                    }
+                )
+            excluded_records.append(receipt)
+        event.semantic_review = review
+
+    retained_ids = {event.event_id for event in retained}
+    for group in groups:
+        group.key_event_ids = [
+            event_id for event_id in group.key_event_ids if event_id in retained_ids
+        ]
+
+    if excluded_records:
+        index_path = quarantine_root / "Candidate-Index.json"
+        index = (
+            json.loads(index_path.read_text(encoding="utf-8-sig"))
+            if index_path.is_file()
+            else {
+                "schema_version": "visioncortex-review-candidate-index/1",
+                "policy": (
+                    "unconfirmed candidates remain visible and indexed; they are "
+                    "never counted as confirmed key material"
+                ),
+                "candidates": [],
+            }
+        )
+        by_id = {
+            str(item.get("event_id")): item
+            for item in index.get("candidates") or []
+            if isinstance(item, dict) and item.get("event_id")
+        }
+        event_by_id = {event.event_id: event for event in events}
+        for receipt in excluded_records:
+            event = event_by_id[receipt["event_id"]]
+            media_root = quarantine_root / event.event_id
+            by_id[event.event_id] = {
+                "event_id": event.event_id,
+                "status": "review_candidate_not_confirmed_key_material",
+                "disposition": receipt["disposition"],
+                "cv_action_type": (
+                    (event.semantic_review or {}).get("pre_curation_action_type")
+                    or event.action_type.value
+                ),
+                "cv_objects": (
+                    (event.semantic_review or {}).get("pre_curation_objects")
+                    or receipt["previous_participant_objects"]
+                ),
+                "model_action_type": (
+                    (event.semantic_review or {}).get("model_action_type")
+                ),
+                "global_start_ms": event.global_start_ms,
+                "global_end_ms": event.global_end_ms,
+                "key_global_ms": event.key_global_ms,
+                "source_views": list(event.supporting_views),
+                "media": sorted(
+                    _relative(path, layout.root)
+                    for path in media_root.rglob("*")
+                    if path.is_file()
+                ),
+                "semantic_receipt": (
+                    "JSON-Config-Files/semantic_key_material_curation.json"
+                ),
+                "source_reference": (
+                    "Original-Experiment-Videos/Original-Video-Index.json"
+                ),
+            }
+        index["candidates"] = list(by_id.values())
+        index["candidate_count"] = len(index["candidates"])
+        write_json(index_path, index)
+        semantic_curation["review_candidate_count"] = index["candidate_count"]
+
+    records = semantic_curation.get("records") or []
+    accepted_count = sum(
+        bool(record.get("final_delivery_accepted"))
+        for record in records
+        if isinstance(record, dict)
+    )
+    semantic_curation.update(
+        {
+            "accepted_count": accepted_count,
+            "excluded_count": int(semantic_curation.get("candidate_count") or 0)
+            - accepted_count,
+            "confirmed_count": sum(
+                record.get("disposition") == "accepted_confirmed"
+                and bool(record.get("final_delivery_accepted"))
+                for record in records
+                if isinstance(record, dict)
+            ),
+            "strict_relabel_count": sum(
+                record.get("disposition") == "accepted_strict_relabel"
+                and bool(record.get("final_delivery_accepted"))
+                for record in records
+                if isinstance(record, dict)
+            ),
+            "objective_cv_preserved_count": sum(
+                record.get("disposition")
+                == "accepted_objective_cv_preserved_over_sparse_semantics"
+                and bool(record.get("final_delivery_accepted"))
+                for record in records
+                if isinstance(record, dict)
+            ),
+            "state_safety_downclass_count": sum(
+                record.get("disposition")
+                == "accepted_state_safety_downclass_to_contact"
+                and bool(record.get("final_delivery_accepted"))
+                for record in records
+                if isinstance(record, dict)
+            ),
+            "visual_participant_reconciliation": {
+                "schema_version": (
+                    "visioncortex-visual-participant-reconciliation-index/1"
+                ),
+                "policy": (
+                    "prune unsupported reviewed participants and quarantine an "
+                    "event if its remaining final frame cannot satisfy the action contract"
+                ),
+                "pruned_event_count": len(pruned_records),
+                "excluded_event_count": len(excluded_records),
+                "pruned_events": pruned_records,
+                "excluded_events": excluded_records,
+            },
+        }
+    )
+    return retained, semantic_curation
 
 
 def refresh_key_material_metadata(

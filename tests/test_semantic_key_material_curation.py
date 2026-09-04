@@ -162,6 +162,86 @@ def test_curates_confirmed_relabelled_and_rejected_media(tmp_path: Path):
     assert review_index["candidates"][0]["media"]
 
 
+def test_unmapped_explicit_participant_does_not_confirm_background_cv_target(
+    tmp_path: Path,
+):
+    layout = ArchiveLayout(tmp_path / "archive")
+    layout.create()
+    layout.work = tmp_path / "cache" / "run"
+    event = _event(
+        "EVT-GLOVE-PACK", ActionType.HAND_OBJECT_CONTACT,
+        "confirmed", "hand_object_contact", confidence=0.93,
+    )
+    event.objects = ["hand", "paper"]
+    event.model_understanding["current_step"] = "从手套盒取出并展开手套"
+    event.model_understanding["hand_object_interactions"] = [
+        {"hand": "right", "object": "蓝色手套包装盒/蓝色手套", "contact": "接触/抓取"}
+    ]
+    group = _group([event])
+    _materialize_stub(layout, event)
+    curated, report = curate_semantically_reviewed_key_materials(
+        layout, [event], [group], {"key_materials": {}},
+    )
+    assert curated == []
+    assert not event.accepted
+    assert report["records"][0]["disposition"] == (
+        "review_candidate_unmapped_interaction_participants"
+    )
+    assert len(list((layout.key_materials / "Review-Candidates" / event.event_id).rglob("*.*"))) == 6
+
+
+def test_contradictory_contact_is_retained_for_review(tmp_path: Path):
+    layout = ArchiveLayout(tmp_path / "archive")
+    layout.create()
+    event = _event(
+        "EVT-CONTACT-CONFLICT", ActionType.HAND_OBJECT_CONTACT,
+        "confirmed", "hand_object_contact", confidence=0.92,
+    )
+    event.objects = ["gloved_hand", "balance"]
+    event.model_understanding.update({
+        "hand_object_interactions": [
+            {"object": "blue glove", "contact": "grasp"},
+            {"object": "balance", "contact": "接触"},
+        ],
+        "action_proof": {"reason": "手与手套接触明确；天平仅作为背景或接近对象出现"},
+    })
+    group = _group([event])
+    _materialize_stub(layout, event)
+    curated, _report = curate_semantically_reviewed_key_materials(
+        layout, [event], [group], {"key_materials": {}},
+    )
+    assert curated == []
+    assert event.semantic_review["curation_disposition"] == (
+        "review_candidate_conflicting_interaction_participants"
+    )
+    assert event.semantic_review["semantic_participant_conflicts"][0]["class_name"] == "balance"
+    retained = layout.key_materials / "Review-Candidates" / event.event_id
+    assert len(list(retained.rglob("*.jpg"))) == 3
+    assert len(list(retained.rglob("*.mp4"))) == 3
+
+
+def test_explicit_canonical_paper_is_not_quarantined_as_unmapped(tmp_path: Path):
+    layout = ArchiveLayout(tmp_path / "archive")
+    layout.create()
+    event = _event(
+        "EVT-PAPER", ActionType.HAND_OBJECT_CONTACT,
+        "confirmed", "hand_object_contact", confidence=0.92,
+    )
+    event.objects = ["hand", "paper"]
+    event.model_understanding["hand_object_interactions"] = [
+        {"object": "paper", "contact": "grasp"},
+    ]
+    group = _group([event])
+    _materialize_stub(layout, event)
+    curated, _report = curate_semantically_reviewed_key_materials(
+        layout, [event], [group], {"key_materials": {}},
+    )
+    assert curated == [event]
+    assert event.accepted
+    assert event.objects == ["hand", "paper"]
+    assert len(event.key_frames) == 3
+
+
 def test_same_action_refines_cv_participant_from_structured_interaction(
     tmp_path: Path,
 ):

@@ -163,8 +163,10 @@ def test_health_reports_local_storage_without_claiming_nas(monkeypatch, tmp_path
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["storage_mode"] == "local_development"
-    assert payload["archive_label"] == "本地开发归档"
+    assert payload["storage_mode"] == "local"
+    assert payload["archive_label"] == "任务归档"
+    assert payload["capacity_policy"] == "dynamic_by_submitted_files"
+    assert "minimum_capacity" not in payload
     assert payload["archive_root"] == str(archive)
     assert payload["archive_available"] is True
     assert payload["nas_available"] is False
@@ -174,6 +176,36 @@ def test_health_reports_local_storage_without_claiming_nas(monkeypatch, tmp_path
     assert payload["fixed_benchmark"]["input_mode"] == (
         "local files / zero-copy source references"
     )
+
+
+def test_model_candidate_api_exposes_quality_without_claiming_production():
+    client = TestClient(api.app)
+
+    response = client.get("/api/model-candidates")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["candidate_count"] >= 1
+    assert payload["production_configuration_changed"] is False
+    assert all(
+        candidate["policy"]["production_enabled"] is False
+        and candidate["policy"]["production_certified"] is False
+        for candidate in payload["candidates"]
+    )
+    by_id = {item["candidate_id"]: item for item in payload["candidates"]}
+    assert by_id["public-apparatus-21class-yolo26m-v4"]["status"] == (
+        "invalidated_split_leakage_not_promoted"
+    )
+    assert by_id["public-apparatus-21class-yolo26m-v4"]["dataset"][
+        "cross_split_content_hash_count"
+    ] == 35
+    assert by_id["public-apparatus-21class-yolo26s-v6-clean"]["dataset"][
+        "cross_split_content_hash_count"
+    ] == 0
+    v7 = by_id["public-apparatus-21class-yolo26m-v7-clean-augmented"]
+    assert v7["dataset"]["cross_split_content_hash_count"] == 0
+    assert v7["comparative_test_metrics"]["independent_test_claim_allowed"] is False
+    assert v7["policy"]["production_enabled"] is False
 
 
 def test_collection_api_returns_batch_cards_without_opening_video_paths(
@@ -388,6 +420,85 @@ def test_archived_quality_fallback_uses_evidence_without_fabricating_accuracy():
     assert quality["key_materials"]["cross_view_or_explicit_uncertainty_count"] == 2
 
 
+def test_key_material_verification_summary_exposes_models_timing_and_uncertainty():
+    annotation = {
+        "mode": "event_participants_only",
+        "event_count": 1,
+        "rendered_view_count": 2,
+        "selective_verification": {
+            "policy": "bounded final frames only",
+            "decision_status_counts": {"admitted": 1, "deferred_budget_exhausted": 1},
+            "wall_seconds": 3.5,
+            "budget": {"admitted_event_count": 1, "deferred_count": 1},
+            "source_copy_bytes": 0,
+            "ark_calls": 0,
+            "token_usage": 0,
+        },
+        "records": [
+            {
+                "event_id": "EVENT-1",
+                "view_id": "fp",
+                "role_label": "First-Person",
+                "rendered_classes": ["hand", "pipette"],
+                "rendered_detections": [
+                    {"class_name": "hand", "confidence": 0.91},
+                    {"class_name": "pipette", "confidence": 0.72},
+                ],
+                "minimum_rendered_confidence": 0.72,
+                "selective_verification": {
+                    "status": "admitted",
+                    "assessment": {"reasons": ["low_closed_set_confidence"]},
+                },
+                "open_vocabulary_supplement": {
+                    "status": "executed",
+                    "model_load_seconds": 1.2,
+                    "inference_seconds": 0.3,
+                    "grounding_dino_fallback": {
+                        "status": "executed",
+                        "model_load_seconds": 1.5,
+                        "inference_seconds": 0.4,
+                    },
+                },
+            },
+            {
+                "event_id": "EVENT-1",
+                "view_id": "tp",
+                "role_label": "Third-Person",
+                "rendered_classes": ["hand", "pipette"],
+                "rendered_detections": [
+                    {"class_name": "pipette", "confidence": 0.84}
+                ],
+                "minimum_rendered_confidence": 0.84,
+                "selective_verification": {
+                    "status": "deferred_budget_exhausted",
+                    "reason": "wall_time_budget_exhausted",
+                    "assessment": {"reasons": []},
+                },
+            },
+        ],
+    }
+
+    summary, by_event = api._summarize_key_material_verification(annotation)
+
+    event = by_event["EVENT-1"]
+    assert event["status"] == "verification_deferred_budget_exhausted"
+    assert event["models"] == [
+        "closed_set_yolo_tensorrt",
+        "grounding_dino_base",
+        "yolo_world_v2",
+    ]
+    assert event["confidence"] == {"minimum": 0.72, "maximum": 0.91}
+    assert event["timing"] == {
+        "model_load_seconds": 2.7,
+        "inference_seconds": 0.7,
+    }
+    assert event["uncertain"] is True
+    assert "wall_time_budget_exhausted" in event["uncertainty_reasons"]
+    assert summary["uncertain_event_count"] == 1
+    assert summary["model_execution_counts"]["closed_set_yolo_tensorrt"] == 2
+    assert summary["source_copy_bytes"] == 0
+
+
 def test_archive_performance_display_separates_cold_start_from_reuse_run():
     metrics = {
         "total_duration_seconds": 572.15617,
@@ -474,10 +585,33 @@ def test_run_snapshot_uses_durable_live_observability(tmp_path):
     assert snapshot["metrics"]["tokens"]["total_tokens"] == 4321
     assert snapshot["freshness"]["telemetry_updated_at"] == "telemetry-time"
     assert snapshot["stage_receipts"][0]["stage"] == "experiment_clips"
-    assert snapshot["stage_receipts"][0]["artifacts"][0]["available"] is True
+    stage_artifact = snapshot["stage_receipts"][0]["artifacts"][0]
+    assert stage_artifact["available"] is True
+    assert stage_artifact["relative_path"] == "Experiment-Clips"
+    assert stage_artifact["kind"] == "directory"
     assert next(
         item for item in snapshot["archive_areas"] if item["name"] == "Experiment-Clips"
     )["available"] is True
+
+
+def test_stage_receipt_recovers_promoted_artifact_from_stale_staging_path(tmp_path):
+    final = tmp_path / "final"
+    artifact = final / "Original-Experiment-Videos" / "Original-Video-Index.json"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("{}", encoding="utf-8")
+    receipts = final / "JSON-Config-Files" / "Stage-Receipts"
+    receipts.mkdir(parents=True)
+    stale = tmp_path / "Processing" / "run-1" / "Original-Experiment-Videos" / artifact.name
+    (receipts / "original_ingest.json").write_text(
+        json.dumps({"stage": "original_ingest", "artifacts": [str(stale)]}),
+        encoding="utf-8",
+    )
+
+    item = api._stage_receipts_from_root(final)[0]["artifacts"][0]
+
+    assert item["available"] is True
+    assert item["relative_path"] == "Original-Experiment-Videos/Original-Video-Index.json"
+    assert item["kind"] == "file"
 
 
 def test_completed_run_hydrates_from_formal_archive_before_staging(tmp_path):

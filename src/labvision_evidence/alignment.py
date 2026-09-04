@@ -79,11 +79,12 @@ def _timestamp_point(row: dict[str, str], row_number: int, fps: float) -> Timest
         else:
             _source_name, source_text = _first(row, SOURCE_COLUMNS)
             source_ms = _parse_datetime_ms(source_text) if source_text is not None else None
-    if source_ms is None and local_name == "timestamp_ms" and abs(local_ms) > 10_000_000_000:
-        source_ms = local_ms
-        local_ms = frame_index * 1000.0 / max(fps, 1e-9)
-    if source_ms is None and local_name == "timestamp_s" and abs(local_ms) > 10_000_000_000:
-        source_ms = local_ms
+    # Capture exports can put epoch wall-clock values in local_time_us.
+    # Playback stays on the media frame timeline even when a separate,
+    # preferred capture-clock column is also present.
+    if abs(local_ms) > 10_000_000_000:
+        if source_ms is None:
+            source_ms = local_ms
         local_ms = frame_index * 1000.0 / max(fps, 1e-9)
     return TimestampPoint(frame_index=frame_index, local_ms=local_ms, source_ms=source_ms)
 

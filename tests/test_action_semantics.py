@@ -1029,7 +1029,10 @@ def test_temporal_review_reuses_short_key_clip(tmp_path: Path):
     samples = extract_temporal_review_frames(clip, tmp_path / "samples", "fp01", 3)
 
     assert len(samples) == 3
-    assert ["temporal_phase=before" in samples[0][0], "temporal_phase=peak" in samples[1][0], "temporal_phase=after" in samples[2][0]] == [True, True, True]
+    assert [label.split("temporal_phase=", 1)[1].split(";", 1)[0] for label, _ in samples] == [
+        "clip_early", "clip_middle", "clip_late",
+    ]
+    assert all("sample_scope=clip_timeline" in label and "nominal_clip_time_ms=" in label for label, _ in samples)
     assert all(path.is_file() and path.stat().st_size > 0 for _, path in samples)
 
 
@@ -1051,9 +1054,9 @@ def test_five_frame_temporal_review_preserves_named_phases(tmp_path: Path):
     )
 
     assert [label.split("temporal_phase=", 1)[1].split(";", 1)[0] for label, _ in samples] == [
-        "before",
-        "early",
-        "peak",
-        "late",
-        "after",
+        "clip_early",
+        "clip_mid_early",
+        "clip_middle",
+        "clip_mid_late",
+        "clip_late",
     ]
