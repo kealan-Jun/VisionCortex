@@ -19,9 +19,10 @@ def physical_change_records(
     for event in normalized_events:
         event_id = str(event.get("event_id") or "")
         parent_event_id = str(event.get("parent_event_id") or "unassigned")
+        parent_event_uid = str(event.get("parent_event_uid") or parent_event_id)
         event_uid = str(
             (((event.get("provenance") or {}).get("index") or {}).get("event_uid"))
-            or f"{archive_id}:{parent_event_id}:{event_id}"
+            or f"{archive_id}:{parent_event_uid}:{event_id}"
         )
         before = event.get("state_before") or {}
         after = event.get("state_after") or {}
@@ -54,6 +55,7 @@ def physical_change_records(
                     "event_uid": event_uid,
                     "event_id": event_id,
                     "parent_event_id": parent_event_id,
+                    "parent_event_uid": parent_event_uid,
                     "action_type": str(event.get("action_type") or "unknown"),
                     "object_role": str(object_role),
                     "object_id": object_id,

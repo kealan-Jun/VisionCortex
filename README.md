@@ -279,7 +279,7 @@ visioncortex serve --host 127.0.0.1 --port 8000
 `JSON-Config-Files/Input-Manifests/input_seal.json` 写入与 NAS 零复制入口一致的输入
 封条。未提交的会话可用 `DELETE /api/upload-sessions/{session_id}` 取消并释放预留空间。
 
-已完成档案不会依赖浏览器加载整份大 JSON 才能查找关键素材：`GET /api/key-events` 支持跨档案或指定档案的全文、动作类型、实验组、双视角和时间范围筛选，并通过与筛选条件绑定的 `cursor` 分页；`GET /api/key-events/{event_uid}` 返回事件及带 SHA-256 的素材引用；`GET /api/evidence/{evidence_uid}` 可一跳回到 `evidence_package.json` 的 JSON Pointer 和原视频物理分片；`GET /api/physical-changes` 查询明确观测到的对象前后状态变化，不会替 unknown 区间补状态。稳定事件 UID 格式为 `{archive_id}:{parent_event_id}:{event_id}`。SQLite/JSONL 都是权威归档 JSON 的派生产物，可随时重建，不会取代原 JSON。
+已完成档案不会依赖浏览器加载整份大 JSON 才能查找关键素材：`GET /api/key-events` 支持跨档案或指定档案的全文、动作类型、实验组、双视角和时间范围筛选，并通过与筛选条件绑定的 `cursor` 分页；`GET /api/key-events/{event_uid}` 返回事件及带 SHA-256 的素材引用；`GET /api/evidence/{evidence_uid}` 可一跳回到 `evidence_package.json` 的 JSON Pointer 和原视频物理分片；`GET /api/physical-changes` 查询明确观测到的对象前后状态变化，不会替 unknown 区间补状态。稳定事件 UID 格式为 `{archive_id}:{parent_event_uid}:{event_id}`；其中稳定实验组 UID 不会因前面插入其他实验而改变，原有 `GROUP-xxxx` 继续作为页面顺序编号。SQLite/JSONL 都是权威归档 JSON 的派生产物，可随时重建，不会取代原 JSON。
 
 开发仓与稳定发布仓采用单向晋升，具体规则见 [双仓发布策略](docs/DUAL-REPOSITORY-RELEASE-POLICY.md)；旧 RealityLoopAI 仓库的全量只读审计与复用结论见 [旧仓库审计报告](docs/REALITYLOOP-LEGACY-REPOSITORY-AUDIT-20260817.md)。
 

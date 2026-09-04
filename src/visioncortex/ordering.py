@@ -128,6 +128,31 @@ def stable_segment_fingerprint(
     )
 
 
+def stable_segment_uid(
+    segment: ExperimentSegment,
+    events_by_id: Mapping[str, EvidenceEvent],
+) -> str:
+    """Return an immutable segment identity independent of display ordering."""
+
+    return f"SEG-{stable_segment_fingerprint(segment, events_by_id)[:20]}"
+
+
+def stable_group_uid(
+    segments: Iterable[ExperimentSegment],
+    events_by_id: Mapping[str, EvidenceEvent],
+) -> str:
+    """Return an immutable group identity from its ordered atomic membership."""
+
+    fingerprints = [
+        stable_segment_fingerprint(segment, events_by_id)
+        for segment in sorted(
+            segments,
+            key=lambda item: segment_sort_key(item, events_by_id),
+        )
+    ]
+    return f"GRP-{_fingerprint({'segment_fingerprints': fingerprints})[:20]}"
+
+
 def segment_sort_key(
     segment: ExperimentSegment,
     events_by_id: Mapping[str, EvidenceEvent],

@@ -15,12 +15,16 @@ import numpy as np
 from .detection import iter_frame_evidence
 from .candidate_index import CoarseFrameIndex, FineFrameIndex
 from .decisions import decision_receipt
-from .grouping import select_formal_experiment_start_events
+from .grouping import (
+    event_stable_identities,
+    select_formal_experiment_start_events,
+)
 from .ordering import (
     candidate_sort_key,
     event_sort_key,
     stable_candidate_fingerprint,
     stable_event_fingerprint,
+    stable_segment_uid,
 )
 from .schemas import (
     ActionCandidate,
@@ -3298,6 +3302,15 @@ def _split_rich_repeated_primary_sequences(
     minimum_gap_ms = float(
         continuity_cfg.get("atomic_sequence_split_min_gap_seconds", 5.0)
     ) * 1000.0
+    gap_by_action_ms = {
+        str(name): float(value) * 1000.0
+        for name, value in (
+            continuity_cfg.get(
+                "atomic_sequence_split_min_gap_seconds_by_action"
+            )
+            or {}
+        ).items()
+    }
     minimum_events = max(
         1,
         int(continuity_cfg.get("atomic_sequence_split_min_events_per_side", 4)),
@@ -3330,6 +3343,7 @@ def _split_rich_repeated_primary_sequences(
                 list[EvidenceEvent],
                 list[EvidenceEvent],
                 list[str],
+                float,
             ]
         ] = []
         for position in range(minimum_events, len(ordered) - minimum_events + 1):
@@ -3338,12 +3352,16 @@ def _split_rich_repeated_primary_sequences(
             left_end_ms = max(event.global_end_ms for event in left)
             right_start_ms = min(event.global_start_ms for event in right)
             inactive_gap_ms = right_start_ms - left_end_ms
-            if inactive_gap_ms < minimum_gap_ms:
-                continue
             repeated_primary_actions = sorted(
                 primary_actions(left) & primary_actions(right)
             )
             if not repeated_primary_actions:
+                continue
+            required_gap_ms = max(
+                [minimum_gap_ms]
+                + [gap_by_action_ms.get(action, minimum_gap_ms) for action in repeated_primary_actions]
+            )
+            if inactive_gap_ms < required_gap_ms:
                 continue
             if not (
                 required_roles <= observed_roles(left)
@@ -3357,6 +3375,7 @@ def _split_rich_repeated_primary_sequences(
                     left,
                     right,
                     repeated_primary_actions,
+                    required_gap_ms,
                 )
             )
         if not candidates:
@@ -3364,9 +3383,9 @@ def _split_rich_repeated_primary_sequences(
 
         # Prefer the strongest physical inactivity boundary.  For an exact tie,
         # the earlier boundary wins so the result is stable across input order.
-        inactive_gap_ms, position, left, right, repeated = max(
+        inactive_gap_ms, position, left, right, repeated, required_gap_ms = max(
             candidates,
-            key=lambda item: (item[0], -item[1]),
+            key=lambda item: (item[0] / max(item[5], 1.0), item[0], -item[1]),
         )
         if decision_receipts is not None:
             decision_receipts.append(
@@ -3392,9 +3411,11 @@ def _split_rich_repeated_primary_sequences(
                         "left_roles": sorted(role.value for role in observed_roles(left)),
                         "right_roles": sorted(role.value for role in observed_roles(right)),
                         "repeated_primary_actions": repeated,
+                        "required_gap_ms_for_repeated_actions": required_gap_ms,
                     },
                     thresholds={
                         "minimum_inactive_gap_ms": minimum_gap_ms,
+                        "minimum_inactive_gap_ms_by_action": gap_by_action_ms,
                         "minimum_events_per_side": minimum_events,
                         "required_roles_per_side": sorted(
                             role.value for role in required_roles
@@ -3413,6 +3434,24 @@ def _split_rich_repeated_primary_sequences(
     for group in groups:
         split_groups.extend(split_one(group))
     return split_groups
+
+
+def _event_core_interval(event: EvidenceEvent) -> tuple[float, float]:
+    """Return a valid core interval, tolerating legacy ``model_copy`` fixtures."""
+
+    core_start = event.core_global_start_ms
+    core_end = event.core_global_end_ms
+    if core_start is None or core_end is None:
+        return float(event.global_start_ms), float(event.global_end_ms)
+    core_start = float(core_start)
+    core_end = float(core_end)
+    if (
+        core_end < core_start
+        or core_end < event.global_start_ms
+        or core_start > event.global_end_ms
+    ):
+        return float(event.global_start_ms), float(event.global_end_ms)
+    return core_start, core_end
 
 
 def build_experiment_segments(
@@ -3488,7 +3527,23 @@ def build_experiment_segments(
     if not accepted:
         return []
     cfg = config["segmentation"]
-    gap_ms = float(cfg["experiment_gap_seconds"]) * 1000.0
+    default_gap_ms = float(cfg["experiment_gap_seconds"]) * 1000.0
+    action_gap_seconds = {
+        str(name): float(value)
+        for name, value in (
+            cfg.get("experiment_gap_seconds_by_action") or {}
+        ).items()
+    }
+    identity_idle_bridge_enabled = bool(
+        cfg.get("identity_idle_bridge_enabled", True)
+    )
+    identity_idle_bridge_max_gap_ms = float(
+        cfg.get("identity_idle_bridge_max_gap_seconds", 300.0)
+    ) * 1000.0
+    identity_idle_bridge_minimum = max(
+        2,
+        int(cfg.get("identity_idle_bridge_min_shared_identities", 2)),
+    )
     groups: list[list[EvidenceEvent]] = []
     ordered_windows = (
         sorted(coarse_windows, key=candidate_sort_key) if coarse_windows else []
@@ -3502,47 +3557,188 @@ def build_experiment_segments(
         padding_ms = float(config["performance"]["fine_window_padding_seconds"]) * 1000.0
         buckets: list[list[EvidenceEvent]] = [[] for _ in ordered_windows]
         unassigned: list[EvidenceEvent] = []
+        active_windows: list[tuple[int, ActionCandidate]] = []
+        window_cursor = 0
         for event in accepted:
-            midpoint = (event.global_start_ms + event.global_end_ms) / 2.0
+            event_start_ms, event_end_ms = _event_core_interval(event)
+            while (
+                window_cursor < len(ordered_windows)
+                and ordered_windows[window_cursor].global_start_ms - padding_ms
+                <= event_end_ms
+            ):
+                active_windows.append(
+                    (window_cursor, ordered_windows[window_cursor])
+                )
+                window_cursor += 1
+            active_windows = [
+                item
+                for item in active_windows
+                if item[1].global_end_ms + padding_ms >= event_start_ms
+            ]
             matches = [
-                index
-                for index, window in enumerate(ordered_windows)
-                if window.global_start_ms - padding_ms <= midpoint <= window.global_end_ms + padding_ms
+                (index, window)
+                for index, window in active_windows
+                if window.global_start_ms - padding_ms <= event_end_ms
+                and window.global_end_ms + padding_ms >= event_start_ms
             ]
             if not matches:
                 unassigned.append(event)
                 continue
-            best = min(
+            event_span_ms = max(1.0, event_end_ms - event_start_ms)
+            best, _best_window = max(
                 matches,
-                key=lambda index: abs(
-                    midpoint
-                    - (
-                        ordered_windows[index].global_start_ms
-                        + ordered_windows[index].global_end_ms
+                key=lambda item: (
+                    max(
+                        0.0,
+                        min(event_end_ms, item[1].global_end_ms)
+                        - max(event_start_ms, item[1].global_start_ms),
                     )
-                    / 2.0
+                    / event_span_ms,
+                    int(item[1].view_id in event.supporting_views),
+                    -abs(
+                        (event_start_ms + event_end_ms) / 2.0
+                        - (
+                            item[1].global_start_ms
+                            + item[1].global_end_ms
+                        )
+                        / 2.0
+                    ),
+                    stable_candidate_fingerprint(item[1]),
                 ),
             )
             buckets[best].append(event)
-        for bucket in buckets:
+
+        def effective_gap_ms(
+            previous: EvidenceEvent,
+            current: EvidenceEvent,
+        ) -> float:
+            return max(
+                default_gap_ms,
+                action_gap_seconds.get(previous.action_type.value, 0.0)
+                * 1000.0,
+                action_gap_seconds.get(current.action_type.value, 0.0)
+                * 1000.0,
+            )
+
+        def can_bridge_identity_idle(
+            current: Sequence[EvidenceEvent],
+            event: EvidenceEvent,
+            gap_ms: float,
+            *,
+            same_recalled_window: bool,
+        ) -> tuple[bool, list[tuple[str, str, int]]]:
+            if (
+                not identity_idle_bridge_enabled
+                or gap_ms < 0.0
+                or gap_ms > identity_idle_bridge_max_gap_ms
+            ):
+                return False, []
+            current_identities = {
+                identity
+                for prior in current
+                for identity in event_stable_identities(prior)
+            }
+            shared_identities = sorted(
+                current_identities & event_stable_identities(event)
+            )
+            if len(shared_identities) < identity_idle_bridge_minimum:
+                return False, shared_identities
+            both_roles = {
+                ViewRole.FIRST_PERSON,
+                ViewRole.THIRD_PERSON,
+            }
+            current_roles = {
+                role for prior in current for role in prior.supporting_roles
+            }
+            if not (
+                both_roles.issubset(current_roles)
+                and both_roles.issubset(set(event.supporting_roles))
+            ):
+                return False, shared_identities
+            if same_recalled_window:
+                return True, shared_identities
+            # Without a recalled window, extend only an action whose observed
+            # state explicitly ended incomplete. A completed stationary bottle
+            # must not hold an experiment open by identity alone.
+            prior_state = str(
+                (current[-1].state_machine or {}).get("lifecycle_state") or ""
+            )
+            return prior_state == "incomplete_end", shared_identities
+
+        def append_temporal_groups(
+            items: Sequence[EvidenceEvent],
+            *,
+            same_recalled_window: bool,
+        ) -> None:
             current: list[EvidenceEvent] = []
-            for event in sorted(bucket, key=event_sort_key):
-                if current and event.global_start_ms - current[-1].global_end_ms > gap_ms:
+            current_end_ms = 0.0
+            for event in sorted(items, key=event_sort_key):
+                event_start_ms, event_end_ms = _event_core_interval(event)
+                observed_gap_ms = event_start_ms - current_end_ms if current else 0.0
+                gap_limit_ms = (
+                    effective_gap_ms(current[-1], event)
+                    if current
+                    else default_gap_ms
+                )
+                bridged = False
+                shared_identities: list[tuple[str, str, int]] = []
+                if current and observed_gap_ms > gap_limit_ms:
+                    bridged, shared_identities = can_bridge_identity_idle(
+                        current,
+                        event,
+                        observed_gap_ms,
+                        same_recalled_window=same_recalled_window,
+                    )
+                if current and observed_gap_ms > gap_limit_ms and not bridged:
                     groups.append(current)
                     current = []
+                    current_end_ms = 0.0
+                elif bridged and decision_receipts is not None:
+                    decision_receipts.append(
+                        decision_receipt(
+                            decision_type="adaptive_experiment_idle_bridge",
+                            rule_id="QF1-STABLE-IDENTITY-IDLE-BRIDGE",
+                            verdict="accepted",
+                            subject_ids=[current[-1].event_id, event.event_id],
+                            reason_codes=[
+                                "same_recalled_window_and_multiple_stable_identities"
+                                if same_recalled_window
+                                else "incomplete_action_and_multiple_stable_identities"
+                            ],
+                            facts={
+                                "gap_ms": observed_gap_ms,
+                                "shared_track_identities": [
+                                    {
+                                        "view_id": view_id,
+                                        "object": object_name,
+                                        "track_id": track_id,
+                                    }
+                                    for view_id, object_name, track_id in shared_identities
+                                ],
+                                "same_recalled_window": same_recalled_window,
+                            },
+                            thresholds={
+                                "ordinary_gap_limit_ms": gap_limit_ms,
+                                "identity_idle_bridge_maximum_gap_ms": (
+                                    identity_idle_bridge_max_gap_ms
+                                ),
+                                "minimum_shared_identities": (
+                                    identity_idle_bridge_minimum
+                                ),
+                            },
+                            evidence_refs=[current[-1].event_id, event.event_id],
+                        )
+                    )
                 current.append(event)
+                current_end_ms = max(current_end_ms, event_end_ms)
             if current:
                 groups.append(current)
+
+        for bucket in buckets:
+            append_temporal_groups(bucket, same_recalled_window=True)
         # Retain independently strong evidence that falls outside a recalled
         # window, but group it conservatively by the legacy event-gap rule.
-        current: list[EvidenceEvent] = []
-        for event in unassigned:
-            if current and event.global_start_ms - current[-1].global_end_ms > gap_ms:
-                groups.append(current)
-                current = []
-            current.append(event)
-        if current:
-            groups.append(current)
+        append_temporal_groups(unassigned, same_recalled_window=False)
         groups.sort(
             key=lambda group: (
                 min(event.global_start_ms for event in group),
@@ -3550,12 +3746,70 @@ def build_experiment_segments(
             )
         )
     else:
-        current = []
+        def no_window_gap_ms(previous: EvidenceEvent, current: EvidenceEvent) -> float:
+            return max(
+                default_gap_ms,
+                action_gap_seconds.get(previous.action_type.value, 0.0) * 1000.0,
+                action_gap_seconds.get(current.action_type.value, 0.0) * 1000.0,
+            )
+
+        current: list[EvidenceEvent] = []
+        current_end_ms = 0.0
         for event in accepted:
-            if current and event.global_start_ms - current[-1].global_end_ms > gap_ms:
-                groups.append(current)
-                current = []
+            event_start_ms, event_end_ms = _event_core_interval(event)
+            if current:
+                observed_gap_ms = event_start_ms - current_end_ms
+                gap_limit_ms = no_window_gap_ms(current[-1], event)
+                current_identities = {
+                    identity
+                    for prior in current
+                    for identity in event_stable_identities(prior)
+                }
+                shared_identities = sorted(
+                    current_identities & event_stable_identities(event)
+                )
+                prior_incomplete = str(
+                    (current[-1].state_machine or {}).get("lifecycle_state") or ""
+                ) == "incomplete_end"
+                identity_bridge = bool(
+                    identity_idle_bridge_enabled
+                    and observed_gap_ms <= identity_idle_bridge_max_gap_ms
+                    and len(shared_identities) >= identity_idle_bridge_minimum
+                    and prior_incomplete
+                    and {
+                        ViewRole.FIRST_PERSON,
+                        ViewRole.THIRD_PERSON,
+                    }.issubset(set(event.supporting_roles))
+                )
+                if observed_gap_ms > gap_limit_ms and not identity_bridge:
+                    groups.append(current)
+                    current = []
+                    current_end_ms = 0.0
+                elif observed_gap_ms > gap_limit_ms and identity_bridge and decision_receipts is not None:
+                    decision_receipts.append(
+                        decision_receipt(
+                            decision_type="adaptive_experiment_idle_bridge",
+                            rule_id="QF1-STABLE-IDENTITY-IDLE-BRIDGE",
+                            verdict="accepted",
+                            subject_ids=[current[-1].event_id, event.event_id],
+                            reason_codes=[
+                                "incomplete_action_and_multiple_stable_identities"
+                            ],
+                            facts={
+                                "gap_ms": observed_gap_ms,
+                                "same_recalled_window": False,
+                            },
+                            thresholds={
+                                "ordinary_gap_limit_ms": gap_limit_ms,
+                                "identity_idle_bridge_maximum_gap_ms": (
+                                    identity_idle_bridge_max_gap_ms
+                                ),
+                            },
+                            evidence_refs=[current[-1].event_id, event.event_id],
+                        )
+                    )
             current.append(event)
+            current_end_ms = max(current_end_ms, event_end_ms)
         if current:
             groups.append(current)
 
@@ -3574,6 +3828,13 @@ def build_experiment_segments(
         )
     )
 
+    def core_start_ms(event: EvidenceEvent) -> float:
+        return _event_core_interval(event)[0]
+
+    def core_end_ms(event: EvidenceEvent) -> float:
+        return _event_core_interval(event)[1]
+
+    by_event = {event.event_id: event for event in events}
     segments: list[ExperimentSegment] = []
     for index, unsorted_group in enumerate(groups, 1):
         segment_id = f"EXP-{index:04d}"
@@ -3584,7 +3845,7 @@ def build_experiment_segments(
         # earlier by themselves.
         start_anchors = select_formal_experiment_start_events(group, config)
         raw_start = min(
-            event.global_start_ms for event in (start_anchors or group)
+            core_start_ms(event) for event in (start_anchors or group)
         )
         leading_context: list[EvidenceEvent] = []
         if start_anchors and bool(
@@ -3607,8 +3868,8 @@ def build_experiment_segments(
             eligible_leading = [
                 event
                 for event in group
-                if event.global_start_ms < raw_start
-                and event.global_end_ms >= lower_limit_ms
+                if core_start_ms(event) < raw_start
+                and core_end_ms(event) >= lower_limit_ms
                 and str(
                     ((event.state_machine or {}).get("publication") or {}).get(
                         "status"
@@ -3624,27 +3885,27 @@ def build_experiment_segments(
             ]
             for event in sorted(
                 eligible_leading,
-                key=lambda item: (item.global_end_ms, item.global_start_ms),
+                key=lambda item: (core_end_ms(item), core_start_ms(item)),
                 reverse=True,
             ):
-                if event.global_start_ms >= cursor_ms:
+                if core_start_ms(event) >= cursor_ms:
                     continue
-                if event.global_end_ms < cursor_ms - maximum_leading_gap_ms:
+                if core_end_ms(event) < cursor_ms - maximum_leading_gap_ms:
                     break
                 leading_context.append(event)
-                cursor_ms = min(cursor_ms, event.global_start_ms)
+                cursor_ms = min(cursor_ms, core_start_ms(event))
             if leading_context:
                 leading_context.sort(key=event_sort_key)
                 raw_start = min(
                     raw_start,
-                    min(event.global_start_ms for event in leading_context),
+                    min(core_start_ms(event) for event in leading_context),
                 )
         start = max(0.0, raw_start - float(cfg["experiment_pre_roll_seconds"]) * 1000.0)
         # Accepted recall evidence may precede the first reliable operation
         # anchor. Keep it in the global audit ledger, but do not attach an event
         # that ends before the bounded clip starts to this experiment.
-        bounded_group = [event for event in group if event.global_end_ms >= start]
-        raw_end = max(event.global_end_ms for event in bounded_group)
+        bounded_group = [event for event in group if core_end_ms(event) >= start]
+        raw_end = max(core_end_ms(event) for event in bounded_group)
         boundary_context_receipt: dict[str, Any] | None = None
         core_roles = {
             role for event in bounded_group for role in event.supporting_roles
@@ -3846,10 +4107,32 @@ def build_experiment_segments(
                 semantic_review_admitted_views.add(context_view_id)
         duration_minutes = max((end - start) / 60_000.0, 1e-6)
         threshold = float(cfg["min_view_action_density_per_minute"])
+        sparse_view_enabled = bool(
+            cfg.get("long_experiment_sparse_view_enabled", True)
+        )
+        sparse_minimum_duration_ms = float(
+            cfg.get("long_experiment_sparse_view_min_duration_seconds", 120.0)
+        ) * 1000.0
+        sparse_minimum_events = max(
+            2,
+            int(cfg.get("long_experiment_sparse_view_min_events", 2)),
+        )
+        sparse_minimum_evidence_ms = float(
+            cfg.get("long_experiment_sparse_view_min_evidence_seconds", 1.0)
+        ) * 1000.0
         participating = sorted(
             view_id
             for view_id, count in candidate_counts.items()
-            if count / duration_minutes >= threshold
+            if (
+                count / duration_minutes >= threshold
+                or (
+                    sparse_view_enabled
+                    and end - start >= sparse_minimum_duration_ms
+                    and count >= sparse_minimum_events
+                    and direct_evidence_ms[view_id]
+                    >= sparse_minimum_evidence_ms
+                )
+            )
             and (
                 direct_evidence_ms[view_id] >= 500.0
                 or view_id in semantic_review_admitted_views
@@ -3867,8 +4150,8 @@ def build_experiment_segments(
             micro_segments.append(
                 {
                     "micro_segment_id": f"MICRO-{index:04d}-{position + 1:04d}",
-                    "start_global_ms": event.global_start_ms,
-                    "end_global_ms": event.global_end_ms,
+                    "start_global_ms": core_start_ms(event),
+                    "end_global_ms": core_end_ms(event),
                     "action_type": event.action_type.value,
                     "objects": event.objects,
                     "evidence_event_id": event.event_id,
@@ -3892,6 +4175,7 @@ def build_experiment_segments(
                 rejected_views=rejected_views,
                 micro_segments=micro_segments,
             )
+        segment.segment_uid = stable_segment_uid(segment, by_event)
         segments.append(segment)
         if decision_receipts is not None:
             if boundary_context_receipt is not None:
@@ -3904,7 +4188,7 @@ def build_experiment_segments(
                         if start_anchors
                         else group
                     )
-                    if event.global_start_ms == raw_start
+                    if core_start_ms(event) == raw_start
                 ),
                 key=event_sort_key,
             )
@@ -3912,7 +4196,7 @@ def build_experiment_segments(
                 (
                     event
                     for event in bounded_group
-                    if event.global_end_ms == raw_end
+                    if core_end_ms(event) == raw_end
                 ),
                 key=event_sort_key,
             )

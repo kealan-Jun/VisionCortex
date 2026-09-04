@@ -375,6 +375,9 @@ def set_event_admission(
 
 class ExperimentSegment(BaseModel):
     segment_id: str
+    # Stable across insertions of unrelated earlier segments. ``segment_id``
+    # remains the human-readable timeline position for backward compatibility.
+    segment_uid: str | None = None
     global_start_ms: float
     global_end_ms: float
     event_ids: list[str]
@@ -393,6 +396,8 @@ class ExperimentGroup(BaseModel):
     """One independently archived experiment or one continuous experiment chain."""
 
     group_id: str
+    # Stable evidence identity; ``group_id`` remains the display/order label.
+    group_uid: str | None = None
     continuity_type: Literal["independent", "continuous"]
     atomic_experiment_ids: list[str]
     global_start_ms: float

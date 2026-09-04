@@ -164,3 +164,55 @@ def test_hand_only_overlap_cannot_deduplicate_different_manipulated_objects(
     assert by_id["E-2"]["receipt_schema_version"] == (
         "visioncortex-decision-receipt/1.0.0"
     )
+
+
+def test_coverage_budget_preserves_timeline_end_instead_of_confidence_only(
+    default_config,
+):
+    default_config["key_materials"][
+        "max_per_action_type_per_atomic_experiment"
+    ] = 3
+    default_config["key_materials"]["adaptive_coverage_budget_enabled"] = False
+    events = [
+        _event(1, 1_000, confidence=0.99),
+        _event(2, 2_000, confidence=0.98),
+        _event(3, 3_000, confidence=0.97),
+        _event(4, 400_000, confidence=0.60),
+        _event(5, 800_000, confidence=0.20),
+    ]
+    group, segment = _context(events)
+    receipts = []
+
+    selected = select_key_events(
+        [group], [segment], events, default_config, decision_receipts=receipts
+    )
+
+    selected_ids = {event.event_id for event in selected}
+    assert selected_ids == {"E-1", "E-4", "E-5"}
+    end_receipt = next(item for item in receipts if item["event_id"] == "E-5")
+    assert "timeline_end_coverage" in end_receipt["facts"][
+        "coverage_selection_reasons"
+    ]
+
+
+def test_long_experiment_grows_bounded_key_material_budget(default_config):
+    key_cfg = default_config["key_materials"]
+    key_cfg["max_per_action_type_per_atomic_experiment"] = 2
+    key_cfg["max_per_action_type_ceiling"] = 6
+    key_cfg["adaptive_budget_step_seconds"] = 600
+    key_cfg["adaptive_per_action_type_additional_per_step"] = 1
+    events = [
+        _event(index, index * 300_000, confidence=0.9 - index * 0.01)
+        for index in range(1, 6)
+    ]
+    group, segment = _context(events)
+    segment.global_start_ms = 0
+    segment.global_end_ms = 1_800_000
+    group.global_start_ms = 0
+    group.global_end_ms = 1_800_000
+
+    selected = select_key_events(
+        [group], [segment], events, default_config
+    )
+
+    assert len(selected) == 4

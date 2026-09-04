@@ -33,7 +33,12 @@ from visioncortex.schemas import (
 )
 
 
-def _indexed_archive(root: Path, *, event_count: int = 1):
+def _indexed_archive(
+    root: Path,
+    *,
+    event_count: int = 1,
+    stable_group_uids: bool = False,
+):
     archive_id = root.name
     transforms = {
         view_id: AlignmentTransform(
@@ -94,6 +99,7 @@ def _indexed_archive(root: Path, *, event_count: int = 1):
         )
         group = ExperimentGroup(
             group_id=group_id,
+            group_uid=(f"GRP-stable-{ordinal:04d}" if stable_group_uids else None),
             continuity_type="independent",
             atomic_experiment_ids=[f"EXP-{ordinal:04d}"],
             global_start_ms=10_000,
@@ -163,6 +169,22 @@ def _indexed_archive(root: Path, *, event_count: int = 1):
         root, archive_id, normalized, events, groups, infos, hash_workers=2
     )
     return archive_id, events, groups, normalized, manifest
+
+
+def test_index_uid_uses_stable_group_uid_but_keeps_display_group_id(tmp_path):
+    root = tmp_path / "Archive-Stable-UID"
+    archive_id, events, groups, normalized, manifest = _indexed_archive(
+        root, stable_group_uids=True
+    )
+
+    payload = normalized[0]
+    expected = stable_event_uid(
+        archive_id, groups[0].group_uid, events[0].event_id
+    )
+    assert payload["parent_event_id"] == groups[0].group_id
+    assert payload["parent_event_uid"] == groups[0].group_uid
+    assert payload["provenance"]["index"]["event_uid"] == expected
+    assert manifest["schema_version"] == "visioncortex-evidence-index/4"
 
 
 def test_build_archive_index_preserves_one_hop_artifact_and_source_references(tmp_path):

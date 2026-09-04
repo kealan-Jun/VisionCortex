@@ -274,6 +274,17 @@ alignment:
 segmentation:
   min_experiment_seconds: 5.0
   experiment_gap_seconds: 30.0
+  # Preserve the existing 30 s fallback while allowing longer observable
+  # process actions to survive ordinary reading/tool-change pauses.
+  experiment_gap_seconds_by_action:
+    liquid_movement: 45.0
+    pipette_transfer_operation: 45.0
+    device_panel_operation: 60.0
+  # A larger gap is bridged only inside one recalled window and only when at
+  # least two view-scoped tracked object identities survive on both sides.
+  identity_idle_bridge_enabled: true
+  identity_idle_bridge_max_gap_seconds: 300.0
+  identity_idle_bridge_min_shared_identities: 2
   experiment_pre_roll_seconds: 2.0
   experiment_post_roll_seconds: 3.0
   boundary_context_activation_gap_seconds: 30.0
@@ -325,6 +336,14 @@ segmentation:
   min_event_duration_seconds: 0.50
   min_event_observations: 3
   min_view_action_density_per_minute: 0.30
+  # Long experiments may contain valid sparse observations separated by a
+  # wait. Preserve such a view only when it has multiple accepted events and
+  # at least one second of direct evidence; this does not weaken dual-role
+  # formal delivery.
+  long_experiment_sparse_view_enabled: true
+  long_experiment_sparse_view_min_duration_seconds: 120.0
+  long_experiment_sparse_view_min_events: 2
+  long_experiment_sparse_view_min_evidence_seconds: 1.0
   single_view_accept_confidence: 0.78
   # Container open/close is a directly observable state transition. It still
   # requires aligned media and MLLM confirmation before semantic acceptance.
@@ -396,6 +415,9 @@ continuity:
   atomic_fragment_max_events_per_side: 3
   atomic_fragment_repeated_primary_actions:
     - liquid_movement
+    - pipette_transfer_operation
+    - container_state_change
+    - device_panel_operation
   # One wide coarse motion envelope may cover two complete adjacent workflows.
   # Split only at a real inactivity gap when each side remains a rich dual-view
   # sequence and both sides repeat a primary process action. This is stricter
@@ -405,6 +427,11 @@ continuity:
   # inactivity boundary; the independently reviewed Z0001 atomic split remains
   # 9.9 seconds and therefore still exceeds this threshold.
   atomic_sequence_split_min_gap_seconds: 9.0
+  atomic_sequence_split_min_gap_seconds_by_action:
+    liquid_movement: 9.0
+    pipette_transfer_operation: 9.0
+    container_state_change: 6.0
+    device_panel_operation: 12.0
   atomic_sequence_split_min_events_per_side: 4
   # A brief FP-only observation may sit between two corroborated fragments of
   # one recalled operation when the TP view is occluded. It may connect the
@@ -428,6 +455,21 @@ key_materials:
   duplicate_interval_overlap_ratio: 0.50
   max_per_action_type_per_atomic_experiment: 12
   max_per_experiment_group: 50
+  # Keep the historical caps for short experiments, then grow a bounded
+  # budget for long timelines. Selection preserves atomic experiments, action
+  # types, state transitions, time buckets and object identities before using
+  # confidence as a fill criterion.
+  adaptive_coverage_budget_enabled: true
+  adaptive_budget_step_seconds: 600.0
+  adaptive_per_action_type_additional_per_step: 2
+  adaptive_per_group_additional_per_step: 10
+  max_per_action_type_ceiling: 48
+  max_per_experiment_group_ceiling: 240
+  coverage_time_bucket_seconds: 300.0
+  coverage_critical_action_types:
+    - container_state_change
+    - device_panel_operation
+    - pipette_transfer_operation
   # Strict model relabels may enter the final user-facing Key-Materials tree.
   # Rejected, uncertain and invalid multi-class replies remain in audit/cache.
   semantic_relabel_min_confidence: 0.70

@@ -2855,6 +2855,8 @@ def archive_detail(archive_name: str) -> dict[str, Any]:
                 "dual_view_material_ready": bool(frame and clip),
                 "experiment_group": {
                     "group_id": group.get("group_id") or event.get("parent_event_id"),
+                    "group_uid": group.get("group_uid")
+                    or event.get("parent_event_uid"),
                     "name": group.get("experiment_name") or event.get("parent_event_id"),
                     "folder": group.get("archive_folder"),
                     "continuity_type": group.get("continuity_type"),

@@ -377,6 +377,58 @@ def validate_experiment_and_material_quality(
             }
         )
     event_count = len(key_events)
+    event_by_id = {event.event_id: event for event in key_events}
+    stable_group_uids = [group.group_uid for group in groups if group.group_uid]
+    stable_group_uid_gate_active = bool(stable_group_uids)
+    stable_group_uid_gate_passed = bool(
+        not stable_group_uid_gate_active
+        or (
+            len(stable_group_uids) == len(groups)
+            and len(set(stable_group_uids)) == len(stable_group_uids)
+        )
+    )
+    pair_coverage: list[dict[str, Any]] = []
+    for group in groups:
+        group_events = [
+            event_by_id[event_id]
+            for event_id in group.key_event_ids
+            if event_id in event_by_id
+        ]
+        jointly_supported = [
+            event.event_id
+            for event in group_events
+            if {
+                group.first_person_view,
+                group.third_person_view,
+            }.issubset(set(event.supporting_views))
+        ]
+        pair_coverage.append(
+            {
+                "group_id": group.group_id,
+                "group_uid": group.group_uid,
+                "first_person_view": group.first_person_view,
+                "third_person_view": group.third_person_view,
+                "key_event_count": len(group_events),
+                "declared_key_event_count": len(group.key_event_ids),
+                "all_declared_key_events_resolved": (
+                    len(group_events) == len(group.key_event_ids)
+                ),
+                "jointly_supported_key_event_ids": jointly_supported,
+                "passed": (
+                    not group.key_event_ids
+                    or (
+                        len(group_events) == len(group.key_event_ids)
+                        and bool(jointly_supported)
+                    )
+                ),
+            }
+        )
+    canonical_pair_coverage_passed = all(
+        item["passed"] for item in pair_coverage
+    )
+    segmentation_integrity_passed = bool(
+        stable_group_uid_gate_passed and canonical_pair_coverage_passed
+    )
     cross_view_rate = cross_view_count / event_count if event_count else 0.0
     participant_only_annotation_gate_passed = bool(
         participant_only_annotation_count == event_count
@@ -416,6 +468,7 @@ def validate_experiment_and_material_quality(
             ),
             participant_only_annotation_count == 0
             or action_participant_visibility_pass_count == event_count,
+            segmentation_integrity_passed,
         )
     )
     boundary_evaluated = bool(normalized_expected)
@@ -460,6 +513,17 @@ def validate_experiment_and_material_quality(
             "false_negative_baseline_ids": false_negatives,
             "false_positive_group_ids": false_positives,
             "matches": matches,
+        },
+        "segmentation_integrity": {
+            "passed": segmentation_integrity_passed,
+            "stable_group_uid_gate_active": stable_group_uid_gate_active,
+            "stable_group_uid_count": len(stable_group_uids),
+            "stable_group_uid_unique": (
+                len(set(stable_group_uids)) == len(stable_group_uids)
+            ),
+            "stable_group_uid_gate_passed": stable_group_uid_gate_passed,
+            "canonical_pair_coverage_passed": canonical_pair_coverage_passed,
+            "groups": pair_coverage,
         },
         "key_materials": {
             "passed": materials_passed,

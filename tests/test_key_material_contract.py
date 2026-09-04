@@ -66,6 +66,7 @@ def test_key_material_json_uses_normalized_event_contract():
     assert list(payload) == [
         "event_id",
         "parent_event_id",
+        "parent_event_uid",
         "actor_id",
         "workstation_id",
         "action_type",

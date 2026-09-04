@@ -19,7 +19,7 @@ from .pathing import archive_contains, archive_relative_posix
 from .schemas import EvidenceEvent, ExperimentGroup, VideoInfo
 
 
-INDEX_SCHEMA_VERSION = "visioncortex-evidence-index/3"
+INDEX_SCHEMA_VERSION = "visioncortex-evidence-index/4"
 INDEX_DB_NAME = "evidence_index.sqlite"
 INDEX_MANIFEST_NAME = "evidence_index_manifest.json"
 ARTIFACT_REGISTRY_NAME = "artifact_registry.jsonl"
@@ -101,8 +101,12 @@ def _event_uid_from_payload(
     ).get("event_uid")
     if existing:
         return str(existing)
-    group_id = str(payload.get("parent_event_id") or "unassigned")
-    return stable_event_uid(archive_id, group_id, str(payload["event_id"]))
+    parent_uid = str(
+        payload.get("parent_event_uid")
+        or payload.get("parent_event_id")
+        or "unassigned"
+    )
+    return stable_event_uid(archive_id, parent_uid, str(payload["event_id"]))
 
 
 def _artifact_record(
@@ -279,7 +283,8 @@ def _evidence_records(
             group = _group_for_event(groups, event.event_id)
         except StopIteration:
             continue
-        event_uid = stable_event_uid(archive_id, group.group_id, event.event_id)
+        parent_uid = group.group_uid or group.group_id
+        event_uid = stable_event_uid(archive_id, parent_uid, event.event_id)
         event_index = event_positions[event.event_id]
         for candidate_index, candidate in enumerate(event.candidates):
             candidate_evidence_id = candidate.candidate_id
@@ -294,6 +299,7 @@ def _evidence_records(
                 "event_uid": event_uid,
                 "event_id": event.event_id,
                 "parent_event_id": group.group_id,
+                "parent_event_uid": parent_uid,
                 "evidence_kind": "action_candidate",
                 "view_id": candidate.view_id,
                 "view_role": candidate.role.value,
@@ -358,6 +364,7 @@ def _evidence_records(
                     "event_uid": event_uid,
                     "event_id": event.event_id,
                     "parent_event_id": group.group_id,
+                    "parent_event_uid": parent_uid,
                     "evidence_kind": "frame_evidence",
                     "view_id": candidate.view_id,
                     "view_role": candidate.role.value,
@@ -837,7 +844,7 @@ def build_archive_index(
         "schema_version": INDEX_SCHEMA_VERSION,
         "authority": "JSON files remain canonical; SQLite and JSONL registries are rebuildable derivatives",
         "archive_id": archive_id,
-        "event_uid_format": "{archive_id}:{parent_event_id}:{event_id}",
+        "event_uid_format": "{archive_id}:{parent_event_uid_or_legacy_id}:{event_id}",
         "counts": {
             "key_events": len(normalized_events),
             "artifacts": len(artifact_records),

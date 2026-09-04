@@ -1335,7 +1335,11 @@ def _artifact_json(
         else "third_person"
     )
     event_uid = (
-        stable_event_uid(archive_id, group.group_id, event.event_id)
+        stable_event_uid(
+            archive_id,
+            group.group_uid or group.group_id,
+            event.event_id,
+        )
         if archive_id
         else None
     )
@@ -1481,6 +1485,7 @@ def _artifact_json(
     return {
         "event_id": event.event_id,
         "parent_event_id": group.group_id,
+        "parent_event_uid": group.group_uid or group.group_id,
         "actor_id": "operator-01",
         "workstation_id": (
             "weighing-station-01"

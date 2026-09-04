@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
 from collections import Counter
+import math
 from typing import Any, Sequence
 
 from .decisions import decision_receipt
@@ -8,7 +10,9 @@ from .ordering import (
     event_sort_key,
     segment_sort_key,
     stable_event_fingerprint,
+    stable_group_uid,
     stable_segment_fingerprint,
+    stable_segment_uid,
 )
 from .schemas import (
     ActionCandidate,
@@ -57,35 +61,62 @@ def _candidate_track_identities(candidate: ActionCandidate) -> set[tuple[str, st
 
     objects = sorted(set(candidate.objects) - ACTOR_OBJECTS)
     identities: set[tuple[str, str, int]] = set()
+
+    def add_identity(object_name: Any, track_id: Any) -> None:
+        if str(object_name) not in objects or track_id is None:
+            return
+        try:
+            identities.add((candidate.view_id, str(object_name), int(track_id)))
+        except (TypeError, ValueError):
+            return
+
     for evidence in candidate.evidence:
-        explicit_object = evidence.get("object_class_name") or evidence.get(
-            "object_name"
+        explicit_pairs = (
+            ("object_class_name", "object_track_id"),
+            ("object_class_name", "track_id"),
+            ("object_name", "object_track_id"),
+            ("object_name", "track_id"),
+            ("tool_class", "tool_track_id"),
+            ("vessel_class", "vessel_track_id"),
+            ("source_class", "source_track_id"),
+            ("target_class", "target_track_id"),
+            ("container_class", "container_track_id"),
         )
-        bound_objects = (
-            [str(explicit_object)]
-            if explicit_object in objects
-            else objects
-            if len(objects) == 1
-            else []
-        )
-        track_ids = [
-            evidence.get(key)
-            for key in (
+        for object_key, track_key in explicit_pairs:
+            add_identity(evidence.get(object_key), evidence.get(track_key))
+        if len(objects) == 1:
+            for track_key in (
                 "object_track_id",
                 "track_id",
                 "container_track_id",
                 "tool_track_id",
-            )
-            if evidence.get(key) is not None
-        ]
-        for object_name in bound_objects:
-            for track_id in track_ids:
-                try:
-                    identities.add(
-                        (candidate.view_id, object_name, int(track_id))
-                    )
-                except (TypeError, ValueError):
-                    continue
+                "vessel_track_id",
+            ):
+                add_identity(objects[0], evidence.get(track_key))
+    signature = candidate.instance_signature or {}
+    for instance_key in signature.get("instance_keys") or []:
+        parts = str(instance_key).rsplit(":", 2)
+        if len(parts) == 3:
+            add_identity(parts[1], parts[2])
+    for object_key, track_key in (
+        ("tool_class", "tool_track_id"),
+        ("source_class", "source_track_id"),
+        ("target_class", "target_track_id"),
+        ("vessel_class", "vessel_track_id"),
+    ):
+        add_identity(signature.get(object_key), signature.get(track_key))
+    signature_objects = {
+        str(item)
+        for item in signature.get("object_classes") or []
+        if str(item) in objects
+    }
+    if not signature_objects and len(objects) == 1:
+        signature_objects = set(objects)
+    signature_tracks = list(signature.get("track_ids") or [])
+    if len(signature_objects) == 1:
+        for object_name in signature_objects:
+            for track_id in signature_tracks:
+                add_identity(object_name, track_id)
     return identities
 
 
@@ -119,6 +150,75 @@ def _event_track_identities(event: EvidenceEvent) -> set[tuple[str, str, int]]:
     }
 
 
+def _event_actor_identities(event: EvidenceEvent) -> set[tuple[str, int]]:
+    identities: set[tuple[str, int]] = set()
+    for candidate in event.candidates:
+        for evidence in candidate.evidence:
+            for key in ("hand_track_id", "actor_track_id"):
+                track_id = evidence.get(key)
+                if track_id is None:
+                    continue
+                try:
+                    identities.add((candidate.view_id, int(track_id)))
+                except (TypeError, ValueError):
+                    continue
+    return identities
+
+
+def _events_have_actor_identity_conflict(
+    left: EvidenceEvent,
+    right: EvidenceEvent,
+) -> bool:
+    left_ids = _event_actor_identities(left)
+    right_ids = _event_actor_identities(right)
+    if left_ids & right_ids:
+        return False
+    shared_views = {view_id for view_id, _ in left_ids} & {
+        view_id for view_id, _ in right_ids
+    }
+    return bool(shared_views)
+
+
+def events_share_stable_identity(
+    left: EvidenceEvent,
+    right: EvidenceEvent,
+) -> bool:
+    """Return whether two events carry the same view-scoped object instance."""
+
+    return bool(_event_track_identities(left) & _event_track_identities(right))
+
+
+def event_stable_identities(
+    event: EvidenceEvent,
+) -> set[tuple[str, str, int]]:
+    """Expose normalized identities to the existing segmentation stage."""
+
+    return _event_track_identities(event)
+
+
+def events_have_stable_identity_conflict(
+    left: EvidenceEvent,
+    right: EvidenceEvent,
+) -> bool:
+    """Reject class-only association when both sides prove different instances."""
+
+    left_ids = _event_track_identities(left)
+    right_ids = _event_track_identities(right)
+    if left_ids & right_ids:
+        return False
+    left_scopes: dict[tuple[str, str], set[int]] = {}
+    right_scopes: dict[tuple[str, str], set[int]] = {}
+    for view_id, object_name, track_id in left_ids:
+        left_scopes.setdefault((view_id, object_name), set()).add(track_id)
+    for view_id, object_name, track_id in right_ids:
+        right_scopes.setdefault((view_id, object_name), set()).add(track_id)
+    shared_scopes = set(left_scopes) & set(right_scopes)
+    return any(
+        left_scopes[scope].isdisjoint(right_scopes[scope])
+        for scope in shared_scopes
+    )
+
+
 def _segment_track_identities(
     segment: ExperimentSegment, by_event: dict[str, EvidenceEvent]
 ) -> set[tuple[str, str, int]]:
@@ -138,6 +238,7 @@ def is_experiment_start_anchor(
         ActionType.HAND_OBJECT_CONTACT,
         ActionType.CONTAINER_STATE_CHANGE,
         ActionType.DEVICE_PANEL_OPERATION,
+        ActionType.PIPETTE_TRANSFER_OPERATION,
     }:
         return True
     if event.action_type == ActionType.LIQUID_MOVEMENT:
@@ -215,19 +316,29 @@ def select_formal_experiment_start_events(
                 )
             continue
         manipulated = _non_actor_objects(event)
+        label_corroborators = [
+            later
+            for later in sorted(dual_role, key=event_sort_key)
+            if later.event_id != event.event_id
+            and later.action_type != ActionType.OBJECT_MOVEMENT
+            # Corroborating contact often overlaps the tracked movement;
+            # requiring it to begin only after movement_end discarded a
+            # valid opener by a few hundred milliseconds.
+            and later.global_end_ms >= event.global_start_ms
+            and later.global_start_ms - event.global_end_ms
+            <= corroboration_gap_ms
+            and bool(manipulated & _non_actor_objects(later))
+        ]
+        conflicting_corroborators = [
+            later
+            for later in label_corroborators
+            if events_have_stable_identity_conflict(event, later)
+        ]
         corroborator = next(
             (
                 later
-                for later in sorted(dual_role, key=event_sort_key)
-                if later.event_id != event.event_id
-                and later.action_type != ActionType.OBJECT_MOVEMENT
-                # Corroborating contact often overlaps the tracked movement;
-                # requiring it to begin only after movement_end discarded a
-                # valid opener by a few hundred milliseconds.
-                and later.global_end_ms >= event.global_start_ms
-                and later.global_start_ms - event.global_end_ms
-                <= corroboration_gap_ms
-                and bool(manipulated & _non_actor_objects(later))
+                for later in label_corroborators
+                if later not in conflicting_corroborators
             ),
             None,
         )
@@ -260,6 +371,16 @@ def select_formal_experiment_start_events(
                             corroborator.event_id if corroborator else None
                         ),
                         "shared_non_hand_objects": shared_objects,
+                        "stable_object_identity_shared": bool(
+                            corroborator
+                            and events_share_stable_identity(event, corroborator)
+                        ),
+                        "stable_object_identity_conflict": bool(
+                            conflicting_corroborators
+                        ),
+                        "conflicting_corroborating_event_ids": [
+                            later.event_id for later in conflicting_corroborators
+                        ],
                     },
                     thresholds={
                         "maximum_corroboration_gap_ms": corroboration_gap_ms,
@@ -462,6 +583,78 @@ def normalize_experiment_segments(
             roles.get(view_id) == ViewRole.THIRD_PERSON for view_id in shared
         )
 
+    def overlapping_fragments_are_compatible(
+        left: ExperimentSegment,
+        right: ExperimentSegment,
+    ) -> tuple[bool, dict[str, Any]]:
+        left_events = _segment_events(left, by_event)
+        right_events = _segment_events(right, by_event)
+        shared_event_ids = sorted(set(left.event_ids) & set(right.event_ids))
+        shared_identities = sorted(
+            _segment_track_identities(left, by_event)
+            & _segment_track_identities(right, by_event)
+        )
+        left_actor_identities = {
+            identity for event in left_events for identity in _event_actor_identities(event)
+        }
+        right_actor_identities = {
+            identity for event in right_events for identity in _event_actor_identities(event)
+        }
+        shared_actor_identities = sorted(
+            left_actor_identities & right_actor_identities
+        )
+        object_identity_conflict = any(
+            events_have_stable_identity_conflict(left_event, right_event)
+            for left_event in left_events
+            for right_event in right_events
+        )
+        actor_identity_conflict = any(
+            _events_have_actor_identity_conflict(left_event, right_event)
+            for left_event in left_events
+            for right_event in right_events
+        )
+        core_overlap_pairs = [
+            (left_event.event_id, right_event.event_id)
+            for left_event in left_events
+            for right_event in right_events
+            if min(left_event.global_end_ms, right_event.global_end_ms)
+            > max(left_event.global_start_ms, right_event.global_start_ms)
+        ]
+        # Legacy event ledgers may not carry tracker identity. Preserve their
+        # established overlapping-action merge only while there is no explicit
+        # different-instance proof. New identity-bearing evidence fails closed.
+        identity_conflict = object_identity_conflict or actor_identity_conflict
+        legacy_overlap = bool(core_overlap_pairs) and not identity_conflict and not (
+            _segment_track_identities(left, by_event)
+            and _segment_track_identities(right, by_event)
+        ) and not (left_actor_identities and right_actor_identities)
+        accepted = bool(
+            shared_event_ids
+            or shared_identities
+            or (shared_actor_identities and core_overlap_pairs)
+            or legacy_overlap
+        )
+        return accepted, {
+            "shared_event_ids": shared_event_ids,
+            "shared_track_identities": [
+                {
+                    "view_id": view_id,
+                    "object": object_name,
+                    "track_id": track_id,
+                }
+                for view_id, object_name, track_id in shared_identities
+            ],
+            "stable_identity_conflict": identity_conflict,
+            "object_identity_conflict": object_identity_conflict,
+            "actor_identity_conflict": actor_identity_conflict,
+            "shared_actor_identities": [
+                {"view_id": view_id, "track_id": track_id}
+                for view_id, track_id in shared_actor_identities
+            ],
+            "core_overlap_event_pairs": [list(item) for item in core_overlap_pairs],
+            "legacy_overlap_without_identity": legacy_overlap,
+        }
+
     def is_same_atomic_fragment(
         left: ExperimentSegment, right: ExperimentSegment
     ) -> bool:
@@ -544,9 +737,28 @@ def normalize_experiment_segments(
         sequence_split_minimum_gap_ms = float(
             continuity_cfg.get("atomic_sequence_split_min_gap_seconds", 8.0)
         ) * 1000.0
+        split_gap_by_action_ms = {
+            str(name): float(value) * 1000.0
+            for name, value in (
+                continuity_cfg.get(
+                    "atomic_sequence_split_min_gap_seconds_by_action"
+                )
+                or {}
+            ).items()
+        }
+        repeated_sequence_gap_ms = max(
+            [sequence_split_minimum_gap_ms]
+            + [
+                split_gap_by_action_ms.get(
+                    action,
+                    sequence_split_minimum_gap_ms,
+                )
+                for action in repeated_primary_actions
+            ]
+        )
         same_unsplit_sequence = bool(
             repeated_primary_actions
-            and raw_inactive_gap_ms < sequence_split_minimum_gap_ms
+            and raw_inactive_gap_ms < repeated_sequence_gap_ms
         )
         complete_action_sequences = (
             not fragment_size_within_limit
@@ -611,7 +823,10 @@ def normalize_experiment_segments(
                             maximum_events_per_fragment
                         ),
                         "sequence_split_minimum_gap_ms": (
-                            sequence_split_minimum_gap_ms
+                            repeated_sequence_gap_ms
+                        ),
+                        "sequence_split_minimum_gap_ms_by_action": (
+                            split_gap_by_action_ms
                         ),
                     },
                     evidence_refs=[
@@ -634,9 +849,35 @@ def normalize_experiment_segments(
     consolidated: list[ExperimentSegment] = []
     for segment in ordered:
         left = consolidated[-1] if consolidated else None
+        overlap = bool(
+            left is not None
+            and segment.global_start_ms <= left.global_end_ms
+        )
+        overlap_accepted = False
+        overlap_facts: dict[str, Any] = {}
+        if left is not None and overlap and has_shared_dual_view(left, segment):
+            overlap_accepted, overlap_facts = overlapping_fragments_are_compatible(
+                left, segment
+            )
+            if decision_receipts is not None:
+                decision_receipts.append(
+                    decision_receipt(
+                        decision_type="overlapping_atomic_fragment_merge",
+                        rule_id="QF2-OVERLAP-REQUIRES-PHYSICAL-COMPATIBILITY",
+                        verdict="merged" if overlap_accepted else "rejected",
+                        subject_ids=[left.segment_id, segment.segment_id],
+                        reason_codes=[
+                            "shared_physical_identity_or_legacy_identity_absence"
+                            if overlap_accepted
+                            else "overlap_without_shared_physical_identity"
+                        ],
+                        facts=overlap_facts,
+                        evidence_refs=[*left.event_ids, *segment.event_ids],
+                    )
+                )
         if left is not None and has_shared_dual_view(left, segment) and (
-            segment.global_start_ms <= left.global_end_ms
-            or is_same_atomic_fragment(left, segment)
+            overlap_accepted
+            or (not overlap and is_same_atomic_fragment(left, segment))
         ):
             merged_events = list(dict.fromkeys([*left.event_ids, *segment.event_ids]))
             merged_micro = sorted(
@@ -691,6 +932,8 @@ def normalize_experiment_segments(
         )
         if not suppress:
             filtered.append(segment)
+    for segment in filtered:
+        segment.segment_uid = stable_segment_uid(segment, by_event)
     return filtered
 
 
@@ -1984,6 +2227,8 @@ def prepare_formal_experiment_segments(
                 legacy=item,
             )
         )
+    for segment in extended:
+        segment.segment_uid = stable_segment_uid(segment, by_event)
     return extended, normalized_receipts
 
 
@@ -1998,11 +2243,61 @@ def _continuity_evidence(
     gap_ms = right.global_start_ms - left.global_end_ms
     max_gap_ms = float(cfg["max_gap_seconds"]) * 1000.0
     if gap_ms < 0:
-        return True, "原子实验边界重叠，属于同一连续活动链", {
+        left_events = _segment_events(left, by_event)
+        right_events = _segment_events(right, by_event)
+        shared_event_ids = sorted(set(left.event_ids) & set(right.event_ids))
+        shared_identities = sorted(
+            _segment_track_identities(left, by_event)
+            & _segment_track_identities(right, by_event)
+        )
+        shared_actor_identities = sorted(
+            {
+                identity
+                for event in left_events
+                for identity in _event_actor_identities(event)
+            }
+            & {
+                identity
+                for event in right_events
+                for identity in _event_actor_identities(event)
+            }
+        )
+        identity_conflict = any(
+            events_have_stable_identity_conflict(left_event, right_event)
+            or _events_have_actor_identity_conflict(left_event, right_event)
+            for left_event in left_events
+            for right_event in right_events
+        )
+        verified_overlap = bool(
+            not identity_conflict
+            and (shared_event_ids or shared_identities or shared_actor_identities)
+        )
+        return verified_overlap, (
+            "原子实验边界重叠且物理身份连续"
+            if verified_overlap
+            else "原子实验仅时间重叠，缺少共同物理身份，保持独立"
+        ), {
             "gap_ms": gap_ms,
-            "continuity_basis": "temporal_overlap",
+            "continuity_basis": (
+                "verified_temporal_overlap"
+                if verified_overlap
+                else "temporal_overlap_without_physical_identity"
+            ),
+            "shared_event_ids": shared_event_ids,
             "shared_object_labels": [],
-            "shared_track_identities": [],
+            "shared_track_identities": [
+                {
+                    "view_id": view_id,
+                    "object": object_name,
+                    "track_id": track_id,
+                }
+                for view_id, object_name, track_id in shared_identities
+            ],
+            "stable_identity_conflict": identity_conflict,
+            "shared_actor_identities": [
+                {"view_id": view_id, "track_id": track_id}
+                for view_id, track_id in shared_actor_identities
+            ],
         }
     if gap_ms > max_gap_ms:
         return False, f"间隔 {gap_ms / 1000.0:.1f}s 超过连续实验阈值 {max_gap_ms / 1000.0:.1f}s", {
@@ -2111,6 +2406,8 @@ def _quarantined_context_continuity_evidence(
     roles: dict[str, ViewRole],
     coarse_windows: Sequence[ActionCandidate],
     config: dict[str, Any],
+    indexed_context_events: Sequence[EvidenceEvent] | None = None,
+    indexed_context_starts: Sequence[float] | None = None,
 ) -> tuple[bool, str, dict[str, Any]]:
     """Prove continuity through rejected FP context without promoting it.
 
@@ -2159,14 +2456,24 @@ def _quarantined_context_continuity_evidence(
         ActionType.CONTAINER_STATE_CHANGE,
         ActionType.DEVICE_PANEL_OPERATION,
     }
+    if indexed_context_events is not None and indexed_context_starts is not None:
+        lower = bisect_left(
+            indexed_context_starts,
+            left.global_end_ms - maximum_span_ms,
+        )
+        upper = bisect_right(indexed_context_starts, right.global_start_ms)
+        context_source = indexed_context_events[lower:upper]
+    else:
+        context_source = list(by_event.values())
     context_events = sorted(
         (
             event
-            for event in by_event.values()
+            for event in context_source
             if not event_is_formal(event)
             and ViewRole.FIRST_PERSON in event.supporting_roles
             and ViewRole.THIRD_PERSON not in event.supporting_roles
             and event.action_type in eligible_actions
+            and bool(set(event.supporting_views) & set(shared_first))
             and event.global_end_ms >= left.global_end_ms
             and event.global_start_ms <= right.global_start_ms
         ),
@@ -2184,6 +2491,24 @@ def _quarantined_context_continuity_evidence(
 
     left_events = _segment_events(left, by_event)
     right_events = _segment_events(right, by_event)
+    left_identities = {
+        identity for event in left_events for identity in event_stable_identities(event)
+    }
+    right_identities = {
+        identity for event in right_events for identity in event_stable_identities(event)
+    }
+    context_identities = {
+        identity
+        for event in context_events
+        for identity in event_stable_identities(event)
+    }
+    context_identity_available = bool(
+        left_identities and right_identities and context_identities
+    )
+    context_identity_compatible = bool(
+        left_identities & context_identities
+        and right_identities & context_identities
+    )
     left_families = _continuity_object_families(left_events)
     right_families = _continuity_object_families(right_events)
     context_families = _continuity_object_families(context_events)
@@ -2227,6 +2552,9 @@ def _quarantined_context_continuity_evidence(
         "right_object_family_support": (
             len(right_context_families) >= minimum_shared_objects
         ),
+        "context_identity_compatible_when_available": (
+            not context_identity_available or context_identity_compatible
+        ),
     }
     accepted = all(
         value
@@ -2249,6 +2577,8 @@ def _quarantined_context_continuity_evidence(
         "maximum_context_step_ms": maximum_observed_step_ms,
         "left_context_object_families": left_context_families,
         "right_context_object_families": right_context_families,
+        "context_identity_evidence_available": context_identity_available,
+        "context_identity_compatible": context_identity_compatible,
         "formal_membership_changed": False,
         "minimum_context_events": minimum_context_events,
         "minimum_shared_object_families": minimum_shared_objects,
@@ -2274,13 +2604,16 @@ def _select_view_pair(
     segments: Sequence[ExperimentSegment],
     events: Sequence[EvidenceEvent],
     views: Sequence[ViewInput],
-) -> tuple[str, str]:
+) -> tuple[str, str, dict[str, Any]]:
     roles = {view.view_id: view.role for view in views}
     event_ids = {event_id for segment in segments for event_id in segment.event_ids}
     scores: Counter[str] = Counter()
-    for event in events:
-        if event.event_id not in event_ids or not event_is_formal(event):
-            continue
+    relevant_events = [
+        event
+        for event in events
+        if event.event_id in event_ids and event_is_formal(event)
+    ]
+    for event in relevant_events:
         for view_id in event.supporting_views:
             scores[view_id] += max(1, round(event.confidence * 10))
     participating = {view for segment in segments for view in segment.participating_views}
@@ -2288,9 +2621,61 @@ def _select_view_pair(
     third_candidates = [view for view in participating if roles.get(view) == ViewRole.THIRD_PERSON]
     if not first_candidates or not third_candidates:
         raise ValueError("实验组必须同时具有第一人称和第三人称有效视角")
-    first = max(first_candidates, key=lambda view: (scores[view], view))
-    third = max(third_candidates, key=lambda view: (scores[view], view))
-    return first, third
+    pair_scores: list[dict[str, Any]] = []
+    for first in sorted(first_candidates):
+        for third in sorted(third_candidates):
+            joint_events = [
+                event
+                for event in relevant_events
+                if {first, third}.issubset(set(event.supporting_views))
+            ]
+            jointly_covered_segments = sum(
+                any(
+                    event.event_id in segment.event_ids
+                    and {first, third}.issubset(set(event.supporting_views))
+                    for event in relevant_events
+                )
+                for segment in segments
+            )
+            joint_duration_ms = sum(
+                max(0.0, event.global_end_ms - event.global_start_ms)
+                for event in joint_events
+            )
+            pair_scores.append(
+                {
+                    "first_person_view": first,
+                    "third_person_view": third,
+                    "joint_event_count": len(joint_events),
+                    "joint_event_score": sum(
+                        max(1, round(event.confidence * 10))
+                        for event in joint_events
+                    ),
+                    "joint_event_duration_ms": round(joint_duration_ms, 3),
+                    "jointly_covered_segment_count": jointly_covered_segments,
+                    "minimum_individual_score": min(scores[first], scores[third]),
+                    "combined_individual_score": scores[first] + scores[third],
+                }
+            )
+    selected = max(
+        pair_scores,
+        key=lambda item: (
+            item["jointly_covered_segment_count"],
+            item["joint_event_count"],
+            item["joint_event_score"],
+            item["joint_event_duration_ms"],
+            item["minimum_individual_score"],
+            item["combined_individual_score"],
+        ),
+    )
+    return (
+        str(selected["first_person_view"]),
+        str(selected["third_person_view"]),
+        {
+            "selection_basis": "joint_action_coverage_then_individual_quality",
+            "selected_pair": selected,
+            "pair_scores": pair_scores,
+        },
+    )
 
 
 def build_experiment_groups(
@@ -2310,6 +2695,19 @@ def build_experiment_groups(
     if not ordered:
         return []
     roles = {view.view_id: view.role for view in views}
+    indexed_context_events = sorted(
+        (
+            event
+            for event in events
+            if not event_is_formal(event)
+            and ViewRole.FIRST_PERSON in event.supporting_roles
+            and ViewRole.THIRD_PERSON not in event.supporting_roles
+        ),
+        key=event_sort_key,
+    )
+    indexed_context_starts = [
+        event.global_start_ms for event in indexed_context_events
+    ]
     chains: list[tuple[list[ExperimentSegment], list[str]]] = []
     current = [ordered[0]]
     reasons: list[str] = []
@@ -2377,6 +2775,8 @@ def build_experiment_groups(
                     roles,
                     coarse_windows,
                     config,
+                    indexed_context_events,
+                    indexed_context_starts,
                 )
             )
             if decision_receipts is not None:
@@ -2484,23 +2884,48 @@ def build_experiment_groups(
 
     groups: list[ExperimentGroup] = []
     for index, (chain, chain_reasons) in enumerate(chains, 1):
-        first, third = _select_view_pair(chain, events, views)
+        first, third, pair_receipt = _select_view_pair(chain, events, views)
         group_id = f"GROUP-{index:04d}"
         for segment in chain:
             segment.group_id = group_id
-        groups.append(
-            ExperimentGroup(
+        group = ExperimentGroup(
                 group_id=group_id,
+                group_uid=stable_group_uid(chain, by_event),
                 continuity_type="continuous" if len(chain) > 1 else "independent",
                 atomic_experiment_ids=[segment.segment_id for segment in chain],
                 global_start_ms=min(segment.global_start_ms for segment in chain),
                 global_end_ms=max(segment.global_end_ms for segment in chain),
-                participating_views=sorted({first, third}),
+                participating_views=sorted(
+                    {
+                        view_id
+                        for segment in chain
+                        for view_id in segment.participating_views
+                    }
+                ),
                 first_person_view=first,
                 third_person_view=third,
                 continuity_reason="；".join(chain_reasons),
             )
-        )
+        groups.append(group)
+        if decision_receipts is not None:
+            decision_receipts.append(
+                decision_receipt(
+                    decision_type="experiment_group_view_pair",
+                    rule_id="QF3-JOINT-DUAL-VIEW-COVERAGE",
+                    verdict="selected",
+                    subject_ids=[group_id, group.group_uid or group_id],
+                    reason_codes=["joint_action_coverage_then_individual_quality"],
+                    facts={
+                        **pair_receipt,
+                        "participating_views_preserved": list(
+                            group.participating_views
+                        ),
+                    },
+                    evidence_refs=[
+                        event_id for segment in chain for event_id in segment.event_ids
+                    ],
+                )
+            )
     return groups
 
 
@@ -2522,6 +2947,25 @@ def select_key_events(
     separation_ms = float(cfg["minimum_separation_seconds"]) * 1000.0
     overlap_ratio = float(cfg.get("duplicate_interval_overlap_ratio", 0.50))
     max_per_type = int(cfg["max_per_action_type_per_atomic_experiment"])
+    adaptive_budget_enabled = bool(cfg.get("adaptive_coverage_budget_enabled", True))
+    coverage_bucket_ms = float(
+        cfg.get("coverage_time_bucket_seconds", 300.0)
+    ) * 1000.0
+    budget_step_ms = max(
+        1.0,
+        float(cfg.get("adaptive_budget_step_seconds", 600.0)) * 1000.0,
+    )
+    critical_action_types = {
+        str(value)
+        for value in cfg.get(
+            "coverage_critical_action_types",
+            [
+                ActionType.CONTAINER_STATE_CHANGE.value,
+                ActionType.DEVICE_PANEL_OPERATION.value,
+                ActionType.PIPETTE_TRANSFER_OPERATION.value,
+            ],
+        )
+    }
     selected: list[EvidenceEvent] = []
     decisions: dict[str, dict[str, Any]] = {}
 
@@ -2554,8 +2998,97 @@ def select_key_events(
                 "legacy_overlap_ratio_threshold_not_used": overlap_ratio,
                 "requires_positive_interval_overlap": True,
                 "dedup_comparisons": [],
+                "coverage_selection_reasons": [],
             },
         )
+
+    def adaptive_limit(
+        base: int,
+        duration_ms: float,
+        *,
+        additional_per_step: int,
+        ceiling: int,
+    ) -> int:
+        if not adaptive_budget_enabled:
+            return base
+        steps = max(0, math.ceil(max(0.0, duration_ms) / budget_step_ms) - 1)
+        return min(max(base, ceiling), base + steps * additional_per_step)
+
+    def ranked(items: Sequence[EvidenceEvent]) -> list[EvidenceEvent]:
+        return sorted(
+            items,
+            key=lambda event: (
+                -float(event.confidence),
+                event_sort_key(event),
+            ),
+        )
+
+    def coverage_select(
+        items: Sequence[EvidenceEvent],
+        limit: int,
+        *,
+        start_ms: float,
+        segment_by_event: dict[str, str] | None = None,
+        required_view_pair: tuple[str, str] | None = None,
+    ) -> tuple[list[EvidenceEvent], dict[str, list[str]]]:
+        ordered = sorted(items, key=event_sort_key)
+        retained: list[EvidenceEvent] = []
+        reasons: dict[str, list[str]] = {}
+
+        def offer(event: EvidenceEvent, reason: str) -> None:
+            if event in retained or len(retained) >= limit:
+                return
+            retained.append(event)
+            reasons.setdefault(event.event_id, []).append(reason)
+
+        if segment_by_event:
+            for segment_id in sorted(set(segment_by_event.values())):
+                candidates = [
+                    event
+                    for event in ordered
+                    if segment_by_event.get(event.event_id) == segment_id
+                ]
+                if candidates:
+                    offer(ranked(candidates)[0], "atomic_experiment_coverage")
+        if required_view_pair:
+            pair_candidates = [
+                event
+                for event in ordered
+                if set(required_view_pair).issubset(set(event.supporting_views))
+            ]
+            if pair_candidates:
+                offer(ranked(pair_candidates)[0], "canonical_view_pair_coverage")
+        for action_type in sorted({event.action_type.value for event in ordered}):
+            candidates = [
+                event for event in ordered if event.action_type.value == action_type
+            ]
+            offer(ranked(candidates)[0], "action_type_coverage")
+        if ordered:
+            offer(ordered[0], "timeline_start_coverage")
+            offer(ordered[-1], "timeline_end_coverage")
+        for event in ordered:
+            if event.action_type.value in critical_action_types:
+                offer(event, "critical_state_or_operation")
+
+        time_buckets: dict[int, list[EvidenceEvent]] = {}
+        for event in ordered:
+            bucket = int(max(0.0, event.key_global_ms - start_ms) // coverage_bucket_ms)
+            time_buckets.setdefault(bucket, []).append(event)
+        for bucket in sorted(time_buckets):
+            offer(ranked(time_buckets[bucket])[0], "timeline_bucket_coverage")
+
+        object_buckets: dict[tuple[Any, ...], list[EvidenceEvent]] = {}
+        for event in ordered:
+            identities = tuple(sorted(event_stable_identities(event)))
+            object_key: tuple[Any, ...] = identities or tuple(
+                sorted(_non_actor_objects(event))
+            )
+            object_buckets.setdefault(object_key, []).append(event)
+        for object_key in sorted(object_buckets, key=str):
+            offer(ranked(object_buckets[object_key])[0], "object_identity_coverage")
+        for event in ranked(ordered):
+            offer(event, "confidence_fill")
+        return sorted(retained, key=event_sort_key), reasons
 
     def duplicate_metrics(
         existing: EvidenceEvent,
@@ -2650,47 +3183,102 @@ def select_key_events(
                         )
                     continue
                 bucket.append(event)
+            segment_limit = adaptive_limit(
+                max_per_type,
+                segment.global_end_ms - segment.global_start_ms,
+                additional_per_step=max(
+                    0,
+                    int(cfg.get("adaptive_per_action_type_additional_per_step", 2)),
+                ),
+                ceiling=max(
+                    max_per_type,
+                    int(cfg.get("max_per_action_type_ceiling", 48)),
+                ),
+            )
             for bucket in per_type.values():
-                if len(bucket) > max_per_type:
-                    ranked = sorted(
-                        bucket, key=lambda event: event.confidence, reverse=True
+                if len(bucket) > segment_limit:
+                    retained, coverage_reasons = coverage_select(
+                        bucket,
+                        segment_limit,
+                        start_ms=segment.global_start_ms,
+                        required_view_pair=(
+                            group.first_person_view,
+                            group.third_person_view,
+                        ),
                     )
                     retained_ids = {
-                        event.event_id for event in ranked[:max_per_type]
+                        event.event_id for event in retained
                     }
-                    for dropped in ranked[max_per_type:]:
+                    for kept in retained:
+                        ensure_decision(kept, group, segment_id)[
+                            "coverage_selection_reasons"
+                        ] = coverage_reasons.get(kept.event_id, [])
+                    for dropped in bucket:
+                        if dropped.event_id in retained_ids:
+                            continue
                         ensure_decision(dropped, group, segment_id).update(
                             {
                                 "selected": False,
-                                "decision": "per_action_type_cap",
+                                "decision": "per_action_type_coverage_budget",
                                 "retained_event_ids": sorted(retained_ids),
-                                "cap": max_per_type,
+                                "base_cap": max_per_type,
+                                "cap": segment_limit,
                             }
                         )
-                    bucket = ranked[:max_per_type]
+                    bucket = retained
                 group_selected.extend(bucket)
         group_selected.sort(key=lambda event: event.key_global_ms)
-        max_total = int(cfg["max_per_experiment_group"])
+        base_max_total = int(cfg["max_per_experiment_group"])
+        max_total = adaptive_limit(
+            base_max_total,
+            group.global_end_ms - group.global_start_ms,
+            additional_per_step=max(
+                0,
+                int(cfg.get("adaptive_per_group_additional_per_step", 10)),
+            ),
+            ceiling=max(
+                base_max_total,
+                int(cfg.get("max_per_experiment_group_ceiling", 240)),
+            ),
+        )
         if len(group_selected) > max_total:
-            mandatory = []
-            for action_type in sorted({event.action_type for event in group_selected}, key=lambda item: item.value):
-                mandatory.append(
-                    max(
-                        (event for event in group_selected if event.action_type == action_type),
-                        key=lambda event: event.confidence,
+            segment_by_event = {
+                event_id: segment.segment_id
+                for segment in (
+                    by_segment[segment_id]
+                    for segment_id in group.atomic_experiment_ids
+                    if segment_id in by_segment
+                )
+                for event_id in segment.event_ids
+            }
+            retained, coverage_reasons = coverage_select(
+                group_selected,
+                max_total,
+                start_ms=group.global_start_ms,
+                segment_by_event=segment_by_event,
+                required_view_pair=(
+                    group.first_person_view,
+                    group.third_person_view,
+                ),
+            )
+            retained_ids = {event.event_id for event in retained}
+            for kept in retained:
+                decisions[kept.event_id]["coverage_selection_reasons"] = sorted(
+                    set(
+                        decisions[kept.event_id].get(
+                            "coverage_selection_reasons", []
+                        )
+                        + coverage_reasons.get(kept.event_id, [])
                     )
                 )
-            remaining = [event for event in group_selected if event not in mandatory]
-            remaining.sort(key=lambda event: event.confidence, reverse=True)
-            retained = mandatory + remaining[: max(0, max_total - len(mandatory))]
-            retained_ids = {event.event_id for event in retained}
             for dropped in group_selected:
                 if dropped.event_id not in retained_ids:
                     decisions[dropped.event_id].update(
                         {
                             "selected": False,
-                            "decision": "per_experiment_group_cap",
+                            "decision": "per_experiment_group_coverage_budget",
                             "retained_event_ids": sorted(retained_ids),
+                            "base_cap": base_max_total,
                             "cap": max_total,
                         }
                     )
@@ -2703,6 +3291,10 @@ def select_key_events(
                 {
                     "selected": True,
                     "decision": "selected",
+                    "coverage_selection_reasons": decisions[event.event_id].get(
+                        "coverage_selection_reasons", []
+                    )
+                    or ["within_budget"],
                 }
             )
         group.key_event_ids = [event.event_id for event in group_selected]
@@ -2745,11 +3337,20 @@ def select_key_events(
                             "dedup_comparisons": item.get(
                                 "dedup_comparisons", []
                             ),
+                            "coverage_selection_reasons": item.get(
+                                "coverage_selection_reasons", []
+                            ),
+                            "base_cap": item.get("base_cap"),
+                            "effective_cap": item.get("cap"),
                         },
                         thresholds={
                             "minimum_separation_ms": separation_ms,
                             "requires_positive_interval_overlap": True,
                             "requires_shared_non_hand_object": True,
+                            "coverage_time_bucket_ms": coverage_bucket_ms,
+                            "adaptive_coverage_budget_enabled": (
+                                adaptive_budget_enabled
+                            ),
                         },
                         evidence_refs=[str(item["event_id"])],
                         legacy=item,
