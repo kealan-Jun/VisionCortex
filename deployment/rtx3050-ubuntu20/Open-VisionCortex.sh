@@ -9,8 +9,8 @@ fi
 systemctl --user reset-failed "${units[@]}" || true
 systemctl --user start "${units[@]}"
 for _attempt in {1..30}; do
-  if curl --silent --fail --max-time 2 http://127.0.0.1:8000/api/health >/dev/null; then
-    exec xdg-open 'http://127.0.0.1:8000/#/home'
+  if curl --silent --fail --max-time 2 http://127.0.0.1:8001/api/health >/dev/null; then
+    exec xdg-open 'http://127.0.0.1:8001/#/home'
   fi
   sleep 1
 done

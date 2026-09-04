@@ -7,13 +7,14 @@ start_script="$install_root/Start-VisionCortex.sh"
 launcher_source="$app_root/deployment/rtx3050-ubuntu20/Open-VisionCortex.sh"
 unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 application_dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+autostart_dir="${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
 
 [[ -x $start_script && -f $launcher_source ]] || {
   printf '%s\n' 'VisionCortex 安装不完整，无法配置开机自启。' >&2
   exit 1
 }
 
-install -d -m 0755 "$unit_dir" "$application_dir"
+install -d -m 0755 "$unit_dir" "$application_dir" "$autostart_dir"
 install -m 0755 "$launcher_source" "$install_root/Open-VisionCortex.sh"
 cat > "$unit_dir/visioncortex-analysis.service" <<EOF
 [Unit]
@@ -43,6 +44,17 @@ Exec=$install_root/Open-VisionCortex.sh
 Icon=applications-science
 Terminal=false
 Categories=Science;Education;
+StartupNotify=true
+EOF
+cat > "$autostart_dir/visioncortex.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=VisionCortex
+Comment=登录后自动打开实验视频分析工作台
+Exec=$install_root/Open-VisionCortex.sh
+Icon=applications-science
+Terminal=false
+X-GNOME-Autostart-enabled=true
 StartupNotify=true
 EOF
 

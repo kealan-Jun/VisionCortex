@@ -121,7 +121,9 @@ resource_limits:
   gpu_temperature_warning_c: 78
 
 storage:
-  staging_directory_name: Processing
+  # Keep in-progress and failed-run evidence available without mixing it into
+  # the user-facing experiment folders.
+  staging_directory_name: .VisionCortex-Run-Staging
   index_csv: /mnt/visioncortex-nas/VisionCortexExperimentCache/Collection-Catalog/selected-recordings.csv
   archive_root: /mnt/visioncortex-nas/VisionCortexExperimentArchive
   local_input_root: /opt/visioncortex-rtx3050/Runtime/Input-Manifests

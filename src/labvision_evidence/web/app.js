@@ -570,7 +570,7 @@ function renderHome() {
   const attentionTarget = attention.length === 1 ? `#/archive/${encodeURIComponent(attention[0].name)}/experiments` : attention.length ? "#/experiments?status=attention" : "#/experiments";
   const health = state.health || {};
   main.innerHTML = `<div class="page workspace-page">
-    <header class="page-hero workbench-hero"><div><p class="eyebrow">实验工作台</p><h1>${running.length ? "实验正在有序分析" : attention.length ? "有实验需要处理" : "今天从哪里开始？"}</h1><p>${running.length ? `${running.length} 个任务正在运行，完成后会自动生成素材与报告。` : attention.length ? `${attention.length} 个实验需要检查，其他档案均可正常查看。` : "导入多视角视频，或继续查看最近完成的实验成果。"}</p></div><div class="hero-actions"><a class="primary-button" href="#/new">${icon("plus")}新建实验</a></div></header>
+    <header class="page-hero workbench-hero"><div><p class="eyebrow">实验工作台</p><h1>实验运行概览</h1><p>${running.length ? `${running.length} 个实验正在分析，完成后将自动生成关键素材和报告。` : attention.length ? `${attention.length} 个实验需要关注，其余档案可正常查看。` : "集中查看实验状态、分析进度与最近生成的成果。"}</p></div><div class="hero-actions"><a class="primary-button" href="#/new">${icon("plus")}新建实验</a></div></header>
     <section class="home-focus-grid" aria-label="待办概览">
       <a href="#/experiments"><span>${icon("folder")}</span><small>今日新增</small><strong>${number(todayCount)}</strong><em>查看实验记录 ${icon("arrow")}</em></a>
       <a href="#/tasks" class="${running.length ? "active" : ""}"><span>${icon("activity")}</span><small>正在分析</small><strong>${number(running.length)}</strong><em>${running.length ? "查看任务进度" : "当前没有运行任务"} ${icon("arrow")}</em></a>
