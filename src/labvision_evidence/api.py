@@ -4622,9 +4622,10 @@ def create_nas_batch_run(
                 },
             )
         request = payload or {}
-        default_name = datetime.fromtimestamp(
+        batch_timestamp = datetime.fromtimestamp(
             int(batch["recording_start_us"]) / 1_000_000
-        ).strftime("采集批次-%Y%m%d-%H%M%S")
+        ).strftime("%Y%m%d-%H%M%S")
+        default_name = f"采集批次-{batch_timestamp}"
         experiment_name = str(request.get("experiment_name") or default_name).strip()
         collection_id = "nas-" + hashlib.sha256(batch_id.encode()).hexdigest()[:24]
         try:
