@@ -25,6 +25,7 @@ def test_ubuntu_shell_scripts_are_syntactically_valid_and_gpu_scoped():
         "06-Run-LAN-Server.sh",
         "07-Install-LAN-Server.sh",
         "08-Server-Status.sh",
+        "Open-VisionCortex.sh",
     ):
         path = DEPLOYMENT / name
         subprocess.run(["bash", "-n", str(path)], check=True)
@@ -95,6 +96,7 @@ def test_local_systemd_service_is_reboot_resilient_and_nas_independent():
     installer = (DEPLOYMENT / "05-Install-Local-Service.sh").read_text(
         encoding="utf-8"
     )
+    launcher = (DEPLOYMENT / "Open-VisionCortex.sh").read_text(encoding="utf-8")
 
     assert "Restart=on-failure" in service
     assert "WantedBy=default.target" in service
@@ -102,6 +104,22 @@ def test_local_systemd_service_is_reboot_resilient_and_nas_independent():
     assert "/srv/sentinel-data/VisionCortex3090Ti/Runtime/NoNasWeb" in service
     assert "/home/x1/桌面/nas" not in service
     assert "systemctl --user enable --now visioncortex-local.service" in installer
+    assert (
+        'autostart_root="${XDG_CONFIG_HOME:-$HOME/.config}/autostart"' in installer
+    )
+    assert 'sudo loginctl enable-linger "$(id -un)"' in installer
+    assert "X-GNOME-Autostart-enabled=true" in installer
+    assert "StartupWMClass=VisionCortex" in installer
+    assert "http://127.0.0.1:8000/api/health" in launcher
+    assert "http://127.0.0.1:8000/#/home" in launcher
+    assert "visioncortex-lan.service" in launcher
+    assert "visioncortex-local.service" in launcher
+    assert '--user-data-dir="$browser_profile"' in launcher
+    assert "VISIONCORTEX_BROWSER_SCALE" in launcher
+    assert "desktop_width >= 3200" in launcher
+    assert "browser_scale='1.5'" in launcher
+    assert '--force-device-scale-factor="$browser_scale"' in launcher
+    assert '--app="$url"' in launcher
 
 
 def test_lan_systemd_service_is_authenticated_private_and_production_scoped():

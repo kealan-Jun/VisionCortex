@@ -128,6 +128,30 @@ This manual lifecycle binds only to `127.0.0.1:8000`. PID ownership is checked
 before a process is reused or stopped. It is intended for administrator-side
 validation, not for other computers on the LAN.
 
+For the local no-NAS appliance experience, install the persistent user service
+and desktop launcher once:
+
+```bash
+./deployment/rtx3090ti-ubuntu/05-Install-Local-Service.sh
+```
+
+The installer enables the Web service at boot, installs a **VisionCortex**
+application entry, and opens the product in a dedicated browser window after
+the desktop user logs in. The launcher uses the production LAN service when it
+is enabled; otherwise it starts the local no-NAS service. Both modes use
+`127.0.0.1:8000` from this workstation. Browser auto-open happens at graphical
+login, while user-service lingering keeps the enabled service available before
+login. This convenience does not weaken production preflight, authentication,
+NAS, model, or quality gates.
+
+The launcher detects a primary display width of 3200 pixels or greater and
+starts the dedicated Chromium profile at a 1.5 device scale. This keeps both
+the browser chrome and the product readable on the workstation's 3840x2160
+display while the Web UI independently expands its dashboard and video layouts
+at wide CSS viewports. Set `VISIONCORTEX_BROWSER_SCALE=1.0` (or another value
+from 1.0 through 2.0) before launching to override the detected value; ordinary
+1080p displays are not forced to scale.
+
 ## Authenticated LAN server
 
 The normal team entry point is the production LAN service. Team members do not

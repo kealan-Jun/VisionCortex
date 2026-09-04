@@ -585,8 +585,49 @@ function renderHome() {
         <section class="workspace-status"><header><h2>工作区状态</h2><a href="#/operations" aria-label="查看服务状态">${icon("arrow")}</a></header><div><span>档案存储</span><strong class="${health.archive_available ? "status-ok" : "status-pending"}">${health.archive_available ? "可用" : "待连接"}</strong></div><div><span>智能理解</span><strong class="${health.mllm_enabled && health.ark_key_configured ? "status-ok" : "status-pending"}">${health.mllm_enabled && health.ark_key_configured ? "已启用" : "待启用"}</strong></div></section>
       </aside>
     </div>
+    <section class="home-launchpad" aria-labelledby="home-launchpad-title" aria-describedby="home-launchpad-description">
+      <span class="home-launchpad-icon">${icon("upload")}</span>
+      <div><p class="eyebrow">快速开始</p><h2 id="home-launchpad-title">把多视角视频拖到这里</h2><p id="home-launchpad-description">也可以选择视频文件；随后确认视角与实验信息，再创建分析任务。</p></div>
+      <div class="home-launchpad-flow" aria-label="分析流程"><span><b>1</b>选择视频</span><span><b>2</b>确认视角</span><span><b>3</b>创建任务</span></div>
+      <label class="primary-button batch-import-button home-upload-button">${icon("upload")}选择视频<input id="home-upload-input" aria-label="从首页选择视频文件" type="file" multiple accept="video/*,.mp4,.mov,.m4v,.mkv,.avi,.webm,.csv,text/csv" /></label>
+    </section>
     <nav class="workspace-shortcuts" aria-label="实验成果入口"><a href="#/materials"><span>${icon("boxes")}</span><div><strong>关键素材库</strong></div>${icon("arrow")}</a><a href="#/reports"><span>${icon("file")}</span><div><strong>实验室日报</strong></div>${icon("arrow")}</a></nav>
   </div>`;
+  bindHomeLaunchpad();
+}
+
+function bindHomeLaunchpad() {
+  const launchpad = document.querySelector(".home-launchpad");
+  const input = document.querySelector("#home-upload-input");
+  if (!launchpad || !input) return;
+  const importFromHome = (fileList) => {
+    const files = [...(fileList || [])];
+    const hasVideo = files.some((file) => /\.(mp4|mov|m4v|mkv|avi|webm)$/i.test(file.name) || file.type.startsWith("video/"));
+    if (!hasVideo) {
+      toast("没有识别到视频文件，请选择 MP4、MOV、MKV、AVI 或 WebM。", "error");
+      return;
+    }
+    location.hash = "#/new";
+    importBatch(files);
+  };
+  input.addEventListener("change", (event) => importFromHome(event.target.files));
+  launchpad.addEventListener("dragenter", (event) => {
+    event.preventDefault();
+    launchpad.classList.add("is-dragging");
+  });
+  launchpad.addEventListener("dragover", (event) => {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    launchpad.classList.add("is-dragging");
+  });
+  launchpad.addEventListener("dragleave", (event) => {
+    if (!launchpad.contains(event.relatedTarget)) launchpad.classList.remove("is-dragging");
+  });
+  launchpad.addEventListener("drop", (event) => {
+    event.preventDefault();
+    launchpad.classList.remove("is-dragging");
+    importFromHome(event.dataTransfer.files);
+  });
 }
 
 async function rerunBenchmark() {

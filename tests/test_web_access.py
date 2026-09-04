@@ -136,6 +136,29 @@ def test_frontend_supports_grouped_search_focus_mode_and_safe_rerun():
     assert 'api("/api/runs/from-paths"' in app_js
 
 
+def test_frontend_has_2k_4k_density_without_forcing_1080p_zoom():
+    web_root = Path(api.__file__).parent / "web"
+    styles = (web_root / "styles.css").read_text(encoding="utf-8")
+    index = (web_root / "index.html").read_text(encoding="utf-8")
+
+    large_screen = styles.split("@media (min-width: 2200px) {", 1)[1].split(
+        "@media (min-width: 2200px) and", 1
+    )[0]
+    assert "--font-md: 16px" in large_screen
+    assert "width: min(100%,2800px)" in large_screen
+    assert ".home-launchpad {" in large_screen
+    assert ".library-card-grid { grid-template-columns: repeat(4" in large_screen
+    assert "width: min(2100px,calc(100vw - 96px))" in large_screen
+    assert "styles.css?v=20260904-product-shell-30" in index
+    assert "app.js?v=20260904-product-shell-30" in index
+
+    app_js = (web_root / "app.js").read_text(encoding="utf-8")
+    assert "function bindHomeLaunchpad()" in app_js
+    assert 'location.hash = "#/new"' in app_js
+    assert 'launchpad.addEventListener("drop"' in app_js
+    assert "importFromHome(event.dataTransfer.files)" in app_js
+
+
 def test_normal_product_pages_hide_raw_paths_and_explain_partial_results():
     app_js = (
         Path(api.__file__).parent / "web" / "app.js"
