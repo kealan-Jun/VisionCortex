@@ -328,6 +328,16 @@ def build_daily_report(
     action_counts: Counter[str] = Counter()
     uncertainties: list[dict[str, Any]] = []
     contradictions: list[dict[str, Any]] = []
+    if evidence_eval.get("observation_status") == "no_accepted_observation":
+        uncertainties.append(
+            {
+                "scope": "run",
+                "id": summary.experiment_id,
+                "items": [
+                    "No accepted experiment segment was observed; this does not prove that no physical action occurred."
+                ],
+            }
+        )
 
     for group in sorted(summary.experiment_groups, key=lambda item: item.global_start_ms):
         understanding = group.model_understanding or {}
@@ -550,6 +560,13 @@ def build_daily_report(
             "evidence_package_eval_passed": bool(evidence_eval.get("passed")),
             "evidence_package_eval_check_count": len(evidence_eval.get("checks") or []),
             "evidence_package_eval_failure_count": len(evidence_eval.get("failures") or []),
+            "observation_status": evidence_eval.get("observation_status"),
+            "observation_evidence_classification": evidence_eval.get(
+                "observation_evidence_classification"
+            ),
+            "negative_action_claim_supported": evidence_eval.get(
+                "negative_action_claim_supported"
+            ),
             "representative_visual_count": sum(
                 item.get("representative_visual") is not None for item in timeline
             ),

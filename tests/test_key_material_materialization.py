@@ -231,6 +231,112 @@ def test_key_material_view_selection_restores_accepted_peak_for_dual_coverage(
     assert receipt["key_timestamp_fallback"]["timestamp_clamped"] is False
 
 
+def test_key_material_missing_dual_role_timestamp_quarantines_only_event(
+    tmp_path, monkeypatch
+):
+    layout = archive.ArchiveLayout(tmp_path / "archive")
+    layout.create()
+    views = [
+        ViewInput(
+            view_id="fp",
+            role=ViewRole.FIRST_PERSON,
+            video=tmp_path / "fp.mp4",
+        ),
+        ViewInput(
+            view_id="tp",
+            role=ViewRole.THIRD_PERSON,
+            video=tmp_path / "tp.mp4",
+        ),
+    ]
+    infos = {
+        view.view_id: VideoInfo(
+            path=view.video,
+            duration_ms=1_000,
+            fps=30,
+            width=1280,
+            height=720,
+            frame_count=30,
+        )
+        for view in views
+    }
+    transforms = {
+        view.view_id: AlignmentTransform(
+            view_id=view.view_id,
+            reference_view_id="fp",
+        )
+        for view in views
+    }
+    event = EvidenceEvent(
+        event_id="EVT-OUTSIDE",
+        action_type=ActionType.OBJECT_MOVEMENT,
+        global_start_ms=1_500,
+        global_end_ms=2_000,
+        key_global_ms=1_800,
+        objects=["tube"],
+        confidence=0.9,
+        accepted=True,
+        audit_reason="test",
+        supporting_views=["fp", "tp"],
+        supporting_roles=[ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON],
+        candidates=[],
+    )
+    group = ExperimentGroup(
+        group_id="GROUP-OUTSIDE",
+        continuity_type="independent",
+        atomic_experiment_ids=["EXP-OUTSIDE"],
+        global_start_ms=1_500,
+        global_end_ms=2_000,
+        participating_views=["fp", "tp"],
+        first_person_view="fp",
+        third_person_view="tp",
+        continuity_reason="test",
+        key_event_ids=[event.event_id],
+    )
+    monkeypatch.setattr(archive, "_best_event_frames_many", lambda *_args: {})
+    monkeypatch.setattr(
+        archive,
+        "nearest_frame_evidence_many",
+        lambda _path, timestamps: {float(item): None for item in timestamps},
+    )
+
+    archive.materialize_key_materials(
+        layout,
+        [event],
+        [group],
+        views,
+        infos,
+        transforms,
+        {"fp": tmp_path / "fp.jsonl", "tp": tmp_path / "tp.jsonl"},
+        {
+            "segmentation": {
+                "key_clip_pre_seconds": 2,
+                "key_clip_post_seconds": 3,
+            },
+            "performance": {
+                "ffmpeg_video_encoder": "h264_nvenc",
+                "materialization_workers": 2,
+            },
+        },
+    )
+
+    assert event.accepted is False
+    assert event.formal_admission_status == "rejected"
+    receipt = event.observability["key_material_view_selection"]
+    assert receipt["status"] == (
+        "machine_quarantined_missing_dual_role_key_material"
+    )
+    assert receipt["analysis_continuation_allowed"] is True
+    runtime = json.loads(
+        (
+            layout.json_config / "key_material_materialization_runtime.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert runtime["candidate_event_count"] == 1
+    assert runtime["accepted_event_count"] == 0
+    assert runtime["machine_quarantined_event_count"] == 1
+    assert runtime["records"] == []
+
+
 def test_key_material_view_pair_is_selected_jointly_by_object_identity_class(
     tmp_path,
 ):

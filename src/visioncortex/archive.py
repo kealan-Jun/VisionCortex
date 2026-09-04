@@ -5539,14 +5539,59 @@ def materialize_key_materials(
                         "grounding_dino_temporal_rescue_applied": True,
                     }
                 )
-        pair, pair_receipt = _select_key_material_view_pair_with_peak_fallback(
-            group,
-            event,
-            views,
-            infos,
-            transforms,
-            previous_key_global_ms,
-        )
+        try:
+            pair, pair_receipt = _select_key_material_view_pair_with_peak_fallback(
+                group,
+                event,
+                views,
+                infos,
+                transforms,
+                previous_key_global_ms,
+            )
+        except ValueError as error:
+            # One CV candidate can outlive a shorter physical camera tail after
+            # alignment or participant-keyframe reranking.  That candidate has
+            # no honest dual-role key material, but it must not abort unrelated
+            # events or the experiment package.  Reject it fail-closed and let
+            # semantic curation write the normal machine-quarantine receipt.
+            event.key_global_ms = previous_key_global_ms
+            set_event_admission(event, "rejected")
+            event.uncertainty = list(
+                dict.fromkeys(
+                    [*event.uncertainty, "key_material_dual_role_coverage_unavailable"]
+                )
+            )
+            event.audit_reason = (
+                f"{event.audit_reason}; " if event.audit_reason else ""
+            ) + "machine-quarantined: no honest dual-role key material"
+            failure_receipt = {
+                "schema_version": "visioncortex-key-material-view-selection/1",
+                "status": "machine_quarantined_missing_dual_role_key_material",
+                "evidence_classification": "PARTIAL_EVIDENCE",
+                "reason": str(error),
+                "key_global_ms": previous_key_global_ms,
+                "timestamp_clamped": False,
+                "synthetic_cross_view_evidence": False,
+                "manual_fallback_required": False,
+                "analysis_continuation_allowed": True,
+            }
+            event.observability["key_material_view_selection"] = failure_receipt
+            event.semantic_review = {
+                **dict(event.semantic_review or {}),
+                "model_status": "not_run",
+                "error_class": "key_material_dual_role_coverage_unavailable",
+                "error": str(error),
+                "evidence_classification": "PARTIAL_EVIDENCE",
+                "retryable": False,
+            }
+            key_frame_selection_records.append(
+                {
+                    "event_id": event.event_id,
+                    **dict(event.observability.get("key_frame_selection") or {}),
+                    "key_material_view_selection": failure_receipt,
+                }
+            )
+            continue
         if pair_receipt.get("key_timestamp_fallback"):
             event.observability.setdefault("key_frame_selection", {}).update(
                 {
@@ -5590,6 +5635,7 @@ def materialize_key_materials(
                 "key_material_view_selection": pair_receipt,
             }
         )
+    accepted_events = [event for event in accepted_events if event.accepted]
     if progress_callback is not None:
         progress_callback(len(accepted_events), len(accepted_events))
     if bool(config.get("performance", {}).get("release_auxiliary_models_after_event")):
@@ -6049,7 +6095,13 @@ def materialize_key_materials(
             + len(nearest_by_view),
             "archive_hierarchy_version": "2.0.0",
             "category_index": _relative(category_index_path, layout.root),
-            "accepted_event_count": len(all_accepted_events),
+            "candidate_event_count": len(all_accepted_events),
+            "accepted_event_count": sum(
+                event.accepted for event in all_accepted_events
+            ),
+            "machine_quarantined_event_count": sum(
+                not event.accepted for event in all_accepted_events
+            ),
             "last_pass_materialized_event_count": len(accepted_events),
             "materialization_passes": materialization_passes,
             "records": previous_records + runtime_records,
@@ -8190,8 +8242,26 @@ def evidence_package_eval(
             }
         )
     failures = [check for check in checks if not check["passed"]]
+    empty_observation = not segments
     return {
-        "passed": not failures and bool(segments),
+        # Package integrity and observational sufficiency are separate claims.
+        # A fully scanned input with no accepted segment is still a valid,
+        # reportable package; it is not proof that no physical action occurred.
+        "passed": not failures,
+        "package_integrity_status": (
+            "passed_empty_observation"
+            if not failures and empty_observation
+            else "passed"
+            if not failures
+            else "failed"
+        ),
+        "observation_status": (
+            "no_accepted_observation" if empty_observation else "observations_present"
+        ),
+        "observation_evidence_classification": (
+            "PARTIAL_EVIDENCE" if empty_observation else "PROVEN"
+        ),
+        "negative_action_claim_supported": False if empty_observation else None,
         "checks": checks,
         "failures": failures,
         "segment_count": len(segments),
