@@ -415,11 +415,11 @@ performance:
   # generation. The same verified experiment clip is otherwise reopened for
   # every event even though event processing is ordered by the archive.
   key_material_frame_reader_max_open: 2
-  # A cold four-view production run showed that overlapping group-aligned
-  # encodes raised this stage from 81.86 s to 84.38 s because NVENC work then
-  # contended with the two role clips. Keep the optional scheduler disabled on
-  # this host; key-material aligned clips retain their independently proven
-  # overlap below.
+  # An alternating four-group A/B with byte-identical outputs measured
+  # sequential at 82.85/87.08 s and overlap at 87.35/84.75 s. The overlapping
+  # mean was 1.27% slower because aligned NVENC work contended with the two role
+  # clips. Keep this optional scheduler disabled on this host; key-material
+  # aligned clips retain their independently proven overlap below.
   overlap_aligned_experiment_clips: false
   aligned_experiment_clip_workers: 2
   # Role clips for event N+1 can encode while the aligned clip for event N is
