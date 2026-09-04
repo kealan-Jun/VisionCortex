@@ -428,7 +428,8 @@ def test_cap_and_paper_requests_have_separate_candidates_and_shared_budget(setup
         return [{"class_name": name, "confidence": 0.8, "xyxy_norm": [0.3,0.3,0.5,0.5]}], {"status":"executed"}
 
     reviewer = review_module.ParticipantVisualReviewer(config, tmp_path / "both-work", tmp_path / "both-output", detector)
-    event = _event(); event.objects.append("bottle_cap")
+    event = _event()
+    event.objects.append("bottle_cap")
     paper, _ = reviewer.review(event, views)
     cap, plan = reviewer.review(event, views, participant_class="bottle_cap")
     assert paper["input_fingerprint"] != cap["input_fingerprint"]
@@ -439,7 +440,8 @@ def test_cap_and_paper_requests_have_separate_candidates_and_shared_budget(setup
 
 
 def test_present_paper_does_not_hide_missing_cap_in_annotation_gate():
-    event = _event(); event.objects.append("bottle_cap")
+    event = _event()
+    event.objects.append("bottle_cap")
     event.observability["key_material_annotation"] = {
         "mode": "event_participants_only",
         "views": {view: {"rendered_classes":["gloved_hand", "paper"], "extraneous_rendered_classes":[]} for view in ["fp","tp"]},

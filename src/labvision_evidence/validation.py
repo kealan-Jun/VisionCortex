@@ -268,7 +268,6 @@ def validate_experiment_and_material_quality(
             for class_name in classes
         }
         actor_classes = {"hand", "gloved_hand"}
-        manipulated_object_visible = bool(rendered_classes - actor_classes)
         interaction_pair_view_ids = sorted(
             view_id
             for view_id, classes in rendered_classes_by_view.items()

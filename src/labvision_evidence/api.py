@@ -44,7 +44,6 @@ from .nas_recordings import (
     create_selection,
     enabled as directory_ingest_enabled,
     scan_recordings,
-    selection_path,
     validate_selection,
 )
 from .indexing import (
@@ -2485,14 +2484,6 @@ def collection_detail(experiment_id: str) -> dict[str, Any]:
         raise HTTPException(404, str(exc)) from exc
     except (OSError, ValueError) as exc:
         raise HTTPException(503, f"无法读取采集批次索引: {exc}") from exc
-    if directory_ingest_enabled(settings):
-        try:
-            validate_selection(settings, experiment_id)
-        except (OSError, ValueError) as exc:
-            raise HTTPException(409, str(exc)) from exc
-        settings["storage"]["index_csv"] = str(
-            selection_path(settings, experiment_id, ".csv")
-        )
 
 
 def _search_archive_roots(archive_name: str | None) -> list[tuple[str, Path]]:

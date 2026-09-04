@@ -86,7 +86,7 @@ def _plain_clock_bounds(clock: Path) -> tuple[int, int]:
         for cells in csv.reader(lines):
             if len(cells) != len(fields):
                 continue
-            row = dict(zip(fields, cells))
+            row = dict(zip(fields, cells, strict=True))
             if row.get("rgb_recorded") == "0" or not row.get("rgb_video_frame_index"):
                 continue
             try:

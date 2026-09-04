@@ -54,7 +54,10 @@ labvision_evidence = ["web/*.html", "web/*.css", "web/*.js", "templates/*.json"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --strict-config --strict-markers"
-filterwarnings = ["error"]
+filterwarnings = [
+  "error",
+  "ignore:The anyio\\.abc\\.BlockingPortal alias is deprecated, use anyio\\.from_thread\\.BlockingPortal instead\\.:DeprecationWarning:anyio\\._lazyimport",
+]
 
 [tool.ruff.lint]
 # Keep the default E4/E7/E9/F rules and add the small set of bug-risk rules
