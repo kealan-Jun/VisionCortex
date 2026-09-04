@@ -131,8 +131,20 @@ def _inspect(root: Path, video: Path, now: float, settle: float, allow_plain: bo
             header = next(csv.reader([handle.readline(65536)]), [])
         if not {"global_timestamp_us", "frame_system_timestamp_us", "wallclock_us", "epoch_us"}.intersection(header) or "rgb_video_frame_index" not in header:
             issues.append("CSV 缺少采集时间或视频帧序号")
-    start = int(merged.get("recording_window_start_global_us") or 0)
-    end = int(merged.get("recording_window_end_global_us") or 0)
+    start = int(
+        merged.get("recording_quality_window_start_global_us")
+        or merged.get("recording_window_first_valid_global_us")
+        or merged.get("recording_window_start_global_us")
+        or merged.get("segment_start_us")
+        or 0
+    )
+    end = int(
+        merged.get("recording_quality_window_end_global_us")
+        or merged.get("recording_window_last_valid_global_us")
+        or merged.get("recording_window_end_global_us")
+        or merged.get("segment_end_us")
+        or 0
+    )
     if plain and clock.is_file():
         start, end = _plain_clock_bounds(clock)
     if not start or end <= start:
@@ -302,6 +314,10 @@ def scan_recordings(config: dict[str, Any]) -> dict[str, Any]:
                 break
             for name in sorted(files):
                 if not name.lower().endswith((".mp4", ".mov", ".mkv", ".avi", ".webm")) or name.startswith("."):
+                    continue
+                if not allow_plain and not name.lower().endswith("rgb.mp4"):
+                    # Recorder-native batches publish RGB evidence alongside
+                    # depth containers. Only RGB is a pipeline view source.
                     continue
                 path = current / name
                 if path.is_symlink():

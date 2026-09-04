@@ -30,6 +30,28 @@ def test_rtx3090ti_ubuntu_profile_matches_host_and_keeps_view_count_dynamic():
 
     config = load_config(profile)
 
+    assert config["collection_ingest"] == {
+        "enabled": True,
+        "poll_seconds": 30,
+        "settle_seconds": 120,
+        "max_results": 200,
+        "persist_snapshot": True,
+        "snapshot_path": None,
+        "mode": "directory_metadata",
+        "source_root": "/home/x1/桌面/nas",
+        "camera_directories": [
+            "lubancat-4df661d7_cam01",
+            "orangepi5pro-f022c4_cam01",
+        ],
+        "camera_role_map": {
+            "lubancat-4df661d7_cam01": "first_person",
+            "orangepi5pro-f022c4_cam01": "third_person",
+        },
+        "discover_plain_video_csv": False,
+        "max_scan_directories": 20000,
+        "max_recordings": 5000,
+    }
+
     performance = config["performance"]
     assert performance["profile"] == "rtx3090ti-24gb-ubuntu-dynamic-multiview"
     assert performance["tensor_rt"] == "required"

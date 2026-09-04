@@ -7,6 +7,26 @@ project:
   # the fallback on the same NAS staging filesystem as the formal archive.
   output_root: /home/x1/桌面/nas/VisionCortexExperimentArchive/.VisionCortex-Run-Staging
 
+# Continuously watch the recorder-native first/third-person pair documented for
+# this workstation. The scanner reads bounded sidecar metadata only; it neither
+# copies nor renames source media.
+collection_ingest:
+  enabled: true
+  mode: directory_metadata
+  source_root: /home/x1/桌面/nas
+  camera_directories:
+    - lubancat-4df661d7_cam01
+    - orangepi5pro-f022c4_cam01
+  camera_role_map:
+    lubancat-4df661d7_cam01: first_person
+    orangepi5pro-f022c4_cam01: third_person
+  discover_plain_video_csv: false
+  poll_seconds: 30
+  settle_seconds: 120
+  max_scan_directories: 20000
+  max_recordings: 5000
+  persist_snapshot: true
+
 alignment:
   # Formal 3090 Ti evidence may use the local timeline as a recall fallback,
   # but it needs absolute-clock or reliable visual support before promotion.

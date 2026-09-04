@@ -236,6 +236,31 @@ def test_configured_camera_pair_becomes_one_click_batch(nas_config, monkeypatch)
     assert receipt["role_source"] == "configured_camera_role_map"
 
 
+def test_recorder_scan_ignores_depth_media_and_uses_finalized_quality_window(
+    nas_config,
+):
+    folder = recording(nas_config, "a_cam01")
+    (folder / "depth.mkv").write_bytes(b"depth-is-not-an-rgb-view")
+    for name in ("meta.json", "recording_ready.json"):
+        path = folder / name
+        payload = json.loads(path.read_text())
+        payload.update(
+            recording_window_end_global_us=0,
+            recording_quality_window_start_global_us=1788408001000000,
+            recording_quality_window_end_global_us=1788408009000000,
+        )
+        path.write_text(json.dumps(payload))
+        os.utime(path, (time.time() - 1000, time.time() - 1000))
+    os.utime(folder / "depth.mkv", (time.time() - 1000, time.time() - 1000))
+
+    inventory = scan_recordings(nas_config)
+
+    assert inventory["recording_count"] == 1
+    assert inventory["recordings"][0]["relative_path"].endswith("/rgb.mp4")
+    assert inventory["recordings"][0]["duration_seconds"] == 8.0
+    assert inventory["recordings"][0]["available"] is True
+
+
 def test_service_continuously_publishes_camera_monitor_receipt(
     nas_config, monkeypatch, tmp_path
 ):
