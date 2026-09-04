@@ -16,7 +16,7 @@ if [[ ! -r /proc/$pid/cmdline ]]; then
   exit 0
 fi
 command_line=$(tr '\0' ' ' < "/proc/$pid/cmdline")
-[[ $command_line == *labvision_evidence*serve* ]] || { printf '%s\n' "PID $pid is not a VisionCortex Web process; refusing to stop it." >&2; exit 1; }
+[[ $command_line == *visioncortex*serve* ]] || { printf '%s\n' "PID $pid is not a VisionCortex Web process; refusing to stop it." >&2; exit 1; }
 
 kill "$pid"
 for _ in $(seq 1 50); do

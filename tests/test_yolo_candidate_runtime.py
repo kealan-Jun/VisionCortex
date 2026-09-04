@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from labvision_evidence.yolo_candidate_runtime import (
+from visioncortex.yolo_candidate_runtime import (
     _exact_batches,
     export_and_benchmark_yolo_candidate,
 )

@@ -1,4 +1,4 @@
-from labvision_evidence.consensus_labels import build_consensus_box_labels
+from visioncortex.consensus_labels import build_consensus_box_labels
 
 
 def test_consensus_accepts_independent_families_and_retains_rejections():

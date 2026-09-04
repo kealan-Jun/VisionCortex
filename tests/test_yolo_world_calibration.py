@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from labvision_evidence.yolo_world_calibration import _canonical_nms
+from visioncortex.yolo_world_calibration import _canonical_nms
 
 
 def test_canonical_nms_deduplicates_synonymous_prompt_boxes():

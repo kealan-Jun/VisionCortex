@@ -4,14 +4,14 @@ import cv2
 import numpy as np
 import pytest
 
-from labvision_evidence.alignment import iter_aligned_rows
-from labvision_evidence.schemas import (
+from visioncortex.alignment import iter_aligned_rows
+from visioncortex.schemas import (
     AlignmentTransform,
     VideoSegmentInput,
     ViewInput,
     ViewRole,
 )
-from labvision_evidence.video_io import (
+from visioncortex.video_io import (
     extract_view_clip,
     iter_view_sampled_frames,
     probe_video,

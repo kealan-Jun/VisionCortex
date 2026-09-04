@@ -45,7 +45,7 @@ fi
 mkdir -p -- "$runtime_root/Input-Manifests" "$runtime_tmp" "$engine_root"
 export PATH="$venv/bin:$PATH"
 
-export LABVISION_CONFIG=$config
+export VISIONCORTEX_CONFIG=$config
 export VISIONCORTEX_TENSORRT=required
 export VISIONCORTEX_NAS_INDEX_CSV=${VISIONCORTEX_NAS_INDEX_CSV:-'/home/x1/桌面/nas/experiment_record_index.csv'}
 export VISIONCORTEX_NAS_ARCHIVE_ROOT=${VISIONCORTEX_NAS_ARCHIVE_ROOT:-'/home/x1/桌面/nas/VisionCortexExperimentArchive'}
@@ -67,7 +67,7 @@ if [[ -f $pid_file ]]; then
   recorded_pid=$(tr -d '[:space:]' < "$pid_file")
   if [[ $recorded_pid =~ ^[0-9]+$ && -r /proc/$recorded_pid/cmdline ]]; then
     command_line=$(tr '\0' ' ' < "/proc/$recorded_pid/cmdline")
-    if [[ $command_line == *labvision_evidence*serve* ]] && health_ok; then
+    if [[ $command_line == *visioncortex*serve* ]] && health_ok; then
       printf 'VisionCortex Web is already running: %s/#/home (PID %s)\n' "$url" "$recorded_pid"
       exit 0
     fi
@@ -82,7 +82,7 @@ if health_ok; then
 fi
 
 cd -- "$project_root"
-nohup "$python" -m labvision_evidence serve --host 127.0.0.1 --port "$port" --config "$config" \
+nohup "$python" -m visioncortex serve --host 127.0.0.1 --port "$port" --config "$config" \
   >"$stdout_log" 2>"$stderr_log" < /dev/null &
 web_pid=$!
 printf '%s\n' "$web_pid" > "$pid_file.tmp"

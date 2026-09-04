@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from labvision_evidence.config import load_config
+from visioncortex.config import load_config
 
 
 def test_rtx4090_profile_inherits_quality_rules_and_keeps_view_count_dynamic():
@@ -141,3 +141,16 @@ def test_profile_inheritance_rejects_cycles(tmp_path: Path):
 
     with pytest.raises(ValueError, match="cycle"):
         load_config(first)
+
+
+def test_mllm_config_rejects_evidence_budget_that_would_drop_a_view(
+    tmp_path: Path,
+):
+    profile = tmp_path / "bad-mllm-budget.yaml"
+    profile.write_text(
+        "mllm:\n  max_images_per_event: 5\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="preserve both temporal views"):
+        load_config(profile)

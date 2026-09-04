@@ -5,8 +5,8 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from labvision_evidence import api
-from labvision_evidence.web_access import (
+from visioncortex import api
+from visioncortex.web_access import (
     is_allowed_lan_client,
     valid_basic_authorization,
     validate_web_access_configuration,
@@ -149,8 +149,8 @@ def test_frontend_has_2k_4k_density_without_forcing_1080p_zoom():
     assert ".home-launchpad {" in large_screen
     assert ".library-card-grid { grid-template-columns: repeat(4" in large_screen
     assert "width: min(2100px,calc(100vw - 96px))" in large_screen
-    assert "styles.css?v=20260904-product-shell-30" in index
-    assert "app.js?v=20260904-product-shell-30" in index
+    assert "styles.css?v=20260904-product-shell-31" in index
+    assert "app.js?v=20260904-product-shell-31" in index
 
     app_js = (web_root / "app.js").read_text(encoding="utf-8")
     assert "function bindHomeLaunchpad()" in app_js

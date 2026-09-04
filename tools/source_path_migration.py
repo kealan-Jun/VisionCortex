@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 
-from labvision_evidence.source_path_migrations import (
+from visioncortex.source_path_migrations import (
     create_migration_receipt,
     load_migration_receipt,
     resolve_manifest_copy,

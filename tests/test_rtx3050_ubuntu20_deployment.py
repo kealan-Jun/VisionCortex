@@ -8,15 +8,15 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from labvision_evidence import archive, liquid_semantic, temporal_segmentation
-from labvision_evidence.config import load_config
-from labvision_evidence import config as config_module
-from labvision_evidence.detection import (
+from visioncortex import archive, liquid_semantic, temporal_segmentation
+from visioncortex.config import load_config
+from visioncortex import config as config_module
+from visioncortex.detection import (
     FramePacket,
     RoleScanner,
     _engine_requires_exact_batch,
 )
-from labvision_evidence.schemas import ViewInput, ViewRole
+from visioncortex.schemas import ViewInput, ViewRole
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -85,7 +85,10 @@ def test_installed_runtime_can_resolve_sibling_default_config(tmp_path, monkeypa
     config_root.mkdir(parents=True)
     default = config_root / "default.yaml"
     profile = config_root / "target.yaml"
-    default.write_text("performance:\n  batch_size: 1\n", encoding="utf-8")
+    default.write_text(
+        "performance:\n  batch_size: 1\nmllm:\n  max_images_per_event: 12\n",
+        encoding="utf-8",
+    )
     profile.write_text("performance:\n  batch_size: 8\n", encoding="utf-8")
     monkeypatch.setattr(
         config_module, "DEFAULT_CONFIG", tmp_path / "venv/configs/default.yaml"

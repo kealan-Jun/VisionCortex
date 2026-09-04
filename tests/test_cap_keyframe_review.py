@@ -3,8 +3,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from labvision_evidence import archive
-from labvision_evidence.schemas import ActionType, AlignmentTransform, EvidenceEvent
+from visioncortex import archive
+from visioncortex.schemas import ActionType, AlignmentTransform, EvidenceEvent
 
 
 @pytest.mark.parametrize("admit_second", [True, False])

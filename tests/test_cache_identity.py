@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from labvision_evidence.pipeline import build_cache_identity
-from labvision_evidence.schemas import RunManifest, ViewInput, ViewRole
+from visioncortex.pipeline import build_cache_identity
+from visioncortex.schemas import RunManifest, ViewInput, ViewRole
 
 
 def _manifest(tmp_path: Path) -> RunManifest:

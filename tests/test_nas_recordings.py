@@ -7,9 +7,9 @@ import pytest
 from fastapi import BackgroundTasks
 from fastapi.testclient import TestClient
 
-from labvision_evidence import api
-from labvision_evidence.collection_catalog import discover_collections
-from labvision_evidence.nas_recordings import (
+from visioncortex import api
+from visioncortex.collection_catalog import discover_collections
+from visioncortex.nas_recordings import (
     create_selection, scan_recordings, selection_path, validate_selection,
 )
 

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from labvision_evidence.storage import (
+from visioncortex.storage import (
     describe_index_experiment,
     prepare_from_nas_index,
     safe_archive_name,

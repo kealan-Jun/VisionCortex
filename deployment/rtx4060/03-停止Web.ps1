@@ -11,7 +11,7 @@ if ($null -eq $Process) {
     Write-Host 'The process no longer exists; the PID file was removed.'
     exit 0
 }
-if ($Process.CommandLine -notmatch 'labvision_evidence' -or $Process.CommandLine -notmatch 'serve') {
+if ($Process.CommandLine -notmatch 'visioncortex' -or $Process.CommandLine -notmatch 'serve') {
     throw "PID $ProcessId is not a VisionCortex Web process; refusing to stop it."
 }
 Stop-Process -Id $ProcessId

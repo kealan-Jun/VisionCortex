@@ -5,12 +5,12 @@ import cv2
 import numpy as np
 import pytest
 
-from labvision_evidence import archive
-from labvision_evidence import participant_visual_review as review_module
-from labvision_evidence.config import load_config
-from labvision_evidence.pipeline import EvidencePipeline
-from labvision_evidence.schemas import ActionType, EvidenceEvent, ExperimentGroup, ViewRole
-from labvision_evidence.validation import validate_experiment_and_material_quality
+from visioncortex import archive
+from visioncortex import participant_visual_review as review_module
+from visioncortex.config import load_config
+from visioncortex.pipeline import EvidencePipeline
+from visioncortex.schemas import ActionType, EvidenceEvent, ExperimentGroup, ViewRole
+from visioncortex.validation import validate_experiment_and_material_quality
 
 
 def _event():

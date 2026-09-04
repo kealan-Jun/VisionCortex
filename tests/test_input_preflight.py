@@ -2,8 +2,8 @@ from pathlib import Path
 
 import pytest
 
-from labvision_evidence import input_preflight
-from labvision_evidence.schemas import (
+from visioncortex import input_preflight
+from visioncortex.schemas import (
     RunManifest,
     TimestampPoint,
     VideoInfo,
@@ -70,6 +70,14 @@ def test_prequeue_preflight_proves_common_clock_coverage(monkeypatch, tmp_path):
     assert receipt["common_clock_overlap"]["start_ms"] == 1_500
     assert receipt["common_clock_overlap"]["end_ms"] == 5_000
     assert receipt["video_segment_count"] == 2
+    assert receipt["runtime"]["media_probe_seconds"] >= 0.0
+    assert receipt["runtime"]["clock_preflight_seconds"] >= 0.0
+    assert receipt["runtime"]["total_seconds"] >= sum(
+        (
+            receipt["runtime"]["media_probe_seconds"],
+            receipt["runtime"]["clock_preflight_seconds"],
+        )
+    ) - 0.000002
 
 
 def test_prequeue_preflight_blocks_views_without_clock_overlap(monkeypatch, tmp_path):

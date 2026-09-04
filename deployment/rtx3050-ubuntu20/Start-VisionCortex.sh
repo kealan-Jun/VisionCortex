@@ -93,4 +93,4 @@ else
 fi
 
 cd -- "$app_root"
-exec "$python" -m labvision_evidence serve --host 127.0.0.1 --port "$port" --config "$config"
+exec "$python" -m visioncortex serve --host 127.0.0.1 --port "$port" --config "$config"

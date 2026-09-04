@@ -3,9 +3,9 @@ from pathlib import Path
 
 import pytest
 
-from labvision_evidence.daily_reports import build_daily_report, evaluate_daily_report
-from labvision_evidence.schemas import RunSummary, ViewRole
-from labvision_evidence.report_presentations import _headline_status
+from visioncortex.daily_reports import build_daily_report, evaluate_daily_report
+from visioncortex.schemas import RunSummary, ViewRole
+from visioncortex.report_presentations import _headline_status
 
 
 @pytest.mark.parametrize("quality,human,expected", [

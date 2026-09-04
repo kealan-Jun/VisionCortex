@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/home/x1/Projects/VisionCortex
-Environment=LABVISION_CONFIG=/home/x1/Projects/VisionCortex/configs/rtx3090ti-ubuntu-production.yaml
+Environment=VISIONCORTEX_CONFIG=/home/x1/Projects/VisionCortex/configs/rtx3090ti-ubuntu-production.yaml
 Environment=PYTHONUNBUFFERED=1
 Environment=VISIONCORTEX_RUNTIME_BASE=/srv/sentinel-data/VisionCortex3090Ti
 Environment=VISIONCORTEX_PYTHON=/srv/sentinel-data/VisionCortex3090Ti/.venv/bin/python

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from labvision_evidence.yolo_training import (
+from visioncortex.yolo_training import (
     build_mapped_public_yolo_union,
     build_public_yolo_training_view,
     build_yolo_training_dataset,
@@ -427,7 +427,7 @@ def test_training_records_metrics_and_resource_telemetry(monkeypatch, tmp_path):
             return SimpleNamespace(save_dir=run)
 
     monkeypatch.setattr(
-        "labvision_evidence.yolo_training.ResourceMonitor", FakeMonitor
+        "visioncortex.yolo_training.ResourceMonitor", FakeMonitor
     )
     monkeypatch.setitem(sys.modules, "ultralytics", SimpleNamespace(YOLO=FakeYOLO))
 

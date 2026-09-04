@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from labvision_evidence.action_state_machine import (
+from visioncortex.action_state_machine import (
     attach_continuous_action_states,
     build_event_state_receipt,
 )
-from labvision_evidence.schemas import (
+from visioncortex.schemas import (
     ActionCandidate,
     ActionType,
     EvidenceEvent,

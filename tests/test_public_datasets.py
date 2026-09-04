@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from labvision_evidence.public_datasets import (
+from visioncortex.public_datasets import (
     _safe_extract_rar,
     _validate_rar_listing,
     prepare_public_dataset,
@@ -148,7 +148,7 @@ def test_rar_listing_rejects_links_and_path_traversal(monkeypatch, tmp_path):
         ]
     )
     monkeypatch.setattr(
-        "labvision_evidence.public_datasets._run_archive_tool",
+        "visioncortex.public_datasets._run_archive_tool",
         lambda command: next(outputs),
     )
 
@@ -172,13 +172,13 @@ def test_safe_rar_extraction_is_atomic_and_size_checked(monkeypatch, tmp_path):
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(
-        "labvision_evidence.public_datasets.shutil.which", lambda name: "/bin/bsdtar"
+        "visioncortex.public_datasets.shutil.which", lambda name: "/bin/bsdtar"
     )
     monkeypatch.setattr(
-        "labvision_evidence.public_datasets._validate_rar_listing", fake_listing
+        "visioncortex.public_datasets._validate_rar_listing", fake_listing
     )
     monkeypatch.setattr(
-        "labvision_evidence.public_datasets._run_archive_tool", fake_run
+        "visioncortex.public_datasets._run_archive_tool", fake_run
     )
 
     receipt = _safe_extract_rar(

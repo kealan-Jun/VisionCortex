@@ -4,7 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
-from labvision_evidence.replay_acceptance import (
+from visioncortex.replay_acceptance import (
     build_archive_regression_snapshot,
     compare_archive_snapshot,
 )

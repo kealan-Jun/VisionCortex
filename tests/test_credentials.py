@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from labvision_evidence.credentials import ensure_ark_api_key
+from visioncortex.credentials import ensure_ark_api_key
 
 
 def _config(name: str = "TEST_ARK_API_KEY") -> dict:

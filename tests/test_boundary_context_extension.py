@@ -2,11 +2,11 @@ from pathlib import Path
 
 import pytest
 
-from labvision_evidence.grouping import (
+from visioncortex.grouping import (
     prepare_formal_experiment_segments,
     select_formal_experiment_start_events,
 )
-from labvision_evidence.schemas import (
+from visioncortex.schemas import (
     ActionCandidate,
     ActionType,
     EvidenceEvent,

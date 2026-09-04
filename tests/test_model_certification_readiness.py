@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from labvision_evidence.model_certification import (
+from visioncortex.model_certification import (
     build_model_certification_readiness,
 )
 

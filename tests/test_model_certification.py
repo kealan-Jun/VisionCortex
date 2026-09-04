@@ -1,6 +1,6 @@
 import json
 
-from labvision_evidence.model_certification import (
+from visioncortex.model_certification import (
     CERTIFICATION_SCHEMA,
     _artifact_paths,
     _certification_input_fingerprint,

@@ -1,6 +1,6 @@
 from copy import deepcopy
 
-from labvision_evidence.mllm import normalize_uncalibrated_hand_identity
+from visioncortex.mllm import normalize_uncalibrated_hand_identity
 
 
 def test_cross_view_hand_assignments_remain_unknown_without_calibration():

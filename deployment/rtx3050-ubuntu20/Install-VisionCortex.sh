@@ -126,8 +126,8 @@ print(f"PyTorch_CUDA={torch.version.cuda}")
 print(f"compute_capability={major}.{minor}")
 PY
 "$venv/bin/python" -c "import tensorrt as trt; print(f'TensorRT={trt.__version__}')"
-"$venv/bin/python" -m labvision_evidence prepare-public-models --config "$config"
-"$venv/bin/python" -m labvision_evidence prepare-engine --config "$config"
+"$venv/bin/python" -m visioncortex prepare-public-models --config "$config"
+"$venv/bin/python" -m visioncortex prepare-engine --config "$config"
 
 # TensorRT ships builder resources for many GPU architectures and Windows.
 # Keep the RTX 3050 (SM86) and PTX rebuild resources, then remove only the
@@ -159,7 +159,7 @@ if [[ -n $trt_lib_dir ]]; then
   done < <(find "$trt_lib_dir" -maxdepth 1 -type f -name 'libnvinfer_builder_resource_*' -print0)
 fi
 
-"$venv/bin/python" -m labvision_evidence validate-models --config "$config"
+"$venv/bin/python" -m visioncortex validate-models --config "$config"
 "$venv/bin/python" - <<'PY'
 import json
 import time
@@ -171,8 +171,8 @@ import pynvml
 import torch
 from ultralytics import YOLO
 
-from labvision_evidence.config import load_config
-from labvision_evidence.detection import _engine_build_batch
+from visioncortex.config import load_config
+from visioncortex.detection import _engine_build_batch
 
 root = Path("/opt/visioncortex-rtx3050")
 config = load_config(root / "app/configs/rtx3050-6gb-ubuntu20-production.yaml")

@@ -3,13 +3,15 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pytest
 
-from labvision_evidence.archive import (
+from visioncortex.archive import (
     ArchiveLayout,
+    SemanticAnalysisUnavailable,
     _key_material_event_folder_name,
     curate_semantically_reviewed_key_materials,
 )
-from labvision_evidence.schemas import (
+from visioncortex.schemas import (
     ActionType,
     EvidenceEvent,
     ExperimentGroup,
@@ -146,18 +148,21 @@ def test_curates_confirmed_relabelled_and_rejected_media(tmp_path: Path):
     assert group.key_event_ids == ["EVT-CONFIRMED", "EVT-RELABEL"]
     assert (
         layout.key_materials
-        / "Review-Candidates"
+        / "Machine-Quarantine"
         / "EVT-REJECTED"
         / "Key-Frames"
     ).is_dir()
     review_index = json.loads(
         (
             layout.key_materials
-            / "Review-Candidates"
-            / "Candidate-Index.json"
+            / "Machine-Quarantine"
+            / "Machine-Quarantine-Index.json"
         ).read_text(encoding="utf-8")
     )
     assert review_index["candidate_count"] == 1
+    assert review_index["schema_version"] == (
+        "visioncortex-machine-quarantine-index/1"
+    )
     assert review_index["candidates"][0]["event_id"] == "EVT-REJECTED"
     assert review_index["candidates"][0]["media"]
 
@@ -187,7 +192,13 @@ def test_unmapped_explicit_participant_does_not_confirm_background_cv_target(
     assert report["records"][0]["disposition"] == (
         "review_candidate_unmapped_interaction_participants"
     )
-    assert len(list((layout.key_materials / "Review-Candidates" / event.event_id).rglob("*.*"))) == 6
+    assert len(
+        list(
+            (
+                layout.key_materials / "Machine-Quarantine" / event.event_id
+            ).rglob("*.*")
+        )
+    ) == 6
 
 
 def test_contradictory_contact_is_retained_for_review(tmp_path: Path):
@@ -215,7 +226,7 @@ def test_contradictory_contact_is_retained_for_review(tmp_path: Path):
         "review_candidate_conflicting_interaction_participants"
     )
     assert event.semantic_review["semantic_participant_conflicts"][0]["class_name"] == "balance"
-    retained = layout.key_materials / "Review-Candidates" / event.event_id
+    retained = layout.key_materials / "Machine-Quarantine" / event.event_id
     assert len(list(retained.rglob("*.jpg"))) == 3
     assert len(list(retained.rglob("*.mp4"))) == 3
 
@@ -240,6 +251,40 @@ def test_explicit_canonical_paper_is_not_quarantined_as_unmapped(tmp_path: Path)
     assert event.accepted
     assert event.objects == ["hand", "paper"]
     assert len(event.key_frames) == 3
+
+
+def test_unavailable_model_result_stops_before_media_or_event_mutation(
+    tmp_path: Path,
+):
+    layout = ArchiveLayout(tmp_path / "archive")
+    layout.create()
+    layout.work = tmp_path / "cache" / "run"
+    event = _event(
+        "EVT-MODEL-UNAVAILABLE",
+        ActionType.HAND_OBJECT_CONTACT,
+        "uncertain",
+        "unknown",
+    )
+    event.semantic_review["model_status"] = "failed"
+    group = _group([event])
+    _materialize_stub(layout, event)
+    original_frames = dict(event.key_frames)
+    original_clips = dict(event.key_clips)
+    original_group_events = list(group.key_event_ids)
+
+    with pytest.raises(SemanticAnalysisUnavailable, match="resume incomplete"):
+        curate_semantically_reviewed_key_materials(
+            layout,
+            [event],
+            [group],
+            {"key_materials": {"semantic_relabel_min_confidence": 0.7}},
+        )
+
+    assert event.accepted is True
+    assert event.key_frames == original_frames
+    assert event.key_clips == original_clips
+    assert group.key_event_ids == original_group_events
+    assert not (layout.key_materials / "Machine-Quarantine").exists()
 
 
 def test_same_action_refines_cv_participant_from_structured_interaction(

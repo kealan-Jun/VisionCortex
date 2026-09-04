@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from labvision_evidence import cli
-from labvision_evidence.schemas import RunManifest, ViewInput, ViewRole
+from visioncortex import cli
+from visioncortex.schemas import RunManifest, ViewInput, ViewRole
 
 
 def test_fixed_benchmark_preprocessing_only_never_promotes_formal_archive(

@@ -1,6 +1,6 @@
 import json
 
-from labvision_evidence.collection_state import (
+from visioncortex.collection_state import (
     collection_state_path,
     read_collection_states,
     record_collection_state,

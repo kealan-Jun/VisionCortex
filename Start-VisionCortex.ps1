@@ -75,7 +75,7 @@ $StderrLog = Join-Path $RuntimeRoot 'visioncortex-web.stderr.log'
 $PidFile = Join-Path $RuntimeRoot 'visioncortex-web.pid'
 
 $EnvironmentOverrides = [ordered]@{
-    'LABVISION_CONFIG' = $Config
+    'VISIONCORTEX_CONFIG' = $Config
     'VISIONCORTEX_NAS_INDEX_CSV' = (Join-Path $ProjectRoot 'examples\development-index.csv')
     'VISIONCORTEX_NAS_ARCHIVE_ROOT' = $ArchiveRoot
     'VISIONCORTEX_NAS_CACHE_ROOT' = $CacheRoot
@@ -92,7 +92,7 @@ foreach ($Name in $EnvironmentOverrides.Keys) {
 }
 try {
     $Arguments = @(
-        '-m', 'labvision_evidence', 'serve',
+        '-m', 'visioncortex', 'serve',
         '--host', '127.0.0.1',
         '--port', "$Port",
         '--config', ('"' + $Config + '"')

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from labvision_evidence import hardware_acceptance
+from visioncortex import hardware_acceptance
 
 
 def test_hardware_tuning_selects_fewest_worker_profile_within_two_percent(

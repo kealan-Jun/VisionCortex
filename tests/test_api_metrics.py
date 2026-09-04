@@ -10,8 +10,8 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 from starlette.datastructures import UploadFile
 
-from labvision_evidence import api
-from labvision_evidence.collection_catalog import clear_collection_catalog_cache
+from visioncortex import api
+from visioncortex.collection_catalog import clear_collection_catalog_cache
 
 
 def test_gpu_background_jobs_run_one_at_a_time(monkeypatch, tmp_path):

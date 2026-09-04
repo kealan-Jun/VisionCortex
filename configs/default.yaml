@@ -28,6 +28,31 @@ performance:
   coarse_refinement_min_candidates: 2
   coarse_refinement_min_span_seconds: 30.0
   coarse_quarantine_objectless_unconfirmed_motion: true
+  coarse_shared_motion_probe_enabled: false
+  coarse_frame_index_enabled: false
+  coarse_coverage_gate_enabled: false
+  coarse_minimum_coverage_ratio: 0.98
+  coarse_maximum_gap_periods: 4.0
+  candidate_discovery_quality_gate_enabled: false
+  coarse_semantic_association_enabled: false
+  coarse_semantic_cluster_margin_seconds: 3.0
+  coarse_max_boundary_expansion_seconds: 0.0
+  coarse_spatial_relation_enabled: false
+  coarse_hand_object_gap_norm: 0.08
+  coarse_hand_object_approach_gap_norm: 0.16
+  coarse_hand_object_approach_delta_norm: 0.025
+  coarse_micro_action_guard_enabled: false
+  coarse_micro_action_min_confidence: 0.72
+  coarse_micro_action_window_seconds: 4.0
+  coarse_rolling_motion_threshold_enabled: false
+  coarse_rolling_motion_window_seconds: 600.0
+  coarse_tracker_motion_prediction_enabled: false
+  coarse_tracker_maximum_center_distance: 0.18
+  coarse_open_vocabulary_recall_enabled: false
+  coarse_open_vocabulary_adaptive_selection_enabled: false
+  coarse_open_vocabulary_diversity_bucket_seconds: 600.0
+  coarse_open_vocabulary_max_frames_per_hour_per_view: 2
+  coarse_open_vocabulary_maximum_error_rate: 0.10
   fine_batch_size: 16
   # A lone first-person source otherwise starves TensorRT between FFmpeg
   # bursts. Decode two adjacent bounded chunks concurrently, but consume them
@@ -50,6 +75,53 @@ performance:
   # later dual-view gap. Exhaust remaining views for unresolved temporal
   # clusters before declaring the evidence layer complete.
   fine_group_recall_zero_prior_quality_fallback: true
+  # Optional derived index for the existing fine stage. JSONL remains the
+  # authoritative evidence ledger; hardware profiles may enable incremental
+  # indexing, coverage admission and bounded-memory candidate reduction.
+  fine_frame_index_enabled: false
+  fine_coverage_gate_enabled: false
+  fine_minimum_coverage_ratio: 0.98
+  fine_maximum_gap_periods: 4.0
+  fine_streaming_candidates_enabled: false
+  fine_state_max_entries: 4096
+  fine_instance_association_enabled: false
+  fine_instance_appearance_enabled: false
+  fine_instance_minimum_cosine_similarity: 0.25
+  fine_instance_cross_view_conflict_quarantine_enabled: false
+  fine_track_stitching_enabled: false
+  fine_track_stitch_max_gap_seconds: 2.5
+  fine_track_stitch_max_center_distance: 0.12
+  fine_contact_state_enabled: false
+  fine_affine_object_motion_enabled: false
+  fine_roi_open_vocabulary_recall_enabled: false
+  fine_roi_open_vocabulary_max_frames_per_window: 2
+  fine_roi_open_vocabulary_hand_padding_norm: 0.20
+  fine_roi_open_vocabulary_maximum_error_rate: 0.10
+  # Null inherits the established coarse tracker setting for compatibility.
+  fine_tracker_motion_prediction_enabled: null
+  fine_tracker_maximum_center_distance: null
+  # In-place candidate_audit upgrades. The default profile retains the
+  # established decisions; production hardware profiles enable the stricter
+  # association, formal-admission and bounded-query contracts explicitly.
+  audit_constrained_clustering_enabled: false
+  audit_local_alignment_enabled: false
+  audit_explainable_scoring_enabled: false
+  audit_formal_admission_status_enabled: false
+  audit_core_interval_enabled: false
+  audit_stable_event_ids_enabled: false
+  audit_sqlite_candidate_index_enabled: false
+  audit_max_cluster_span_seconds: 30.0
+  audit_core_start_quantile: 0.50
+  audit_core_end_quantile: 0.50
+  audit_independent_view_bonus: 0.04
+  audit_dual_role_bonus: 0.04
+  audit_maximum_independence_bonus: 0.12
+  audit_maximum_alignment_penalty: 0.08
+  audit_liquid_spatial_context_enabled: false
+  audit_liquid_context_hand_object_gap_norm: 0.08
+  audit_liquid_context_minimum_frames: 2
+  audit_liquid_sequence_formal_gate_enabled: false
+  action_state_observed_timestamps_enabled: false
   # Optional workload-adaptive mode. The default remains the established all-
   # selected-view scan; hardware profiles may enable progressive cross-view
   # supplementation explicitly.
@@ -116,6 +188,13 @@ performance:
   motion_probe_min_views: 2
   motion_probe_primary_min_seconds: 45.0
   motion_probe_window_padding_seconds: 90.0
+  motion_probe_affine_compensation_enabled: false
+  motion_probe_max_rotation_degrees: 8.0
+  motion_probe_max_scale_delta: 0.12
+  motion_probe_rolling_threshold_enabled: false
+  motion_probe_rolling_window_seconds: 600.0
+  motion_probe_legacy_raw_union_enabled: false
+  motion_probe_max_cluster_seconds: 0.0
   motion_probe_fallback_peaks_per_hour: 8
   motion_probe_fallback_separation_seconds: 120.0
   motion_probe_fallback_window_seconds: 60.0
@@ -146,26 +225,66 @@ performance:
 
 alignment:
   reference_view: first_person
+  # Keep the configured first-person preference when clock quality ties, but
+  # do not let a recorder with invalid or discontinuous clocks anchor every
+  # other view.
+  reference_strategy: best_clock_quality
+  reference_preference_bonus: 0.15
   nearest_tolerance_ms: 120.0
   visual_anchor_search_seconds: 5.0
   visual_anchor_fps: 4.0
   max_drift_ppm: 2500.0
   minimum_match_ratio: 0.60
   cross_view_event_tolerance_ms: 750.0
+  cross_view_event_max_tolerance_ms: 2500.0
   visual_anchor_count: 3
   visual_anchor_duration_seconds: 10.0
   visual_audit_csv_confidence_threshold: 0.80
   visual_audit_search_seconds: 1.0
-  visual_audit_anchor_count: 2
+  visual_audit_anchor_count: 3
   visual_audit_duration_seconds: 2.0
-  visual_audit_fps: 1.0
+  visual_audit_fps: 2.0
+  mandatory_visual_audit: true
   aligned_timestamps_fps: 2.0
   max_csv_points_per_view: 30000
+  # Read a few distributed rows from every physical clock ledger. This remains
+  # bounded over SMB while detecting mid-segment resets that endpoints miss.
+  csv_sampling_mode: bounded_sparse
+  csv_samples_per_segment: 5
+  csv_bounded_full_read_limit_bytes: 2097152
+  csv_read_workers: 12
+  clock_jump_threshold_ms: 500.0
+  clock_rate_error_ppm: 10000.0
+  maximum_segment_clock_shift_ms: 300000.0
+  minimum_alignment_uncertainty_ms: 25.0
+  maximum_alignment_uncertainty_ms: 5000.0
+  local_timeline_fallback_enabled: true
+  local_timeline_confidence_cap: 0.65
+  local_timeline_uncertainty_ms: 1000.0
+  # Preserve timestamp-less local workflows, but label them degraded. Formal
+  # server profiles may override this to require absolute or visual evidence.
+  allow_local_timeline_formal_evidence: true
+  allow_uncertain_segment_formal_evidence: true
+  quality_gate_enabled: true
+  minimum_required_role_overlap_ms: 1000.0
+  view_coverage_warning_ratio: 0.999
+  # Retained for older profile readers. csv_sampling_mode is authoritative.
   csv_segment_endpoints_only: true
 
 segmentation:
   min_experiment_seconds: 5.0
   experiment_gap_seconds: 30.0
+  # Preserve the existing 30 s fallback while allowing longer observable
+  # process actions to survive ordinary reading/tool-change pauses.
+  experiment_gap_seconds_by_action:
+    liquid_movement: 45.0
+    pipette_transfer_operation: 45.0
+    device_panel_operation: 60.0
+  # A larger gap is bridged only inside one recalled window and only when at
+  # least two view-scoped tracked object identities survive on both sides.
+  identity_idle_bridge_enabled: true
+  identity_idle_bridge_max_gap_seconds: 300.0
+  identity_idle_bridge_min_shared_identities: 2
   experiment_pre_roll_seconds: 2.0
   experiment_post_roll_seconds: 3.0
   boundary_context_activation_gap_seconds: 30.0
@@ -217,6 +336,14 @@ segmentation:
   min_event_duration_seconds: 0.50
   min_event_observations: 3
   min_view_action_density_per_minute: 0.30
+  # Long experiments may contain valid sparse observations separated by a
+  # wait. Preserve such a view only when it has multiple accepted events and
+  # at least one second of direct evidence; this does not weaken dual-role
+  # formal delivery.
+  long_experiment_sparse_view_enabled: true
+  long_experiment_sparse_view_min_duration_seconds: 120.0
+  long_experiment_sparse_view_min_events: 2
+  long_experiment_sparse_view_min_evidence_seconds: 1.0
   single_view_accept_confidence: 0.78
   # Container open/close is a directly observable state transition. It still
   # requires aligned media and MLLM confirmation before semantic acceptance.
@@ -288,6 +415,9 @@ continuity:
   atomic_fragment_max_events_per_side: 3
   atomic_fragment_repeated_primary_actions:
     - liquid_movement
+    - pipette_transfer_operation
+    - container_state_change
+    - device_panel_operation
   # One wide coarse motion envelope may cover two complete adjacent workflows.
   # Split only at a real inactivity gap when each side remains a rich dual-view
   # sequence and both sides repeat a primary process action. This is stricter
@@ -297,6 +427,11 @@ continuity:
   # inactivity boundary; the independently reviewed Z0001 atomic split remains
   # 9.9 seconds and therefore still exceeds this threshold.
   atomic_sequence_split_min_gap_seconds: 9.0
+  atomic_sequence_split_min_gap_seconds_by_action:
+    liquid_movement: 9.0
+    pipette_transfer_operation: 9.0
+    container_state_change: 6.0
+    device_panel_operation: 12.0
   atomic_sequence_split_min_events_per_side: 4
   # A brief FP-only observation may sit between two corroborated fragments of
   # one recalled operation when the TP view is occluded. It may connect the
@@ -320,6 +455,21 @@ key_materials:
   duplicate_interval_overlap_ratio: 0.50
   max_per_action_type_per_atomic_experiment: 12
   max_per_experiment_group: 50
+  # Keep the historical caps for short experiments, then grow a bounded
+  # budget for long timelines. Selection preserves atomic experiments, action
+  # types, state transitions, time buckets and object identities before using
+  # confidence as a fill criterion.
+  adaptive_coverage_budget_enabled: true
+  adaptive_budget_step_seconds: 600.0
+  adaptive_per_action_type_additional_per_step: 2
+  adaptive_per_group_additional_per_step: 10
+  max_per_action_type_ceiling: 48
+  max_per_experiment_group_ceiling: 240
+  coverage_time_bucket_seconds: 300.0
+  coverage_critical_action_types:
+    - container_state_change
+    - device_panel_operation
+    - pipette_transfer_operation
   # Strict model relabels may enter the final user-facing Key-Materials tree.
   # Rejected, uncertain and invalid multi-class replies remain in audit/cache.
   semantic_relabel_min_confidence: 0.70
@@ -350,16 +500,27 @@ mllm:
   http2: false
   max_output_tokens: 4096
   max_images_per_event: 8
+  max_images_per_event_by_action:
+    liquid_movement: 12
   # Reuse the already-materialized short key clips. The model sees an aligned
   # before/peak/after sequence for each selected role instead of one still.
   use_key_clip_temporal_samples: true
   temporal_samples_per_view: 3
+  # Liquid review reserves explicit slots for both roles. Profile overrides may
+  # increase both counts, but configuration validation rejects silent truncation.
+  liquid_primary_samples: 9
+  liquid_context_samples: 3
   # Build a bounded semantic audit queue for ontology-limited CV actions. The
   # plan is written before any model call and cannot mutate CV acceptance.
   candidate_review_max_events: 120
   candidate_review_include_rejected: true
   candidate_review_rejected_min_confidence: 0.75
+  candidate_review_stratified_queue_enabled: false
+  candidate_review_time_bucket_seconds: 1800
   storyboard_pairs_per_group: 4
+  storyboard_pairs_per_group_max: 12
+  storyboard_seconds_per_pair: 300
+  max_images_per_group: 12
   group_workers: 4
   workers: 8
   response_language: zh-CN

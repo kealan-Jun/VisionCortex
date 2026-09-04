@@ -3,15 +3,15 @@ from pathlib import Path
 
 import pytest
 
-from labvision_evidence.archive import ArchiveLayout
-from labvision_evidence.grouping import (
+from visioncortex.archive import ArchiveLayout
+from visioncortex.grouping import (
     build_experiment_groups,
     normalize_experiment_segments,
     prepare_formal_experiment_segments,
     select_formal_experiment_start_events,
 )
-from labvision_evidence.pipeline import EvidencePipeline
-from labvision_evidence.schemas import (
+from visioncortex.pipeline import EvidencePipeline
+from visioncortex.schemas import (
     ActionCandidate,
     ActionType,
     AlignmentTransform,

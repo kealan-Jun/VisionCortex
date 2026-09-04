@@ -1,7 +1,7 @@
 import json
 
-from labvision_evidence.config import load_config
-from labvision_evidence.pipeline import create_dry_run
+from visioncortex.config import load_config
+from visioncortex.pipeline import create_dry_run
 
 
 def test_dry_run_builds_contract_without_video_or_ffmpeg(tmp_path):

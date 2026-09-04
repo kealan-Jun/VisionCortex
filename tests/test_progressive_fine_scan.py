@@ -1,8 +1,8 @@
 from pathlib import Path
 
-from labvision_evidence.config import load_config
-from labvision_evidence.pipeline import EvidencePipeline
-from labvision_evidence.schemas import (
+from visioncortex.config import load_config
+from visioncortex.pipeline import EvidencePipeline
+from visioncortex.schemas import (
     ActionCandidate,
     ActionType,
     AlignmentTransform,
@@ -594,10 +594,10 @@ def test_progressive_scan_stops_after_first_successful_supplement(
         return []
 
     monkeypatch.setattr(pipeline, "_scan_all_views_concurrently", fake_scan)
-    monkeypatch.setattr("labvision_evidence.pipeline.generate_candidates", fake_generate)
-    monkeypatch.setattr("labvision_evidence.pipeline.audit_candidates", fake_audit)
+    monkeypatch.setattr("visioncortex.pipeline.generate_candidates", fake_generate)
+    monkeypatch.setattr("visioncortex.pipeline.audit_candidates", fake_audit)
     monkeypatch.setattr(
-        "labvision_evidence.pipeline.refine_liquid_events_with_context", fake_refine
+        "visioncortex.pipeline.refine_liquid_events_with_context", fake_refine
     )
 
     paths, scanned, _, report = pipeline._run_progressive_fine_scan(
@@ -679,7 +679,7 @@ def test_progressive_scan_exhausts_all_views_when_gap_remains(
 
     monkeypatch.setattr(pipeline, "_scan_all_views_concurrently", fake_scan)
     monkeypatch.setattr(
-        "labvision_evidence.pipeline.generate_candidates", lambda *_args: []
+        "visioncortex.pipeline.generate_candidates", lambda *_args: []
     )
     direct_first_candidate = _candidate("FIRST-CAND")
     direct_first_candidate.evidence = [
@@ -692,7 +692,7 @@ def test_progressive_scan_exhausts_all_views_when_gap_remains(
     direct_first_event = _event("FIRST", [ViewRole.FIRST_PERSON])
     direct_first_event.candidates = [direct_first_candidate]
     monkeypatch.setattr(
-        "labvision_evidence.pipeline.audit_candidates",
+        "visioncortex.pipeline.audit_candidates",
         lambda *_args: ([direct_first_event.model_copy(deep=True)], []),
     )
 
@@ -809,9 +809,9 @@ def test_dynamic_scout_ranks_all_third_person_views_then_scans_narrow_anchor_win
         return list(_views), report
 
     monkeypatch.setattr(pipeline, "_scan_all_views_concurrently", fake_scan)
-    monkeypatch.setattr("labvision_evidence.pipeline.generate_candidates", fake_generate)
-    monkeypatch.setattr("labvision_evidence.pipeline.audit_candidates", fake_audit)
-    monkeypatch.setattr("labvision_evidence.pipeline.select_fine_scan_views", fake_select)
+    monkeypatch.setattr("visioncortex.pipeline.generate_candidates", fake_generate)
+    monkeypatch.setattr("visioncortex.pipeline.audit_candidates", fake_audit)
+    monkeypatch.setattr("visioncortex.pipeline.select_fine_scan_views", fake_select)
 
     paths, scanned, _, report = pipeline._run_progressive_fine_scan(
         manifest,

@@ -5,19 +5,19 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from labvision_evidence.action_semantics import (
+from visioncortex.action_semantics import (
     attach_action_observability,
     build_semantic_review_plan,
     record_semantic_review,
 )
-from labvision_evidence.actions import (
+from visioncortex.actions import (
     _Observation,
     _frame_observations,
     _infer_liquid_transfer_sequences,
     audit_candidates,
 )
-from labvision_evidence.archive import extract_temporal_review_frames
-from labvision_evidence.schemas import (
+from visioncortex.archive import extract_temporal_review_frames
+from visioncortex.schemas import (
     ActionCandidate,
     ActionType,
     AlignmentTransform,

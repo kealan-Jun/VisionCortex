@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from labvision_evidence.yolo_evaluation import evaluate_files, evaluate_yolo_predictions
+from visioncortex.yolo_evaluation import evaluate_files, evaluate_yolo_predictions
 
 
 def test_per_class_metrics_require_box_iou_and_class_match():

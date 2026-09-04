@@ -1,12 +1,13 @@
 from pathlib import Path
 
-from labvision_evidence.actions import audit_candidates, build_experiment_segments
-from labvision_evidence.grouping import (
+from visioncortex.actions import audit_candidates, build_experiment_segments
+from visioncortex.grouping import (
     build_experiment_groups,
     normalize_experiment_segments,
     prepare_formal_experiment_segments,
+    select_formal_experiment_start_events,
 )
-from labvision_evidence.schemas import (
+from visioncortex.schemas import (
     ActionCandidate,
     ActionType,
     AlignmentTransform,
@@ -1979,3 +1980,300 @@ def test_formal_promotion_does_not_bridge_across_different_coarse_boundaries(
     assert "quarantined_continuity_bridge" not in {
         item["decision"] for item in receipts
     }
+
+
+def _tracked_dual_event(
+    event_id: str,
+    start_ms: float,
+    end_ms: float,
+    *,
+    track_offset: int = 0,
+    supporting_views: tuple[str, str] = ("fp", "tp"),
+) -> EvidenceEvent:
+    candidates = [
+        ActionCandidate(
+            candidate_id=f"{event_id}-{view_id}-{object_name}",
+            action_type=ActionType.HAND_OBJECT_CONTACT,
+            view_id=view_id,
+            role=role,
+            local_start_ms=start_ms,
+            local_end_ms=end_ms,
+            global_start_ms=start_ms,
+            global_end_ms=end_ms,
+            key_global_ms=(start_ms + end_ms) / 2.0,
+            objects=[object_name],
+            confidence=0.9,
+            evidence=[
+                {
+                    "object_class_name": object_name,
+                    "track_id": track_id + track_offset,
+                    "hand_track_id": 1 + track_offset,
+                }
+            ],
+        )
+        for view_id, role in (
+            (supporting_views[0], ViewRole.FIRST_PERSON),
+            (supporting_views[1], ViewRole.THIRD_PERSON),
+        )
+        for object_name, track_id in (("reagent_bottle", 11), ("tube_rack", 12))
+    ]
+    return EvidenceEvent(
+        event_id=event_id,
+        action_type=ActionType.HAND_OBJECT_CONTACT,
+        global_start_ms=start_ms,
+        global_end_ms=end_ms,
+        key_global_ms=(start_ms + end_ms) / 2.0,
+        objects=["gloved_hand", "reagent_bottle", "tube_rack"],
+        confidence=0.9,
+        accepted=True,
+        audit_reason="tracked dual-view operation",
+        supporting_views=list(supporting_views),
+        supporting_roles=[ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON],
+        candidates=candidates,
+    )
+
+
+def test_identity_proven_idle_inside_one_recalled_window_stays_one_segment(
+    default_config,
+):
+    views = [
+        ViewInput(view_id="fp", role=ViewRole.FIRST_PERSON, video=Path("fp.mp4")),
+        ViewInput(view_id="tp", role=ViewRole.THIRD_PERSON, video=Path("tp.mp4")),
+    ]
+    events = [
+        _tracked_dual_event("BEFORE-WAIT", 1_000, 5_000),
+        _tracked_dual_event("AFTER-WAIT", 100_000, 105_000),
+    ]
+    recalled = ActionCandidate(
+        candidate_id="RECALLED-WORKFLOW",
+        action_type=ActionType.OBJECT_MOVEMENT,
+        view_id="fp",
+        role=ViewRole.FIRST_PERSON,
+        local_start_ms=0,
+        local_end_ms=110_000,
+        global_start_ms=0,
+        global_end_ms=110_000,
+        key_global_ms=55_000,
+        objects=["reagent_bottle", "tube_rack"],
+        confidence=0.8,
+    )
+    receipts = []
+
+    segments = build_experiment_segments(
+        events,
+        views,
+        default_config,
+        coarse_windows=[recalled],
+        decision_receipts=receipts,
+    )
+
+    assert len(segments) == 1
+    assert segments[0].event_ids == ["BEFORE-WAIT", "AFTER-WAIT"]
+    assert segments[0].segment_uid.startswith("SEG-")
+    bridge = next(
+        item
+        for item in receipts
+        if item["decision_type"] == "adaptive_experiment_idle_bridge"
+    )
+    assert bridge["facts"]["same_recalled_window"] is True
+    assert len(bridge["facts"]["shared_track_identities"]) == 4
+
+
+def test_overlapping_different_tracked_objects_remain_independent(default_config):
+    views = [
+        ViewInput(view_id="fp", role=ViewRole.FIRST_PERSON, video=Path("fp.mp4")),
+        ViewInput(view_id="tp", role=ViewRole.THIRD_PERSON, video=Path("tp.mp4")),
+    ]
+    left_event = _tracked_dual_event("LEFT", 10_000, 20_000)
+    right_event = _tracked_dual_event(
+        "RIGHT", 15_000, 25_000, track_offset=100
+    )
+    segments = [
+        ExperimentSegment(
+            segment_id="EXP-LEFT",
+            global_start_ms=8_000,
+            global_end_ms=23_000,
+            event_ids=[left_event.event_id],
+            participating_views=["fp", "tp"],
+        ),
+        ExperimentSegment(
+            segment_id="EXP-RIGHT",
+            global_start_ms=13_000,
+            global_end_ms=28_000,
+            event_ids=[right_event.event_id],
+            participating_views=["fp", "tp"],
+        ),
+    ]
+    receipts = []
+
+    normalized = normalize_experiment_segments(
+        segments,
+        [left_event, right_event],
+        views,
+        default_config,
+        decision_receipts=receipts,
+    )
+    groups = build_experiment_groups(
+        normalized,
+        [left_event, right_event],
+        views,
+        default_config,
+        decision_receipts=receipts,
+    )
+
+    assert len(normalized) == 2
+    assert len(groups) == 2
+    overlap = next(
+        item
+        for item in receipts
+        if item["decision_type"] == "overlapping_atomic_fragment_merge"
+    )
+    assert overlap["verdict"] == "rejected"
+    assert overlap["facts"]["stable_identity_conflict"] is True
+
+
+def test_group_selects_jointly_supported_pair_and_preserves_all_views(
+    default_config,
+):
+    views = [
+        ViewInput(view_id=view_id, role=role, video=Path(f"{view_id}.mp4"))
+        for view_id, role in (
+            ("fp-a", ViewRole.FIRST_PERSON),
+            ("fp-b", ViewRole.FIRST_PERSON),
+            ("fp-c", ViewRole.FIRST_PERSON),
+            ("tp-a", ViewRole.THIRD_PERSON),
+            ("tp-b", ViewRole.THIRD_PERSON),
+            ("tp-c", ViewRole.THIRD_PERSON),
+        )
+    ]
+
+    def event(event_id, start_ms, first, third, confidence):
+        return EvidenceEvent(
+            event_id=event_id,
+            action_type=ActionType.HAND_OBJECT_CONTACT,
+            global_start_ms=start_ms,
+            global_end_ms=start_ms + 1_000,
+            key_global_ms=start_ms + 500,
+            objects=["gloved_hand", "tube"],
+            confidence=confidence,
+            accepted=True,
+            audit_reason="joint view coverage",
+            supporting_views=[first, third],
+            supporting_roles=[ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON],
+            candidates=[],
+        )
+
+    events = [
+        event("A-A", 1_000, "fp-a", "tp-a", 0.6),
+        event("A-C", 3_000, "fp-a", "tp-c", 0.6),
+        event("B-B", 5_000, "fp-b", "tp-b", 0.7),
+        event("C-B", 7_000, "fp-c", "tp-b", 0.7),
+    ]
+    segment = ExperimentSegment(
+        segment_id="EXP-1",
+        global_start_ms=0,
+        global_end_ms=10_000,
+        event_ids=[item.event_id for item in events],
+        participating_views=[view.view_id for view in views],
+    )
+    receipts = []
+
+    groups = build_experiment_groups(
+        [segment], events, views, default_config, decision_receipts=receipts
+    )
+
+    group = groups[0]
+    assert (group.first_person_view, group.third_person_view) in {
+        ("fp-b", "tp-b"),
+        ("fp-c", "tp-b"),
+    }
+    assert set(group.participating_views) == {view.view_id for view in views}
+    assert group.group_uid.startswith("GRP-")
+
+
+def test_stable_segment_and_group_uids_survive_earlier_insertion(default_config):
+    views = [
+        ViewInput(view_id="fp", role=ViewRole.FIRST_PERSON, video=Path("fp.mp4")),
+        ViewInput(view_id="tp", role=ViewRole.THIRD_PERSON, video=Path("tp.mp4")),
+    ]
+    target = _tracked_dual_event("TARGET", 500_000, 505_000)
+    earlier = _tracked_dual_event("EARLIER", 1_000, 5_000, track_offset=100)
+
+    target_only_segments = build_experiment_segments([target], views, default_config)
+    target_only_groups = build_experiment_groups(
+        target_only_segments, [target], views, default_config
+    )
+    inserted_segments = build_experiment_segments(
+        [earlier, target], views, default_config
+    )
+    inserted_groups = build_experiment_groups(
+        inserted_segments, [earlier, target], views, default_config
+    )
+    inserted_target_segment = next(
+        segment for segment in inserted_segments if "TARGET" in segment.event_ids
+    )
+    inserted_target_group = next(
+        group
+        for group in inserted_groups
+        if inserted_target_segment.segment_id in group.atomic_experiment_ids
+    )
+
+    assert target_only_segments[0].segment_id != inserted_target_segment.segment_id
+    assert target_only_segments[0].segment_uid == inserted_target_segment.segment_uid
+    assert target_only_groups[0].group_id != inserted_target_group.group_id
+    assert target_only_groups[0].group_uid == inserted_target_group.group_uid
+
+
+def test_movement_opener_rejects_same_class_with_different_track_identity(
+    default_config,
+):
+    movement = _tracked_dual_event("MOVE-A", 1_000, 5_000).model_copy(
+        update={"action_type": ActionType.OBJECT_MOVEMENT}
+    )
+    later_contact = _tracked_dual_event(
+        "CONTACT-B", 6_000, 10_000, track_offset=100
+    )
+    receipts = []
+
+    openers = select_formal_experiment_start_events(
+        [movement, later_contact], default_config, decision_receipts=receipts
+    )
+
+    assert [event.event_id for event in openers] == ["CONTACT-B"]
+    movement_receipt = next(
+        item
+        for item in receipts
+        if item.get("event_id") == "MOVE-A"
+    )
+    assert movement_receipt["verdict"] == "deferred"
+    assert movement_receipt["facts"]["stable_object_identity_conflict"] is True
+
+
+def test_repeated_device_workflows_use_action_specific_split_gap(default_config):
+    views = [
+        ViewInput(view_id="fp", role=ViewRole.FIRST_PERSON, video=Path("fp.mp4")),
+        ViewInput(view_id="tp", role=ViewRole.THIRD_PERSON, video=Path("tp.mp4")),
+    ]
+    events = []
+    for index, start_ms in enumerate(
+        [1_000, 3_000, 5_000, 7_000, 21_000, 23_000, 25_000, 27_000],
+        start=1,
+    ):
+        events.append(
+            _tracked_dual_event(
+                f"DEVICE-{index}", start_ms, start_ms + 1_000
+            ).model_copy(update={"action_type": ActionType.DEVICE_PANEL_OPERATION})
+        )
+    receipts = []
+
+    segments = build_experiment_segments(
+        events, views, default_config, decision_receipts=receipts
+    )
+
+    assert len(segments) == 2
+    split = next(
+        item
+        for item in receipts
+        if item["decision_type"] == "raw_atomic_sequence_split"
+    )
+    assert split["facts"]["required_gap_ms_for_repeated_actions"] == 12_000

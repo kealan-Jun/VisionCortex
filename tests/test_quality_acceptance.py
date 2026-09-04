@@ -1,8 +1,8 @@
 import json
 from pathlib import Path
 
-from labvision_evidence.schemas import ActionType, EvidenceEvent, ExperimentGroup, ViewRole
-from labvision_evidence.validation import validate_experiment_and_material_quality
+from visioncortex.schemas import ActionType, EvidenceEvent, ExperimentGroup, ViewRole
+from visioncortex.validation import validate_experiment_and_material_quality
 
 
 def group(group_id: str, start_ms: float, end_ms: float, continuity: str, atomic_count: int):
@@ -117,6 +117,26 @@ def test_natural_experiment_does_not_require_all_action_categories():
     assert report["key_materials"]["required_action_types"] == []
     assert report["key_materials"]["missing_action_types"] == []
     assert "liquid_movement" in report["key_materials"]["unobserved_action_types"]
+
+
+def test_segmentation_integrity_rejects_duplicate_uid_and_uncovered_view_pair():
+    first = group("GROUP-1", 1_000, 2_000, "independent", 1)
+    second = group("GROUP-2", 3_000, 4_000, "independent", 1)
+    first.group_uid = "GRP-duplicate"
+    second.group_uid = "GRP-duplicate"
+    candidate = event(1, ActionType.HAND_OBJECT_CONTACT)
+    first.key_event_ids = [candidate.event_id]
+    first.third_person_view = "tp02"
+
+    report = validate_experiment_and_material_quality(
+        [first, second], [candidate], None
+    )
+
+    integrity = report["segmentation_integrity"]
+    assert integrity["passed"] is False
+    assert integrity["stable_group_uid_gate_passed"] is False
+    assert integrity["canonical_pair_coverage_passed"] is False
+    assert report["passed"] is False
     assert report["key_materials"]["category_coverage_is_acceptance_gate"] is False
 
 

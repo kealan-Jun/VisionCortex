@@ -1,10 +1,10 @@
-from labvision_evidence.archive import (
+from visioncortex.archive import (
     _artifact_json,
     _event_key_frame_score,
     _event_participant_boxes,
     _missing_state_transition_fallback_classes,
 )
-from labvision_evidence.schemas import (
+from visioncortex.schemas import (
     ActionType,
     AlignmentTransform,
     EvidenceEvent,
@@ -35,6 +35,11 @@ def test_key_material_json_uses_normalized_event_contract():
             "action_type_confirmed": "liquid_movement",
             "current_step": "移液器从源容器吸取液体",
             "next_step": "移动至目标离心管并释放液体",
+            "next_step_evidence": {
+                "status": "inferred",
+                "reason": "当前源端动作支持谨慎预测",
+                "evidence_event_ids": ["EVT-000001"],
+            },
             "physical_change": {"before": "移液器在源容器外", "after": "移液器从目标容器撤回"},
             "per_view_observations": [
                 {"view_id": "fp", "observation": "移液器接触源容器"},
@@ -66,6 +71,7 @@ def test_key_material_json_uses_normalized_event_contract():
     assert list(payload) == [
         "event_id",
         "parent_event_id",
+        "parent_event_uid",
         "actor_id",
         "workstation_id",
         "action_type",
@@ -90,7 +96,13 @@ def test_key_material_json_uses_normalized_event_contract():
     assert payload["action_type"] == "liquid_transfer"
     assert payload["action_subtype"] == "pipette_transfer"
     assert payload["decision"]["observed_facts"]
-    assert payload["decision"]["supported_inferences"]
+    assert payload["decision"]["supported_inferences"] == [
+        "预测下一步：移动至目标离心管并释放液体"
+    ]
+    assert not any(
+        "移动至目标离心管并释放液体" in fact
+        for fact in payload["decision"]["observed_facts"]
+    )
     assert len(payload["key_frames"]) == 3
     assert len(payload["key_clips"]) == 3
     assert payload["provenance"]["mllm"]["usage"]["total_tokens"] == 120

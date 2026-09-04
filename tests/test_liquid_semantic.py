@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from labvision_evidence.liquid_semantic import validate_liquid_semantic_runtime
+from visioncortex.liquid_semantic import validate_liquid_semantic_runtime
 
 
 def test_liquid_semantic_runtime_can_be_disabled():

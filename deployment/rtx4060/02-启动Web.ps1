@@ -20,7 +20,7 @@ if ([string]::IsNullOrWhiteSpace($env:ARK_API_KEY) -and -not [string]::IsNullOrW
 }
 if ([string]::IsNullOrWhiteSpace($env:ARK_API_KEY)) { throw 'ARK_API_KEY is not configured. Run setup again.' }
 
-$env:LABVISION_CONFIG = $Config
+$env:VISIONCORTEX_CONFIG = $Config
 $env:VISIONCORTEX_COARSE_DECODE_LANES = 'cuda,cuda,cuda,cuda,cpu,cpu'
 $env:VISIONCORTEX_SOURCE_WORKERS = '6'
 $env:VISIONCORTEX_DECODE_QUEUE_DEPTH = '4'
@@ -45,7 +45,7 @@ if ($existing) {
 }
 else {
     $quotedConfig = '"' + $Config + '"'
-    $arguments = @('-m', 'labvision_evidence', 'serve', '--host', '127.0.0.1', '--port', "$Port", '--config', $quotedConfig)
+    $arguments = @('-m', 'visioncortex', 'serve', '--host', '127.0.0.1', '--port', "$Port", '--config', $quotedConfig)
     $process = Start-Process -FilePath $Python -ArgumentList $arguments -WorkingDirectory $ProjectRoot -WindowStyle Hidden -RedirectStandardOutput $StdoutLog -RedirectStandardError $StderrLog -PassThru
     Set-Content -LiteralPath $PidFile -Value $process.Id -Encoding ascii
     $ready = $false

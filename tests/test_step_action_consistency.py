@@ -1,8 +1,9 @@
-from labvision_evidence.pipeline import (
+from visioncortex.pipeline import (
     normalize_final_group_action_language,
+    refine_groups_from_final_events,
     validate_final_step_action_consistency,
 )
-from labvision_evidence.schemas import (
+from visioncortex.schemas import (
     ActionType,
     EvidenceEvent,
     ExperimentGroup,
@@ -69,6 +70,52 @@ def test_allows_lower_level_contact_claim():
     )
 
     assert report["passed"] is True
+
+
+def test_final_group_steps_are_rebuilt_without_a_second_model_pass():
+    event = _event()
+    event.model_understanding = {
+        "status": "completed",
+        "current_step": "戴手套的手抓取离心管",
+        "next_step": "移动离心管",
+        "next_step_evidence": {
+            "status": "inferred",
+            "reason": "当前抓取姿态支持谨慎预测",
+            "evidence_event_ids": [event.event_id],
+        },
+        "physical_change": {"before": "未抓取", "after": "已抓取"},
+        "confidence": 0.91,
+        "uncertainties": [],
+    }
+    group = _group("旧的未审核步骤")
+    group.model_understanding["usage"] = {"total_tokens": 100}
+
+    refine_groups_from_final_events([group], [event])
+
+    assert group.model_understanding["refinement_model_call_count"] == 0
+    assert group.model_understanding["usage"] == {"total_tokens": 100}
+    assert group.model_understanding["steps"] == [
+        {
+            "step_index": 1,
+            "start_global_ms": 1000.0,
+            "end_global_ms": 2000.0,
+            "current_step": "戴手套的手抓取离心管",
+            "next_step": "移动离心管",
+            "next_step_status": "inferred",
+            "next_step_evidence": {
+                "status": "inferred",
+                "reason": "当前抓取姿态支持谨慎预测",
+                "evidence_event_ids": ["EVT-1"],
+            },
+            "supporting_event_ids": ["EVT-1"],
+            "objects": ["gloved_hand", "balance"],
+            "physical_change": "未抓取 → 已抓取",
+            "supporting_views": ["fp", "tp"],
+            "confidence": 0.91,
+            "action_type": "hand_object_contact",
+            "event_id": "EVT-1",
+        }
+    ]
 
 
 def test_pipette_object_name_does_not_assert_liquid_movement():

@@ -9,12 +9,12 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from labvision_evidence import storage, video_io
-from labvision_evidence.mllm import ArkAnalyzer
-from labvision_evidence.schemas import VideoInfo, ViewInput, ViewRole
-from labvision_evidence.storage import IncrementalArchivePublisher
-from labvision_evidence.telemetry import ResourceMonitor, _NvmlSampler
-from labvision_evidence.video_io import ViewFrameReader
+from visioncortex import storage, video_io
+from visioncortex.mllm import ArkAnalyzer
+from visioncortex.schemas import VideoInfo, ViewInput, ViewRole
+from visioncortex.storage import IncrementalArchivePublisher
+from visioncortex.telemetry import ResourceMonitor, _NvmlSampler
+from visioncortex.video_io import ViewFrameReader
 
 
 def test_mllm_reuses_one_http_connection_pool(monkeypatch, default_config):
@@ -43,7 +43,7 @@ def test_mllm_reuses_one_http_connection_pool(monkeypatch, default_config):
             self.closed = True
 
     monkeypatch.setenv("ARK_API_KEY", "configured-for-test")
-    monkeypatch.setattr("labvision_evidence.mllm.httpx.Client", FakeClient)
+    monkeypatch.setattr("visioncortex.mllm.httpx.Client", FakeClient)
     analyzer = ArkAnalyzer(default_config)
     first = analyzer._call("system", {"event": 1}, [])
     second = analyzer._call("system", {"event": 2}, [])
@@ -53,6 +53,128 @@ def test_mllm_reuses_one_http_connection_pool(monkeypatch, default_config):
     assert len(clients) == 1
     assert clients[0].posts == 2
     assert clients[0].closed is True
+
+
+def test_mllm_retries_schema_invalid_response_before_accepting(monkeypatch, default_config):
+    valid = {
+        "current_step": "抓取离心管",
+        "next_step": "移动离心管",
+        "next_step_evidence": {
+            "status": "inferred",
+            "reason": "当前抓取姿态支持谨慎预测",
+            "evidence_event_ids": ["EVT-1"],
+        },
+        "action_type_confirmed": "hand_object_contact",
+        "objects": ["gloved_hand", "tube"],
+        "hand_object_interactions": [
+            {"hand": "right", "object": "tube", "contact": "grasp"}
+        ],
+        "physical_change": {"before": "未抓取", "after": "已抓取"},
+        "per_view_observations": [
+            {"view_id": "fp", "observation": "手接触离心管"}
+        ],
+        "candidate_action_support_by_view": [
+            {
+                "view_id": "fp",
+                "supports_candidate_action": True,
+                "confidence": 0.9,
+                "reason": "接触清晰",
+            }
+        ],
+        "confirmed_action_support_by_view": [
+            {
+                "view_id": "fp",
+                "supports_confirmed_action": True,
+                "confidence": 0.9,
+                "reason": "接触清晰",
+            }
+        ],
+        "action_proof": {
+            "proof_type": "direct_other",
+            "visible_liquid_or_level_change": False,
+            "source_contact_visible": False,
+            "withdrawal_or_transport_visible": False,
+            "target_contact_visible": False,
+            "release_or_plunger_change_visible": False,
+            "dual_role_cv_sequence_verified": False,
+            "container_before_state_visible": False,
+            "container_after_state_visible": False,
+            "container_state_transition_completed": False,
+            "reason": "可见抓取",
+        },
+        "cross_view_consistency": "single_view",
+        "evidence_verdict": "confirmed",
+        "temporal_support": {
+            "before": "未接触",
+            "peak": "抓取",
+            "after": "保持抓取",
+        },
+        "confidence": 0.9,
+        "uncertainties": [],
+    }
+    responses = [{"confidence": 0.9}, valid]
+
+    class FakeResponse:
+        is_error = False
+
+        def __init__(self, result):
+            self.result = result
+
+        def json(self):
+            return {
+                "choices": [
+                    {"message": {"content": json.dumps(self.result)}}
+                ],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 2,
+                    "total_tokens": 12,
+                },
+            }
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            self.posts = 0
+
+        def post(self, *_args, **_kwargs):
+            response = FakeResponse(responses[self.posts])
+            self.posts += 1
+            return response
+
+        def close(self):
+            return None
+
+    default_config["mllm"]["max_retries"] = 2
+    monkeypatch.setenv("ARK_API_KEY", "configured-for-test")
+    monkeypatch.setattr("visioncortex.mllm.httpx.Client", FakeClient)
+    monkeypatch.setattr("visioncortex.mllm.time.sleep", lambda _seconds: None)
+    analyzer = ArkAnalyzer(default_config)
+
+    result = analyzer._call(
+        "system", {"event_id": "EVT-1"}, [], response_kind="event"
+    )
+
+    assert result["status"] == "completed"
+    assert result["attempts"] == 2
+    assert result["response_contract"] == (
+        "visioncortex-event-mllm-response/1"
+    )
+    assert analyzer.client.posts == 2
+
+
+def test_mllm_refuses_to_silently_truncate_evidence(monkeypatch, default_config):
+    monkeypatch.setenv("ARK_API_KEY", "configured-for-test")
+    analyzer = ArkAnalyzer(default_config)
+    try:
+        with pytest.raises(ValueError, match="silently discard images"):
+            analyzer._call(
+                "system",
+                {"event_id": "EVT-1"},
+                [("one", Path("one.jpg")), ("two", Path("two.jpg"))],
+                max_images=1,
+            )
+    finally:
+        analyzer.close()
 
 
 def test_encoder_capability_is_probed_once(monkeypatch):

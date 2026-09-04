@@ -5,12 +5,12 @@ import json
 import pytest
 import yaml
 
-from labvision_evidence.yolo_calibration import (
+from visioncortex.yolo_calibration import (
     _select_threshold,
     audit_yolo_dataset_integrity,
     evaluate_yolo_with_calibrated_thresholds,
 )
-from labvision_evidence.yolo_evaluation import evaluate_yolo_predictions
+from visioncortex.yolo_evaluation import evaluate_yolo_predictions
 
 
 def _dataset(tmp_path, *, duplicate_test_content: bool = False):

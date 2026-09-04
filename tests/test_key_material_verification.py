@@ -8,13 +8,13 @@ import cv2
 import numpy as np
 import pytest
 
-from labvision_evidence import archive
-from labvision_evidence.key_material_verification import (
+from visioncortex import archive
+from visioncortex.key_material_verification import (
     SelectiveVerificationBudget,
     plan_selective_key_material_verification,
     validate_selective_key_material_verification,
 )
-from labvision_evidence.schemas import (
+from visioncortex.schemas import (
     ActionType,
     EvidenceEvent,
     ExperimentGroup,

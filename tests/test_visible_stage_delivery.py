@@ -4,12 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from labvision_evidence import api
-from labvision_evidence.archive import ArchiveLayout
-from labvision_evidence.config import load_config
-from labvision_evidence.pipeline import EvidencePipeline
-from labvision_evidence.schemas import ActionType, EvidenceEvent
-from labvision_evidence.storage import (
+from visioncortex import api
+from visioncortex.archive import ArchiveLayout
+from visioncortex.config import load_config
+from visioncortex.pipeline import EvidencePipeline
+from visioncortex.schemas import ActionType, EvidenceEvent
+from visioncortex.storage import (
     IncrementalArchivePublisher,
     fixed_archive_staging_paths,
     initialize_nas_archive,
@@ -199,7 +199,7 @@ def test_task_page_exposes_each_completed_stage_output():
     app_js = (
         Path(__file__).parents[1]
         / "src"
-        / "labvision_evidence"
+        / "visioncortex"
         / "web"
         / "app.js"
     ).read_text(encoding="utf-8")
@@ -221,7 +221,7 @@ def test_operations_page_exposes_only_user_facing_nas_locations():
     app_js = (
         Path(__file__).parents[1]
         / "src"
-        / "labvision_evidence"
+        / "visioncortex"
         / "web"
         / "app.js"
     ).read_text(encoding="utf-8")

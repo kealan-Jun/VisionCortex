@@ -2,10 +2,10 @@ import json
 
 import pytest
 
-from labvision_evidence import pipeline as pipeline_module
-from labvision_evidence.config import load_config
-from labvision_evidence.pipeline import EvidencePipeline
-from labvision_evidence.schemas import RunManifest, ViewInput, ViewRole
+from visioncortex import pipeline as pipeline_module
+from visioncortex.config import load_config
+from visioncortex.pipeline import EvidencePipeline
+from visioncortex.schemas import RunManifest, ViewInput, ViewRole
 
 
 class _ReachedVideoProbe(RuntimeError):

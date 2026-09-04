@@ -36,7 +36,7 @@ $previousPythonPath = $env:PYTHONPATH
 $env:PYTHONPATH = $visionCortexSourceRoot
 
 try {
-    & $visionCortexPython -B -m labvision_evidence.runtime_preflight `
+    & $visionCortexPython -B -m visioncortex.runtime_preflight `
         --expected-source $visionCortexSourceRoot
     if ($LASTEXITCODE -ne 0) {
         throw "VisionCortex project runtime preflight failed: $LASTEXITCODE"
@@ -56,26 +56,26 @@ try {
     $Dev041Archive = $dev041Resolution.resolved_archive
     $Dev042Archive = $dev042Resolution.resolved_archive
 
-    & $visionCortexPython -B -m labvision_evidence.cli inspect-quality-ledger-inputs `
+    & $visionCortexPython -B -m visioncortex.cli inspect-quality-ledger-inputs `
         --archive $Dev041Archive
     if ($LASTEXITCODE -ne 0) {
         throw "DEV-041 quality-ledger input preflight failed: $LASTEXITCODE"
     }
 
-    & $visionCortexPython -B -m labvision_evidence.cli inspect-quality-ledger-inputs `
+    & $visionCortexPython -B -m visioncortex.cli inspect-quality-ledger-inputs `
         --archive $Dev042Archive
     if ($LASTEXITCODE -ne 0) {
         throw "DEV-042 quality-ledger input preflight failed: $LASTEXITCODE"
     }
 
-    & $visionCortexPython -B -m labvision_evidence.cli replay-quality-ledger `
+    & $visionCortexPython -B -m visioncortex.cli replay-quality-ledger `
         --archive $Dev041Archive `
         --config $visionCortexConfig
     if ($LASTEXITCODE -ne 0) {
         throw "DEV-041 quality-ledger replay failed: $LASTEXITCODE"
     }
 
-    & $visionCortexPython -B -m labvision_evidence.cli replay-quality-ledger `
+    & $visionCortexPython -B -m visioncortex.cli replay-quality-ledger `
         --archive $Dev042Archive `
         --config $visionCortexConfig
     if ($LASTEXITCODE -ne 0) {

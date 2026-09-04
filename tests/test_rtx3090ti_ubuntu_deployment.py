@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from labvision_evidence.api import _folder_open_command
+from visioncortex.api import _folder_open_command
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -149,7 +149,7 @@ def test_lan_systemd_service_is_authenticated_private_and_production_scoped():
 
 
 def test_linux_archive_folder_uses_xdg_open(monkeypatch, tmp_path):
-    monkeypatch.setattr("labvision_evidence.api.shutil.which", lambda name: "/usr/bin/xdg-open")
+    monkeypatch.setattr("visioncortex.api.shutil.which", lambda name: "/usr/bin/xdg-open")
 
     command = _folder_open_command(tmp_path, os_name="posix", platform="linux")
 

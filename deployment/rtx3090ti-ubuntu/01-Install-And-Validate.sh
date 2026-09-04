@@ -80,7 +80,7 @@ SAM2_BUILD_CUDA=0 "$venv_python" -m pip install \
   "SAM-2 @ git+https://github.com/facebookresearch/sam2.git@$sam2_revision"
 "$venv_python" -m pip install --no-deps -e "$project_root"
 
-export LABVISION_CONFIG=$config
+export VISIONCORTEX_CONFIG=$config
 export VISIONCORTEX_TENSORRT=required
 export VISIONCORTEX_ULTRALYTICS_CONFIG_DIR="$runtime_root/ThirdParty"
 export VISIONCORTEX_NAS_INDEX_CSV=${VISIONCORTEX_NAS_INDEX_CSV:-'/home/x1/桌面/nas/experiment_record_index.csv'}
@@ -110,12 +110,12 @@ print(f'PyTorch_CUDA={torch.version.cuda}')
 print(f'compute_capability={major}.{minor}')
 PY
 "$venv_python" -c "import tensorrt as trt; print(f'TensorRT={trt.__version__}')"
-"$venv_python" -m labvision_evidence prepare-public-models --config "$config"
+"$venv_python" -m visioncortex prepare-public-models --config "$config"
 
 if [[ $skip_engine == false ]]; then
-  "$venv_python" -m labvision_evidence prepare-engine --config "$config"
+  "$venv_python" -m visioncortex prepare-engine --config "$config"
 fi
-"$venv_python" -m labvision_evidence validate-models --config "$config"
+"$venv_python" -m visioncortex validate-models --config "$config"
 
 if [[ $skip_api_key_check == false && -z ${ARK_API_KEY:-} ]]; then
   printf '%s\n' 'ARK_API_KEY is not present. Export it securely before starting Web or a production run.' >&2

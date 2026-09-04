@@ -1,5 +1,5 @@
-from labvision_evidence.alignment import _nearest_pairs, _robust_affine, _timestamp_point
-from labvision_evidence.schemas import TimestampPoint
+from visioncortex.alignment import _nearest_pairs, _robust_affine, _timestamp_point
+from visioncortex.schemas import TimestampPoint
 
 
 def test_capture_epoch_local_time_is_not_a_playback_coordinate():

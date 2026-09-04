@@ -48,7 +48,7 @@
 - Lightweight development install: `python -m pip install -e ".[dev]"`.
 - Focused Python check: `python -m pytest tests/<relevant_test>.py`.
 - Python source changes: run relevant tests plus `ruff check src tests` and `python -m compileall -q src tests` when available.
-- Web JavaScript changes: run `node --check src/labvision_evidence/web/app.js` plus the relevant Python/Web characterization tests.
+- Web JavaScript changes: run `node --check src/visioncortex/web/app.js` plus the relevant Python/Web characterization tests.
 - Ubuntu deployment-script changes: run `bash -n` on the changed scripts.
 - Documentation-only changes: run `git diff --check` and validate referenced paths/commands. Do not install dependencies or run code tests locally unless the documentation changes an executable contract.
 - Stable promotion still requires the repository's complete deterministic GitHub Actions suite, including Ubuntu Python 3.11/3.12, Windows Python 3.11, repository policy, and no-NAS contracts.

@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 
-from labvision_evidence.model_promotion import evaluate_yolo_candidate_promotion
+from visioncortex.model_promotion import evaluate_yolo_candidate_promotion
 
 
 def _sha(path):

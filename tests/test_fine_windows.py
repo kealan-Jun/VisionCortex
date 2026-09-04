@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from labvision_evidence.pipeline import EvidencePipeline
-from labvision_evidence.schemas import (
+from visioncortex.pipeline import EvidencePipeline
+from visioncortex.schemas import (
     ActionCandidate,
     ActionType,
     AlignmentTransform,

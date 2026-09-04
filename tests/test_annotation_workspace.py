@@ -5,8 +5,8 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from labvision_evidence import api
-from labvision_evidence.annotation_workspace import (
+from visioncortex import api
+from visioncortex.annotation_workspace import (
     export_reviewed_ground_truth,
     load_annotation_workspace,
     record_annotation_decision,

@@ -1,4 +1,4 @@
-from labvision_evidence.archive import (
+from visioncortex.archive import (
     _canonical_grounding_label,
     _filter_grounded_actor_boxes,
     _relabel_participant_objects,
@@ -7,11 +7,11 @@ from labvision_evidence.archive import (
     _select_state_container_candidate,
     _view_specific_participant_objects,
 )
-from labvision_evidence.pipeline import (
+from visioncortex.pipeline import (
     _synchronize_final_event_state_receipts,
     _synchronize_segments_with_final_key_events,
 )
-from labvision_evidence.schemas import (
+from visioncortex.schemas import (
     ActionType,
     EvidenceEvent,
     ExperimentGroup,

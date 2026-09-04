@@ -9,9 +9,9 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from labvision_evidence import api
-from labvision_evidence.run_queue import DurableRunQueue
-from labvision_evidence.upload_sessions import (
+from visioncortex import api
+from visioncortex.run_queue import DurableRunQueue
+from visioncortex.upload_sessions import (
     StorageReservationError,
     UploadSessionStore,
 )
@@ -298,7 +298,7 @@ def test_web_client_uses_resumable_sessions_instead_of_one_shot_multipart():
     app_js = (
         Path(__file__).resolve().parents[1]
         / "src"
-        / "labvision_evidence"
+        / "visioncortex"
         / "web"
         / "app.js"
     ).read_text(encoding="utf-8")

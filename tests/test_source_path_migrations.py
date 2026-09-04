@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from labvision_evidence.source_path_migrations import (
+from visioncortex.source_path_migrations import (
     SourcePathResolver,
     create_migration_receipt,
     load_migration_receipt,

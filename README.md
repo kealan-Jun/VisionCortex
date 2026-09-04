@@ -1,4 +1,6 @@
-# LabVision Evidence
+# VisionCortex
+
+`VisionCortex` 是仓库、安装包、命令行、API、网页、模型与数据注册表、报告和证据产物的唯一项目名称。新增能力和产物必须继续使用该名称及 `visioncortex-` 机器标识前缀。
 
 ## 用户快速启动
 
@@ -35,7 +37,7 @@ RTX 4060 真实六路运行节点必须先阅读
 [`docs/RTX4060-真实六路运行回传模板.md`](docs/RTX4060-真实六路运行回传模板.md)。
 运行节点只同步冻结提交并执行真实全链路，不修改代码、不运行开发测试。
 
-> 冻结基线：六路、多视角、3 小时湿实验视频的时间对齐、有界实验筛选、五类关键素材和细粒度步骤理解流水线。RTX 4060 部署、固定 NAS 基准、缓存目录与开发协作方式见 [RTX4060-交接与运行说明.md](RTX4060-交接与运行说明.md)。
+> 冻结基线：六路、多视角、3 小时湿实验视频的时间对齐、有界实验筛选、六类关键素材和细粒度步骤理解流水线。RTX 4060 部署、固定 NAS 基准、缓存目录与开发协作方式见 [RTX4060-交接与运行说明.md](RTX4060-交接与运行说明.md)。
 
 ## 3090 Ti 局域网服务器
 
@@ -121,29 +123,29 @@ RTX 3090 Ti 配置还启用有界选择性复核：液体、容器状态和移�
 
 ```bash
 # 六视角媒体、六类关键素材、步骤理解、日报、PDF、JSON/JSONL/SQLite
-labvision run-local-acceptance \
+visioncortex run-local-acceptance \
   --output /srv/sentinel-data/VisionCortex3090Ti/Runtime/LocalAcceptance \
   --config configs/rtx3090ti-ubuntu-local.yaml
 
 # 六路 CUDA 解码 + 双 TensorRT 角色引擎硬件压测
-labvision benchmark-local-hardware --output <local-output> \
+visioncortex benchmark-local-hardware --output <local-output> \
   --media <h264-1> --media <h264-2> --media <h264-3> \
   --media <h264-4> --media <h264-5> --media <h264-6>
 
 # 依次测量每角色 1/2/3 个 TensorRT 压测上下文；只给出容量结论，不自动改生产并发
-labvision tune-local-hardware --output <new-local-output> \
+visioncortex tune-local-hardware --output <new-local-output> \
   --duration-seconds 20 --config configs/rtx3090ti-ubuntu-local.yaml \
   --media <h264-1> --media <h264-2> --media <h264-3> \
   --media <h264-4> --media <h264-5> --media <h264-6>
 
 # 真实执行全部本地生产 CV 模型；使用公开人工标注样本，不访问 NAS/豆包
-labvision accept-local-models \
+visioncortex accept-local-models \
   --dataset /srv/sentinel-data/VisionCortex3090Ti/Runtime/PublicDatasets/LabPicsChemistry/extracted \
   --output /srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/<new-run> \
   --config configs/rtx3090ti-ubuntu-local.yaml
 
 # 只读统计正式认证仍缺多少真值；不扫描生产归档
-labvision model-certification-readiness \
+visioncortex model-certification-readiness \
   --config configs/rtx3090ti-ubuntu-production.yaml \
   --output /srv/sentinel-data/VisionCortex3090Ti/Runtime/Model-Quality/readiness.json
 
@@ -173,13 +175,13 @@ Waseda Chemical Apparatus 公共人工框数据已固定 URL、大小与 SHA-256
 补充 hand、pipette 和六类实验器具，但不能直接替换项目的 21 类生产本体：
 
 ```bash
-labvision prepare-public-dataset --dataset-id WasedaChemicalApparatus \
+visioncortex prepare-public-dataset --dataset-id WasedaChemicalApparatus \
   --destination <local-public-dataset-root>
-labvision build-public-yolo-training-view --source <extracted-root> \
+visioncortex build-public-yolo-training-view --source <extracted-root> \
   --dataset-receipt <dataset-receipt.json> --output <new-zero-copy-view>
-labvision train-yolo-model --dataset <new-zero-copy-view> --base-model <best.pt> \
+visioncortex train-yolo-model --dataset <new-zero-copy-view> --base-model <best.pt> \
   --output <new-candidate> --epochs 60 --max-hours 1.5 --patience 15
-labvision evaluate-yolo-model-on-human-truth --dataset <new-zero-copy-view> \
+visioncortex evaluate-yolo-model-on-human-truth --dataset <new-zero-copy-view> \
   --model <new-candidate>/weights/best.pt --split test --output <new-evaluation>
 ```
 
@@ -187,7 +189,7 @@ labvision evaluate-yolo-model-on-human-truth --dataset <new-zero-copy-view> \
 重新进入高学习率 warmup；这些参数会写入训练回执：
 
 ```bash
-labvision train-yolo-model --dataset <mapped-21-class-union> \
+visioncortex train-yolo-model --dataset <mapped-21-class-union> \
   --audit-receipt <integrity-audit.json> \
   --base-model <previous-best.pt> --output <fine-tuned-candidate> \
   --optimizer AdamW --learning-rate 0.001 \
@@ -201,14 +203,14 @@ SHA-256；157 条多边形标注会在验证后确定性转为其最小外接框
 过采样，但 val/test 永不重复：
 
 ```bash
-labvision prepare-public-dataset --dataset-id ChemEq25 \
+visioncortex prepare-public-dataset --dataset-id ChemEq25 \
   --destination <local-public-dataset-root>
-labvision build-public-yolo-training-view --source <chemeq-extracted-root> \
+visioncortex build-public-yolo-training-view --source <chemeq-extracted-root> \
   --dataset-receipt <chemeq-dataset-receipt.json> --output <chemeq-zero-copy-view>
-labvision build-mapped-public-yolo-union \
+visioncortex build-mapped-public-yolo-union \
   --source WasedaChemicalApparatus=<waseda-zero-copy-view> \
   --source ChemEq25=<chemeq-zero-copy-view> --output <mapped-21-class-union>
-labvision audit-yolo-dataset-integrity --dataset <mapped-21-class-union> \
+visioncortex audit-yolo-dataset-integrity --dataset <mapped-21-class-union> \
   --output <new-integrity-audit> --focus-classes hand,pipette
 ```
 
@@ -219,19 +221,19 @@ labvision audit-yolo-dataset-integrity --dataset <mapped-21-class-union> \
 最高的候选生成阈值，随后才可读取测试集：
 
 ```bash
-labvision calibrate-yolo-confidence --dataset <leakage-free-union> \
+visioncortex calibrate-yolo-confidence --dataset <leakage-free-union> \
   --model <candidate>/weights/best.pt --audit-receipt <integrity-audit.json> \
   --output <new-val-calibration> --target-classes hand,pipette
-labvision evaluate-yolo-calibrated --dataset <leakage-free-union> \
+visioncortex evaluate-yolo-calibrated --dataset <leakage-free-union> \
   --model <candidate>/weights/best.pt \
   --calibration-receipt <new-val-calibration>/threshold-calibration.json \
   --output <new-test-evaluation> \
   --test-exposure-status first_use_independent
-labvision calibrate-yolo-world-prompts --dataset <leakage-free-union> \
+visioncortex calibrate-yolo-world-prompts --dataset <leakage-free-union> \
   --model <yolo-world-v2.pt> --audit-receipt <integrity-audit.json> \
   --prompt-map configs/models/yolo-world-hand-pipette-prompts.json \
   --output <new-yolo-world-val-calibration>
-labvision measure-yolo-candidate-tensorrt --dataset <leakage-free-union> \
+visioncortex measure-yolo-candidate-tensorrt --dataset <leakage-free-union> \
   --model <candidate>/weights/best.pt --audit-receipt <integrity-audit.json> \
   --output <new-candidate-tensorrt-benchmark> \
   --image-size 960 --export-batch 4 --benchmark-image-limit 256
@@ -254,14 +256,14 @@ TensorRT 候选基准固定空间尺寸与导出 batch，并显式按完整静�
 A/B 回执也必须 fail-closed：
 
 ```bash
-labvision evaluate-yolo-candidate-promotion \
+visioncortex evaluate-yolo-candidate-promotion \
   --evaluation-receipt <evaluation>/visioncortex-evaluation-receipt.json \
   --output <promotion>/promotion-decision.json
 ```
 
 固定基准不会重复创建实验目录：先启动 Web，再运行 `deployment\rtx4060\04-重跑固定六路基准.ps1`，由常驻 Web 服务异步执行并复用 `Y:\VisionCortexExperimentArchive\CustomFlow_standard_correct_12_ABCFA_0001--exp_20260810_144014_e918b762`。不要在有超时限制的命令包装器里前台运行 `run-fixed-benchmark`。其他用户上传任务仍按实际上传路数动态创建独立档案。
 
-面向化学湿实验长视频的多视角证据流水线。系统把第一人称与第三人称视频先对齐，再以两套 21 类 YOLO 模型和 ByteTrack 生成候选，经过跨视角审计后，提取实验片段、五类物理动作关键帧/关键片段/时间戳，并调用豆包多模态模型生成步骤级理解。
+面向化学湿实验长视频的多视角证据流水线。系统把第一人称与第三人称视频先对齐，再以两套 21 类 YOLO 模型和 ByteTrack 生成候选，经过跨视角审计后，提取实验片段、六类物理动作关键帧/关键片段/时间戳，并调用豆包多模态模型生成步骤级理解。
 
 ## 产出
 
@@ -279,6 +281,7 @@ labvision evaluate-yolo-candidate-promotion \
     run_manifest.json
     time_alignment.json
     aligned_timestamps.csv
+    alignment_quality_gate.json       # 正式证据门禁、逐路可用区间与隔离分片
     evidence_package.json
     physical_change_log.json
     evidence_package_eval.json
@@ -333,27 +336,38 @@ $env:ARK_API_KEY = '<在本机安全设置，不要写入 yaml 或 git>'
 - 时间戳：`timestamp_ms` / `timestamp_s` / `timestamp` / `pts_time`
 - 可选共同时间：`global_timestamp_ms` / `wallclock_ms`
 
-时间戳为 ISO-8601 时也可解析。若 CSV 没有共同时间列，系统以视频起点为粗对齐，并用跨视角运动变化序列进行视觉锚点互相关校准；如果已有共同时间，先做最近邻鲁棒仿射拟合，再用视觉锚点修正残余偏移。
+时间戳为 ISO-8601 时也可解析。对齐阶段对每个物理分片读取有上限的首、中、尾
+分布采样，验证 `clock_sync_valid`、单调性、跳时和漂移，再保存逐分片变换与误差。
+系统优先使用质量最好的时钟作为内部基准，同时保留配置中的第一人称偏好；生产
+任务即使已有高置信度共同时间，也执行开头、中间、结尾的轻量视觉锚点审计。
+若 CSV 没有共同时间列，系统仍保留原有视频起点粗对齐能力并明确标记为
+`local_timeline_assumption`；3090 Ti 正式配置要求该结果获得可靠视觉支持后才能
+进入正式证据。`aligned_timestamps.csv` 使用完整基准时间轴并为每路记录
+`<view>_available`，单路短录或坏分片只会被隔离，不再截断其他视角。
+`alignment_runtime.json` 分别记录共享时钟采样、逐路视觉审计、分片拟合耗时和
+视觉特征缓存规模，便于在真实长视频上核算新增质量检查的速度成本。
+进入 GPU 队列前的 `prequeue_input_preflight.json` 同时记录媒体探测、时钟检查和
+总耗时；NAS 模式只做有界元数据/时钟读取，不复制或完整哈希原始长视频。
 
 ## 运行
 
 ```powershell
-labvision validate-models --config .\configs\default.yaml
-labvision prepare-engine --config .\configs\default.yaml
-labvision run --manifest .\examples\manifest.example.yaml --config .\configs\default.yaml
+visioncortex validate-models --config .\configs\default.yaml
+visioncortex prepare-engine --config .\configs\default.yaml
+visioncortex run --manifest .\examples\manifest.example.yaml --config .\configs\default.yaml
 ```
 
 没有真实视频时可完整验证目录、JSON 契约和评估器：
 
 ```powershell
-labvision dry-run --output .\outputs\dry-run
+visioncortex dry-run --output .\outputs\dry-run
 pytest -q
 ```
 
 上传服务：
 
 ```powershell
-labvision serve --host 127.0.0.1 --port 8000
+visioncortex serve --host 127.0.0.1 --port 8000
 ```
 
 浏览器先以 `POST /api/upload-sessions` 创建动态空间预留，再对
@@ -362,7 +376,15 @@ labvision serve --host 127.0.0.1 --port 8000
 从 `GET /api/runs/{run_id}` 查询。旧的 `POST /api/runs` 一次性 multipart 接口暂时保留
 用于兼容旧客户端，新页面不再使用它。API 只绑定本机，除非显式改为 `0.0.0.0`。
 
-已完成档案不会依赖浏览器加载整份大 JSON 才能查找关键素材：`GET /api/key-events` 支持跨档案或指定档案的全文、动作类型、实验组、双视角和时间范围筛选，并通过与筛选条件绑定的 `cursor` 分页；`GET /api/key-events/{event_uid}` 返回事件及带 SHA-256 的素材引用；`GET /api/evidence/{evidence_uid}` 可一跳回到 `evidence_package.json` 的 JSON Pointer 和原视频物理分片；`GET /api/physical-changes` 查询明确观测到的对象前后状态变化，不会替 unknown 区间补状态。稳定事件 UID 格式为 `{archive_id}:{parent_event_id}:{event_id}`。SQLite/JSONL 都是权威归档 JSON 的派生产物，可随时重建，不会取代原 JSON。
+同一浏览器机位既可上传一个连续视频，也可按顺序上传多个原始分片；两种输入都会
+转换为同一份 `RunManifest`，不会创建另一条分析链。新上传默认以 2 个文件并发、每个
+文件内部顺序分块传输，每块都必须通过 SHA-256；小文件保留完整 SHA-256，大文件用
+持久化有序分块哈希树封存，提交时不再从 NAS 全量重读。上传完成后、进入 GPU 队列前，
+服务会校验设备角色、媒体可读性、分片顺序和 CSV 时钟覆盖，并在
+`JSON-Config-Files/Input-Manifests/input_seal.json` 写入与 NAS 零复制入口一致的输入
+封条。未提交的会话可用 `DELETE /api/upload-sessions/{session_id}` 取消并释放预留空间。
+
+已完成档案不会依赖浏览器加载整份大 JSON 才能查找关键素材：`GET /api/key-events` 支持跨档案或指定档案的全文、动作类型、实验组、双视角和时间范围筛选，并通过与筛选条件绑定的 `cursor` 分页；`GET /api/key-events/{event_uid}` 返回事件及带 SHA-256 的素材引用；`GET /api/evidence/{evidence_uid}` 可一跳回到 `evidence_package.json` 的 JSON Pointer 和原视频物理分片；`GET /api/physical-changes` 查询明确观测到的对象前后状态变化，不会替 unknown 区间补状态。稳定事件 UID 格式为 `{archive_id}:{parent_event_uid}:{event_id}`；其中稳定实验组 UID 不会因前面插入其他实验而改变，原有 `GROUP-xxxx` 继续作为页面顺序编号。SQLite/JSONL 都是权威归档 JSON 的派生产物，可随时重建，不会取代原 JSON。
 
 开发仓与稳定发布仓采用单向晋升，具体规则见 [双仓发布策略](docs/DUAL-REPOSITORY-RELEASE-POLICY.md)；旧 RealityLoopAI 仓库的全量只读审计与复用结论见 [旧仓库审计报告](docs/REALITYLOOP-LEGACY-REPOSITORY-AUDIT-20260817.md)。
 
@@ -390,12 +412,12 @@ labvision serve --host 127.0.0.1 --port 8000
 
 任务页按“原视频留存 → 预检/对齐 → 有界实验发现 → 实验片段 → 关键素材 → 证据验收 → 日报/PDF”七个用户环节展示。完成状态以 `JSON-Config-Files/Stage-Receipts/*.json` 的原子阶段回执为准，并明确显示每步归档目录、阶段耗时、当前/下一步、逐视角进度和数据更新时间；遥测超过 20 秒没有更新时会显式提示状态可能延迟，而不会误判任务已经停止。
 
-固定六路基准在归档前还会生成 `JSON-Config-Files/quality_acceptance.json`。评估基线只用于验收、不参与推理，分别检查五段实验的 Precision/Recall、起止边界误差、连续/独立关系、五类关键动作覆盖、关键帧/关键片段与模型结果完整性、跨视角支持或显式不确定性。任何正式固定归档缺少自动质量验收、日报/PDF或证据包验收，均拒绝覆盖 NAS 正式目录；目录提升后再做 SHA-256 清单核验。
+固定六路基准在归档前还会生成 `JSON-Config-Files/quality_acceptance.json`。评估基线只用于验收、不参与推理，分别检查五段实验的 Precision/Recall、起止边界误差、连续/独立关系、六类关键动作覆盖、关键帧/关键片段与模型结果完整性、跨视角支持或显式不确定性。任何正式固定归档缺少自动质量验收、日报/PDF或证据包验收，均拒绝覆盖 NAS 正式目录；目录提升后再做 SHA-256 清单核验。
 
 已有档案可以离线复验，不解码视频，也不调用模型：
 
 ```powershell
-labvision validate-archive-quality `
+visioncortex validate-archive-quality `
   --archive <实验档案目录> `
   --baseline configs/acceptance/six-view-three-hour-reviewed-baseline.json `
   --write

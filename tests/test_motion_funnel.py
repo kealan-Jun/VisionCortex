@@ -8,10 +8,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from labvision_evidence import video_io
-from labvision_evidence.actions import fuse_motion_probe_candidates
-from labvision_evidence.alignment import _absolute_clock_transform
-from labvision_evidence.detection import (
+from visioncortex import video_io
+from visioncortex.actions import fuse_motion_probe_candidates
+from visioncortex.alignment import _absolute_clock_transform
+from visioncortex.detection import (
     ChunkEnd,
     FramePacket,
     ProducerEnd,
@@ -23,7 +23,7 @@ from labvision_evidence.detection import (
     nearest_frame_evidence_many,
     scan_videos,
 )
-from labvision_evidence.schemas import (
+from visioncortex.schemas import (
     ActionCandidate,
     ActionType,
     AlignmentTransform,
@@ -35,7 +35,7 @@ from labvision_evidence.schemas import (
     ViewInput,
     ViewRole,
 )
-from labvision_evidence.video_io import probe_views
+from visioncortex.video_io import probe_views
 
 
 def _motion(view_id: str, role: ViewRole, start_ms: float, end_ms: float) -> ActionCandidate:
@@ -104,7 +104,7 @@ def test_parallel_segment_probe_preserves_virtual_order(monkeypatch):
             size_bytes=100,
         )
 
-    monkeypatch.setattr("labvision_evidence.video_io.probe_video", fake_probe)
+    monkeypatch.setattr("visioncortex.video_io.probe_video", fake_probe)
     info = probe_views([view], workers=2)["fp"]
     assert [segment.path.name for segment in info.segments] == [
         "segment-2.mp4",
@@ -135,10 +135,10 @@ def test_parallel_probe_never_uses_wall_clock_pause_as_media_duration(monkeypatc
     recorder_clock = media.model_copy(update={"duration_ms": 410_402.117})
 
     monkeypatch.setattr(
-        "labvision_evidence.video_io.probe_video", lambda _path: media.model_copy()
+        "visioncortex.video_io.probe_video", lambda _path: media.model_copy()
     )
     monkeypatch.setattr(
-        "labvision_evidence.video_io._clock_metadata_video_info",
+        "visioncortex.video_io._clock_metadata_video_info",
         lambda _video, _clock: recorder_clock.model_copy(),
     )
 
@@ -179,7 +179,7 @@ def test_recorder_sidecars_avoid_remote_mp4_probe(tmp_path, monkeypatch):
     def forbidden_probe(_path):
         raise AssertionError("recorder sidecars should avoid remote MP4 probing")
 
-    monkeypatch.setattr("labvision_evidence.video_io.probe_video", forbidden_probe)
+    monkeypatch.setattr("visioncortex.video_io.probe_video", forbidden_probe)
 
     info = probe_views([view], workers=1, prefer_clock_metadata=True)["fp"]
 
@@ -265,8 +265,8 @@ def test_inference_batch_crosses_chunk_boundary_without_losing_checkpoint(
             output.put(ChunkEnd(view_id=view.view_id, chunk_index=chunk, total_chunks=2))
         output.put(ProducerEnd(view_id=view.view_id))
 
-    monkeypatch.setattr("labvision_evidence.detection.RoleScanner", FakeScanner)
-    monkeypatch.setattr("labvision_evidence.detection._producer", fake_producer)
+    monkeypatch.setattr("visioncortex.detection.RoleScanner", FakeScanner)
+    monkeypatch.setattr("visioncortex.detection._producer", fake_producer)
     default_config["performance"]["coarse_batch_size"] = 4
     default_config["performance"]["inference_batch_wait_ms"] = 100
     paths = scan_videos(
@@ -343,8 +343,8 @@ def test_fine_scan_uses_six_decode_slots_without_multiplying_every_source(
         decode_workers[view.view_id] = _args[-1]
         output.put(ProducerEnd(view_id=view.view_id))
 
-    monkeypatch.setattr("labvision_evidence.detection.RoleScanner", FakeScanner)
-    monkeypatch.setattr("labvision_evidence.detection._producer", fake_producer)
+    monkeypatch.setattr("visioncortex.detection.RoleScanner", FakeScanner)
+    monkeypatch.setattr("visioncortex.detection._producer", fake_producer)
     default_config["performance"]["fine_active_decode_slots"] = 6
     default_config["performance"]["fine_first_person_decode_workers"] = 2
     default_config["performance"]["fine_third_person_decode_workers"] = 2
@@ -430,8 +430,8 @@ def test_motion_probe_can_run_yolo_on_the_same_sampled_frames(
         output.put(ChunkEnd(view_id=view.view_id, chunk_index=0, total_chunks=1))
         output.put(ProducerEnd(view_id=view.view_id))
 
-    monkeypatch.setattr("labvision_evidence.detection.RoleScanner", FakeScanner)
-    monkeypatch.setattr("labvision_evidence.detection._producer", fake_producer)
+    monkeypatch.setattr("visioncortex.detection.RoleScanner", FakeScanner)
+    monkeypatch.setattr("visioncortex.detection._producer", fake_producer)
     default_config["performance"]["motion_probe_run_yolo"] = True
     default_config["performance"]["motion_probe_batch_size"] = 4
 
@@ -453,6 +453,76 @@ def test_motion_probe_can_run_yolo_on_the_same_sampled_frames(
     assert runtime["backend"] != "motion_only"
     assert runtime["motion_sample_count"] == 4
     assert runtime["inference_frame_count"] == 4
+
+
+def test_coarse_decode_embeds_the_logical_motion_probe_grid(
+    monkeypatch, default_config
+):
+    view = ViewInput(
+        view_id="fp",
+        role=ViewRole.FIRST_PERSON,
+        video=Path("shared.mp4"),
+    )
+    info = VideoInfo(
+        path=Path("shared.mp4"),
+        duration_ms=3_000.0,
+        fps=30.0,
+        width=8,
+        height=8,
+        frame_count=90,
+    )
+
+    def fake_frames(*_args, **_kwargs):
+        for index in range(6):
+            frame = np.full((8, 8, 3), index * 10, dtype=np.uint8)
+            yield index, float(index * 500), frame
+
+    monkeypatch.setattr(
+        "visioncortex.detection.iter_view_sampled_frames", fake_frames
+    )
+    default_config["performance"].update(
+        {
+            "coarse_shared_motion_probe_enabled": True,
+            "motion_probe_fps": 0.5,
+            "motion_probe_camera_motion_compensation": False,
+            "motion_probe_segment_workers": 1,
+        }
+    )
+    output: queue.Queue = queue.Queue()
+
+    _producer(
+        view,
+        info,
+        output,
+        set(),
+        default_config,
+        None,
+        2.0,
+        8,
+        False,
+        "cpu",
+        0.5,
+        (8, 8),
+        None,
+        "coarse",
+    )
+
+    packets = []
+    while not output.empty():
+        item = output.get()
+        if isinstance(item, FramePacket):
+            packets.append(item)
+    assert [item.local_ms for item in packets] == [
+        0.0,
+        500.0,
+        1_000.0,
+        1_500.0,
+        2_000.0,
+        2_500.0,
+    ]
+    assert [
+        item.local_ms for item in packets if item.motion_probe_score is not None
+    ] == [0.0, 2_000.0]
 
 
 def test_role_scanner_records_oom_batch_contraction(default_config):
@@ -534,7 +604,7 @@ def test_parallel_motion_probe_preserves_segment_order(monkeypatch, default_conf
         time.sleep((2_000.0 - start_ms) / 100_000.0)
         yield int(start_ms / 1_000.0), start_ms, np.zeros((8, 8, 3), dtype=np.uint8)
 
-    monkeypatch.setattr("labvision_evidence.detection.iter_view_sampled_frames", fake_frames)
+    monkeypatch.setattr("visioncortex.detection.iter_view_sampled_frames", fake_frames)
     default_config["performance"]["motion_probe_segment_workers"] = 3
     default_config["performance"]["synchronized_segment_waves"] = False
     output: queue.Queue = queue.Queue()
@@ -592,7 +662,7 @@ def test_fine_prefetch_decodes_concurrently_but_emits_in_time_order(
         time.sleep((4_000.0 - start_ms) / 100_000.0)
         yield int(start_ms / 1_000.0), start_ms, np.zeros((8, 8, 3), dtype=np.uint8)
 
-    monkeypatch.setattr("labvision_evidence.detection.iter_view_sampled_frames", fake_frames)
+    monkeypatch.setattr("visioncortex.detection.iter_view_sampled_frames", fake_frames)
     default_config["performance"]["fine_chunk_seconds"] = 1
     default_config["performance"]["fine_first_person_decode_workers"] = 2
     default_config["performance"]["fine_decode_prefetch_frames"] = 1
@@ -654,7 +724,7 @@ def test_fine_prefetch_stops_other_decoders_after_failure(monkeypatch, default_c
             raise RuntimeError("decode unit failed")
         yield int(start_ms / 1_000.0), start_ms, np.zeros((8, 8, 3), dtype=np.uint8)
 
-    monkeypatch.setattr("labvision_evidence.detection.iter_view_sampled_frames", fake_frames)
+    monkeypatch.setattr("visioncortex.detection.iter_view_sampled_frames", fake_frames)
     default_config["performance"]["fine_chunk_seconds"] = 1
     default_config["performance"]["fine_first_person_decode_workers"] = 2
     default_config["performance"]["fine_decode_prefetch_frames"] = 1
@@ -727,7 +797,7 @@ def test_source_activity_maps_window_units_to_virtual_segments(
         yield from ()
 
     monkeypatch.setattr(
-        "labvision_evidence.detection.iter_view_sampled_frames", no_frames
+        "visioncortex.detection.iter_view_sampled_frames", no_frames
     )
     output: queue.Queue = queue.Queue()
     output.activity_path = tmp_path / "source_activity.jsonl"
@@ -838,7 +908,7 @@ def test_decode_fallback_is_visible_in_audit_log(monkeypatch, tmp_path, caplog):
     monkeypatch.setattr(video_io, "_ffmpeg_frame_iterator", ffmpeg_frame)
     monkeypatch.setattr(video_io.shutil, "which", lambda _name: "ffmpeg")
 
-    with caplog.at_level("WARNING", logger="labvision_evidence.video_io"):
+    with caplog.at_level("WARNING", logger="visioncortex.video_io"):
         frames = list(
             video_io.iter_sampled_frames(
                 source,

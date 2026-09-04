@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from labvision_evidence import detection
+from visioncortex import detection
 
 
 CLASSES = {

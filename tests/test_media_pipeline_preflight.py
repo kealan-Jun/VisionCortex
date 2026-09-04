@@ -1,8 +1,8 @@
 from pathlib import Path
 
-from labvision_evidence import pipeline as pipeline_module
-from labvision_evidence.pipeline import run_media_pipeline_preflight
-from labvision_evidence.schemas import RunManifest, VideoInfo, ViewInput, ViewRole
+from visioncortex import pipeline as pipeline_module
+from visioncortex.pipeline import run_media_pipeline_preflight
+from visioncortex.schemas import RunManifest, VideoInfo, ViewInput, ViewRole
 
 
 def _info(path: Path) -> VideoInfo:

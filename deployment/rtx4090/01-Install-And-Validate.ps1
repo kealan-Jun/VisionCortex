@@ -69,7 +69,7 @@ if (-not (Test-Path -LiteralPath $Python -PathType Leaf)) {
 }
 & $Python -m pip install --no-index --find-links $Wheelhouse --upgrade pip setuptools wheel
 if ($LASTEXITCODE -ne 0) { throw 'Offline packaging-tool installation failed.' }
-& $Python -m pip install --no-index --find-links $Wheelhouse 'labvision-evidence[tensorrt]==0.1.0'
+& $Python -m pip install --no-index --find-links $Wheelhouse 'visioncortex[tensorrt]==0.1.0'
 if ($LASTEXITCODE -ne 0) { throw 'Offline VisionCortex dependency installation failed.' }
 
 $env:PATH = "$FfmpegBin;$env:PATH"
@@ -107,10 +107,10 @@ if ([string]::IsNullOrWhiteSpace($env:ARK_API_KEY) -and -not $SkipApiKeyPrompt) 
 }
 
 if (-not $SkipTensorRTExport) {
-    & $Python -m labvision_evidence prepare-engine --config $Config
+    & $Python -m visioncortex prepare-engine --config $Config
     if ($LASTEXITCODE -ne 0) { throw 'RTX 4090 TensorRT engine export failed.' }
 }
-& $Python -m labvision_evidence validate-models --config $Config
+& $Python -m visioncortex validate-models --config $Config
 if ($LASTEXITCODE -ne 0) { throw 'The two 21-class YOLO models failed validation.' }
 
 Write-Host ''

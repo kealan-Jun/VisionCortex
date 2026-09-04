@@ -1,8 +1,8 @@
 import time
 from pathlib import Path
 
-from labvision_evidence import video_io
-from labvision_evidence.schemas import (
+from visioncortex import video_io
+from visioncortex.schemas import (
     VideoInfo,
     VideoSegmentInfo,
     VideoSegmentInput,
