@@ -400,7 +400,12 @@ performance:
   source_workers: 12
   decode_queue_depth: 64
   cpu_decode_threads: 12
-  yolo_inference_workers: 2
+  # The scheduler now consumes this value as real per-role scanner capacity.
+  # With the production 1+N camera topology, three third-person partitions plus
+  # the first-person scanner keep four batch-4 TensorRT contexts resident. The
+  # existing four-context hardware receipt peaked at 13.97 GiB, below the 90%
+  # memory contract; real-video telemetry still decides final promotion.
+  yolo_inference_workers: 3
   materialization_workers: 3
   # Exact derived MP4s are immutable and content-addressed beneath the existing
   # NAS cache root. Cold audits populate the cache without reading it; their
