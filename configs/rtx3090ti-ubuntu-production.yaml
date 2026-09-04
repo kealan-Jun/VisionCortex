@@ -240,16 +240,19 @@ key_materials:
 performance:
   profile: rtx3090ti-24gb-ubuntu-dynamic-multiview
   tensor_rt: required
-  # Strengthen the existing motion -> coarse -> fine funnel in place. The
-  # 0.5 FPS exact grid contains every former 0.1 FPS timestamp, while all live
-  # views participate and wearable-camera translation is compensated before
-  # motion bursts are ranked.
-  motion_probe_fps: 0.5
+  # Keep discovery proportional to experiment time instead of camera count.
+  # The wearable boundary view establishes a deterministic 0.1 FPS timeline;
+  # its YOLO ledger is reused by coarse discovery, and independent static
+  # views enter only bounded 20 FPS waves for unresolved aligned anchors.
+  motion_probe_fps: 0.1
   motion_probe_max_width: 416
-  motion_probe_keyframes_only: false
-  motion_probe_run_yolo: false
-  coarse_reuse_motion_probe: false
-  motion_probe_all_views: true
+  motion_probe_keyframes_only: true
+  motion_probe_sparse_strategy: auto
+  motion_probe_run_yolo: true
+  coarse_reuse_motion_probe: true
+  motion_probe_all_views: false
+  motion_probe_first_person_views: 1
+  motion_probe_third_person_views: 0
   motion_probe_camera_motion_compensation: true
   motion_probe_affine_compensation_enabled: true
   motion_probe_max_rotation_degrees: 8.0
@@ -262,17 +265,18 @@ performance:
   motion_probe_camera_motion_max_shift_ratio: 0.35
   motion_probe_first_person_quality_fallback: true
   motion_probe_first_person_raw_motion_weight: 0.25
-  # The original coarse node now performs its own all-view full-timeline scan.
-  # A 2 FPS grid contains the former 0.1 FPS evidence grid and removes the
-  # early-window blind spot without introducing a parallel pipeline.
+  # Retain the stronger 2 FPS detector setting for bounded fallback scans, but
+  # do not execute it across every camera and every idle hour. The reusable
+  # 0.1 FPS first-person ledger is the coarse boundary source in the normal
+  # path; unsupported windows remain recall guards for progressive fine scan.
   coarse_detection_fps: 2.0
   coarse_image_size: 416
   coarse_keyframes_only: false
   coarse_all_views: true
-  coarse_full_timeline_scan: true
-  coarse_shared_motion_probe_enabled: true
-  coarse_frame_index_enabled: true
-  coarse_coverage_gate_enabled: true
+  coarse_full_timeline_scan: false
+  coarse_shared_motion_probe_enabled: false
+  coarse_frame_index_enabled: false
+  coarse_coverage_gate_enabled: false
   coarse_minimum_coverage_ratio: 0.98
   coarse_maximum_gap_periods: 4.0
   candidate_discovery_quality_gate_enabled: true
@@ -300,11 +304,12 @@ performance:
   coarse_open_vocabulary_maximum_error_rate: 0.10
   coarse_open_vocabulary_candidate_window_seconds: 4.0
   coarse_open_vocabulary_max_actor_object_gap_norm: 0.08
-  # Fine scanning remains the existing stage. All selected third-person views
-  # enter its first wave, the 20 FPS grid is a strict superset of the former
-  # 10 FPS grid, and risk/alignment rules can only expand existing windows.
+  # Fine scanning starts from the first-person boundary evidence at 20 FPS.
+  # Third-person views are admitted only for unresolved aligned anchors. This
+  # preserves the dense temporal grid and complete candidate/audit receipts
+  # while avoiding a broad full-timeline pass on any static camera.
   detection_fps: 20.0
-  fine_initial_third_person_views: 999
+  fine_initial_third_person_views: 0
   # Preserve the same all-view 20 FPS envelope while eliminating repeated
   # ledger parsing and admitting formal evidence from actual sampled coverage.
   fine_frame_index_enabled: true
@@ -400,13 +405,17 @@ performance:
   source_workers: 12
   decode_queue_depth: 64
   cpu_decode_threads: 12
-  # The scheduler now consumes this value as real per-role scanner capacity.
-  # With the production 1+N camera topology, three third-person partitions plus
-  # the first-person scanner keep four batch-4 TensorRT contexts resident. The
-  # existing four-context hardware receipt peaked at 13.97 GiB, below the 90%
-  # memory contract; real-video telemetry still decides final promotion.
+  # The scheduler consumes this value as real per-role scanner capacity. The
+  # cold four-view A/B on this host showed that pooling three sparse coarse
+  # streams into one context increased motion/coarse wall time by 26 seconds;
+  # retain parallel contexts and use progressive windows to remove work.
   yolo_inference_workers: 3
   materialization_workers: 3
+  # Role clips for event N+1 can encode while the aligned clip for event N is
+  # assembled. Media paths and event objects are disjoint, and publication is
+  # still delayed until every future has completed successfully.
+  overlap_aligned_key_materials: true
+  aligned_key_material_workers: 2
   # Exact derived MP4s are immutable and content-addressed beneath the existing
   # NAS cache root. Cold audits populate the cache without reading it; their
   # explicitly paired reuse runs verify hashes before materialization.
@@ -428,6 +437,16 @@ archive:
 mllm:
   candidate_review_stratified_queue_enabled: true
   candidate_review_time_bucket_seconds: 1800
+  # Keep the evidence originals untouched while bounding only the request
+  # representation. On the real workstation the unbounded first failure wave
+  # spent more than twenty minutes repeatedly uploading review images through
+  # the LAN proxy. Two bounded attempts and a two-request failure wave keep a
+  # provider outage resumable without stalling local evidence production.
+  request_image_max_edge: 768
+  request_image_jpeg_quality: 82
+  timeout_seconds: 90
+  max_retries: 2
+  failure_circuit_breaker_threshold: 2
   # Common actions retain both views in three aligned temporal phases while
   # halving image count. Liquid/container/panel evidence keeps the inherited
   # six high-detail per-view samples because small state changes limit quality.

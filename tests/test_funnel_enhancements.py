@@ -301,7 +301,7 @@ def test_open_vocabulary_coarse_candidate_only_adds_a_recall_window(
     assert report["replaces_closed_set_candidates"] is False
 
 
-def test_3090ti_profile_enables_single_funnel_superset_while_default_stays_legacy():
+def test_3090ti_profile_uses_reusable_sparse_discovery_and_progressive_fine_scan():
     default = load_config()
     production = load_config(Path("configs/rtx3090ti-ubuntu-production.yaml"))
 
@@ -310,18 +310,21 @@ def test_3090ti_profile_enables_single_funnel_superset_while_default_stays_legac
     assert not default["performance"].get(
         "fine_risk_window_expansion_enabled", False
     )
-    assert production["performance"]["motion_probe_all_views"] is True
-    assert production["performance"]["motion_probe_fps"] == 0.5
+    assert production["performance"]["motion_probe_all_views"] is False
+    assert production["performance"]["motion_probe_first_person_views"] == 1
+    assert production["performance"]["motion_probe_third_person_views"] == 0
+    assert production["performance"]["motion_probe_fps"] == 0.1
     assert production["performance"]["coarse_all_views"] is True
-    assert production["performance"]["coarse_full_timeline_scan"] is True
-    assert production["performance"]["coarse_shared_motion_probe_enabled"] is True
-    assert production["performance"]["coarse_frame_index_enabled"] is True
+    assert production["performance"]["motion_probe_run_yolo"] is True
+    assert production["performance"]["coarse_reuse_motion_probe"] is True
+    assert production["performance"]["coarse_full_timeline_scan"] is False
+    assert production["performance"]["coarse_shared_motion_probe_enabled"] is False
     assert production["performance"]["coarse_semantic_association_enabled"] is True
     assert production["performance"]["coarse_micro_action_guard_enabled"] is True
     assert production["performance"]["candidate_discovery_quality_gate_enabled"] is True
-    assert production["performance"]["coarse_reuse_motion_probe"] is False
+    assert production["performance"]["coarse_frame_index_enabled"] is False
     assert production["performance"]["detection_fps"] == 20.0
-    assert production["performance"]["fine_initial_third_person_views"] == 999
+    assert production["performance"]["fine_initial_third_person_views"] == 0
 
 
 def test_rolling_motion_threshold_adds_quiet_period_recall_without_removing_legacy(

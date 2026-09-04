@@ -5404,6 +5404,115 @@ def _review_bounded_cap_keyframe(
     return None, receipt
 
 
+def _select_key_material_media_source(
+    view: ViewInput,
+    info: VideoInfo,
+    transform: AlignmentTransform,
+    event: EvidenceEvent,
+    group: ExperimentGroup,
+    local_experiment_source: tuple[ViewInput, VideoInfo] | None,
+    *,
+    before_ms: float,
+    after_ms: float,
+) -> tuple[ViewInput, VideoInfo, float, float, float, dict[str, Any]]:
+    """Use a derived experiment clip only when it honestly covers the event.
+
+    Encoded experiment clips can end a fraction of a frame before the requested
+    global group boundary. An event close to that tail must fall back to the
+    original source instead of aborting the archive or clamping its timestamp.
+    """
+
+    clip_start_global = max(event.global_start_ms - before_ms, 0.0)
+    clip_end_global = event.global_end_ms + after_ms
+    original_key_ms = transform.to_local(event.key_global_ms)
+    original_start_ms = max(0.0, transform.to_local(clip_start_global))
+    original_end_ms = min(
+        info.duration_ms,
+        transform.to_local(clip_end_global),
+    )
+    selection: dict[str, Any] = {
+        "schema_version": "visioncortex-key-material-source-selection/1",
+        "selected_source": "original_source",
+        "fallback_reason": "experiment_clip_unavailable",
+        "requested_key_global_ms": float(event.key_global_ms),
+    }
+    if local_experiment_source is None:
+        return (
+            view,
+            info,
+            original_key_ms,
+            original_start_ms,
+            original_end_ms,
+            selection,
+        )
+
+    candidate_view, candidate_info = local_experiment_source
+    candidate_key_ms = event.key_global_ms - group.global_start_ms
+    candidate_event_start_ms = event.global_start_ms - group.global_start_ms
+    candidate_event_end_ms = event.global_end_ms - group.global_start_ms
+    requested_start_ms = clip_start_global - group.global_start_ms
+    requested_end_ms = clip_end_global - group.global_start_ms
+    candidate_start_ms = max(
+        0.0,
+        requested_start_ms,
+    )
+    candidate_end_ms = min(
+        candidate_info.duration_ms,
+        requested_end_ms,
+    )
+    key_covered = 0.0 <= candidate_key_ms < candidate_info.duration_ms
+    interval_covered = bool(
+        0.0 <= candidate_event_start_ms < candidate_event_end_ms
+        and candidate_event_end_ms <= candidate_info.duration_ms
+    )
+    selection.update(
+        {
+            "experiment_clip_path": str(candidate_view.video),
+            "experiment_clip_duration_ms": float(candidate_info.duration_ms),
+            "experiment_relative_key_ms": float(candidate_key_ms),
+            "experiment_relative_event_start_ms": float(
+                candidate_event_start_ms
+            ),
+            "experiment_relative_event_end_ms": float(candidate_event_end_ms),
+            "experiment_requested_clip_start_ms": float(requested_start_ms),
+            "experiment_requested_clip_end_ms": float(requested_end_ms),
+            "experiment_relative_clip_start_ms": float(candidate_start_ms),
+            "experiment_relative_clip_end_ms": float(candidate_end_ms),
+            "experiment_clip_key_covered": key_covered,
+            "experiment_clip_interval_covered": interval_covered,
+        }
+    )
+    if key_covered and interval_covered:
+        selection.update(
+            {
+                "selected_source": "verified_local_experiment_clip",
+                "fallback_reason": None,
+            }
+        )
+        return (
+            candidate_view,
+            candidate_info,
+            candidate_key_ms,
+            candidate_start_ms,
+            candidate_end_ms,
+            selection,
+        )
+
+    selection["fallback_reason"] = (
+        "experiment_clip_key_timestamp_outside_media"
+        if not key_covered
+        else "experiment_clip_event_interval_outside_media"
+    )
+    return (
+        view,
+        info,
+        original_key_ms,
+        original_start_ms,
+        original_end_ms,
+        selection,
+    )
+
+
 def materialize_key_materials(
     layout: ArchiveLayout,
     events: Sequence[EvidenceEvent],
@@ -5683,6 +5792,124 @@ def materialize_key_materials(
                     source_view,
                     probe_video(path),
                 )
+    overlap_aligned = bool(
+        publisher is None
+        and config.get("performance", {}).get(
+            "overlap_aligned_key_materials", False
+        )
+    )
+    aligned_executor = (
+        ThreadPoolExecutor(
+            max_workers=max(
+                1,
+                int(
+                    config.get("performance", {}).get(
+                        "aligned_key_material_workers", 1
+                    )
+                ),
+            ),
+            thread_name_prefix="key-material-aligned",
+        )
+        if overlap_aligned
+        else None
+    )
+    aligned_jobs: list[Any] = []
+
+    def materialize_aligned(
+        event: EvidenceEvent,
+        group: ExperimentGroup,
+        action_folder: str,
+        frame_dir: Path,
+        clip_dir: Path,
+        first_material_view: str,
+        third_material_view: str,
+        frame_paths: dict[str, Path],
+        clip_paths: dict[str, Path],
+        event_started: float,
+    ) -> dict[str, Any]:
+        aligned_started = time.perf_counter()
+        aligned_frame = frame_dir / "Aligned_First+Third.jpg"
+        _write_aligned_frame(
+            frame_paths["First-Person"],
+            frame_paths["Third-Person"],
+            aligned_frame,
+            (first_material_view, third_material_view),
+        )
+        aligned_frame_relative = _relative(aligned_frame, layout.root)
+        event.key_frames["aligned_first_third"] = aligned_frame_relative
+        aligned_frame_json = frame_dir / "Aligned_First+Third.json"
+        write_json(
+            aligned_frame_json,
+            _artifact_json(
+                group,
+                event,
+                "aligned_first_third_key_frame",
+                aligned_frame_relative,
+                None,
+                transforms,
+                archive_id,
+            ),
+        )
+        aligned_clip = clip_dir / "Aligned_First+Third.mp4"
+        aligned_inputs = [
+            (first_material_view, clip_paths["First-Person"]),
+            (third_material_view, clip_paths["Third-Person"]),
+        ]
+        aligned_cache = _materialize_derived_media(
+            aligned_clip,
+            "key-aligned-clip",
+            {
+                "event_id": event.event_id,
+                "global_start_ms": max(event.global_start_ms - before, 0.0),
+                "global_end_ms": event.global_end_ms + after,
+                "layout": "first_person_left,third_person_right",
+                "grid_shape": "2x1@640x360_each",
+            },
+            [path for _, path in aligned_inputs],
+            config,
+            lambda: create_grid_video(aligned_inputs, aligned_clip, encoder),
+            content_address_inputs=True,
+        )
+        aligned_clip_relative = _relative(aligned_clip, layout.root)
+        event.key_clips["aligned_first_third"] = aligned_clip_relative
+        aligned_clip_json = clip_dir / "Aligned_First+Third.json"
+        write_json(
+            aligned_clip_json,
+            _artifact_json(
+                group,
+                event,
+                "aligned_first_third_key_clip",
+                aligned_clip_relative,
+                None,
+                transforms,
+                archive_id,
+            ),
+        )
+        if publisher is not None:
+            for artifact in (
+                aligned_frame,
+                aligned_frame_json,
+                aligned_clip,
+                aligned_clip_json,
+            ):
+                publisher.publish_file(artifact)
+        return {
+            "event_id": event.event_id,
+            "experiment_group_id": group.group_id,
+            "action_type": event.action_type.value,
+            "action_category_folder": action_folder,
+            "role_label": "Aligned-First-Third",
+            "view_id": "aligned_first_third",
+            "duration_seconds": round(time.perf_counter() - aligned_started, 6),
+            "frame_output_bytes": aligned_frame.stat().st_size,
+            "clip_output_bytes": aligned_clip.stat().st_size,
+            "event_wall_duration_seconds": round(
+                time.perf_counter() - event_started, 6
+            ),
+            "overlapped_with_next_event": overlap_aligned,
+            **aligned_cache,
+        }
+
     selected_event_ids = {event.event_id for event in accepted_events}
     for event in events:
         if event.event_id not in selected_event_ids:
@@ -5706,35 +5933,37 @@ def materialize_key_materials(
             role_started = time.perf_counter()
             view = by_view[view_id]
             transform = transforms[view_id]
-            material_view = view
-            material_info = infos[view_id]
-            material_source = "original_source"
-            material_source_path = None
-            local_key_ms = transform.to_local(event.key_global_ms)
             clip_start_global = max(event.global_start_ms - before, 0.0)
             clip_end_global = event.global_end_ms + after
-            local_start = max(0.0, transform.to_local(clip_start_global))
-            local_end = min(
-                infos[view_id].duration_ms,
-                transform.to_local(clip_end_global),
-            )
             local_experiment_source = local_experiment_sources.get(
                 (group.group_id, view_id)
             )
-            if local_experiment_source is not None:
-                material_view, material_info = local_experiment_source
-                material_source = "verified_local_experiment_clip"
-                material_source_path = str(material_view.video)
-                local_key_ms = event.key_global_ms - group.global_start_ms
-                local_start = max(
-                    0.0,
-                    clip_start_global - group.global_start_ms,
-                )
-                local_end = min(
-                    material_info.duration_ms,
-                    clip_end_global - group.global_start_ms,
-                )
-            if not 0.0 <= local_key_ms <= material_info.duration_ms:
+            (
+                material_view,
+                material_info,
+                local_key_ms,
+                local_start,
+                local_end,
+                material_source_selection,
+            ) = _select_key_material_media_source(
+                view,
+                infos[view_id],
+                transform,
+                event,
+                group,
+                local_experiment_source,
+                before_ms=before,
+                after_ms=after,
+            )
+            material_source = str(
+                material_source_selection["selected_source"]
+            )
+            material_source_path = (
+                str(material_view.video)
+                if material_source == "verified_local_experiment_clip"
+                else None
+            )
+            if not 0.0 <= local_key_ms < material_info.duration_ms:
                 raise ValueError(
                     f"{event.event_id}/{view_id} key timestamp is outside the material source"
                 )
@@ -5795,6 +6024,7 @@ def materialize_key_materials(
                     ),
                     "material_source": material_source,
                     "material_source_path": material_source_path,
+                    "material_source_selection": material_source_selection,
                     "upstream_source_files": [
                         str(path) for path in view_source_files(view)
                     ],
@@ -5853,6 +6083,7 @@ def materialize_key_materials(
                 "frame_decode_offset_ms": used_offset_ms,
                 "material_source": material_source,
                 "material_source_path": material_source_path,
+                "material_source_selection": material_source_selection,
                 "upstream_source_files": [
                     str(path) for path in view_source_files(view)
                 ],
@@ -5944,82 +6175,43 @@ def materialize_key_materials(
                 }
             )["views"][view_id] = dict(result["annotation_filter"])
 
-        aligned_started = time.perf_counter()
-        aligned_frame = frame_dir / "Aligned_First+Third.jpg"
-        _write_aligned_frame(
-            frame_paths["First-Person"],
-            frame_paths["Third-Person"],
-            aligned_frame,
-            (first_material_view, third_material_view),
+        aligned_arguments = (
+            event,
+            group,
+            action_folder,
+            frame_dir,
+            clip_dir,
+            first_material_view,
+            third_material_view,
+            dict(frame_paths),
+            dict(clip_paths),
+            event_started,
         )
-        aligned_frame_relative = _relative(aligned_frame, layout.root)
-        event.key_frames["aligned_first_third"] = aligned_frame_relative
-        write_json(
-            frame_dir / "Aligned_First+Third.json",
-            _artifact_json(
-                group,
-                event,
-                "aligned_first_third_key_frame",
-                aligned_frame_relative,
-                None,
-                transforms,
-                archive_id,
-            ),
-        )
-        if publisher is not None:
-            publisher.publish_file(aligned_frame)
-            publisher.publish_file(frame_dir / "Aligned_First+Third.json")
-        aligned_clip = clip_dir / "Aligned_First+Third.mp4"
-        aligned_inputs = [
-            (first_material_view, clip_paths["First-Person"]),
-            (third_material_view, clip_paths["Third-Person"]),
-        ]
-        aligned_cache = _materialize_derived_media(
-            aligned_clip,
-            "key-aligned-clip",
-            {
-                "event_id": event.event_id,
-                "global_start_ms": max(event.global_start_ms - before, 0.0),
-                "global_end_ms": event.global_end_ms + after,
-                "layout": "first_person_left,third_person_right",
-                "grid_shape": "2x1@640x360_each",
-            },
-            [path for _, path in aligned_inputs],
-            config,
-            lambda: create_grid_video(aligned_inputs, aligned_clip, encoder),
-            content_address_inputs=True,
-        )
-        aligned_clip_relative = _relative(aligned_clip, layout.root)
-        event.key_clips["aligned_first_third"] = aligned_clip_relative
-        write_json(
-            clip_dir / "Aligned_First+Third.json",
-            _artifact_json(
-                group,
-                event,
-                "aligned_first_third_key_clip",
-                aligned_clip_relative,
-                None,
-                transforms,
-                archive_id,
-            ),
-        )
-        if publisher is not None:
-            publisher.publish_file(aligned_clip)
-            publisher.publish_file(clip_dir / "Aligned_First+Third.json")
-        runtime_records.append(
-            {
-                "event_id": event.event_id,
-                "experiment_group_id": group.group_id,
-                "action_type": event.action_type.value,
-                "action_category_folder": action_folder,
-                "role_label": "Aligned-First-Third",
-                "view_id": "aligned_first_third",
-                "duration_seconds": round(time.perf_counter() - aligned_started, 6),
-                "frame_output_bytes": aligned_frame.stat().st_size,
-                "clip_output_bytes": aligned_clip.stat().st_size,
-                "event_wall_duration_seconds": round(time.perf_counter() - event_started, 6),
-                **aligned_cache,
-            }
+        if aligned_executor is None:
+            runtime_records.append(materialize_aligned(*aligned_arguments))
+        else:
+            aligned_jobs.append(
+                aligned_executor.submit(materialize_aligned, *aligned_arguments)
+            )
+
+    if aligned_executor is not None:
+        try:
+            runtime_records.extend(job.result() for job in aligned_jobs)
+        finally:
+            aligned_executor.shutdown(wait=True, cancel_futures=True)
+        event_order = {
+            event.event_id: index for index, event in enumerate(accepted_events)
+        }
+        role_order = {
+            "First-Person": 0,
+            "Third-Person": 1,
+            "Aligned-First-Third": 2,
+        }
+        runtime_records.sort(
+            key=lambda item: (
+                event_order.get(str(item.get("event_id")), len(event_order)),
+                role_order.get(str(item.get("role_label")), len(role_order)),
+            )
         )
 
     category_index_path = write_key_material_category_index(

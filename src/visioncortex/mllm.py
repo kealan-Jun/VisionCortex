@@ -11,7 +11,9 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Literal, Sequence
 
+import cv2
 import httpx
+import numpy as np
 from pydantic import BaseModel, ConfigDict, Field
 
 from .schemas import (
@@ -250,9 +252,54 @@ FINAL_GROUP_SYSTEM_PROMPT = GROUP_SYSTEM_PROMPT + """
 """
 
 
-def _image_data_url(path: Path) -> str:
-    mime = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
-    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+def _image_data_url(
+    path: Path,
+    *,
+    max_edge: int = 0,
+    jpeg_quality: int = 85,
+) -> str:
+    """Build a bounded wire image without changing the evidence artifact.
+
+    Full-resolution JPEGs remain in the archive. Only the in-memory request
+    representation is resized, which prevents slow links and retries from
+    repeatedly uploading multi-megabyte evidence payloads.
+    """
+
+    payload = path.read_bytes()
+    suffix = path.suffix.lower()
+    mime = "image/png" if suffix == ".png" else "image/jpeg"
+    edge_limit = max(0, int(max_edge))
+    if edge_limit > 0:
+        image = cv2.imdecode(
+            np.frombuffer(payload, dtype=np.uint8),
+            cv2.IMREAD_UNCHANGED,
+        )
+        if image is not None and max(image.shape[:2]) > edge_limit:
+            scale = edge_limit / float(max(image.shape[:2]))
+            resized = cv2.resize(
+                image,
+                (
+                    max(1, int(round(image.shape[1] * scale))),
+                    max(1, int(round(image.shape[0] * scale))),
+                ),
+                interpolation=cv2.INTER_AREA,
+            )
+            if suffix == ".png":
+                encoded_ok, encoded_image = cv2.imencode(
+                    ".png", resized, [cv2.IMWRITE_PNG_COMPRESSION, 6]
+                )
+            else:
+                encoded_ok, encoded_image = cv2.imencode(
+                    ".jpg",
+                    resized,
+                    [
+                        cv2.IMWRITE_JPEG_QUALITY,
+                        min(100, max(1, int(jpeg_quality))),
+                    ],
+                )
+            if encoded_ok:
+                payload = encoded_image.tobytes()
+    encoded = base64.b64encode(payload).decode("ascii")
     return f"data:{mime};base64,{encoded}"
 
 
@@ -401,6 +448,17 @@ class ArkAnalyzer:
     def available(self) -> bool:
         return self.enabled and bool(self.api_key)
 
+    def _request_image_transport(self) -> dict[str, Any]:
+        return {
+            "maximum_edge_pixels": int(
+                self.config.get("request_image_max_edge", 0)
+            ),
+            "jpeg_quality": int(
+                self.config.get("request_image_jpeg_quality", 85)
+            ),
+            "source_artifacts_mutated": False,
+        }
+
     def _call(
         self,
         system_prompt: str,
@@ -430,6 +488,7 @@ class ArkAnalyzer:
                 "latency_seconds": 0.0,
                 "attempts": 0,
                 "transport_failure_count": transport_failure_count,
+                "request_image_transport": self._request_image_transport(),
                 "usage": {
                     "input_tokens": None,
                     "output_tokens": None,
@@ -451,7 +510,19 @@ class ArkAnalyzer:
         for label, path in selected:
             content.append({"type": "input_text", "text": label})
             content.append(
-                {"type": "input_image", "image_url": _image_data_url(path), "detail": "high"}
+                {
+                    "type": "input_image",
+                    "image_url": _image_data_url(
+                        path,
+                        max_edge=int(
+                            self.config.get("request_image_max_edge", 0)
+                        ),
+                        jpeg_quality=int(
+                            self.config.get("request_image_jpeg_quality", 85)
+                        ),
+                    ),
+                    "detail": "high",
+                }
             )
         request = {
             "model": self.config["model"],
@@ -493,6 +564,7 @@ class ArkAnalyzer:
                             if response_kind
                             else None
                         ),
+                        "request_image_transport": self._request_image_transport(),
                     }
                 )
                 with self._failure_lock:
@@ -547,6 +619,7 @@ class ArkAnalyzer:
             "attempts": attempt + 1,
             "transport_failure_count": transport_failure_count,
             "failure_circuit_open": circuit_opened,
+            "request_image_transport": self._request_image_transport(),
             "usage": {
                 "input_tokens": None,
                 "output_tokens": None,

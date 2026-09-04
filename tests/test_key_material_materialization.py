@@ -630,7 +630,12 @@ def test_key_material_roles_export_concurrently_and_write_runtime(monkeypatch, t
         {"fp": tmp_path / "fp.jsonl", "tp": tmp_path / "tp.jsonl"},
         {
             "segmentation": {"key_clip_pre_seconds": 2, "key_clip_post_seconds": 3},
-            "performance": {"ffmpeg_video_encoder": "h264_nvenc", "materialization_workers": 2},
+            "performance": {
+                "ffmpeg_video_encoder": "h264_nvenc",
+                "materialization_workers": 2,
+                "overlap_aligned_key_materials": True,
+                "aligned_key_material_workers": 2,
+            },
         },
     )
 
@@ -714,6 +719,11 @@ def test_key_material_roles_export_concurrently_and_write_runtime(monkeypatch, t
         for item in runtime["records"]
         if item["role_label"] != "Aligned-First-Third"
     } == {"verified_local_experiment_clip"}
+    assert next(
+        item
+        for item in runtime["records"]
+        if item["role_label"] == "Aligned-First-Third"
+    )["overlapped_with_next_event"] is True
     assert runtime["total_duration_seconds"] > 0
 
     archive.materialize_key_materials(
@@ -742,6 +752,170 @@ def test_key_material_roles_export_concurrently_and_write_runtime(monkeypatch, t
         item["scope"] for item in refreshed_runtime["materialization_passes"]
     ] == ["initial", "post_semantic_selective_refresh"]
     assert refreshed_runtime["last_pass_materialized_event_count"] == 1
+
+
+def test_short_experiment_clip_falls_back_to_original_media(tmp_path):
+    original = ViewInput(
+        view_id="fp",
+        role=ViewRole.FIRST_PERSON,
+        video=tmp_path / "original.mp4",
+    )
+    original_info = VideoInfo(
+        path=original.video,
+        duration_ms=60_000,
+        fps=30,
+        width=1280,
+        height=720,
+        frame_count=1800,
+    )
+    transform = AlignmentTransform(
+        view_id="fp",
+        reference_view_id="fp",
+        confidence=1.0,
+        state="aligned",
+    )
+    event = EvidenceEvent(
+        event_id="EVT-TAIL",
+        action_type=ActionType.HAND_OBJECT_CONTACT,
+        global_start_ms=12_500,
+        global_end_ms=13_000,
+        key_global_ms=12_950,
+        objects=["tube"],
+        confidence=0.9,
+        accepted=True,
+        audit_reason="test",
+        supporting_views=["fp", "tp"],
+        supporting_roles=[ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON],
+        candidates=[],
+    )
+    group = ExperimentGroup(
+        group_id="GROUP-TAIL",
+        continuity_type="independent",
+        atomic_experiment_ids=["EXP-TAIL"],
+        global_start_ms=9_000,
+        global_end_ms=13_000,
+        participating_views=["fp", "tp"],
+        first_person_view="fp",
+        third_person_view="tp",
+        continuity_reason="test",
+        key_event_ids=[event.event_id],
+    )
+    derived = ViewInput(
+        view_id="fp",
+        role=ViewRole.FIRST_PERSON,
+        video=tmp_path / "experiment.mp4",
+    )
+    derived_info = VideoInfo(
+        path=derived.video,
+        duration_ms=3_900,
+        fps=30,
+        width=1280,
+        height=720,
+        frame_count=117,
+    )
+
+    selected = archive._select_key_material_media_source(
+        original,
+        original_info,
+        transform,
+        event,
+        group,
+        (derived, derived_info),
+        before_ms=2_000,
+        after_ms=3_000,
+    )
+
+    material_view, material_info, local_key_ms, _, _, receipt = selected
+    assert material_view is original
+    assert material_info is original_info
+    assert local_key_ms == event.key_global_ms
+    assert receipt["selected_source"] == "original_source"
+    assert receipt["fallback_reason"] == (
+        "experiment_clip_key_timestamp_outside_media"
+    )
+    assert receipt["experiment_clip_key_covered"] is False
+
+
+def test_experiment_clip_with_partial_interval_falls_back_to_original_media(tmp_path):
+    original = ViewInput(
+        view_id="fp",
+        role=ViewRole.FIRST_PERSON,
+        video=tmp_path / "original.mp4",
+    )
+    original_info = VideoInfo(
+        path=original.video,
+        duration_ms=60_000,
+        fps=30,
+        width=1280,
+        height=720,
+        frame_count=1800,
+    )
+    transform = AlignmentTransform(
+        view_id="fp",
+        reference_view_id="fp",
+        confidence=1.0,
+        state="aligned",
+    )
+    event = EvidenceEvent(
+        event_id="EVT-PARTIAL-INTERVAL",
+        action_type=ActionType.OBJECT_MOVEMENT,
+        global_start_ms=11_500,
+        global_end_ms=13_200,
+        key_global_ms=11_900,
+        objects=["tube"],
+        confidence=0.9,
+        accepted=True,
+        audit_reason="test",
+        supporting_views=["fp", "tp"],
+        supporting_roles=[ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON],
+        candidates=[],
+    )
+    group = ExperimentGroup(
+        group_id="GROUP-PARTIAL-INTERVAL",
+        continuity_type="independent",
+        atomic_experiment_ids=["EXP-PARTIAL-INTERVAL"],
+        global_start_ms=9_000,
+        global_end_ms=13_500,
+        participating_views=["fp", "tp"],
+        first_person_view="fp",
+        third_person_view="tp",
+        continuity_reason="test",
+        key_event_ids=[event.event_id],
+    )
+    derived = ViewInput(
+        view_id="fp",
+        role=ViewRole.FIRST_PERSON,
+        video=tmp_path / "experiment.mp4",
+    )
+    derived_info = VideoInfo(
+        path=derived.video,
+        duration_ms=4_000,
+        fps=30,
+        width=1280,
+        height=720,
+        frame_count=120,
+    )
+
+    selected = archive._select_key_material_media_source(
+        original,
+        original_info,
+        transform,
+        event,
+        group,
+        (derived, derived_info),
+        before_ms=500,
+        after_ms=2_000,
+    )
+
+    material_view, material_info, local_key_ms, _, _, receipt = selected
+    assert material_view is original
+    assert material_info is original_info
+    assert local_key_ms == event.key_global_ms
+    assert receipt["experiment_clip_key_covered"] is True
+    assert receipt["experiment_clip_interval_covered"] is False
+    assert receipt["fallback_reason"] == (
+        "experiment_clip_event_interval_outside_media"
+    )
 
 
 def test_component_budget_applies_classic_path_limit_only_on_windows(monkeypatch):

@@ -61,6 +61,13 @@ def test_rtx3090ti_ubuntu_profile_matches_host_and_keeps_view_count_dynamic():
     assert performance["tensor_rt"] == "required"
     assert performance["batch_size"] == 16
     assert performance["engine_batch_size"] == 4
+    assert performance["motion_probe_fps"] == 0.1
+    assert performance["motion_probe_run_yolo"] is True
+    assert performance["coarse_reuse_motion_probe"] is True
+    assert performance["coarse_full_timeline_scan"] is False
+    assert performance["fine_initial_third_person_views"] == 0
+    assert performance["overlap_aligned_key_materials"] is True
+    assert performance["aligned_key_material_workers"] == 2
     assert performance["coarse_decode_lanes"] == ["cuda"]
     assert performance["fine_decode_lanes"] == ["cuda"]
     assert performance["fine_min_third_person_views"] is None

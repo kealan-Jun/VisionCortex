@@ -1,3 +1,5 @@
+import base64
+import hashlib
 import json
 import shutil
 import subprocess
@@ -10,10 +12,11 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import httpx
+import cv2
 
 from visioncortex import storage, video_io
 from visioncortex.archive import _run_bounded_semantic_waves
-from visioncortex.mllm import ArkAnalyzer
+from visioncortex.mllm import ArkAnalyzer, _image_data_url
 from visioncortex.schemas import VideoInfo, ViewInput, ViewRole
 from visioncortex.storage import IncrementalArchivePublisher
 from visioncortex.telemetry import ResourceMonitor, _NvmlSampler
@@ -58,6 +61,29 @@ def test_mllm_reuses_one_http_connection_pool(monkeypatch, default_config):
     assert clients[0].closed is True
 
 
+def test_mllm_bounds_wire_image_without_mutating_evidence(tmp_path):
+    path = tmp_path / "evidence.jpg"
+    source = np.random.default_rng(7).integers(
+        0, 256, size=(720, 1280, 3), dtype=np.uint8
+    )
+    assert cv2.imwrite(
+        str(path), source, [cv2.IMWRITE_JPEG_QUALITY, 96]
+    )
+    original_digest = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    data_url = _image_data_url(path, max_edge=640, jpeg_quality=75)
+
+    encoded = data_url.split(",", 1)[1]
+    decoded = cv2.imdecode(
+        np.frombuffer(base64.b64decode(encoded), dtype=np.uint8),
+        cv2.IMREAD_COLOR,
+    )
+    assert decoded is not None
+    assert max(decoded.shape[:2]) == 640
+    assert len(base64.b64decode(encoded)) < path.stat().st_size
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == original_digest
+
+
 def test_mllm_transport_failure_circuit_skips_later_calls(
     monkeypatch, default_config
 ):
@@ -84,8 +110,14 @@ def test_mllm_transport_failure_circuit_skips_later_calls(
 
     assert first["status"] == second["status"] == "failed"
     assert second["failure_circuit_open"] is True
+    assert second["request_image_transport"] == {
+        "maximum_edge_pixels": 0,
+        "jpeg_quality": 85,
+        "source_artifacts_mutated": False,
+    }
     assert third["status"] == "skipped_failure_circuit_open"
     assert third["attempts"] == 0
+    assert third["request_image_transport"] == second["request_image_transport"]
     assert analyzer.client.posts == 2
 
 
