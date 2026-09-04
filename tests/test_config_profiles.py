@@ -39,17 +39,21 @@ def test_rtx3090ti_ubuntu_profile_matches_host_and_keeps_view_count_dynamic():
         "snapshot_path": None,
         "mode": "directory_metadata",
         "source_root": "/home/x1/桌面/nas",
-        "camera_directories": [
-            "lubancat-4df661d7_cam01",
-            "orangepi5pro-f022c4_cam01",
-        ],
+        "camera_directories": [],
+        "camera_directory_glob": "*_cam*",
         "camera_role_map": {
             "lubancat-4df661d7_cam01": "first_person",
+            "lubancat-e8cc0cb3_cam01": "first_person",
+            "orangepi5pro-ab748372_cam01": "third_person",
+            "orangepi5pro-b439137c_cam02": "third_person",
+            "orangepi5pro-d12a4719_cam01": "first_person",
             "orangepi5pro-f022c4_cam01": "third_person",
+            "rk3588-ubuntu_cam01": "third_person",
         },
         "discover_plain_video_csv": False,
         "max_scan_directories": 20000,
         "max_recordings": 5000,
+        "max_recordings_per_camera": 32,
     }
 
     performance = config["performance"]

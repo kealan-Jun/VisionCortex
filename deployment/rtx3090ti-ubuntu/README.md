@@ -152,6 +152,23 @@ at wide CSS viewports. Set `VISIONCORTEX_BROWSER_SCALE=1.0` (or another value
 from 1.0 through 2.0) before launching to override the detected value; ordinary
 1080p displays are not forced to scale.
 
+For the local NAS-backed appliance flow used on the RTX 3050, install the
+separate capture-monitor/analysis service once:
+
+```bash
+./deployment/rtx3090ti-ubuntu/09-Install-Analysis-Service.sh
+```
+
+This enables `visioncortex-analysis.service` at boot on
+`127.0.0.1:8001`. It automatically discovers every top-level `*_cam*`
+recorder directory, scans the newest 32 recordings per camera every 30
+seconds, and groups files only when their recorder-issued
+`recording_session_id` matches and their cross-camera time windows overlap.
+Unregistered camera roles and incomplete recorder sidecars stay visible but
+blocked. The existing `visioncortex-local.service` remains an independent
+no-NAS fallback on port 8000. When the analysis service is installed, the
+desktop launcher opens the NAS-backed page on port 8001.
+
 ## Authenticated LAN server
 
 The normal team entry point is the production LAN service. Team members do not

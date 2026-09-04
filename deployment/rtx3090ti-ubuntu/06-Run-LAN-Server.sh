@@ -8,6 +8,12 @@ python=${VISIONCORTEX_PYTHON:-"$runtime_base/.venv/bin/python"}
 config=${VISIONCORTEX_CONFIG:-"$project_root/configs/rtx3090ti-ubuntu-production.yaml"}
 ark_key_file=${VISIONCORTEX_ARK_API_KEY_FILE:-'/home/x1/.config/VisionCortex/ark_api_key'}
 port=${VISIONCORTEX_WEB_PORT:-8000}
+host=${VISIONCORTEX_WEB_HOST:-0.0.0.0}
+
+case "$host" in
+  127.0.0.1|0.0.0.0) ;;
+  *) printf 'Unsupported VisionCortex Web host: %s\n' "$host" >&2; exit 2 ;;
+esac
 
 [[ -x $python ]] || { printf '%s\n' 'VisionCortex Python environment is missing.' >&2; exit 1; }
 [[ -f $config ]] || { printf 'VisionCortex configuration is missing: %s\n' "$config" >&2; exit 1; }
@@ -32,6 +38,6 @@ export ARK_API_KEY
 
 cd -- "$project_root"
 exec "$python" -m visioncortex serve \
-  --host 0.0.0.0 \
+  --host "$host" \
   --port "$port" \
   --config "$config"

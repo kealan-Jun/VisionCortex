@@ -2182,7 +2182,8 @@ def health() -> dict[str, Any]:
         analysis_ready = False
         analysis_blocker = "NAS 归档或缓存目录不可用"
     with _nas_monitor_lock:
-        monitor = dict((_nas_monitor_snapshot or {}).get("monitor") or {})
+        monitor_snapshot = _nas_monitor_snapshot or {}
+        monitor = dict(monitor_snapshot.get("monitor") or {})
     return {
         "status": "ok",
         "product_name": PRODUCT_NAME,
@@ -2245,9 +2246,16 @@ def health() -> dict[str, Any]:
             ),
             "recursive_nas_scan": False,
             "camera_directories": list(
-                (settings.get("collection_ingest") or {}).get(
+                monitor_snapshot.get("camera_directories")
+                or (settings.get("collection_ingest") or {}).get(
                     "camera_directories", []
                 )
+            ),
+            "camera_directory_count": int(
+                monitor_snapshot.get("camera_directory_count") or 0
+            ),
+            "unconfigured_camera_directories": list(
+                monitor_snapshot.get("unconfigured_camera_directories") or []
             ),
             "monitor_status": monitor.get("status", "starting"),
             "monitor_observed_at": monitor.get("observed_at"),
@@ -4568,6 +4576,34 @@ def nas_recordings() -> dict[str, Any]:
         )
     if monitored is not None:
         return monitored
+    if _nas_monitor_thread is not None and _nas_monitor_thread.is_alive():
+        # The first scan can cover many recorder directories on a remote SMB
+        # mount. Do not start a duplicate synchronous scan from each browser
+        # refresh while the single background monitor is establishing its
+        # first snapshot.
+        return {
+            "mode": "directory_metadata",
+            "recordings": [],
+            "recording_count": 0,
+            "batches": [],
+            "camera_directories": [],
+            "camera_directory_count": 0,
+            "unconfigured_camera_directories": [],
+            "errors": [],
+            "truncated": False,
+            "source_copy_bytes": 0,
+            "video_decode": False,
+            "monitor": {
+                "status": "starting",
+                "observed_at": datetime.now().astimezone().isoformat(),
+                "poll_seconds": float(
+                    (settings.get("collection_ingest") or {}).get(
+                        "poll_seconds", 30.0
+                    )
+                ),
+                "consecutive_failures": 0,
+            },
+        }
     try:
         inventory = scan_recordings(settings)
         return inventory | {

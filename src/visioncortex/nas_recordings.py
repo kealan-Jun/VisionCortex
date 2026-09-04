@@ -205,6 +205,47 @@ def _camera_directories(root: Path, settings: dict[str, Any], allow_plain: bool)
     return sorted(root.glob(settings.get("camera_directory_glob", "*_cam*")))
 
 
+def _merged_recording_intervals(
+    items: list[dict[str, Any]],
+) -> list[tuple[int, int]]:
+    intervals = sorted(
+        (
+            int(item.get("recording_start_us") or 0),
+            int(item.get("recording_end_us") or 0),
+        )
+        for item in items
+        if int(item.get("recording_end_us") or 0)
+        > int(item.get("recording_start_us") or 0)
+    )
+    merged: list[tuple[int, int]] = []
+    for start, end in intervals:
+        if not merged or start > merged[-1][1]:
+            merged.append((start, end))
+        else:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+    return merged
+
+
+def _intersect_recording_intervals(
+    left: list[tuple[int, int]], right: list[tuple[int, int]]
+) -> list[tuple[int, int]]:
+    intersections: list[tuple[int, int]] = []
+    left_index = 0
+    right_index = 0
+    while left_index < len(left) and right_index < len(right):
+        left_start, left_end = left[left_index]
+        right_start, right_end = right[right_index]
+        start = max(left_start, right_start)
+        end = min(left_end, right_end)
+        if end > start:
+            intersections.append((start, end))
+        if left_end <= right_end:
+            left_index += 1
+        else:
+            right_index += 1
+    return intersections
+
+
 def _recording_batches(
     recordings: list[dict[str, Any]], settings: dict[str, Any]
 ) -> list[dict[str, Any]]:
@@ -226,6 +267,26 @@ def _recording_batches(
     batches = []
     for session_id, items in grouped.items():
         cameras = {str(item.get("camera_key") or "") for item in items}
+        items_by_camera: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for item in items:
+            items_by_camera[str(item.get("camera_key") or "")].append(item)
+        camera_intervals = {
+            camera: _merged_recording_intervals(camera_items)
+            for camera, camera_items in items_by_camera.items()
+        }
+        common_intervals: list[tuple[int, int]] | None = None
+        for intervals in camera_intervals.values():
+            common_intervals = (
+                intervals
+                if common_intervals is None
+                else _intersect_recording_intervals(common_intervals, intervals)
+            )
+            if not common_intervals:
+                break
+        common_intervals = common_intervals or []
+        overlap_start_us = common_intervals[0][0] if common_intervals else 0
+        overlap_end_us = common_intervals[-1][1] if common_intervals else 0
+        overlap_duration_us = sum(end - start for start, end in common_intervals)
         roles = {role_map.get(camera) for camera in cameras} - {None}
         issues = sorted(
             {
@@ -238,11 +299,18 @@ def _recording_batches(
         missing_cameras = sorted(expected_cameras - cameras)
         if missing_cameras:
             issues.append("等待另一视角完成同一采集批次")
+        unconfigured_cameras = sorted(cameras - role_map.keys())
+        if unconfigured_cameras:
+            issues.append("采集相机视角待确认")
         if roles != {"first_person", "third_person"}:
             issues.append("采集相机视角尚未配置完整")
+        if not common_intervals:
+            issues.append("同一采集会话的相机时间范围不重叠")
         available = bool(items) and all(item.get("available") for item in items) and not issues
-        start_us = min(int(item.get("recording_start_us") or 0) for item in items)
-        end_us = max(int(item.get("recording_end_us") or 0) for item in items)
+        source_start_us = min(int(item.get("recording_start_us") or 0) for item in items)
+        source_end_us = max(int(item.get("recording_end_us") or 0) for item in items)
+        start_us = overlap_start_us if common_intervals else source_start_us
+        end_us = overlap_end_us if common_intervals else source_end_us
         fingerprint = hashlib.sha256(
             json.dumps(
                 {
@@ -263,12 +331,29 @@ def _recording_batches(
                 "recording_end_us": end_us,
                 "recording_start_time": _iso(start_us),
                 "recording_end_time": _iso(end_us),
-                "duration_seconds": (end_us - start_us) / 1e6 if end_us > start_us else None,
+                "duration_seconds": (
+                    overlap_duration_us / 1e6
+                    if common_intervals
+                    else (end_us - start_us) / 1e6
+                    if end_us > start_us
+                    else None
+                ),
+                "cross_view_overlap_start_us": overlap_start_us,
+                "cross_view_overlap_end_us": overlap_end_us,
+                "cross_view_overlap_seconds": overlap_duration_us / 1e6,
+                "cross_view_overlap_window_count": len(common_intervals),
+                "cross_view_overlap_windows": [
+                    {"start_us": start, "end_us": end}
+                    for start, end in common_intervals
+                ],
+                "source_recording_start_us": source_start_us,
+                "source_recording_end_us": source_end_us,
                 "camera_count": len(cameras),
                 "recording_count": len(items),
                 "size_bytes": sum(int(item.get("size_bytes") or 0) for item in items),
                 "available": available,
                 "issues": issues,
+                "unconfigured_cameras": unconfigured_cameras,
                 "recordings": [
                     {
                         "recording_id": item["recording_id"],
@@ -294,12 +379,19 @@ def scan_recordings(config: dict[str, Any]) -> dict[str, Any]:
     excluded = {Path(config["storage"][key]).resolve() for key in ("archive_root", "local_cache_root")}
     visited = 0
     truncated = False
+    history_window_limited = False
     allow_plain = bool(settings.get("discover_plain_video_csv", False))
     # Bound discovery and exclude archives/caches at every depth.
     cameras = _camera_directories(root, settings, allow_plain)
+    monitored_camera_directories: list[str] = []
     for camera in cameras:
         if not camera.is_dir() or (camera != root and camera.is_symlink()) or camera.resolve() in excluded:
             continue
+        monitored_camera_directories.append(
+            "." if camera == root else camera.relative_to(root).as_posix()
+        )
+        camera_recording_count = 0
+        camera_recording_limit = int(settings.get("max_recordings_per_camera") or 0)
         def scan_error(exc: OSError) -> None:
             errors.append({"path": str(exc.filename), "message": "无法读取采集目录"})
 
@@ -307,7 +399,16 @@ def scan_recordings(config: dict[str, Any]) -> dict[str, Any]:
             current = Path(folder)
             depth = len(current.relative_to(camera).parts)
             max_depth = min(8, int(settings.get("max_scan_depth", 6))) if allow_plain else 2
-            directories[:] = sorted(name for name in directories if not name.startswith((".", "#")) and not (current / name).is_symlink() and (current / name).resolve() not in excluded) if depth < max_depth else []
+            directories[:] = sorted(
+                (
+                    name
+                    for name in directories
+                    if not name.startswith((".", "#"))
+                    and not (current / name).is_symlink()
+                    and (current / name).resolve() not in excluded
+                ),
+                reverse=True,
+            ) if depth < max_depth else []
             visited += 1
             if visited > int(settings.get("max_scan_directories", 20000)):
                 truncated = True
@@ -334,10 +435,22 @@ def scan_recordings(config: dict[str, Any]) -> dict[str, Any]:
                         item["camera_key"]
                     )
                     recordings.append(item)
+                    camera_recording_count += 1
                 except (OSError, ValueError, TypeError, OverflowError) as exc:
                     errors.append({"path": path.relative_to(root).as_posix(), "message": str(exc)})
+                if (
+                    camera_recording_limit > 0
+                    and camera_recording_count >= camera_recording_limit
+                ):
+                    history_window_limited = True
+                    break
             if len(recordings) >= int(settings.get("max_recordings", 5000)):
                 truncated = True
+                break
+            if (
+                camera_recording_limit > 0
+                and camera_recording_count >= camera_recording_limit
+            ):
                 break
         if truncated:
             break
@@ -346,6 +459,17 @@ def scan_recordings(config: dict[str, Any]) -> dict[str, Any]:
         "mode": "directory_metadata", "recordings": recordings,
         "recording_count": len(recordings), "errors": errors, "truncated": truncated,
         "batches": _recording_batches(recordings, settings),
+        "camera_directories": monitored_camera_directories,
+        "camera_directory_count": len(monitored_camera_directories),
+        "history_window_limited": history_window_limited,
+        "max_recordings_per_camera": int(
+            settings.get("max_recordings_per_camera") or 0
+        ),
+        "unconfigured_camera_directories": sorted(
+            camera
+            for camera in monitored_camera_directories
+            if camera != "." and camera not in (settings.get("camera_role_map") or {})
+        ),
         "generated_at": _iso(round(now * 1e6)),
         "source_copy_bytes": 0, "video_decode": False,
     }

@@ -10,7 +10,11 @@ from fastapi.testclient import TestClient
 from visioncortex import api
 from visioncortex.collection_catalog import discover_collections
 from visioncortex.nas_recordings import (
-    create_selection, scan_recordings, selection_path, validate_selection,
+    _recording_batches,
+    create_selection,
+    scan_recordings,
+    selection_path,
+    validate_selection,
 )
 
 
@@ -236,6 +240,148 @@ def test_configured_camera_pair_becomes_one_click_batch(nas_config, monkeypatch)
     assert receipt["role_source"] == "configured_camera_role_map"
 
 
+def test_dynamic_camera_discovery_monitors_unknown_roles_but_blocks_batch(
+    nas_config,
+):
+    nas_config["collection_ingest"].update(
+        camera_directories=[],
+        camera_directory_glob="*_cam*",
+        camera_role_map={
+            "a_cam01": "first_person",
+            "b_cam01": "third_person",
+        },
+        discover_plain_video_csv=False,
+    )
+    recording(nas_config, "a_cam01")
+    recording(nas_config, "b_cam01")
+    recording(nas_config, "new_cam01")
+
+    inventory = scan_recordings(nas_config)
+
+    assert inventory["camera_directory_count"] == 3
+    assert inventory["camera_directories"] == [
+        "a_cam01",
+        "b_cam01",
+        "new_cam01",
+    ]
+    assert inventory["unconfigured_camera_directories"] == ["new_cam01"]
+    assert len(inventory["batches"]) == 1
+    assert inventory["batches"][0]["available"] is False
+    assert inventory["batches"][0]["unconfigured_cameras"] == ["new_cam01"]
+    assert "采集相机视角待确认" in inventory["batches"][0]["issues"]
+
+
+def test_batch_requires_exact_session_identity_and_cross_camera_time_overlap(
+    nas_config,
+):
+    nas_config["collection_ingest"].update(
+        camera_directories=["a_cam01", "b_cam01"],
+        camera_role_map={
+            "a_cam01": "first_person",
+            "b_cam01": "third_person",
+        },
+        discover_plain_video_csv=False,
+    )
+    a = recording(nas_config, "a_cam01")
+    b = recording(nas_config, "b_cam01", offset=20_000_000)
+    session_id = json.loads((a / "meta.json").read_text())["recording_session_id"]
+    for name in ("meta.json", "recording_ready.json"):
+        path = b / name
+        payload = json.loads(path.read_text())
+        payload["recording_session_id"] = session_id
+        path.write_text(json.dumps(payload))
+        os.utime(path, (time.time() - 1000, time.time() - 1000))
+
+    inventory = scan_recordings(nas_config)
+
+    assert len(inventory["batches"]) == 1
+    batch = inventory["batches"][0]
+    assert batch["available"] is False
+    assert batch["cross_view_overlap_seconds"] == 0.0
+    assert "同一采集会话的相机时间范围不重叠" in batch["issues"]
+
+
+def test_nearby_recordings_with_different_sessions_are_never_merged(nas_config):
+    nas_config["collection_ingest"].update(
+        camera_directories=["a_cam01", "b_cam01"],
+        camera_role_map={
+            "a_cam01": "first_person",
+            "b_cam01": "third_person",
+        },
+        discover_plain_video_csv=False,
+    )
+    recording(nas_config, "a_cam01")
+    recording(nas_config, "b_cam01", offset=1_000_000)
+
+    inventory = scan_recordings(nas_config)
+
+    assert len(inventory["batches"]) == 2
+    assert not any(batch["available"] for batch in inventory["batches"])
+
+
+def test_segment_gaps_are_not_mistaken_for_cross_camera_time_overlap():
+    def item(camera, recording_id, start, end):
+        return {
+            "camera_key": camera,
+            "recording_id": recording_id,
+            "recording_session_id": "session-1",
+            "recording_start_us": start,
+            "recording_end_us": end,
+            "size_bytes": 1,
+            "available": True,
+            "issues": [],
+            "source_signature": recording_id,
+            "relative_path": f"{camera}/{recording_id}/rgb.mp4",
+        }
+
+    batches = _recording_batches(
+        [
+            item("a_cam01", "a-1", 1, 10),
+            item("a_cam01", "a-2", 20, 30),
+            item("b_cam01", "b-1", 10, 20),
+        ],
+        {
+            "camera_directories": ["a_cam01", "b_cam01"],
+            "camera_role_map": {
+                "a_cam01": "first_person",
+                "b_cam01": "third_person",
+            },
+        },
+    )
+
+    assert len(batches) == 1
+    assert batches[0]["available"] is False
+    assert batches[0]["cross_view_overlap_window_count"] == 0
+    assert batches[0]["cross_view_overlap_seconds"] == 0.0
+    assert "同一采集会话的相机时间范围不重叠" in batches[0]["issues"]
+
+
+def test_realtime_monitor_scans_newest_recordings_first_with_per_camera_bound(
+    nas_config,
+):
+    nas_config["collection_ingest"].update(
+        camera_directories=["a_cam01"],
+        camera_role_map={"a_cam01": "first_person"},
+        max_recordings_per_camera=1,
+    )
+    root = Path(nas_config["collection_ingest"]["source_root"])
+    recording(nas_config, "a_cam01")
+    old = root / "a_cam01" / "2026-09-03" / "120000"
+    newer = root / "a_cam01" / "2026-09-04" / "130000"
+    newer.mkdir(parents=True)
+    for source in old.iterdir():
+        target = newer / source.name
+        target.write_bytes(source.read_bytes())
+        os.utime(target, (time.time() - 1000, time.time() - 1000))
+
+    inventory = scan_recordings(nas_config)
+
+    assert inventory["recording_count"] == 1
+    assert "/2026-09-04/130000/" in inventory["recordings"][0]["relative_path"]
+    assert inventory["history_window_limited"] is True
+    assert inventory["max_recordings_per_camera"] == 1
+
+
 def test_recorder_scan_ignores_depth_media_and_uses_finalized_quality_window(
     nas_config,
 ):
@@ -291,9 +437,33 @@ def test_service_continuously_publishes_camera_monitor_receipt(
 
     assert payload["batches"][0]["available"] is True
     assert health["collection_ingest"]["monitor_status"] == "watching"
+    assert health["collection_ingest"]["camera_directory_count"] == 2
+    assert health["collection_ingest"]["camera_directories"] == [
+        "a_cam01",
+        "b_cam01",
+    ]
     assert (
         tmp_path / "runtime" / "state" / "nas-recording-monitor.json"
     ).is_file()
+
+
+def test_web_does_not_duplicate_a_slow_initial_monitor_scan(
+    nas_config, monkeypatch
+):
+    thread = type("Thread", (), {"is_alive": lambda self: True})()
+    monkeypatch.setattr(api, "_settings", lambda: nas_config)
+    monkeypatch.setattr(api, "_nas_monitor_snapshot", None)
+    monkeypatch.setattr(api, "_nas_monitor_thread", thread)
+    monkeypatch.setattr(
+        api,
+        "scan_recordings",
+        lambda _settings: pytest.fail("browser request duplicated background scan"),
+    )
+
+    payload = api.nas_recordings()
+
+    assert payload["monitor"]["status"] == "starting"
+    assert payload["recording_count"] == 0
 
 
 def test_configured_nas_alias_is_allowed_but_nested_symlinks_are_not(nas_config):

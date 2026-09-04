@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-url='http://127.0.0.1:8000/#/home'
-health_url='http://127.0.0.1:8000/api/health'
 browser_profile="${XDG_CONFIG_HOME:-$HOME/.config}/visioncortex-browser"
 browser_scale="${VISIONCORTEX_BROWSER_SCALE:-}"
 
@@ -20,10 +18,18 @@ if [[ -n $browser_scale && ! $browser_scale =~ ^(1([.][0-9]+)?|2([.]0+)?)$ ]]; t
   exit 1
 fi
 
-if systemctl --user is-enabled --quiet visioncortex-lan.service 2>/dev/null; then
+if systemctl --user is-enabled --quiet visioncortex-analysis.service 2>/dev/null; then
+  service='visioncortex-analysis.service'
+  url='http://127.0.0.1:8001/#/home'
+  health_url='http://127.0.0.1:8001/api/health'
+elif systemctl --user is-enabled --quiet visioncortex-lan.service 2>/dev/null; then
   service='visioncortex-lan.service'
+  url='http://127.0.0.1:8000/#/home'
+  health_url='http://127.0.0.1:8000/api/health'
 elif systemctl --user is-enabled --quiet visioncortex-local.service 2>/dev/null; then
   service='visioncortex-local.service'
+  url='http://127.0.0.1:8000/#/home'
+  health_url='http://127.0.0.1:8000/api/health'
 else
   printf '%s\n' 'VisionCortex Web 服务尚未安装。' >&2
   exit 1

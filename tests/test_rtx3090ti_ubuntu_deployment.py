@@ -25,6 +25,7 @@ def test_ubuntu_shell_scripts_are_syntactically_valid_and_gpu_scoped():
         "06-Run-LAN-Server.sh",
         "07-Install-LAN-Server.sh",
         "08-Server-Status.sh",
+        "09-Install-Analysis-Service.sh",
         "Open-VisionCortex.sh",
     ):
         path = DEPLOYMENT / name
@@ -137,7 +138,8 @@ def test_lan_systemd_service_is_authenticated_private_and_production_scoped():
     assert "VISIONCORTEX_NAS_ARCHIVE_ROOT=/home/x1/桌面/nas/" in service
     assert "ExecStartPre=" in service and "--production" in service
     assert "Restart=on-failure" in service
-    assert "--host 0.0.0.0" in runner
+    assert "VISIONCORTEX_WEB_HOST" in runner
+    assert '--host "$host"' in runner
     assert "ARK_API_KEY=$(<\"$ark_key_file\")" in runner
     assert "permissions must be 600" in runner
     assert "read -r -s" in installer
@@ -146,6 +148,28 @@ def test_lan_systemd_service_is_authenticated_private_and_production_scoped():
     assert "api/health" in status
     assert 'cat "$password_file"' not in status
     assert "url=http://%s:8000/#/home" in status
+
+
+def test_analysis_service_is_local_reboot_resilient_and_monitors_nas():
+    service = (DEPLOYMENT / "visioncortex-analysis.service").read_text(
+        encoding="utf-8"
+    )
+    installer = (DEPLOYMENT / "09-Install-Analysis-Service.sh").read_text(
+        encoding="utf-8"
+    )
+    launcher = (DEPLOYMENT / "Open-VisionCortex.sh").read_text(encoding="utf-8")
+
+    assert "rtx3090ti-ubuntu-production.yaml" in service
+    assert "VISIONCORTEX_WEB_HOST=127.0.0.1" in service
+    assert "VISIONCORTEX_WEB_PORT=8001" in service
+    assert "Restart=always" in service
+    assert "WantedBy=default.target" in service
+    assert "/home/x1/桌面/nas/VisionCortexExperimentArchive" in service
+    assert "systemctl --user enable --now visioncortex-analysis.service" in installer
+    assert "sudo loginctl enable-linger" in installer
+    assert "http://127.0.0.1:8001/api/health" in installer
+    assert "visioncortex-analysis.service" in launcher
+    assert "http://127.0.0.1:8001/#/home" in launcher
 
 
 def test_linux_archive_folder_uses_xdg_open(monkeypatch, tmp_path):
