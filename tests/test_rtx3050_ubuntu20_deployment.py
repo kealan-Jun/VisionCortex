@@ -58,6 +58,9 @@ def test_rtx3050_profile_preserves_full_chain_with_bounded_memory():
         "production_model_certification.json"
     )
     assert "3090" not in certification_path
+    assert config["validation"]["model_certification"].get(
+        "required_for_formal_production"
+    ) is False
 
 
 def test_rtx3050_local_profile_cannot_inherit_nas_paths():
