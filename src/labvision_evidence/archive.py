@@ -1735,6 +1735,22 @@ def write_key_material_category_index(
                 if publisher is not None:
                     publisher.publish_file(frame_summary_path)
                     publisher.publish_file(clip_summary_path)
+            else:
+                # A later semantic or visual-quality pass can quarantine every
+                # event that initially populated a category.  Remove the stale
+                # summary and its now-empty directory so the user-facing NAS
+                # tree never claims that a JSON-only category contains media.
+                for summary_path, category_folder in (
+                    (frame_summary_path, frame_category_folder),
+                    (clip_summary_path, clip_category_folder),
+                ):
+                    summary_path.unlink(missing_ok=True)
+                    try:
+                        category_folder.rmdir()
+                    except OSError:
+                        # Preserve any unexpected material for audit instead of
+                        # deleting a non-empty directory here.
+                        pass
             categories.append(
                 {
                     "action_type": action_type,

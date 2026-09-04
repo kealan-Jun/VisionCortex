@@ -52,6 +52,22 @@ def test_unobserved_action_categories_stay_in_index_without_json_only_folders(
         key_event_ids=[event.event_id],
     )
 
+    # Reproduce a category tree created before the final quality pass.
+    archive.write_key_material_category_index(
+        layout,
+        [group],
+        [event],
+        include_empty_categories=True,
+    )
+    stale_frame_category = (
+        layout.key_frames / "001-Test" / "03-Liquid-Movement"
+    )
+    stale_clip_category = (
+        layout.key_clips / "001-Test" / "03-Liquid-Movement"
+    )
+    assert (stale_frame_category / "Category.json").is_file()
+    assert (stale_clip_category / "Category.json").is_file()
+
     path = archive.write_key_material_category_index(
         layout,
         [group],
@@ -68,9 +84,8 @@ def test_unobserved_action_categories_stay_in_index_without_json_only_folders(
     assert categories["liquid_movement"]["materialized"] is False
     assert categories["liquid_movement"]["coverage_status"] == "not_observed"
     assert categories["liquid_movement"]["folder"] is None
-    assert not (
-        layout.key_frames / "001-Test" / "03-Liquid-Movement"
-    ).exists()
+    assert not stale_frame_category.exists()
+    assert not stale_clip_category.exists()
 
 
 def test_key_material_view_selection_uses_real_same_role_fallback_at_short_tail(
