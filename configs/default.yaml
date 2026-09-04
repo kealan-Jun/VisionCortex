@@ -486,10 +486,16 @@ mllm:
   http2: false
   max_output_tokens: 4096
   max_images_per_event: 8
+  max_images_per_event_by_action:
+    liquid_movement: 12
   # Reuse the already-materialized short key clips. The model sees an aligned
   # before/peak/after sequence for each selected role instead of one still.
   use_key_clip_temporal_samples: true
   temporal_samples_per_view: 3
+  # Liquid review reserves explicit slots for both roles. Profile overrides may
+  # increase both counts, but configuration validation rejects silent truncation.
+  liquid_primary_samples: 9
+  liquid_context_samples: 3
   # Build a bounded semantic audit queue for ontology-limited CV actions. The
   # plan is written before any model call and cannot mutate CV acceptance.
   candidate_review_max_events: 120
@@ -498,6 +504,9 @@ mllm:
   candidate_review_stratified_queue_enabled: false
   candidate_review_time_bucket_seconds: 1800
   storyboard_pairs_per_group: 4
+  storyboard_pairs_per_group_max: 12
+  storyboard_seconds_per_pair: 300
+  max_images_per_group: 12
   group_workers: 4
   workers: 8
   response_language: zh-CN

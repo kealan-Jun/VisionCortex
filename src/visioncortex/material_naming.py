@@ -12,9 +12,21 @@ ACTION_SLUGS = {
     "liquid_movement": "Liquid-Movement",
     "container_state_change": "Container-State-Change",
     "device_panel_operation": "Device-Panel-Operation",
-    # Append instead of renumbering the established five archive categories.
+    # Preserve the established category numbers and append the newer class.
     "pipette_transfer_operation": "Pipette-Transfer-Operation",
 }
+
+ACTION_LABELS_ZH = {
+    "hand_object_contact": "手部与物体接触",
+    "object_movement": "物体移动",
+    "liquid_movement": "液体移动（直接视觉证据）",
+    "container_state_change": "容器状态变化",
+    "device_panel_operation": "设备面板操作",
+    "pipette_transfer_operation": "移液器源到目标操作（液体不可见）",
+}
+
+if tuple(ACTION_LABELS_ZH) != tuple(ACTION_SLUGS):
+    raise RuntimeError("Key-material action labels and folders must share one order")
 
 ACTION_CATEGORY_FOLDERS = {
     action_type: f"{index:02d}-{slug}"

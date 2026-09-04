@@ -849,6 +849,8 @@ def record_semantic_review(
             else "whole_model_response"
         ),
         "semantic_proof_contradictions": proof_contradictions,
+        "next_step_evidence": dict(result.get("next_step_evidence") or {}),
+        "response_contract": result.get("response_contract"),
         "verdict": verdict,
         "usage": result.get("usage") or {},
         "latency_seconds": result.get("latency_seconds"),

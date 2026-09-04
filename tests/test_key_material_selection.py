@@ -132,6 +132,50 @@ def test_overlapping_nearby_actions_keep_higher_confidence_with_receipt(
     assert by_id["E-2"]["selected"] is True
 
 
+def test_overlapping_same_class_different_tracks_remain_distinct(
+    default_config,
+):
+    events = [_event(1, 10_000, confidence=0.8), _event(2, 10_800, confidence=0.95)]
+    for event, track_id in zip(events, (101, 202), strict=True):
+        event.candidates[0].evidence = [
+            {"object_name": "tube", "track_id": track_id}
+        ]
+    group, segment = _context(events)
+    receipts = []
+
+    selected = select_key_events(
+        [group], [segment], events, default_config, decision_receipts=receipts
+    )
+    comparison = next(
+        item
+        for item in receipts
+        if item["event_id"] == "E-2"
+    )["facts"]["dedup_comparisons"][0]
+
+    assert [event.event_id for event in selected] == ["E-1", "E-2"]
+    assert comparison["stable_identity_available"] is True
+    assert comparison["stable_identity_conflict"] is True
+    assert comparison["is_duplicate"] is False
+
+
+def test_overlapping_same_track_is_deduplicated(default_config):
+    events = [_event(1, 10_000, confidence=0.8), _event(2, 10_800, confidence=0.95)]
+    for event in events:
+        event.candidates[0].evidence = [
+            {"object_name": "tube", "track_id": 101}
+        ]
+    group, segment = _context(events)
+    receipts = []
+
+    selected = select_key_events(
+        [group], [segment], events, default_config, decision_receipts=receipts
+    )
+
+    assert [event.event_id for event in selected] == ["E-2"]
+    dropped = next(item for item in receipts if item["event_id"] == "E-1")
+    assert dropped["shared_stable_identities"] == [("fp", "tube", 101)]
+
+
 def test_hand_only_overlap_cannot_deduplicate_different_manipulated_objects(
     default_config,
 ):

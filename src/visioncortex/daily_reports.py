@@ -10,6 +10,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from .archive import ArchiveLayout, write_json
+from .material_naming import ACTION_LABELS_ZH
 from .pathing import archive_relative_posix
 from .report_presentations import (
     render_daily_html,
@@ -19,14 +20,7 @@ from .report_presentations import (
 from .schemas import RunSummary
 
 
-ACTION_LABELS = {
-    "hand_object_contact": "手部与物体接触",
-    "object_movement": "物体移动",
-    "liquid_movement": "液体移动（直接视觉证据）",
-    "container_state_change": "容器状态变化",
-    "device_panel_operation": "设备面板操作",
-    "pipette_transfer_operation": "移液器源到目标操作（液体不可见）",
-}
+ACTION_LABELS = ACTION_LABELS_ZH
 TEMPLATE_DIRECTORY = Path(__file__).with_name("templates")
 DEFAULT_DAILY_TEMPLATE_ID = "VC-LAB-DAILY-REPORT-V2"
 PROFESSIONAL_TEMPLATE_ID = "VC-PROFESSIONAL-EVIDENCE-REPORT-V1"
@@ -348,6 +342,8 @@ def build_daily_report(
                     "end_timecode": _clock(raw.get("end_global_ms")),
                     "current_step": raw.get("current_step"),
                     "next_step": raw.get("next_step"),
+                    "next_step_status": raw.get("next_step_status") or "unknown",
+                    "supporting_event_ids": raw.get("supporting_event_ids") or [],
                     "objects": raw.get("objects") or [],
                     "physical_change": raw.get("physical_change"),
                     "supporting_views": raw.get("supporting_views") or [],
@@ -402,6 +398,16 @@ def build_daily_report(
                     "observed_evidence": event.audit_reason,
                     "current_step": event_understanding.get("current_step"),
                     "next_step": event_understanding.get("next_step"),
+                    "next_step_status": (
+                        (event_understanding.get("next_step_evidence") or {}).get(
+                            "status"
+                        )
+                        or "unknown"
+                    ),
+                    "next_step_evidence": event_understanding.get(
+                        "next_step_evidence"
+                    )
+                    or {},
                     "model_status": event_understanding.get("status"),
                     "model_confidence": event_understanding.get("confidence"),
                     "model_usage": event_understanding.get("usage") or {},
@@ -580,7 +586,11 @@ def build_daily_report(
             "runtime_audit": run_metrics.get("runtime_audit") or {},
         },
         "human_review": {
-            "status": "pending",
+            "status": "not_required",
+            "required_for_completion": False,
+            "algorithmic_acceptance_source": (
+                "JSON-Config-Files/evidence_package_eval.json"
+            ),
             "reviewer_id": None,
             "reviewed_at": None,
             "comments": [],

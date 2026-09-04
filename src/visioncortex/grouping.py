@@ -196,6 +196,32 @@ def event_stable_identities(
     return _event_track_identities(event)
 
 
+def event_view_stable_identities(
+    event: EvidenceEvent,
+    view_id: str,
+) -> set[tuple[str, int]]:
+    """Return object-class and track identities proven in one physical view."""
+
+    return {
+        (object_name, track_id)
+        for identity_view, object_name, track_id in _event_track_identities(event)
+        if identity_view == view_id
+    }
+
+
+def event_view_actor_identities(
+    event: EvidenceEvent,
+    view_id: str,
+) -> set[int]:
+    """Return actor tracks proven in one physical view."""
+
+    return {
+        track_id
+        for identity_view, track_id in _event_actor_identities(event)
+        if identity_view == view_id
+    }
+
+
 def events_have_stable_identity_conflict(
     left: EvidenceEvent,
     right: EvidenceEvent,
@@ -3036,20 +3062,35 @@ def select_key_events(
         reasons: dict[str, list[str]] = {}
 
         def offer(event: EvidenceEvent, reason: str) -> None:
-            if event in retained or len(retained) >= limit:
+            if event in retained:
+                reasons.setdefault(event.event_id, []).append(reason)
+                return
+            if len(retained) >= limit:
                 return
             retained.append(event)
             reasons.setdefault(event.event_id, []).append(reason)
 
+        coverage_queues: list[tuple[str, list[EvidenceEvent]]] = []
         if segment_by_event:
-            for segment_id in sorted(set(segment_by_event.values())):
-                candidates = [
-                    event
-                    for event in ordered
-                    if segment_by_event.get(event.event_id) == segment_id
-                ]
-                if candidates:
-                    offer(ranked(candidates)[0], "atomic_experiment_coverage")
+            coverage_queues.append(
+                (
+                    "atomic_experiment_coverage",
+                    [
+                        ranked(
+                            [
+                                event
+                                for event in ordered
+                                if segment_by_event.get(event.event_id) == segment_id
+                            ]
+                        )[0]
+                        for segment_id in sorted(set(segment_by_event.values()))
+                        if any(
+                            segment_by_event.get(event.event_id) == segment_id
+                            for event in ordered
+                        )
+                    ],
+                )
+            )
         if required_view_pair:
             pair_candidates = [
                 event
@@ -3057,25 +3098,44 @@ def select_key_events(
                 if set(required_view_pair).issubset(set(event.supporting_views))
             ]
             if pair_candidates:
-                offer(ranked(pair_candidates)[0], "canonical_view_pair_coverage")
-        for action_type in sorted({event.action_type.value for event in ordered}):
-            candidates = [
-                event for event in ordered if event.action_type.value == action_type
-            ]
-            offer(ranked(candidates)[0], "action_type_coverage")
+                coverage_queues.append(
+                    ("canonical_view_pair_coverage", [ranked(pair_candidates)[0]])
+                )
+        coverage_queues.append(
+            (
+                "action_type_coverage",
+                [
+                    ranked(
+                        [
+                            event
+                            for event in ordered
+                            if event.action_type.value == action_type
+                        ]
+                    )[0]
+                    for action_type in sorted(
+                        {event.action_type.value for event in ordered}
+                    )
+                ],
+            )
+        )
         if ordered:
-            offer(ordered[0], "timeline_start_coverage")
-            offer(ordered[-1], "timeline_end_coverage")
-        for event in ordered:
-            if event.action_type.value in critical_action_types:
-                offer(event, "critical_state_or_operation")
+            coverage_queues.extend(
+                [
+                    ("timeline_start_coverage", [ordered[0]]),
+                    ("timeline_end_coverage", [ordered[-1]]),
+                ]
+            )
 
         time_buckets: dict[int, list[EvidenceEvent]] = {}
         for event in ordered:
             bucket = int(max(0.0, event.key_global_ms - start_ms) // coverage_bucket_ms)
             time_buckets.setdefault(bucket, []).append(event)
-        for bucket in sorted(time_buckets):
-            offer(ranked(time_buckets[bucket])[0], "timeline_bucket_coverage")
+        coverage_queues.append(
+            (
+                "timeline_bucket_coverage",
+                [ranked(time_buckets[bucket])[0] for bucket in sorted(time_buckets)],
+            )
+        )
 
         object_buckets: dict[tuple[Any, ...], list[EvidenceEvent]] = {}
         for event in ordered:
@@ -3084,11 +3144,62 @@ def select_key_events(
                 sorted(_non_actor_objects(event))
             )
             object_buckets.setdefault(object_key, []).append(event)
-        for object_key in sorted(object_buckets, key=str):
-            offer(ranked(object_buckets[object_key])[0], "object_identity_coverage")
+        coverage_queues.append(
+            (
+                "object_identity_coverage",
+                [
+                    ranked(object_buckets[object_key])[0]
+                    for object_key in sorted(object_buckets, key=str)
+                ],
+            )
+        )
+        critical_buckets: dict[tuple[Any, ...], list[EvidenceEvent]] = {}
+        for event in ordered:
+            if event.action_type.value not in critical_action_types:
+                continue
+            identities = tuple(sorted(event_stable_identities(event)))
+            object_key: tuple[Any, ...] = identities or tuple(
+                sorted(_non_actor_objects(event))
+            )
+            time_bucket = int(
+                max(0.0, event.key_global_ms - start_ms) // coverage_bucket_ms
+            )
+            critical_buckets.setdefault(
+                (event.action_type.value, time_bucket, object_key), []
+            ).append(event)
+        coverage_queues.append(
+            (
+                "critical_state_or_operation_coverage",
+                [
+                    ranked(critical_buckets[key])[0]
+                    for key in sorted(critical_buckets, key=str)
+                ],
+            )
+        )
+
+        # Round-robin across coverage dimensions. A long run of one critical
+        # class can no longer consume the entire budget before time and object
+        # coverage receive a slot.
+        queue_positions = [0] * len(coverage_queues)
+        while len(retained) < limit:
+            progressed = False
+            for queue_index, (reason, queue) in enumerate(coverage_queues):
+                position = queue_positions[queue_index]
+                if position >= len(queue):
+                    continue
+                queue_positions[queue_index] += 1
+                offer(queue[position], reason)
+                progressed = True
+                if len(retained) >= limit:
+                    break
+            if not progressed:
+                break
         for event in ranked(ordered):
             offer(event, "confidence_fill")
-        return sorted(retained, key=event_sort_key), reasons
+        return sorted(retained, key=event_sort_key), {
+            event_id: sorted(set(event_reasons))
+            for event_id, event_reasons in reasons.items()
+        }
 
     def duplicate_metrics(
         existing: EvidenceEvent,
@@ -3097,6 +3208,13 @@ def select_key_events(
         shared_all = set(existing.objects) & set(event.objects)
         shared_objects = sorted(shared_all - ACTOR_OBJECTS)
         shared_actor_objects = sorted(shared_all & ACTOR_OBJECTS)
+        existing_identities = event_stable_identities(existing)
+        event_identities = event_stable_identities(event)
+        shared_stable_identities = sorted(existing_identities & event_identities)
+        stable_identity_available = bool(existing_identities and event_identities)
+        stable_identity_conflict = events_have_stable_identity_conflict(
+            existing, event
+        )
         interval_overlap_ms = max(
             0.0,
             min(existing.global_end_ms, event.global_end_ms)
@@ -3112,6 +3230,9 @@ def select_key_events(
         return {
             "shared_objects": shared_objects,
             "shared_actor_objects": shared_actor_objects,
+            "shared_stable_identities": shared_stable_identities,
+            "stable_identity_available": stable_identity_available,
+            "stable_identity_conflict": stable_identity_conflict,
             "peak_distance_ms": abs(
                 existing.key_global_ms - event.key_global_ms
             ),
@@ -3139,7 +3260,12 @@ def select_key_events(
                 duplicate: tuple[EvidenceEvent, dict[str, Any]] | None = None
                 for existing in bucket:
                     metrics = duplicate_metrics(existing, event)
-                    is_duplicate = bool(metrics["shared_objects"]) and bool(
+                    identity_compatible = bool(
+                        metrics["shared_stable_identities"]
+                        if metrics["stable_identity_available"]
+                        else metrics["shared_objects"]
+                    ) and not bool(metrics["stable_identity_conflict"])
+                    is_duplicate = identity_compatible and bool(
                         metrics["interval_overlap_ms"] > 0.0
                         and metrics["peak_distance_ms"] < separation_ms
                     )
@@ -3149,9 +3275,9 @@ def select_key_events(
                             **metrics,
                             "is_duplicate": is_duplicate,
                             "reason": (
-                                "shared_non_hand_object_with_overlapping_interval"
+                                "same_physical_identity_with_overlapping_interval"
                                 if is_duplicate
-                                else "missing_shared_non_hand_object_or_interval_overlap"
+                                else "identity_or_interval_does_not_prove_duplicate"
                             ),
                         }
                     )
@@ -3326,6 +3452,15 @@ def select_key_events(
                             ),
                             "shared_actor_objects": item.get(
                                 "shared_actor_objects", []
+                            ),
+                            "shared_stable_identities": item.get(
+                                "shared_stable_identities", []
+                            ),
+                            "stable_identity_available": item.get(
+                                "stable_identity_available", False
+                            ),
+                            "stable_identity_conflict": item.get(
+                                "stable_identity_conflict", False
                             ),
                             "peak_distance_ms": item.get("peak_distance_ms"),
                             "interval_overlap_ms": item.get(

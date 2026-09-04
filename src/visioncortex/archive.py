@@ -32,6 +32,11 @@ from .indexing import (
     stable_evidence_uid,
 )
 from .identity import PRODUCT_NAME
+from .grouping import (
+    event_stable_identities,
+    event_view_actor_identities,
+    event_view_stable_identities,
+)
 from .mllm import (
     ArkStepAnalyzer,
     EVENT_SYSTEM_PROMPT,
@@ -87,6 +92,46 @@ def write_json(path: Path, payload: Any) -> None:
         json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default), encoding="utf-8"
     )
     temporary.replace(path)
+
+
+class SemanticAnalysisUnavailable(RuntimeError):
+    """A resumable semantic stage failed before it could adjudicate evidence."""
+
+
+def _raise_for_incomplete_semantic_results(
+    layout: "ArchiveLayout",
+    *,
+    stage: str,
+    results: Sequence[tuple[str, dict[str, Any]]],
+) -> None:
+    incomplete = [
+        {
+            "subject_id": subject_id,
+            "status": str(result.get("status") or "unknown"),
+            "error": result.get("error"),
+            "attempts": result.get("attempts"),
+        }
+        for subject_id, result in results
+        if result.get("status") != "completed"
+    ]
+    if not incomplete:
+        return
+    path = layout.json_config / f"{stage}_semantic_failures.json"
+    write_json(
+        path,
+        {
+            "schema_version": "visioncortex-semantic-stage-failure/1",
+            "stage": stage,
+            "status": "resumable_failure",
+            "formal_evidence_mutated": False,
+            "completed_results_reusable": True,
+            "incomplete": incomplete,
+        },
+    )
+    raise SemanticAnalysisUnavailable(
+        f"{stage} semantic analysis incomplete for {len(incomplete)} subject(s); "
+        f"resume from {path}"
+    )
 
 
 def _semantic_fingerprint(
@@ -760,7 +805,14 @@ def materialize_experiment_clips(
         publisher.publish_file(runtime_path)
 
 
-def _storyboard_times(group: ExperimentGroup, events: Sequence[EvidenceEvent], limit: int) -> list[float]:
+def _storyboard_times(
+    group: ExperimentGroup,
+    events: Sequence[EvidenceEvent],
+    limit: int,
+    segments: Sequence[ExperimentSegment] = (),
+) -> list[float]:
+    """Cover boundaries, atomic segments and action classes before uniform fill."""
+
     if limit < 2:
         return [(group.global_start_ms + group.global_end_ms) / 2.0]
     duration = max(1.0, group.global_end_ms - group.global_start_ms)
@@ -768,17 +820,52 @@ def _storyboard_times(group: ExperimentGroup, events: Sequence[EvidenceEvent], l
         group.global_start_ms + duration * index / (limit - 1)
         for index in range(limit)
     ]
-    event_times = [
-        event.key_global_ms
+    accepted = [
+        event
         for event in events
         if event.accepted
         and group.global_start_ms <= event.key_global_ms <= group.global_end_ms
     ]
-    candidates = sorted(set(uniform + event_times))
     selected = [uniform[0], uniform[-1]]
+
+    def add(value: float) -> None:
+        if len(selected) >= limit:
+            return
+        bounded = min(group.global_end_ms, max(group.global_start_ms, float(value)))
+        if bounded not in selected:
+            selected.append(bounded)
+
+    for segment in sorted(segments, key=lambda item: item.global_start_ms):
+        segment_events = [
+            event
+            for event in accepted
+            if event.event_id in set(segment.event_ids)
+        ]
+        representative = (
+            max(
+                segment_events,
+                key=lambda event: (event.confidence, -event.key_global_ms),
+            ).key_global_ms
+            if segment_events
+            else (segment.global_start_ms + segment.global_end_ms) / 2.0
+        )
+        add(representative)
+    for action_type in sorted({event.action_type.value for event in accepted}):
+        add(
+            max(
+                (
+                    event
+                    for event in accepted
+                    if event.action_type.value == action_type
+                ),
+                key=lambda event: (event.confidence, -event.key_global_ms),
+            ).key_global_ms
+        )
+
+    candidates = sorted(set(uniform + [event.key_global_ms for event in accepted]))
     while len(selected) < limit and candidates:
         best = max(candidates, key=lambda value: min(abs(value - item) for item in selected))
-        selected.append(best)
+        add(best)
         candidates.remove(best)
     return sorted(set(selected))[:limit]
 
@@ -799,13 +886,38 @@ def analyze_experiment_groups(
     cache_root = layout.work / "mllm-cache" / "experiment-groups"
     by_view = {view.view_id: view for view in views}
     by_segment = {segment.segment_id: segment for segment in segments}
-    max_pairs = max(2, int(config["mllm"].get("storyboard_pairs_per_group", 6)))
+    base_pairs = max(2, int(config["mllm"].get("storyboard_pairs_per_group", 4)))
+    maximum_pairs = max(
+        base_pairs,
+        int(config["mllm"].get("storyboard_pairs_per_group_max", base_pairs)),
+    )
+    seconds_per_pair = max(
+        1.0,
+        float(config["mllm"].get("storyboard_seconds_per_pair", 300.0)),
+    )
 
     def analyze(group: ExperimentGroup) -> tuple[ExperimentGroup, dict[str, Any]]:
         storyboard: list[tuple[str, Path]] = []
         storyboard_dir = layout.work / "group-storyboards" / group.group_id
+        atomic = [by_segment[item] for item in group.atomic_experiment_ids]
+        event_ids = {event_id for segment in atomic for event_id in segment.event_ids}
+        group_events = [event for event in events if event.event_id in event_ids]
+        duration_pairs = math.ceil(
+            max(1.0, group.global_end_ms - group.global_start_ms)
+            / (seconds_per_pair * 1000.0)
+        ) + 1
+        action_pairs = len(
+            {event.action_type.value for event in group_events if event.accepted}
+        ) + 2
+        pair_limit = min(
+            maximum_pairs,
+            max(base_pairs, duration_pairs, len(atomic) + 2, action_pairs),
+        )
         with ViewFrameReader(max_open=2) as frame_reader:
-            for index, global_ms in enumerate(_storyboard_times(group, events, max_pairs), 1):
+            for index, global_ms in enumerate(
+                _storyboard_times(group, group_events, pair_limit, atomic), 1
+            ):
+                role_paths: dict[str, Path] = {}
                 for role_label, view_id in (
                     ("first_person", group.first_person_view),
                     ("third_person", group.third_person_view),
@@ -820,15 +932,29 @@ def analyze_experiment_groups(
                     path.parent.mkdir(parents=True, exist_ok=True)
                     if not cv2.imwrite(str(path), frame, [cv2.IMWRITE_JPEG_QUALITY, 88]):
                         continue
+                    role_paths[role_label] = path
+                if {"first_person", "third_person"} <= set(role_paths):
+                    aligned = storyboard_dir / f"{index:02d}_aligned_first_third.jpg"
+                    _write_aligned_frame(
+                        role_paths["first_person"],
+                        role_paths["third_person"],
+                        aligned,
+                        (
+                            f"First-Person {group.first_person_view}",
+                            f"Third-Person {group.third_person_view}",
+                        ),
+                    )
                     storyboard.append(
                         (
-                            f"t={global_ms:.3f}ms; role={role_label}; view_id={view_id}",
-                            path,
+                            f"t={global_ms:.3f}ms; aligned_first_third; "
+                            f"first={group.first_person_view}; third={group.third_person_view}",
+                            aligned,
                         )
                     )
-        atomic = [by_segment[item] for item in group.atomic_experiment_ids]
-        event_ids = {event_id for segment in atomic for event_id in segment.event_ids}
-        group_events = [event for event in events if event.event_id in event_ids]
+        if len(storyboard) < 2:
+            raise RuntimeError(
+                f"{group.group_id} has fewer than two complete aligned storyboard pairs"
+            )
         semantic_evidence = {
             "continuity_type": group.continuity_type,
             "continuity_reason": group.continuity_reason,
@@ -851,6 +977,14 @@ def analyze_experiment_groups(
                 for event in group_events
                 if event.accepted
             ],
+            "storyboard_sampling": {
+                "base_pair_count": base_pairs,
+                "effective_pair_limit": pair_limit,
+                "materialized_pair_count": len(storyboard),
+                "maximum_pair_count": maximum_pairs,
+                "seconds_per_pair": seconds_per_pair,
+                "atomic_experiment_count": len(atomic),
+            },
         }
         system_prompt = (
             FINAL_GROUP_SYSTEM_PROMPT if final_adjudicated else GROUP_SYSTEM_PROMPT
@@ -887,11 +1021,13 @@ def analyze_experiment_groups(
         return group, result
 
     workers = max(1, int(config["mllm"].get("group_workers", 2)))
+    semantic_results: list[tuple[str, dict[str, Any]]] = []
     try:
         with ThreadPoolExecutor(max_workers=min(workers, max(1, len(groups)))) as executor:
             futures = [executor.submit(analyze, group) for group in groups]
             for future in as_completed(futures):
                 group, result = future.result()
+                semantic_results.append((group.group_id, result))
                 group.model_understanding = result
                 if result.get("status") == "completed":
                     group.experiment_name = str(
@@ -923,6 +1059,11 @@ def analyze_experiment_groups(
                     segment.semantic_understanding = result
     finally:
         analyzer.close()
+    _raise_for_incomplete_semantic_results(
+        layout,
+        stage="experiment_group",
+        results=semantic_results,
+    )
 
 
 def _write_aligned_frame(left: Path, right: Path, destination: Path, labels: tuple[str, str]) -> None:
@@ -982,7 +1123,6 @@ def _select_key_material_view_pair(
         ViewRole.FIRST_PERSON: group.first_person_view,
         ViewRole.THIRD_PERSON: group.third_person_view,
     }
-    selected: dict[ViewRole, str] = {}
     candidates_receipt: dict[str, list[dict[str, Any]]] = {}
     for role, preferred in by_role.items():
         role_candidates: list[dict[str, Any]] = []
@@ -1009,30 +1149,99 @@ def _select_key_material_view_pair(
                     "candidate_supported": view_id in supported,
                     "group_preferred": view_id == preferred,
                     "physical_margin_ms": round(margin_ms, 6),
+                    "stable_object_identities": sorted(
+                        event_view_stable_identities(event, view_id)
+                    ),
+                    "stable_actor_track_ids": sorted(
+                        event_view_actor_identities(event, view_id)
+                    ),
                 }
             )
-        eligible = [item for item in role_candidates if item["in_physical_bounds"]]
         candidates_receipt[role.value] = role_candidates
-        if not eligible:
+        if not any(item["in_physical_bounds"] for item in role_candidates):
             raise ValueError(
                 f"{event.event_id} has no {role.value} view containing global "
                 f"key timestamp {event.key_global_ms:.3f} ms"
             )
-        winner = max(
-            eligible,
-            key=lambda item: (
-                bool(item["directly_supported"]),
-                bool(item["candidate_supported"]),
-                bool(item["group_preferred"]),
-                float(item["physical_margin_ms"]),
-                str(item["view_id"]),
-            ),
+
+    pair_candidates: list[dict[str, Any]] = []
+    for first in candidates_receipt[ViewRole.FIRST_PERSON.value]:
+        if not first["in_physical_bounds"]:
+            continue
+        for third in candidates_receipt[ViewRole.THIRD_PERSON.value]:
+            if not third["in_physical_bounds"]:
+                continue
+            first_classes = {
+                str(item[0]) for item in first["stable_object_identities"]
+            }
+            third_classes = {
+                str(item[0]) for item in third["stable_object_identities"]
+            }
+            shared_identity_classes = sorted(first_classes & third_classes)
+            both_action_supported = bool(
+                first["candidate_supported"] and third["candidate_supported"]
+            )
+            identity_conflict = bool(
+                both_action_supported
+                and first_classes
+                and third_classes
+                and not shared_identity_classes
+            )
+            pair_candidates.append(
+                {
+                    "first_person_view": first["view_id"],
+                    "third_person_view": third["view_id"],
+                    "both_views_directly_supported": bool(
+                        first["directly_supported"] and third["directly_supported"]
+                    ),
+                    "direct_support_count": int(first["directly_supported"])
+                    + int(third["directly_supported"]),
+                    "both_views_candidate_supported": both_action_supported,
+                    "candidate_support_count": int(first["candidate_supported"])
+                    + int(third["candidate_supported"]),
+                    "shared_identity_classes": shared_identity_classes,
+                    "stable_identity_available_in_both_views": bool(
+                        first_classes and third_classes
+                    ),
+                    "actor_identity_available_in_both_views": bool(
+                        first["stable_actor_track_ids"]
+                        and third["stable_actor_track_ids"]
+                    ),
+                    "identity_conflict": identity_conflict,
+                    "group_preferred_pair": bool(
+                        first["group_preferred"] and third["group_preferred"]
+                    ),
+                    "minimum_physical_margin_ms": min(
+                        float(first["physical_margin_ms"]),
+                        float(third["physical_margin_ms"]),
+                    ),
+                }
+            )
+    eligible_pairs = [
+        item for item in pair_candidates if not item["identity_conflict"]
+    ]
+    if not eligible_pairs:
+        raise ValueError(
+            f"{event.event_id} has no identity-compatible first/third-person "
+            f"view pair at {event.key_global_ms:.3f} ms"
         )
-        selected[role] = str(winner["view_id"])
-    pair = (
-        selected[ViewRole.FIRST_PERSON],
-        selected[ViewRole.THIRD_PERSON],
+    winner = max(
+        eligible_pairs,
+        key=lambda item: (
+            bool(item["both_views_directly_supported"]),
+            int(item["direct_support_count"]),
+            bool(item["both_views_candidate_supported"]),
+            int(item["candidate_support_count"]),
+            bool(item["shared_identity_classes"]),
+            bool(item["stable_identity_available_in_both_views"]),
+            bool(item["actor_identity_available_in_both_views"]),
+            bool(item["group_preferred_pair"]),
+            float(item["minimum_physical_margin_ms"]),
+            str(item["first_person_view"]),
+            str(item["third_person_view"]),
+        ),
     )
+    pair = (str(winner["first_person_view"]), str(winner["third_person_view"]))
     receipt = {
         "schema_version": "visioncortex-key-material-view-selection/1",
         "policy": "same-role real source containing aligned key timestamp",
@@ -1046,6 +1255,18 @@ def _select_key_material_view_pair(
         "fallback_applied": pair
         != (group.first_person_view, group.third_person_view),
         "candidates": candidates_receipt,
+        "pair_candidates": pair_candidates,
+        "selected_pair_identity": {
+            key: value
+            for key, value in winner.items()
+            if key
+            not in {
+                "first_person_view",
+                "third_person_view",
+                "minimum_physical_margin_ms",
+                "group_preferred_pair",
+            }
+        },
     }
     return pair, receipt
 
@@ -1300,6 +1521,10 @@ def _artifact_json(
 
     current_step = str(understanding.get("current_step") or "")
     next_step = str(understanding.get("next_step") or "")
+    next_step_evidence = dict(understanding.get("next_step_evidence") or {})
+    next_step_status = str(next_step_evidence.get("status") or "unknown")
+    if next_step_status not in {"observed", "inferred", "unknown"}:
+        next_step_status = "unknown"
     uncertainties = list(
         dict.fromkeys(
             [
@@ -1404,7 +1629,10 @@ def _artifact_json(
     )
     supported_inferences = []
     if next_step and next_step not in {"未知", "unknown", "不确定"}:
-        supported_inferences.append(f"下一步：{next_step}")
+        if next_step_status == "observed":
+            observed_facts.append(f"已观察后续动作：{next_step}")
+        elif next_step_status == "inferred":
+            supported_inferences.append(f"预测下一步：{next_step}")
     contradictions = []
     if consistency == "conflict":
         contradictions.append("第一人称与第三人称观察发生冲突，详见 observations")
@@ -1577,6 +1805,8 @@ def _artifact_json(
                 "attempts": understanding.get("attempts"),
                 "current_step": current_step or None,
                 "next_step": next_step or None,
+                "next_step_status": next_step_status,
+                "next_step_evidence": next_step_evidence,
             },
             "alignment": {
                 item: transforms[item].model_dump(mode="json")
@@ -1653,7 +1883,7 @@ def write_key_material_category_index(
     *,
     include_empty_categories: bool = True,
 ) -> Path:
-    """Write a human-browsable and machine-indexable five-category manifest."""
+    """Write a human-browsable and machine-indexable six-category manifest."""
 
     event_by_id = {
         event.event_id: event for event in events if event.accepted
@@ -4472,6 +4702,7 @@ def materialize_key_materials(
     config: dict[str, Any],
     publisher: Any | None = None,
     archive_id: str | None = None,
+    materialize_event_ids: set[str] | None = None,
 ) -> None:
     by_view = {view.view_id: view for view in views}
     before = float(config["segmentation"]["key_clip_pre_seconds"]) * 1000.0
@@ -4481,10 +4712,15 @@ def materialize_key_materials(
     group_by_event = {event_id: group for group in groups for event_id in group.key_event_ids}
     runtime_records: list[dict[str, Any]] = []
     stage_started = time.perf_counter()
-    accepted_events = [
+    all_accepted_events = [
         event
         for event in events
         if event.accepted and event.event_id in group_by_event
+    ]
+    accepted_events = [
+        event
+        for event in all_accepted_events
+        if materialize_event_ids is None or event.event_id in materialize_event_ids
     ]
     include_empty_categories = bool(
         config.get("archive", {}).get(
@@ -4494,7 +4730,7 @@ def materialize_key_materials(
     prepare_key_material_category_layout(
         layout,
         groups,
-        accepted_events,
+        all_accepted_events,
         include_empty_categories=include_empty_categories,
     )
     best_frames_by_view = {
@@ -4631,8 +4867,9 @@ def materialize_key_materials(
         for view_id, path in detection_paths.items()
     }
     lookup_seconds = time.perf_counter() - lookup_started
+    selected_event_ids = {event.event_id for event in accepted_events}
     for event in events:
-        if not event.accepted or event.event_id not in group_by_event:
+        if event.event_id not in selected_event_ids:
             continue
         event_started = time.perf_counter()
         group = group_by_event[event.event_id]
@@ -4924,26 +5161,80 @@ def materialize_key_materials(
     category_index_path = write_key_material_category_index(
         layout,
         groups,
-        events,
+        all_accepted_events,
         publisher=publisher,
         include_empty_categories=include_empty_categories,
     )
     runtime_path = layout.json_config / "key_material_materialization_runtime.json"
+    previous_runtime: dict[str, Any] = {}
+    if materialize_event_ids is not None and runtime_path.exists():
+        try:
+            previous_runtime = json.loads(
+                runtime_path.read_text(encoding="utf-8-sig")
+            )
+        except (OSError, ValueError):
+            previous_runtime = {}
+    previous_records = [
+        item
+        for item in previous_runtime.get("records") or []
+        if str(item.get("event_id") or "") not in selected_event_ids
+    ]
+    previous_passes = list(previous_runtime.get("materialization_passes") or [])
+    if not previous_passes and previous_runtime:
+        previous_passes = [
+            {
+                "scope": "initial",
+                "event_ids": sorted(
+                    {
+                        str(item.get("event_id"))
+                        for item in previous_runtime.get("records") or []
+                        if item.get("event_id")
+                    }
+                ),
+                "duration_seconds": previous_runtime.get(
+                    "total_duration_seconds", 0.0
+                ),
+            }
+        ]
+    current_duration = round(time.perf_counter() - stage_started, 6)
+    materialization_passes = previous_passes + [
+        {
+            "scope": (
+                "initial"
+                if materialize_event_ids is None
+                else "post_semantic_selective_refresh"
+            ),
+            "event_ids": sorted(selected_event_ids),
+            "duration_seconds": current_duration,
+        }
+    ]
     write_json(
         runtime_path,
         {
             "schema_version": "visioncortex-key-materialization-runtime/1",
             "workers": workers,
-            "total_duration_seconds": round(time.perf_counter() - stage_started, 6),
-            "detection_ledger_lookup_seconds": round(lookup_seconds, 6),
-            "detection_ledger_passes": len(nearest_by_view),
+            "total_duration_seconds": round(
+                sum(
+                    float(item.get("duration_seconds") or 0.0)
+                    for item in materialization_passes
+                ),
+                6,
+            ),
+            "detection_ledger_lookup_seconds": round(
+                float(previous_runtime.get("detection_ledger_lookup_seconds") or 0.0)
+                + lookup_seconds,
+                6,
+            ),
+            "detection_ledger_passes": int(
+                previous_runtime.get("detection_ledger_passes") or 0
+            )
+            + len(nearest_by_view),
             "archive_hierarchy_version": "2.0.0",
             "category_index": _relative(category_index_path, layout.root),
-            "accepted_event_count": sum(
-                bool(event.accepted and event.event_id in group_by_event)
-                for event in events
-            ),
-            "records": runtime_records,
+            "accepted_event_count": len(all_accepted_events),
+            "last_pass_materialized_event_count": len(accepted_events),
+            "materialization_passes": materialization_passes,
+            "records": previous_records + runtime_records,
         },
     )
     if publisher is not None:
@@ -5181,15 +5472,22 @@ def analyze_key_materials(layout: ArchiveLayout, events: Sequence[EvidenceEvent]
         return event, result
 
     workers = max(1, int(config["mllm"].get("workers", 4)))
+    semantic_results: list[tuple[str, dict[str, Any]]] = []
     try:
         with ThreadPoolExecutor(max_workers=min(workers, max(1, len(accepted)))) as executor:
             futures = [executor.submit(analyze, event) for event in accepted]
             for future in as_completed(futures):
                 event, result = future.result()
+                semantic_results.append((event.event_id, result))
                 event.model_understanding = result
                 record_semantic_review(event, result)
     finally:
         analyzer.close()
+    _raise_for_incomplete_semantic_results(
+        layout,
+        stage="key_material",
+        results=semantic_results,
+    )
 
 
 def curate_semantically_reviewed_key_materials(
@@ -5202,11 +5500,23 @@ def curate_semantically_reviewed_key_materials(
     """Keep only semantically confirmed actions in final Key-Materials.
 
     CV acceptance remains in each semantic-review receipt. Rejected or
-    uncertain generated media moves into a clearly separated formal review
-    candidate tree, so recall disputes remain visually auditable without being
-    presented as confirmed key material.
+    uncertain generated media moves into a machine-quarantine tree, so recall
+    disputes remain visually auditable without becoming a manual completion
+    gate or being presented as confirmed key material.
     """
 
+    incomplete_model_events = [
+        event.event_id
+        for event in events
+        if str((event.semantic_review or {}).get("model_status") or "")
+        != "completed"
+    ]
+    if incomplete_model_events:
+        raise SemanticAnalysisUnavailable(
+            "Semantic curation cannot treat unavailable model results as negative "
+            "evidence; resume incomplete events: "
+            + ", ".join(sorted(incomplete_model_events))
+        )
     if publisher is not None:
         raise RuntimeError(
             "Semantic key-material curation requires direct staging output; "
@@ -5221,7 +5531,7 @@ def curate_semantically_reviewed_key_materials(
     group_by_event = {
         event_id: group for group in groups for event_id in group.key_event_ids
     }
-    quarantine_root = layout.key_materials / "Review-Candidates"
+    quarantine_root = layout.key_materials / "Machine-Quarantine"
     records: list[dict[str, Any]] = []
     curated: list[EvidenceEvent] = []
 
@@ -6032,6 +6342,19 @@ def curate_semantically_reviewed_key_materials(
                 shared_objects = (
                     set(existing.objects) & set(event.objects)
                 ) - actor_objects
+                existing_identities = event_stable_identities(existing)
+                event_identities = event_stable_identities(event)
+                stable_identity_available = bool(
+                    existing_identities and event_identities
+                )
+                shared_stable_identities = (
+                    existing_identities & event_identities
+                )
+                identity_compatible = bool(
+                    shared_stable_identities
+                    if stable_identity_available
+                    else shared_objects
+                )
                 interval_overlap_ms = max(
                     0.0,
                     min(existing.global_end_ms, event.global_end_ms)
@@ -6056,7 +6379,7 @@ def curate_semantically_reviewed_key_materials(
                     and overlap_ratio >= 0.50
                 )
                 if (
-                    shared_objects
+                    identity_compatible
                     and interval_overlap_ms > 0.0
                     and (
                         peak_distance_ms < separation_ms
@@ -6115,6 +6438,11 @@ def curate_semantically_reviewed_key_materials(
                         (set(retained.objects) & set(dropped.objects))
                         - actor_objects
                     ),
+                    "shared_stable_identities": sorted(
+                        event_stable_identities(retained)
+                        & event_stable_identities(dropped)
+                    ),
+                    "stable_identity_required_when_available": True,
                     "interval_overlap_ms": round(
                         max(
                             0.0,
@@ -6184,6 +6512,19 @@ def curate_semantically_reviewed_key_materials(
                 shared_objects = (
                     set(contact.objects) & set(state_event.objects)
                 ) - actor_objects
+                contact_identities = event_stable_identities(contact)
+                state_identities = event_stable_identities(state_event)
+                stable_identity_available = bool(
+                    contact_identities and state_identities
+                )
+                shared_stable_identities = (
+                    contact_identities & state_identities
+                )
+                identity_compatible = bool(
+                    shared_stable_identities
+                    if stable_identity_available
+                    else shared_objects
+                )
                 interval_overlap_ms = max(
                     0.0,
                     min(contact.global_end_ms, state_event.global_end_ms)
@@ -6191,7 +6532,7 @@ def curate_semantically_reviewed_key_materials(
                 )
                 overlap_ratio = interval_overlap_ms / contact_duration_ms
                 if not (
-                    shared_objects
+                    identity_compatible
                     and overlap_ratio >= 0.80
                     and state_event.global_start_ms
                     <= contact.key_global_ms
@@ -6240,6 +6581,10 @@ def curate_semantically_reviewed_key_materials(
                         "dropped_action_type": contact.action_type.value,
                         "retained_action_type": state_event.action_type.value,
                         "shared_objects": sorted(shared_objects),
+                        "shared_stable_identities": sorted(
+                            shared_stable_identities
+                        ),
+                        "stable_identity_required_when_available": True,
                         "interval_overlap_ms": round(interval_overlap_ms, 3),
                         "contact_interval_overlap_ratio": round(
                             overlap_ratio, 4
@@ -6263,7 +6608,7 @@ def curate_semantically_reviewed_key_materials(
             event_id for event_id in group.key_event_ids if event_id in curated_ids
         ]
     final_annotation = _rerender_curated_participant_annotations(
-        layout, curated, groups
+        layout, curated, groups, config
     )
     write_key_material_category_index(
         layout,
@@ -6286,7 +6631,7 @@ def curate_semantically_reviewed_key_materials(
         review_candidates.append(
             {
                 "event_id": event_id,
-                "status": "review_candidate_not_confirmed_key_material",
+                "status": "machine_quarantined_not_confirmed_key_material",
                 "disposition": record.get("disposition"),
                 "cv_action_type": record.get("cv_action_type"),
                 "cv_objects": record.get("cv_objects") or [],
@@ -6313,14 +6658,15 @@ def curate_semantically_reviewed_key_materials(
                 ),
             }
         )
-    review_candidate_index_path = quarantine_root / "Candidate-Index.json"
+    review_candidate_index_path = quarantine_root / "Machine-Quarantine-Index.json"
     write_json(
         review_candidate_index_path,
         {
-            "schema_version": "visioncortex-review-candidate-index/1",
+            "schema_version": "visioncortex-machine-quarantine-index/1",
             "policy": (
-                "unconfirmed candidates remain visible and indexed; they are "
-                "never counted as confirmed key material"
+                "unconfirmed candidates are automatically quarantined and indexed; "
+                "they never require manual fallback and are never counted as "
+                "confirmed key material"
             ),
             "candidate_count": len(review_candidates),
             "candidates": review_candidates,
@@ -6368,11 +6714,10 @@ def curate_semantically_reviewed_key_materials(
         "state_subsumed_contact_count": len(subsumed_event_ids),
         "state_contact_subsumption": state_subsumption_records,
         "semantic_relabel_min_confidence": relabel_min_confidence,
-        "unconfirmed_media_retention": (
-            "formal_review_candidate_tree_with_source_reference"
-        ),
+        "unconfirmed_media_retention": "automatic_machine_quarantine_with_source_reference",
         "unconfirmed_media_formally_published": True,
         "unconfirmed_media_counted_as_confirmed": False,
+        "manual_fallback_required": False,
         "review_candidate_count": len(review_candidates),
         "review_candidate_index": _relative(
             review_candidate_index_path, layout.root

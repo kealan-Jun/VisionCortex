@@ -38,8 +38,9 @@
     },
     {
       "id": "human_review",
-      "title": "确认与备注",
-      "required": true
+      "title": "自动验收与可选备注",
+      "required": false,
+      "completion_gate": "evidence_package_eval"
     }
   ],
   "visual_policy": {

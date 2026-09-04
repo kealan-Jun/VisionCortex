@@ -7,9 +7,10 @@ import random
 import re
 import time
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Literal, Sequence
 
 import httpx
+from pydantic import BaseModel, ConfigDict, Field
 
 from .schemas import (
     ActionType,
@@ -31,6 +32,7 @@ CV 可观测性收据会明确21类检测器能直接证明什么、仍缺什么
 {
   "current_step": "当前这一步做什么，细到手、对象、状态",
   "next_step": "根据尾部状态可直接观察或谨慎推断的下一步；不能判断写未知",
+  "next_step_evidence": {"status":"observed/inferred/unknown", "reason":"下一步的画面依据或无法判断原因", "evidence_event_ids":["当前事件ID"]},
   "action_type_confirmed": "hand_object_contact/object_movement/pipette_transfer_operation/liquid_movement/container_state_change/device_panel_operation/unknown",
   "objects": ["明确可见物体"],
   "hand_object_interactions": [{"hand":"left/right/unknown", "object":"物体", "contact":"接触/抓取/释放/操作"}],
@@ -45,7 +47,7 @@ CV 可观测性收据会明确21类检测器能直接证明什么、仍缺什么
   "confidence": 0.0,
   "uncertainties": ["无法确认项"]
 }
-evidence_verdict 的含义只针对候选动作本身：至少一个视角直接清晰证明则为 confirmed；候选动作未被证明但另一个动作被证明才用 relabel_suggested；证据不足用 uncertain；直接反证用 rejected。candidate_action_support_by_view 只评价输入候选；confirmed_action_support_by_view 只评价 action_type_confirmed。视角主体冲突单独写入 cross_view_consistency 和 uncertainties，不能抹去单个视角对动作本体的直接证明。
+evidence_verdict 的含义只针对候选动作本身：至少一个视角直接清晰证明则为 confirmed；候选动作未被证明但另一个动作被证明才用 relabel_suggested；证据不足用 uncertain；直接反证用 rejected。candidate_action_support_by_view 只评价输入候选；confirmed_action_support_by_view 只评价 action_type_confirmed。视角主体冲突单独写入 cross_view_consistency 和 uncertainties，不能抹去单个视角对动作本体的直接证明。next_step_evidence.status=observed 只允许下一动作已经在时序尾部直接出现；尚未出现但可谨慎预测必须写 inferred；无依据必须写 unknown。预测不得伪装成已观察事实。
 对 container_state_change，只有在同一个视角的时序中同时看到动作前容器状态、动作后容器状态，且开启/关闭/盖合/解除盖合的状态转换已完成，才能把 action_proof 中三个 container_* 字段都填 true 并确认该类。这里三个 container_* 字段表示“至少一个视角存在完整直接闭环”，不要求另一个视角重复拍到；若一个视角完整证明而另一视角模糊、遮挡或拍到并行动作，必须保留 container_state_change，把完整证明视角的 confirmed_action_support_by_view 标 true，并把另一视角的不完整性写入 cross_view_consistency/uncertainties，不得因此把三个字段改为 false 或降级为 hand_object_contact。只看到手持瓶盖对准瓶口、操作进行中、所有视角末帧仍被手遮挡，不算已完成的容器状态转换；此时才应按可见事实改为 hand_object_contact 或 object_movement。
 禁止输出 Markdown。"""
 
@@ -63,13 +65,165 @@ GROUP_SYSTEM_PROMPT = """你是化学湿实验有界视频的步骤级理解与�
   "continuity_type_confirmed": "independent/continuous/uncertain",
   "continuity_reason": "可观察的连续/独立依据",
   "atomic_experiments": [{"name":"内部原子实验名称", "start_global_ms":0, "end_global_ms":0, "purpose_observable":"可观察目标或未知"}],
-  "steps": [{"step_index":1, "start_global_ms":0, "end_global_ms":0, "current_step":"当前动作", "next_step":"下一动作或未知", "objects":["物体"], "physical_change":"状态变化", "supporting_views":["视角ID"], "confidence":0.0}],
+  "steps": [{"step_index":1, "start_global_ms":0, "end_global_ms":0, "current_step":"当前动作", "next_step":"下一动作或未知", "next_step_status":"observed/inferred/unknown", "supporting_event_ids":["事件ID"], "objects":["物体"], "physical_change":"状态变化", "supporting_views":["视角ID"], "confidence":0.0}],
   "overall_summary": "整个有界视频的实验内容",
   "boundary_assessment": {"start_complete":true, "end_complete":true, "start_reason":"起点证据", "end_reason":"终点证据", "localized_rescan_needed":false},
   "confidence": 0.0,
   "uncertainties": ["无法确认项"]
 }
 禁止输出 Markdown。"""
+
+
+class _StrictResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class _EventPhysicalChange(_StrictResponse):
+    before: str
+    after: str
+
+
+class _ViewObservation(_StrictResponse):
+    view_id: str
+    observation: str
+
+
+class _CandidateViewSupport(_StrictResponse):
+    view_id: str
+    supports_candidate_action: bool
+    confidence: float = Field(ge=0.0, le=1.0)
+    reason: str
+
+
+class _ConfirmedViewSupport(_StrictResponse):
+    view_id: str
+    supports_confirmed_action: bool
+    confidence: float = Field(ge=0.0, le=1.0)
+    reason: str
+
+
+class _HandObjectInteraction(_StrictResponse):
+    hand: str
+    object: str
+    contact: str
+
+
+class _ActionProof(_StrictResponse):
+    proof_type: Literal[
+        "visible_liquid_flow",
+        "visible_liquid_level_change",
+        "pour_with_visible_liquid_change",
+        "pipette_closed_transfer_cycle",
+        "pipette_operational_transfer_chain",
+        "posture_only",
+        "direct_other",
+        "none",
+    ]
+    visible_liquid_or_level_change: bool
+    source_contact_visible: bool
+    withdrawal_or_transport_visible: bool
+    target_contact_visible: bool
+    release_or_plunger_change_visible: bool
+    dual_role_cv_sequence_verified: bool
+    container_before_state_visible: bool
+    container_after_state_visible: bool
+    container_state_transition_completed: bool
+    reason: str
+
+
+class _TemporalSupport(_StrictResponse):
+    before: str
+    peak: str
+    after: str
+
+
+class _NextStepEvidence(_StrictResponse):
+    status: Literal["observed", "inferred", "unknown"]
+    reason: str
+    evidence_event_ids: list[str]
+
+
+class _EventResponse(_StrictResponse):
+    current_step: str
+    next_step: str
+    next_step_evidence: _NextStepEvidence
+    action_type_confirmed: Literal[
+        "hand_object_contact",
+        "object_movement",
+        "pipette_transfer_operation",
+        "liquid_movement",
+        "container_state_change",
+        "device_panel_operation",
+        "unknown",
+    ]
+    objects: list[str]
+    hand_object_interactions: list[_HandObjectInteraction]
+    physical_change: _EventPhysicalChange
+    per_view_observations: list[_ViewObservation]
+    candidate_action_support_by_view: list[_CandidateViewSupport]
+    confirmed_action_support_by_view: list[_ConfirmedViewSupport]
+    action_proof: _ActionProof
+    cross_view_consistency: Literal[
+        "consistent", "partial", "conflict", "single_view"
+    ]
+    evidence_verdict: Literal[
+        "confirmed", "relabel_suggested", "uncertain", "rejected"
+    ]
+    temporal_support: _TemporalSupport
+    confidence: float = Field(ge=0.0, le=1.0)
+    uncertainties: list[str]
+
+
+class _AtomicExperimentResponse(_StrictResponse):
+    name: str
+    start_global_ms: float
+    end_global_ms: float
+    purpose_observable: str
+
+
+class _GroupStepResponse(_StrictResponse):
+    step_index: int = Field(ge=1)
+    start_global_ms: float
+    end_global_ms: float
+    current_step: str
+    next_step: str
+    next_step_status: Literal["observed", "inferred", "unknown"]
+    supporting_event_ids: list[str]
+    objects: list[str]
+    physical_change: str
+    supporting_views: list[str]
+    confidence: float = Field(ge=0.0, le=1.0)
+
+
+class _BoundaryAssessment(_StrictResponse):
+    start_complete: bool
+    end_complete: bool
+    start_reason: str
+    end_reason: str
+    localized_rescan_needed: bool
+
+
+class _GroupResponse(_StrictResponse):
+    experiment_name: str
+    experiment_name_en: str
+    continuity_type_confirmed: Literal["independent", "continuous", "uncertain"]
+    continuity_reason: str
+    atomic_experiments: list[_AtomicExperimentResponse]
+    steps: list[_GroupStepResponse]
+    overall_summary: str
+    boundary_assessment: _BoundaryAssessment
+    confidence: float = Field(ge=0.0, le=1.0)
+    uncertainties: list[str]
+
+
+def _validate_response_payload(
+    payload: dict[str, Any],
+    response_kind: Literal["event", "group"] | None,
+) -> dict[str, Any]:
+    if response_kind is None:
+        return payload
+    contract = _EventResponse if response_kind == "event" else _GroupResponse
+    return contract.model_validate(payload).model_dump(mode="json")
 
 
 FINAL_GROUP_SYSTEM_PROMPT = GROUP_SYSTEM_PROMPT + """
@@ -173,6 +327,7 @@ class ArkAnalyzer:
         image_paths: Sequence[tuple[str, Path]],
         *,
         max_images: int | None = None,
+        response_kind: Literal["event", "group"] | None = None,
     ) -> dict[str, Any]:
         if not self.enabled:
             return {"status": "disabled", "uncertainties": ["多模态分析已在配置中关闭"]}
@@ -184,7 +339,13 @@ class ArkAnalyzer:
         content: list[dict[str, Any]] = [
             {"type": "input_text", "text": json.dumps(metadata, ensure_ascii=False)}
         ]
-        selected = list(image_paths)[: int(max_images or self.config["max_images_per_event"])]
+        image_limit = int(max_images or self.config["max_images_per_event"])
+        selected = list(image_paths)
+        if len(selected) > image_limit:
+            raise ValueError(
+                "MLLM evidence allocation would silently discard images: "
+                f"prepared {len(selected)}, configured limit {image_limit}"
+            )
         for label, path in selected:
             content.append({"type": "input_text", "text": label})
             content.append(
@@ -215,7 +376,9 @@ class ArkAnalyzer:
                         response=response,
                     )
                 payload = response.json()
-                result = _parse_json(_extract_text(payload))
+                result = _validate_response_payload(
+                    _parse_json(_extract_text(payload)), response_kind
+                )
                 result.update(
                     {
                         "status": "completed",
@@ -223,6 +386,11 @@ class ArkAnalyzer:
                         "usage": _usage(payload),
                         "latency_seconds": round(time.perf_counter() - started, 6),
                         "attempts": attempt + 1,
+                        "response_contract": (
+                            f"visioncortex-{response_kind}-mllm-response/1"
+                            if response_kind
+                            else None
+                        ),
                     }
                 )
                 return result
@@ -293,6 +461,7 @@ class ArkAnalyzer:
             },
             image_paths,
             max_images=max_images,
+            response_kind="event",
         )
 
     def analyze_group(
@@ -356,6 +525,13 @@ class ArkAnalyzer:
                 ),
             },
             storyboards,
+            max_images=int(
+                self.config.get(
+                    "max_images_per_group",
+                    self.config["max_images_per_event"],
+                )
+            ),
+            response_kind="group",
         )
 
 

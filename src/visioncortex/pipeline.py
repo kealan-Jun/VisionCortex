@@ -69,6 +69,7 @@ from .coarse_recall import (
     generate_open_vocabulary_coarse_candidates,
     generate_open_vocabulary_fine_candidates,
 )
+from .material_naming import ACTION_LABELS_ZH
 from .candidate_index import (
     CoarseFrameIndex,
     FineFrameIndex,
@@ -566,6 +567,126 @@ def normalize_final_group_action_language(
         "correction_count": len(corrections),
         "corrections": corrections,
     }
+
+
+def refine_groups_from_final_events(
+    groups: Sequence[ExperimentGroup],
+    key_events: Sequence[EvidenceEvent],
+) -> None:
+    """Rebuild final group steps from adjudicated events without a second MLLM call.
+
+    The initial group pass remains responsible for bounded-experiment naming and
+    continuity. Event-level review is the stronger source for final action facts,
+    so this pass deterministically replaces only the step narrative and keeps the
+    initial model receipt and token usage available for audit.
+    """
+
+    event_by_id = {event.event_id: event for event in key_events if event.accepted}
+    for group in groups:
+        previous = deepcopy(group.model_understanding or {})
+        events = sorted(
+            (
+                event_by_id[event_id]
+                for event_id in group.key_event_ids
+                if event_id in event_by_id
+            ),
+            key=event_sort_key,
+        )
+        steps: list[dict[str, Any]] = []
+        uncertainties = list(previous.get("uncertainties") or [])
+        for index, event in enumerate(events, 1):
+            understanding = dict(event.model_understanding or {})
+            physical_change = dict(understanding.get("physical_change") or {})
+            next_step_evidence = dict(
+                understanding.get("next_step_evidence") or {}
+            )
+            next_step_status = str(
+                next_step_evidence.get("status") or "unknown"
+            )
+            if next_step_status not in {"observed", "inferred", "unknown"}:
+                next_step_status = "unknown"
+            supporting_event_ids = {
+                event.event_id,
+                *(
+                    str(item)
+                    for item in next_step_evidence.get("evidence_event_ids") or []
+                    if item
+                ),
+            }
+            before = str(physical_change.get("before") or "")
+            after = str(physical_change.get("after") or "")
+            physical_change_text = (
+                f"{before} → {after}"
+                if before or after
+                else "未观察到可确认的状态变化"
+            )
+            event_uncertainties = [
+                str(item)
+                for item in (
+                    list(event.uncertainty)
+                    + list(understanding.get("uncertainties") or [])
+                )
+                if item
+            ]
+            uncertainties.extend(event_uncertainties)
+            steps.append(
+                {
+                    "step_index": index,
+                    "start_global_ms": float(event.global_start_ms),
+                    "end_global_ms": float(event.global_end_ms),
+                    "current_step": str(
+                        understanding.get("current_step")
+                        or ACTION_LABELS_ZH[event.action_type.value]
+                    ),
+                    "next_step": str(
+                        understanding.get("next_step") or "未知"
+                    ),
+                    "next_step_status": next_step_status,
+                    "next_step_evidence": next_step_evidence,
+                    "supporting_event_ids": sorted(supporting_event_ids),
+                    "objects": list(event.objects),
+                    "physical_change": physical_change_text,
+                    "supporting_views": list(event.supporting_views),
+                    "confidence": float(
+                        understanding.get("confidence") or event.confidence
+                    ),
+                    "action_type": event.action_type.value,
+                    "event_id": event.event_id,
+                }
+            )
+        action_labels = [
+            ACTION_LABELS_ZH[action_type]
+            for action_type in dict.fromkeys(
+                event.action_type.value for event in events
+            )
+        ]
+        step_summaries = [
+            str(step["current_step"])
+            for step in steps
+            if str(step.get("current_step") or "").strip()
+        ]
+        summary = (
+            f"已自动验收 {len(events)} 个关键动作：{'、'.join(action_labels)}；"
+            f"步骤依次为：{'；'.join(step_summaries)}。"
+            if events
+            else "当前有界实验没有通过自动验收的关键动作。"
+        )
+        refined = dict(previous)
+        refined.update(
+            {
+                "steps": steps,
+                "overall_summary": summary,
+                "uncertainties": sorted(set(uncertainties)),
+                "pre_curation_understanding": previous,
+                "refinement_pass": "deterministic_post_event_semantic_curation",
+                "refinement_source": "final_adjudicated_key_events",
+                "refinement_model_call_count": 0,
+                "refinement_key_event_count": len(events),
+                "archive_folder_frozen_after_initial_materialization": True,
+                "display_identity_refined_after_event_curation": False,
+            }
+        )
+        group.model_understanding = refined
 
 
 def _synchronize_final_event_state_receipts(
@@ -5914,28 +6035,58 @@ class EvidencePipeline:
             segment_semantic_repairs = _synchronize_segments_with_final_key_events(
                 segments, groups, key_events
             )
-            # Semantic adjudication can replace both the action class and its
-            # participant set.  The first materialization intentionally
-            # precedes Ark so the model has review media, but those CV-era
-            # participants must not decide the final frame or final boxes.
-            # Re-select from the immutable fine ledger using only the curated
-            # participants.  Derived clips are content-addressed and reused;
-            # this does not repeat the full scan or copy source media.
+            # Semantic adjudication can replace the action, participants, or
+            # strongest supporting role. Re-materialize only events whose final
+            # evidence can change the selected frame/boxes instead of repeating
+            # every accepted clip after the model pass.
             pre_final_key_timestamps = {
                 event.event_id: float(event.key_global_ms) for event in key_events
             }
-            materialize_key_materials(
-                layout,
-                key_events,
-                groups,
-                manifest.views,
-                infos,
-                transforms,
-                detection_paths,
-                self.config,
-                publisher=self._publisher,
-                archive_id=manifest.experiment_id,
-            )
+            curation_record_by_event = {
+                str(record["event_id"]): record
+                for record in semantic_curation.get("records") or []
+            }
+            rematerialize_event_ids: set[str] = set()
+            for event in key_events:
+                record = curation_record_by_event.get(event.event_id) or {}
+                selected_source_view = str(
+                    (
+                        (event.observability or {}).get("key_frame_selection")
+                        or {}
+                    ).get("source_view_id")
+                    or ""
+                )
+                direct_view_ids = {
+                    str(item)
+                    for item in (event.semantic_review or {}).get(
+                        "directly_supported_view_ids", []
+                    )
+                    if item
+                }
+                if (
+                    record.get("semantic_participant_refinement_changed")
+                    or record.get("cv_action_type")
+                    != record.get("final_action_type")
+                    or (
+                        direct_view_ids
+                        and selected_source_view not in direct_view_ids
+                    )
+                ):
+                    rematerialize_event_ids.add(event.event_id)
+            if rematerialize_event_ids:
+                materialize_key_materials(
+                    layout,
+                    key_events,
+                    groups,
+                    manifest.views,
+                    infos,
+                    transforms,
+                    detection_paths,
+                    self.config,
+                    publisher=self._publisher,
+                    archive_id=manifest.experiment_id,
+                    materialize_event_ids=rematerialize_event_ids,
+                )
             state_receipt_repairs = _synchronize_final_event_state_receipts(
                 key_events, self.config
             )
@@ -5952,10 +6103,16 @@ class EvidencePipeline:
                     "visioncortex-post-semantic-participant-key-frame-selection/1"
                 ),
                 "policy": (
-                    "immutable-fine-ledger; final semantic participants only"
+                    "immutable-fine-ledger; selective refresh for changed final evidence"
                 ),
                 "full_scan_repeated": False,
                 "source_copy_bytes": 0,
+                "rematerialized_event_ids": sorted(rematerialize_event_ids),
+                "unchanged_media_reused_event_ids": sorted(
+                    event.event_id
+                    for event in key_events
+                    if event.event_id not in rematerialize_event_ids
+                ),
                 "events": [
                     {
                         "event_id": event.event_id,
@@ -5968,6 +6125,9 @@ class EvidencePipeline:
                             - pre_final_key_timestamps[event.event_id],
                             3,
                         ),
+                        "media_rematerialized": (
+                            event.event_id in rematerialize_event_ids
+                        ),
                     }
                     for event in key_events
                 ],
@@ -5978,64 +6138,11 @@ class EvidencePipeline:
                 layout.json_config / "semantic_key_material_curation.json",
                 semantic_curation,
             )
-            # The initial group pass is needed to name/materialize bounded
-            # experiments. Refine its steps after event-level adjudication so
-            # rejected CV hypotheses (for example, a nearby balance mistaken
-            # for a panel operation) cannot leak into the final step narrative.
-            group_identity = {
-                group.group_id: {
-                    "experiment_name": group.experiment_name,
-                    "experiment_name_en": group.experiment_name_en,
-                    "archive_folder": group.archive_folder,
-                    "continuity_type": group.continuity_type,
-                    "continuity_reason": group.continuity_reason,
-                    "pre_curation_understanding": dict(
-                        group.model_understanding or {}
-                    ),
-                }
-                for group in groups
-            }
-            analyze_experiment_groups(
-                layout,
-                groups,
-                segments,
-                key_events,
-                manifest.views,
-                infos,
-                transforms,
-                self.config,
-                final_adjudicated=True,
-            )
-            for group in groups:
-                identity = group_identity[group.group_id]
-                refined_experiment_name = group.experiment_name
-                refined_experiment_name_en = group.experiment_name_en
-                refined = dict(group.model_understanding or {})
-                refined.update(
-                    {
-                        "pre_curation_understanding": identity[
-                            "pre_curation_understanding"
-                        ],
-                        "refinement_pass": "post_event_semantic_curation",
-                        "refinement_key_event_count": len(group.key_event_ids),
-                        "pre_curation_experiment_name": identity[
-                            "experiment_name"
-                        ],
-                        "pre_curation_experiment_name_en": identity[
-                            "experiment_name_en"
-                        ],
-                        "archive_folder_frozen_after_initial_materialization": (
-                            True
-                        ),
-                        "display_identity_refined_after_event_curation": True,
-                    }
-                )
-                group.model_understanding = refined
-                group.experiment_name = refined_experiment_name
-                group.experiment_name_en = refined_experiment_name_en
-                group.archive_folder = identity["archive_folder"]
-                group.continuity_type = identity["continuity_type"]
-                group.continuity_reason = str(identity["continuity_reason"])
+            # The initial group pass names the bounded experiment and verifies
+            # continuity. Final steps come from the stronger event-level
+            # adjudication, so rebuild them deterministically instead of paying
+            # for a duplicate group MLLM pass over the same evidence.
+            refine_groups_from_final_events(groups, key_events)
             normalize_final_group_action_language(groups, key_events)
             for group in groups:
                 for segment in segments:

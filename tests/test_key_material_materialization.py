@@ -7,10 +7,12 @@ import numpy as np
 
 from visioncortex import archive
 from visioncortex.schemas import (
+    ActionCandidate,
     ActionType,
     AlignmentTransform,
     EvidenceEvent,
     ExperimentGroup,
+    ExperimentSegment,
     VideoInfo,
     ViewInput,
     ViewRole,
@@ -214,6 +216,162 @@ def test_key_material_view_selection_restores_accepted_peak_for_dual_coverage(
     assert receipt["key_timestamp_fallback"]["timestamp_clamped"] is False
 
 
+def test_key_material_view_pair_is_selected_jointly_by_object_identity_class(
+    tmp_path,
+):
+    views = [
+        ViewInput(view_id="fp", role=ViewRole.FIRST_PERSON, video=tmp_path / "fp.mp4"),
+        ViewInput(view_id="tp-wrong", role=ViewRole.THIRD_PERSON, video=tmp_path / "tp-wrong.mp4"),
+        ViewInput(view_id="tp-tube", role=ViewRole.THIRD_PERSON, video=tmp_path / "tp-tube.mp4"),
+    ]
+    infos = {
+        view.view_id: VideoInfo(
+            path=view.video,
+            duration_ms=5_000,
+            fps=30,
+            width=1280,
+            height=720,
+            frame_count=150,
+        )
+        for view in views
+    }
+    transforms = {
+        view.view_id: AlignmentTransform(
+            view_id=view.view_id,
+            reference_view_id="fp",
+        )
+        for view in views
+    }
+
+    def candidate(view_id: str, object_name: str, track_id: int) -> ActionCandidate:
+        return ActionCandidate(
+            candidate_id=f"C-{view_id}",
+            action_type=ActionType.HAND_OBJECT_CONTACT,
+            view_id=view_id,
+            role=(
+                ViewRole.FIRST_PERSON
+                if view_id == "fp"
+                else ViewRole.THIRD_PERSON
+            ),
+            local_start_ms=1000,
+            local_end_ms=2000,
+            global_start_ms=1000,
+            global_end_ms=2000,
+            key_global_ms=1500,
+            objects=[object_name],
+            confidence=0.9,
+            evidence=[{"object_name": object_name, "track_id": track_id}],
+        )
+
+    event = EvidenceEvent(
+        event_id="EVT-IDENTITY-PAIR",
+        action_type=ActionType.HAND_OBJECT_CONTACT,
+        global_start_ms=1000,
+        global_end_ms=2000,
+        key_global_ms=1500,
+        objects=["tube", "reagent_bottle"],
+        confidence=0.9,
+        accepted=True,
+        audit_reason="test",
+        supporting_views=[view.view_id for view in views],
+        supporting_roles=[ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON],
+        candidates=[
+            candidate("fp", "tube", 11),
+            candidate("tp-wrong", "reagent_bottle", 21),
+            candidate("tp-tube", "tube", 31),
+        ],
+    )
+    group = ExperimentGroup(
+        group_id="GROUP-IDENTITY-PAIR",
+        continuity_type="independent",
+        atomic_experiment_ids=["EXP-1"],
+        global_start_ms=1000,
+        global_end_ms=2000,
+        participating_views=[view.view_id for view in views],
+        first_person_view="fp",
+        third_person_view="tp-wrong",
+        continuity_reason="test",
+        key_event_ids=[event.event_id],
+    )
+
+    pair, receipt = archive._select_key_material_view_pair(
+        group, event, views, infos, transforms
+    )
+
+    assert pair == ("fp", "tp-tube")
+    assert receipt["fallback_applied"] is True
+    assert receipt["selected_pair_identity"]["shared_identity_classes"] == [
+        "tube"
+    ]
+    wrong_pair = next(
+        item
+        for item in receipt["pair_candidates"]
+        if item["third_person_view"] == "tp-wrong"
+    )
+    assert wrong_pair["identity_conflict"] is True
+
+
+def test_group_storyboard_sampling_covers_boundaries_segments_and_actions():
+    action_types = [
+        ActionType.HAND_OBJECT_CONTACT,
+        ActionType.OBJECT_MOVEMENT,
+        ActionType.CONTAINER_STATE_CHANGE,
+    ]
+    event_times = [600_000.0, 1_800_000.0, 3_000_000.0]
+    events = [
+        EvidenceEvent(
+            event_id=f"EVT-{index}",
+            action_type=action_type,
+            global_start_ms=event_time - 1000,
+            global_end_ms=event_time + 1000,
+            key_global_ms=event_time,
+            objects=["tube"],
+            confidence=0.8 + index * 0.01,
+            accepted=True,
+            audit_reason="test",
+            supporting_views=["fp", "tp"],
+            supporting_roles=[ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON],
+            candidates=[],
+        )
+        for index, (action_type, event_time) in enumerate(
+            zip(action_types, event_times, strict=True), 1
+        )
+    ]
+    segments = [
+        ExperimentSegment(
+            segment_id=f"EXP-{index}",
+            global_start_ms=event_time - 10_000,
+            global_end_ms=event_time + 10_000,
+            event_ids=[event.event_id],
+            participating_views=["fp", "tp"],
+        )
+        for index, (event, event_time) in enumerate(
+            zip(events, event_times, strict=True), 1
+        )
+    ]
+    group = ExperimentGroup(
+        group_id="GROUP-LONG",
+        continuity_type="continuous",
+        atomic_experiment_ids=[segment.segment_id for segment in segments],
+        global_start_ms=0,
+        global_end_ms=3_600_000,
+        participating_views=["fp", "tp"],
+        first_person_view="fp",
+        third_person_view="tp",
+        continuity_reason="test",
+        key_event_ids=[event.event_id for event in events],
+    )
+
+    times = archive._storyboard_times(
+        group, events, limit=8, segments=segments
+    )
+
+    assert times[0] == 0
+    assert times[-1] == 3_600_000
+    assert set(event_times).issubset(times)
+    assert len(times) == 8
+
+
 def test_key_material_roles_export_concurrently_and_write_runtime(monkeypatch, tmp_path):
     layout = archive.ArchiveLayout(tmp_path / "archive")
     layout.create()
@@ -397,6 +555,33 @@ def test_key_material_roles_export_concurrently_and_write_runtime(monkeypatch, t
     assert runtime["category_index"] == "Key-Materials/Key-Material-Category-Index.json"
     assert len(runtime["records"]) == 3
     assert runtime["total_duration_seconds"] > 0
+
+    archive.materialize_key_materials(
+        layout,
+        [event],
+        [group],
+        views,
+        infos,
+        transforms,
+        {"fp": tmp_path / "fp.jsonl", "tp": tmp_path / "tp.jsonl"},
+        {
+            "segmentation": {
+                "key_clip_pre_seconds": 2,
+                "key_clip_post_seconds": 3,
+            },
+            "performance": {
+                "ffmpeg_video_encoder": "h264_nvenc",
+                "materialization_workers": 2,
+            },
+        },
+        materialize_event_ids={event.event_id},
+    )
+    refreshed_runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
+    assert len(refreshed_runtime["records"]) == 3
+    assert [
+        item["scope"] for item in refreshed_runtime["materialization_passes"]
+    ] == ["initial", "post_semantic_selective_refresh"]
+    assert refreshed_runtime["last_pass_materialized_event_count"] == 1
 
 
 def test_component_budget_applies_classic_path_limit_only_on_windows(monkeypatch):

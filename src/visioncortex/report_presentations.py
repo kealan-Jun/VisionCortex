@@ -74,10 +74,18 @@ def render_daily_markdown(report: dict[str, Any]) -> str:
         if group.get("steps"):
             first = group["steps"][0]
             last = group["steps"][-1]
+            next_status = str(last.get("next_step_status") or "unknown")
+            next_label = (
+                "已观察后续"
+                if next_status == "observed"
+                else "预测后续"
+                if next_status == "inferred"
+                else "后续未知"
+            )
             lines.extend(
                 [
                     f"- 开始阶段：{first.get('current_step') or '未说明'}",
-                    f"- 后续阶段：{last.get('next_step') or last.get('current_step') or '证据不足'}",
+                    f"- {next_label}：{last.get('next_step') or '证据不足'}",
                 ]
             )
         action_text = "；".join(
@@ -95,11 +103,10 @@ def render_daily_markdown(report: dict[str, Any]) -> str:
             f"- 对齐状态：{report['alignment_summary']['aligned']}/{report['alignment_summary']['view_count']} 路完成",
             "- 完整步骤、关键事件、素材路径与来源信息请在同档案 Web 页面或 JSON 索引中查看。",
             "",
-            "## 确认与备注",
+            "## 自动验收与备注",
             "",
-            "- 状态：待确认",
-            "- 确认人：__________",
-            "- 备注：________________________________________",
+            "- 状态：以证据包自动验收结果为准，不要求人工兜底",
+            "- 人工备注：可选，不影响任务完成状态",
             "",
         ]
     )
@@ -136,6 +143,14 @@ def render_daily_html(report: dict[str, Any]) -> str:
         empty_actions = '<span class="pill">无已验收动作</span>'
         first_step = group["steps"][0] if group.get("steps") else {}
         last_step = group["steps"][-1] if group.get("steps") else {}
+        next_status = str(last_step.get("next_step_status") or "unknown")
+        next_label = (
+            "已观察后续"
+            if next_status == "observed"
+            else "预测后续"
+            if next_status == "inferred"
+            else "后续未知"
+        )
         continuity = "连续实验" if group["continuity_type"] == "continuous" else "独立实验"
         experiment_cards.append(
             f"<section class='experiment'><div class='section-kicker'>实验 {index:02d}</div>"
@@ -144,7 +159,7 @@ def render_daily_html(report: dict[str, Any]) -> str:
             f"<div class='experiment-grid'>{visual_html}<div class='brief'>"
             f"<h3>结果摘要</h3><p>{e(group.get('overall_summary') or '暂无摘要')}</p>"
             f"<dl><dt>开始阶段</dt><dd>{e(first_step.get('current_step') or '未说明')}</dd>"
-            f"<dt>后续阶段</dt><dd>{e(last_step.get('next_step') or last_step.get('current_step') or '证据不足')}</dd></dl>"
+            f"<dt>{next_label}</dt><dd>{e(last_step.get('next_step') or '证据不足')}</dd></dl>"
             f"<div class='pills'>{actions or empty_actions}</div>"
             f"</div></div></section>"
         )
@@ -161,7 +176,7 @@ def render_daily_html(report: dict[str, Any]) -> str:
 <p class="note">本日报面向日常查看与交接，只呈现已验收结论和代表性双视角证据。完整技术账本保留在同一档案中。</p></div></header>
 <h2 class="section-title">实验简报</h2>{''.join(experiment_cards)}
 <section class="panel attention"><h2>关注事项与交接</h2><p>质量状态：<b>{e(status)}</b>。时间对齐完成 {report['alignment_summary']['aligned']}/{report['alignment_summary']['view_count']} 路；记录不确定性 {len(report['uncertainties'])} 组、跨视角矛盾 {len(report['contradictions'])} 项。</p><p>流水线总耗时 {_duration(performance.get('total_duration_seconds'))}；预处理 {_duration((performance.get('preprocessing_sla') or {}).get('actual_seconds'))}；模型用量 {performance.get('total_input_tokens') or 0:,} 输入 + {performance.get('total_output_tokens') or 0:,} 输出 = {performance.get('total_tokens') or 0:,} Token。</p></section>
-<section class="panel"><h2>确认与备注</h2><p>状态：待确认　确认人：__________　确认时间：__________</p><p>备注：____________________________________________________________</p></section>
+  <section class="panel"><h2>自动验收与备注</h2><p>状态：以证据包自动验收结果为准，不要求人工兜底。</p><p>人工备注为可选信息，不影响任务完成状态。</p></section>
 <p class="footer-note">当前步骤和下一步骤属于已归档证据支持的模型理解；图片可点击打开对应关键片段。日报生成不新增模型调用或 Token。</p>
 </main></body></html>"""
 
@@ -369,8 +384,16 @@ def render_professional_pdf(path: Path, report: dict[str, Any], archive_root: Pa
         story.extend([Paragraph("实验结果摘要", h2), Paragraph(html.escape(group.get("overall_summary") or "暂无摘要"), body)])
         action_text = "；".join(f"{item['action_label']} {item['event_count']}" for item in group.get("key_action_summary") or [] if item["event_count"]) or "无已验收动作"
         story.append(Paragraph(f"动作类别分布：{html.escape(action_text)}。", body))
-        step_rows = [["步骤", "时间", "当前在做什么", "下一步"]]
+        step_rows = [["步骤", "时间", "当前在做什么", "后续状态"]]
         for step in group["steps"]:
+            next_status = str(step.get("next_step_status") or "unknown")
+            next_prefix = (
+                "已观察："
+                if next_status == "observed"
+                else "预测："
+                if next_status == "inferred"
+                else "未知："
+            )
             step_rows.append(
                 [
                     str(step.get("step_index") or "-"),
@@ -379,7 +402,7 @@ def render_professional_pdf(path: Path, report: dict[str, Any], archive_root: Pa
                         small,
                     ),
                     p(step.get("current_step") or "未说明", small),
-                    p(step.get("next_step") or "证据不足", small),
+                    p(next_prefix + str(step.get("next_step") or "证据不足"), small),
                 ]
             )
         story.extend([Paragraph("步骤级理解", h2), styled_table(step_rows, [12*mm,40*mm,56.5*mm,56.5*mm])])
