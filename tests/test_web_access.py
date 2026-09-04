@@ -149,11 +149,13 @@ def test_frontend_has_2k_4k_density_without_forcing_1080p_zoom():
     assert ".home-launchpad {" in large_screen
     assert ".library-card-grid { grid-template-columns: repeat(4" in large_screen
     assert "width: min(2100px,calc(100vw - 96px))" in large_screen
-    assert "styles.css?v=20260904-product-shell-31" in index
-    assert "app.js?v=20260904-product-shell-31" in index
+    assert "styles.css?v=20260904-product-shell-32" in index
+    assert "app.js?v=20260904-product-shell-32" in index
 
     app_js = (web_root / "app.js").read_text(encoding="utf-8")
     assert "function bindHomeLaunchpad()" in app_js
+    assert ".home-launchpad {\n  display: grid;" in styles
+    assert app_js.index('class="home-launchpad"') < app_js.index('class="workspace-grid"')
     assert 'location.hash = "#/new"' in app_js
     assert 'launchpad.addEventListener("drop"' in app_js
     assert "importFromHome(event.dataTransfer.files)" in app_js

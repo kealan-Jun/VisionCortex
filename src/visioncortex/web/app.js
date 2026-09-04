@@ -577,6 +577,12 @@ function renderHome() {
       <a href="#/reports"><span>${icon("file")}</span><small>有报告可查看</small><strong>${number(reportReady)}</strong><em>进入实验室日报 ${icon("arrow")}</em></a>
       <a href="${attentionTarget}" class="${attention.length ? "attention" : ""}"><span>${icon(attention.length ? "x" : "check")}</span><small>需要关注</small><strong>${number(attention.length)}</strong><em>${attention.length === 1 ? "直接打开异常实验" : attention.length ? "查看异常实验列表" : "当前状态正常"} ${icon("arrow")}</em></a>
     </section>
+    <section class="home-launchpad" aria-labelledby="home-launchpad-title" aria-describedby="home-launchpad-description">
+      <span class="home-launchpad-icon">${icon("upload")}</span>
+      <div><p class="eyebrow">快速开始</p><h2 id="home-launchpad-title">把多视角视频拖到这里</h2><p id="home-launchpad-description">也可以选择视频文件；随后确认视角与实验信息，再创建分析任务。</p></div>
+      <div class="home-launchpad-flow" aria-label="分析流程"><span><b>1</b>选择视频</span><span><b>2</b>确认视角</span><span><b>3</b>创建任务</span></div>
+      <label class="primary-button batch-import-button home-upload-button">${icon("upload")}选择视频<input id="home-upload-input" aria-label="从首页选择视频文件" type="file" multiple accept="video/*,.mp4,.mov,.m4v,.mkv,.avi,.webm,.csv,text/csv" /></label>
+    </section>
     ${running.length ? `<section class="current-work"><span class="current-icon">${icon("activity")}</span><div><small>正在分析</small><h2>${esc(productExperimentName(running[0].experiment_id))}</h2><p>${esc(STAGE_LABELS[running[0].state] || "处理中")}</p></div><a class="secondary-button" href="#/tasks">查看任务进度 ${icon("arrow")}</a></section>` : ""}
     <div class="workspace-grid">
       <section class="panel recent-panel"><header class="panel-heading"><div><h2>最近完成与更新</h2><p>从上次离开的地方继续</p></div><a href="#/experiments">全部记录 ${icon("arrow")}</a></header>${archiveRows(filteredArchives().slice(0, 6))}</section>
@@ -585,12 +591,6 @@ function renderHome() {
         <section class="workspace-status"><header><h2>工作区状态</h2><a href="#/operations" aria-label="查看服务状态">${icon("arrow")}</a></header><div><span>档案存储</span><strong class="${health.archive_available ? "status-ok" : "status-pending"}">${health.archive_available ? "可用" : "待连接"}</strong></div><div><span>智能理解</span><strong class="${health.mllm_enabled && health.ark_key_configured ? "status-ok" : "status-pending"}">${health.mllm_enabled && health.ark_key_configured ? "已启用" : "待启用"}</strong></div></section>
       </aside>
     </div>
-    <section class="home-launchpad" aria-labelledby="home-launchpad-title" aria-describedby="home-launchpad-description">
-      <span class="home-launchpad-icon">${icon("upload")}</span>
-      <div><p class="eyebrow">快速开始</p><h2 id="home-launchpad-title">把多视角视频拖到这里</h2><p id="home-launchpad-description">也可以选择视频文件；随后确认视角与实验信息，再创建分析任务。</p></div>
-      <div class="home-launchpad-flow" aria-label="分析流程"><span><b>1</b>选择视频</span><span><b>2</b>确认视角</span><span><b>3</b>创建任务</span></div>
-      <label class="primary-button batch-import-button home-upload-button">${icon("upload")}选择视频<input id="home-upload-input" aria-label="从首页选择视频文件" type="file" multiple accept="video/*,.mp4,.mov,.m4v,.mkv,.avi,.webm,.csv,text/csv" /></label>
-    </section>
     <nav class="workspace-shortcuts" aria-label="实验成果入口"><a href="#/materials"><span>${icon("boxes")}</span><div><strong>关键素材库</strong></div>${icon("arrow")}</a><a href="#/reports"><span>${icon("file")}</span><div><strong>实验室日报</strong></div>${icon("arrow")}</a></nav>
   </div>`;
   bindHomeLaunchpad();
