@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import httpx
 
 from visioncortex import storage, video_io
 from visioncortex.mllm import ArkAnalyzer
@@ -53,6 +54,37 @@ def test_mllm_reuses_one_http_connection_pool(monkeypatch, default_config):
     assert len(clients) == 1
     assert clients[0].posts == 2
     assert clients[0].closed is True
+
+
+def test_mllm_transport_failure_circuit_skips_later_calls(
+    monkeypatch, default_config
+):
+    class FailingClient:
+        def __init__(self, **_kwargs):
+            self.posts = 0
+
+        def post(self, *_args, **_kwargs):
+            self.posts += 1
+            raise httpx.ReadTimeout("timed out")
+
+        def close(self):
+            return None
+
+    default_config["mllm"]["max_retries"] = 1
+    default_config["mllm"]["failure_circuit_breaker_threshold"] = 2
+    monkeypatch.setenv("ARK_API_KEY", "configured-for-test")
+    monkeypatch.setattr("visioncortex.mllm.httpx.Client", FailingClient)
+    analyzer = ArkAnalyzer(default_config)
+
+    first = analyzer._call("system", {"event": 1}, [])
+    second = analyzer._call("system", {"event": 2}, [])
+    third = analyzer._call("system", {"event": 3}, [])
+
+    assert first["status"] == second["status"] == "failed"
+    assert second["failure_circuit_open"] is True
+    assert third["status"] == "skipped_failure_circuit_open"
+    assert third["attempts"] == 0
+    assert analyzer.client.posts == 2
 
 
 def test_mllm_retries_schema_invalid_response_before_accepting(monkeypatch, default_config):

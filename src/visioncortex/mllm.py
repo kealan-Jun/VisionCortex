@@ -5,6 +5,7 @@ import json
 import os
 import random
 import re
+import threading
 import time
 from copy import deepcopy
 from pathlib import Path
@@ -375,6 +376,9 @@ class ArkAnalyzer:
         self.config = config["mllm"]
         self.api_key = os.getenv(str(self.config["api_key_env"]))
         self.enabled = bool(self.config["enabled"])
+        self._failure_lock = threading.Lock()
+        self._transport_failure_count = 0
+        self._failure_circuit_open = False
         pool_size = max(
             2,
             int(self.config.get("workers", 4)),
@@ -412,6 +416,27 @@ class ArkAnalyzer:
             return {
                 "status": "skipped_missing_api_key",
                 "uncertainties": [f"未设置环境变量 {self.config['api_key_env']}，未调用模型"],
+            }
+        with self._failure_lock:
+            circuit_open = self._failure_circuit_open
+            transport_failure_count = self._transport_failure_count
+        if circuit_open:
+            return {
+                "status": "skipped_failure_circuit_open",
+                "error": "Ark transport failure circuit is open for this stage",
+                "uncertainties": [
+                    "多模态服务连续不可用；当前事件进入可重试机器隔离"
+                ],
+                "latency_seconds": 0.0,
+                "attempts": 0,
+                "transport_failure_count": transport_failure_count,
+                "usage": {
+                    "input_tokens": None,
+                    "output_tokens": None,
+                    "total_tokens": None,
+                    "cached_input_tokens": None,
+                    "server_reported": False,
+                },
             }
         content: list[dict[str, Any]] = [
             {"type": "input_text", "text": json.dumps(metadata, ensure_ascii=False)}
@@ -470,6 +495,8 @@ class ArkAnalyzer:
                         ),
                     }
                 )
+                with self._failure_lock:
+                    self._transport_failure_count = 0
                 return normalize_uncalibrated_hand_identity(result)
             except (httpx.HTTPError, ValueError, json.JSONDecodeError) as exc:
                 last_error = exc
@@ -496,12 +523,30 @@ class ArkAnalyzer:
                         + random.uniform(0.0, 0.75)
                     )
                     time.sleep(max(0.0, delay))
+        circuit_opened = False
+        if isinstance(last_error, httpx.HTTPError):
+            threshold = max(
+                1,
+                int(
+                    self.config.get(
+                        "failure_circuit_breaker_threshold", 4
+                    )
+                ),
+            )
+            with self._failure_lock:
+                self._transport_failure_count += 1
+                if self._transport_failure_count >= threshold:
+                    self._failure_circuit_open = True
+                circuit_opened = self._failure_circuit_open
+                transport_failure_count = self._transport_failure_count
         return {
             "status": "failed",
             "error": f"{type(last_error).__name__}: {last_error}",
             "uncertainties": ["多模态调用失败；保留 CV 与跨视角审计结果，不伪造模型理解"],
             "latency_seconds": round(time.perf_counter() - started, 6),
             "attempts": attempt + 1,
+            "transport_failure_count": transport_failure_count,
+            "failure_circuit_open": circuit_opened,
             "usage": {
                 "input_tokens": None,
                 "output_tokens": None,

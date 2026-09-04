@@ -528,6 +528,9 @@ mllm:
   # receipts remain deliverable; incomplete events are machine-quarantined and
   # retryable instead of invalidating the entire run.
   fail_run_on_incomplete: false
+  # Stop scheduling new event calls after a full wave of transport failures;
+  # already-running calls finish and every skipped event remains retryable.
+  failure_circuit_breaker_threshold: 4
 
 archive:
   create_xlsx: true
