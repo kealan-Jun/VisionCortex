@@ -210,6 +210,10 @@ performance:
   yolo_inference_workers: 2
   inference_batch_wait_ms: 25
   materialization_workers: 2
+  # Experiment clips are already local, verified derivatives with original
+  # NAS provenance. Reuse them for key frames/clips so every event does not
+  # reopen and randomly seek the frozen remote source.
+  reuse_experiment_clips_for_key_materials: true
   io_workers: 4
   synchronized_segment_waves: false
   segment_wave_timeout_seconds: 3600

@@ -442,12 +442,23 @@ def test_key_material_roles_export_concurrently_and_write_runtime(monkeypatch, t
         archive_folder="01-Contact-Test",
         key_event_ids=[event.event_id],
     )
+    experiment_folder = layout.experiment_clips / group.archive_folder
+    experiment_folder.mkdir(parents=True, exist_ok=True)
+    experiment_sources = {}
+    for role_key in ("first-person", "third-person"):
+        source = experiment_folder / f"{role_key}.mp4"
+        source.write_bytes(b"verified-local-experiment-clip")
+        experiment_sources[role_key] = source
+        group.videos[role_key] = source.relative_to(layout.root).as_posix()
+
+    material_sources = []
 
     class FakeReader:
         def __init__(self, max_open=1):
             self.max_open = max_open
 
         def read(self, view, info, local_ms):
+            material_sources.append(("frame", view.video, local_ms))
             return np.zeros((24, 32, 3), dtype=np.uint8)
 
         def close(self):
@@ -460,12 +471,27 @@ def test_key_material_roles_export_concurrently_and_write_runtime(monkeypatch, t
         with lock:
             concurrency["active"] += 1
             concurrency["maximum"] = max(concurrency["maximum"], concurrency["active"])
+            material_sources.append(
+                ("clip", view.video, start_ms, duration_ms)
+            )
         time.sleep(0.03)
         destination.write_bytes(b"clip")
         with lock:
             concurrency["active"] -= 1
 
     monkeypatch.setattr(archive, "ViewFrameReader", FakeReader)
+    monkeypatch.setattr(
+        archive,
+        "probe_video",
+        lambda path: VideoInfo(
+            path=path,
+            duration_ms=4_000,
+            fps=30,
+            width=1280,
+            height=720,
+            frame_count=120,
+        ),
+    )
     monkeypatch.setattr(
         archive,
         "nearest_frame_evidence_many",
@@ -503,6 +529,14 @@ def test_key_material_roles_export_concurrently_and_write_runtime(monkeypatch, t
     )
 
     assert concurrency["maximum"] == 2
+    assert {
+        source for _kind, source, *_rest in material_sources
+    } == set(experiment_sources.values())
+    assert {
+        (item[2], item[3])
+        for item in material_sources
+        if item[0] == "clip"
+    } == {(0.0, 4_000.0)}
     assert len(event.key_frames) == 3
     assert len(event.key_clips) == 3
     expected_category = "01-Hand-Object-Contact"
@@ -569,6 +603,11 @@ def test_key_material_roles_export_concurrently_and_write_runtime(monkeypatch, t
     assert runtime["archive_hierarchy_version"] == "2.0.0"
     assert runtime["category_index"] == "Key-Materials/Key-Material-Category-Index.json"
     assert len(runtime["records"]) == 3
+    assert {
+        item.get("material_source")
+        for item in runtime["records"]
+        if item["role_label"] != "Aligned-First-Third"
+    } == {"verified_local_experiment_clip"}
     assert runtime["total_duration_seconds"] > 0
 
     archive.materialize_key_materials(

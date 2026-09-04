@@ -86,6 +86,7 @@ from .video_io import (
     ViewFrameReader,
     create_grid_video,
     extract_view_clip,
+    probe_video,
     select_video_encoder,
     view_source_files,
     write_annotated_frame,
@@ -5608,6 +5609,34 @@ def materialize_key_materials(
         for view_id, path in detection_paths.items()
     }
     lookup_seconds = time.perf_counter() - lookup_started
+    local_experiment_sources: dict[
+        tuple[str, str], tuple[ViewInput, VideoInfo]
+    ] = {}
+    if bool(
+        config.get("performance", {}).get(
+            "reuse_experiment_clips_for_key_materials", True
+        )
+    ):
+        for group in groups:
+            for role_label, view_id in (
+                ("First-Person", group.first_person_view),
+                ("Third-Person", group.third_person_view),
+            ):
+                relative = group.videos.get(role_label.lower())
+                if not relative:
+                    continue
+                path = layout.root / relative
+                if not path.is_file():
+                    continue
+                source_view = ViewInput(
+                    view_id=view_id,
+                    role=by_view[view_id].role,
+                    video=path,
+                )
+                local_experiment_sources[(group.group_id, view_id)] = (
+                    source_view,
+                    probe_video(path),
+                )
     selected_event_ids = {event.event_id for event in accepted_events}
     for event in events:
         if event.event_id not in selected_event_ids:
@@ -5631,10 +5660,37 @@ def materialize_key_materials(
             role_started = time.perf_counter()
             view = by_view[view_id]
             transform = transforms[view_id]
+            material_view = view
+            material_info = infos[view_id]
+            material_source = "original_source"
+            material_source_path = None
             local_key_ms = transform.to_local(event.key_global_ms)
-            if not 0.0 <= local_key_ms <= infos[view_id].duration_ms:
+            clip_start_global = max(event.global_start_ms - before, 0.0)
+            clip_end_global = event.global_end_ms + after
+            local_start = max(0.0, transform.to_local(clip_start_global))
+            local_end = min(
+                infos[view_id].duration_ms,
+                transform.to_local(clip_end_global),
+            )
+            local_experiment_source = local_experiment_sources.get(
+                (group.group_id, view_id)
+            )
+            if local_experiment_source is not None:
+                material_view, material_info = local_experiment_source
+                material_source = "verified_local_experiment_clip"
+                material_source_path = str(material_view.video)
+                local_key_ms = event.key_global_ms - group.global_start_ms
+                local_start = max(
+                    0.0,
+                    clip_start_global - group.global_start_ms,
+                )
+                local_end = min(
+                    material_info.duration_ms,
+                    clip_end_global - group.global_start_ms,
+                )
+            if not 0.0 <= local_key_ms <= material_info.duration_ms:
                 raise ValueError(
-                    f"{event.event_id}/{view_id} key timestamp is outside the source video"
+                    f"{event.event_id}/{view_id} key timestamp is outside the material source"
                 )
             frame_started = time.perf_counter()
             frame = None
@@ -5643,9 +5699,11 @@ def materialize_key_materials(
             try:
                 for offset_ms in (0.0, -100.0, 100.0, -250.0, 250.0):
                     candidate_ms = local_key_ms + offset_ms
-                    if not 0.0 <= candidate_ms <= infos[view_id].duration_ms:
+                    if not 0.0 <= candidate_ms <= material_info.duration_ms:
                         continue
-                    frame = frame_reader.read(view, infos[view_id], candidate_ms)
+                    frame = frame_reader.read(
+                        material_view, material_info, candidate_ms
+                    )
                     if frame is not None:
                         used_offset_ms = offset_ms
                         break
@@ -5679,10 +5737,21 @@ def materialize_key_materials(
                     "view_id": view_id,
                     "role_label": role_label,
                     "requested_key_global_ms": float(event.key_global_ms),
-                    "decoded_key_global_ms": transform.to_global(
-                        local_key_ms + used_offset_ms
+                    "decoded_key_global_ms": (
+                        group.global_start_ms + local_key_ms + used_offset_ms
+                        if material_source == "verified_local_experiment_clip"
+                        else transform.to_global(local_key_ms + used_offset_ms)
                     ),
-                    "key_frame_time_basis": "decoder_seek_target; source_frame_pts_not_recorded",
+                    "key_frame_time_basis": (
+                        "verified_experiment_clip_relative_time; source_frame_pts_not_recorded"
+                        if material_source == "verified_local_experiment_clip"
+                        else "decoder_seek_target; source_frame_pts_not_recorded"
+                    ),
+                    "material_source": material_source,
+                    "material_source_path": material_source_path,
+                    "upstream_source_files": [
+                        str(path) for path in view_source_files(view)
+                    ],
                     "frame_decode_offset_ms": used_offset_ms,
                     "detections": detected_boxes,
                     "retention": "existing_persistent_run_cache",
@@ -5695,13 +5764,9 @@ def materialize_key_materials(
             base = role_label
             frame_path = frame_dir / f"{base}.jpg"
             write_annotated_frame(frame, boxes, frame_path)
-            clip_start_global = max(event.global_start_ms - before, 0.0)
-            clip_end_global = event.global_end_ms + after
-            local_start = max(0.0, transform.to_local(clip_start_global))
-            local_end = min(infos[view_id].duration_ms, transform.to_local(clip_end_global))
             if local_end <= local_start:
                 raise ValueError(
-                    f"{event.event_id}/{view_id} key clip boundary is outside the source video"
+                    f"{event.event_id}/{view_id} key clip boundary is outside the material source"
                 )
             clip_path = clip_dir / f"{base}.mp4"
             clip_started = time.perf_counter()
@@ -5716,12 +5781,13 @@ def materialize_key_materials(
                     "local_end_ms": local_end,
                     "global_start_ms": clip_start_global,
                     "global_end_ms": clip_end_global,
+                    "material_source": material_source,
                 },
-                view_source_files(view),
+                view_source_files(material_view),
                 config,
                 lambda: extract_view_clip(
-                    view,
-                    infos[view_id],
+                    material_view,
+                    material_info,
                     clip_path,
                     local_start,
                     local_end - local_start,
@@ -5739,6 +5805,11 @@ def materialize_key_materials(
                 "frame_path": frame_path,
                 "clip_path": clip_path,
                 "frame_decode_offset_ms": used_offset_ms,
+                "material_source": material_source,
+                "material_source_path": material_source_path,
+                "upstream_source_files": [
+                    str(path) for path in view_source_files(view)
+                ],
                 "frame_duration_seconds": round(frame_seconds, 6),
                 "clip_duration_seconds": round(clip_seconds, 6),
                 "duration_seconds": round(time.perf_counter() - role_started, 6),
