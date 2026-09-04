@@ -118,7 +118,8 @@ def _raise_for_incomplete_semantic_results(
     *,
     stage: str,
     results: Sequence[tuple[str, dict[str, Any]]],
-) -> None:
+    fail_run: bool = True,
+) -> list[str]:
     incomplete = [
         {
             "subject_id": subject_id,
@@ -130,23 +131,27 @@ def _raise_for_incomplete_semantic_results(
         if result.get("status") != "completed"
     ]
     if not incomplete:
-        return
+        return []
     path = layout.json_config / f"{stage}_semantic_failures.json"
     write_json(
         path,
         {
             "schema_version": "visioncortex-semantic-stage-failure/1",
             "stage": stage,
-            "status": "resumable_failure",
+            "status": "resumable_failure" if fail_run else "partial_evidence",
+            "evidence_classification": "NOT_PROVEN" if fail_run else "PARTIAL_EVIDENCE",
+            "analysis_continuation_allowed": not fail_run,
             "formal_evidence_mutated": False,
             "completed_results_reusable": True,
             "incomplete": incomplete,
         },
     )
-    raise SemanticAnalysisUnavailable(
-        f"{stage} semantic analysis incomplete for {len(incomplete)} subject(s); "
-        f"resume from {path}"
-    )
+    if fail_run:
+        raise SemanticAnalysisUnavailable(
+            f"{stage} semantic analysis incomplete for {len(incomplete)} subject(s); "
+            f"resume from {path}"
+        )
+    return [str(item["subject_id"]) for item in incomplete]
 
 
 def _semantic_fingerprint(
@@ -1082,6 +1087,7 @@ def analyze_experiment_groups(
         layout,
         stage="experiment_group",
         results=semantic_results,
+        fail_run=bool(config.get("mllm", {}).get("fail_run_on_incomplete", False)),
     )
 
 
@@ -6293,6 +6299,7 @@ def analyze_key_materials(layout: ArchiveLayout, events: Sequence[EvidenceEvent]
         layout,
         stage="key_material",
         results=semantic_results,
+        fail_run=bool(config.get("mllm", {}).get("fail_run_on_incomplete", False)),
     )
 
 
@@ -6394,18 +6401,6 @@ def curate_semantically_reviewed_key_materials(
     gate or being presented as confirmed key material.
     """
 
-    incomplete_model_events = [
-        event.event_id
-        for event in events
-        if str((event.semantic_review or {}).get("model_status") or "")
-        != "completed"
-    ]
-    if incomplete_model_events:
-        raise SemanticAnalysisUnavailable(
-            "Semantic curation cannot treat unavailable model results as negative "
-            "evidence; resume incomplete events: "
-            + ", ".join(sorted(incomplete_model_events))
-        )
     if publisher is not None:
         raise RuntimeError(
             "Semantic key-material curation requires direct staging output; "
@@ -6475,6 +6470,56 @@ def curate_semantically_reviewed_key_materials(
         provenance_media = dict(
             review.get("pre_curation_media") or original_paths
         )
+        if str(review.get("model_status") or "") != "completed":
+            movement = move_event_media(event, destination_action=None)
+            set_event_admission(event, "rejected")
+            disposition = "machine_quarantined_semantic_unavailable"
+            review.update(
+                {
+                    "pre_curation_verdict": (
+                        review.get("pre_curation_verdict")
+                        or review.get("verdict")
+                        or None
+                    ),
+                    "pre_curation_action_type": provenance_action_type,
+                    "pre_curation_objects": provenance_objects,
+                    "pre_curation_supporting_views": provenance_supporting_views,
+                    "pre_curation_supporting_roles": provenance_supporting_roles,
+                    "pre_curation_state_machine": provenance_state_machine,
+                    "pre_curation_media": provenance_media,
+                    "verdict": "semantic_unavailable",
+                    "final_delivery_accepted": False,
+                    "final_action_type": None,
+                    "final_participant_objects": [],
+                    "curation_disposition": disposition,
+                    "curation_policy": "semantic-final-key-material-v1",
+                    "evidence_classification": "PARTIAL_EVIDENCE",
+                    "retryable": True,
+                    **movement,
+                }
+            )
+            event.semantic_review = review
+            records.append(
+                {
+                    "event_id": event.event_id,
+                    "cv_action_type": provenance_action_type,
+                    "cv_objects": provenance_objects,
+                    "model_action_type": None,
+                    "pre_curation_verdict": review.get("pre_curation_verdict"),
+                    "model_confidence": 0.0,
+                    "disposition": disposition,
+                    "final_action_type": None,
+                    "final_participant_objects": [],
+                    "semantic_participant_refined": False,
+                    "semantic_participant_refinement_changed": False,
+                    "final_delivery_accepted": False,
+                    "semantic_state_machine_rebuilt": False,
+                    "evidence_classification": "PARTIAL_EVIDENCE",
+                    "retryable": True,
+                    **movement,
+                }
+            )
+            continue
         model_action_value = str(review.get("model_action_type") or "")
         model_confidence = float(review.get("model_confidence") or 0.0)
         review_verdict = str(review.get("verdict") or "")

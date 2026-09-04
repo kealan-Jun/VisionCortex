@@ -524,6 +524,10 @@ mllm:
   group_workers: 4
   workers: 8
   response_language: zh-CN
+  # Provider/API failure is event-level uncertainty. Completed semantic
+  # receipts remain deliverable; incomplete events are machine-quarantined and
+  # retryable instead of invalidating the entire run.
+  fail_run_on_incomplete: false
 
 archive:
   create_xlsx: true

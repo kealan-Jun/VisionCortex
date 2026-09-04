@@ -3,11 +3,9 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-import pytest
 
 from visioncortex.archive import (
     ArchiveLayout,
-    SemanticAnalysisUnavailable,
     _key_material_event_folder_name,
     curate_semantically_reviewed_key_materials,
 )
@@ -253,7 +251,7 @@ def test_explicit_canonical_paper_is_not_quarantined_as_unmapped(tmp_path: Path)
     assert len(event.key_frames) == 3
 
 
-def test_unavailable_model_result_stops_before_media_or_event_mutation(
+def test_unavailable_model_result_is_quarantined_without_failing_run(
     tmp_path: Path,
 ):
     layout = ArchiveLayout(tmp_path / "archive")
@@ -268,23 +266,23 @@ def test_unavailable_model_result_stops_before_media_or_event_mutation(
     event.semantic_review["model_status"] = "failed"
     group = _group([event])
     _materialize_stub(layout, event)
-    original_frames = dict(event.key_frames)
-    original_clips = dict(event.key_clips)
-    original_group_events = list(group.key_event_ids)
+    curated, report = curate_semantically_reviewed_key_materials(
+        layout,
+        [event],
+        [group],
+        {"key_materials": {"semantic_relabel_min_confidence": 0.7}},
+    )
 
-    with pytest.raises(SemanticAnalysisUnavailable, match="resume incomplete"):
-        curate_semantically_reviewed_key_materials(
-            layout,
-            [event],
-            [group],
-            {"key_materials": {"semantic_relabel_min_confidence": 0.7}},
-        )
-
-    assert event.accepted is True
-    assert event.key_frames == original_frames
-    assert event.key_clips == original_clips
-    assert group.key_event_ids == original_group_events
-    assert not (layout.key_materials / "Machine-Quarantine").exists()
+    assert curated == []
+    assert event.accepted is False
+    assert event.key_frames == {}
+    assert event.key_clips == {}
+    assert group.key_event_ids == []
+    assert report["records"][0]["disposition"] == (
+        "machine_quarantined_semantic_unavailable"
+    )
+    assert report["records"][0]["retryable"] is True
+    assert (layout.key_materials / "Machine-Quarantine").is_dir()
 
 
 def test_same_action_refines_cv_participant_from_structured_interaction(
