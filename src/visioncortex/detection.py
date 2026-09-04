@@ -1527,6 +1527,7 @@ def scan_videos(
     decode_backends: dict[str, str] | None = None,
     wave_barrier: threading.Barrier | None = None,
     progress_callback: Callable[[str, int, int], None] | None = None,
+    scanner_id: str | None = None,
 ) -> dict[str, Path]:
     work_dir.mkdir(parents=True, exist_ok=True)
     output_paths = {view.view_id: work_dir / f"{view.view_id}.detections.jsonl" for view in views}
@@ -1713,7 +1714,8 @@ def scan_videos(
             "synchronized_segment_waves": wave_barrier is not None,
             "model_load_seconds": round(model_load_seconds, 6),
         }
-        runtime_path = work_dir / f"runtime_{phase}_{role.value}.json"
+        scanner_suffix = f"_{scanner_id}" if scanner_id else ""
+        runtime_path = work_dir / f"runtime_{phase}_{role.value}{scanner_suffix}.json"
         tracker_motion_prediction = config["performance"].get(
             "fine_tracker_motion_prediction_enabled"
             if phase == "fine"
@@ -1763,7 +1765,10 @@ def scan_videos(
             )
         )
         frame_queue: queue.Queue[Any] = queue.Queue(maxsize=max(1, queue_depth))
-        frame_queue.activity_path = work_dir / f"source_activity_{phase}_{role.value}.jsonl"
+        frame_queue.activity_path = (
+            work_dir
+            / f"source_activity_{phase}_{role.value}{scanner_suffix}.jsonl"
+        )
         frame_queue.activity_lock = threading.Lock()
         threads = [
             threading.Thread(

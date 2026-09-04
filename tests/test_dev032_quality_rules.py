@@ -1,8 +1,6 @@
 import time
 from pathlib import Path
 
-import pytest
-
 from visioncortex.archive import ArchiveLayout
 from visioncortex.grouping import (
     build_experiment_groups,
@@ -790,7 +788,7 @@ def test_pipeline_metrics_remain_callable_after_quality_planning(default_config)
     assert "preprocessing_sla" in metrics
 
 
-def test_unresolved_cross_view_clusters_fail_before_model_gate(
+def test_unresolved_cross_view_clusters_are_retained_without_failing_run(
     default_config, tmp_path
 ):
     pipeline = EvidencePipeline(default_config)
@@ -804,11 +802,12 @@ def test_unresolved_cross_view_clusters_fail_before_model_gate(
         },
     }
 
-    with pytest.raises(RuntimeError, match="quality precheck failed"):
-        pipeline._run_boundary_precheck(
-            layout, [], progressive_report=progressive_report
-        )
+    report = pipeline._run_boundary_precheck(
+        layout, [], progressive_report=progressive_report
+    )
 
-    assert (
-        layout.json_config / "boundary_precheck.json"
-    ).read_text(encoding="utf-8").find('"passed": false') >= 0
+    assert report["status"] == "partial"
+    assert report["passed"] is False
+    assert report["blocking_failure"] is False
+    assert report["analysis_continuation_allowed"] is True
+    assert report["evidence_classification"] == "PARTIAL_EVIDENCE"

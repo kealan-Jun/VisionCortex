@@ -1778,11 +1778,27 @@ class EvidencePipeline:
         )
         evaluated = boundary_evaluated or progressive_evaluated
         passed = boundary_passed and progressive_passed
+        # A reviewed baseline regression invalidates the bounded experiment
+        # itself and remains a blocking pre-model failure.  In contrast, an
+        # unresolved recall candidate is event-level uncertainty: retain it in
+        # the audit ledger, mark the run partial, and continue producing
+        # machine-verifiable evidence for the candidates that did close across
+        # views.  One uncertain candidate must not discard an otherwise usable
+        # analysis run.
+        blocking_failure = boundary_evaluated and not boundary_passed
+        continuation_status = (
+            "passed" if passed else "failed" if blocking_failure else "partial"
+        )
         report = {
             "schema_version": "visioncortex-boundary-precheck/1",
-            "status": "passed" if passed else "failed",
+            "status": continuation_status,
             "evaluated": evaluated,
             "passed": passed,
+            "blocking_failure": blocking_failure,
+            "analysis_continuation_allowed": not blocking_failure,
+            "evidence_classification": (
+                "PROVEN" if passed else "NOT_PROVEN" if blocking_failure else "PARTIAL_EVIDENCE"
+            ),
             "baseline": full_report["baseline"],
             "baseline_selection": dict(self._acceptance_baseline_selection),
             "thresholds": full_report["thresholds"],
@@ -1806,8 +1822,7 @@ class EvidencePipeline:
         path = layout.json_config / "boundary_precheck.json"
         write_json(path, report)
         if (
-            evaluated
-            and not passed
+            blocking_failure
             and bool(validation.get("fail_before_model_on_boundary_regression", True))
         ):
             raise RuntimeError(
@@ -1995,11 +2010,11 @@ class EvidencePipeline:
         phase="fine",
         decode_backends: dict[str, str] | None = None,
     ):
-        groups = [
+        role_groups = [
             [view for view in manifest.views if view.role == ViewRole.FIRST_PERSON],
             [view for view in manifest.views if view.role == ViewRole.THIRD_PERSON],
         ]
-        groups = [group for group in groups if group]
+        role_groups = [group for group in role_groups if group]
         kwargs = {
             "windows": windows,
             "sample_fps": sample_fps,
@@ -2011,6 +2026,33 @@ class EvidencePipeline:
             ),
         }
         perf = self.config["performance"]
+        concurrent_roles = (
+            bool(perf.get("concurrent_role_scanners", True))
+            and len(role_groups) > 1
+        )
+        workers_per_role = max(
+            1, int(perf.get("yolo_inference_workers", 1))
+        )
+        scanner_groups: list[tuple[list[ViewInput], str | None]] = []
+        for role_group in role_groups:
+            worker_count = (
+                min(workers_per_role, len(role_group))
+                if concurrent_roles
+                else 1
+            )
+            partitions = [role_group[index::worker_count] for index in range(worker_count)]
+            partitions = [partition for partition in partitions if partition]
+            for index, partition in enumerate(partitions, start=1):
+                scanner_groups.append(
+                    (
+                        partition,
+                        (
+                            f"worker_{index:02d}"
+                            if len(partitions) > 1
+                            else None
+                        ),
+                    )
+                )
         requested_sources = int(perf.get("source_workers", len(manifest.views)))
         if requested_sources < len(manifest.views):
             raise ValueError(
@@ -2028,7 +2070,6 @@ class EvidencePipeline:
             lanes = ["cuda" if perf.get("ffmpeg_hwaccel") else "cpu"] * len(manifest.views)
         if len(lanes) < len(manifest.views):
             lanes.extend([lanes[-1]] * (len(manifest.views) - len(lanes)))
-        concurrent_roles = bool(perf.get("concurrent_role_scanners", True)) and len(groups) > 1
         default_decode_backends = {
             view.view_id: lanes[index] for index, view in enumerate(manifest.views)
         }
@@ -2066,8 +2107,24 @@ class EvidencePipeline:
                 {
                     "schema_version": "visioncortex-role-scheduler/1",
                     "phase": phase,
-                    "mode": "concurrent_roles" if concurrent_roles else "sequential_role_residency",
-                    "role_order": [group[0].role.value for group in groups],
+                    "mode": (
+                        "concurrent_role_workers"
+                        if concurrent_roles and len(scanner_groups) > len(role_groups)
+                        else "concurrent_roles"
+                        if concurrent_roles
+                        else "sequential_role_residency"
+                    ),
+                    "role_order": [group[0].role.value for group in role_groups],
+                    "yolo_inference_workers_per_role": workers_per_role,
+                    "active_scanner_count": len(scanner_groups),
+                    "scanner_groups": [
+                        {
+                            "scanner_id": scanner_id,
+                            "role": group[0].role.value,
+                            "view_ids": [view.view_id for view in group],
+                        }
+                        for group, scanner_id in scanner_groups
+                    ],
                     "configured_decode_lanes": lanes,
                     "active_view_ids": [view.view_id for view in manifest.views],
                     "decode_backends": kwargs["decode_backends"],
@@ -2084,7 +2141,7 @@ class EvidencePipeline:
         )
         if not concurrent_roles:
             result = {}
-            for group in groups:
+            for group in role_groups:
                 group_kwargs = dict(kwargs)
                 group_kwargs["decode_backends"] = {
                     view.view_id: kwargs["decode_backends"][view.view_id]
@@ -2116,10 +2173,22 @@ class EvidencePipeline:
                 self._view_runtime[view.view_id]["state"] = f"{phase}_completed"
             return result
         result = {}
-        with ThreadPoolExecutor(max_workers=len(groups), thread_name_prefix="role-scanner") as executor:
+        with ThreadPoolExecutor(
+            max_workers=len(scanner_groups),
+            thread_name_prefix="role-scanner",
+        ) as executor:
             futures = [
-                executor.submit(scan_videos, group, infos, transforms, work_dir, self.config, **kwargs)
-                for group in groups
+                executor.submit(
+                    scan_videos,
+                    group,
+                    infos,
+                    transforms,
+                    work_dir,
+                    self.config,
+                    scanner_id=scanner_id,
+                    **kwargs,
+                )
+                for group, scanner_id in scanner_groups
             ]
             for future in futures:
                 result.update(future.result())

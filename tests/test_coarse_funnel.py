@@ -211,3 +211,57 @@ def test_sequential_role_residency_preserves_original_decode_lanes(
     }
     scheduler = json.loads((tmp_path / "scheduler_fine.json").read_text(encoding="utf-8"))
     assert scheduler["mode"] == "sequential_role_residency"
+
+
+def test_concurrent_role_workers_partition_views_without_losing_order(
+    monkeypatch, tmp_path, default_config
+):
+    views = [
+        ViewInput(view_id="fp", role=ViewRole.FIRST_PERSON, video=Path("fp.mp4")),
+        *[
+            ViewInput(
+                view_id=f"tp{index}",
+                role=ViewRole.THIRD_PERSON,
+                video=Path(f"tp{index}.mp4"),
+            )
+            for index in range(5)
+        ],
+    ]
+    manifest = RunManifest(experiment_id="scheduler-workers", views=views)
+    default_config["performance"]["source_workers"] = 6
+    default_config["performance"]["concurrent_role_scanners"] = True
+    default_config["performance"]["yolo_inference_workers"] = 2
+    calls = []
+
+    def fake_scan(group, _infos, _transforms, _work_dir, _config, **kwargs):
+        calls.append(
+            {
+                "views": [view.view_id for view in group],
+                "scanner_id": kwargs.get("scanner_id"),
+            }
+        )
+        return {view.view_id: tmp_path / f"{view.view_id}.jsonl" for view in group}
+
+    monkeypatch.setattr("visioncortex.pipeline.scan_videos", fake_scan)
+    pipeline = EvidencePipeline(default_config)
+    pipeline._scan_all_views_concurrently(
+        manifest,
+        infos={},
+        transforms={},
+        work_dir=tmp_path,
+        phase="fine",
+    )
+
+    assert sorted(view for call in calls for view in call["views"]) == sorted(
+        view.view_id for view in views
+    )
+    third_calls = [call for call in calls if call["views"][0].startswith("tp")]
+    assert len(third_calls) == 2
+    assert {call["scanner_id"] for call in third_calls} == {
+        "worker_01",
+        "worker_02",
+    }
+    scheduler = json.loads((tmp_path / "scheduler_fine.json").read_text(encoding="utf-8"))
+    assert scheduler["mode"] == "concurrent_role_workers"
+    assert scheduler["active_scanner_count"] == 3
+    assert scheduler["yolo_inference_workers_per_role"] == 2
