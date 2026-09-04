@@ -1574,8 +1574,9 @@ async function pollRun(runId, archiveName) {
       return;
     }
     if (run.state === "failed") {
-      toast(run.error || "分析失败", "error");
-      setProgress(1, `失败：${run.error || "请检查服务日志"}`);
+      const failure = friendlyFailureReason(run);
+      toast(failure, "error");
+      setProgress(1, `失败：${failure}`);
       document.querySelector("#start-run")?.removeAttribute("disabled");
       return;
     }
@@ -1667,42 +1668,39 @@ function guidedPipelineView(run, outputsOpen = false) {
     const receiptUrl = latestReceipt ? stageArtifactUrl(run, latestReceipt.receipt) : "";
     const resultLink = definition.resultTab && deliveredReceipts.length
       ? `<a href="${esc(stageResultRoute(run,definition.resultTab[0]))}">${icon("arrow")}${esc(definition.resultTab[1])}</a>` : "";
-    const artifactLinks = deliveredReceipts.length ? `<div class="journey-artifacts">${resultLink}${featured.map(({item,label})=>`<a target="_blank" href="${esc(stageArtifactUrl(run,item.relative_path))}" title="${esc(item.relative_path)}">${icon("file")}${esc(label)}</a>`).join("")}${receiptUrl ? `<a class="receipt-link" target="_blank" href="${esc(receiptUrl)}">${icon("check")}完整清单</a>` : ""}</div>` : "";
+    const artifactLinks = deliveredReceipts.length ? `<div class="journey-artifacts">${resultLink}${featured.map(({item,label})=>`<a target="_blank" href="${esc(stageArtifactUrl(run,item.relative_path))}">${icon("file")}${esc(label)}</a>`).join("")}${receiptUrl ? `<a class="receipt-link" target="_blank" href="${esc(receiptUrl)}">${icon("check")}完整清单</a>` : ""}</div>` : "";
     const detail = stageState === "done"
       ? `${receipt?.stage_duration_seconds != null ? `耗时 ${duration(receipt.stage_duration_seconds)}` : "产出已保存"}`
       : stageState === "active" ? definition.doing
-      : stageState === "failed" ? `失败位置：${STAGE_LABELS[status.failed_stage] || status.failed_stage || run.error || "本环节"}`
-      : stageState === "interrupted" ? "已完成产出保留，可从持久账本续跑。"
-      : stageState === "done-unreceipted" ? "后续阶段已开始；该历史运行没有独立阶段回执。"
+      : stageState === "failed" ? `停止位置：${STAGE_LABELS[status.failed_stage] || "当前分析环节"}`
+      : stageState === "interrupted" ? "已完成内容会保留，可以稍后重新分析。"
+      : stageState === "done-unreceipted" ? "该环节已通过，后续分析已经开始。"
       : "等待前序环节完成";
     return `<article class="journey-step ${stageState}"><span class="journey-number">${definition.number}</span><div class="journey-copy"><header><strong>${esc(definition.title)}</strong><span>${esc(stateLabel[stageState])}</span></header><p>${esc(detail)}</p>${artifactLinks}</div></article>`;
   }).join("");
-  return `<section class="current-guide ${active.state}"><div><span class="guide-kicker">${esc(stateLabel[active.state])} · 第 ${esc(active.definition.number)} 步，共 7 步</span><h3>${esc(active.definition.title)}</h3><p>${esc(status.message || active.definition.doing)}</p></div><aside><small>${next ? "接下来" : "最终结果"}</small><strong>${esc(next?.definition.title || "实验成果已完整保存")}</strong></aside></section><div class="task-progress-line"><span>${["failed", "interrupted"].includes(run.state) ? "处理已停止" : `已完成 ${Math.round(Number(run.progress || 0) * 100)}%`}</span><span>已用 ${duration(elapsedForRun(run, status))}</span></div><details class="technical-observability" ${outputsOpen ? "open" : ""}><summary>查看各环节与生成文件</summary><div class="pipeline-journey">${cards}</div></details>`;
+  return `<section class="current-guide ${active.state}"><div><span class="guide-kicker">${esc(stateLabel[active.state])} · 第 ${esc(active.definition.number)} 步，共 7 步</span><h3>${esc(active.definition.title)}</h3><p>${esc(productRunMessage(run, active.definition.doing))}</p></div><aside><small>${next ? "接下来" : "最终结果"}</small><strong>${esc(next?.definition.title || "实验成果已完整保存")}</strong></aside></section><div class="task-progress-line"><span>${["failed", "interrupted"].includes(run.state) ? "处理已停止" : `已完成 ${Math.round(Number(run.progress || 0) * 100)}%`}</span><span>已用 ${duration(elapsedForRun(run, status))}</span></div><details class="technical-observability" ${outputsOpen ? "open" : ""}><summary>查看各环节与生成文件</summary><div class="pipeline-journey">${cards}</div></details>`;
 }
 
 function runObservabilityCard(run, outputsOpen = false) {
   const snapshot = run.observability || {};
   const status = snapshot.status || {};
-  const live = latestTelemetry(run);
-  const gpu = live.gpu || {};
-  const network = live.host_network || {};
-  const processIo = live.pipeline_process_tree_io || {};
-  const views = normalizedViews(status);
-  const metrics = snapshot.metrics || {};
-  const tokens = metrics.tokens?.run_total || {};
   const freshness = newestFreshness(snapshot);
   const current = status.stage || run.state;
-  const gpuCompute = gpu["utilization.gpu"] ?? gpu.utilization_percent ?? "—";
-  const nvdec = gpu["utilization.decoder"] ?? gpu.decoder_percent ?? "—";
-  const memory = gpu["memory.used"] ?? gpu.memory_used_mib ?? "—";
   const freshnessNote = freshness.stale && !["completed","failed","interrupted"].includes(run.state)
-    ? `<div class="freshness-warning">状态数据已 ${duration(freshness.age)} 未更新：NAS 遥测可能延迟，不能据此判定任务停止；页面仍会继续刷新。</div>` : "";
+    ? `<div class="freshness-warning">任务状态已 ${duration(freshness.age)} 未更新；分析可能仍在后台继续，页面会自动刷新。</div>` : "";
   const previewAvailable = (snapshot.stage_receipts || []).length > 0;
   const resultRoute = run.nas_staging && run.state !== "completed"
     ? `stage/${encodeURIComponent(run.run_id)}` : `archive/${encodeURIComponent(run.experiment_id || "")}`;
   const archiveLink = run.state === "completed" || previewAvailable
     ? `<a class="secondary-button" href="#/${resultRoute}/experiments">${run.state === "completed" ? "查看实验结果" : "预览已完成内容"}</a>` : "";
-  return `<section class="panel live-run-card"><header class="panel-heading"><div title="实验编号：${esc(run.experiment_id || run.run_id)}"><p class="panel-kicker">实验分析</p><h2>${esc(productExperimentName(run.experiment_id || run.run_id))}</h2></div><div class="run-heading-actions">${archiveLink}<span class="queue-status ${esc(run.state)}"><i></i>${esc(STAGE_LABELS[current] || current)}</span></div></header>${freshnessNote}${guidedPipelineView(run,outputsOpen)}<details class="technical-observability"><summary>详细运行信息</summary><div class="technical-actions"><p>任务编号：${esc(run.run_id)}</p></div><div class="live-metric-grid"><article><small>总体进度</small><strong>${Math.round(Number(run.progress ?? status.progress ?? 0)*100)}%</strong><span>${duration(elapsedForRun(run,status))} 已用</span></article><article><small>GPU / NVDEC（瞬时）</small><strong>${gpuCompute}% / ${nvdec}%</strong><span>单点样本 · ${memory} MiB 显存</span></article><article><small>CPU / 内存（瞬时）</small><strong>${live.cpu_percent ?? "—"}% / ${live.memory_percent ?? "—"}%</strong><span>单点主机采样</span></article><article><small>NAS/网络读取（瞬时）</small><strong>${network.received_mib_per_second ?? "—"} MiB/s</strong><span>进程树读 ${processIo.read_mib_per_second ?? "—"} MiB/s</span></article><article><small>模型 Token</small><strong>${number(tokens.total_tokens)}</strong><span>${number(tokens.input_tokens)} 输入 + ${number(tokens.output_tokens)} 输出</span></article><article><small>最近更新</small><strong>${freshness.value ? formatDate(freshness.value) : "待采样"}</strong><span>${freshness.age == null ? "正式运行记录" : `${duration(freshness.age)} 前`}</span></article></div>${views.length ? `<div class="view-runtime-grid">${views.map(([viewId,item])=>{ const done=item.completed_units ?? item.completed_work_units; const total=item.total_units ?? item.total_work_units; return `<article><span class="view-state-dot ${item.state === "completed" ? "completed" : ""}"></span><div><strong>${esc(viewId)}</strong><small>${esc(item.role || "待识别角色")} · ${esc(item.state || "等待中")} · ${total ? `${number(done)}/${number(total)} 单元` : `${number(item.segment_count)} 分片`}</small></div></article>`; }).join("")}</div>` : `<div class="empty-state compact-empty">等待逐视角运行记录。</div>`}</details></section>`;
+  return `<section class="panel live-run-card"><header class="panel-heading"><div><p class="panel-kicker">实验分析</p><h2>${esc(productExperimentName(run.experiment_id || run.run_id))}</h2></div><div class="run-heading-actions">${archiveLink}<span class="queue-status ${esc(run.state)}"><i></i>${esc(STAGE_LABELS[current] || (run.state === "failed" ? "处理失败" : "处理中"))}</span></div></header>${freshnessNote}${guidedPipelineView(run,outputsOpen)}</section>`;
+}
+
+function productRunMessage(run, fallback) {
+  if (["failed", "interrupted"].includes(run?.state)) return friendlyFailureReason(run);
+  const raw = String(run?.observability?.status?.message || "").trim();
+  if (!raw || raw.length > 180 || /(?:runtimeerror|traceback|exception|[a-z]:\\|\/(?:mnt|home|tmp|var)\/)/i.test(raw)) return fallback;
+  return raw;
 }
 
 function renderOperations() {
@@ -1728,7 +1726,7 @@ function archiveProcessStopped(data) {
 
 function friendlyFailureReason(data) {
   const status = data?.observability?.status || {};
-  const raw = String(status.error || status.message || "");
+  const raw = String(status.error || status.message || data?.error || "");
   if (/decode|frame|sam2/i.test(raw)) return "关键素材精细处理时，系统无法读取其中一段视频的指定画面。";
   if (/cuda|gpu|memory|out of memory/i.test(raw)) return "视频分析所需的计算资源暂时不足，任务已安全停止。";
   if (/network|timeout|connection/i.test(raw)) return "分析过程中连接暂时中断，已完成的内容仍然保留。";

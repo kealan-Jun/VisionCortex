@@ -157,6 +157,7 @@ def test_normal_product_pages_hide_raw_paths_and_explain_partial_results():
     assert "data.path" not in result_header
     assert "archive-file-details" not in result_header
     assert "archivePath" not in run_card
+    assert "run.error" not in run_card
     assert "查看技术信息" not in attention_panel
     assert "result.path" not in archive_actions
     assert "本页仅展示处理停止前已完成的内容" in result_header

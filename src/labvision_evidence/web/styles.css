@@ -1554,6 +1554,18 @@ body { color: var(--text); background: var(--page); -webkit-font-smoothing: anti
 .next-action-panel h2 { margin: 5px 0 9px; color: #1c4047; font-size: 18px; }
 .next-action-panel > p:not(.eyebrow) { margin: 0 0 18px; color: #627a7f; font-size: 12px; line-height: 1.65; }
 .next-action-panel .secondary-button { justify-self: start; background: #fff; }
+.archive-quick-filters { display: flex; flex-wrap: wrap; gap: 8px; padding: 14px 20px 4px; }
+.archive-quick-filters button { min-height: 34px; border: 1px solid #d8e4e2; border-radius: 999px; padding: 7px 13px; color: #587176; background: #fff; font: inherit; font-size: var(--font-xs); font-weight: 600; line-height: 1; cursor: pointer; transition: border-color .16s ease,background .16s ease,color .16s ease,box-shadow .16s ease; }
+.archive-quick-filters button:hover { border-color: #adcac6; color: var(--brand); background: #f7fbfa; }
+.archive-quick-filters button.active { border-color: #b9d4d0; color: var(--brand); background: var(--brand-soft); box-shadow: inset 0 0 0 1px rgba(47,116,123,.06); }
+.archive-quick-filters button:focus-visible { outline: 3px solid rgba(45,124,130,.14); outline-offset: 2px; }
+.archive-advanced-filters { border-bottom: 1px solid #e6eeee; padding: 2px 20px 13px; }
+.archive-advanced-filters > summary { display: inline-flex; min-height: 32px; align-items: center; gap: 8px; border-radius: 8px; padding: 6px 8px; color: #6c8286; font-size: var(--font-xs); font-weight: 600; list-style: none; cursor: pointer; user-select: none; }
+.archive-advanced-filters > summary::-webkit-details-marker { display: none; }
+.archive-advanced-filters > summary::before { width: 7px; height: 7px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; content: ""; transform: rotate(-45deg); transition: transform .16s ease; }
+.archive-advanced-filters[open] > summary::before { transform: rotate(45deg) translate(-1px,-1px); }
+.archive-advanced-filters > summary:hover { color: var(--brand); background: #f2f7f6; }
+.archive-advanced-filters .archive-filter-toolbar { margin: 8px -20px -13px; }
 .archive-filter-toolbar { display: grid; grid-template-columns: repeat(4,minmax(130px,1fr)) auto; align-items: end; gap: 10px; border-top: 1px solid #e9efef; border-bottom: 1px solid #e9efef; padding: 14px 20px; background: #f8fbfa; }
 .archive-filter-toolbar label { display: grid; min-width: 0; gap: 5px; color: #718589; font-size: 10px; font-weight: 700; }
 .archive-filter-toolbar select { min-width: 0; width: 100%; height: 37px; border: 1px solid #d8e3e2; border-radius: var(--radius-control); padding: 7px 9px; color: #294b51; background: #fff; font-size: 11px; }
