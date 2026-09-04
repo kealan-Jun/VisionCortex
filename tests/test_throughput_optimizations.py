@@ -2,6 +2,7 @@ import json
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ import pytest
 import httpx
 
 from visioncortex import storage, video_io
+from visioncortex.archive import _run_bounded_semantic_waves
 from visioncortex.mllm import ArkAnalyzer
 from visioncortex.schemas import VideoInfo, ViewInput, ViewRole
 from visioncortex.storage import IncrementalArchivePublisher
@@ -85,6 +87,38 @@ def test_mllm_transport_failure_circuit_skips_later_calls(
     assert third["status"] == "skipped_failure_circuit_open"
     assert third["attempts"] == 0
     assert analyzer.client.posts == 2
+
+
+def test_semantic_queue_waits_for_failure_bounded_wave_before_scheduling_more():
+    failure_threshold = 2
+    lock = threading.Lock()
+    transport_calls = 0
+    circuit_open = False
+
+    def analyze(item):
+        nonlocal transport_calls, circuit_open
+        with lock:
+            if circuit_open:
+                return item, "skipped"
+            transport_calls += 1
+        # Keep both members of the first wave in flight before either opens the
+        # circuit, matching concurrent HTTP failures.
+        time.sleep(0.01)
+        with lock:
+            if transport_calls >= failure_threshold:
+                circuit_open = True
+        return item, "failed"
+
+    results = _run_bounded_semantic_waves(
+        list(range(7)),
+        analyze,
+        workers=8,
+        failure_threshold=failure_threshold,
+    )
+
+    assert transport_calls == failure_threshold
+    assert sum(status == "failed" for _item, status in results) == failure_threshold
+    assert sum(status == "skipped" for _item, status in results) == 5
 
 
 def test_mllm_retries_schema_invalid_response_before_accepting(monkeypatch, default_config):

@@ -6247,6 +6247,25 @@ def key_material_review_images(
     ) if images else fallback_images
 
 
+def _run_bounded_semantic_waves(
+    items: Sequence[Any],
+    analyze: Callable[[Any], Any],
+    *,
+    workers: int,
+    failure_threshold: int,
+) -> list[Any]:
+    """Run semantic calls in waves no larger than the transport failure gate."""
+
+    wave_size = max(1, min(int(workers), int(failure_threshold)))
+    completed: list[Any] = []
+    for wave_start in range(0, len(items), wave_size):
+        wave = items[wave_start : wave_start + wave_size]
+        with ThreadPoolExecutor(max_workers=len(wave)) as executor:
+            futures = [executor.submit(analyze, item) for item in wave]
+            completed.extend(future.result() for future in as_completed(futures))
+    return completed
+
+
 def analyze_key_materials(layout: ArchiveLayout, events: Sequence[EvidenceEvent], config: dict[str, Any]) -> None:
     analyzer = ArkStepAnalyzer(config)
     accepted = [event for event in events if event.accepted]
@@ -6283,16 +6302,26 @@ def analyze_key_materials(layout: ArchiveLayout, events: Sequence[EvidenceEvent]
         return event, result
 
     workers = max(1, int(config["mllm"].get("workers", 4)))
+    failure_threshold = max(
+        1, int(config["mllm"].get("failure_circuit_breaker_threshold", 4))
+    )
     semantic_results: list[tuple[str, dict[str, Any]]] = []
     try:
-        with ThreadPoolExecutor(max_workers=min(workers, max(1, len(accepted)))) as executor:
-            futures = [executor.submit(analyze, event) for event in accepted]
-            for future in as_completed(futures):
-                event, result = future.result()
-                result = normalize_uncalibrated_hand_identity(result)
-                semantic_results.append((event.event_id, result))
-                event.model_understanding = result
-                record_semantic_review(event, result)
+        # Submit one failure-bounded wave at a time.  Submitting the entire queue
+        # lets every worker enter the transport before the shared circuit can
+        # observe a complete failed wave, defeating the circuit breaker during
+        # a provider outage.
+        completed = _run_bounded_semantic_waves(
+            accepted,
+            analyze,
+            workers=workers,
+            failure_threshold=failure_threshold,
+        )
+        for event, result in completed:
+            result = normalize_uncalibrated_hand_identity(result)
+            semantic_results.append((event.event_id, result))
+            event.model_understanding = result
+            record_semantic_review(event, result)
     finally:
         analyzer.close()
     _raise_for_incomplete_semantic_results(
