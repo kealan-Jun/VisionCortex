@@ -6,7 +6,13 @@ from typing import Any, Sequence
 from .recall_evaluation import (
     evaluate_key_event_recall as evaluate_key_event_recall,
 )
-from .schemas import ActionType, EvidenceEvent, ExperimentGroup, ViewInput
+from .schemas import (
+    ActionType,
+    EvidenceEvent,
+    ExperimentGroup,
+    ViewInput,
+    event_is_formal,
+)
 
 
 def _iou(left: tuple[float, float], right: tuple[float, float]) -> float:
@@ -218,7 +224,7 @@ def validate_experiment_and_material_quality(
         semantic_confirmed_count += int(semantic_confirmed)
         semantic_unconfirmed_count += int(semantic_unconfirmed)
         confirmed = bool(
-            event.accepted
+            event_is_formal(event)
             and event.confidence >= 0.5
             and (not semantic_review or semantic_confirmed)
         )

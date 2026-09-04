@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from typing import Any, Sequence
 
-from .schemas import ActionType, EvidenceEvent, ViewRole
+from .schemas import ActionType, EvidenceEvent, ViewRole, event_is_formal
 
 
 HAND_CLASSES = {"hand", "gloved_hand"}
@@ -80,8 +80,207 @@ def _evidence_flags(event: EvidenceEvent) -> dict[str, bool]:
                 "target_withdraw",
             }
             for item in evidence
+        )
+        or any(
+            bool(
+                ((candidate.provenance or {}).get("interaction_state") or {}).get(
+                    "release_observed"
+                )
+            )
+            for candidate in event.candidates
         ),
     }
+
+
+def _observed_transition_trace(
+    event: EvidenceEvent, present: Sequence[str]
+) -> list[dict[str, Any]]:
+    timed_evidence = [
+        (float(timestamp), evidence)
+        for candidate in event.candidates
+        for evidence in candidate.evidence
+        if isinstance(
+            (timestamp := evidence.get("observation_global_ms")),
+            (int, float),
+        )
+    ]
+
+    def observed_time(predicate, *, latest: bool = False) -> float | None:
+        values = [
+            timestamp
+            for timestamp, evidence in timed_evidence
+            if predicate(evidence)
+        ]
+        if not values:
+            return None
+        return max(values) if latest else min(values)
+
+    phase_times: dict[str, tuple[float, str]] = {}
+    if event.action_type == ActionType.HAND_OBJECT_CONTACT:
+        approach = observed_time(
+            lambda evidence: bool(
+                (evidence.get("interaction_state") or {}).get(
+                    "approach_confirmed"
+                )
+            )
+        )
+        contact = observed_time(
+            lambda evidence: evidence.get("distance_norm") is not None
+        )
+        if approach is not None:
+            phase_times["approach"] = (approach, "observed_frame")
+        if contact is not None:
+            phase_times["contact"] = (contact, "observed_frame")
+            phase_times["manipulation"] = (
+                float(event.key_global_ms),
+                "observed_peak_candidate",
+            )
+        release_values = [
+            float(value)
+            for candidate in event.candidates
+            if isinstance(
+                (
+                    value := (
+                        (candidate.provenance or {}).get("interaction_state")
+                        or {}
+                    ).get("release_observed_at_global_ms")
+                ),
+                (int, float),
+            )
+        ]
+        if release_values:
+            phase_times["release"] = (
+                min(release_values),
+                "observed_separation_frame",
+            )
+    elif event.action_type == ActionType.OBJECT_MOVEMENT:
+        movement_start = observed_time(
+            lambda evidence: evidence.get("camera_compensated_displacement_norm")
+            is not None
+            or evidence.get("displacement_norm") is not None
+        )
+        movement_end = observed_time(
+            lambda evidence: evidence.get("camera_compensated_displacement_norm")
+            is not None
+            or evidence.get("displacement_norm") is not None,
+            latest=True,
+        )
+        if movement_start is not None:
+            phase_times["movement_start"] = (
+                movement_start,
+                "observed_frame",
+            )
+            phase_times["transport"] = (
+                float(event.key_global_ms),
+                "observed_peak_candidate",
+            )
+            phase_times["stable_before"] = (
+                movement_start,
+                "inferred_from_first_motion_frame",
+            )
+        if movement_end is not None and "stable_after" in present:
+            phase_times["stable_after"] = (
+                movement_end,
+                "observed_release_or_motion_end",
+            )
+    elif event.action_type in {
+        ActionType.LIQUID_MOVEMENT,
+        ActionType.PIPETTE_TRANSFER_OPERATION,
+    }:
+        sequences = [
+            evidence
+            for candidate in event.candidates
+            for evidence in candidate.evidence
+            if evidence.get("transfer_sequence") == "source_transport_target"
+        ]
+        if sequences:
+            source_ends = [
+                float(item["source_contact_end_global_ms"])
+                for item in sequences
+                if isinstance(
+                    item.get("source_contact_end_global_ms"), (int, float)
+                )
+            ]
+            target_starts = [
+                float(item["target_contact_start_global_ms"])
+                for item in sequences
+                if isinstance(
+                    item.get("target_contact_start_global_ms"), (int, float)
+                )
+            ]
+            if source_ends and target_starts:
+                source_end = min(source_ends)
+                target_start = min(target_starts)
+                phase_times.update(
+                    {
+                        "source_approach": (
+                            float(event.core_global_start_ms),
+                            "inferred_from_candidate_boundary",
+                        ),
+                        "source_contact": (source_end, "observed_contact_run_end"),
+                        "source_withdraw": (source_end, "observed_contact_run_end"),
+                        "transport": (
+                            (source_end + target_start) / 2.0,
+                            "inferred_between_observed_contacts",
+                        ),
+                        "target_contact": (
+                            target_start,
+                            "observed_contact_run_start",
+                        ),
+                        "target_release": (
+                            float(event.core_global_end_ms),
+                            "inferred_from_candidate_boundary",
+                        ),
+                    }
+                )
+    elif event.action_type == ActionType.CONTAINER_STATE_CHANGE:
+        first = observed_time(lambda _evidence: True)
+        last = observed_time(lambda _evidence: True, latest=True)
+        if first is not None:
+            phase_times["state_before"] = (first, "observed_frame")
+            phase_times["operation"] = (
+                float(event.key_global_ms),
+                "observed_peak_candidate",
+            )
+        if last is not None and "state_after" in present:
+            phase_times["state_after"] = (last, "observed_frame")
+            phase_times["state_hold"] = (last, "observed_frame")
+    else:
+        contact = observed_time(
+            lambda evidence: evidence.get("distance_norm") is not None
+        )
+        if contact is not None:
+            phase_times["panel_approach"] = (
+                contact,
+                "inferred_from_first_contact_frame",
+            )
+            phase_times["panel_contact"] = (contact, "observed_frame")
+        control = observed_time(
+            lambda evidence: evidence.get("control_id") is not None
+            or evidence.get("panel_roi") is not None
+            or evidence.get("display_state_change") is not None
+        )
+        if control is not None:
+            phase_times["control_change"] = (control, "observed_frame")
+
+    trace = []
+    for phase in present:
+        timestamp, source = phase_times.get(
+            phase,
+            (
+                float(event.key_global_ms),
+                "inferred_from_candidate_interval",
+            ),
+        )
+        trace.append(
+            {
+                "phase": phase,
+                "timestamp_us": round(timestamp * 1000.0),
+                "source": source,
+                "observed": source.startswith("observed"),
+            }
+        )
+    return sorted(trace, key=lambda item: (item["timestamp_us"], item["phase"]))
 
 
 def _phase_contract(
@@ -225,6 +424,9 @@ def build_event_state_receipt(
     if not event.accepted:
         lifecycle = "rejected"
         terminal_reason = event.audit_reason
+    elif not event_is_formal(event):
+        lifecycle = "provisional"
+        terminal_reason = "semantic_adjudication_required_before_formal_use"
     elif completeness >= minimum_complete:
         lifecycle = "completed"
         terminal_reason = "required_phases_observed"
@@ -235,14 +437,23 @@ def build_event_state_receipt(
     start_us = round(event.global_start_ms * 1000.0)
     end_us = round(event.global_end_ms * 1000.0)
     span_us = max(1, end_us - start_us)
-    trace = [
-        {
-            "phase": phase,
-            "timestamp_us": round(start_us + span_us * index / max(1, len(present) - 1)),
-            "source": "deterministic_cv_state_receipt",
-        }
-        for index, phase in enumerate(present)
-    ]
+    if config.get("performance", {}).get(
+        "action_state_observed_timestamps_enabled", False
+    ):
+        trace = _observed_transition_trace(event, present)
+        trace_policy = "observed_timestamps_with_explicit_inference_labels"
+    else:
+        trace = [
+            {
+                "phase": phase,
+                "timestamp_us": round(
+                    start_us + span_us * index / max(1, len(present) - 1)
+                ),
+                "source": "deterministic_cv_state_receipt",
+            }
+            for index, phase in enumerate(present)
+        ]
+        trace_policy = "legacy_evenly_distributed_phase_receipt"
     non_hand = sorted(set(event.objects) - HAND_CLASSES)
     return {
         "schema_version": "visioncortex-continuous-action-state/1.0.0",
@@ -259,6 +470,7 @@ def build_event_state_receipt(
         "phases": present,
         "missing_phases": [phase for phase in required if phase not in present],
         "transition_trace": trace,
+        "transition_trace_policy": trace_policy,
         "state_before": before,
         "state_after": after,
         "object_identity": {
@@ -286,7 +498,13 @@ def build_event_state_receipt(
             "contradiction_penalty": 0.0,
         },
         "publication": {
-            "status": "primary" if event.accepted else "internal_candidate",
+            "status": (
+                "primary"
+                if event_is_formal(event)
+                else "provisional_semantic_review"
+                if event.accepted
+                else "internal_candidate"
+            ),
             "suppressed_by_event_id": None,
             "reason": None,
         },
@@ -360,7 +578,7 @@ def attach_continuous_action_states(
     )
     fragments: dict[tuple[str, tuple[str, ...]], list[EvidenceEvent]] = defaultdict(list)
     for event in events:
-        if not event.accepted:
+        if not event_is_formal(event):
             continue
         key = (
             _normalized_action(event.action_type),

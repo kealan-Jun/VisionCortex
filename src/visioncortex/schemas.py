@@ -319,6 +319,9 @@ class EvidenceEvent(BaseModel):
     objects: list[str]
     confidence: float
     accepted: bool
+    formal_admission_status: Literal[
+        "formal", "provisional", "rejected"
+    ] | None = None
     audit_reason: str
     supporting_views: list[str]
     supporting_roles: list[ViewRole]
@@ -330,6 +333,44 @@ class EvidenceEvent(BaseModel):
     key_frames: dict[str, str] = Field(default_factory=dict)
     key_clips: dict[str, str] = Field(default_factory=dict)
     model_understanding: dict[str, Any] | None = None
+    event_fingerprint: str | None = None
+    core_global_start_ms: float | None = None
+    core_global_end_ms: float | None = None
+    evidence_global_start_ms: float | None = None
+    evidence_global_end_ms: float | None = None
+
+    @model_validator(mode="after")
+    def normalize_formal_admission(self) -> EvidenceEvent:
+        if self.formal_admission_status is None:
+            self.formal_admission_status = (
+                "formal" if self.accepted else "rejected"
+            )
+        self.accepted = self.formal_admission_status != "rejected"
+        if self.core_global_start_ms is None:
+            self.core_global_start_ms = float(self.global_start_ms)
+        if self.core_global_end_ms is None:
+            self.core_global_end_ms = float(self.global_end_ms)
+        if self.evidence_global_start_ms is None:
+            self.evidence_global_start_ms = float(self.global_start_ms)
+        if self.evidence_global_end_ms is None:
+            self.evidence_global_end_ms = float(self.global_end_ms)
+        return self
+
+
+def event_is_formal(event: EvidenceEvent) -> bool:
+    """Return the single admission predicate used by delivery stages."""
+
+    return bool(
+        event.accepted and event.formal_admission_status == "formal"
+    )
+
+
+def set_event_admission(
+    event: EvidenceEvent,
+    status: Literal["formal", "provisional", "rejected"],
+) -> None:
+    event.formal_admission_status = status
+    event.accepted = status != "rejected"
 
 
 class ExperimentSegment(BaseModel):

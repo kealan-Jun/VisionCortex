@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 from .detection import iter_frame_evidence
-from .schemas import FrameEvidence, VideoInfo, ViewInput
+from .schemas import ActionCandidate, FrameEvidence, VideoInfo, ViewInput
 
 
 _ACTOR_CLASSES = {"hand", "gloved_hand"}
@@ -174,6 +174,57 @@ class FineFrameIndex:
         finally:
             connection.close()
 
+    def replace_audit_candidates(
+        self, candidates: Sequence[ActionCandidate]
+    ) -> int:
+        """Refresh the derived time index used by candidate_audit."""
+
+        connection = sqlite3.connect(self.path)
+        try:
+            connection.execute("DELETE FROM fine_audit_candidates")
+            connection.executemany(
+                "INSERT INTO fine_audit_candidates VALUES (?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        candidate.candidate_id,
+                        candidate.action_type.value,
+                        candidate.view_id,
+                        float(candidate.global_start_ms),
+                        float(candidate.global_end_ms),
+                        candidate.model_dump_json(),
+                    )
+                    for candidate in candidates
+                ],
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        return len(candidates)
+
+    def iter_audit_candidates(
+        self,
+        *,
+        start_ms: float,
+        end_ms: float,
+        action_type: str | None = None,
+    ) -> Iterable[ActionCandidate]:
+        clauses = ["global_end_ms >= ?", "global_start_ms <= ?"]
+        parameters: list[Any] = [float(start_ms), float(end_ms)]
+        if action_type is not None:
+            clauses.append("action_type = ?")
+            parameters.append(str(action_type))
+        query = (
+            "SELECT payload_json FROM fine_audit_candidates WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY global_start_ms, global_end_ms, candidate_id"
+        )
+        connection = sqlite3.connect(self.path)
+        try:
+            for (payload,) in connection.execute(query, parameters):
+                yield ActionCandidate.model_validate_json(payload)
+        finally:
+            connection.close()
+
 
 def create_fine_frame_index(index_path: Path) -> FineFrameIndex:
     index_path.parent.mkdir(parents=True, exist_ok=True)
@@ -235,6 +286,18 @@ def create_fine_frame_index(index_path: Path) -> FineFrameIndex:
                 new_tracks INTEGER NOT NULL,
                 PRIMARY KEY (source_pass, view_id)
             ) WITHOUT ROWID;
+            CREATE TABLE fine_audit_candidates (
+                candidate_id TEXT NOT NULL PRIMARY KEY,
+                action_type TEXT NOT NULL,
+                view_id TEXT NOT NULL,
+                global_start_ms REAL NOT NULL,
+                global_end_ms REAL NOT NULL,
+                payload_json TEXT NOT NULL
+            ) WITHOUT ROWID;
+            CREATE INDEX fine_audit_candidates_time
+                ON fine_audit_candidates(global_start_ms, global_end_ms);
+            CREATE INDEX fine_audit_candidates_action_time
+                ON fine_audit_candidates(action_type, global_start_ms, global_end_ms);
             """
         )
         connection.commit()

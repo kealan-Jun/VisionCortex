@@ -100,6 +100,28 @@ performance:
   # Null inherits the established coarse tracker setting for compatibility.
   fine_tracker_motion_prediction_enabled: null
   fine_tracker_maximum_center_distance: null
+  # In-place candidate_audit upgrades. The default profile retains the
+  # established decisions; production hardware profiles enable the stricter
+  # association, formal-admission and bounded-query contracts explicitly.
+  audit_constrained_clustering_enabled: false
+  audit_local_alignment_enabled: false
+  audit_explainable_scoring_enabled: false
+  audit_formal_admission_status_enabled: false
+  audit_core_interval_enabled: false
+  audit_stable_event_ids_enabled: false
+  audit_sqlite_candidate_index_enabled: false
+  audit_max_cluster_span_seconds: 30.0
+  audit_core_start_quantile: 0.50
+  audit_core_end_quantile: 0.50
+  audit_independent_view_bonus: 0.04
+  audit_dual_role_bonus: 0.04
+  audit_maximum_independence_bonus: 0.12
+  audit_maximum_alignment_penalty: 0.08
+  audit_liquid_spatial_context_enabled: false
+  audit_liquid_context_hand_object_gap_norm: 0.08
+  audit_liquid_context_minimum_frames: 2
+  audit_liquid_sequence_formal_gate_enabled: false
+  action_state_observed_timestamps_enabled: false
   # Optional workload-adaptive mode. The default remains the established all-
   # selected-view scan; hardware profiles may enable progressive cross-view
   # supplementation explicitly.
@@ -431,6 +453,8 @@ mllm:
   candidate_review_max_events: 120
   candidate_review_include_rejected: true
   candidate_review_rejected_min_confidence: 0.75
+  candidate_review_stratified_queue_enabled: false
+  candidate_review_time_bucket_seconds: 1800
   storyboard_pairs_per_group: 4
   group_workers: 4
   workers: 8

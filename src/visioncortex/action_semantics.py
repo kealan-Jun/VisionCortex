@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, defaultdict, deque
 from typing import Any, Iterable, Sequence
 
-from .schemas import ActionType, EvidenceEvent, ViewRole
+from .schemas import ActionType, EvidenceEvent, ViewRole, event_is_formal
 
 
 HAND_CLASSES = {"hand", "gloved_hand"}
@@ -498,6 +498,9 @@ def build_action_observability(event: EvidenceEvent) -> dict[str, Any]:
 
     if not both_roles:
         missing.append("dual_role_action_support")
+    if event.formal_admission_status == "provisional":
+        review_priority = "required"
+        missing.append("formal_semantic_adjudication")
 
     return {
         "schema_version": "visioncortex-action-observability/3",
@@ -507,7 +510,8 @@ def build_action_observability(event: EvidenceEvent) -> dict[str, Any]:
         "semantic_review_priority": review_priority,
         "can_cv_directly_prove_action": support_level == "direct_cv",
         "can_define_boundary_without_semantic_promotion": bool(
-            event.accepted and (support_level == "direct_cv" or both_roles)
+            event_is_formal(event)
+            and (support_level == "direct_cv" or both_roles)
         ),
         "signals": sorted(set(signals)),
         "unmet_visual_requirements": sorted(set(missing)),
@@ -553,12 +557,10 @@ def attach_action_observability(
 ) -> list[dict[str, Any]]:
     receipts: list[dict[str, Any]] = []
     for event in events:
-        semantic_recall_admission = (event.observability or {}).get(
-            "semantic_recall_admission"
-        )
-        receipt = build_action_observability(event)
-        if isinstance(semantic_recall_admission, dict):
-            receipt["semantic_recall_admission"] = semantic_recall_admission
+        receipt = {
+            **(event.observability or {}),
+            **build_action_observability(event),
+        }
         event.observability = receipt
         receipts.append(receipt)
     return receipts
@@ -583,10 +585,12 @@ def build_semantic_review_plan(
     eligible: list[EvidenceEvent] = []
     skipped: list[dict[str, Any]] = []
     for event in events:
-        receipt = event.observability or build_action_observability(event)
+        receipt = dict(event.observability or {})
+        if "semantic_review_priority" not in receipt:
+            receipt.update(build_action_observability(event))
         event.observability = receipt
         priority = str(receipt["semantic_review_priority"])
-        if priority == "optional" and event.accepted:
+        if priority == "optional" and event_is_formal(event):
             skipped.append({"event_id": event.event_id, "reason": "direct_cv_optional"})
             continue
         if not event.accepted and (
@@ -601,20 +605,106 @@ def build_semantic_review_plan(
             continue
         eligible.append(event)
 
-    eligible.sort(
-        key=lambda event: (
+    def priority_key(event: EvidenceEvent) -> tuple[int, int, float, float, str]:
+        return (
             rank.get(str(event.observability.get("semantic_review_priority")), 9),
             0 if not event.accepted else 1,
             -float(event.confidence),
             float(event.key_global_ms),
+            event.event_id,
         )
+
+    eligible.sort(key=priority_key)
+    stratified = bool(cfg.get("candidate_review_stratified_queue_enabled", False))
+    bucket_ms = max(
+        1.0,
+        float(cfg.get("candidate_review_time_bucket_seconds", 1800.0)) * 1000.0,
     )
-    selected = eligible[:max_events]
-    overflow = eligible[max_events:]
+    if stratified:
+        scheduled: list[EvidenceEvent] = []
+        by_priority: dict[int, list[EvidenceEvent]] = defaultdict(list)
+        for event in eligible:
+            by_priority[priority_key(event)[0]].append(event)
+        for priority in sorted(by_priority):
+            action_strata: dict[
+                str,
+                dict[tuple[int, tuple[str, ...], str], deque[EvidenceEvent]],
+            ] = defaultdict(lambda: defaultdict(deque))
+            for event in by_priority[priority]:
+                roles = tuple(
+                    sorted(
+                        role.value if isinstance(role, ViewRole) else str(role)
+                        for role in event.supporting_roles
+                    )
+                )
+                stratum = (
+                    int(float(event.key_global_ms) // bucket_ms),
+                    roles,
+                    str(event.formal_admission_status),
+                )
+                action_strata[event.action_type.value][stratum].append(event)
+            action_queues: dict[str, deque[EvidenceEvent]] = {}
+            for action_type, strata in action_strata.items():
+                action_queue: deque[EvidenceEvent] = deque()
+                ordered_strata = sorted(strata)
+                while any(strata.values()):
+                    for key in ordered_strata:
+                        if strata[key]:
+                            action_queue.append(strata[key].popleft())
+                action_queues[action_type] = action_queue
+            ordered_actions = sorted(action_queues)
+            while any(action_queues.values()):
+                for action_type in ordered_actions:
+                    if action_queues[action_type]:
+                        scheduled.append(action_queues[action_type].popleft())
+    else:
+        scheduled = eligible
+
+    selected = scheduled[:max_events]
+    overflow = scheduled[max_events:]
+    batches = (
+        [scheduled[index : index + max_events] for index in range(0, len(scheduled), max_events)]
+        if max_events > 0
+        else []
+    )
+
+    positions = {event.event_id: index for index, event in enumerate(scheduled, start=1)}
+
+    def event_payload(event: EvidenceEvent) -> dict[str, Any]:
+        queue_position = positions[event.event_id]
+        return {
+            "event_id": event.event_id,
+            "action_type": event.action_type.value,
+            "accepted_by_cv": event.accepted,
+            "formal_admission_status": event.formal_admission_status,
+            "confidence": event.confidence,
+            "priority": event.observability["semantic_review_priority"],
+            "cv_ontology_support": event.observability["cv_ontology_support"],
+            "unmet_visual_requirements": event.observability[
+                "unmet_visual_requirements"
+            ],
+            "global_start_ms": event.global_start_ms,
+            "global_end_ms": event.global_end_ms,
+            "key_global_ms": event.key_global_ms,
+            "supporting_views": event.supporting_views,
+            "supporting_roles": [
+                role.value if isinstance(role, ViewRole) else str(role)
+                for role in event.supporting_roles
+            ],
+            "queue_position": queue_position,
+            "batch_index": (
+                ((queue_position - 1) // max_events) + 1 if max_events > 0 else None
+            ),
+        }
+
     action_counts = Counter(event.action_type.value for event in selected)
     return {
         "schema_version": "visioncortex-semantic-review-plan/1",
-        "policy": "cv_recall_first_mllm_bounded_adjudication",
+        "policy": (
+            "cv_recall_first_stratified_batched_adjudication"
+            if stratified
+            else "cv_recall_first_mllm_bounded_adjudication"
+        ),
         "model_may_mutate_cv_acceptance": False,
         "model_may_confirm_relabel_or_mark_uncertain": True,
         "temporal_evidence_required": True,
@@ -623,36 +713,35 @@ def build_semantic_review_plan(
         "eligible_count": len(eligible),
         "overflow_count": len(overflow),
         "max_events": max_events,
+        "batch_count": len(batches),
+        "all_eligible_scheduled": bool(max_events > 0 or not scheduled),
+        "queue_stratification": {
+            "enabled": stratified,
+            "dimensions": [
+                "semantic_priority",
+                "action_type",
+                "time_bucket",
+                "supporting_roles",
+                "formal_admission_status",
+            ]
+            if stratified
+            else [],
+            "time_bucket_ms": bucket_ms if stratified else None,
+        },
         "action_type_counts": dict(sorted(action_counts.items())),
-        "selected": [
+        "selected": [event_payload(event) for event in selected],
+        "scheduled_batches": [
             {
-                "event_id": event.event_id,
-                "action_type": event.action_type.value,
-                "accepted_by_cv": event.accepted,
-                "confidence": event.confidence,
-                "priority": event.observability["semantic_review_priority"],
-                "cv_ontology_support": event.observability["cv_ontology_support"],
-                "unmet_visual_requirements": event.observability[
-                    "unmet_visual_requirements"
-                ],
-                "global_start_ms": event.global_start_ms,
-                "global_end_ms": event.global_end_ms,
-                "key_global_ms": event.key_global_ms,
-                "supporting_views": event.supporting_views,
-                "supporting_roles": [
-                    role.value if isinstance(role, ViewRole) else str(role)
-                    for role in event.supporting_roles
-                ],
+                "batch_index": index,
+                "event_count": len(batch),
+                "action_type_counts": dict(
+                    sorted(Counter(event.action_type.value for event in batch).items())
+                ),
+                "events": [event_payload(event) for event in batch],
             }
-            for event in selected
+            for index, batch in enumerate(batches, start=1)
         ],
-        "skipped": [
-            *skipped,
-            *(
-                {"event_id": event.event_id, "reason": "semantic_budget_overflow"}
-                for event in overflow
-            ),
-        ],
+        "skipped": skipped,
     }
 
 

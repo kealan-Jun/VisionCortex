@@ -75,7 +75,7 @@ from .replay_acceptance import (
 from .recall_evaluation import evaluate_key_event_recall
 from .reviewed_artifacts import load_dataset_scoped_json
 from .schema_contracts import write_archive_contract_manifest
-from .schemas import RunManifest, RunSummary, VideoInfo
+from .schemas import RunManifest, RunSummary, VideoInfo, event_is_formal
 from .storage import (
     fixed_archive_staging_paths,
     initialize_nas_archive,
@@ -1966,7 +1966,9 @@ def repair_key_material_presentation_command(
             publisher=None,
         )
     else:
-        key_events = [event for event in reviewed_key_events if event.accepted]
+        key_events = [
+            event for event in reviewed_key_events if event_is_formal(event)
+        ]
         semantic_curation = prior_curation
     segment_semantic_repairs = _synchronize_segments_with_final_key_events(
         summary.segments, summary.experiment_groups, key_events

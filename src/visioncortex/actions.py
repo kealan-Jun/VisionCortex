@@ -33,6 +33,8 @@ from .schemas import (
     PhysicalChange,
     ViewInput,
     ViewRole,
+    event_is_formal,
+    set_event_admission,
 )
 
 
@@ -1001,7 +1003,15 @@ def _representative_observation_evidence(
         middle = observations[len(observations) // 2]
         if middle not in selected:
             selected.append(middle)
-    return [item.evidence for item in selected[:50]]
+    return [_observation_evidence(item) for item in selected[:50]]
+
+
+def _observation_evidence(observation: _Observation) -> dict[str, Any]:
+    return {
+        **observation.evidence,
+        "observation_local_ms": round(float(observation.local_ms), 3),
+        "observation_global_ms": round(float(observation.global_ms), 3),
+    }
 
 
 def _observation_instance_signature(
@@ -1236,7 +1246,7 @@ def _candidate_from_accumulator(
         key_global_ms=accumulator.key_item.global_ms,
         objects=sorted(accumulator.objects),
         confidence=confidence,
-        evidence=[item.evidence for item in representatives],
+        evidence=[_observation_evidence(item) for item in representatives],
         uncertainty=uncertainty,
         instance_signature=signature,
         provenance={
@@ -2502,10 +2512,183 @@ def _instance_association_receipt(
     }
 
 
+def _candidate_alignment_profile(
+    candidate: ActionCandidate,
+    transform: AlignmentTransform,
+    *,
+    local_segments_enabled: bool,
+) -> dict[str, Any]:
+    if not local_segments_enabled or not transform.segment_transforms:
+        return {
+            "state": transform.state,
+            "confidence": float(transform.confidence),
+            "uncertainty_ms": max(0.0, float(transform.uncertainty_ms)),
+            "available": bool(
+                transform.state != "failed"
+                and transform.is_available_at_global(candidate.key_global_ms)
+            ),
+            "segment_indexes": [],
+            "basis": "view_transform",
+        }
+    overlapping = [
+        segment
+        for segment in transform.segment_transforms
+        if segment.local_end_ms >= candidate.local_start_ms
+        and segment.local_start_ms <= candidate.local_end_ms
+    ]
+    if not overlapping:
+        return {
+            "state": "failed",
+            "confidence": 0.0,
+            "uncertainty_ms": max(0.0, float(transform.uncertainty_ms)),
+            "available": False,
+            "segment_indexes": [],
+            "basis": "no_local_alignment_segment",
+        }
+    states = {segment.state for segment in overlapping}
+    state = (
+        "failed"
+        if "failed" in states
+        else "uncertain"
+        if "uncertain" in states
+        else "aligned"
+    )
+    return {
+        "state": state,
+        "confidence": min(float(segment.confidence) for segment in overlapping),
+        "uncertainty_ms": max(
+            max(0.0, float(segment.uncertainty_ms))
+            for segment in overlapping
+        ),
+        "available": state != "failed",
+        "segment_indexes": [
+            int(segment.segment_index) for segment in overlapping
+        ],
+        "basis": "candidate_local_alignment_segments",
+    }
+
+
+def _weighted_quantile(
+    values: Sequence[float],
+    weights: Sequence[float],
+    quantile: float,
+) -> float:
+    ordered = sorted(
+        zip(values, weights, strict=True), key=lambda item: item[0]
+    )
+    if not ordered:
+        raise ValueError("weighted quantile requires at least one value")
+    total = math.fsum(max(0.0, float(weight)) for _, weight in ordered)
+    if total <= 1e-9:
+        return float(median(value for value, _ in ordered))
+    target = min(1.0, max(0.0, float(quantile))) * total
+    cumulative = 0.0
+    for value, weight in ordered:
+        cumulative += max(0.0, float(weight))
+        if cumulative >= target:
+            return float(value)
+    return float(ordered[-1][0])
+
+
+def _cluster_confidence_receipt(
+    cluster: Sequence[ActionCandidate],
+    profiles: dict[int, dict[str, Any]],
+    config: dict[str, Any],
+) -> tuple[float, dict[str, Any]]:
+    perf = config["performance"]
+    role_weights = dict(perf.get("audit_role_confidence_weights") or {})
+    action_offsets = dict(perf.get("audit_action_confidence_offsets") or {})
+    best_by_view: dict[str, ActionCandidate] = {}
+    for candidate in cluster:
+        current = best_by_view.get(candidate.view_id)
+        if current is None or candidate.confidence > current.confidence:
+            best_by_view[candidate.view_id] = candidate
+    contributors = []
+    numerator = 0.0
+    denominator = 0.0
+    for candidate in sorted(best_by_view.values(), key=candidate_sort_key):
+        profile = profiles[id(candidate)]
+        calibrated = min(
+            1.0,
+            max(
+                0.0,
+                float(candidate.confidence)
+                + float(
+                    action_offsets.get(candidate.action_type.value, 0.0)
+                ),
+            ),
+        )
+        role_weight = float(role_weights.get(candidate.role.value, 1.0))
+        alignment_weight = max(
+            0.10,
+            0.25 + 0.75 * max(0.0, float(profile["confidence"])),
+        )
+        weight = role_weight * alignment_weight
+        numerator += calibrated * weight
+        denominator += weight
+        contributors.append(
+            {
+                "candidate_id": candidate.candidate_id,
+                "view_id": candidate.view_id,
+                "role": candidate.role.value,
+                "raw_confidence": round(float(candidate.confidence), 6),
+                "calibrated_confidence": round(calibrated, 6),
+                "role_weight": round(role_weight, 6),
+                "alignment_weight": round(alignment_weight, 6),
+                "effective_weight": round(weight, 6),
+            }
+        )
+    base = numerator / max(denominator, 1e-9)
+    views = {candidate.view_id for candidate in cluster}
+    roles = {candidate.role for candidate in cluster}
+    independence_bonus = min(
+        float(perf.get("audit_maximum_independence_bonus", 0.12)),
+        float(perf.get("audit_independent_view_bonus", 0.04))
+        * max(0, len(views) - 1)
+        + (
+            float(perf.get("audit_dual_role_bonus", 0.04))
+            if len(roles) == 2
+            else 0.0
+        ),
+    )
+    maximum_alignment_penalty = float(
+        perf.get("audit_maximum_alignment_penalty", 0.08)
+    )
+    tolerance = max(
+        1.0,
+        float(config["alignment"].get("cross_view_event_max_tolerance_ms", 2500.0)),
+    )
+    uncertainty_ratio = math.fsum(
+        min(1.0, float(profiles[id(candidate)]["uncertainty_ms"]) / tolerance)
+        for candidate in best_by_view.values()
+    ) / max(1, len(best_by_view))
+    uncertain_state_ratio = math.fsum(
+        profiles[id(candidate)]["state"] != "aligned"
+        for candidate in best_by_view.values()
+    ) / max(1, len(best_by_view))
+    alignment_penalty = min(
+        maximum_alignment_penalty,
+        maximum_alignment_penalty
+        * (0.70 * uncertainty_ratio + 0.30 * uncertain_state_ratio),
+    )
+    confidence = min(1.0, max(0.0, base + independence_bonus - alignment_penalty))
+    return confidence, {
+        "schema_version": "visioncortex-audit-confidence/1",
+        "method": "best_per_view_alignment_weighted_independent_support",
+        "base_confidence": round(base, 6),
+        "independence_bonus": round(independence_bonus, 6),
+        "alignment_penalty": round(alignment_penalty, 6),
+        "final_confidence": round(confidence, 6),
+        "contributing_view_count": len(best_by_view),
+        "contributors": contributors,
+    }
+
+
 def audit_candidates(
     candidates: Sequence[ActionCandidate],
     transforms: dict[str, AlignmentTransform],
     config: dict[str, Any],
+    frame_index: FineFrameIndex | None = None,
 ) -> tuple[list[EvidenceEvent], list[dict[str, Any]]]:
     tolerance = float(config["alignment"]["cross_view_event_tolerance_ms"])
     maximum_tolerance = max(
@@ -2517,17 +2700,78 @@ def audit_candidates(
         ),
     )
 
+    perf = config["performance"]
+    local_alignment_enabled = bool(
+        perf.get("audit_local_alignment_enabled", False)
+    )
+    constrained = bool(
+        perf.get("audit_constrained_clustering_enabled", False)
+    )
+    profiles = {
+        id(candidate): _candidate_alignment_profile(
+            candidate,
+            transforms[candidate.view_id],
+            local_segments_enabled=local_alignment_enabled,
+        )
+        for candidate in candidates
+    }
+
     def pair_tolerance(left: ActionCandidate, right: ActionCandidate) -> float:
         if left.view_id == right.view_id:
             return tolerance
-        left_error = max(0.0, float(transforms[left.view_id].uncertainty_ms))
-        right_error = max(0.0, float(transforms[right.view_id].uncertainty_ms))
+        left_error = float(profiles[id(left)]["uncertainty_ms"])
+        right_error = float(profiles[id(right)]["uncertainty_ms"])
         propagated = math.sqrt(left_error**2 + right_error**2)
         return min(maximum_tolerance, tolerance + propagated)
 
     seg_cfg = config["segmentation"]
+    ordered_candidates = sorted(candidates, key=candidate_sort_key)
+    candidate_by_id = {
+        candidate.candidate_id: candidate for candidate in ordered_candidates
+    }
+    sqlite_lookup_enabled = bool(
+        perf.get("audit_sqlite_candidate_index_enabled", False)
+        and frame_index is not None
+    )
+    if sqlite_lookup_enabled:
+        assert frame_index is not None
+        frame_index.replace_audit_candidates(ordered_candidates)
+    bucket_ms = max(1000.0, maximum_tolerance)
+    candidate_buckets: dict[int, list[ActionCandidate]] = defaultdict(list)
+    for candidate in ordered_candidates:
+        first_bucket = math.floor(candidate.global_start_ms / bucket_ms)
+        last_bucket = math.floor(candidate.global_end_ms / bucket_ms)
+        for bucket in range(first_bucket, last_bucket + 1):
+            candidate_buckets[bucket].append(candidate)
+
+    def nearby_candidates(start_ms: float, end_ms: float) -> list[ActionCandidate]:
+        if sqlite_lookup_enabled:
+            assert frame_index is not None
+            return [
+                candidate_by_id.get(item.candidate_id, item)
+                for item in frame_index.iter_audit_candidates(
+                    start_ms=start_ms,
+                    end_ms=end_ms,
+                )
+            ]
+        first_bucket = math.floor(start_ms / bucket_ms)
+        last_bucket = math.floor(end_ms / bucket_ms)
+        unique: dict[str, ActionCandidate] = {}
+        for bucket in range(first_bucket, last_bucket + 1):
+            for candidate in candidate_buckets.get(bucket, []):
+                if (
+                    candidate.global_end_ms >= start_ms
+                    and candidate.global_start_ms <= end_ms
+                ):
+                    unique[candidate.candidate_id] = candidate
+        return sorted(unique.values(), key=candidate_sort_key)
+
+    maximum_cluster_span_ms = max(
+        maximum_tolerance,
+        float(perf.get("audit_max_cluster_span_seconds", 30.0)) * 1000.0,
+    )
     clusters: list[list[ActionCandidate]] = []
-    for candidate in sorted(candidates, key=candidate_sort_key):
+    for candidate in ordered_candidates:
         selected: list[ActionCandidate] | None = None
         for cluster in reversed(clusters):
             if (
@@ -2536,13 +2780,44 @@ def audit_candidates(
                 > maximum_tolerance
             ):
                 break
-            if cluster[0].action_type == candidate.action_type and any(
-                _objects_overlap(candidate, item, config)
-                and candidate.global_start_ms
+            compatible_members = [
+                item
+                for item in cluster
+                if _objects_overlap(candidate, item, config)
+            ]
+            temporal_matches = [
+                candidate.global_start_ms
                 <= item.global_end_ms + pair_tolerance(candidate, item)
                 and candidate.global_end_ms
                 >= item.global_start_ms - pair_tolerance(candidate, item)
-                for item in cluster
+                for item in compatible_members
+            ]
+            temporal_match = bool(temporal_matches) and (
+                all(temporal_matches) if constrained else any(temporal_matches)
+            )
+            complete_identity_match = bool(compatible_members) and (
+                not constrained or len(compatible_members) == len(cluster)
+            )
+            proposed_span = max(
+                candidate.global_end_ms,
+                max(item.global_end_ms for item in cluster),
+            ) - min(
+                candidate.global_start_ms,
+                min(item.global_start_ms for item in cluster),
+            )
+            local_alignment_available = bool(
+                profiles[id(candidate)]["available"]
+                and all(profiles[id(item)]["available"] for item in cluster)
+            )
+            if (
+                cluster[0].action_type == candidate.action_type
+                and temporal_match
+                and complete_identity_match
+                and (not local_alignment_enabled or local_alignment_available)
+                and (
+                    not constrained
+                    or proposed_span <= maximum_cluster_span_ms
+                )
             ):
                 selected = cluster
                 break
@@ -2559,10 +2834,51 @@ def audit_candidates(
         roles = sorted({item.role for item in cluster}, key=lambda role: role.value)
         weighted_confidence = math.fsum(item.confidence for item in cluster) / len(cluster)
         cross_view_bonus = min(0.16, 0.06 * (len(views) - 1) + (0.06 if len(roles) == 2 else 0.0))
-        confidence = min(1.0, weighted_confidence + cross_view_bonus)
-        aligned_views = [view_id for view_id in views if transforms[view_id].state == "aligned"]
+        legacy_confidence = min(1.0, weighted_confidence + cross_view_bonus)
+        if perf.get("audit_explainable_scoring_enabled", False):
+            confidence, confidence_receipt = _cluster_confidence_receipt(
+                cluster, profiles, config
+            )
+        else:
+            confidence = legacy_confidence
+            confidence_receipt = {
+                "schema_version": "visioncortex-audit-confidence/1",
+                "method": "legacy_candidate_mean_plus_cross_view_bonus",
+                "base_confidence": round(weighted_confidence, 6),
+                "independence_bonus": round(cross_view_bonus, 6),
+                "alignment_penalty": 0.0,
+                "final_confidence": round(confidence, 6),
+            }
+        aligned_views = sorted(
+            {
+                item.view_id
+                for item in cluster
+                if profiles[id(item)]["state"] == "aligned"
+                and profiles[id(item)]["available"]
+            }
+        )
         both_roles = len(roles) == 2
-        duration_ms = max(item.global_end_ms for item in cluster) - min(item.global_start_ms for item in cluster)
+        evidence_start_ms = min(item.global_start_ms for item in cluster)
+        evidence_end_ms = max(item.global_end_ms for item in cluster)
+        duration_ms = evidence_end_ms - evidence_start_ms
+        if perf.get("audit_core_interval_enabled", False):
+            weights = [max(0.01, float(item.confidence)) for item in cluster]
+            core_start_ms = _weighted_quantile(
+                [float(item.global_start_ms) for item in cluster],
+                weights,
+                float(perf.get("audit_core_start_quantile", 0.50)),
+            )
+            core_end_ms = _weighted_quantile(
+                [float(item.global_end_ms) for item in cluster],
+                weights,
+                float(perf.get("audit_core_end_quantile", 0.50)),
+            )
+            if core_end_ms < core_start_ms:
+                center = float(median(item.key_global_ms for item in cluster))
+                core_start_ms = core_end_ms = center
+        else:
+            core_start_ms = evidence_start_ms
+            core_end_ms = evidence_end_ms
         action_specific_thresholds = seg_cfg.get(
             "single_view_action_accept_confidence", {}
         )
@@ -2604,12 +2920,21 @@ def audit_candidates(
                     0.55,
                 )
             )
+            cluster_ids = {item.candidate_id for item in cluster}
             context_candidates = [
                 item
-                for item in candidates
-                if item not in cluster
+                for item in nearby_candidates(
+                    cluster_start_ms - maximum_tolerance,
+                    cluster_end_ms + maximum_tolerance,
+                )
+                if item.candidate_id not in cluster_ids
                 and item.role not in roles
-                and transforms[item.view_id].state == "aligned"
+                and _candidate_alignment_profile(
+                    item,
+                    transforms[item.view_id],
+                    local_segments_enabled=local_alignment_enabled,
+                )["state"]
+                == "aligned"
                 and item.confidence >= context_minimum
                 and item.global_start_ms
                 <= cluster_end_ms
@@ -2641,6 +2966,33 @@ def audit_candidates(
             seg_cfg.get("allow_strong_single_role_actions", False)
         ):
             accepted = accepted and both_roles
+        formal_status = "formal" if accepted else "rejected"
+        if perf.get("audit_formal_admission_status_enabled", False):
+            direct_admission = bool(
+                accepted
+                and (
+                    both_roles
+                    or len(views) >= 2
+                    or single_view_strong
+                )
+            )
+            if accepted and not direct_admission and semantic_context_admitted:
+                formal_status = "provisional"
+            liquid_sequence_observed = any(
+                evidence.get("transfer_sequence")
+                == "source_transport_target"
+                for item in cluster
+                for evidence in item.evidence
+            )
+            if (
+                accepted
+                and cluster[0].action_type == ActionType.LIQUID_MOVEMENT
+                and perf.get(
+                    "audit_liquid_sequence_formal_gate_enabled", False
+                )
+                and not liquid_sequence_observed
+            ):
+                formal_status = "provisional"
         uncertainty: list[str] = []
         if not both_roles:
             uncertainty.append("该动作没有同时获得第一与第三人称支持")
@@ -2654,7 +3006,7 @@ def audit_candidates(
             uncertainty.append(f"以下视角对齐不确定: {', '.join(uncertain_alignments)}")
         if cluster[0].action_type == ActionType.LIQUID_MOVEMENT:
             uncertainty.append("液体移动由传统CV候选提出，最终语义需多模态模型确认")
-        if accepted:
+        if formal_status == "formal":
             if both_roles:
                 reason = "第一/第三人称动作、对象和全局时间窗一致"
             elif len(views) >= 2:
@@ -2666,6 +3018,8 @@ def audit_candidates(
                 )
             else:
                 reason = "单路持续强物理证据通过门控；未强制其他空/无效视角产出"
+        elif formal_status == "provisional":
+            reason = "候选进入待语义复核区；未获得正式实验边界资格"
         else:
             reason = "候选缺少足够的跨视角或持续强物理证据"
         observability: dict[str, Any] = {
@@ -2689,6 +3043,32 @@ def audit_candidates(
             "object_instance_association": _instance_association_receipt(
                 cluster, config
             ),
+            "candidate_alignment": {
+                "schema_version": "visioncortex-candidate-local-alignment/1",
+                "local_segment_enforced": local_alignment_enabled,
+                "candidates": {
+                    item.candidate_id: profiles[id(item)] for item in cluster
+                },
+            },
+            "confidence_fusion": confidence_receipt,
+            "event_boundary": {
+                "schema_version": "visioncortex-event-boundary/1",
+                "core_global_start_ms": core_start_ms,
+                "core_global_end_ms": core_end_ms,
+                "evidence_global_start_ms": evidence_start_ms,
+                "evidence_global_end_ms": evidence_end_ms,
+                "core_drives_formal_segmentation": bool(
+                    perf.get("audit_core_interval_enabled", False)
+                ),
+            },
+            "audit_lookup": {
+                "strategy": (
+                    "sqlite_time_index"
+                    if sqlite_lookup_enabled
+                    else "bounded_time_buckets"
+                ),
+                "bucket_ms": None if sqlite_lookup_enabled else bucket_ms,
+            },
         }
         if semantic_context_candidate is not None:
             observability["semantic_recall_admission"] = {
@@ -2707,21 +3087,29 @@ def audit_candidates(
         event = EvidenceEvent(
             event_id=f"EVT-{index:06d}",
             action_type=cluster[0].action_type,
-            global_start_ms=min(item.global_start_ms for item in cluster),
-            global_end_ms=max(item.global_end_ms for item in cluster),
+            global_start_ms=core_start_ms,
+            global_end_ms=core_end_ms,
             key_global_ms=float(median(item.key_global_ms for item in cluster)),
             objects=sorted({obj for item in cluster for obj in item.objects}),
             confidence=confidence,
-            accepted=accepted,
+            accepted=formal_status != "rejected",
+            formal_admission_status=formal_status,
             audit_reason=reason,
             supporting_views=views,
             supporting_roles=roles,
             candidates=cluster,
             uncertainty=uncertainty,
             observability=observability,
+            core_global_start_ms=core_start_ms,
+            core_global_end_ms=core_end_ms,
+            evidence_global_start_ms=evidence_start_ms,
+            evidence_global_end_ms=evidence_end_ms,
         )
+        event.event_fingerprint = stable_event_fingerprint(event)
+        if perf.get("audit_stable_event_ids_enabled", False):
+            event.event_id = f"EVT-{event.event_fingerprint[:16].upper()}"
         events.append(event)
-        if not accepted:
+        if formal_status == "rejected":
             rejected.append(
                 {
                     "event_id": event.event_id,
@@ -2729,6 +3117,8 @@ def audit_candidates(
                     "reason": reason,
                     "confidence": confidence,
                     "duration_ms": duration_ms,
+                    "formal_admission_status": formal_status,
+                    "event_fingerprint": event.event_fingerprint,
                 }
             )
     return events, rejected
@@ -2739,6 +3129,7 @@ def refine_liquid_events_with_context(
     detection_paths: dict[str, Path],
     context_ms: float = 1000.0,
     frame_index: FineFrameIndex | None = None,
+    config: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Reject single-view liquid hypotheses without nearby visible hand evidence.
 
@@ -2747,6 +3138,17 @@ def refine_liquid_events_with_context(
     single-view candidates must additionally show a hand in the temporal
     neighborhood before they may influence experiment bounds.
     """
+    performance = (config or {}).get("performance", {})
+    spatial_enabled = bool(
+        performance.get("audit_liquid_spatial_context_enabled", False)
+    )
+    maximum_gap = float(
+        performance.get("audit_liquid_context_hand_object_gap_norm", 0.08)
+    )
+    minimum_frames = max(
+        1,
+        int(performance.get("audit_liquid_context_minimum_frames", 2)),
+    )
     indexes: dict[str, tuple[list[float], list[FrameEvidence]]] = {}
     rejected: list[dict[str, Any]] = []
     for event in events:
@@ -2754,7 +3156,27 @@ def refine_liquid_events_with_context(
             continue
         supported: list[str] = []
         hand_counts: dict[str, int] = {}
+        spatial_counts: dict[str, int] = {}
         for view_id in event.supporting_views:
+            view_candidates = [
+                candidate
+                for candidate in event.candidates
+                if candidate.view_id == view_id
+            ]
+            track_ids = {
+                int(value)
+                for candidate in view_candidates
+                for evidence in candidate.evidence
+                for key in (
+                    "object_track_id",
+                    "tool_track_id",
+                    "vessel_track_id",
+                    "source_track_id",
+                    "target_track_id",
+                )
+                if isinstance((value := evidence.get(key)), int)
+            }
+            object_classes = set(event.objects) - HAND_CLASSES
             if frame_index is not None:
                 nearby_frames = list(
                     frame_index.iter_global_frames(
@@ -2763,46 +3185,84 @@ def refine_liquid_events_with_context(
                         end_ms=event.global_end_ms + context_ms,
                     )
                 )
-                count = sum(
-                    1
-                    for frame in nearby_frames
-                    if any(
-                        box.class_name in HAND_CLASSES
-                        for box in frame.detections
+            else:
+                if view_id not in indexes:
+                    frames = [
+                        frame
+                        for frame in iter_frame_evidence(
+                            detection_paths[view_id]
+                        )
+                        if frame.global_ms is not None
+                    ]
+                    indexes[view_id] = (
+                        [float(frame.global_ms) for frame in frames],
+                        frames,
                     )
+                times, frames = indexes[view_id]
+                left = bisect_left(
+                    times, event.global_start_ms - context_ms
                 )
-                hand_counts[view_id] = count
-                if count:
-                    supported.append(view_id)
-                continue
-            if view_id not in indexes:
-                frames = [
-                    frame
-                    for frame in iter_frame_evidence(detection_paths[view_id])
-                    if frame.global_ms is not None
+                right = bisect_left(
+                    times, event.global_end_ms + context_ms
+                )
+                nearby_frames = frames[left:right]
+            hand_count = 0
+            spatial_count = 0
+            for frame in nearby_frames:
+                hands = [
+                    box
+                    for box in frame.detections
+                    if box.class_name in HAND_CLASSES
                 ]
-                indexes[view_id] = ([float(frame.global_ms) for frame in frames], frames)
-            times, frames = indexes[view_id]
-            left = bisect_left(times, event.global_start_ms - context_ms)
-            right = bisect_left(times, event.global_end_ms + context_ms)
-            count = sum(
-                1
-                for frame in frames[left:right]
-                if any(box.class_name in HAND_CLASSES for box in frame.detections)
-            )
-            hand_counts[view_id] = count
-            if count:
+                if hands:
+                    hand_count += 1
+                relevant_objects = [
+                    box
+                    for box in frame.detections
+                    if box.class_name in object_classes
+                    and (
+                        not track_ids
+                        or (
+                            box.track_id is not None
+                            and int(box.track_id) in track_ids
+                        )
+                    )
+                ]
+                if hands and relevant_objects and any(
+                    _box_distance(hand, obj) <= maximum_gap
+                    for hand in hands
+                    for obj in relevant_objects
+                ):
+                    spatial_count += 1
+            hand_counts[view_id] = hand_count
+            spatial_counts[view_id] = spatial_count
+            qualifying_count = spatial_count if spatial_enabled else hand_count
+            if qualifying_count >= (minimum_frames if spatial_enabled else 1):
                 supported.append(view_id)
+        event.observability["liquid_context"] = {
+            "schema_version": "visioncortex-liquid-spatial-context/1",
+            "spatial_association_required": spatial_enabled,
+            "maximum_hand_object_gap_norm": maximum_gap,
+            "minimum_supporting_frames": minimum_frames,
+            "hand_frame_counts": hand_counts,
+            "spatial_support_frame_counts": spatial_counts,
+        }
         if supported:
             event.supporting_views = supported
             event.supporting_roles = sorted(
                 {candidate.role for candidate in event.candidates if candidate.view_id in supported},
                 key=lambda role: role.value,
             )
-            event.audit_reason += f"；液体候选手部上下文={hand_counts}"
+            event.audit_reason += (
+                f"；液体候选手部上下文={hand_counts}，"
+                f"手-工具/容器空间支持={spatial_counts}"
+            )
             continue
-        event.accepted = False
-        event.audit_reason = "液体运动候选的全部支持视角均缺少邻近手部证据，不能用于实验边界"
+        set_event_admission(event, "rejected")
+        event.audit_reason = (
+            "液体运动候选的全部支持视角均缺少满足门槛的邻近手-工具/容器证据，"
+            "不能用于实验边界"
+        )
         event.uncertainty.append("保留为 CV 候选，未进入关键素材；液体语义不得仅由 ROI 运动推断")
         rejected.append(
             {
@@ -2811,6 +3271,9 @@ def refine_liquid_events_with_context(
                 "reason": event.audit_reason,
                 "confidence": event.confidence,
                 "duration_ms": event.global_end_ms - event.global_start_ms,
+                "formal_admission_status": event.formal_admission_status,
+                "hand_frame_counts": hand_counts,
+                "spatial_support_frame_counts": spatial_counts,
             }
         )
     return rejected
@@ -2963,7 +3426,7 @@ def build_experiment_segments(
         (
             event
             for event in events
-            if event.accepted
+            if event_is_formal(event)
             and str(
                 ((event.state_machine or {}).get("publication") or {}).get(
                     "status"
@@ -2983,7 +3446,7 @@ def build_experiment_segments(
         (
             event
             for event in events
-            if event.accepted and event not in component_only
+            if event_is_formal(event) and event not in component_only
         ),
         key=event_sort_key,
     )
@@ -3556,7 +4019,7 @@ def build_physical_change_log(events: Iterable[EvidenceEvent]) -> list[PhysicalC
     }
     changes: list[PhysicalChange] = []
     for event in events:
-        if not event.accepted:
+        if not event_is_formal(event):
             continue
         before, after = None, None
         if event.action_type == ActionType.CONTAINER_STATE_CHANGE:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from typing import Any, Sequence
 
-from .schemas import EvidenceEvent
+from .schemas import EvidenceEvent, event_is_formal
 
 
 ACTION_TYPE_ALIASES = {
@@ -428,7 +428,7 @@ def evaluate_key_event_recall(
     direct_action_class_supported_prediction_ids: list[str] = []
     prediction_ids_without_semantic_review: list[str] = []
     for event in predictions:
-        if not event.accepted:
+        if not event_is_formal(event):
             continue
         if not in_coverage(
             event.global_start_ms, event.global_end_ms, event.key_global_ms

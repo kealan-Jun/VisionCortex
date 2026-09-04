@@ -286,6 +286,25 @@ performance:
   fine_roi_open_vocabulary_maximum_error_rate: 0.10
   fine_tracker_motion_prediction_enabled: true
   fine_tracker_maximum_center_distance: 0.18
+  audit_constrained_clustering_enabled: true
+  audit_local_alignment_enabled: true
+  audit_explainable_scoring_enabled: true
+  audit_formal_admission_status_enabled: true
+  audit_core_interval_enabled: true
+  audit_stable_event_ids_enabled: true
+  audit_sqlite_candidate_index_enabled: true
+  audit_max_cluster_span_seconds: 30.0
+  audit_core_start_quantile: 0.50
+  audit_core_end_quantile: 0.50
+  audit_independent_view_bonus: 0.04
+  audit_dual_role_bonus: 0.04
+  audit_maximum_independence_bonus: 0.12
+  audit_maximum_alignment_penalty: 0.08
+  audit_liquid_spatial_context_enabled: true
+  audit_liquid_context_hand_object_gap_norm: 0.08
+  audit_liquid_context_minimum_frames: 2
+  audit_liquid_sequence_formal_gate_enabled: true
+  action_state_observed_timestamps_enabled: true
   fine_risk_window_expansion_enabled: true
   fine_risk_extra_padding_seconds: 30.0
   fine_risk_low_confidence_threshold: 0.70
@@ -360,6 +379,8 @@ archive:
   include_empty_action_categories: false
 
 mllm:
+  candidate_review_stratified_queue_enabled: true
+  candidate_review_time_bucket_seconds: 1800
   # Common actions retain both views in three aligned temporal phases while
   # halving image count. Liquid/container/panel evidence keeps the inherited
   # six high-detail per-view samples because small state changes limit quality.

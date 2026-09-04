@@ -11,7 +11,13 @@ from typing import Any, Sequence
 
 import httpx
 
-from .schemas import ActionType, EvidenceEvent, ExperimentGroup, ExperimentSegment
+from .schemas import (
+    ActionType,
+    EvidenceEvent,
+    ExperimentGroup,
+    ExperimentSegment,
+    event_is_formal,
+)
 
 
 EVENT_SYSTEM_PROMPT = """你是化学湿实验视频证据审计模型。你会收到严格对齐的第一人称和第三人称动作前、峰值、动作后关键帧，以及传统 CV 证据。
@@ -326,13 +332,17 @@ class ArkAnalyzer:
                         "supporting_views": event.supporting_views,
                     }
                     for event in events
-                    if event.accepted
+                    if event_is_formal(event)
                 ],
                 **(
                     {
                         "absent_action_classes": sorted(
                             {item.value for item in ActionType}
-                            - {event.action_type.value for event in events if event.accepted}
+                            - {
+                                event.action_type.value
+                                for event in events
+                                if event_is_formal(event)
+                            }
                         )
                     }
                     if final_adjudicated

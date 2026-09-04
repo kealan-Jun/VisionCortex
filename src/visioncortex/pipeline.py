@@ -93,6 +93,7 @@ from .schemas import (
     VideoInfo,
     ViewInput,
     ViewRole,
+    event_is_formal,
 )
 from .video_io import (
     benchmark_sparse_decode_strategy,
@@ -249,7 +250,7 @@ def _recover_group_storyboard_state_events(
             event
             for event in events
             if event.event_id in group_event_ids
-            and event.accepted
+            and event_is_formal(event)
             and event.action_type == ActionType.CONTAINER_STATE_CHANGE
         ]
         for step in understanding.get("steps") or []:
@@ -320,6 +321,7 @@ def _recover_group_storyboard_state_events(
                     step_confidence,
                 ),
                 accepted=True,
+                formal_admission_status="provisional",
                 audit_reason=(
                     "完整组故事板豆包显式提出容器开合状态转换；"
                     "仅作为召回候选，必须通过独立事件级豆包状态证明"
@@ -2148,7 +2150,7 @@ class EvidencePipeline:
                     # when observability explicitly says the action can define
                     # a boundary without semantic promotion.
                     reliable_start_signal = complete_first_person_transfer or (
-                        event.accepted
+                        event_is_formal(event)
                         and bool(
                             (event.observability or {}).get(
                                 "can_define_boundary_without_semantic_promotion"
@@ -2180,7 +2182,7 @@ class EvidencePipeline:
             cross_view = [
                 event
                 for event in first_signal
-                if event.accepted
+                if event_is_formal(event)
                 and {ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON}.issubset(
                     set(event.supporting_roles)
                 )
@@ -2259,6 +2261,7 @@ class EvidencePipeline:
                             "key_global_ms": event.key_global_ms,
                             "confidence": event.confidence,
                             "accepted": event.accepted,
+                            "formal_admission_status": event.formal_admission_status,
                             "action_type": event.action_type.value,
                             "objects": list(event.objects),
                         }
@@ -2596,7 +2599,7 @@ class EvidencePipeline:
             group_events = [
                 event
                 for event in events
-                if event.accepted and event.event_id in event_ids
+                if event_is_formal(event) and event.event_id in event_ids
             ]
             cross_view_events = [
                 event
@@ -3117,12 +3120,14 @@ class EvidencePipeline:
         ) -> list[dict[str, Any]]:
             if fine_frame_index is None:
                 return refine_liquid_events_with_context(
-                    current_events, detection_paths
+                    current_events,
+                    detection_paths,
                 )
             return refine_liquid_events_with_context(
                 current_events,
                 detection_paths,
                 frame_index=fine_frame_index,
+                config=self.config,
             )
 
         def execute_pass(
@@ -3242,9 +3247,19 @@ class EvidencePipeline:
                 view for view in fine_views if view.view_id in scanned
             ]
             current_candidates = generate_current_candidates(scanned_views)
-            current_events, _ = audit_candidates(
-                current_candidates, transforms, self.config
-            )
+            if fine_frame_index is None:
+                current_events, _ = audit_candidates(
+                    current_candidates,
+                    transforms,
+                    self.config,
+                )
+            else:
+                current_events, _ = audit_candidates(
+                    current_candidates,
+                    transforms,
+                    self.config,
+                    fine_frame_index,
+                )
             liquid_context_rejections = refine_current_liquid_context(
                 current_events
             )
@@ -3477,9 +3492,19 @@ class EvidencePipeline:
                 return formal_state_cache
             state_views = [view for view in fine_views if view.view_id in scanned]
             state_candidates = generate_current_candidates(state_views)
-            state_events, _ = audit_candidates(
-                state_candidates, transforms, self.config
-            )
+            if fine_frame_index is None:
+                state_events, _ = audit_candidates(
+                    state_candidates,
+                    transforms,
+                    self.config,
+                )
+            else:
+                state_events, _ = audit_candidates(
+                    state_candidates,
+                    transforms,
+                    self.config,
+                    fine_frame_index,
+                )
             refine_current_liquid_context(state_events)
             attach_action_observability(state_events)
             raw_state_segments = build_experiment_segments(
@@ -5449,14 +5474,32 @@ class EvidencePipeline:
 
             self._status(layout, "candidate_audit", 0.68, "持续性、动作密度与跨视角一致性审计")
             candidates = sorted(candidates, key=candidate_sort_key)
-            events, rejected = audit_candidates(candidates, transforms, self.config)
-            rejected.extend(
-                refine_liquid_events_with_context(
-                    events,
-                    detection_paths,
-                    frame_index=fine_runtime_index,
+            if fine_runtime_index is None:
+                events, rejected = audit_candidates(
+                    candidates,
+                    transforms,
+                    self.config,
                 )
-            )
+            else:
+                events, rejected = audit_candidates(
+                    candidates,
+                    transforms,
+                    self.config,
+                    fine_runtime_index,
+                )
+            if fine_runtime_index is None:
+                rejected.extend(
+                    refine_liquid_events_with_context(events, detection_paths)
+                )
+            else:
+                rejected.extend(
+                    refine_liquid_events_with_context(
+                        events,
+                        detection_paths,
+                        frame_index=fine_runtime_index,
+                        config=self.config,
+                    )
+                )
             state_machine_ledger = attach_continuous_action_states(events, self.config)
             observability_receipts = attach_action_observability(events)
             semantic_review_plan = build_semantic_review_plan(events, self.config)

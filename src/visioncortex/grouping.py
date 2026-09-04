@@ -18,6 +18,7 @@ from .schemas import (
     ExperimentSegment,
     ViewInput,
     ViewRole,
+    event_is_formal,
 )
 
 
@@ -171,7 +172,8 @@ def select_formal_experiment_start_events(
     dual_role = [
         event
         for event in events
-        if event.accepted and required_roles.issubset(set(event.supporting_roles))
+        if event_is_formal(event)
+        and required_roles.issubset(set(event.supporting_roles))
     ]
     canonical = [
         event for event in dual_role if is_experiment_start_anchor(event, config)
@@ -346,7 +348,7 @@ def normalize_experiment_segments(
             eligible_leading = [
                 event
                 for event in core_events
-                if event.accepted
+                if event_is_formal(event)
                 and event.global_start_ms < anchor_start_ms
                 and event.global_end_ms >= lower_limit_ms
                 and str(
@@ -825,7 +827,7 @@ def prepare_formal_experiment_segments(
         )
         context_events = _segment_events(context, by_event)
         if not shared_first or not shared_boundaries or not any(
-            event.accepted for event in context_events
+            event_is_formal(event) for event in context_events
         ):
             return None
         shared_windows = [
@@ -985,7 +987,7 @@ def prepare_formal_experiment_segments(
                 required_semantic_events = [
                     event
                     for event in segment_event_items
-                    if event.accepted
+                    if event_is_formal(event)
                     and str(
                         (event.observability or {}).get(
                             "semantic_review_priority"
@@ -1006,7 +1008,7 @@ def prepare_formal_experiment_segments(
                 provisional_movement_openers = [
                     event
                     for event in segment_event_items
-                    if event.accepted
+                    if event_is_formal(event)
                     and event.action_type == ActionType.OBJECT_MOVEMENT
                     and required_roles.issubset(set(event.supporting_roles))
                     and str(
@@ -1168,7 +1170,10 @@ def prepare_formal_experiment_segments(
             and extension_ms <= maximum_extension_ms
             and shared_boundaries
             and len(shared_objects) >= tail_context_min_shared_objects
-            and any(event.accepted for event in _segment_events(segment, by_event))
+            and any(
+                event_is_formal(event)
+                for event in _segment_events(segment, by_event)
+            )
         )
         if eligible_boundary_tail_context:
             promoted[-1] = previous.model_copy(
@@ -1300,7 +1305,7 @@ def prepare_formal_experiment_segments(
         considered = [
             event
             for event in events
-            if event.accepted
+            if event_is_formal(event)
             and event.event_id not in segment.event_ids
             and len(set(event.supporting_roles)) == 1
             and 0.0
@@ -1492,7 +1497,7 @@ def prepare_formal_experiment_segments(
                 | {
                     obj
                     for event in _segment_events(segment, by_event)
-                    if event.accepted
+                    if event_is_formal(event)
                     for obj in event.objects
                 }
             ) - ACTOR_OBJECTS
@@ -1540,7 +1545,7 @@ def prepare_formal_experiment_segments(
             eligible = [
                 event
                 for event in events
-                if not event.accepted
+                if not event_is_formal(event)
                 and event.event_id not in segment.event_ids
                 and len(set(event.supporting_roles)) == 1
                 and event.action_type in boundary_action_types
@@ -1818,7 +1823,7 @@ def prepare_formal_experiment_segments(
             eligible = [
                 event
                 for event in events
-                if event.accepted
+                if event_is_formal(event)
                 and event.event_id not in source_segment_event_ids
                 and event.event_id not in existing_formal_event_ids
                 and event.action_type in allowed_action_types
@@ -2158,7 +2163,7 @@ def _quarantined_context_continuity_evidence(
         (
             event
             for event in by_event.values()
-            if not event.accepted
+            if not event_is_formal(event)
             and ViewRole.FIRST_PERSON in event.supporting_roles
             and ViewRole.THIRD_PERSON not in event.supporting_roles
             and event.action_type in eligible_actions
@@ -2274,7 +2279,7 @@ def _select_view_pair(
     event_ids = {event_id for segment in segments for event_id in segment.event_ids}
     scores: Counter[str] = Counter()
     for event in events:
-        if event.event_id not in event_ids or not event.accepted:
+        if event.event_id not in event_ids or not event_is_formal(event):
             continue
         for view_id in event.supporting_views:
             scores[view_id] += max(1, round(event.confidence * 10))

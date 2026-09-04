@@ -58,6 +58,8 @@ from .schemas import (
     VideoInfo,
     ViewInput,
     ViewRole,
+    event_is_formal,
+    set_event_admission,
 )
 from .temporal_segmentation import audit_participant_continuity
 from .video_io import (
@@ -769,7 +771,8 @@ def _storyboard_times(group: ExperimentGroup, events: Sequence[EvidenceEvent], l
     event_times = [
         event.key_global_ms
         for event in events
-        if event.accepted and group.global_start_ms <= event.key_global_ms <= group.global_end_ms
+        if event.accepted
+        and group.global_start_ms <= event.key_global_ms <= group.global_end_ms
     ]
     candidates = sorted(set(uniform + event_times))
     selected = [uniform[0], uniform[-1]]
@@ -1647,7 +1650,9 @@ def write_key_material_category_index(
 ) -> Path:
     """Write a human-browsable and machine-indexable five-category manifest."""
 
-    event_by_id = {event.event_id: event for event in events if event.accepted}
+    event_by_id = {
+        event.event_id: event for event in events if event.accepted
+    }
     experiments: list[dict[str, Any]] = []
     for group in groups:
         experiment_folder = group.archive_folder or _safe_folder_name(group.group_id)
@@ -4930,7 +4935,8 @@ def materialize_key_materials(
             "archive_hierarchy_version": "2.0.0",
             "category_index": _relative(category_index_path, layout.root),
             "accepted_event_count": sum(
-                bool(event.accepted and event.event_id in group_by_event) for event in events
+                bool(event.accepted and event.event_id in group_by_event)
+                for event in events
             ),
             "records": runtime_records,
         },
@@ -5664,7 +5670,7 @@ def curate_semantically_reviewed_key_materials(
         }
         if final_action is None:
             movement = move_event_media(event, destination_action=None)
-            event.accepted = False
+            set_event_admission(event, "rejected")
         elif final_action != original_action:
             event.action_type = final_action
             event.objects = (
@@ -5673,9 +5679,9 @@ def curate_semantically_reviewed_key_materials(
                 else relabel_objects
             )
             movement = move_event_media(event, destination_action=final_action)
-            event.accepted = True
+            set_event_admission(event, "formal")
         else:
-            event.accepted = True
+            set_event_admission(event, "formal")
 
         semantic_participant_refined = bool(
             review.get("semantic_participant_refined")
@@ -6066,7 +6072,7 @@ def curate_semantically_reviewed_key_materials(
                 bucket[bucket.index(duplicate_of)] = event
             duplicate_event_ids.add(dropped.event_id)
             movement = move_event_media(dropped, destination_action=None)
-            dropped.accepted = False
+            set_event_admission(dropped, "rejected")
             dropped_review = dropped.semantic_review or {}
             dropped_review.update(
                 {
@@ -6189,7 +6195,7 @@ def curate_semantically_reviewed_key_materials(
                     continue
                 subsumed_event_ids.add(contact.event_id)
                 movement = move_event_media(contact, destination_action=None)
-                contact.accepted = False
+                set_event_admission(contact, "rejected")
                 contact_review = contact.semantic_review or {}
                 contact_review.update(
                     {
@@ -6413,7 +6419,7 @@ def refresh_key_material_metadata(
 def _timestamp_rows(events: Sequence[EvidenceEvent]) -> list[dict[str, Any]]:
     rows = []
     for event in events:
-        if not event.accepted:
+        if not event_is_formal(event):
             continue
         rows.append(
             {
@@ -6467,7 +6473,8 @@ def write_screening_notes(
         f"{PRODUCT_NAME} 有界实验片段筛选记录",
         "= 输入路数不等于输出路数；仅通过物理动作持续性与边界审计的视角会生成 MP4。",
         f"输入视角: {len(all_views)}",
-        f"接受事件: {sum(event.accepted for event in events)}",
+        f"正式事件: {sum(event_is_formal(event) for event in events)}",
+        f"待复核事件: {sum(event.formal_admission_status == 'provisional' for event in events)}",
         f"拒绝事件: {sum(not event.accepted for event in events)}",
         f"有效实验段: {len(segments)}",
         "",
@@ -6612,7 +6619,10 @@ def finalize_archive(
         stats={
             "input_view_count": len(manifest.views),
             "output_clip_view_count": len({view for segment in segments for view in segment.participating_views}),
-            "accepted_event_count": sum(event.accepted for event in events),
+            "accepted_event_count": sum(event_is_formal(event) for event in events),
+            "provisional_event_count": sum(
+                event.formal_admission_status == "provisional" for event in events
+            ),
             "rejected_event_count": sum(not event.accepted for event in events),
             "experiment_group_count": len(groups),
             "key_event_count": len(key_events),

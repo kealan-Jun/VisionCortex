@@ -76,6 +76,8 @@ def candidate_sort_key(candidate: ActionCandidate) -> tuple[Any, ...]:
 
 
 def stable_event_fingerprint(event: EvidenceEvent) -> str:
+    if event.event_fingerprint:
+        return event.event_fingerprint
     return _fingerprint(
         {
             "action_type": event.action_type.value,
@@ -86,6 +88,7 @@ def stable_event_fingerprint(event: EvidenceEvent) -> str:
             "supporting_views": sorted(event.supporting_views),
             "supporting_roles": sorted(role.value for role in event.supporting_roles),
             "accepted": bool(event.accepted),
+            "formal_admission_status": event.formal_admission_status,
             "candidate_fingerprints": sorted(
                 stable_candidate_fingerprint(candidate)
                 for candidate in event.candidates
