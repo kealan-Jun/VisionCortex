@@ -56,7 +56,7 @@ testpaths = ["tests"]
 addopts = "-q --strict-config --strict-markers"
 filterwarnings = [
   "error",
-  "ignore:The anyio\\.abc\\.BlockingPortal alias is deprecated, use anyio\\.from_thread\\.BlockingPortal instead\\.:DeprecationWarning:anyio\\._lazyimport",
+  "ignore:The anyio\\.abc\\.BlockingPortal alias is deprecated, use anyio\\.from_thread\\.BlockingPortal instead\\.:DeprecationWarning",
 ]
 
 [tool.ruff.lint]
