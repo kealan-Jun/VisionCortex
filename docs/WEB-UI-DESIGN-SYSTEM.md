@@ -31,9 +31,9 @@ Use borders and tonal surfaces before adding shadows. Reserve the deepest brand 
 
 - Page title: 27–36px, semibold.
 - Section title: 17–22px, semibold.
-- Body: 12–14px with 1.55–1.7 line height.
-- Metadata: 9–11px. Monospace is limited to identifiers, paths, timestamps, and machine values.
-- Prefer task language such as “打开实验文件” and “查看分析进度”. Avoid exposing pipeline stage names in primary interfaces.
+- Body: 13–14px with 1.55–1.7 line height.
+- Metadata: 11–12px. Monospace is limited to identifiers, timestamps, and machine values; raw local paths stay out of ordinary product pages.
+- Prefer task language such as “打开实验文件” and “查看任务进度”. Avoid exposing pipeline stage names in primary interfaces.
 - Never describe model inference as an observed fact or human ground truth.
 
 ## Component rules
@@ -51,9 +51,17 @@ Use borders and tonal surfaces before adding shadows. Reserve the deepest brand 
 - List view is the density default; card view is an optional visual scan mode.
 - Status text must come from the recorded pipeline state.
 
+### Search and result libraries
+
+- Global search groups results by experiment, step, key material, and report, and supports keyboard navigation.
+- Experiment records, key materials, and reports are separate product destinations. Do not reuse one generic archive table for all three.
+- Key material filters cover date, action type, object, and evidence support. Report cards lead with a readable summary and the recorded concern count.
+- Large libraries load cached archive detail progressively and retain shareable filters in the URL.
+
 ### Key materials and video
 
 - Material cards are overview-first. Only one material detail is expanded during continuous review.
+- Focus mode gives the video or synchronized frame the dominant area, with supporting facts and previous/next navigation kept alongside it.
 - The available archive media mode must be stated honestly. Do not render a first-person or third-person switch unless independent media URLs exist.
 - Standard review controls: previous/next material, 0.5×–2× speed, loop, fullscreen, start/peak/end markers, and documented keyboard shortcuts.
 
@@ -64,6 +72,7 @@ Use borders and tonal surfaces before adding shadows. Reserve the deepest brand 
 - Success: a recorded gate or operation completed.
 - Error: the user needs a retry, return path, or another concrete recovery action.
 - Every non-success state includes a plain-language explanation. Recoverable states include an action.
+- A stopped experiment may be re-run with its original recorded input configuration when that input is still available; otherwise the interface must direct the user to select the source again.
 
 ## Responsive behavior
 

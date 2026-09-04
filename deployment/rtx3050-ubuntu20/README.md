@@ -51,6 +51,17 @@ Start the production service after the existing NAS paths are mounted:
 /opt/visioncortex-rtx3050/Start-VisionCortex.sh --production
 ```
 
+Install the user service and the **VisionCortex** desktop launcher once:
+
+```bash
+bash /opt/visioncortex-rtx3050/app/deployment/rtx3050-ubuntu20/Install-Autostart.sh
+```
+
+The installer enables automatic restart and user-service lingering, so the
+analysis service can recover after a reboot without waiting for the desktop
+session. The launcher starts the service when necessary, waits for the health
+endpoint, and then opens the product page.
+
 Production startup detects either `$HOME/桌面/nas` or
 `/mnt/visioncortex-nas`. It fails closed if the existing index, archive, cache,
 secure Ark credential, CUDA decode, NVENC, model hashes, or free-space contract

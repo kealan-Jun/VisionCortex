@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#1e4a52" />
     <link id="product-favicon" rel="icon" href="data:," />
     <title>现实回环 · 多视角湿实验分析</title>
-    <link rel="stylesheet" href="/ui/styles.css?v=20260904-product-shell-11" />
+    <link rel="stylesheet" href="/ui/styles.css?v=20260904-product-shell-22" />
   </head>
   <body>
     <a class="skip-link" href="#main-content">跳到主要内容</a>
@@ -21,7 +21,7 @@
             <p class="nav-section-label">实验工作台</p>
             <a class="nav-link" data-route="home" href="#/home"><span class="nav-icon" data-icon="dashboard"></span><span class="nav-label">概览</span></a>
             <a class="nav-link" data-route="experiments" href="#/experiments"><span class="nav-icon" data-icon="flask"></span><span class="nav-label">实验记录</span></a>
-            <a class="nav-link" data-route="tasks" href="#/tasks"><span class="nav-icon" data-icon="activity"></span><span class="nav-label">分析进度</span><em id="running-badge" hidden>0</em></a>
+            <a class="nav-link" data-route="tasks" href="#/tasks"><span class="nav-icon" data-icon="activity"></span><span class="nav-label">任务进度</span><em id="running-badge" hidden>0</em></a>
             <a class="nav-link nav-create" data-route="new" href="#/new"><span class="nav-icon" data-icon="plus"></span><span class="nav-label">新建实验</span></a>
             <div class="nav-separator"></div>
             <p class="nav-section-label">实验成果</p>
@@ -45,7 +45,10 @@
               <div class="breadcrumb"><span id="section-name">工作空间</span><strong id="page-name">总览</strong></div>
               <span class="phase-chip" id="phase-chip"><i></i><span>暂无进行中的任务</span></span>
             </div>
-            <label class="topbar-search"><span data-icon="search"></span><input id="global-search" placeholder="搜索实验名称…" aria-label="搜索实验" /></label>
+            <div class="topbar-search-shell">
+              <label class="topbar-search"><span data-icon="search"></span><input id="global-search" placeholder="搜索实验、步骤、素材和报告…" aria-label="全局搜索" autocomplete="off" aria-controls="global-search-results" aria-expanded="false" /></label>
+              <section class="global-search-results" id="global-search-results" role="listbox" aria-label="全局搜索结果" hidden></section>
+            </div>
             <button class="secondary-button refresh-button" id="refresh-button" type="button" aria-label="刷新"><span data-icon="refresh"></span><span>刷新</span></button>
           </header>
           <main class="product-content" id="main-content" tabindex="-1">
@@ -64,6 +67,6 @@
     </dialog>
     <div class="toast-region" id="toast-region" aria-live="polite"></div>
     <script src="/ui/brand-logo.js" defer></script>
-    <script src="/ui/app.js?v=20260904-product-shell-11" defer></script>
+    <script src="/ui/app.js?v=20260904-product-shell-22" defer></script>
   </body>
 </html>

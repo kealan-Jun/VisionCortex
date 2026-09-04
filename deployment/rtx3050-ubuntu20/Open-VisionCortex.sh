@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+units=(visioncortex-analysis.service)
+if systemctl --user cat visioncortex-local.service >/dev/null 2>&1; then
+  units+=(visioncortex-local.service)
+fi
+
+systemctl --user reset-failed "${units[@]}" || true
+systemctl --user start "${units[@]}"
+for _attempt in {1..30}; do
+  if curl --silent --fail --max-time 2 http://127.0.0.1:8000/api/health >/dev/null; then
+    exec xdg-open 'http://127.0.0.1:8000/#/home'
+  fi
+  sleep 1
+done
+printf '%s\n' 'VisionCortex 启动未完成，请检查：systemctl --user status visioncortex-analysis.service' >&2
+exit 1

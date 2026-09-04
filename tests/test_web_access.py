@@ -105,3 +105,61 @@ def test_frontend_refreshes_grouped_nas_batches_and_monitor_state():
     assert 'document.querySelector("#nas-batches")' in app_js
     assert "batchPicker.outerHTML = nasBatchPicker()" in app_js
     assert "持续监控中" in app_js
+
+
+def test_frontend_uses_distinct_product_libraries_and_shareable_filters():
+    app_js = (
+        Path(api.__file__).parent / "web" / "app.js"
+    ).read_text(encoding="utf-8")
+
+    assert "function renderMaterialsLibrary(" in app_js
+    assert "function renderReportsLibrary(" in app_js
+    assert "function archiveLibraryHash(" in app_js
+    assert 'query.set("status", filters.status)' in app_js
+    assert 'query.set("view", filters.view)' in app_js
+    assert "data-global-material-filter=\"date\"" in app_js
+    assert "data-global-material-filter=\"object\"" in app_js
+
+
+def test_frontend_supports_grouped_search_focus_mode_and_safe_rerun():
+    app_js = (
+        Path(api.__file__).parent / "web" / "app.js"
+    ).read_text(encoding="utf-8")
+
+    assert "function globalSearchGroups(" in app_js
+    assert '[["实验",experimentResults],["步骤",stepResults],["关键素材",materialResults],["报告",reportResults]]' in app_js
+    assert "function openMaterialFocus(" in app_js
+    assert "data-material-focus" in app_js
+    assert "data-focus-nav" in app_js
+    assert "function rerunArchive(" in app_js
+    assert "original_upload_manifest.json" in app_js
+    assert 'api("/api/runs/from-paths"' in app_js
+
+
+def test_normal_product_pages_hide_raw_paths_and_explain_partial_results():
+    app_js = (
+        Path(api.__file__).parent / "web" / "app.js"
+    ).read_text(encoding="utf-8")
+
+    result_header = app_js.split("function resultHeader", 1)[1].split(
+        "function experimentExecutiveSummary", 1
+    )[0]
+    run_card = app_js.split("function runObservabilityCard", 1)[1].split(
+        "function renderOperations", 1
+    )[0]
+    attention_panel = app_js.split("function experimentAttentionPanel", 1)[1].split(
+        "function resultHeader", 1
+    )[0]
+    archive_actions = app_js.split("function bindArchiveActions", 1)[1].split(
+        "function updateResultNavDensity", 1
+    )[0]
+
+    assert "data.path" not in result_header
+    assert "archive-file-details" not in result_header
+    assert "archivePath" not in run_card
+    assert "查看技术信息" not in attention_panel
+    assert "result.path" not in archive_actions
+    assert "本页仅展示处理停止前已完成的内容" in result_header
+    assert "function experimentAttentionPanel(" in app_js
+    assert "本次处理未生成实验日报" in app_js
+    assert "本次处理未生成专业报告" in app_js
