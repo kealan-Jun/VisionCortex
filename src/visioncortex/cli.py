@@ -807,6 +807,13 @@ def run_command(
     output: Annotated[Path | None, typer.Option("--output", "-o")] = None,
 ) -> None:
     settings = load_config(config)
+    # Match the indexed production entrypoints before opening media or starting
+    # GPU work. CV-only/local runs must not require or read an Ark credential.
+    if (
+        settings.get("mllm", {}).get("enabled", False)
+        and not settings["project"].get("preprocessing_acceptance_only", False)
+    ):
+        ensure_ark_api_key(settings, required=True)
     if output:
         settings["project"]["output_root"] = str(output)
     result = EvidencePipeline(settings, _progress).run(load_manifest(manifest))
