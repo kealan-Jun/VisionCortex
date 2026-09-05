@@ -76,6 +76,42 @@ GPU 任务，其余任务保留为“排队等待”，避免互相争抢显存�
 仓库。真实模型、真实视频质量和正式归档能力仍须在 3090 Ti 主机按下面的生产门禁
 验收，网页能打开本身不代表完整推理已经通过。
 
+归档查阅不会在每次打开页面时重新遍历并读取全部 JSON。服务会把正式归档中已有的
+`evidence_index.sqlite` 同步为 3090 Ti 本地运行目录下的可重建读取索引；归档 JSON
+和逐归档 SQLite 仍是权威数据，读取索引损坏或删除后会自动重建，不复制原视频。
+归档目录、实验片段和关键事件均分页加载，中文动作词会扩展到现有动作本体的中英文
+同义词；素材 URL 绑定当前 `release_id`，旧版本链接会返回冲突提示而不会继续展示
+浏览器缓存。关键帧延迟加载、关键片段不预加载正文，服务默认最多并发传输 8 个归档
+文件；可用 `VISIONCORTEX_WEB_MAX_CONCURRENT_ARCHIVE_STREAMS` 调整，超出时返回
+`429` 并提示浏览器稍后重试，避免多人播放把 NAS 链路拖死。
+
+安装器创建的单一 `visioncortex` 管理账号继续兼容。多人使用时，可改用权限为 `600`
+的 `VISIONCORTEX_WEB_USERS_FILE`，每个人使用独立账号和 `viewer`、`operator` 或
+`admin` 角色；`viewer` 只能查阅，后两者可提交任务。密码文件只保存 PBKDF2 哈希，
+可在服务器终端生成：
+
+```bash
+visioncortex hash-web-password
+```
+
+用户文件格式如下，不能写入明文密码，也不能提交到 Git：
+
+```json
+{
+  "schema_version": "visioncortex-web-users/1",
+  "users": [
+    {"username": "researcher-01", "role": "viewer", "password_hash": "<PBKDF2_HASH>"},
+    {"username": "operator-01", "role": "operator", "password_hash": "<PBKDF2_HASH>"}
+  ]
+}
+```
+
+局域网 API 的账号、角色、来源 IP、方法、路径、状态码和耗时会按日写入服务器本地
+`Runtime/state/web_access_audit-YYYY-MM-DD.jsonl`，不记录密码、Authorization 或
+查询参数。若通过 Nginx/Caddy 等受控反向代理提供 TLS，可设置
+`VISIONCORTEX_WEB_REQUIRE_HTTPS=true` 强制拒绝非 HTTPS 请求；当前安装器显示的
+`http://192.168.x.x` 仅适用于受信任、隔离的内网，不能作为公网入口。
+
 ## Ubuntu RTX 3090 Ti 本地结构
 
 ```text
@@ -285,7 +321,11 @@ visioncortex evaluate-yolo-candidate-promotion \
     evidence_package.json
     physical_change_log.json
     evidence_package_eval.json
+    quality_acceptance.json            # 自动门禁与证据等级；结构通过不等于准确率已测量
     run_metrics.json
+    run_provenance.json                # 代码、配置、模型认证与关键产物哈希绑定
+    schema_contract_manifest.json      # 跨文件契约与事件引用一致性
+    delivery_metrics.json              # Web/NAS 请求到发布门禁的交付耗时，不改写运行指标
     evidence_index.sqlite              # 可重建的事件检索索引（JSON 仍是权威数据）
     evidence_index_manifest.json       # 数量、FTS 能力与文件 SHA-256
     artifact_registry.jsonl            # 事件 → 素材/sidecar/大小/SHA-256
@@ -301,12 +341,13 @@ visioncortex evaluate-yolo-candidate-promotion \
   Lab-Daily-Reports/<YYYY-MM-DD>/
     Lab-Daily-Report-<date>.json, .md, .html
     Daily-Report-Eval.json
-    Human-Review.json
+    Automatic-Acceptance.json
   Professional-PDFs/
-    Lab-Daily-Report-<date>.pdf
+    VisionCortex-Professional-Evidence-Report-<date>.pdf
+  .VisionCortex-Current-Release.json    # 全部门禁通过后才原子切换的当前正式版本
 ```
 
-日报采用固定的 `VC-LAB-DAILY-REPORT-V1`：模型只产出结构化实验理解，确定性渲染器填充固定栏目，日报阶段不新增模型调用或 Token。模板栏目、版本策略和本地开发方式见 [实验室日报固定模板 V1](docs/daily-report-template-v1.md)。
+日报采用固定的 `VC-LAB-DAILY-REPORT-V2`：模型只产出结构化实验理解，确定性渲染器填充固定栏目，日报阶段不新增模型调用或 Token；不确定证据由算法自动隔离，不设置人工审批兜底。
 
 六类动作是 `hand_object_contact`（手与明确物体接触）、`object_movement`、`liquid_movement`、`container_state_change`、`device_panel_operation` 和 `pipette_transfer_operation`。每个记录保留候选、接受/拒绝理由、视角支持、对齐置信度和不确定性，YOLO 框不会被直接当成最终证据。
 

@@ -8,6 +8,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .provenance import verify_run_provenance
+from .schema_contracts import inspect_archive_contracts
+from .storage import (
+    archive_promotion_in_progress,
+    read_current_release_pointer,
+    verify_current_release,
+)
+
 
 COLLECTION_STATE_SCHEMA_VERSION = "visioncortex-collection-processing-registry/1"
 _LEDGER_LOCK = threading.Lock()
@@ -17,6 +25,8 @@ def _accepted_formal_archive(path: Path) -> bool:
     """Return true only for a still-present archive that passed all gates."""
 
     try:
+        if archive_promotion_in_progress(path):
+            return False
         quality = json.loads(
             (path / "JSON-Config-Files" / "quality_acceptance.json").read_text(
                 encoding="utf-8-sig"
@@ -30,7 +40,7 @@ def _accepted_formal_archive(path: Path) -> bool:
         report_paths = list(
             (path / "Lab-Daily-Reports").glob("*/Daily-Report-Eval.json")
         )
-        return bool(
+        legacy_gates_passed = bool(
             path.is_dir()
             and quality.get("passed") is True
             and evidence.get("passed") is True
@@ -40,6 +50,18 @@ def _accepted_formal_archive(path: Path) -> bool:
                 is True
                 for item in report_paths
             )
+        )
+        if not legacy_gates_passed:
+            return False
+        pointer = read_current_release_pointer(path)
+        if pointer is None:
+            return True
+        return bool(
+            inspect_archive_contracts(
+                path, require_release_contracts=True
+            ).get("passed") is True
+            and verify_run_provenance(path).get("passed") is True
+            and verify_current_release(path).get("passed") is True
         )
     except (FileNotFoundError, OSError, ValueError, TypeError):
         return False

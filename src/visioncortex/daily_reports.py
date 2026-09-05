@@ -301,6 +301,7 @@ def build_daily_report(
     run_metrics: dict[str, Any],
     evidence_eval: dict[str, Any],
     config: dict[str, Any],
+    quality_acceptance: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create a deterministic report from accepted package evidence only."""
 
@@ -514,6 +515,17 @@ def build_daily_report(
         "total_tokens": 0,
         "call_count": 0,
     }
+    quality_acceptance = dict(quality_acceptance or {})
+    boundary_quality = quality_acceptance.get("experiment_boundaries") or {}
+    key_event_quality = quality_acceptance.get("key_event_recall") or {}
+    evidence_level = str(
+        quality_acceptance.get("evidence_level")
+        or (
+            "dataset_measured"
+            if boundary_quality.get("evaluated") and key_event_quality.get("evaluated")
+            else "structural_only"
+        )
+    )
     report = {
         "schema_version": "visioncortex-lab-daily-report/2.0",
         "template_id": template["template_id"],
@@ -544,7 +556,7 @@ def build_daily_report(
             "claim_classes": {
                 "observed_fact": "directly traceable to accepted CV/cross-view evidence",
                 "supported_model_understanding": "model interpretation grounded in archived frames or clips",
-                "uncertain": "insufficient or conflicting evidence; human review recommended",
+                "uncertain": "insufficient or conflicting evidence; automatically quarantined from formal facts",
             },
         },
         "overview": {
@@ -567,6 +579,11 @@ def build_daily_report(
             "negative_action_claim_supported": evidence_eval.get(
                 "negative_action_claim_supported"
             ),
+            "quality_acceptance_passed": quality_acceptance.get("passed") is True,
+            "quality_acceptance_status": quality_acceptance.get("status")
+            or "not_available",
+            "evidence_level": evidence_level,
+            "per_run_accuracy_measured": evidence_level == "dataset_measured",
             "representative_visual_count": sum(
                 item.get("representative_visual") is not None for item in timeline
             ),
@@ -591,6 +608,18 @@ def build_daily_report(
         ],
         "uncertainties": uncertainties,
         "contradictions": contradictions,
+        "quality_acceptance": {
+            "passed": quality_acceptance.get("passed") is True,
+            "status": quality_acceptance.get("status") or "not_available",
+            "evidence_level": evidence_level,
+            "structural_passed": quality_acceptance.get("structural_passed"),
+            "formal_accuracy_claim_allowed": quality_acceptance.get(
+                "formal_accuracy_claim_allowed", False
+            ),
+            "boundary_evaluated": bool(boundary_quality.get("evaluated")),
+            "key_event_recall_evaluated": bool(key_event_quality.get("evaluated")),
+            "source": "JSON-Config-Files/quality_acceptance.json",
+        },
         "performance": {
             "total_duration_seconds": run_metrics.get("total_duration_seconds"),
             "preprocessing_sla": run_metrics.get("preprocessing_sla") or {},
@@ -602,15 +631,14 @@ def build_daily_report(
             "total_tokens": total_tokens.get("total_tokens"),
             "runtime_audit": run_metrics.get("runtime_audit") or {},
         },
-        "human_review": {
-            "status": "not_required",
+        "algorithmic_acceptance": {
+            "status": "accepted",
             "required_for_completion": False,
+            "decision_authority": "algorithmic_fail_closed_gates_only",
             "algorithmic_acceptance_source": (
                 "JSON-Config-Files/evidence_package_eval.json"
             ),
-            "reviewer_id": None,
-            "reviewed_at": None,
-            "comments": [],
+            "uncertain_evidence_policy": "automatic_quarantine",
         },
         "provenance": {
             "evidence_package": "JSON-Config-Files/evidence_package.json",
@@ -657,7 +685,7 @@ def evaluate_daily_report(report: dict[str, Any], summary: RunSummary) -> dict[s
         "experiment_briefs": "experiment_timeline",
         "attention_and_handoff": "uncertainties",
         "cost_and_timing": "performance",
-        "human_review": "human_review",
+        "algorithmic_acceptance": "algorithmic_acceptance",
     }
     missing_required_sections = [
         section["id"]
@@ -715,6 +743,51 @@ def evaluate_daily_report(report: dict[str, Any], summary: RunSummary) -> dict[s
         ),
         "Every key event must link to archived key frames and clips.",
     )
+    step_failures: list[str] = []
+    for group in timeline:
+        group_id = str(group.get("group_id") or "")
+        group_event_ids = {
+            str(item.get("event_id")) for item in group.get("key_events") or []
+        }
+        steps = list(group.get("steps") or [])
+        if not steps:
+            step_failures.append(f"{group_id}:steps_empty")
+            continue
+        previous_start: float | None = None
+        for index, step in enumerate(steps):
+            prefix = f"{group_id}:step-{index + 1}"
+            start = step.get("start_global_ms")
+            end = step.get("end_global_ms")
+            if not str(step.get("current_step") or "").strip():
+                step_failures.append(f"{prefix}:current_step_empty")
+            try:
+                start_value = float(start)
+                end_value = float(end)
+            except (TypeError, ValueError):
+                step_failures.append(f"{prefix}:time_missing")
+                continue
+            if not (
+                float(group["start_global_ms"])
+                <= start_value
+                <= end_value
+                <= float(group["end_global_ms"])
+            ):
+                step_failures.append(f"{prefix}:time_outside_group")
+            if previous_start is not None and start_value < previous_start:
+                step_failures.append(f"{prefix}:step_order_regression")
+            previous_start = start_value
+            supporting = {
+                str(item) for item in step.get("supporting_event_ids") or []
+            }
+            if not supporting:
+                step_failures.append(f"{prefix}:supporting_events_empty")
+            elif not supporting.issubset(group_event_ids):
+                step_failures.append(f"{prefix}:unknown_supporting_event")
+    check(
+        "experiment_steps_are_bounded_and_traceable",
+        not step_failures,
+        "failures=" + (",".join(step_failures[:20]) or "none"),
+    )
     check(
         "daily_report_adds_no_model_tokens",
         (report.get("source_policy", {}).get("additional_model_tokens") or {}).get("total_tokens", 0) == 0,
@@ -765,6 +838,19 @@ def evaluate_daily_report(report: dict[str, Any], summary: RunSummary) -> dict[s
         bool(report.get("overview", {}).get("evidence_package_eval_passed")),
         "The underlying evidence package must pass before report promotion.",
     )
+    check(
+        "quality_acceptance_passed",
+        report.get("quality_acceptance", {}).get("passed") is True,
+        "The automatic structural/quality gate must pass before report promotion.",
+    )
+    check(
+        "algorithmic_completion_has_no_human_dependency",
+        report.get("algorithmic_acceptance", {}).get("required_for_completion")
+        is False
+        and report.get("algorithmic_acceptance", {}).get("decision_authority")
+        == "algorithmic_fail_closed_gates_only",
+        "Uncertain evidence is quarantined automatically and never waits for a reviewer.",
+    )
     return {
         "schema_version": "visioncortex-lab-daily-report-eval/1.0",
         "passed": all(item["passed"] for item in checks),
@@ -784,6 +870,12 @@ def generate_daily_report_archive(
     evidence_eval = json.loads(evidence_eval_path.read_text(encoding="utf-8-sig"))
     if not evidence_eval.get("passed"):
         raise RuntimeError("Evidence package did not pass; daily report generation refused")
+    quality_path = layout.json_config / "quality_acceptance.json"
+    if not quality_path.is_file():
+        raise RuntimeError("Quality acceptance is missing; daily report generation refused")
+    quality_acceptance = json.loads(quality_path.read_text(encoding="utf-8-sig"))
+    if quality_acceptance.get("passed") is not True:
+        raise RuntimeError("Quality acceptance did not pass; daily report generation refused")
     effective_metrics = dict(run_metrics)
     effective_metrics["runtime_audit"] = collect_runtime_audit(
         layout, effective_metrics, config
@@ -797,12 +889,12 @@ def generate_daily_report_archive(
                 effective_metrics["full_run_preprocessing"] = full_run
         except (json.JSONDecodeError, OSError):
             pass
-    report = build_daily_report(summary, effective_metrics, evidence_eval, config)
-    quality_path = layout.json_config / "quality_acceptance.json"
-    report["quality_acceptance"] = (
-        json.loads(quality_path.read_text(encoding="utf-8-sig"))
-        if quality_path.is_file()
-        else {"status": "not_evaluated", "passed": False}
+    report = build_daily_report(
+        summary,
+        effective_metrics,
+        evidence_eval,
+        config,
+        quality_acceptance,
     )
     report_date = report["report_date"]
     report_dir = layout.daily_reports / report_date
@@ -812,22 +904,13 @@ def generate_daily_report_archive(
     markdown_path = report_dir / f"{stem}.md"
     html_path = report_dir / f"{stem}.html"
     eval_path = report_dir / "Daily-Report-Eval.json"
-    review_path = report_dir / "Human-Review.json"
-    existing_review = None
-    if review_path.is_file():
-        try:
-            existing_review = json.loads(review_path.read_text(encoding="utf-8-sig"))
-        except (json.JSONDecodeError, OSError):
-            existing_review = None
-    if isinstance(existing_review, dict) and existing_review.get("status") not in {None, "pending"}:
-        report["human_review"] = existing_review
+    acceptance_path = report_dir / "Automatic-Acceptance.json"
     write_json(json_path, report)
     markdown_path.write_text(render_daily_markdown(report), encoding="utf-8")
     html_path.write_text(render_daily_html(report), encoding="utf-8")
     evaluation = evaluate_daily_report(report, summary)
     write_json(eval_path, evaluation)
-    if not review_path.is_file() or not isinstance(existing_review, dict):
-        write_json(review_path, report["human_review"])
+    write_json(acceptance_path, report["algorithmic_acceptance"])
     if not evaluation["passed"]:
         raise RuntimeError("Daily report evaluation failed")
     pdf_path = (
@@ -875,7 +958,9 @@ def generate_daily_report_archive(
             "professional_visual_count"
         ],
         "evaluation": archive_relative_posix(eval_path, layout.root),
-        "human_review": archive_relative_posix(review_path, layout.root),
+        "algorithmic_acceptance": archive_relative_posix(
+            acceptance_path, layout.root
+        ),
         "passed": True,
         "additional_model_tokens": 0,
         "generation_duration_seconds": round(time.perf_counter() - started, 6),
@@ -886,7 +971,7 @@ def generate_daily_report_archive(
                 markdown_path,
                 html_path,
                 eval_path,
-                review_path,
+                acceptance_path,
                 pdf_path,
                 professional_manifest_path,
             )

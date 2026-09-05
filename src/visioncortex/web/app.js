@@ -34,6 +34,9 @@ const ICONS = {
 
 const state = {
   archives: [],
+  archiveNextCursor: null,
+  archiveTotal: 0,
+  archiveTotals: { experiments: 0, key_events: 0 },
   health: null,
   runs: [],
   collections: [],
@@ -51,6 +54,7 @@ const state = {
   collectionQuery: "",
   experimentName: "",
   archiveCache: new Map(),
+  materialCache: new Map(),
   search: "",
   refreshingTasks: false,
   archiveFilters: { status: "all", date: "all", owner: "all", tag: "all", view: "list" },
@@ -233,6 +237,7 @@ const STAGE_LABELS = {
   semantic_refinement: "复核实验步骤",
   package: "检查结果完整性",
   daily_report: "生成实验报告",
+  finalizing: "封存溯源并正式发布",
   completed: "分析完成",
   failed: "分析失败",
   interrupted: "服务重启后待续跑",
@@ -289,7 +294,7 @@ const GUIDED_PIPELINE = [
   },
   {
     id: "reports", number: "07", title: "生成报告并完成归档",
-    stages: ["daily_report", "completed"], completedBy: ["daily_report", "completed"],
+    stages: ["daily_report", "finalizing", "completed"], completedBy: ["daily_report", "finalizing", "completed"],
     folder: "Lab-Daily-Reports / Professional-PDFs",
     outputs: [], resultTab: ["reports","实验室日报"],
     doing: "汇总实验过程与关键发现，生成实验室日报、专业 PDF 和结构化 JSON 报告。",
@@ -379,9 +384,15 @@ function updateServiceChrome() {
 async function loadAll() {
   state.nasLoading = true;
   const nasRequest = api("/api/nas-recordings");
-  const results = await Promise.allSettled([api("/api/health"), api("/api/archives"), api("/api/runs"), api("/api/collections?limit=200")]);
+  const archiveQuery = archiveSearchQuery();
+  const results = await Promise.allSettled([api("/api/health"), api(`/api/archives?limit=50${archiveQuery ? `&q=${encodeURIComponent(archiveQuery)}` : ""}`), api("/api/runs"), api("/api/collections?limit=200")]);
   if (results[0].status === "fulfilled") state.health = results[0].value;
-  if (results[1].status === "fulfilled") state.archives = results[1].value.archives || [];
+  if (results[1].status === "fulfilled") {
+    state.archives = results[1].value.archives || [];
+    state.archiveNextCursor = results[1].value.next_cursor || null;
+    state.archiveTotal = Number(results[1].value.total_count || state.archives.length);
+    state.archiveTotals = results[1].value.totals || { experiments: 0, key_events: 0 };
+  }
   if (results[2].status === "fulfilled") state.runs = results[2].value.runs || [];
   if (results[3].status === "fulfilled") state.collections = results[3].value.collections || [];
   updateServiceChrome();
@@ -497,16 +508,50 @@ function refreshProgressiveSurface() {
   if (!document.querySelector("#global-search-results")?.hidden) renderGlobalSearchResults(state.search);
 }
 
+function libraryQueryKey(section) {
+  return section === "reports" ? "reports" : JSON.stringify([state.globalMaterialFilters, state.search.trim()]);
+}
+
+async function loadLibraryDetail(name, section, cursor = null) {
+  const queryKey = libraryQueryKey(section);
+  const summary = await loadArchive(name);
+  let prior = cachedArchiveDetail(name) || {};
+  if (prior.release_id !== summary.release_id) prior = {};
+  let payload;
+  if (archiveProcessStopped(summary)) payload = summary;
+  else if (section === "reports") payload = await loadArchiveSection(name, "reports");
+  else {
+    const filters = state.globalMaterialFilters;
+    const parameters = new URLSearchParams({ archive: name, limit: "24", material_ready: "true" });
+    if (filters.action !== "all") parameters.set("action_type", filters.action);
+    if (filters.support !== "all") parameters.set("cross_view", String(filters.support === "dual"));
+    const query = [state.search.trim(), filters.object !== "all" ? filters.object : ""].filter(Boolean).join(" ");
+    if (query) parameters.set("q", query);
+    if (cursor) parameters.set("cursor", cursor);
+    const page = await api(`/api/key-events?${parameters}`);
+    payload = {
+      key_events: cursor ? [...(prior.key_events || []), ...(page.items || [])] : page.items || [],
+      material_next_cursor: page.next_cursor || null,
+      material_total_count: Number(page.total_count || 0),
+    };
+  }
+  const result = { ...summary, ...prior, ...payload, libraryKeys: { ...prior.libraryKeys, [section]: queryKey } };
+  state.archiveCache.set(`archive/${name}`, result);
+  return result;
+}
+
 function ensureLibraryDetails() {
   if (state.libraryLoadPromise) return state.libraryLoadPromise;
+  const section = routeParts()[0] === "reports" ? "reports" : "materials";
+  const queryKey = libraryQueryKey(section);
   const missing = state.archives.filter(
-    (archive) => !cachedArchiveDetail(archive.name) && !state.libraryLoadErrors.has(archive.name),
+    (archive) => cachedArchiveDetail(archive.name)?.libraryKeys?.[section] !== queryKey && !state.libraryLoadErrors.has(archive.name),
   );
   if (!missing.length) return Promise.resolve();
   state.libraryLoadPromise = (async () => {
     for (let offset = 0; offset < missing.length; offset += 3) {
       const batch = missing.slice(offset, offset + 3);
-      const results = await Promise.allSettled(batch.map((archive) => loadArchive(archive.name)));
+      const results = await Promise.allSettled(batch.map((archive) => loadLibraryDetail(archive.name, section)));
       results.forEach((result, index) => {
         if (result.status === "rejected") state.libraryLoadErrors.add(batch[index].name);
       });
@@ -517,6 +562,10 @@ function ensureLibraryDetails() {
     refreshProgressiveSurface();
   });
   return state.libraryLoadPromise;
+}
+
+function archiveSearchQuery() {
+  return ["home", "experiments"].includes(routeParts()[0] || "home") ? state.search.trim() : "";
 }
 
 function filteredArchives(applyAdvanced = false) {
@@ -532,6 +581,26 @@ function filteredArchives(applyAdvanced = false) {
     if (filters.owner !== "all" && metadata.owner !== filters.owner) return false;
     if (filters.tag !== "all" && !(metadata.tags || []).includes(filters.tag)) return false;
     return true;
+  });
+}
+
+async function loadMoreArchives() {
+  if (!state.archiveNextCursor) return;
+  const query = archiveSearchQuery();
+  const payload = await api(`/api/archives?limit=50&cursor=${encodeURIComponent(state.archiveNextCursor)}${query ? `&q=${encodeURIComponent(query)}` : ""}`);
+  state.archives.push(...(payload.archives || []));
+  state.archiveNextCursor = payload.next_cursor || null;
+  state.archiveTotal = Number(payload.total_count || state.archives.length);
+}
+
+function bindArchivePagination(target = "experiments") {
+  if (!state.archiveNextCursor) return;
+  document.querySelector("#main-content .page")?.insertAdjacentHTML("beforeend", `<div class="pagination-actions"><button class="secondary-button" id="load-more-archives" type="button">加载更多实验档案（已载入 ${number(state.archives.length)} / ${number(state.archiveTotal)}）</button></div>`);
+  document.querySelector("#load-more-archives")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try { await loadMoreArchives(); renderExperiments(target); }
+    catch (error) { toast(error.message, "error"); button.disabled = false; }
   });
 }
 
@@ -666,6 +735,7 @@ function renderExperiments(target = "experiments") {
   const pendingMaterials = isNasMode() ? `<a class="pending-materials-strip" href="#/new"><span>${icon("plus")}</span><div><strong>有新素材？开始一次实验分析</strong><small>导入多视角视频后，系统会自动整理步骤、素材与报告。</small></div>${icon("arrow")}</a>` : "";
   main.innerHTML = `<div class="page"><header class="page-hero compact library-hero"><div><p class="eyebrow">实验记录</p><h1>实验记录</h1><p>集中查看实验视频、分析过程与可追溯结果。</p></div><div class="hero-actions"><a class="primary-button" href="#/new">${icon("plus")}新建实验</a></div></header>${pendingMaterials}<section class="panel experiment-records"><header class="panel-heading"><div><h2>${activeFilterCount ? "筛选结果" : "全部记录"}<span class="count-pill">${number(filtered.length)}</span></h2><p>${activeFilterCount ? `已应用 ${activeFilterCount} 项条件` : "按更新时间排序"}</p></div><div class="archive-view-toggle" aria-label="记录视图"><button type="button" data-archive-view="list" class="${filters.view === "list" ? "active" : ""}">列表</button><button type="button" data-archive-view="cards" class="${filters.view === "cards" ? "active" : ""}">卡片</button></div></header><nav class="archive-quick-filters" aria-label="快速筛选"><button type="button" data-archive-quick="all" class="${quickFilter === "all" ? "active" : ""}">全部</button><button type="button" data-archive-quick="today" class="${quickFilter === "today" ? "active" : ""}">今天</button><button type="button" data-archive-quick="completed" class="${quickFilter === "completed" ? "active" : ""}">已完成</button><button type="button" data-archive-quick="attention" class="${quickFilter === "attention" ? "active" : ""}">需要关注</button></nav><details class="archive-advanced-filters" ${advancedOpen || quickFilter === "advanced" ? "open" : ""}><summary>更多筛选${advancedOpen ? " · 已应用" : ""}</summary><div class="archive-filter-toolbar"><label><span>更新时间</span><select data-archive-filter="date"><option value="all">全部时间</option><option value="today" ${filters.date === "today" ? "selected" : ""}>今天</option><option value="7d" ${filters.date === "7d" ? "selected" : ""}>最近 7 天</option><option value="30d" ${filters.date === "30d" ? "selected" : ""}>最近 30 天</option></select></label><label><span>状态</span><select data-archive-filter="status"><option value="all">全部状态</option><option value="completed" ${filters.status === "completed" ? "selected" : ""}>已完成</option><option value="processing" ${filters.status === "processing" ? "selected" : ""}>处理中</option><option value="attention" ${filters.status === "attention" ? "selected" : ""}>需要关注</option><option value="archived" ${filters.status === "archived" ? "selected" : ""}>已归档</option></select></label><label><span>负责人</span><select data-archive-filter="owner"><option value="all">全部负责人</option>${owners.map((owner)=>`<option value="${esc(owner)}" ${filters.owner === owner ? "selected" : ""}>${esc(owner)}</option>`).join("")}</select></label><label><span>标签</span><select data-archive-filter="tag"><option value="all">全部标签</option>${tags.map((tag)=>`<option value="${esc(tag)}" ${filters.tag === tag ? "selected" : ""}>${esc(tag)}</option>`).join("")}</select></label><button class="archive-filter-clear" type="button" data-clear-archive-filters ${activeFilterCount ? "" : "disabled"}>清空</button></div></details>${archiveRows(filtered, "experiments", filters.view)}</section></div>`;
   bindArchiveFilters();
+  bindArchivePagination("experiments");
 }
 
 function bindArchiveFilters() {
@@ -702,8 +772,8 @@ function materialLibraryEntries() {
   state.archives.forEach((archive) => {
     const detail = cachedArchiveDetail(archive.name);
     if (!detail) return;
-    detail.key_events.filter(eventHasAlignedDualViewMaterial).forEach((event) => entries.push({archive, detail, event, preliminary: false}));
-    if (!detail.key_events.length) (detail.preliminary_materials || []).forEach((event) => entries.push({archive, detail, event, preliminary: true}));
+    (detail.key_events || []).filter(eventHasAlignedDualViewMaterial).forEach((event) => entries.push({archive, detail, event, preliminary: false}));
+    if (!detail.key_events?.length) (detail.preliminary_materials || []).forEach((event) => entries.push({archive, detail, event, preliminary: true}));
   });
   return entries;
 }
@@ -752,6 +822,21 @@ function renderMaterialsLibrary(progressive = false) {
   document.querySelector("[data-library-more]")?.addEventListener("click",()=>{ state.globalMaterialLimit += 18; renderMaterialsLibrary(true); });
   document.querySelector("[data-reset-global-materials]")?.addEventListener("click",()=>{ state.globalMaterialFilters={date:"all",action:"all",object:"all",support:"all"}; renderMaterialsLibrary(true); });
   bindLibraryImageFallbacks();
+  const more = state.archives.filter((archive) => cachedArchiveDetail(archive.name)?.material_next_cursor);
+  if (more.length) {
+    document.querySelector("#main-content .page")?.insertAdjacentHTML("beforeend", `<div class="pagination-actions"><button class="secondary-button" data-library-next type="button">加载下一页关键素材</button></div>`);
+    document.querySelector("[data-library-next]")?.addEventListener("click", async (event) => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      for (let offset = 0; offset < more.length; offset += 3) {
+        const results = await Promise.allSettled(more.slice(offset, offset + 3).map((archive) => loadLibraryDetail(archive.name, "materials", cachedArchiveDetail(archive.name).material_next_cursor)));
+        results.forEach((result) => { if (result.status === "rejected") toast(result.reason.message, "error"); });
+      }
+      state.globalMaterialLimit += 24;
+      renderMaterialsLibrary(true);
+    });
+  }
+  bindArchivePagination("materials");
 }
 
 function reportLibraryCard(archive, detail) {
@@ -775,6 +860,7 @@ function renderReportsLibrary(progressive = false) {
   const latest = reportEntries[0];
   main.innerHTML = `<div class="page library-page"><header class="page-hero compact library-hero"><div><p class="eyebrow">实验室日报</p><h1>实验室日报</h1><p>快速了解每次实验的过程、结论与需要留意的内容。</p></div>${latest ? `<div class="hero-actions"><a class="primary-button" href="#/archive/${encodeURIComponent(latest[0].name)}/reports">${icon("file")}打开最新日报</a></div>` : ""}</header><section class="library-summary-strip report-summary-strip"><span><small>已生成日报</small><strong>${number(reportEntries.length)}</strong></span><span><small>专业报告</small><strong>${number(reportEntries.filter(([,detail])=>detail.links?.daily_report_pdf).length)}</strong></span><span><small>需要关注</small><strong>${number(unavailable.length)}</strong></span><span><small>已载入</small><strong>${number(loadedArchives.length)} / ${number(state.archives.length)}</strong></span></section>${unavailable.length ? `<a class="library-attention-strip" href="#/experiments?status=attention"><span>${icon("activity")}</span><div><strong>${number(unavailable.length)} 个实验尚未生成日报</strong><small>失败或中断的实验会保留已完成内容，不会显示为完整报告。</small></div>${icon("arrow")}</a>` : ""}<div class="library-results-heading" aria-live="polite"><div><strong>${query ? "搜索结果" : "最近日报"}</strong><span>${number(filtered.length)} 份</span></div>${loading ? `<small><i></i>正在继续载入报告摘要…</small>` : ""}</div>${filtered.length ? `<section class="report-library-grid">${filtered.map(([archive,detail])=>reportLibraryCard(archive,detail)).join("")}</section>` : loading ? libraryCardSkeleton(progressive ? 2 : 4) : productState("neutral","file",query ? "没有找到匹配的实验日报" : "尚未生成实验日报",query ? "可以尝试其他实验名称或关键词。" : "完成实验分析后，日报会自动出现在这里。",query ? `<button class="secondary-button" type="button" data-clear-library-search>清空搜索</button>` : `<a class="primary-button" href="#/new">新建实验</a>`)}</div>`;
   document.querySelector("[data-clear-library-search]")?.addEventListener("click",()=>{ state.search=""; const input=document.querySelector("#global-search"); if(input) input.value=""; renderReportsLibrary(true); });
+  bindArchivePagination("reports");
 }
 
 function createSource(video = null, csv = null, index = state.sources.length) {
@@ -1433,7 +1519,7 @@ async function uploadPlanFiles(plan, initialSession, onProgress) {
 }
 
 function renderStages(activeStage, progressValue) {
-  const stages = ["capacity_reservation","source_transfer","original_ingest","nas_ingest","input_seal","input_preflight","queued","preflight","alignment","motion_probe","candidate_coarse","candidate_fine","candidate_audit","experiment_understanding","experiment_clips","key_materials","mllm","package","daily_report"];
+  const stages = ["capacity_reservation","source_transfer","original_ingest","nas_ingest","input_seal","input_preflight","queued","preflight","alignment","motion_probe","candidate_coarse","candidate_fine","candidate_audit","experiment_understanding","experiment_clips","key_materials","mllm","package","daily_report","finalizing"];
   const activeIndex = stages.indexOf(activeStage);
   const element = document.querySelector("#run-stages");
   if (!element) return;
@@ -1753,12 +1839,98 @@ function renderOperations() {
 }
 
 async function loadArchive(name, staging = false) {
-  const key = `${staging ? "stage" : "archive"}/${name}`;
-  const cached = state.archiveCache.get(key);
-  if (cached?.observability?.status?.stage === "completed" && !staging) return cached;
-  const data = await api(staging ? `/api/staging-runs/${encodeURIComponent(name)}/archive` : `/api/archives/${encodeURIComponent(name)}`);
-  state.archiveCache.set(key, data);
-  return data;
+  if (staging) {
+    const data = await api(`/api/staging-runs/${encodeURIComponent(name)}/archive`);
+    state.archiveCache.set(`stage/${name}`, data);
+    return data;
+  }
+  const summaryKey = `${name}:summary`;
+  const cachedSummary = state.archiveCache.get(summaryKey);
+  if (!cachedSummary || Date.now() - (cachedSummary.loadedAt || 0) > 2000) {
+    const summary = await api(`/api/archives/${encodeURIComponent(name)}?section=summary`);
+    const previousRelease = state.archiveCache.get(summaryKey)?.release_id;
+    if (previousRelease !== undefined && previousRelease !== summary.release_id) {
+      [...state.archiveCache.keys()].filter((key)=>key.startsWith(`${name}:`)).forEach((key)=>state.archiveCache.delete(key));
+      [...state.materialCache.keys()].filter((key)=>key.startsWith(`${name}:`)).forEach((key)=>state.materialCache.delete(key));
+      state.archiveCache.delete(`archive/${name}`);
+    }
+    state.archiveCache.set(summaryKey, { experiments: [], key_events: [], preliminary_materials: [], ...summary, loadedAt: Date.now() });
+  }
+  return state.archiveCache.get(summaryKey);
+}
+
+async function loadArchiveSection(name, section, cursor = null) {
+  const summary = await loadArchive(name);
+  const key = `${name}:${summary.release_id || "legacy"}:${section}:${cursor || "first"}`;
+  if (!state.archiveCache.has(key)) {
+    const url = `/api/archives/${encodeURIComponent(name)}?section=${encodeURIComponent(section)}&limit=24${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
+    const payload = await api(url);
+    if (payload.release_id !== summary.release_id) {
+      state.archiveCache.delete(`${name}:summary`);
+      throw new Error("实验档案刚刚发布了新版本，请重新打开");
+    }
+    state.archiveCache.set(key, { ...summary, ...payload });
+  }
+  return state.archiveCache.get(key);
+}
+
+function materialQueryParameters(name, cursor = null) {
+  const filters = state.materialFilters;
+  const parameters = new URLSearchParams({ archive: name, limit: "24", material_ready: "true" });
+  if (filters.group && filters.group !== "all") parameters.set("parent_event_id", filters.group);
+  if (filters.action !== "all") parameters.set("action_type", filters.action);
+  if (filters.support === "dual") parameters.set("cross_view", "true");
+  if (filters.support === "partial") parameters.set("cross_view", "false");
+  const query = [filters.query.trim(), filters.object !== "all" ? filters.object : ""].filter(Boolean).join(" ");
+  if (query) parameters.set("q", query);
+  if (cursor) parameters.set("cursor", cursor);
+  return parameters;
+}
+
+async function loadArchiveMaterials(name, cursor = null) {
+  const summary = await loadArchive(name);
+  ensureMaterialFilters(summary);
+  if (archiveProcessStopped(summary)) return summary;
+  const groupPayload = await loadArchiveSection(name, "experiments");
+  const parameters = materialQueryParameters(name, cursor);
+  const baseKey = `${name}:${summary.release_id || "legacy"}:materials:${materialQueryParameters(name).toString()}`;
+  if (!cursor && state.materialCache.has(baseKey)) return state.materialCache.get(baseKey);
+  const payload = await api(`/api/key-events?${parameters.toString()}`);
+  if ((payload.items || []).some((item) => (item.release_id || null) !== (summary.release_id || null))) {
+    state.archiveCache.delete(`${name}:summary`);
+    throw new Error("素材所属版本已更新，请重新加载档案");
+  }
+  const previous = cursor ? state.materialCache.get(baseKey) : null;
+  const result = {
+    ...summary,
+    experiment_groups: groupPayload.experiment_groups || [],
+    key_events: previous ? [...previous.key_events, ...(payload.items || [])] : (payload.items || []),
+    material_total_count: Number(payload.total_count || 0),
+    material_next_cursor: payload.next_cursor || null,
+  };
+  state.materialCache.set(baseKey, result);
+  return result;
+}
+
+async function loadArchiveExperiments(name, cursor = null) {
+  const summary = await loadArchive(name);
+  const baseKey = `${name}:${summary.release_id || "legacy"}:experiments:accumulated`;
+  if (!cursor && state.archiveCache.has(baseKey)) return state.archiveCache.get(baseKey);
+  const payload = await loadArchiveSection(name, "experiments", cursor);
+  const previous = cursor ? state.archiveCache.get(baseKey) : null;
+  const result = {
+    ...summary,
+    ...payload,
+    experiments: previous ? [...previous.experiments, ...(payload.experiments || [])] : (payload.experiments || []),
+  };
+  state.archiveCache.set(baseKey, result);
+  return result;
+}
+
+async function loadArchiveView(name, tab, cursor = null) {
+  if (tab === "materials") return loadArchiveMaterials(name, cursor);
+  if (tab === "experiments") return loadArchiveExperiments(name, cursor);
+  return loadArchiveSection(name, tab === "reports" ? "reports" : "metrics", cursor);
 }
 
 function archiveProcessStopped(data) {
@@ -1787,7 +1959,7 @@ function experimentAttentionPanel(data) {
   const receipts = (data.observability?.stage_receipts || []).filter((item)=>item.status==="completed");
   const lastReceipt = receipts.at(-1);
   const preliminaryCount = data.preliminary_materials?.length || 0;
-  const available = [data.experiments?.length ? `${number(data.experiments.length)} 个实验片段` : "", preliminaryCount ? `${number(preliminaryCount)} 份初步素材` : ""].filter(Boolean).join("、") || "任务记录与停止位置";
+  const available = [data.experiments?.length ? `${number(data.counts?.experiments ?? data.experiments.length)} 个实验片段` : "", preliminaryCount ? `${number(preliminaryCount)} 份初步素材` : ""].filter(Boolean).join("、") || "任务记录与停止位置";
   const attentionArchives = state.archives.filter((archive)=>archiveProductStatus(archive).key==="attention");
   const position = attentionArchives.findIndex((archive)=>archive.name===data.name);
   const previous = attentionArchives[position-1];
@@ -1799,7 +1971,7 @@ function resultHeader(data, tab, staging = false) {
   const metrics = data.metrics || {};
   const currentRun = metrics.preprocessing_display?.current_run || {};
   const analysisDuration = currentRun.total_seconds ?? metrics.total_duration_seconds;
-  const formalMaterialCount = data.key_events.length;
+  const formalMaterialCount = Number(data.counts?.key_events ?? data.key_events?.length ?? 0);
   const preliminaryMaterialCount = data.preliminary_materials?.length || 0;
   const materialCount = formalMaterialCount || preliminaryMaterialCount;
   const reportCount = ["daily_report_pdf", "daily_report_json"].filter((key)=>data.links?.[key]).length;
@@ -1811,7 +1983,7 @@ function resultHeader(data, tab, staging = false) {
   const backLabel = staging ? "返回任务进度" : tab === "materials" ? "返回关键素材库" : ["reports","metrics"].includes(tab) ? "返回实验室日报" : "返回实验记录";
   const nextAction = tab === "experiments" ? [`#/archive/${encodeURIComponent(data.name)}/materials`,"image","查看关键素材"] : tab === "materials" ? [`#/archive/${encodeURIComponent(data.name)}/reports`,"file","查看实验日报"] : tab === "reports" ? [`#/archive/${encodeURIComponent(data.name)}/metrics`,"folder","查看专业报告"] : null;
   const heroActions = stopped ? "" : `<div class="hero-actions"><button class="secondary-button" type="button" data-edit-experiment>${icon("file")}编辑信息</button>${nextAction?`<a class="primary-button" href="${nextAction[0]}">${icon(nextAction[1])}${nextAction[2]}</a>`:""}</div>`;
-  return `<div class="result-header" id="archive-overview"><a class="result-back-link" href="${backTarget}">${icon("chevron")}${backLabel}</a><header class="page-hero compact experiment-hero ${stopped?"is-attention":""}"><div title="档案编号：${esc(data.name)}"><p class="eyebrow">${stopped?"阶段性实验结果":"实验详情"}</p><h1>${esc(productExperimentName(data.name))}</h1><p>${stopped?"本页仅展示处理停止前已完成的内容，不代表完整实验成果。":"查看实验过程、关键素材与已生成的报告。"}</p>${metadataChips.length ? `<div class="experiment-meta-chips">${metadataChips.map((item)=>`<span>${esc(item)}</span>`).join("")}</div>` : ""}</div>${heroActions}</header><section class="status-grid result-status-grid">${statusCard("flask","实验片段",number(data.experiments.length),stopped?"阶段性结果":"")}${statusCard("image",formalMaterialCount?"关键素材":preliminaryMaterialCount?"初步素材":"关键素材",number(materialCount),formalMaterialCount?"已完成整理":preliminaryMaterialCount?"尚未形成正式素材":"尚未生成")}${statusCard("clock","分析用时",duration(analysisDuration),stopped?"停止前累计":"")}${statusCard("file","专业报告",number(reportCount),reportCount?"PDF / JSON":"尚未生成")}</section><div class="result-nav-shell"><strong class="result-nav-name" title="${esc(data.name)}">${esc(productExperimentName(data.name))}</strong><nav class="result-tabs" aria-label="实验结果导航"><a class="result-tab ${tab==="experiments"?"active":""}" href="#/archive/${encodeURIComponent(data.name)}/experiments">${icon("video")}<span>实验片段和步骤理解</span></a><a class="result-tab ${tab==="materials"?"active":""}" href="#/archive/${encodeURIComponent(data.name)}/materials">${icon("boxes")}<span>关键素材</span></a><a class="result-tab ${tab==="reports"?"active":""}" href="#/archive/${encodeURIComponent(data.name)}/reports">${icon("file")}<span>实验室日报</span></a><a class="result-tab ${tab==="metrics"?"active":""}" href="#/archive/${encodeURIComponent(data.name)}/metrics">${icon("folder")}<span>专业 PDF / JSON 报告</span></a></nav><button class="result-nav-folder" type="button" data-open-folder="${esc(data.name)}" aria-label="打开实验文件">${icon("folder")}</button></div>${detailAnchorNav(tab)}<dialog class="experiment-meta-dialog" id="experiment-meta-dialog"><form id="experiment-meta-form"><header><div><p class="eyebrow">实验信息</p><h2>完善实验信息</h2><p>便于日常查找与协作，不会改写正式证据档案。</p></div><button class="dialog-close" type="button" data-close-experiment-meta aria-label="关闭">${icon("x")}</button></header><div class="experiment-meta-fields"><label><span>显示名称</span><input name="display_name" value="${esc(metadata.displayName || "")}" placeholder="例如：电子天平称量验证" /></label><label><span>负责人</span><input name="owner" value="${esc(metadata.owner || "")}" placeholder="姓名或团队" /></label><label class="wide"><span>标签</span><input name="tags" value="${esc(tags.join("、"))}" placeholder="例如：称量、质控、第二轮" /></label><label class="wide"><span>实验备注</span><textarea name="note" rows="4" placeholder="记录目的、批次说明或后续事项">${esc(metadata.note || "")}</textarea></label></div>${metadata.note ? `<p class="experiment-note-preview"><strong>当前备注</strong>${esc(metadata.note)}</p>` : ""}<footer><span>实验原始编号会继续保留</span><div><button class="secondary-button" type="button" data-close-experiment-meta>取消</button><button class="primary-button" type="submit">保存信息</button></div></footer></form></dialog></div>`;
+  return `<div class="result-header" id="archive-overview"><a class="result-back-link" href="${backTarget}">${icon("chevron")}${backLabel}</a><header class="page-hero compact experiment-hero ${stopped?"is-attention":""}"><div title="档案编号：${esc(data.name)}"><p class="eyebrow">${stopped?"阶段性实验结果":"实验详情"}</p><h1>${esc(productExperimentName(data.name))}</h1><p>${stopped?"本页仅展示处理停止前已完成的内容，不代表完整实验成果。":"查看实验过程、关键素材与已生成的报告。"}</p>${metadataChips.length ? `<div class="experiment-meta-chips">${metadataChips.map((item)=>`<span>${esc(item)}</span>`).join("")}</div>` : ""}</div>${heroActions}</header><section class="status-grid result-status-grid">${statusCard("flask","实验片段",number(data.counts?.experiments ?? data.experiments.length),stopped?"阶段性结果":"")}${statusCard("image",formalMaterialCount?"关键素材":preliminaryMaterialCount?"初步素材":"关键素材",number(materialCount),formalMaterialCount?"已完成整理":preliminaryMaterialCount?"尚未形成正式素材":"尚未生成")}${statusCard("clock","分析用时",duration(analysisDuration),stopped?"停止前累计":"")}${statusCard("file","专业报告",number(reportCount),reportCount?"PDF / JSON":"尚未生成")}</section><div class="result-nav-shell"><strong class="result-nav-name" title="${esc(data.name)}">${esc(productExperimentName(data.name))}</strong><nav class="result-tabs" aria-label="实验结果导航"><a class="result-tab ${tab==="experiments"?"active":""}" href="#/archive/${encodeURIComponent(data.name)}/experiments">${icon("video")}<span>实验片段和步骤理解</span></a><a class="result-tab ${tab==="materials"?"active":""}" href="#/archive/${encodeURIComponent(data.name)}/materials">${icon("boxes")}<span>关键素材</span></a><a class="result-tab ${tab==="reports"?"active":""}" href="#/archive/${encodeURIComponent(data.name)}/reports">${icon("file")}<span>实验室日报</span></a><a class="result-tab ${tab==="metrics"?"active":""}" href="#/archive/${encodeURIComponent(data.name)}/metrics">${icon("folder")}<span>专业 PDF / JSON 报告</span></a></nav><button class="result-nav-folder" type="button" data-open-folder="${esc(data.name)}" aria-label="打开实验文件">${icon("folder")}</button></div>${detailAnchorNav(tab)}<dialog class="experiment-meta-dialog" id="experiment-meta-dialog"><form id="experiment-meta-form"><header><div><p class="eyebrow">实验信息</p><h2>完善实验信息</h2><p>便于日常查找与协作，不会改写正式证据档案。</p></div><button class="dialog-close" type="button" data-close-experiment-meta aria-label="关闭">${icon("x")}</button></header><div class="experiment-meta-fields"><label><span>显示名称</span><input name="display_name" value="${esc(metadata.displayName || "")}" placeholder="例如：电子天平称量验证" /></label><label><span>负责人</span><input name="owner" value="${esc(metadata.owner || "")}" placeholder="姓名或团队" /></label><label class="wide"><span>标签</span><input name="tags" value="${esc(tags.join("、"))}" placeholder="例如：称量、质控、第二轮" /></label><label class="wide"><span>实验备注</span><textarea name="note" rows="4" placeholder="记录目的、批次说明或后续事项">${esc(metadata.note || "")}</textarea></label></div>${metadata.note ? `<p class="experiment-note-preview"><strong>当前备注</strong>${esc(metadata.note)}</p>` : ""}<footer><span>实验原始编号会继续保留</span><div><button class="secondary-button" type="button" data-close-experiment-meta>取消</button><button class="primary-button" type="submit">保存信息</button></div></footer></form></dialog></div>`;
 }
 
 function experimentExecutiveSummary(data) {
@@ -1821,13 +1993,13 @@ function experimentExecutiveSummary(data) {
   const stopped = archiveProcessStopped(data);
   const summary = timeline[0]?.overall_summary || data.experiments?.[0]?.summary || "实验步骤理解完成后，将在这里汇总本次实验。";
   const concernCount = Number(report.uncertainties?.length||0)+Number(report.contradictions?.length||0);
-  const viewCount = overview.input_view_count ?? data.observability?.status?.input_view_count ?? 0;
-  return `<section class="experiment-executive-summary ${stopped?"is-partial":""}"><header><div><p class="eyebrow">${stopped?"阶段性结果":"实验结论总览"}</p><h2>${stopped?"已完成内容概览":"先看结论，再进入证据"}</h2></div><span class="evidence-kind ${stopped?"uncertain":"interpreted"}">${stopped?"非完整结论":"模型归纳"}</span></header><div class="executive-summary-grid"><article><small>${stopped?"当前可查看":"本次完成"}</small><strong>${number(overview.experiment_group_count??data.experiments?.length)} 个实验片段 · ${number(overview.key_event_count??data.key_events?.length)} 份关键素材</strong><p>${number(viewCount)} 路画面参与分析。</p></article><article class="executive-finding"><small>${stopped?"已生成的步骤理解":"关键发现"}</small><strong>${esc(summary)}</strong></article><article class="${stopped||concernCount?"has-concern":""}"><small>${stopped?"完整性状态":"需要留意"}</small><strong>${stopped?"本次处理未完整结束":concernCount?`${number(concernCount)} 项需留意`:"暂无报告级视角差异"}</strong><p>${stopped?"以下理解仅来自停止前已完成的阶段。":"仍应以实际素材为准。"}</p></article><article><small>建议下一步</small><strong>${stopped?"查看停止位置后重新发起分析。":concernCount?"优先查看存在不确定性的素材。":"继续查看关键素材。"}</strong><a href="${stopped?"#/tasks":`#/archive/${encodeURIComponent(data.name)}/materials`}">${stopped?"查看任务记录":"查看相关素材"} ${icon("arrow")}</a></article></div></section>`;
+  const viewCount = overview.input_view_count ?? data.input_view_count ?? data.observability?.status?.input_view_count ?? 0;
+  return `<section class="experiment-executive-summary ${stopped?"is-partial":""}"><header><div><p class="eyebrow">${stopped?"阶段性结果":"实验结论总览"}</p><h2>${stopped?"已完成内容概览":"先看结论，再进入证据"}</h2></div><span class="evidence-kind ${stopped?"uncertain":"interpreted"}">${stopped?"非完整结论":"模型归纳"}</span></header><div class="executive-summary-grid"><article><small>${stopped?"当前可查看":"本次完成"}</small><strong>${number(overview.experiment_group_count??data.counts?.experiments??data.experiments?.length)} 个实验片段 · ${number(overview.key_event_count??data.counts?.key_events??data.key_events?.length)} 份关键素材</strong><p>${number(viewCount)} 路画面参与分析。</p></article><article class="executive-finding"><small>${stopped?"已生成的步骤理解":"关键发现"}</small><strong>${esc(summary)}</strong></article><article class="${stopped||concernCount?"has-concern":""}"><small>${stopped?"完整性状态":"需要留意"}</small><strong>${stopped?"本次处理未完整结束":concernCount?`${number(concernCount)} 项需留意`:report.report_id?"暂无报告级视角差异":"请在日报中查看完整不确定性"}</strong><p>${stopped?"以下理解仅来自停止前已完成的阶段。":"仍应以实际素材为准。"}</p></article><article><small>建议下一步</small><strong>${stopped?"查看停止位置后重新发起分析。":concernCount?"优先查看存在不确定性的素材。":"继续查看关键素材。"}</strong><a href="${stopped?"#/tasks":`#/archive/${encodeURIComponent(data.name)}/materials`}">${stopped?"查看任务记录":"查看相关素材"} ${icon("arrow")}</a></article></div></section>`;
 }
 
 function experimentCard(experiment, preliminary = false) {
   const stepCount = experiment.steps?.length || 0;
-  const videoTile = (label, url, className = "") => `<article class="experiment-media ${className}"><div class="video-frame">${url ? `<video controls preload="metadata" src="${esc(url)}"></video>` : `<div class="empty-state">${esc(label)}尚未生成</div>`}</div><p class="video-caption">${icon("video")}${esc(label)}</p></article>`;
+  const videoTile = (label, url, className = "") => `<article class="experiment-media ${className}"><div class="video-frame">${url ? `<video controls preload="none" src="${esc(url)}"></video>` : `<div class="empty-state">${esc(label)}尚未生成</div>`}</div><p class="video-caption">${icon("video")}${esc(label)}</p></article>`;
   const videos = `${videoTile("同步双视角", experiment.aligned_video_url, "experiment-media--aligned")}${videoTile("第一人称", experiment.first_person_video_url)}${videoTile("第三人称", experiment.third_person_video_url)}`;
   return `<article class="experiment-card experiment-card--understanding"><header class="experiment-card-header"><div class="experiment-title-copy"><span class="experiment-label">实验片段</span><h2>${esc(experiment.name)}</h2><div class="experiment-meta"><span>${icon("clock")}${timecode(experiment.start_ms)} → ${timecode(experiment.end_ms)}</span><span>${icon("activity")}${number(stepCount)} 个步骤</span></div></div><span class="badge">${experiment.continuity_type === "continuous" ? "连续实验" : "独立实验"}</span></header><div class="video-understanding"><div class="experiment-media-set">${videos}</div><div class="understanding-panel"><div class="understanding-item is-summary"><span class="understanding-index">01</span><div><strong>${preliminary ? "阶段性理解" : "实验整体理解"}</strong><p>${esc(experiment.summary || "暂无模型摘要")}</p></div></div><div class="understanding-item"><span class="understanding-index">02</span><div><strong>步骤粒度</strong><p>${number(stepCount)} 个带时间边界的细粒度步骤；每步区分已观察后续、预测后续和后续未知。</p></div></div>${experiment.uncertainties?.length ? `<div class="understanding-item is-warning"><span class="understanding-index">!</span><div><strong>不确定项</strong><p>${esc(experiment.uncertainties.join("；"))}</p></div></div>` : ""}</div></div><details class="experiment-steps" ${stepCount <= 10 ? "open" : ""}><summary class="experiment-steps-toggle"><span class="experiment-steps-title"><i>${icon("activity")}</i><span><strong>细粒度步骤</strong><small>按时间顺序查看当前动作与后续状态</small></span></span><span class="experiment-step-count">${number(stepCount)} 个 ${icon("chevron")}</span></summary><div class="step-list">${(experiment.steps || []).map((step,index)=>`<article class="step-card"><span class="step-number"><b>${String(step.step_index ?? index+1).padStart(2,"0")}</b><small>${timecode(step.start_global_ms)}<br/>${timecode(step.end_global_ms)}</small></span><div class="step-body"><strong>当前：${esc(step.current_step || step.observed_action || "未描述")}</strong><p class="step-next"><b>${esc(nextStepLabel(step))}：</b>${esc(step.next_step || "没有足够证据支持下一步")}</p><span class="step-meta">对象：${esc((step.objects || []).join("、") || "未明确")} · 置信度：${step.confidence ?? "—"}</span></div></article>`).join("")}</div></details></article>`;
 }
@@ -1872,7 +2044,7 @@ function materialCard(event, index = 0) {
     <section class="material-preview-note"><span class="evidence-kind interpreted">步骤理解</span><p>${esc(current)}</p></section>
     <details class="material-product-details"><summary><span>查看详情与播放</span><small>${event.aligned_clip_url ? `视频 ${duration(clipSeconds)}` : "查看分析"}</small>${icon("chevron")}</summary><div class="material-product-content">
       <div class="material-story"><section class="material-story-main evidence-observed"><small><span class="evidence-kind observed">画面确认</span>直接观察事实</small><ul class="fact-list">${observed.slice(0,3).map((fact)=>`<li>${esc(fact)}</li>`).join("")}</ul></section><section class="material-next-step ${uncertainty ? "evidence-uncertain" : "evidence-inferred"}"><small><span class="evidence-kind ${uncertainty ? "uncertain" : "inferred"}">${esc(nextLabel)}</span>${nextStatus === "observed" ? "来自后续画面" : nextStatus === "inferred" ? "模型推测 · 非事实结论" : "当前证据未支持后续判断"}</small><p>${esc(next)}</p></section><p class="material-support-note">${dualView ? icon("check") : icon("image")}<span>${esc(supportCopy)}</span></p></div>
-      ${event.aligned_clip_url ? `<details class="material-clip-details"><summary>${icon("video")}<span>播放关键片段</span><small>${duration(clipSeconds)}</small>${icon("chevron")}</summary><div class="material-player-toolbar"><span>${icon("video")}同步双视角</span><small>当前档案提供第一 / 第三人称同步合成画面</small><div class="material-player-actions"><button type="button" data-review-adjacent="previous" data-review-event="${esc(event.event_id)}" aria-label="上一份素材">上一份</button><label>倍速<select data-video-speed="${esc(event.event_id)}"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="1.5">1.5×</option><option value="2">2×</option></select></label><label class="loop-control"><input type="checkbox" data-video-loop="${esc(event.event_id)}"/>循环</label><button type="button" data-video-fullscreen="${esc(event.event_id)}">全屏</button><button type="button" data-review-adjacent="next" data-review-event="${esc(event.event_id)}" aria-label="下一份素材">下一份</button></div></div><div class="material-video"><video controls preload="metadata" tabindex="0" data-material-video="${esc(event.event_id)}" src="${esc(event.aligned_clip_url)}"></video><div class="material-time-markers"><button type="button" data-video-seek="${esc(event.event_id)}" data-seconds="0"><i></i><span>片段开始<small>${timecode(Number(event.start_us)/1000)}</small></span></button><button class="peak" type="button" data-video-seek="${esc(event.event_id)}" data-seconds="${peakOffset}"><i></i><span>关键时刻<small>${timecode(Number(event.peak_timestamp_us ?? event.start_us)/1000)}</small></span></button><button type="button" data-video-seek="${esc(event.event_id)}" data-seconds="${clipSeconds}"><i></i><span>片段结束<small>${timecode(Number(event.end_us)/1000)}</small></span></button></div><p class="player-shortcuts">快捷键：空格 播放/暂停 · ←/→ 前后 5 秒 · P/N 上一份/下一份</p></div></details>` : ""}
+      ${event.aligned_clip_url ? `<details class="material-clip-details"><summary>${icon("video")}<span>播放关键片段</span><small>${duration(clipSeconds)}</small>${icon("chevron")}</summary><div class="material-player-toolbar"><span>${icon("video")}同步双视角</span><small>当前档案提供第一 / 第三人称同步合成画面</small><div class="material-player-actions"><button type="button" data-review-adjacent="previous" data-review-event="${esc(event.event_id)}" aria-label="上一份素材">上一份</button><label>倍速<select data-video-speed="${esc(event.event_id)}"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="1.5">1.5×</option><option value="2">2×</option></select></label><label class="loop-control"><input type="checkbox" data-video-loop="${esc(event.event_id)}"/>循环</label><button type="button" data-video-fullscreen="${esc(event.event_id)}">全屏</button><button type="button" data-review-adjacent="next" data-review-event="${esc(event.event_id)}" aria-label="下一份素材">下一份</button></div></div><div class="material-video"><video controls preload="none" tabindex="0" data-material-video="${esc(event.event_id)}" src="${esc(event.aligned_clip_url)}"></video><div class="material-time-markers"><button type="button" data-video-seek="${esc(event.event_id)}" data-seconds="0"><i></i><span>片段开始<small>${timecode(Number(event.start_us)/1000)}</small></span></button><button class="peak" type="button" data-video-seek="${esc(event.event_id)}" data-seconds="${peakOffset}"><i></i><span>关键时刻<small>${timecode(Number(event.peak_timestamp_us ?? event.start_us)/1000)}</small></span></button><button type="button" data-video-seek="${esc(event.event_id)}" data-seconds="${clipSeconds}"><i></i><span>片段结束<small>${timecode(Number(event.end_us)/1000)}</small></span></button></div><p class="player-shortcuts">快捷键：空格 播放/暂停 · ←/→ 前后 5 秒 · P/N 上一份/下一份</p></div></details>` : ""}
       <details class="material-evidence-details"><summary><span>${icon("boxes")}查看对象与分析依据</span><small>素材记录 ${esc(event.event_id)}</small>${icon("chevron")}</summary><div class="material-evidence-content"><section><h3>动作相关对象</h3><div class="object-chip-list">${materialObjectItems(event.objects || {})}</div></section>${verificationTrace(event.verification || {})}</div></details>
     </div></details>
   </article>`;
@@ -1910,7 +2082,7 @@ function filteredMaterialEvents(data) {
     if (filters.object !== "all" && !eventObjectValues(event).includes(filters.object)) return false;
     if (filters.support === "dual" && !eventHasDualViewSupport(event)) return false;
     if (filters.support === "partial" && eventHasDualViewSupport(event)) return false;
-    if (!query) return true;
+    if (!query || data.material_total_count != null) return true;
     const mllm = event.provenance?.mllm || {};
     const haystack = [
       event.event_id,
@@ -1927,7 +2099,7 @@ function filteredMaterialEvents(data) {
 
 function materialResults(data) {
   const events = filteredMaterialEvents(data);
-  const formalTotal = data.key_events.filter(eventHasAlignedDualViewMaterial).length;
+  const formalTotal = Number(data.material_total_count ?? data.key_events.filter(eventHasAlignedDualViewMaterial).length);
   const groupMap = new Map((data.experiment_groups || []).map((group,index) => [group.group_id, { ...group, index }]));
   const grouped = new Map();
   for (const event of events) {
@@ -1952,20 +2124,39 @@ function materialsView(data) {
   ensureMaterialFilters(data);
   const filters = state.materialFilters;
   const formalEvents = data.key_events.filter(eventHasAlignedDualViewMaterial);
-  const quarantinedCount = data.key_events.length - formalEvents.length;
-  const actionTypes = [...new Set(formalEvents.map((event)=>event.action_type).filter(Boolean))];
+  const quarantinedCount = Number(data.quality_acceptance?.key_materials?.missing_dual_view_material_count || 0);
+  const actionTypes = [...new Set([...Object.keys(ACTION_LABELS), ...formalEvents.map((event)=>event.action_type).filter(Boolean)])];
   const actionCounts = Object.fromEntries(actionTypes.map((type)=>[type,formalEvents.filter((event)=>event.action_type===type).length]));
   const objectValues = [...new Set(formalEvents.flatMap(eventObjectValues))].sort();
   return `<section class="material-workspace" id="material-workspace"><header class="material-toolbar-heading"><div><p class="eyebrow">关键素材</p><h2>按实验查看关键画面与片段</h2><p>先看概览，需要时进入聚焦模式查看画面事实、模型提示和视频。</p></div><span class="badge">${number(formalEvents.length)} 份关键素材</span></header><div class="evidence-legend" aria-label="证据信息说明"><span><i class="observed"></i><strong>画面确认</strong>可直接观察</span><span><i class="inferred"></i><strong>模型提示</strong>用于辅助理解</span><span><i class="uncertain"></i><strong>证据不足</strong>保留不确定性</span></div>${quarantinedCount ? `<div class="freshness-warning"><strong>${number(quarantinedCount)} 份素材缺少完整双视角画面，暂未展示。</strong></div>` : ""}<div class="material-filter-bar" id="material-filters"><label><span>实验片段</span><select id="material-group-filter"><option value="all" ${filters.group==="all"?"selected":""}>全部实验（${number(formalEvents.length)}）</option>${(data.experiment_groups||[]).map((group,index)=>`<option value="${esc(group.group_id)}" ${filters.group===group.group_id?"selected":""}>${String(index+1).padStart(2,"0")} · ${esc(group.name)}（${number(group.key_event_count)}）</option>`).join("")}</select></label><label><span>动作类型</span><select id="material-action-filter"><option value="all">全部动作类型</option>${actionTypes.map((type)=>`<option value="${esc(type)}" ${filters.action===type?"selected":""}>${esc(ACTION_LABELS[type]||type)}（${number(actionCounts[type])}）</option>`).join("")}</select></label><label><span>相关对象</span><select id="material-object-filter"><option value="all">全部对象</option>${objectValues.map((value)=>`<option value="${esc(value)}" ${filters.object===value?"selected":""}>${esc(productObjectLabel(value))}</option>`).join("")}</select></label><label><span>画面支持</span><select id="material-support-filter"><option value="all">全部关键素材</option><option value="dual" ${filters.support==="dual"?"selected":""}>两个视角相互印证</option><option value="partial" ${filters.support==="partial"?"selected":""}>单个视角更清晰</option></select></label><label class="material-query"><span>搜索关键素材</span><input id="material-query" value="${esc(filters.query)}" placeholder="例如：移液器、开盖、称量纸" /></label></div><div id="material-results">${materialResults(data)}</div>${materialSelectionBar(data)}<div id="material-focus-host"></div></section>`;
 }
 
 function bindMaterialFilters(data) {
-  const rerender = () => { document.querySelector("#material-results").innerHTML = materialResults(data); bindMaterialInteractions(data); };
+  const rerender = () => {
+    if (data.staging_run_id || archiveProcessStopped(data)) {
+      document.querySelector("#material-results").innerHTML = materialResults(data);
+      bindMaterialInteractions(data);
+    } else return renderArchive(data.name, "materials");
+  };
   document.querySelector("#material-group-filter")?.addEventListener("change", (event)=>{ state.materialFilters.group=event.target.value; rerender(); });
   document.querySelector("#material-action-filter")?.addEventListener("change", (event)=>{ state.materialFilters.action=event.target.value; rerender(); });
   document.querySelector("#material-object-filter")?.addEventListener("change", (event)=>{ state.materialFilters.object=event.target.value; rerender(); });
   document.querySelector("#material-support-filter")?.addEventListener("change", (event)=>{ state.materialFilters.support=event.target.value; rerender(); });
-  document.querySelector("#material-query")?.addEventListener("input", (event)=>{ state.materialFilters.query=event.target.value; rerender(); });
+  let queryTimer;
+  document.querySelector("#material-query")?.addEventListener("input", (event)=>{
+    state.materialFilters.query=event.target.value;
+    clearTimeout(queryTimer);
+    queryTimer=setTimeout(rerender,300);
+  });
+  if (data.material_next_cursor) {
+    document.querySelector("#material-results")?.insertAdjacentHTML("afterend", `<div class="pagination-actions"><button class="secondary-button" id="load-more-materials" type="button">加载更多关键素材</button></div>`);
+    document.querySelector("#load-more-materials")?.addEventListener("click", async (event) => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      try { await loadArchiveMaterials(data.name, data.material_next_cursor); await rerender(); }
+      catch (error) { toast(error.message, "error"); button.disabled = false; }
+    });
+  }
   bindMaterialInteractions(data);
 }
 
@@ -2023,13 +2214,13 @@ function materialFocusMarkup(data, event, events) {
   const next = productEvidenceText(nextStep.next_step, "没有足够证据支持下一步。");
   const clipSeconds = Math.max(0,(Number(event.end_us)-Number(event.start_us))/1_000_000);
   const peakOffset = Math.min(clipSeconds,Math.max(0,(Number(event.peak_timestamp_us??event.start_us)-Number(event.start_us))/1_000_000));
-  return `<dialog class="material-focus-dialog" id="material-focus-dialog"><header><div><p class="eyebrow">聚焦查看 · ${number(index+1)} / ${number(events.length)}</p><h2>${esc(ACTION_LABELS[event.action_type]||"关键实验动作")}</h2><p>${esc(productExperimentName(data.name))} · ${timecode(Number(event.start_us)/1000)} → ${timecode(Number(event.end_us)/1000)}</p></div><button class="dialog-close" type="button" data-close-material-focus aria-label="关闭">${icon("x")}</button></header><div class="material-focus-body"><section class="material-focus-player">${event.aligned_clip_url ? `<video controls autoplay preload="metadata" data-focus-video src="${esc(event.aligned_clip_url)}"></video>` : event.aligned_frame_url ? `<img src="${esc(event.aligned_frame_url)}" alt="同步关键画面"/>` : productState("neutral","image","画面暂不可用","该素材没有可播放的视频或关键帧。")}${event.aligned_clip_url ? `<div class="focus-time-markers"><button type="button" data-focus-seek="0"><span>片段开始</span><small>${timecode(Number(event.start_us)/1000)}</small></button><button type="button" data-focus-seek="${peakOffset}"><span>关键时刻</span><small>${timecode(Number(event.peak_timestamp_us??event.start_us)/1000)}</small></button><button type="button" data-focus-seek="${clipSeconds}"><span>片段结束</span><small>${timecode(Number(event.end_us)/1000)}</small></button></div>` : ""}</section><aside class="material-focus-insight"><section><small>步骤理解</small><strong>${esc(current)}</strong></section><section><small>画面确认</small><ul>${facts.slice(0,4).map((fact)=>`<li>${esc(productEvidenceText(fact,"暂无补充说明"))}</li>`).join("")||"<li>当前档案没有单独记录可直接确认的画面事实。</li>"}</ul></section><section class="focus-next"><small>${esc(nextStepLabel(nextStep))}${nextStepLabel(nextStep) === "预测后续" ? " · 非事实结论" : ""}</small><p>${esc(next)}</p></section></aside></div><footer><div class="focus-playback-controls"><label>播放速度<select data-focus-speed><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="1.5">1.5×</option><option value="2">2×</option></select></label><label><input type="checkbox" data-focus-loop/>循环播放</label><button type="button" data-focus-fullscreen>${icon("video")}全屏</button></div><div class="focus-navigation"><button type="button" data-focus-nav="previous" ${index<=0?"disabled":""}>${icon("chevron")}上一份</button><button type="button" data-focus-nav="next" ${index>=events.length-1?"disabled":""}>下一份 ${icon("arrow")}</button></div></footer></dialog>`;
+  return `<dialog class="material-focus-dialog" id="material-focus-dialog"><header><div><p class="eyebrow">聚焦查看 · ${number(index+1)} / ${number(events.length)}</p><h2>${esc(ACTION_LABELS[event.action_type]||"关键实验动作")}</h2><p>${esc(productExperimentName(data.name))} · ${timecode(Number(event.start_us)/1000)} → ${timecode(Number(event.end_us)/1000)}</p></div><button class="dialog-close" type="button" data-close-material-focus aria-label="关闭">${icon("x")}</button></header><div class="material-focus-body"><section class="material-focus-player">${event.aligned_clip_url ? `<video controls autoplay preload="none" data-focus-video src="${esc(event.aligned_clip_url)}"></video>` : event.aligned_frame_url ? `<img src="${esc(event.aligned_frame_url)}" alt="同步关键画面"/>` : productState("neutral","image","画面暂不可用","该素材没有可播放的视频或关键帧。")}${event.aligned_clip_url ? `<div class="focus-time-markers"><button type="button" data-focus-seek="0"><span>片段开始</span><small>${timecode(Number(event.start_us)/1000)}</small></button><button type="button" data-focus-seek="${peakOffset}"><span>关键时刻</span><small>${timecode(Number(event.peak_timestamp_us??event.start_us)/1000)}</small></button><button type="button" data-focus-seek="${clipSeconds}"><span>片段结束</span><small>${timecode(Number(event.end_us)/1000)}</small></button></div>` : ""}</section><aside class="material-focus-insight"><section><small>步骤理解</small><strong>${esc(current)}</strong></section><section><small>画面确认</small><ul>${facts.slice(0,4).map((fact)=>`<li>${esc(productEvidenceText(fact,"暂无补充说明"))}</li>`).join("")||"<li>当前档案没有单独记录可直接确认的画面事实。</li>"}</ul></section><section class="focus-next"><small>${esc(nextStepLabel(nextStep))}${nextStepLabel(nextStep) === "预测后续" ? " · 非事实结论" : ""}</small><p>${esc(next)}</p></section></aside></div><footer><div class="focus-playback-controls"><label>播放速度<select data-focus-speed><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="1.5">1.5×</option><option value="2">2×</option></select></label><label><input type="checkbox" data-focus-loop/>循环播放</label><button type="button" data-focus-fullscreen>${icon("video")}全屏</button></div><div class="focus-navigation"><button type="button" data-focus-nav="previous" ${index<=0?"disabled":""}>${icon("chevron")}上一份</button><button type="button" data-focus-nav="next" ${index>=events.length-1?"disabled":""}>下一份 ${icon("arrow")}</button></div></footer></dialog>`;
 }
 
 function openMaterialFocus(data, eventId) {
   const events = filteredMaterialEvents(data);
-  const event = events.find((item)=>String(item.event_id)===String(eventId)) || events[0];
-  if (!event) { toast("当前筛选下没有可聚焦查看的素材。", "error"); return; }
+  const event = events.find((item)=>String(item.event_id)===String(eventId));
+  if (!event) { toast("指定素材不在当前已载入页面，请加载更多或调整筛选。", "error"); return; }
   state.focusedMaterialId = String(event.event_id);
   let host = document.querySelector("#material-focus-host");
   if (!host) {
@@ -2148,8 +2339,17 @@ function dailyReportView(data) {
   const alignment = report.alignment_summary || {};
   const actions = report.action_summary || [];
   const timeline = report.experiment_timeline || [];
+  const quality = report.quality_acceptance || {};
+  const qualityPassed = quality.passed === true || (quality.passed == null && overview.evidence_package_eval_passed);
+  const evidenceLevelLabel = quality.evidence_level === "dataset_measured"
+    ? "本实验质量已测量"
+    : quality.evidence_level === "partially_measured"
+      ? "部分质量已测量"
+      : quality.evidence_level == null && overview.evidence_package_eval_passed
+        ? "历史证据包已验收 · 质量层级未记录"
+      : "结构已验收 · 本实验准确率未测量";
   if (!report.report_id) return `<section class="panel" id="daily-report-cover">${archiveProcessStopped(data) ? productState("error","file","本次处理未生成实验日报","分析在报告生成前停止；可以查看已有片段和初步素材，或按原设置重新分析。",`<button class="primary-button" type="button" data-rerun-archive="${esc(data.name)}">按原设置重新分析</button><a class="secondary-button" href="#/archive/${encodeURIComponent(data.name)}/experiments">查看阶段性结果</a>`) : productState("progress", "clock", "实验日报正在准备", "完成前序分析后，日报会自动显示在这里。", `<a class="secondary-button" href="#/tasks">查看任务进度</a>`)}</section>`;
-  return `<section class="daily-report-cover" id="daily-report-cover"><div title="实验编号：${esc(report.experiment_id)}"><p class="eyebrow">实验室日报</p><h2>${esc(report.report_date)} · 实验摘要</h2><p>${esc(productExperimentName(report.experiment_id))}</p></div><span class="badge">${!overview.evidence_package_eval_passed ? "内容整理中" : "内容已生成"}</span></section>
+  return `<section class="daily-report-cover" id="daily-report-cover"><div title="实验编号：${esc(report.experiment_id)}"><p class="eyebrow">实验室日报</p><h2>${esc(report.report_date)} · 实验摘要</h2><p>${esc(productExperimentName(report.experiment_id))}</p></div><span class="badge">${overview.evidence_package_eval_passed && qualityPassed ? esc(evidenceLevelLabel) : "内容整理中"}</span></section>
   <section class="status-grid">${statusCard("video","拍摄视角",number(overview.input_view_count),`${number(overview.first_person_views)} 第一人称 + ${number(overview.third_person_views)} 第三人称`)}${statusCard("flask","实验片段",number(overview.experiment_group_count),"独立 / 连续实验")}${statusCard("image","关键素材",number(overview.key_event_count),"")}${statusCard("activity","状态变化",number(overview.physical_change_count),"")}</section>
   <section class="panel" id="daily-timeline-section"><header class="panel-heading"><div><h2>实验时间线与步骤理解</h2><p>时间均为统一实验相对时间；每项保留证据事件与跨视角素材链接。</p></div></header>${dailyReportTimelineVisual(timeline,actions)}<div class="daily-timeline">${timeline.map((group,index)=>`<article><span class="daily-index">${String(index+1).padStart(2,"0")}</span><div><header><h3>${esc(group.experiment_name)}</h3><span class="badge">${group.continuity_type === "continuous" ? "连续实验" : "独立实验"}</span></header><p class="timecode">${esc(group.start_timecode)} → ${esc(group.end_timecode)}</p><p>${esc(group.overall_summary || "无模型摘要")}</p><details><summary>查看 ${number(group.steps?.length)} 个细粒度步骤</summary><div class="step-list">${(group.steps||[]).map((step)=>`<article class="step-card"><span class="step-number">步骤 ${esc(step.step_index)}<small>${esc(step.start_timecode)}<br/>${esc(step.end_timecode)}</small></span><div class="step-body"><strong>当前：${esc(step.current_step || "未说明")}</strong><p class="step-next"><b>${esc(nextStepLabel(step))}：</b>${esc(step.next_step || "证据不足")}</p><span class="step-meta">对象：${esc((step.objects||[]).join("、") || "未明确")} · ${number(step.supporting_views?.length)} 路证据</span></div></article>`).join("")}</div></details></div></article>`).join("")}</div></section>
   <section class="panel" id="daily-status-section"><header class="panel-heading"><div><h2>报告状态</h2><p>用于判断当前报告的信息是否完整。</p></div></header><table class="metric-table report-summary-table"><tbody><tr><td>多视角同步</td><td>${number(alignment.aligned)}/${number(alignment.view_count)} 路画面已对齐</td></tr><tr><td>需要留意</td><td>${number(report.uncertainties?.length)} 组不确定项，${number(report.contradictions?.length)} 项视角差异</td></tr><tr><td>内容完整性</td><td>${overview.evidence_package_eval_passed ? "实验过程、素材与报告已完整关联" : "部分关联信息仍在整理"}</td></tr></tbody></table></section>`;
@@ -2231,9 +2431,13 @@ function metricsView(data) {
   const performance = metrics.preprocessing_display || {};
   const fullColdStart = performance.full_cold_start || {};
   const currentRun = performance.current_run || {};
-  const statusLabel = quality.status === "evidence_package_passed_no_boundary_ground_truth"
-    ? "证据包结构与媒体已验收；没有人工边界真值"
-    : quality.status || "未生成质量账本";
+  const statusLabel = quality.evidence_level === "dataset_measured"
+    ? "结构验收与本实验质量测量均已通过"
+    : quality.evidence_level === "partially_measured"
+      ? "结构已验收；仅部分质量指标具备独立真值"
+      : quality.passed
+        ? "结构与媒体已验收；本实验准确率未逐任务测量"
+        : quality.status || "未生成质量账本";
   const boundaryAccuracy = boundary.evaluated
     ? `${percent(boundary.precision)} / ${percent(boundary.recall)}`
     : "未评估（历史档案无人工边界基线）";
@@ -2256,6 +2460,7 @@ function metricsView(data) {
     evidence_package_eval: "证据包结构/媒体验收 JSON",
     key_material_recall_eval: "关键素材 Precision / Recall 评估 JSON",
     final_key_material_annotation: "关键素材对象框与二次复核 JSON",
+    run_provenance: "代码、配置、模型与证据溯源 JSON",
   };
   const verificationSection = `<section class="panel"><header class="panel-heading"><div><h2>关键素材模型质量账本</h2><p>逐事件显示实际执行的视觉模型、对象框置信度、二次复核耗时和明确保留的不确定性；没有人工真值时不展示伪造的准确率。</p></div></header><table class="metric-table"><tbody><tr><td>复核账本</td><td>${verification.available ? "可用" : "历史档案未生成"}</td></tr><tr><td>事件 / 渲染视角</td><td>${number(verification.event_count)} / ${number(verification.rendered_view_count)}</td></tr><tr><td>仅渲染动作参与对象</td><td>${number(materials.participant_only_annotation_pass_count)} / ${number(materials.event_count)}（${materials.participant_only_annotation_gate_passed ? "门禁通过" : "未通过或无账本"}）</td></tr><tr><td>动作参与对象可见性</td><td>${number(materials.action_participant_visibility_pass_count)} / ${number(materials.event_count)}（${materials.action_participant_visibility_gate_passed ? "门禁通过" : "未通过或无账本"}）</td></tr><tr><td>决策状态</td><td>${esc(Object.entries(verification.decision_status_counts || {}).map(([key,value])=>`${key}: ${value}`).join("；") || "无")}</td></tr><tr><td>实际模型执行</td><td>${esc(Object.entries(verification.model_execution_counts || {}).map(([key,value])=>`${MODEL_LABELS[key] || key}: ${value}`).join("；") || "无")}</td></tr><tr><td>二次复核推理耗时</td><td>YOLO-World ${duration(verification.timing?.open_vocabulary_inference_seconds)}；Grounding DINO ${duration(verification.timing?.grounding_dino_inference_seconds)}；总墙钟 ${duration(verification.timing?.wall_seconds)}</td></tr><tr><td>保留不确定性的事件</td><td>${number(verification.uncertain_event_count)}</td></tr><tr><td>预算使用</td><td>${number(verification.budget?.admitted_event_count)} 事件 / ${number(verification.budget?.admitted_view_count)} 视角；延后 ${number(verification.budget?.deferred_count)}</td></tr></tbody></table></section>`;
   return `<section class="panel"><header class="panel-heading"><div><h2>耗时口径</h2><p>${performanceSummary} ${reuseNote}</p></div></header><div class="performance-compare"><article><small>历史完整冷启动预处理</small><strong>${duration(fullColdStart.seconds)}</strong><span>${esc(fullColdStart.includes || "预检 + 对齐 + 全量粗扫 + 有界精扫 + 边界审计；不含模型理解")}</span></article><article><small>当前归档运行总耗时</small><strong>${duration(currentRun.total_seconds ?? metrics.total_duration_seconds)}</strong><span>${currentRun.reused_validated_cv_ledgers ? "复用已验收 CV 账本，重新生成理解/媒体/证据包" : "以本次运行账本为准"}</span></article><article><small>当前运行预处理</small><strong>${duration(currentRun.preprocessing_seconds)}</strong><span>${currentRun.reused_validated_cv_ledgers ? "不是冷启动基准" : "当前运行实际值"}</span></article></div><table class="metric-table"><thead><tr><th>阶段</th><th>说明</th><th>耗时</th></tr></thead><tbody>${extraRows}${stages.map((stage)=>`<tr><td>${esc(stage.stage)}</td><td>${esc(STAGE_LABELS[stage.stage] || stage.stage)}</td><td>${duration(stage.duration_seconds)}</td></tr>`).join("")}</tbody></table></section><section class="panel"><header class="panel-heading"><div><h2>Token 用量</h2><p>CV、FFmpeg 与 TensorRT 不消耗模型 Token；断点复用的模型结果不重复计入本次实际消耗。</p></div></header><table class="metric-table"><thead><tr><th>阶段</th><th>执行 / 复用</th><th>输入 Token</th><th>输出 Token</th><th>总 Token</th></tr></thead><tbody><tr><td>实验片段步骤理解</td><td>${number(tokens.experiment_groups?.executed_call_count ?? tokens.experiment_groups?.call_count)} / ${number(tokens.experiment_groups?.reused_call_count)}</td><td>${number(tokens.experiment_groups?.input_tokens)}</td><td>${number(tokens.experiment_groups?.output_tokens)}</td><td>${number(tokens.experiment_groups?.total_tokens)}</td></tr><tr><td>关键素材理解</td><td>${number(tokens.key_materials?.executed_call_count ?? tokens.key_materials?.call_count)} / ${number(tokens.key_materials?.reused_call_count)}</td><td>${number(tokens.key_materials?.input_tokens)}</td><td>${number(tokens.key_materials?.output_tokens)}</td><td>${number(tokens.key_materials?.total_tokens)}</td></tr><tr><td><strong>全任务</strong></td><td>—</td><td><strong>${number(tokens.run_total?.input_tokens)}</strong></td><td><strong>${number(tokens.run_total?.output_tokens)}</strong></td><td><strong>${number(tokens.run_total?.total_tokens)}</strong></td></tr></tbody></table></section><section class="panel"><header class="panel-heading"><div><h2>质量验收</h2><p>${esc(materialEvaluation.displayNote)}</p></div></header><table class="metric-table"><tbody><tr><td>总体状态</td><td>${esc(statusLabel)}</td></tr><tr><td>实验检出 Precision / Recall</td><td>${boundaryAccuracy}</td></tr><tr><td>关键素材 Precision / Recall</td><td>${esc(materialEvaluation.recallLabel)}</td></tr><tr><td>边界通过率 / 连续性准确率</td><td>${boundaryContinuity}</td></tr><tr><td>证据包结构与媒体</td><td>${boundary.evidence_package_eval_passed || materials.evidence_package_eval_passed ? "通过自动验收" : "未通过或无验收记录"}</td></tr><tr><td>关键素材类别覆盖</td><td>${esc(materialEvaluation.categoryCoverageLabel)}</td></tr><tr><td>第一/第三人称成套素材</td><td>${number(materials.dual_view_material_count)} / ${number(materials.event_count)}（${percent(materials.dual_view_material_rate)}）</td></tr><tr><td>双侧共同佐证动作</td><td>${number(materials.cross_view_supported_count)} / ${number(materials.event_count)}（${percent(materials.cross_view_supported_rate)}）</td></tr><tr><td>双视角关联可审计</td><td>${number(materials.cross_view_or_explicit_uncertainty_count)} / ${number(materials.event_count)}</td></tr></tbody></table></section>${verificationSection}<section class="panel"><header class="panel-heading"><div><h2>资源遥测（按阶段）</h2><p>来源：resource_telemetry.json；主机网络包含其他流量，进程树 I/O 单独列出。</p></div></header><table class="metric-table"><thead><tr><th>阶段</th><th>GPU mean/max</th><th>NVDEC mean/max</th><th>CPU mean/max</th><th>网络接收 mean/max</th></tr></thead><tbody>${Object.entries(summaries).map(([stage,item])=>`<tr><td>${esc(STAGE_LABELS[stage]||stage)}</td><td>${metricStat(item.gpu_compute_percent)}/${metricStat(item.gpu_compute_percent,"max","%")}</td><td>${metricStat(item.nvdec_percent)}/${metricStat(item.nvdec_percent,"max","%")}</td><td>${metricStat(item.cpu_percent)}/${metricStat(item.cpu_percent,"max","%")}</td><td>${metricStat(item.host_network_receive_mib_s,"mean"," MiB/s")}/${metricStat(item.host_network_receive_mib_s,"max"," MiB/s")}</td></tr>`).join("")}</tbody></table></section><section class="panel"><header class="panel-heading"><div><h2>模型理解与验收文件</h2><p>这些链接直接指向当前${archiveShortLabel()}档案中的正式文件；历史档案没有的文件不会显示为可点击链接。</p></div></header><div class="result-links" style="padding:20px">${Object.entries(links).map(([key,label])=>data.links[key]?`<a target="_blank" href="${esc(data.links[key])}">${icon("file")}${label}</a>`:"").join("")}</div></section>`;
@@ -2266,7 +2471,7 @@ async function renderArchive(name, tab = "experiments", staging = false) {
   setChrome("archive", productExperimentName(name));
   main.innerHTML = pageSkeleton(`正在读取${archiveLabel()}`);
   try {
-    const data = await loadArchive(name, staging);
+    const data = staging ? await loadArchive(name, true) : await loadArchiveView(name, tab);
     if (location.hash !== requestedHash) return;
     const stage = data.observability?.status?.stage;
     const pending = staging || (stage && stage !== "completed");
@@ -2284,6 +2489,15 @@ async function renderArchive(name, tab = "experiments", staging = false) {
     bindArchiveActions(data);
     bindDetailAnchors();
     bindRerunActions(data);
+    if (tab === "experiments" && data.next_cursor && !staging) {
+      document.querySelector("#experiment-results")?.insertAdjacentHTML("afterend", `<div class="pagination-actions"><button class="secondary-button" id="load-more-experiments" type="button">加载更多实验片段</button></div>`);
+      document.querySelector("#load-more-experiments")?.addEventListener("click", async (event) => {
+        const button = event.currentTarget;
+        button.disabled = true;
+        try { await loadArchiveExperiments(name, data.next_cursor); await renderArchive(name, "experiments"); }
+        catch (error) { toast(error.message, "error"); button.disabled = false; }
+      });
+    }
     if (tab === "materials") {
       bindMaterialFilters(data);
       const focus = routeQuery().get("focus");
@@ -2564,12 +2778,17 @@ document.querySelector("#nav-toggle").addEventListener("click", () => {
   shell.dataset.collapsed = String(collapsed);
   document.querySelector("#nav-toggle").setAttribute("aria-label", collapsed ? "展开全局导航" : "收起全局导航");
 });
+let archiveSearchTimer;
 const globalSearchInput = document.querySelector("#global-search");
 globalSearchInput.addEventListener("input", (event) => {
   state.search = event.target.value;
-  const route = routeParts()[0] || "home";
-  if (["home","experiments","materials","reports"].includes(route)) router();
-  renderGlobalSearchResults(state.search);
+  clearTimeout(archiveSearchTimer);
+  archiveSearchTimer=setTimeout(async ()=>{
+    const route = routeParts()[0] || "home";
+    if (!["home","experiments","materials","reports"].includes(route)) return;
+    try { await loadAll(); await router(); renderGlobalSearchResults(state.search); }
+    catch (error) { toast(error.message,"error"); }
+  },300);
 });
 globalSearchInput.addEventListener("focus",()=>renderGlobalSearchResults(state.search));
 globalSearchInput.addEventListener("keydown",handleGlobalSearchKey);
@@ -2579,6 +2798,7 @@ document.querySelector("#refresh-button").addEventListener("click", async () => 
   button.disabled = true;
   button.classList.add("is-busy");
   state.archiveCache.clear();
+  state.materialCache.clear();
   state.libraryLoadErrors.clear();
   try {
     await loadAll();

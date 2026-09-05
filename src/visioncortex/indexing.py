@@ -27,6 +27,23 @@ EVIDENCE_REGISTRY_NAME = "evidence_registry.jsonl"
 DECISION_REGISTRY_NAME = "decision_receipt_registry.jsonl"
 PHYSICAL_CHANGE_REGISTRY_NAME = "physical_change_registry.jsonl"
 
+_ACTION_SEARCH_ALIASES = {
+    "hand_object_contact": "手 物体 接触 拿取 抓取 放置 touch grasp pick place",
+    "object_movement": "物体 移动 搬运 位移 move movement transport",
+    "liquid_movement": "液体 移动 流动 倾倒 倒液 liquid pour movement",
+    "liquid_transfer": "液体 转移 移液 吸取 排液 加液 pipette transfer aspirate dispense",
+    "pipette_transfer_operation": "移液器 移液 吸取 排液 加液 pipette transfer aspirate dispense",
+    "container_state_change": "容器 状态 变化 开盖 关盖 密封 container open close cap",
+    "device_panel_operation": "设备 面板 操作 按键 旋钮 开关 device panel button knob switch",
+    "panel_operation": "设备 面板 操作 按键 旋钮 开关 device panel button knob switch",
+}
+
+
+def action_search_aliases(action_type: str) -> str:
+    """Return deterministic bilingual terms for the existing action taxonomy."""
+
+    return _ACTION_SEARCH_ALIASES.get(str(action_type or ""), "")
+
 
 def stable_event_uid(archive_id: str, group_id: str, event_id: str) -> str:
     """Return a deterministic identifier that remains stable across reruns."""
@@ -166,10 +183,16 @@ def _artifact_record(
         and cached.get("path") == relative
         and cached.get("size_bytes") == media_stat.st_size
         and cached.get("mtime_ns") == media_stat.st_mtime_ns
+        and cached.get("ctime_ns") == media_stat.st_ctime_ns
+        and cached.get("file_identity") == media_stat.st_ino
         and cached.get("sidecar_size_bytes")
         == (sidecar_stat.st_size if sidecar_stat else None)
         and cached.get("sidecar_mtime_ns")
         == (sidecar_stat.st_mtime_ns if sidecar_stat else None)
+        and cached.get("sidecar_ctime_ns")
+        == (sidecar_stat.st_ctime_ns if sidecar_stat else None)
+        and cached.get("sidecar_file_identity")
+        == (sidecar_stat.st_ino if sidecar_stat else None)
         and cached.get("sha256")
         and (cached.get("sidecar_sha256") if sidecar_available else True)
     )
@@ -190,9 +213,13 @@ def _artifact_record(
         "mime_type": mimetypes.guess_type(media.name)[0] or "application/octet-stream",
         "size_bytes": media_stat.st_size,
         "mtime_ns": media_stat.st_mtime_ns,
+        "ctime_ns": media_stat.st_ctime_ns,
+        "file_identity": media_stat.st_ino,
         "sha256": cached["sha256"] if cache_matches else _sha256(media),
         "sidecar_size_bytes": sidecar_stat.st_size if sidecar_stat else None,
         "sidecar_mtime_ns": sidecar_stat.st_mtime_ns if sidecar_stat else None,
+        "sidecar_ctime_ns": sidecar_stat.st_ctime_ns if sidecar_stat else None,
+        "sidecar_file_identity": sidecar_stat.st_ino if sidecar_stat else None,
         "sidecar_sha256": (
             cached["sidecar_sha256"]
             if cache_matches and sidecar_available
@@ -567,6 +594,9 @@ def _populate_sqlite(
                             "experiment": (payload.get("provenance") or {}).get(
                                 "experiment_name"
                             ),
+                            "action_search_aliases": action_search_aliases(
+                                str(payload.get("action_type") or "")
+                            ),
                         }
                     )
                 )
@@ -744,16 +774,14 @@ def build_archive_index(
     previous_artifacts: dict[str, dict[str, Any]] = {}
     if previous_registry_path.is_file():
         try:
-            previous_artifacts = {
-                item["artifact_uid"]: item
-                for item in (
-                    json.loads(line)
-                    for line in previous_registry_path.read_text(
-                        encoding="utf-8-sig"
-                    ).splitlines()
-                    if line.strip()
-                )
-            }
+            with previous_registry_path.open(
+                "r", encoding="utf-8-sig"
+            ) as previous_registry:
+                for line in previous_registry:
+                    if not line.strip():
+                        continue
+                    item = json.loads(line)
+                    previous_artifacts[str(item["artifact_uid"])] = item
         except (OSError, json.JSONDecodeError, KeyError):
             previous_artifacts = {}
     allow_incomplete = any(
@@ -1028,20 +1056,43 @@ def search_archive_index(
                 f"{where} ORDER BY k.peak_timestamp_us, k.event_uid LIMIT ?",
                 parameters,
             ).fetchall()
+        if use_fts and not rows:
+            like_conditions = [
+                item for item in conditions if item != "key_events_fts MATCH ?"
+            ]
+            like_parameters = parameters[1:-1]
+            like_conditions.append("k.search_text LIKE ?")
+            like_parameters.extend((f"%{query}%", max(1, int(limit))))
+            like_where = f" WHERE {' AND '.join(like_conditions)}"
+            rows = connection.execute(
+                "SELECT k.* FROM key_events k"
+                f"{like_where} ORDER BY k.peak_timestamp_us, k.event_uid LIMIT ?",
+                like_parameters,
+            ).fetchall()
+        artifact_map: dict[str, list[dict[str, Any]]] = {}
+        event_uids = [str(row["event_uid"]) for row in rows]
+        if event_uids:
+            placeholders = ",".join("?" for _ in event_uids)
+            artifact_rows = connection.execute(
+                "SELECT event_uid, artifact_json FROM artifacts "
+                f"WHERE event_uid IN ({placeholders}) "
+                "ORDER BY event_uid, artifact_type, view_id",
+                event_uids,
+            ).fetchall()
+            for artifact_row in artifact_rows:
+                artifact_map.setdefault(str(artifact_row["event_uid"]), []).append(
+                    json.loads(artifact_row["artifact_json"])
+                )
         results = []
         for row in rows:
             payload = json.loads(row["event_json"])
-            artifact_rows = connection.execute(
-                "SELECT artifact_json FROM artifacts WHERE event_uid = ? ORDER BY artifact_type, view_id",
-                (row["event_uid"],),
-            ).fetchall()
             payload.update(
                 {
                     "event_uid": row["event_uid"],
                     "archive_id": row["archive_id"],
-                    "artifact_references": [
-                        json.loads(item["artifact_json"]) for item in artifact_rows
-                    ],
+                    "artifact_references": artifact_map.get(
+                        str(row["event_uid"]), []
+                    ),
                     "key_material_json_reference": {
                         "path": "Key-Materials/Key-Materials-Model-Understanding.json",
                         "event_id": row["event_id"],

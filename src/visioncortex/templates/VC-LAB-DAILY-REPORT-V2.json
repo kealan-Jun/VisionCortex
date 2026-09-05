@@ -35,12 +35,6 @@
       "title": "耗时与模型用量",
       "required": true,
       "fields": ["total_duration_seconds", "preprocessing_seconds", "input_tokens", "output_tokens", "total_tokens"]
-    },
-    {
-      "id": "human_review",
-      "title": "自动验收与可选备注",
-      "required": false,
-      "completion_gate": "evidence_package_eval"
     }
   ],
   "visual_policy": {

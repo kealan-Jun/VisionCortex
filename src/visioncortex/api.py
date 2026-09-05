@@ -8,6 +8,7 @@ import math
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -27,6 +28,14 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 
+from .archive_catalog import (
+    archive_catalog_path,
+    catalog_archive_release,
+    ensure_archive_catalog,
+    lightweight_release_integrity,
+    list_catalog_archives,
+    search_catalog_events,
+)
 from .collection_catalog import discover_collections, get_collection
 from .collection_state import record_collection_state
 from .annotation_workspace import (
@@ -62,24 +71,30 @@ from .run_queue import DurableRunQueue, QueuedRunJob
 from .schemas import RunManifest, VideoSegmentInput, ViewInput
 from .storage import (
     ARCHIVE_DIRECTORIES,
+    archive_promotion_in_progress,
     fixed_archive_staging_paths,
     initialize_nas_archive,
     prepare_from_nas_index,
     promote_fixed_archive,
     run_staging_roots,
+    read_current_release_pointer,
     safe_archive_name,
 )
 from .upload_sessions import StorageReservationError, UploadSessionStore
 from .web_access import (
+    append_access_audit,
+    authenticate_basic_authorization,
     is_allowed_lan_client,
-    valid_basic_authorization,
     validate_web_access_configuration,
     web_access_mode,
+    web_https_required,
 )
 
 
 @asynccontextmanager
 async def _lifespan(_: FastAPI):
+    if _ARCHIVE_STREAM_LIMIT_ERROR:
+        raise RuntimeError(_ARCHIVE_STREAM_LIMIT_ERROR)
     validate_web_access_configuration()
     settings = _settings()
     _initialize_persistent_queue(settings)
@@ -106,6 +121,19 @@ _lock = threading.Lock()
 _gpu_job_lock = threading.Lock()
 _upload_finalize_lock = threading.Lock()
 _nas_batch_submission_lock = threading.Lock()
+_web_access_audit_lock = threading.Lock()
+try:
+    _ARCHIVE_STREAM_LIMIT = max(
+        1, int(os.getenv("VISIONCORTEX_WEB_MAX_CONCURRENT_ARCHIVE_STREAMS", "8"))
+    )
+except ValueError:
+    _ARCHIVE_STREAM_LIMIT = 8
+    _ARCHIVE_STREAM_LIMIT_ERROR = (
+        "VISIONCORTEX_WEB_MAX_CONCURRENT_ARCHIVE_STREAMS must be an integer"
+    )
+else:
+    _ARCHIVE_STREAM_LIMIT_ERROR = None
+_archive_stream_slots = threading.BoundedSemaphore(_ARCHIVE_STREAM_LIMIT)
 _runs: dict[str, dict[str, Any]] = {}
 _persistent_queue: DurableRunQueue | None = None
 _upload_sessions: UploadSessionStore | None = None
@@ -348,33 +376,102 @@ def _recover_orphaned_tasks() -> None:
 async def enforce_web_access(request: Request, call_next):
     """Keep the default local service open and fail closed for LAN service mode."""
 
+    started = time.perf_counter()
+    identity: dict[str, str] | None = None
+    mode = "unknown"
+
+    def audited(response: Response) -> Response:
+        if mode == "lan" and request.url.path.startswith("/api/"):
+            try:
+                settings = _settings()
+                audit_path = (
+                    Path(settings["storage"]["local_runtime_root"])
+                    / "state"
+                    / f"web_access_audit-{datetime.now().astimezone():%Y-%m-%d}.jsonl"
+                )
+                with _web_access_audit_lock:
+                    append_access_audit(
+                        audit_path,
+                        {
+                            "schema_version": "visioncortex-web-access-audit/1",
+                            "observed_at": datetime.now().astimezone().isoformat(),
+                            "username": (identity or {}).get("username") or "anonymous",
+                            "role": (identity or {}).get("role"),
+                            "client": request.client.host if request.client else None,
+                            "method": request.method,
+                            "path": request.url.path,
+                            "status_code": response.status_code,
+                            "duration_ms": round(
+                                (time.perf_counter() - started) * 1000.0, 3
+                            ),
+                        },
+                    )
+            except (OSError, KeyError, RuntimeError, TypeError):
+                pass
+        return response
+
     try:
         mode = web_access_mode()
         if mode == "local":
-            return await call_next(request)
+            identity = {"username": "local", "role": "admin"}
+            request.state.web_identity = identity
+            return audited(await call_next(request))
         client_host = request.client.host if request.client else None
         if not is_allowed_lan_client(client_host):
-            return Response(
+            return audited(Response(
                 "VisionCortex LAN access is not allowed from this network.",
                 status_code=403,
                 headers={"Cache-Control": "no-store"},
-            )
-        if not valid_basic_authorization(request.headers.get("authorization")):
-            return Response(
+            ))
+        if web_https_required() and request.url.scheme != "https":
+            return audited(Response(
+                "VisionCortex LAN access requires HTTPS.",
+                status_code=426,
+                headers={"Cache-Control": "no-store"},
+            ))
+        identity = authenticate_basic_authorization(
+            request.headers.get("authorization")
+        )
+        if identity is None:
+            return audited(Response(
                 "VisionCortex login required.",
                 status_code=401,
                 headers={
                     "WWW-Authenticate": 'Basic realm="VisionCortex 3090 Ti", charset="UTF-8"',
                     "Cache-Control": "no-store",
                 },
+            ))
+        if identity["role"] == "viewer" and request.method not in {
+            "GET",
+            "HEAD",
+            "OPTIONS",
+        }:
+            return audited(Response(
+                "VisionCortex viewer accounts are read-only.",
+                status_code=403,
+                headers={"Cache-Control": "no-store"},
+            ))
+        if identity["role"] != "admin" and (
+            request.url.path.startswith("/api/annotation-workspace")
+            or (
+                request.method == "POST"
+                and request.url.path.startswith("/api/archives/")
+                and request.url.path.endswith("/open")
             )
+        ):
+            return audited(Response(
+                "VisionCortex administrator access is required.",
+                status_code=403,
+                headers={"Cache-Control": "no-store"},
+            ))
+        request.state.web_identity = identity
     except RuntimeError:
-        return Response(
+        return audited(Response(
             "VisionCortex Web access configuration is invalid.",
             status_code=503,
             headers={"Cache-Control": "no-store"},
-        )
-    return await call_next(request)
+        ))
+    return audited(await call_next(request))
 
 
 @app.middleware("http")
@@ -438,6 +535,36 @@ def _nas_storage_available(settings: dict[str, Any]) -> bool:
         return False
 
 
+@app.middleware("http")
+async def limit_archive_streams(request: Request, call_next):
+    """Bound concurrent NAS-backed streams for predictable multi-user playback."""
+
+    if request.url.path != "/api/archive-file":
+        return await call_next(request)
+    if not _archive_stream_slots.acquire(blocking=False):
+        return Response(
+            "VisionCortex archive streaming is busy; retry shortly.",
+            status_code=429,
+            headers={"Retry-After": "2", "Cache-Control": "no-store"},
+        )
+    try:
+        response = await call_next(request)
+    except BaseException:
+        _archive_stream_slots.release()
+        raise
+    original_iterator = response.body_iterator
+
+    async def guarded_body():
+        try:
+            async for chunk in original_iterator:
+                yield chunk
+        finally:
+            _archive_stream_slots.release()
+
+    response.body_iterator = guarded_body()
+    return response
+
+
 def _safe_file_name(value: str, fallback_stem: str = "file") -> str:
     original = Path(value).name
     suffix = Path(original).suffix
@@ -464,6 +591,24 @@ def _settings() -> dict[str, Any]:
 
 def _archive_root(settings: dict[str, Any] | None = None) -> Path:
     return Path((settings or _settings())["storage"]["archive_root"])
+
+
+def _archive_catalog_database(
+    settings: dict[str, Any] | None = None,
+    archive_root: Path | None = None,
+) -> Path:
+    effective_settings = settings or _settings()
+    root = (archive_root or _archive_root(effective_settings)).resolve()
+    storage = effective_settings.get("storage") or {}
+    local_runtime = Path(storage.get("local_runtime_root") or (root / ".VisionCortex-Web-Runtime"))
+    return archive_catalog_path(local_runtime, root)
+
+
+def _ensure_archive_read_catalog(root: Path | None = None) -> Path:
+    archive_root = (root or _archive_root()).resolve()
+    database = _archive_catalog_database(archive_root=archive_root)
+    ensure_archive_catalog(archive_root, database)
+    return database
 
 
 def _queue_database_path(settings: dict[str, Any]) -> Path:
@@ -662,6 +807,101 @@ def _reserve_archive(settings: dict[str, Any], experiment_name: str) -> tuple[st
             archive_name = f"{base_name}-{suffix}-{uuid.uuid4().hex[:4]}"
         nas_root = initialize_nas_archive(settings, archive_name)
     return archive_name, nas_root
+
+
+def _prepare_formal_run_staging(
+    settings: dict[str, Any],
+    archive_name: str,
+    run_id: str,
+    fixed_root: Path,
+) -> tuple[Path, Path, Path]:
+    """Route every Web-created derived package through the same promotion gate."""
+
+    expected_fixed, staging_root, history_root = fixed_archive_staging_paths(
+        settings, archive_name, run_id
+    )
+    if expected_fixed.resolve() != fixed_root.resolve():
+        raise RuntimeError(
+            f"Formal archive reservation mismatch: {expected_fixed} != {fixed_root}"
+        )
+    settings["storage"]["active_archive_path"] = str(staging_root)
+    settings["storage"]["run_output_mode"] = "nas_direct"
+    settings["storage"]["formal_fixed_root"] = str(expected_fixed)
+    settings["storage"]["formal_history_root"] = str(history_root)
+    settings["storage"]["formal_promotion_required"] = True
+    initialize_nas_archive(settings, archive_name)
+    source_json = fixed_root / "JSON-Config-Files"
+    if source_json.is_dir():
+        shutil.copytree(
+            source_json,
+            staging_root / "JSON-Config-Files",
+            dirs_exist_ok=True,
+        )
+    return expected_fixed, staging_root, history_root
+
+
+def _manifest_source_receipts(
+    manifest: RunManifest,
+    known_sha256: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """Describe manifest inputs without reopening large media files."""
+
+    known_sha256 = known_sha256 or {}
+    receipts: list[dict[str, Any]] = []
+    for view in manifest.views:
+        source_pairs: list[tuple[str, int | None, Path]] = []
+        if view.video is not None:
+            source_pairs.append(("video", None, Path(view.video)))
+            if view.timestamps_csv is not None:
+                source_pairs.append(("timestamp_csv", None, Path(view.timestamps_csv)))
+        else:
+            for ordinal, segment in enumerate(view.segments):
+                source_pairs.append(("video", ordinal, Path(segment.video)))
+                if segment.timestamps_csv is not None:
+                    source_pairs.append(
+                        ("timestamp_csv", ordinal, Path(segment.timestamps_csv))
+                    )
+        for kind, ordinal, path in source_pairs:
+            stat = path.stat()
+            resolved = str(path.resolve())
+            sha256 = known_sha256.get(resolved) or known_sha256.get(str(path))
+            receipt = {
+                "kind": kind,
+                "view_id": view.view_id,
+                "segment_ordinal": ordinal,
+                "path": str(path),
+                "size_bytes": int(stat.st_size),
+                "mtime_ns": int(stat.st_mtime_ns),
+                "source_fingerprint_algorithm": "path_size_mtime",
+            }
+            if sha256:
+                receipt.update(
+                    {
+                        "sha256": sha256,
+                        "content_hash": sha256,
+                        "content_hash_algorithm": "sha256",
+                    }
+                )
+            receipts.append(receipt)
+    return receipts
+
+
+def _declared_role_resolution(manifest: RunManifest, source: str) -> dict[str, Any]:
+    return {
+        "schema_version": "visioncortex-view-role-resolution-ledger/1",
+        "experiment_id": manifest.experiment_id,
+        "input_source": source,
+        "status": "resolved",
+        "views": [
+            {
+                "camera_key": view.view_id,
+                "resolved_role": view.role.value,
+                "resolution_source": source,
+                "blocking_reasons": [],
+            }
+            for view in manifest.views
+        ],
+    }
 
 
 def _require_upload_store(settings: dict[str, Any]) -> UploadSessionStore:
@@ -1207,7 +1447,7 @@ def _write_queue_recovery_receipt(
     run_id: str,
     state: str,
     manifest_path: Path,
-    input_seal_path: Path,
+    input_seal_path: Path | None,
     ingest: dict[str, Any] | None,
     error: str | None = None,
     recovered_from_archive_receipt: bool = False,
@@ -1224,7 +1464,11 @@ def _write_queue_recovery_receipt(
         "updated_at": datetime.now().astimezone().isoformat(),
         "archive_root": str(nas_root),
         "manifest_relative_path": manifest_path.relative_to(nas_root).as_posix(),
-        "input_seal_relative_path": input_seal_path.relative_to(nas_root).as_posix(),
+        "input_seal_relative_path": (
+            input_seal_path.relative_to(nas_root).as_posix()
+            if input_seal_path is not None
+            else None
+        ),
         "ingest": ingest,
         "recovery_context": recovery_context,
         "error": error,
@@ -1311,38 +1555,60 @@ def _recover_jobs_from_archive_receipts(settings: dict[str, Any]) -> None:
             if _runtime_activity_receipt(status_path)["active"]:
                 continue
         manifest_relative = Path(str(payload.get("manifest_relative_path") or ""))
-        seal_relative = Path(str(payload.get("input_seal_relative_path") or ""))
-        if manifest_relative.is_absolute() or seal_relative.is_absolute():
+        seal_relative_value = str(payload.get("input_seal_relative_path") or "").strip()
+        seal_relative = Path(seal_relative_value) if seal_relative_value else None
+        if manifest_relative.is_absolute() or (
+            seal_relative is not None and seal_relative.is_absolute()
+        ):
             continue
         manifest_path = (nas_root / manifest_relative).resolve()
-        input_seal_path = (nas_root / seal_relative).resolve()
+        input_seal_path = (
+            (nas_root / seal_relative).resolve()
+            if seal_relative is not None
+            else None
+        )
         try:
             manifest_path.relative_to(nas_root)
-            input_seal_path.relative_to(nas_root)
+            if input_seal_path is not None:
+                input_seal_path.relative_to(nas_root)
         except ValueError:
             continue
-        if not manifest_path.is_file() or not input_seal_path.is_file():
+        if not manifest_path.is_file() or (
+            input_seal_path is not None and not input_seal_path.is_file()
+        ):
             continue
         try:
             manifest = RunManifest.model_validate(
                 yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
             )
-            seal = json.loads(input_seal_path.read_text(encoding="utf-8"))
+            seal = (
+                json.loads(input_seal_path.read_text(encoding="utf-8"))
+                if input_seal_path is not None
+                else None
+            )
         except (OSError, ValueError, yaml.YAMLError, json.JSONDecodeError):
             continue
-        if not verify_input_seal(seal) or seal.get(
-            "experiment_id"
-        ) != manifest.experiment_id:
+        if seal is not None and (
+            not verify_input_seal(seal)
+            or seal.get("experiment_id") != manifest.experiment_id
+        ):
             continue
         sources_available = True
-        for source in seal.get("sources") or []:
+        sources = (
+            seal.get("sources") or []
+            if seal is not None
+            else _manifest_source_receipts(manifest)
+        )
+        for source in sources:
             source_path = Path(str(source.get("path") or ""))
             try:
                 source_stat = source_path.stat()
             except OSError:
                 sources_available = False
                 break
-            if int(source.get("size_bytes") or -1) != int(source_stat.st_size):
+            if source.get("size_bytes") is not None and int(
+                source["size_bytes"]
+            ) != int(source_stat.st_size):
                 sources_available = False
                 break
             expected_mtime = source.get("mtime_ns")
@@ -1356,6 +1622,18 @@ def _recover_jobs_from_archive_receipts(settings: dict[str, Any]) -> None:
         recovered_settings = copy.deepcopy(settings)
         recovered_settings["storage"]["active_archive_path"] = str(nas_root)
         if job_kind == "run":
+            context = payload.get("recovery_context") or {}
+            fixed_root_value = str(context.get("formal_fixed_root") or "").strip()
+            history_root_value = str(context.get("formal_history_root") or "").strip()
+            if fixed_root_value and history_root_value:
+                recovered_settings["storage"].update(
+                    {
+                        "run_output_mode": "nas_direct",
+                        "formal_fixed_root": fixed_root_value,
+                        "formal_history_root": history_root_value,
+                        "formal_promotion_required": True,
+                    }
+                )
             recovered_settings["storage"]["sync_to_nas"] = (
                 str((payload.get("ingest") or {}).get("retention_mode")) == "nas_only"
             )
@@ -1364,7 +1642,10 @@ def _recover_jobs_from_archive_receipts(settings: dict[str, Any]) -> None:
             "progress": 0.0,
             "message": "本地队列账本丢失后，已从归档输入封条恢复任务",
             "experiment_id": manifest.experiment_id,
-            "nas_output": str(nas_root),
+            "nas_output": str(
+                recovered_settings["storage"].get("formal_fixed_root") or nas_root
+            ),
+            "nas_staging": str(nas_root),
             "recovered_from_archive_receipt": True,
         }
         _runs[run_id] = run_state
@@ -1427,7 +1708,7 @@ def _append_web_end_to_end_metrics(
         6,
     )
     for root in dict.fromkeys(path.resolve() for path in roots):
-        metrics_path = root / "JSON-Config-Files" / "run_metrics.json"
+        metrics_path = root / "JSON-Config-Files" / "delivery_metrics.json"
         metrics = _read_json(metrics_path, {}) or {}
         metrics["web_ingest"] = {
             key: value
@@ -1435,7 +1716,7 @@ def _append_web_end_to_end_metrics(
             if key not in {"request_started_perf", "request_started_epoch"}
         }
         metrics["web_end_to_end"] = {
-            "definition": "HTTP request arrival + multipart receive + local/NAS original retention + analysis + final NAS archive",
+            "definition": "HTTP request arrival through analysis release-gate readiness; final publication time is authoritative in the current-release pointer",
             "request_received_at": ingest["request_received_at"],
             "completed_at": ended_at,
             "total_duration_seconds": total_seconds,
@@ -1457,7 +1738,7 @@ def _append_fixed_benchmark_metrics(
         6,
     )
     for root in dict.fromkeys(path.resolve() for path in roots):
-        metrics_path = root / "JSON-Config-Files" / "run_metrics.json"
+        metrics_path = root / "JSON-Config-Files" / "delivery_metrics.json"
         metrics = _read_json(metrics_path, {}) or {}
         metrics["nas_index_ingest"] = {
             key: value
@@ -1470,7 +1751,7 @@ def _append_fixed_benchmark_metrics(
             }
         }
         metrics["fixed_benchmark_end_to_end"] = {
-            "definition": "benchmark request + NAS index staging/reuse + analysis + fixed NAS archive publication",
+            "definition": "benchmark request through analysis release-gate readiness; final publication time is authoritative in the current-release pointer",
             "request_received_at": timing["request_received_at"],
             "completed_at": ended_at,
             "total_duration_seconds": total_seconds,
@@ -1494,7 +1775,7 @@ def _append_collection_index_metrics(
         6,
     )
     for root in dict.fromkeys(path.resolve() for path in roots):
-        metrics_path = root / "JSON-Config-Files" / "run_metrics.json"
+        metrics_path = root / "JSON-Config-Files" / "delivery_metrics.json"
         metrics = _read_json(metrics_path, {}) or {}
         metrics["nas_index_ingest"] = {
             key: value
@@ -1507,7 +1788,7 @@ def _append_collection_index_metrics(
             }
         }
         metrics["collection_end_to_end"] = {
-            "definition": "collection card selection + zero-copy NAS index ingest + analysis + NAS archive",
+            "definition": "collection selection through analysis release-gate readiness; final publication time is authoritative in the current-release pointer",
             "request_received_at": timing["request_received_at"],
             "completed_at": ended_at,
             "total_duration_seconds": total_seconds,
@@ -1523,6 +1804,31 @@ def _read_json(path: Path, default: Any = None) -> Any:
         return json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError):
         return default
+
+
+def _pipeline_status_from_root(root: Path) -> dict[str, Any]:
+    return _read_json(root / "JSON-Config-Files/pipeline_status.json", {}) or _read_json(
+        root / "run_status.json", {}
+    ) or {}
+
+
+def _merged_run_metrics(root: Path) -> dict[str, Any]:
+    json_root = root / "JSON-Config-Files"
+    metrics = _read_json(json_root / "run_metrics.json", {}) or _read_json(
+        json_root / "run_metrics_live.json", {}
+    ) or {}
+    delivery = _read_json(json_root / "delivery_metrics.json", {}) or {}
+    metrics.update(delivery)
+    publication = (read_current_release_pointer(root) or {}).get("publication")
+    if isinstance(publication, dict):
+        metric_key = str(publication.get("metric_key") or "").strip()
+        if metric_key:
+            metrics[metric_key] = {
+                key: value
+                for key, value in publication.items()
+                if key != "metric_key"
+            }
+    return metrics
 
 
 def _stage_receipts_from_root(root: Path) -> list[dict[str, Any]]:
@@ -1598,14 +1904,10 @@ def _archive_areas_from_root(root: Path) -> list[dict[str, Any]]:
 
 def _run_snapshot_from_root(root: Path) -> dict[str, Any]:
     json_root = root / "JSON-Config-Files"
-    status = _read_json(json_root / "pipeline_status.json", {}) or _read_json(
-        root / "run_status.json", {}
-    ) or {}
+    status = _pipeline_status_from_root(root)
     live_telemetry = _read_json(json_root / "resource_telemetry_live.json", {}) or {}
     telemetry = _read_json(json_root / "resource_telemetry.json", {}) or {}
-    metrics = _read_json(json_root / "run_metrics.json", {}) or _read_json(
-        json_root / "run_metrics_live.json", {}
-    ) or {}
+    metrics = _merged_run_metrics(root)
     source_progress = _read_json(json_root / "source_progress.json", {}) or {}
     if source_progress.get("views"):
         status["views"] = source_progress["views"]
@@ -1674,8 +1976,15 @@ def _find_staging_run(settings: dict[str, Any], run_id: str) -> Path | None:
     return None
 
 
-def _file_url(archive_name: str, relative: str | Path) -> str:
-    return f"/api/archive-file?archive={quote(archive_name)}&path={quote(Path(relative).as_posix())}"
+def _file_url(
+    archive_name: str,
+    relative: str | Path,
+    release_id: str | None = None,
+) -> str:
+    url = f"/api/archive-file?archive={quote(archive_name)}&path={quote(Path(relative).as_posix())}"
+    if release_id:
+        url += f"&release={quote(release_id)}"
+    return url
 
 
 def _staging_file_url(run_id: str, relative: str | Path) -> str:
@@ -1690,6 +1999,14 @@ def _resolve_archive(archive_name: str) -> Path:
     candidate = (root / archive_name).resolve()
     if candidate.parent != root or not candidate.is_dir():
         raise HTTPException(404, "实验档案不存在")
+    if archive_promotion_in_progress(candidate):
+        raise HTTPException(409, "实验档案正在原子发布，请稍后重试")
+    json_root = candidate / "JSON-Config-Files"
+    if not (
+        (json_root / "evidence_package.json").is_file()
+        or (json_root / INDEX_DB_NAME).is_file()
+    ):
+        raise HTTPException(409, "实验档案尚未通过正式发布门禁")
     return candidate
 
 
@@ -1770,23 +2087,84 @@ def _execute_now(
     ingest: dict[str, Any] | None = None,
 ) -> None:
     def progress(stage: str, value: float, message: str) -> None:
-        _update(run_id, state=stage, progress=value, message=message, nas_output=str(nas_root))
+        if (
+            stage == "completed"
+            and settings.get("storage", {}).get("formal_promotion_required")
+        ):
+            stage = "finalizing"
+            value = min(float(value), 0.999)
+            message = "派生结果已通过验收，正在发布正式档案"
+        display_root = str(
+            settings.get("storage", {}).get("formal_fixed_root") or nas_root
+        )
+        _update(
+            run_id,
+            state=stage,
+            progress=value,
+            message=message,
+            nas_output=display_root,
+            nas_staging=str(nas_root),
+        )
 
     try:
-        _update(run_id, state="running", progress=0.0, nas_output=str(nas_root))
+        _update(
+            run_id,
+            state="running",
+            progress=0.0,
+            nas_output=str(
+                settings.get("storage", {}).get("formal_fixed_root") or nas_root
+            ),
+            nas_staging=str(nas_root),
+        )
         _update_queue_recovery_state(nas_root, "running")
         output = EvidencePipeline(settings, progress).run(manifest)
+        formal_fixed_value = str(
+            settings.get("storage", {}).get("formal_fixed_root") or ""
+        ).strip()
+        formal_history_value = str(
+            settings.get("storage", {}).get("formal_history_root") or ""
+        ).strip()
+        promotion = None
+        completed_root = Path(output)
+        publication_context = None
         if ingest is not None:
-            _append_web_end_to_end_metrics([Path(output), nas_root], ingest, completed=True)
+            _append_web_end_to_end_metrics([Path(output)], ingest, completed=True)
+            publication_context = {
+                "metric_key": "web_end_to_end",
+                "definition": "HTTP request arrival + source retention + analysis + atomic formal archive publication",
+                "request_received_at": ingest.get("request_received_at"),
+                "request_started_epoch": ingest.get("request_started_epoch"),
+            }
+        if settings.get("storage", {}).get("formal_promotion_required"):
+            _update_queue_recovery_state(nas_root, "completed")
+            if not formal_fixed_value or not formal_history_value:
+                raise RuntimeError(
+                    "Formal Web run is missing fixed/history promotion targets"
+                )
+            formal_fixed_root = Path(formal_fixed_value)
+            promotion = promote_fixed_archive(
+                Path(output),
+                formal_fixed_root,
+                Path(formal_history_value),
+                publication_context,
+            )
+            completed_root = formal_fixed_root
+        elif ingest is not None:
+            _append_web_end_to_end_metrics(
+                [completed_root], ingest, completed=True
+            )
         _update(
             run_id,
             state="completed",
             progress=1.0,
-            output=str(output),
-            nas_output=str(nas_root),
-            archive_url=f"/?archive={quote(nas_root.name)}",
+            output=str(completed_root),
+            nas_output=str(completed_root),
+            nas_staging=str(nas_root),
+            promotion=promotion,
+            archive_url=f"/?archive={quote(completed_root.name)}",
         )
-        _update_queue_recovery_state(nas_root, "completed")
+        if not settings.get("storage", {}).get("formal_promotion_required"):
+            _update_queue_recovery_state(completed_root, "completed")
     except Exception as exc:
         if ingest is not None:
             _append_web_end_to_end_metrics([nas_root], ingest, completed=False)
@@ -1822,6 +2200,10 @@ def _execute_fixed_benchmark_now(
     )
 
     def progress(stage: str, value: float, message: str) -> None:
+        if stage == "completed":
+            stage = "finalizing"
+            value = min(float(value), 0.999)
+            message = "派生结果已通过验收，正在发布固定基准档案"
         _update(run_id, state=stage, progress=value, message=message, nas_output=str(fixed_root))
 
     try:
@@ -1857,7 +2239,19 @@ def _execute_fixed_benchmark_now(
         _update(run_id, state="running", progress=0.02, nas_output=str(fixed_root))
         output = EvidencePipeline(settings, progress).run(manifest)
         _append_fixed_benchmark_metrics([Path(output), nas_root], timing, completed=True)
-        receipt = promote_fixed_archive(nas_root, fixed_root, history_root)
+        receipt = promote_fixed_archive(
+            nas_root,
+            fixed_root,
+            history_root,
+            {
+                "metric_key": "fixed_benchmark_end_to_end",
+                "definition": "benchmark request + NAS index preparation + analysis + atomic fixed archive publication",
+                "request_received_at": timing.get("request_received_at"),
+                "request_started_epoch": timing.get("request_started_epoch"),
+                "experiment_id": _BENCHMARK_EXPERIMENT_ID,
+                "archive_name": _BENCHMARK_ARCHIVE_NAME,
+            },
+        )
         _update(
             run_id,
             state="completed",
@@ -1972,6 +2366,10 @@ def _execute_index_collection_now(
     timing: dict[str, Any],
 ) -> None:
     def progress(stage: str, value: float, message: str) -> None:
+        if stage == "completed":
+            stage = "finalizing"
+            value = min(float(value), 0.999)
+            message = "派生结果已通过验收，正在发布采集批次正式档案"
         _update(
             run_id,
             state=stage,
@@ -2047,8 +2445,20 @@ def _execute_index_collection_now(
         _append_collection_index_metrics(
             [Path(output), staging_root], timing, completed=True
         )
-        promotion = promote_fixed_archive(staging_root, fixed_root, history_root)
-        _update_queue_recovery_state(fixed_root, "completed")
+        _update_queue_recovery_state(staging_root, "completed")
+        promotion = promote_fixed_archive(
+            staging_root,
+            fixed_root,
+            history_root,
+            {
+                "metric_key": "collection_end_to_end",
+                "definition": "collection selection + zero-copy NAS ingest + analysis + atomic formal archive publication",
+                "request_received_at": timing.get("request_received_at"),
+                "request_started_epoch": timing.get("request_started_epoch"),
+                "source_experiment_id": timing.get("source_experiment_id"),
+                "archive_name": timing.get("archive_name"),
+            },
+        )
         record_collection_state(
             settings,
             source_experiment_id,
@@ -2200,6 +2610,8 @@ def health() -> dict[str, Any]:
         "capacity_policy": "dynamic_by_submitted_files",
         "view_count_policy": "dynamic",
         "minimum_cross_view_sources": 2,
+        "max_concurrent_archive_streams": _ARCHIVE_STREAM_LIMIT,
+        "web_access": validate_web_access_configuration(),
         "large_uploads": {
             "protocol": "resumable_chunks_v2",
             "compatible_protocols": ["resumable_chunks_v1"],
@@ -2348,40 +2760,80 @@ def annotation_workspace_export() -> dict[str, Any]:
 
 
 @app.get("/api/archives")
-def list_archives() -> dict[str, Any]:
+def list_archives(
+    q: str | None = None,
+    cursor: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+) -> dict[str, Any]:
     root = _archive_root()
     if not root.is_dir():
-        return {"archive_root": str(root), "archives": []}
-    archives = []
-    for folder in sorted(
-        (item for item in root.iterdir() if item.is_dir()),
-        key=lambda item: item.stat().st_mtime,
-        reverse=True,
-    ):
-        directories = {item.name for item in folder.iterdir() if item.is_dir()}
-        if not directories.intersection(ARCHIVE_DIRECTORIES):
-            continue
-        experiment_root = folder / "Experiment-Clips"
-        key_index = folder / "Key-Materials" / "Key-Materials-Model-Understanding.json"
-        daily_manifest = folder / "JSON-Config-Files" / "daily_report_manifest.json"
-        status = _read_json(folder / "JSON-Config-Files" / "pipeline_status.json", {}) or {}
-        metrics = _read_json(folder / "JSON-Config-Files" / "run_metrics.json", {}) or {}
-        archives.append(
-            {
-                "name": folder.name,
-                "modified_at": datetime.fromtimestamp(folder.stat().st_mtime).isoformat(),
-                "experiment_count": len(list(experiment_root.iterdir())) if experiment_root.is_dir() else 0,
-                "key_event_count": len(_read_json(key_index, []) or []),
-                "pipeline_stage": status.get("stage") or ("completed" if metrics else "archived"),
-                "progress": status.get("progress"),
-                "has_model_understanding": key_index.is_file(),
-                "has_daily_report": daily_manifest.is_file(),
-                "has_evidence_index": (
-                    folder / "JSON-Config-Files" / INDEX_DB_NAME
-                ).is_file(),
-            }
+        return {
+            "archive_root": str(root),
+            "archives": [],
+            "count": 0,
+            "total_count": 0,
+            "totals": {"experiments": 0, "key_events": 0},
+            "next_cursor": None,
+        }
+    cursor_filters = {"q": q}
+    decoded = None
+    if cursor:
+        try:
+            decoded = decode_cursor(cursor, namespace="archives", filters=cursor_filters)
+            if set(decoded) != {"modified_epoch_us", "name"}:
+                raise ValueError("archive cursor position is invalid")
+        except (ValueError, TypeError, KeyError) as exc:
+            raise HTTPException(400, "无效的实验档案分页 cursor") from exc
+    try:
+        database = _ensure_archive_read_catalog(root)
+        rows, total_count, totals = list_catalog_archives(
+            database,
+            query=q,
+            after_modified_epoch_us=(int(decoded["modified_epoch_us"]) if decoded else None),
+            after_name=(str(decoded["name"]) if decoded else None),
+            limit=limit + 1,
         )
-    return {"archive_root": str(root), "archives": archives}
+    except (OSError, ValueError, sqlite3.Error) as exc:
+        raise HTTPException(503, f"无法读取实验档案目录索引: {exc}") from exc
+    has_more = len(rows) > limit
+    page = rows[:limit]
+    archives = [
+        {
+            **{key: value for key, value in row.items() if key not in {"source_revision", "modified_epoch_us", "published_epoch", "catalog_error"}},
+            "has_model_understanding": bool(row["has_model_understanding"]),
+            "has_daily_report": bool(row["has_daily_report"]),
+            "has_evidence_index": bool(row["has_evidence_index"]),
+            "formal_accuracy_claim_allowed": (
+                bool(row["formal_accuracy_claim_allowed"])
+                if row["formal_accuracy_claim_allowed"] is not None
+                else None
+            ),
+            "catalog_status": "ready" if not row.get("catalog_error") else "degraded",
+        }
+        for row in page
+    ]
+    next_cursor = None
+    if has_more and page:
+        last = page[-1]
+        next_cursor = encode_cursor(
+            namespace="archives",
+            position={
+                "modified_epoch_us": int(last["modified_epoch_us"]),
+                "name": str(last["name"]),
+            },
+            filters=cursor_filters,
+        )
+    return {
+        "archive_root": str(root),
+        "archives": archives,
+        "count": len(archives),
+        "total_count": total_count,
+        "totals": totals,
+        "has_more": has_more,
+        "next_cursor": next_cursor,
+        "canonical_source": "formal archive JSON and per-archive SQLite",
+        "catalog_is_rebuildable": True,
+    }
 
 
 def _collection_card(collection: dict[str, Any]) -> dict[str, Any]:
@@ -2553,24 +3005,98 @@ def _attach_index_urls(
 ) -> dict[str, Any]:
     result = dict(event)
     result["archive_name"] = archive_name
+    release_id = str(event.get("release_id") or "") or None
     result["event_url"] = f"/api/key-events/{quote(str(event['event_uid']))}?archive={quote(archive_name)}"
     result["artifact_references"] = [
         {
             **artifact,
             "url": (
-                _file_url(archive_name, artifact["path"])
+                _file_url(archive_name, artifact["path"], release_id)
                 if "://" not in str(artifact.get("path") or "")
                 else None
             ),
             "sidecar_url": (
-                _file_url(archive_name, artifact["sidecar_path"])
+                _file_url(archive_name, artifact["sidecar_path"], release_id)
                 if artifact.get("sidecar_path")
                 else None
             ),
         }
         for artifact in event.get("artifact_references", [])
     ]
+    aligned_frame = next(
+        (
+            item
+            for item in result["artifact_references"]
+            if item.get("artifact_type") == "key_frame"
+            and item.get("view_role") == "aligned_first_third"
+        ),
+        None,
+    )
+    aligned_clip = next(
+        (
+            item
+            for item in result["artifact_references"]
+            if item.get("artifact_type") == "key_clip"
+            and item.get("view_role") == "aligned_first_third"
+        ),
+        None,
+    )
+    result["aligned_frame_url"] = aligned_frame.get("url") if aligned_frame else None
+    result["aligned_clip_url"] = aligned_clip.get("url") if aligned_clip else None
+    result["dual_view_material_ready"] = bool(aligned_frame and aligned_clip)
+    provenance = result.get("provenance") or {}
+    result.setdefault(
+        "experiment_group",
+        {
+            "group_id": result.get("parent_event_id"),
+            "group_uid": result.get("parent_event_uid"),
+            "name": provenance.get("experiment_name") or result.get("parent_event_id"),
+        },
+    )
     return result
+
+
+def _decode_catalog_event_cursor(
+    value: str | None, filters: dict[str, Any]
+) -> dict[str, Any] | None:
+    if not value:
+        return None
+    try:
+        payload = decode_cursor(value, namespace="catalog-key-events", filters=filters)
+        if set(payload) != {
+            "published_epoch_us",
+            "relevance_score",
+            "archive_name",
+            "release_id",
+            "peak_timestamp_us",
+            "event_uid",
+        }:
+            raise ValueError("catalog key-event cursor position is invalid")
+        return {
+            "published_epoch_us": int(payload["published_epoch_us"]),
+            "relevance_score": int(payload["relevance_score"]),
+            "archive_name": str(payload["archive_name"]),
+            "release_id": str(payload["release_id"] or "") or None,
+            "peak_timestamp_us": int(payload["peak_timestamp_us"]),
+            "event_uid": str(payload["event_uid"]),
+        }
+    except (ValueError, TypeError, KeyError) as exc:
+        raise HTTPException(400, "无效的关键事件分页 cursor") from exc
+
+
+def _encode_catalog_event_cursor(event: dict[str, Any], filters: dict[str, Any]) -> str:
+    return encode_cursor(
+        namespace="catalog-key-events",
+        position={
+            "published_epoch_us": int(event.get("published_epoch_us") or 0),
+            "relevance_score": int(event.get("relevance_score") or 0),
+            "archive_name": str(event["archive_name"]),
+            "release_id": str(event.get("release_id") or ""),
+            "peak_timestamp_us": int(event.get("peak_timestamp_us") or 0),
+            "event_uid": str(event["event_uid"]),
+        },
+        filters=filters,
+    )
 
 
 def _attach_staging_index_urls(
@@ -2608,6 +3134,7 @@ def search_key_events(
     action_type: str | None = None,
     parent_event_id: str | None = None,
     cross_view: bool | None = None,
+    material_ready: bool | None = None,
     start_us: int | None = None,
     end_us: int | None = None,
     cursor: str | None = None,
@@ -2615,65 +3142,68 @@ def search_key_events(
 ) -> dict[str, Any]:
     """Search one or every archive without loading monolithic event JSON arrays."""
 
+    if archive:
+        _resolve_archive(archive)
+
     cursor_filters = {
         "archive": archive,
         "q": q,
         "action_type": action_type,
         "parent_event_id": parent_event_id,
         "cross_view": cross_view,
+        "material_ready": material_ready,
         "start_us": start_us,
         "end_us": end_us,
     }
-    decoded_cursor = _decode_event_cursor(cursor, cursor_filters)
-    collected: list[dict[str, Any]] = []
-    for archive_name, root in _search_archive_roots(archive):
-        manifest = _read_json(
-            root / "JSON-Config-Files" / INDEX_MANIFEST_NAME, {}
-        ) or {}
-        archive_id = str(manifest.get("archive_id") or archive_name)
-        after_peak_us = None
-        after_event_uid = None
-        if decoded_cursor:
-            cursor_archive, cursor_peak, cursor_event = decoded_cursor
-            if archive_id < cursor_archive:
-                continue
-            if archive_id == cursor_archive:
-                after_peak_us = cursor_peak
-                after_event_uid = cursor_event
-        items = search_archive_index(
-            root,
+    decoded_cursor = _decode_catalog_event_cursor(cursor, cursor_filters)
+    try:
+        database = _ensure_archive_read_catalog()
+        if decoded_cursor and catalog_archive_release(
+            database, decoded_cursor["archive_name"]
+        ) != decoded_cursor["release_id"]:
+            raise HTTPException(
+                409,
+                "分页期间实验档案已发布新版本，请从第一页重新查询",
+            )
+        items, total_count = search_catalog_events(
+            database,
+            archive_name=archive,
             query=q,
             action_type=action_type,
             parent_event_id=parent_event_id,
             cross_view=cross_view,
+            material_ready=material_ready,
             start_us=start_us,
             end_us=end_us,
-            after_peak_us=after_peak_us,
-            after_event_uid=after_event_uid,
+            after_position=(
+                (
+                    decoded_cursor["relevance_score"],
+                    decoded_cursor["published_epoch_us"],
+                    decoded_cursor["archive_name"],
+                    decoded_cursor["peak_timestamp_us"],
+                    decoded_cursor["event_uid"],
+                )
+                if decoded_cursor
+                else None
+            ),
             limit=limit + 1,
         )
-        collected.extend(_attach_index_urls(archive_name, item) for item in items)
-    collected.sort(
-        key=lambda item: (
-            str(item["archive_id"]),
-            int(item.get("peak_timestamp_us") or 0),
-            str(item["event_uid"]),
-        )
-    )
-    has_more = len(collected) > limit
-    page = collected[:limit]
+    except HTTPException:
+        raise
+    except (OSError, ValueError, sqlite3.Error, json.JSONDecodeError) as exc:
+        raise HTTPException(503, f"无法读取关键事件目录索引: {exc}") from exc
+    has_more = len(items) > limit
+    page = [
+        _attach_index_urls(str(item["archive_name"]), item)
+        for item in items[:limit]
+    ]
     next_cursor = None
     if has_more and page:
-        last = page[-1]
-        next_cursor = _encode_event_cursor(
-            str(last["archive_id"]),
-            int(last.get("peak_timestamp_us") or 0),
-            str(last["event_uid"]),
-            cursor_filters,
-        )
+        next_cursor = _encode_catalog_event_cursor(page[-1], cursor_filters)
     return {
         "items": page,
         "count": len(page),
+        "total_count": total_count,
         "next_cursor": next_cursor,
         "canonical_source": "archived JSON",
         "index_is_rebuildable": True,
@@ -3130,31 +3660,295 @@ def _summarize_key_material_verification(
     }
     return summary, event_summaries
 
+
+def _archive_links(
+    archive_name: str,
+    root: Path,
+    release_id: str | None,
+    daily_manifest: dict[str, Any],
+    *,
+    staging_run_id: str | None = None,
+) -> dict[str, str | None]:
+    def existing(relative: str | None) -> str | None:
+        if not relative:
+            return None
+        candidate = (root / relative).resolve()
+        if not archive_contains(candidate, root.resolve()) or not candidate.is_file():
+            return None
+        return (
+            _staging_file_url(staging_run_id, relative)
+            if staging_run_id else _file_url(archive_name, relative, release_id)
+        )
+
+    return {
+        "experiment_understanding": existing(
+            "JSON-Config-Files/Experiment-Groups-Step-Level-Analysis.json"
+        ),
+        "key_material_understanding": existing(
+            "Key-Materials/Key-Materials-Model-Understanding.json"
+        ),
+        "key_material_category_index": existing(
+            "Key-Materials/Key-Material-Category-Index.json"
+        ),
+        "metrics": existing("JSON-Config-Files/run_metrics.json"),
+        "delivery_metrics": existing("JSON-Config-Files/delivery_metrics.json"),
+        "acceptance": existing("JSON-Config-Files/acceptance_report.json"),
+        "quality_acceptance": existing("JSON-Config-Files/quality_acceptance.json"),
+        "evidence_package_eval": existing("JSON-Config-Files/evidence_package_eval.json"),
+        "key_material_recall_eval": existing(
+            "JSON-Config-Files/key_material_recall_eval.json"
+        ),
+        "daily_report_json": existing(daily_manifest.get("json")),
+        "daily_report_markdown": existing(daily_manifest.get("markdown")),
+        "daily_report_html": existing(daily_manifest.get("html")),
+        "daily_report_pdf": existing(daily_manifest.get("pdf")),
+        "daily_report_eval": existing(daily_manifest.get("evaluation")),
+        "evidence_index_manifest": existing(
+            f"JSON-Config-Files/{INDEX_MANIFEST_NAME}"
+        ),
+        "run_provenance": existing("JSON-Config-Files/run_provenance.json"),
+        "final_key_material_annotation": existing(
+            "JSON-Config-Files/final_key_material_annotation.json"
+        ),
+    }
+
+
+def _archive_summary_payload(archive_name: str, root: Path) -> dict[str, Any]:
+    pointer = read_current_release_pointer(root) or {}
+    release_id = str(pointer.get("release_id") or "") or None
+    json_root = root / "JSON-Config-Files"
+    index_manifest = _read_json(json_root / INDEX_MANIFEST_NAME, {}) or {}
+    daily_manifest = _read_json(json_root / "daily_report_manifest.json", {}) or {}
+    quality = _read_json(json_root / "quality_acceptance.json", {}) or {}
+    metrics = _merged_run_metrics(root)
+    _attach_archive_performance_display(
+        metrics,
+        _read_json(json_root / "acceptance_report.json", {}) or {},
+    )
+    counts = index_manifest.get("counts") or {}
+    manifest = _read_json(json_root / "run_manifest.json", {}) or {}
+    experiment_root = root / "Experiment-Clips"
+    experiment_count = (
+        sum(1 for item in experiment_root.iterdir() if item.is_dir())
+        if experiment_root.is_dir()
+        else 0
+    )
+    return {
+        "name": archive_name,
+        "path": str(_archive_root() / archive_name),
+        "network_path": str(root),
+        "release_id": release_id,
+        "current_release": pointer or None,
+        "integrity_status": (
+            lightweight_release_integrity(root, pointer)
+            if pointer
+            else "legacy_archive_not_release_verified"
+        ),
+        "counts": {
+            "experiments": experiment_count,
+            "key_events": int(counts.get("key_events") or 0),
+        },
+        "quality_acceptance": quality,
+        "input_view_count": len(manifest.get("views") or []) or None,
+        "metrics": metrics,
+        "observability": {
+            "status": _pipeline_status_from_root(root),
+            "stage_receipts": _stage_receipts_from_root(root),
+        },
+        "evidence_index": {
+            **index_manifest,
+            "search_url": f"/api/key-events?archive={quote(archive_name)}",
+        }
+        if index_manifest
+        else None,
+        "links": _archive_links(archive_name, root, release_id, daily_manifest),
+    }
+
+
+def _archive_section_payload(
+    archive_name: str,
+    root: Path,
+    *,
+    section: str,
+    cursor: str | None,
+    limit: int,
+) -> dict[str, Any]:
+    if section not in {"summary", "experiments", "reports", "metrics"}:
+        raise HTTPException(400, "section 必须是 summary、experiments、reports 或 metrics")
+    # Incomplete legacy runs have no final index yet. Retain their already-built
+    # media and failure state instead of presenting an empty successful archive.
+    status = _pipeline_status_from_root(root)
+    if status.get("stage") in {"failed", "interrupted"}:
+        return _archive_detail_from_root(root, archive_name)
+    result = _archive_summary_payload(archive_name, root)
+    if section == "summary":
+        return result
+    json_root = root / "JSON-Config-Files"
+    if section == "experiments":
+        release_id = result.get("release_id")
+        filters = {"archive": archive_name, "release_id": release_id}
+        offset = 0
+        if cursor:
+            try:
+                decoded = decode_cursor(
+                    cursor, namespace="archive-experiments", filters=filters
+                )
+                if set(decoded) != {"offset"}:
+                    raise ValueError("experiment cursor position is invalid")
+                offset = int(decoded["offset"])
+            except (ValueError, TypeError, KeyError) as exc:
+                raise HTTPException(400, "无效的实验片段分页 cursor") from exc
+        analysis = _read_json(
+            json_root / "Experiment-Groups-Step-Level-Analysis.json", {}
+        ) or {}
+        groups = list(analysis.get("experiment_groups") or [])
+        if not groups:
+            legacy_package = _read_json(json_root / "evidence_package.json", {}) or {}
+            groups = list(legacy_package.get("experiment_groups") or [])
+        source_page = groups[offset : offset + limit + 1]
+        has_more = len(source_page) > limit
+        source_page = source_page[:limit]
+        experiments = []
+        for group in source_page:
+            folder_name = str(group.get("archive_folder") or "")
+            understanding = group.get("model_understanding") or {}
+            folder = root / "Experiment-Clips" / folder_name
+            aligned_candidates = (
+                folder / "Aligned_First+Third.mp4",
+                folder / f"{group.get('group_id')}_aligned_multiview.mp4",
+            )
+            aligned = next((path for path in aligned_candidates if path.is_file()), None)
+            experiments.append(
+                {
+                    "folder": folder_name,
+                    "name": group.get("experiment_name") or folder_name,
+                    "continuity_type": group.get("continuity_type"),
+                    "start_ms": group.get("global_start_ms"),
+                    "end_ms": group.get("global_end_ms"),
+                    "summary": understanding.get("overall_summary"),
+                    "steps": understanding.get("steps") or [],
+                    "uncertainties": understanding.get("uncertainties") or [],
+                    "first_person_video_url": (
+                        _file_url(archive_name, archive_relative_posix(folder / "First-Person.mp4", root), release_id)
+                        if (folder / "First-Person.mp4").is_file() else None
+                    ),
+                    "third_person_video_url": (
+                        _file_url(archive_name, archive_relative_posix(folder / "Third-Person.mp4", root), release_id)
+                        if (folder / "Third-Person.mp4").is_file() else None
+                    ),
+                    "aligned_video_url": (
+                        _file_url(
+                            archive_name,
+                            Path(archive_relative_posix(aligned, root)),
+                            release_id,
+                        )
+                        if aligned
+                        else None
+                    ),
+                }
+            )
+        result.update(
+            {
+                "experiments": experiments,
+                "experiment_groups": [
+                    {
+                        "group_id": group.get("group_id"),
+                        "name": group.get("experiment_name")
+                        or group.get("archive_folder"),
+                        "folder": group.get("archive_folder"),
+                        "continuity_type": group.get("continuity_type"),
+                        "start_ms": group.get("global_start_ms"),
+                        "end_ms": group.get("global_end_ms"),
+                        "key_event_count": len(group.get("key_event_ids") or []),
+                    }
+                    for group in groups
+                ],
+                "next_cursor": (
+                    encode_cursor(
+                        namespace="archive-experiments",
+                        position={"offset": offset + limit},
+                        filters=filters,
+                    )
+                    if has_more
+                    else None
+                ),
+                "has_more": has_more,
+            }
+        )
+        return result
+    if section in {"reports", "metrics"}:
+        daily_manifest = _read_json(json_root / "daily_report_manifest.json", {}) or {}
+        result.update(
+            {
+                "daily_report_manifest": daily_manifest,
+                "daily_report": (
+                    _read_json(root / daily_manifest["json"], {})
+                    if daily_manifest.get("json")
+                    else {}
+                )
+                or {},
+            }
+        )
+        if section == "reports":
+            return result
+    metrics = _merged_run_metrics(root)
+    acceptance = _read_json(json_root / "acceptance_report.json", {}) or {}
+    _attach_archive_performance_display(metrics, acceptance)
+    final_annotation = _read_json(
+        json_root / "final_key_material_annotation.json", {}
+    ) or {}
+    key_material_verification, _ = _summarize_key_material_verification(final_annotation)
+    result.update(
+        {
+            "metrics": metrics,
+            "key_material_recall_eval": _read_json(
+                json_root / "key_material_recall_eval.json", {}
+            )
+            or {},
+            "observability": _run_snapshot_from_root(root),
+            "key_material_verification": key_material_verification,
+        }
+    )
+    return result
+
+
 @app.get("/api/archives/{archive_name}")
-def archive_detail(archive_name: str) -> dict[str, Any]:
+def archive_detail(
+    archive_name: str,
+    section: str = "all",
+    cursor: str | None = None,
+    limit: int = Query(default=24, ge=1, le=100),
+) -> dict[str, Any]:
     root = _resolve_archive(archive_name)
+    if section != "all":
+        return _archive_section_payload(
+            archive_name, root, section=section, cursor=cursor, limit=limit
+        )
     return _archive_detail_from_root(root, archive_name)
+
 
 @app.get("/api/staging-runs/{run_id}/archive")
 def staging_archive_detail(run_id: str) -> dict[str, Any]:
     root = _resolve_staging_run(run_id)
     return _archive_detail_from_root(root, root.parent.name, staging_run_id=run_id)
 
+
 def _archive_detail_from_root(
     root: Path, archive_name: str, *, staging_run_id: str | None = None
 ) -> dict[str, Any]:
+    release_pointer = read_current_release_pointer(root) or {}
+    release_id = str(release_pointer.get("release_id") or "") or None
+
     def file_url(name: str, relative: str | Path) -> str:
         return (
             _staging_file_url(staging_run_id, relative)
-            if staging_run_id else _file_url(name, relative)
+            if staging_run_id else _file_url(name, relative, release_id)
         )
 
     index_manifest_path = root / "JSON-Config-Files" / INDEX_MANIFEST_NAME
     index_manifest = _read_json(index_manifest_path, {}) or {}
     package = _read_json(root / "JSON-Config-Files" / "evidence_package.json", {}) or {}
-    metrics = _read_json(root / "JSON-Config-Files" / "run_metrics.json", {}) or {}
-    if not metrics:
-        metrics = _read_json(root / "JSON-Config-Files" / "run_metrics_live.json", {}) or {}
+    metrics = _merged_run_metrics(root)
     acceptance = _read_json(root / "JSON-Config-Files" / "acceptance_report.json", {}) or {}
     quality_path = root / "JSON-Config-Files" / "quality_acceptance.json"
     quality_acceptance = _read_json(quality_path, {}) or {}
@@ -3302,51 +4096,10 @@ def _archive_detail_from_root(
         "missing_dual_view_material_count",
         len(normalized_events) - dual_view_material_count,
     )
-    links = {
-        "experiment_understanding": file_url(
-            archive_name, "JSON-Config-Files/Experiment-Groups-Step-Level-Analysis.json"
-        ),
-        "key_material_understanding": file_url(
-            archive_name, "Key-Materials/Key-Materials-Model-Understanding.json"
-        ),
-        "key_material_category_index": file_url(
-            archive_name, "Key-Materials/Key-Material-Category-Index.json"
-        )
-        if (root / "Key-Materials" / "Key-Material-Category-Index.json").is_file()
-        else None,
-        "metrics": file_url(archive_name, "JSON-Config-Files/run_metrics.json"),
-        "acceptance": file_url(archive_name, "JSON-Config-Files/acceptance_report.json"),
-        "quality_acceptance": file_url(
-            archive_name, "JSON-Config-Files/quality_acceptance.json"
-        ) if quality_path.is_file() else None,
-        "evidence_package_eval": file_url(
-            archive_name, "JSON-Config-Files/evidence_package_eval.json"
-        ) if evidence_eval_path.is_file() else None,
-        "key_material_recall_eval": file_url(
-            archive_name, "JSON-Config-Files/key_material_recall_eval.json"
-        ) if recall_eval_path.is_file() else None,
-        "final_key_material_annotation": file_url(
-            archive_name, "JSON-Config-Files/final_key_material_annotation.json"
-        ) if final_annotation_path.is_file() else None,
-        "daily_report_json": file_url(archive_name, daily_manifest["json"])
-        if daily_manifest.get("json")
-        else None,
-        "daily_report_markdown": file_url(archive_name, daily_manifest["markdown"])
-        if daily_manifest.get("markdown")
-        else None,
-        "daily_report_html": file_url(archive_name, daily_manifest["html"])
-        if daily_manifest.get("html")
-        else None,
-        "daily_report_pdf": file_url(archive_name, daily_manifest["pdf"])
-        if daily_manifest.get("pdf")
-        else None,
-        "daily_report_eval": file_url(archive_name, daily_manifest["evaluation"])
-        if daily_manifest.get("evaluation")
-        else None,
-        "evidence_index_manifest": file_url(
-            archive_name, f"JSON-Config-Files/{INDEX_MANIFEST_NAME}"
-        ) if index_manifest_path.is_file() else None,
-    }
+    links = _archive_links(
+        archive_name, root, release_id, daily_manifest,
+        staging_run_id=staging_run_id,
+    )
     snapshot = _run_snapshot_from_root(root)
     preliminary_materials = []
     if not normalized_events and snapshot.get("status", {}).get("stage") != "completed":
@@ -3376,6 +4129,16 @@ def _archive_detail_from_root(
         "path": str(root),
         "staging_run_id": staging_run_id,
         "network_path": str(root),
+        "release_id": release_id,
+        "integrity_status": (
+            lightweight_release_integrity(root, release_pointer)
+            if release_pointer
+            else "legacy_archive_not_release_verified"
+        ),
+        "counts": {
+            "experiments": len(experiments),
+            "key_events": len(normalized_events),
+        },
         "experiments": experiments,
         "experiment_groups": [
             {
@@ -3398,6 +4161,7 @@ def _archive_detail_from_root(
         "observability": snapshot,
         "daily_report": daily_report,
         "daily_report_manifest": daily_manifest,
+        "current_release": release_pointer or None,
         "evidence_index": {
             **index_manifest,
             "search_url": (f"/api/staging-runs/{quote(staging_run_id)}/key-events"
@@ -3408,12 +4172,53 @@ def _archive_detail_from_root(
 
 
 @app.get("/api/archive-file")
-def archive_file(archive: str, path: str) -> FileResponse:
+def archive_file(
+    archive: str,
+    path: str,
+    release: str | None = None,
+) -> FileResponse:
     root = _resolve_archive(archive).resolve()
     candidate = (root / path).resolve()
     if not archive_contains(candidate, root) or not candidate.is_file():
         raise HTTPException(404, "档案文件不存在")
-    return FileResponse(candidate)
+    headers = {
+        "Accept-Ranges": "bytes",
+        "X-Content-Type-Options": "nosniff",
+        "Cache-Control": "private, no-cache",
+    }
+    if release:
+        pointer = read_current_release_pointer(root) or {}
+        if str(pointer.get("release_id") or "") != release:
+            raise HTTPException(409, "该素材链接对应的归档版本已更新，请刷新页面")
+        if lightweight_release_integrity(root, pointer) != "release_manifest_verified":
+            raise HTTPException(409, "正式归档发布清单完整性校验失败")
+        manifest_path = (root / str(pointer.get("release_manifest") or "")).resolve()
+        if not archive_contains(manifest_path, root) or not manifest_path.is_file():
+            raise HTTPException(409, "正式归档发布清单不可用")
+        manifest = _read_json(manifest_path, {}) or {}
+        relative = candidate.relative_to(root)
+        directory = relative.parts[0] if relative.parts else ""
+        inner_path = Path(*relative.parts[1:]).as_posix() if len(relative.parts) > 1 else ""
+        receipt = next(
+            (
+                item
+                for item in (manifest.get("manifests") or {}).get(directory, [])
+                if str(item.get("path") or "") == inner_path
+            ),
+            None,
+        )
+        if receipt is None or int(receipt.get("size_bytes") or -1) != candidate.stat().st_size:
+            raise HTTPException(409, "正式归档素材与发布清单不一致")
+        digest = str(receipt.get("sha256") or "")
+        headers.update(
+            {
+                "Cache-Control": "private, max-age=31536000, immutable",
+                "ETag": f'"sha256-{digest}"',
+                "X-VisionCortex-Release": release,
+                "X-VisionCortex-Integrity": "release-manifest-size-matched",
+            }
+        )
+    return FileResponse(candidate, headers=headers)
 
 
 @app.get("/api/staging-file")
@@ -4066,14 +4871,29 @@ def finalize_upload_session(
 
         run_id = str(upload_record["run_id"])
         settings["storage"]["sync_to_nas"] = retention_mode == "nas_only"
-        settings["storage"]["active_archive_path"] = str(nas_root)
+        fixed_root, staging_root, _history_root = _prepare_formal_run_staging(
+            settings, archive_name, run_id, nas_root
+        )
         queue_recovery_path = _write_queue_recovery_receipt(
-            nas_root,
+            staging_root,
             run_id=run_id,
             state="queued",
-            manifest_path=manifest_path,
-            input_seal_path=input_seal_path,
+            manifest_path=(
+                staging_root
+                / "JSON-Config-Files"
+                / "input_manifest.yaml"
+            ),
+            input_seal_path=(
+                staging_root
+                / "JSON-Config-Files"
+                / "Input-Manifests"
+                / "input_seal.json"
+            ),
             ingest=ingest,
+            recovery_context={
+                "formal_fixed_root": str(fixed_root),
+                "formal_history_root": str(_history_root),
+            },
         )
         store.assign_run(session_id, run_id)
         existing_job = (
@@ -4085,7 +4905,8 @@ def finalize_upload_session(
                 state="queued",
                 progress=0.0,
                 experiment_id=manifest.experiment_id,
-                nas_output=str(nas_root),
+                nas_output=str(fixed_root),
+                nas_staging=str(staging_root),
             )
             queue_persistence = _schedule_job(
                 background_tasks,
@@ -4094,11 +4915,11 @@ def finalize_upload_session(
                 payload={
                     "manifest": manifest.model_dump(mode="json"),
                     "settings": settings,
-                    "nas_root": str(nas_root),
+                    "nas_root": str(staging_root),
                     "ingest": ingest,
                 },
                 fallback=_execute,
-                fallback_args=(run_id, manifest, settings, nas_root, ingest),
+                fallback_args=(run_id, manifest, settings, staging_root, ingest),
             )
         else:
             queue_persistence = "sqlite"
@@ -4112,7 +4933,8 @@ def finalize_upload_session(
             "run_id": run_id,
             "state": "queued",
             "status_url": f"/api/runs/{run_id}",
-            "nas_output": str(nas_root),
+            "nas_output": str(fixed_root),
+            "nas_staging": str(staging_root),
             "archive_url": f"/?archive={quote(archive_name)}",
             "queue_persistence": queue_persistence,
             "queue_disaster_recovery": "archive_receipt",
@@ -4209,15 +5031,40 @@ async def create_run(
         manifest = RunManifest(experiment_id=archive_name, views=view_inputs)
     except (KeyError, IndexError, TypeError, ValueError) as exc:
         raise HTTPException(400, f"视角映射无效: {exc}") from exc
-    manifest_path = (
-        nas_root / "JSON-Config-Files" / "input_manifest.yaml"
-        if not retain_local_copy
-        else local_root / "manifest.yaml"
+    manifest_payload = yaml.safe_dump(
+        manifest.model_dump(mode="json"), allow_unicode=True, sort_keys=False
     )
+    manifest_path = nas_root / "JSON-Config-Files" / "input_manifest.yaml"
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest_path.write_text(
-        yaml.safe_dump(manifest.model_dump(mode="json"), allow_unicode=True, sort_keys=False),
-        encoding="utf-8",
+    manifest_path.write_text(manifest_payload, encoding="utf-8")
+    if retain_local_copy:
+        local_manifest_path = local_root / "manifest.yaml"
+        local_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        local_manifest_path.write_text(manifest_payload, encoding="utf-8")
+    role_resolution = _declared_role_resolution(
+        manifest, "browser_legacy_upload_declared"
+    )
+    _write_json_atomic(
+        nas_root / "JSON-Config-Files" / "view_role_resolution.json",
+        role_resolution,
+    )
+    sha_by_path = {
+        str(Path(item["analysis_path"]).resolve()): str(item["sha256"])
+        for item in upload_ledger
+    }
+    input_seal = build_input_seal(
+        manifest,
+        source_mode="browser_legacy_upload",
+        sources=_manifest_source_receipts(manifest, sha_by_path),
+        role_resolution=role_resolution,
+        copied_source_bytes=sum(int(item["bytes"]) for item in upload_ledger),
+    )
+    write_input_seal(
+        nas_root
+        / "JSON-Config-Files"
+        / "Input-Manifests"
+        / "input_seal.json",
+        input_seal,
     )
     upload_record = {
         "run_id": run_id,
@@ -4283,8 +5130,32 @@ async def create_run(
             "artifacts": [
                 "Original-Experiment-Videos",
                 "JSON-Config-Files/original_upload_manifest.json",
+                "JSON-Config-Files/Input-Manifests/input_seal.json",
+                "JSON-Config-Files/view_role_resolution.json",
             ],
             "token_ledger": "JSON-Config-Files/run_metrics.json",
+        },
+    )
+    fixed_root, staging_root, _history_root = _prepare_formal_run_staging(
+        settings, archive_name, run_id, nas_root
+    )
+    _write_queue_recovery_receipt(
+        staging_root,
+        run_id=run_id,
+        state="queued",
+        manifest_path=(
+            staging_root / "JSON-Config-Files" / "input_manifest.yaml"
+        ),
+        input_seal_path=(
+            staging_root
+            / "JSON-Config-Files"
+            / "Input-Manifests"
+            / "input_seal.json"
+        ),
+        ingest=ingest,
+        recovery_context={
+            "formal_fixed_root": str(fixed_root),
+            "formal_history_root": str(_history_root),
         },
     )
     _update(
@@ -4292,7 +5163,8 @@ async def create_run(
         state="queued",
         progress=0.0,
         experiment_id=manifest.experiment_id,
-        nas_output=str(nas_root),
+        nas_output=str(fixed_root),
+        nas_staging=str(staging_root),
     )
     queue_persistence = _schedule_job(
         background_tasks,
@@ -4301,17 +5173,18 @@ async def create_run(
         payload={
             "manifest": manifest.model_dump(mode="json"),
             "settings": settings,
-            "nas_root": str(nas_root),
+            "nas_root": str(staging_root),
             "ingest": ingest,
         },
         fallback=_execute,
-        fallback_args=(run_id, manifest, settings, nas_root, ingest),
+        fallback_args=(run_id, manifest, settings, staging_root, ingest),
     )
     return {
         "run_id": run_id,
         "state": "queued",
         "status_url": f"/api/runs/{run_id}",
-        "nas_output": str(nas_root),
+        "nas_output": str(fixed_root),
+        "nas_staging": str(staging_root),
         "archive_url": f"/?archive={quote(archive_name)}",
         "queue_persistence": queue_persistence,
     }
@@ -4506,9 +5379,61 @@ def create_run_from_paths(payload: dict[str, Any], background_tasks: BackgroundT
     archive_name, nas_root = _reserve_archive(settings, manifest.experiment_id)
     if archive_name != manifest.experiment_id:
         manifest = manifest.model_copy(update={"experiment_id": archive_name})
-    settings["storage"]["active_archive_path"] = str(nas_root)
     run_id = uuid.uuid4().hex[:12]
-    _update(run_id, state="queued", progress=0.0, experiment_id=manifest.experiment_id)
+    fixed_root, staging_root, _history_root = _prepare_formal_run_staging(
+        settings, archive_name, run_id, nas_root
+    )
+    manifest_path = staging_root / "JSON-Config-Files" / "input_manifest.yaml"
+    manifest_path.write_text(
+        yaml.safe_dump(
+            manifest.model_dump(mode="json"), allow_unicode=True, sort_keys=False
+        ),
+        encoding="utf-8",
+    )
+    try:
+        role_resolution = _declared_role_resolution(
+            manifest, "api_from_paths_declared"
+        )
+        _write_json_atomic(
+            staging_root / "JSON-Config-Files" / "view_role_resolution.json",
+            role_resolution,
+        )
+        input_seal = build_input_seal(
+            manifest,
+            source_mode="api_from_paths",
+            sources=_manifest_source_receipts(manifest),
+            role_resolution=role_resolution,
+            copied_source_bytes=0,
+        )
+        input_seal_path = write_input_seal(
+            staging_root
+            / "JSON-Config-Files"
+            / "Input-Manifests"
+            / "input_seal.json",
+            input_seal,
+        )
+    except OSError as exc:
+        raise HTTPException(422, f"输入路径不可读取: {exc}") from exc
+    _write_queue_recovery_receipt(
+        staging_root,
+        run_id=run_id,
+        state="queued",
+        manifest_path=manifest_path,
+        input_seal_path=input_seal_path,
+        ingest=None,
+        recovery_context={
+            "formal_fixed_root": str(fixed_root),
+            "formal_history_root": str(_history_root),
+        },
+    )
+    _update(
+        run_id,
+        state="queued",
+        progress=0.0,
+        experiment_id=manifest.experiment_id,
+        nas_output=str(fixed_root),
+        nas_staging=str(staging_root),
+    )
     queue_persistence = _schedule_job(
         background_tasks,
         run_id=run_id,
@@ -4516,17 +5441,18 @@ def create_run_from_paths(payload: dict[str, Any], background_tasks: BackgroundT
         payload={
             "manifest": manifest.model_dump(mode="json"),
             "settings": settings,
-            "nas_root": str(nas_root),
+            "nas_root": str(staging_root),
             "ingest": None,
         },
         fallback=_execute,
-        fallback_args=(run_id, manifest, settings, nas_root),
+        fallback_args=(run_id, manifest, settings, staging_root),
     )
     return {
         "run_id": run_id,
         "state": "queued",
         "status_url": f"/api/runs/{run_id}",
-        "nas_output": str(nas_root),
+        "nas_output": str(fixed_root),
+        "nas_staging": str(staging_root),
         "queue_persistence": queue_persistence,
     }
 

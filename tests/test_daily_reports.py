@@ -21,6 +21,19 @@ def test_structure_pass_does_not_imply_quality_approval(quality, human, expected
     assert _headline_status(report)[0] == expected
 
 
+def _accepted_quality() -> dict:
+    return {
+        "passed": True,
+        "status": "structural_only",
+        "structural_passed": True,
+        "evidence_level": "structural_only",
+        "formal_accuracy_claim_allowed": False,
+        "experiment_boundaries": {"evaluated": False},
+        "key_event_recall": {"evaluated": False},
+        "key_materials": {},
+    }
+
+
 def _summary_with_post_curation_rejection() -> RunSummary:
     base_event = {
         "action_type": "hand_object_contact",
@@ -83,7 +96,23 @@ def _summary_with_post_curation_rejection() -> RunSummary:
                     "third_person_view": "third",
                     "continuity_reason": "unit test",
                     "key_event_ids": ["EVT-ACCEPTED"],
-                    "model_understanding": {"status": "completed", "steps": []},
+                    "model_understanding": {
+                        "status": "completed",
+                        "steps": [
+                            {
+                                "step_index": 1,
+                                "start_global_ms": 1000,
+                                "end_global_ms": 2000,
+                                "current_step": "手接触实验对象",
+                                "next_step": "未知",
+                                "next_step_status": "unknown",
+                                "supporting_event_ids": ["EVT-ACCEPTED"],
+                                "objects": ["gloved_hand", "paper"],
+                                "supporting_views": ["first", "third"],
+                                "confidence": 0.9,
+                            }
+                        ],
+                    },
                 }
             ],
             "physical_change_log": [
@@ -113,7 +142,13 @@ def _summary_with_post_curation_rejection() -> RunSummary:
 def test_daily_report_excludes_post_curation_physical_changes(default_config):
     summary = _summary_with_post_curation_rejection()
 
-    report = build_daily_report(summary, {}, {"passed": True, "checks": []}, default_config)
+    report = build_daily_report(
+        summary,
+        {},
+        {"passed": True, "checks": []},
+        default_config,
+        _accepted_quality(),
+    )
     evaluation = evaluate_daily_report(report, summary)
 
     assert evaluation["passed"] is True
@@ -127,7 +162,13 @@ def test_daily_report_excludes_post_curation_physical_changes(default_config):
 
 def test_daily_report_eval_fails_closed_on_rejected_physical_change(default_config):
     summary = _summary_with_post_curation_rejection()
-    report = build_daily_report(summary, {}, {"passed": True, "checks": []}, default_config)
+    report = build_daily_report(
+        summary,
+        {},
+        {"passed": True, "checks": []},
+        default_config,
+        _accepted_quality(),
+    )
     report["physical_change_log"].append(
         summary.physical_change_log[1].model_dump(mode="json")
     )
@@ -155,6 +196,7 @@ def test_daily_report_carries_precomputed_runtime_audit(default_config):
         {"runtime_audit": runtime_audit},
         {"passed": True, "checks": []},
         default_config,
+        _accepted_quality(),
     )
 
     assert report["performance"]["runtime_audit"] == runtime_audit
@@ -168,7 +210,13 @@ def test_daily_report_shows_aligned_visual_without_inflating_direct_role_support
     event.supporting_views = ["third"]
     event.supporting_roles = [ViewRole.THIRD_PERSON]
 
-    report = build_daily_report(summary, {}, {"passed": True, "checks": []}, default_config)
+    report = build_daily_report(
+        summary,
+        {},
+        {"passed": True, "checks": []},
+        default_config,
+        _accepted_quality(),
+    )
     evaluation = evaluate_daily_report(report, summary)
     visual = report["experiment_timeline"][0]["representative_visual"]
 
@@ -197,7 +245,12 @@ def test_daily_report_reconciles_local_validation_package(default_config):
         (root / "evidence_package_eval.json").read_text(encoding="utf-8-sig")
     )
 
-    report = build_daily_report(summary, metrics, evidence_eval, default_config)
+    quality = json.loads(
+        (root / "quality_acceptance.json").read_text(encoding="utf-8-sig")
+    )
+    report = build_daily_report(
+        summary, metrics, evidence_eval, default_config, quality
+    )
     evaluation = evaluate_daily_report(report, summary)
 
     assert evaluation["passed"] is True

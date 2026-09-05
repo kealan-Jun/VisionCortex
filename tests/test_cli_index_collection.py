@@ -220,6 +220,33 @@ def test_cold_doubao_promotion_audit_rejects_semantic_cache_reuse(tmp_path):
         cli._audit_true_cold_doubao_execution(tmp_path / "archive")
 
 
+def test_published_archive_repair_staging_copies_release_without_raw_media(tmp_path):
+    archive = tmp_path / "Collection-01"
+    for directory in cli.DERIVED_ARCHIVE_DIRECTORIES:
+        path = archive / directory / "receipt.txt"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(directory, encoding="utf-8")
+    originals = archive / "Original-Experiment-Videos"
+    originals.mkdir(parents=True)
+    (originals / "Original-Video-Index.json").write_text("{}", encoding="utf-8")
+    (originals / "view-01.ffconcat").write_text(
+        "ffconcat version 1.0\nfile 'Y:/source.mp4'\n", encoding="utf-8"
+    )
+    (originals / "raw.mp4").write_bytes(b"must-not-copy")
+
+    staging, history = cli._stage_published_archive_for_repair(archive)
+
+    assert staging.is_dir()
+    assert history.parent.parent.name == ".VisionCortex-Run-History"
+    assert (staging / "Original-Experiment-Videos" / "Original-Video-Index.json").is_file()
+    assert (staging / "Original-Experiment-Videos" / "view-01.ffconcat").is_file()
+    assert not (staging / "Original-Experiment-Videos" / "raw.mp4").exists()
+    for directory in cli.DERIVED_ARCHIVE_DIRECTORIES:
+        assert (staging / directory / "receipt.txt").read_text(
+            encoding="utf-8"
+        ) == directory
+
+
 def test_presentation_repair_relocates_unreferenced_event_directories(tmp_path):
     layout = ArchiveLayout(tmp_path / "archive")
     layout.create()
@@ -362,6 +389,11 @@ def test_register_archive_requires_and_records_passing_report_receipts(
         cli,
         "record_collection_state",
         lambda *args, **kwargs: recorded.append(kwargs) or tmp_path / "ledger.json",
+    )
+    monkeypatch.setattr(
+        cli,
+        "validate_formal_archive_release",
+        lambda *_args, **_kwargs: {"archive_contract": {"passed": True}},
     )
 
     cli.register_archived_collection_command(

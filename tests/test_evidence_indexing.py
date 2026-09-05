@@ -1,5 +1,6 @@
 import hashlib
 import json
+import threading
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -321,9 +322,20 @@ def test_archive_detail_exposes_key_material_recall_receipt(
     )
 
 
-def test_search_archive_index_filters_full_text_and_returns_material_hashes(tmp_path):
+def test_search_archive_index_filters_full_text_and_returns_material_hashes(
+    tmp_path, monkeypatch
+):
     root = tmp_path / "Archive-Search"
     _, _, _, _, _ = _indexed_archive(root, event_count=2)
+    statements = []
+    original_connect = indexing.sqlite3.connect
+
+    def traced_connect(*args, **kwargs):
+        connection = original_connect(*args, **kwargs)
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(indexing.sqlite3, "connect", traced_connect)
 
     results = search_archive_index(
         root,
@@ -337,6 +349,11 @@ def test_search_archive_index_filters_full_text_and_returns_material_hashes(tmp_
     assert all(item["event_uid"] for item in results)
     assert all(len(item["artifact_references"]) == 6 for item in results)
     assert all(item["artifact_references"][0]["sha256"] for item in results)
+    artifact_queries = [
+        statement for statement in statements if "FROM artifacts" in statement
+    ]
+    assert len(artifact_queries) == 1
+    assert " IN (" in artifact_queries[0]
 
 
 def test_quality_decision_receipts_are_indexed_by_rule_verdict_and_subject(tmp_path):
@@ -482,6 +499,242 @@ def test_key_event_api_paginates_and_resolves_event_and_evidence(monkeypatch, tm
     )
     assert evidence.status_code == 200
     assert evidence.json()["event_url"].startswith("/api/key-events/")
+
+
+def test_archive_catalog_paginates_and_global_search_uses_one_read_model(
+    monkeypatch, tmp_path
+):
+    archive_root = tmp_path / "archives"
+    first = archive_root / "Archive-Alpha"
+    second = archive_root / "Archive-Beta"
+    _indexed_archive(first, event_count=2)
+    _indexed_archive(second, event_count=1)
+    catalog = tmp_path / "runtime" / "archive-catalog.sqlite3"
+    monkeypatch.setattr(api, "_archive_root", lambda settings=None: archive_root)
+    monkeypatch.setattr(
+        api, "_archive_catalog_database", lambda settings=None, archive_root=None: catalog
+    )
+    client = TestClient(api.app)
+
+    first_page = client.get("/api/archives", params={"limit": 1}).json()
+    assert first_page["count"] == 1
+    assert first_page["total_count"] == 2
+    assert first_page["totals"]["key_events"] == 3
+    assert first_page["next_cursor"]
+
+    second_page = client.get(
+        "/api/archives",
+        params={"limit": 1, "cursor": first_page["next_cursor"]},
+    ).json()
+    assert second_page["archives"][0]["name"] != first_page["archives"][0]["name"]
+
+    search = client.get(
+        "/api/key-events", params={"q": "移液", "limit": 10}
+    ).json()
+    assert search["count"] == 3
+    assert search["total_count"] == 3
+    assert {item["archive_name"] for item in search["items"]} == {
+        "Archive-Alpha",
+        "Archive-Beta",
+    }
+    assert all(item["aligned_frame_url"] for item in search["items"])
+    literal_wildcard = client.get(
+        "/api/key-events", params={"q": "%", "limit": 10}
+    ).json()
+    assert literal_wildcard["total_count"] == 0
+
+
+def test_archive_summary_is_lightweight_and_experiment_section_is_paginated(
+    monkeypatch, tmp_path
+):
+    archive_root = tmp_path / "archives"
+    root = archive_root / "Archive-Sections"
+    _, _, groups, _, _ = _indexed_archive(root, event_count=2)
+    analysis = {
+        "experiment_groups": [
+            {
+                **group.model_dump(mode="json"),
+                "model_understanding": {
+                    "overall_summary": f"summary-{index}",
+                    "steps": [],
+                },
+            }
+            for index, group in enumerate(groups, 1)
+        ]
+    }
+    (root / "JSON-Config-Files" / "Experiment-Groups-Step-Level-Analysis.json").write_text(
+        json.dumps(analysis, ensure_ascii=False), encoding="utf-8"
+    )
+    monkeypatch.setattr(api, "_archive_root", lambda settings=None: archive_root)
+    client = TestClient(api.app)
+
+    summary = client.get(
+        f"/api/archives/{root.name}", params={"section": "summary"}
+    ).json()
+    assert summary["counts"] == {"experiments": 0, "key_events": 2}
+    assert "key_events" not in summary
+    assert "daily_report" not in summary
+
+    first_page = client.get(
+        f"/api/archives/{root.name}",
+        params={"section": "experiments", "limit": 1},
+    ).json()
+    assert len(first_page["experiments"]) == 1
+    assert first_page["next_cursor"]
+    second_page = client.get(
+        f"/api/archives/{root.name}",
+        params={
+            "section": "experiments",
+            "limit": 1,
+            "cursor": first_page["next_cursor"],
+        },
+    ).json()
+    assert second_page["experiments"][0]["name"] == "移液实验"
+
+    (root / "JSON-Config-Files" / "evidence_package.json").write_text(
+        json.dumps(analysis, ensure_ascii=False), encoding="utf-8"
+    )
+    (root / "JSON-Config-Files" / "Experiment-Groups-Step-Level-Analysis.json").unlink()
+    legacy_page = client.get(
+        f"/api/archives/{root.name}",
+        params={"section": "experiments", "limit": 1},
+    ).json()
+    assert legacy_page["experiments"][0]["name"] == "移液实验"
+
+
+def test_catalog_refreshes_pipeline_state_without_rebuilding_event_index(monkeypatch, tmp_path):
+    archive_root = tmp_path / "archives"
+    root = archive_root / "Archive-State"
+    _, _, _, normalized, _ = _indexed_archive(root)
+    (root / "Key-Materials/Key-Materials-Model-Understanding.json").write_text(
+        json.dumps(normalized), encoding="utf-8"
+    )
+    status_path = root / "JSON-Config-Files/pipeline_status.json"
+    status_path.write_text('{"stage":"candidate_fine"}', encoding="utf-8")
+    catalog = tmp_path / "runtime/catalog.sqlite3"
+    monkeypatch.setattr(api, "_archive_root", lambda settings=None: archive_root)
+    monkeypatch.setattr(api, "_archive_catalog_database", lambda **_kwargs: catalog)
+    client = TestClient(api.app)
+    assert client.get("/api/archives").json()["archives"][0]["pipeline_stage"] == "candidate_fine"
+    status_path.write_text('{"stage":"failed","failed_stage":"mllm"}', encoding="utf-8")
+    assert client.get("/api/archives").json()["archives"][0]["pipeline_stage"] == "failed"
+    detail = client.get(f"/api/archives/{root.name}?section=summary").json()
+    assert detail["observability"]["status"]["failed_stage"] == "mllm"
+    assert len(detail["key_events"]) == 1
+
+
+def test_paginated_sections_keep_role_videos_and_professional_report(monkeypatch, tmp_path):
+    archive_root = tmp_path / "archives"
+    root = archive_root / "Archive-Sections-Roles"
+    _, _, groups, _, _ = _indexed_archive(root)
+    folder = root / "Experiment-Clips" / groups[0].archive_folder
+    folder.mkdir(parents=True)
+    for name in ("First-Person.mp4", "Third-Person.mp4", "Aligned_First+Third.mp4"):
+        (folder / name).write_bytes(b"structural-media-fixture")
+    json_root = root / "JSON-Config-Files"
+    (json_root / "Experiment-Groups-Step-Level-Analysis.json").write_text(
+        json.dumps({"experiment_groups": [group.model_dump(mode="json") for group in groups]})
+    )
+    (json_root / "pipeline_status.json").write_text('{"stage":"completed"}')
+    (json_root / "daily_report_manifest.json").write_text('{"json":"report.json"}')
+    (root / "report.json").write_text('{"report_id":"R1"}')
+    monkeypatch.setattr(api, "_archive_root", lambda settings=None: archive_root)
+    client = TestClient(api.app)
+    detail = client.get(f"/api/archives/{root.name}?section=experiments").json()
+    experiment = detail["experiments"][0]
+    assert all(experiment[field] for field in (
+        "first_person_video_url", "third_person_video_url", "aligned_video_url"
+    ))
+    metrics = client.get(f"/api/archives/{root.name}?section=metrics").json()
+    assert metrics["daily_report"]["report_id"] == "R1"
+    assert metrics["observability"]["status"]["stage"] == "completed"
+
+
+def test_versioned_archive_file_rejects_stale_or_size_mismatched_content(
+    monkeypatch, tmp_path
+):
+    archive_root = tmp_path / "archives"
+    root = archive_root / "Archive-Media"
+    json_root = root / "JSON-Config-Files"
+    json_root.mkdir(parents=True)
+    (json_root / "evidence_package.json").write_text("{}", encoding="utf-8")
+    report = root / "Lab-Daily-Reports" / "report.txt"
+    report.parent.mkdir(parents=True)
+    report.write_text("verified report", encoding="utf-8")
+    release_manifest = root / ".release-manifest.json"
+    release_payload = {
+        "release_id": "release-001",
+        "manifests": {
+            "Lab-Daily-Reports": [
+                {
+                    "path": "report.txt",
+                    "size_bytes": report.stat().st_size,
+                    "sha256": hashlib.sha256(report.read_bytes()).hexdigest(),
+                }
+            ]
+        },
+    }
+    release_manifest.write_text(json.dumps(release_payload), encoding="utf-8")
+    pointer = {
+        "release_id": "release-001",
+        "release_manifest": release_manifest.name,
+        "release_manifest_file_sha256": hashlib.sha256(
+            release_manifest.read_bytes()
+        ).hexdigest(),
+    }
+    (root / ".VisionCortex-Current-Release.json").write_text(
+        json.dumps(pointer), encoding="utf-8"
+    )
+    monkeypatch.setattr(api, "_archive_root", lambda settings=None: archive_root)
+    client = TestClient(api.app)
+
+    current = client.get(
+        "/api/archive-file",
+        params={
+            "archive": root.name,
+            "path": "Lab-Daily-Reports/report.txt",
+            "release": "release-001",
+        },
+    )
+    assert current.status_code == 200
+    assert current.headers["cache-control"].endswith("immutable")
+    assert current.headers["x-visioncortex-release"] == "release-001"
+    assert current.headers["etag"].startswith('"sha256-')
+
+    stale = client.get(
+        "/api/archive-file",
+        params={
+            "archive": root.name,
+            "path": "Lab-Daily-Reports/report.txt",
+            "release": "release-old",
+        },
+    )
+    assert stale.status_code == 409
+
+    report.write_text("tampered report is larger", encoding="utf-8")
+    mismatched = client.get(
+        "/api/archive-file",
+        params={
+            "archive": root.name,
+            "path": "Lab-Daily-Reports/report.txt",
+            "release": "release-001",
+        },
+    )
+    assert mismatched.status_code == 409
+
+
+def test_archive_stream_limit_returns_retryable_busy_response(monkeypatch):
+    semaphore = threading.BoundedSemaphore(1)
+    assert semaphore.acquire(blocking=False)
+    monkeypatch.setattr(api, "_archive_stream_slots", semaphore)
+
+    response = TestClient(api.app).get(
+        "/api/archive-file", params={"archive": "unused", "path": "unused"}
+    )
+
+    assert response.status_code == 429
+    assert response.headers["retry-after"] == "2"
+    semaphore.release()
 
 
 def test_staging_run_web_endpoints_are_indexable_and_fail_closed(

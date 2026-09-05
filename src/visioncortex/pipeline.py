@@ -81,7 +81,12 @@ from .candidate_index import (
 )
 from .daily_reports import generate_daily_report_archive
 from .decisions import decision_receipt
-from .schema_contracts import write_archive_contract_manifest
+from .model_certification import audit_production_model_certification
+from .provenance import write_run_provenance
+from .schema_contracts import (
+    validate_archive_contracts_or_raise,
+    write_archive_contract_manifest,
+)
 from .schemas import (
     ActionCandidate,
     ActionType,
@@ -118,6 +123,7 @@ from .telemetry import ResourceMonitor
 from .reviewed_artifacts import load_dataset_scoped_json
 from .validation import (
     evaluate_key_event_recall,
+    finalize_quality_acceptance_claims,
     validate_experiment_and_material_quality,
 )
 
@@ -1443,6 +1449,10 @@ class EvidencePipeline:
             "applied": False,
             "reason": "not_evaluated",
         }
+        self._model_certification_audit: dict[str, Any] = {
+            "required": False,
+            "status": "not_required_by_profile",
+        }
 
     def _scan_progress(
         self, phase: str, view_id: str, completed_units: int, total_units: int
@@ -1737,6 +1747,9 @@ class EvidencePipeline:
         if not step_consistency["passed"]:
             report["passed"] = False
             report["status"] = "failed"
+        finalize_quality_acceptance_claims(
+            report, recall_gate, step_consistency
+        )
         write_json(layout.json_config / "quality_acceptance.json", report)
         write_json(
             layout.json_config / "key_material_recall_eval.json",
@@ -4510,6 +4523,13 @@ class EvidencePipeline:
             preflight_breakdown["source_validation"] = source_validation
             preflight_step_started = time.perf_counter()
             model_report = validate_models(self.config)
+            self._model_certification_audit = (
+                audit_production_model_certification(self.config)
+            )
+            write_json(
+                layout.json_config / "model_certification_audit.json",
+                self._model_certification_audit,
+            )
             model_report["video_encoder"] = video_encoder_preflight(
                 str(self.config["performance"].get("ffmpeg_video_encoder", "h264_nvenc"))
             )
@@ -6451,10 +6471,19 @@ class EvidencePipeline:
             # may contain multiple atomic segments but must count as one bounded
             # experiment in the user-facing output and boundary evaluation.
             self._run_sidecar_validation(layout, manifest, groups)
-            self._run_quality_acceptance(layout, groups, key_events)
+            quality_acceptance = self._run_quality_acceptance(
+                layout, groups, key_events
+            )
+            if quality_acceptance.get("passed") is not True:
+                raise RuntimeError(
+                    "Automatic experiment/material quality acceptance failed; "
+                    f"see {layout.json_config / 'quality_acceptance.json'}"
+                )
             self._complete_stage(layout, "package", [layout.json_config])
             self._status(layout, "daily_report", 0.98, "从已验收证据生成实验室日报并执行一致性校验")
-            generate_daily_report_archive(layout, summary, self._metrics(events, groups), self.config)
+            generate_daily_report_archive(
+                layout, summary, self._metrics(events, groups), self.config
+            )
             self._complete_stage(
                 layout,
                 "daily_report",
@@ -6462,33 +6491,36 @@ class EvidencePipeline:
             )
             if not self.config["archive"].get("keep_debug_candidates") and layout.work.exists():
                 shutil.rmtree(layout.work)
-            self._status(layout, "completed", 1.0, "处理完成")
-            run_metrics = self._metrics(events, groups)
-            # Refresh the package after the final stage has been closed so the
-            # durable evidence package and the standalone ledger contain the
-            # same complete stage durations and provider-reported token usage.
-            summary = finalize_archive(
+            self._status(
                 layout,
-                manifest,
-                infos,
-                transforms,
-                events,
-                segments,
-                groups,
-                key_events,
-                physical_changes,
-                rejected,
-                self.config,
-                disk_report,
-                run_metrics=run_metrics,
+                "finalizing",
+                0.995,
+                "封存最终运行指标、溯源清单和归档契约",
             )
-            # Refresh the report with the closed daily_report stage duration and
-            # final provider-reported token ledger. This remains deterministic.
-            generate_daily_report_archive(layout, summary, run_metrics, self.config)
+            run_metrics = self._metrics(events, groups)
+            summary.stats["run_metrics"] = run_metrics
+            summary.stats["run_provenance"] = {
+                "path": "JSON-Config-Files/run_provenance.json"
+            }
+            write_json(
+                layout.json_config / "run_metrics.json",
+                run_metrics,
+            )
+            write_json(
+                layout.json_config / "evidence_package.json",
+                summary.model_dump(mode="json"),
+            )
+            write_run_provenance(
+                layout.root,
+                self.config,
+                self._model_certification_audit,
+                repository_root=Path(__file__).resolve().parents[2],
+            )
             write_archive_contract_manifest(layout.root)
+            validate_archive_contracts_or_raise(layout.root)
             self._complete_stage(
                 layout,
-                "completed",
+                "finalizing",
                 [
                     layout.experiment_clips,
                     layout.key_materials,
@@ -6497,6 +6529,8 @@ class EvidencePipeline:
                     layout.professional_pdfs,
                 ],
             )
+            self._status(layout, "completed", 1.0, "处理完成并通过自动发布前验收")
+            self._complete_stage(layout, "completed", [layout.json_config])
             return layout.root
         except Exception as exc:
             self._status(layout, "failed", 1.0, f"{type(exc).__name__}: {exc}")
@@ -6809,7 +6843,8 @@ def create_dry_run(output: Path, config: dict[str, Any]) -> Path:
         supporting_roles=[ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON],
         candidates=candidates,
         model_understanding={
-            "status": "dry_run",
+            "status": "completed",
+            "execution_mode": "dry_run",
             "current_step": "戴手套的手接触移液器",
             "next_step": "未知",
             "confidence": 0.9,
@@ -6858,6 +6893,24 @@ def create_dry_run(output: Path, config: dict[str, Any]) -> Path:
             "third-person": "dry-run://tp01/experiment-json",
             "aligned_first_third": "dry-run://aligned/experiment-json",
         },
+        model_understanding={
+            "status": "completed",
+            "execution_mode": "dry_run",
+            "steps": [
+                {
+                    "step_index": 1,
+                    "start_global_ms": event.global_start_ms,
+                    "end_global_ms": event.global_end_ms,
+                    "current_step": "戴手套的手接触移液器",
+                    "next_step": "未知",
+                    "next_step_status": "unknown",
+                    "supporting_event_ids": [event.event_id],
+                    "objects": event.objects,
+                    "supporting_views": event.supporting_views,
+                    "confidence": event.confidence,
+                }
+            ],
+        },
     )
     prepare_key_material_category_layout(layout, [group])
     action_folder = key_material_action_folder(event.action_type)
@@ -6873,6 +6926,18 @@ def create_dry_run(output: Path, config: dict[str, Any]) -> Path:
         cv2.imwrite(str(path), image)
         event.key_frames[view.view_id] = archive_relative_posix(path, layout.root)
         event.key_clips[view.view_id] = f"dry-run://{view.view_id}/key-clip"
+    aligned_path = (
+        layout.key_frames
+        / str(group.archive_folder)
+        / action_folder
+        / event.event_id
+        / "Aligned_First+Third.jpg"
+    )
+    cv2.imwrite(str(aligned_path), image)
+    event.key_frames["aligned_first_third"] = archive_relative_posix(
+        aligned_path, layout.root
+    )
+    event.key_clips["aligned_first_third"] = "dry-run://aligned/key-clip"
     write_key_material_category_index(layout, [group], [event])
     physical = [
         PhysicalChange(
@@ -6940,6 +7005,9 @@ def create_dry_run(output: Path, config: dict[str, Any]) -> Path:
         minimum_cross_view_event_rate=0.0,
     )
     dry_quality["dry_run"] = True
+    dry_quality["structural_passed"] = bool(dry_quality.get("passed"))
+    dry_quality["evidence_level"] = "synthetic_structural_only"
+    dry_quality["formal_accuracy_claim_allowed"] = False
     write_json(layout.json_config / "quality_acceptance.json", dry_quality)
     dry_metrics = {
         "total_duration_seconds": 0.0,
@@ -6955,6 +7023,13 @@ def create_dry_run(output: Path, config: dict[str, Any]) -> Path:
     }
     write_json(layout.json_config / "run_metrics.json", dry_metrics)
     generate_daily_report_archive(layout, summary, dry_metrics, config)
+    write_run_provenance(
+        layout.root,
+        config,
+        {"required": False, "status": "not_required_by_profile"},
+        repository_root=Path(__file__).resolve().parents[2],
+    )
     write_archive_contract_manifest(layout.root)
+    validate_archive_contracts_or_raise(layout.root)
     write_json(layout.root / "run_status.json", {"stage": "completed", "progress": 1.0, "dry_run": True})
     return layout.root

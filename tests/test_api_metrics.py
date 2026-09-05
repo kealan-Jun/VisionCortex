@@ -101,10 +101,52 @@ def test_web_end_to_end_metrics_preserve_pipeline_metrics(tmp_path):
 
     payload = json.loads(metrics_path.read_text(encoding="utf-8"))
     assert payload["total_duration_seconds"] == 12.5
-    assert payload["web_ingest"]["file_count"] == 2
-    assert "request_started_perf" not in payload["web_ingest"]
-    assert payload["web_end_to_end"]["completed"] is True
-    assert payload["web_end_to_end"]["total_duration_seconds"] >= 0.01
+    assert "web_ingest" not in payload
+    delivery = json.loads(
+        (root / "JSON-Config-Files" / "delivery_metrics.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert delivery["web_ingest"]["file_count"] == 2
+    assert "request_started_perf" not in delivery["web_ingest"]
+    assert delivery["web_end_to_end"]["completed"] is True
+    assert delivery["web_end_to_end"]["total_duration_seconds"] >= 0.01
+    merged = api._merged_run_metrics(root)
+    assert merged["total_duration_seconds"] == 12.5
+    assert merged["web_ingest"]["file_count"] == 2
+
+
+def test_current_release_publication_is_authoritative_for_delivery_duration(tmp_path):
+    root = tmp_path / "archive"
+    json_root = root / "JSON-Config-Files"
+    json_root.mkdir(parents=True)
+    (json_root / "run_metrics.json").write_text(
+        json.dumps({"total_duration_seconds": 12.5}), encoding="utf-8"
+    )
+    (json_root / "delivery_metrics.json").write_text(
+        json.dumps({"web_end_to_end": {"total_duration_seconds": 10.0}}),
+        encoding="utf-8",
+    )
+    (root / ".VisionCortex-Current-Release.json").write_text(
+        json.dumps(
+            {
+                "publication": {
+                    "metric_key": "web_end_to_end",
+                    "completed": True,
+                    "total_duration_seconds": 15.0,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    merged = api._merged_run_metrics(root)
+
+    assert merged["total_duration_seconds"] == 12.5
+    assert merged["web_end_to_end"] == {
+        "completed": True,
+        "total_duration_seconds": 15.0,
+    }
 
 
 def test_health_exposes_fixed_benchmark_and_cache_locations(monkeypatch, tmp_path):

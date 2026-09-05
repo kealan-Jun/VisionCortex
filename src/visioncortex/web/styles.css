@@ -286,6 +286,7 @@ svg { display: block; width: 17px; height: 17px; fill: none; stroke: currentColo
 .material-filter-bar select:focus, .material-filter-bar input:focus { border-color: var(--brand-2); outline: 3px solid rgba(45,124,130,.1); }
 .material-result-summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 4px 2px; color: var(--text-3); font-size: 12px; }
 .material-result-summary strong { color: var(--text); font-size: 13px; }
+.pagination-actions { display: flex; justify-content: center; padding: 16px 20px 20px; }
 .material-group { display: grid; gap: 11px; scroll-margin-top: 220px; }
 .material-group > header { display: grid; grid-template-columns: 36px minmax(0,1fr) auto; align-items: center; gap: 11px; border-bottom: 1px solid var(--border); padding: 14px 4px 10px; }
 .material-group > header h2 { margin: 0; font-size: 16px; }
