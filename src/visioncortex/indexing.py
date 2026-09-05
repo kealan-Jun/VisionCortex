@@ -27,6 +27,23 @@ EVIDENCE_REGISTRY_NAME = "evidence_registry.jsonl"
 DECISION_REGISTRY_NAME = "decision_receipt_registry.jsonl"
 PHYSICAL_CHANGE_REGISTRY_NAME = "physical_change_registry.jsonl"
 
+_ACTION_SEARCH_ALIASES = {
+    "hand_object_contact": "手 物体 接触 拿取 抓取 放置 touch grasp pick place",
+    "object_movement": "物体 移动 搬运 位移 move movement transport",
+    "liquid_movement": "液体 移动 流动 倾倒 倒液 liquid pour movement",
+    "liquid_transfer": "液体 转移 移液 吸取 排液 加液 pipette transfer aspirate dispense",
+    "pipette_transfer_operation": "移液器 移液 吸取 排液 加液 pipette transfer aspirate dispense",
+    "container_state_change": "容器 状态 变化 开盖 关盖 密封 container open close cap",
+    "device_panel_operation": "设备 面板 操作 按键 旋钮 开关 device panel button knob switch",
+    "panel_operation": "设备 面板 操作 按键 旋钮 开关 device panel button knob switch",
+}
+
+
+def action_search_aliases(action_type: str) -> str:
+    """Return deterministic bilingual terms for the existing action taxonomy."""
+
+    return _ACTION_SEARCH_ALIASES.get(str(action_type or ""), "")
+
 
 def stable_event_uid(archive_id: str, group_id: str, event_id: str) -> str:
     """Return a deterministic identifier that remains stable across reruns."""
@@ -577,6 +594,9 @@ def _populate_sqlite(
                             "experiment": (payload.get("provenance") or {}).get(
                                 "experiment_name"
                             ),
+                            "action_search_aliases": action_search_aliases(
+                                str(payload.get("action_type") or "")
+                            ),
                         }
                     )
                 )
@@ -1036,20 +1056,43 @@ def search_archive_index(
                 f"{where} ORDER BY k.peak_timestamp_us, k.event_uid LIMIT ?",
                 parameters,
             ).fetchall()
+        if use_fts and not rows:
+            like_conditions = [
+                item for item in conditions if item != "key_events_fts MATCH ?"
+            ]
+            like_parameters = parameters[1:-1]
+            like_conditions.append("k.search_text LIKE ?")
+            like_parameters.extend((f"%{query}%", max(1, int(limit))))
+            like_where = f" WHERE {' AND '.join(like_conditions)}"
+            rows = connection.execute(
+                "SELECT k.* FROM key_events k"
+                f"{like_where} ORDER BY k.peak_timestamp_us, k.event_uid LIMIT ?",
+                like_parameters,
+            ).fetchall()
+        artifact_map: dict[str, list[dict[str, Any]]] = {}
+        event_uids = [str(row["event_uid"]) for row in rows]
+        if event_uids:
+            placeholders = ",".join("?" for _ in event_uids)
+            artifact_rows = connection.execute(
+                "SELECT event_uid, artifact_json FROM artifacts "
+                f"WHERE event_uid IN ({placeholders}) "
+                "ORDER BY event_uid, artifact_type, view_id",
+                event_uids,
+            ).fetchall()
+            for artifact_row in artifact_rows:
+                artifact_map.setdefault(str(artifact_row["event_uid"]), []).append(
+                    json.loads(artifact_row["artifact_json"])
+                )
         results = []
         for row in rows:
             payload = json.loads(row["event_json"])
-            artifact_rows = connection.execute(
-                "SELECT artifact_json FROM artifacts WHERE event_uid = ? ORDER BY artifact_type, view_id",
-                (row["event_uid"],),
-            ).fetchall()
             payload.update(
                 {
                     "event_uid": row["event_uid"],
                     "archive_id": row["archive_id"],
-                    "artifact_references": [
-                        json.loads(item["artifact_json"]) for item in artifact_rows
-                    ],
+                    "artifact_references": artifact_map.get(
+                        str(row["event_uid"]), []
+                    ),
                     "key_material_json_reference": {
                         "path": "Key-Materials/Key-Materials-Model-Understanding.json",
                         "event_id": row["event_id"],

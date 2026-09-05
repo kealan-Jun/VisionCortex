@@ -76,6 +76,42 @@ GPU 任务，其余任务保留为“排队等待”，避免互相争抢显存�
 仓库。真实模型、真实视频质量和正式归档能力仍须在 3090 Ti 主机按下面的生产门禁
 验收，网页能打开本身不代表完整推理已经通过。
 
+归档查阅不会在每次打开页面时重新遍历并读取全部 JSON。服务会把正式归档中已有的
+`evidence_index.sqlite` 同步为 3090 Ti 本地运行目录下的可重建读取索引；归档 JSON
+和逐归档 SQLite 仍是权威数据，读取索引损坏或删除后会自动重建，不复制原视频。
+归档目录、实验片段和关键事件均分页加载，中文动作词会扩展到现有动作本体的中英文
+同义词；素材 URL 绑定当前 `release_id`，旧版本链接会返回冲突提示而不会继续展示
+浏览器缓存。关键帧延迟加载、关键片段不预加载正文，服务默认最多并发传输 8 个归档
+文件；可用 `VISIONCORTEX_WEB_MAX_CONCURRENT_ARCHIVE_STREAMS` 调整，超出时返回
+`429` 并提示浏览器稍后重试，避免多人播放把 NAS 链路拖死。
+
+安装器创建的单一 `visioncortex` 管理账号继续兼容。多人使用时，可改用权限为 `600`
+的 `VISIONCORTEX_WEB_USERS_FILE`，每个人使用独立账号和 `viewer`、`operator` 或
+`admin` 角色；`viewer` 只能查阅，后两者可提交任务。密码文件只保存 PBKDF2 哈希，
+可在服务器终端生成：
+
+```bash
+visioncortex hash-web-password
+```
+
+用户文件格式如下，不能写入明文密码，也不能提交到 Git：
+
+```json
+{
+  "schema_version": "visioncortex-web-users/1",
+  "users": [
+    {"username": "researcher-01", "role": "viewer", "password_hash": "<PBKDF2_HASH>"},
+    {"username": "operator-01", "role": "operator", "password_hash": "<PBKDF2_HASH>"}
+  ]
+}
+```
+
+局域网 API 的账号、角色、来源 IP、方法、路径、状态码和耗时会按日写入服务器本地
+`Runtime/state/web_access_audit-YYYY-MM-DD.jsonl`，不记录密码、Authorization 或
+查询参数。若通过 Nginx/Caddy 等受控反向代理提供 TLS，可设置
+`VISIONCORTEX_WEB_REQUIRE_HTTPS=true` 强制拒绝非 HTTPS 请求；当前安装器显示的
+`http://192.168.x.x` 仅适用于受信任、隔离的内网，不能作为公网入口。
+
 ## Ubuntu RTX 3090 Ti 本地结构
 
 ```text

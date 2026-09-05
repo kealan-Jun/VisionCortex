@@ -95,11 +95,27 @@ from .validation import (
     finalize_quality_acceptance_claims,
     validate_experiment_and_material_quality,
 )
+from .web_access import hash_web_password
 from .yolo_evaluation import evaluate_files as evaluate_yolo_files
 from .yolo_training import build_yolo_training_dataset, train_yolo_model
 
 
 app = typer.Typer(no_args_is_help=True, help="多视角化学实验视频证据流水线")
+
+
+@app.command("hash-web-password")
+def hash_web_password_command() -> None:
+    """Prompt securely and print a PBKDF2 hash for the LAN users file."""
+
+    password = typer.prompt(
+        "VisionCortex Web password",
+        hide_input=True,
+        confirmation_prompt=True,
+    )
+    try:
+        typer.echo(hash_web_password(password))
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
 
 def _progress(stage: str, progress: float, message: str) -> None:
