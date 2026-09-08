@@ -11,6 +11,11 @@ project:
 # scanner reads bounded sidecar metadata only; it neither copies nor renames
 # source media. A directory can be visible before its view role is approved;
 # such recordings remain fail-closed instead of being guessed from its name.
+speech_recognition:
+  enabled: true
+  python_executable: /srv/sentinel-data/VisionCortex3090Ti/Runtime/ASR-Pilot/.venv/bin/python
+  model_directory: /srv/sentinel-data/VisionCortex3090Ti/Models/Speech/faster-whisper-small/536b0662742c02347bc0e980a01041f333bce120
+
 collection_ingest:
   enabled: true
   mode: directory_metadata
@@ -370,17 +375,21 @@ performance:
   # held-out action windows.
   auto_exhaustive_short_timeline_enabled: true
   auto_exhaustive_short_timeline_seconds: 600
-  # Ultralytics expands a dynamic 640 profile up to 1920x1920 while building.
-  # On the actual 3090 Ti, a max build batch of 16 exhausts builder memory in
-  # the attention block. Keep the runtime request at 16, but cap the engine's
-  # dynamic profile at four; the scanner reads the engine metadata and splits
-  # larger requested batches safely. Tune only after a bounded acceptance run.
+  # Retain the existing batch-4 engines. A 2026-09-08 bounded 640px profile
+  # successfully built batch 32, so four is not the GPU's memory ceiling.
+  # That candidate changed several detection receipts and is not promoted.
+  # Runtime requests are split according to the loaded engine's real capacity.
   engine_batch_size: 4
   batch_size: 16
   coarse_batch_size: 16
   motion_probe_batch_size: 16
   fine_batch_size: 16
   fine_active_decode_slots: 8
+  # Four real-source cold runs on 2026-09-08 preserved all 2014 candidates,
+  # 979 movement receipts, five boundaries and 61 selected event identities.
+  # The single-role supplemental wave can now use independent contexts;
+  # they share the eight decode slots instead of multiplying that budget.
+  fine_inference_workers_per_role: 3
   fine_first_person_decode_workers: 4
   fine_third_person_decode_workers: 6
   fine_decode_prefetch_frames: 48
@@ -446,6 +455,13 @@ archive:
   include_empty_action_categories: false
 
 mllm:
+  boundary_review:
+    enabled: true
+    # Review scope limits API input, not the allowed experiment duration.
+    maximum_gap_seconds: 120
+    context_seconds: 12
+    maximum_pairs: 20
+    minimum_confidence: 0.85
   candidate_review_stratified_queue_enabled: true
   candidate_review_time_bucket_seconds: 1800
   # Keep the evidence originals untouched while bounding only the request
@@ -455,7 +471,7 @@ mllm:
   # provider outage resumable without stalling local evidence production.
   request_image_max_edge: 768
   request_image_jpeg_quality: 82
-  timeout_seconds: 90
+  timeout_seconds: 180
   max_retries: 2
   failure_circuit_breaker_threshold: 2
   # Common actions retain both views in three aligned temporal phases while
@@ -476,6 +492,12 @@ mllm:
     liquid_movement: 18
 
 segmentation:
+  # The paired local preprocessing comparison measured 218.27 -> 196.61 s
+  # with the same engines and evidence. Two movement workers were faster
+  # than four in the isolated replay; keep decoding's default thread policy.
+  movement_visual_verification:
+    workers: 2
+    frame_cache_size: 512
   # The exhaustive short-timeline path sees accepted preparation evidence
   # outside sparse motion-sentinel windows.  A publication-primary single-role
   # chain may extend the boundary only when it reaches the first dual-role

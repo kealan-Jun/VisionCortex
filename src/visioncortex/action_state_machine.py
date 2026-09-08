@@ -333,7 +333,12 @@ def _phase_contract(
         ]
         present = []
         if flags["transfer_sequence"]:
-            present = list(required)
+            contact_only = any(
+                evidence.get("contact_sequence_only") is True
+                for candidate in event.candidates for evidence in candidate.evidence
+                if evidence.get("transfer_sequence") == "source_transport_target"
+            )
+            present = ["source_contact", "target_contact"] if contact_only else list(required)
         elif flags["contact"] or flags["roi_motion"]:
             present = ["source_approach", "source_contact"]
         before = {
@@ -365,6 +370,12 @@ def _phase_contract(
                 else "not_observed"
             ),
         }
+        if flags["transfer_sequence"] and "transport" not in present:
+            after = {
+                "tool": "target_proximity_only_release_unknown",
+                "source": "tool_proximity_observed_contents_unknown",
+                "target": "tool_proximity_observed_contents_unknown",
+            }
     elif event.action_type == ActionType.CONTAINER_STATE_CHANGE:
         if "bottle_cap" in objects or "tube_cap" in objects:
             subtype = "cap_remove_or_replace"
@@ -492,7 +503,9 @@ def build_event_state_receipt(
             "phase_completeness": round(completeness, 4),
             "cross_view_support": 0.95 if both_roles else 0.45,
             "state_change_support": round(
-                1.0 if "state_after" in present or _evidence_flags(event)["transfer_sequence"] else 0.3,
+                1.0 if "state_after" in present or (
+                    _evidence_flags(event)["transfer_sequence"] and "transport" in present
+                ) else 0.3,
                 4,
             ),
             "contradiction_penalty": 0.0,

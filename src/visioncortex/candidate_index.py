@@ -420,6 +420,12 @@ def ingest_fine_frame_ledgers(
         for view in views:
             path = detection_paths[view.view_id]
             source_map: dict[int, int] = {}
+            # A source pass already has distinct tracker identities. Reserve
+            # each mapped identity for the entire pass, including occlusions
+            # and detections that occur later in the current frame. Otherwise
+            # a nearby new object can steal an existing mapping and both
+            # objects subsequently share one trajectory.
+            assigned_tracks: set[int] = set()
             used_by_frame: set[int] = set()
             input_frames = 0
             replaced_frames = 0
@@ -459,7 +465,7 @@ def ingest_fine_frame_ledgers(
                                 overlapping=overlapping,
                                 maximum_gap_ms=maximum_stitch_gap_ms,
                                 maximum_center_distance=maximum_center_distance,
-                                used_tracks=used_by_frame,
+                                used_tracks=used_by_frame | assigned_tracks,
                             )
                         if unified_track_id is None:
                             unified_track_id = next_ids.get(view.view_id, 1)
@@ -469,6 +475,7 @@ def ingest_fine_frame_ledgers(
                         else:
                             stitched_tracks.add(unified_track_id)
                         source_map[int(source_track_id)] = unified_track_id
+                        assigned_tracks.add(unified_track_id)
                         connection.execute(
                             "INSERT OR REPLACE INTO fine_track_stitches VALUES (?, ?, ?, ?, ?, ?, ?)",
                             (
@@ -594,6 +601,7 @@ def ingest_fine_frame_ledgers(
         connection.close()
     return {
         "source_pass": source_pass,
+        "track_identity_policy": "injective_source_track_mapping_per_view_and_pass",
         "views": reports,
         "input_frames": sum(item["input_frames"] for item in reports),
         "stitched_tracks": sum(item["stitched_tracks"] for item in reports),

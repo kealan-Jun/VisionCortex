@@ -33,6 +33,8 @@ class VideoSegmentInput(BaseModel):
 
     video: Path
     timestamps_csv: Path | None = None
+    audio: Path | None = None
+    audio_offset_ms: float | None = Field(default=None, allow_inf_nan=False)
 
 
 class ViewInput(BaseModel):
@@ -42,6 +44,8 @@ class ViewInput(BaseModel):
     role: ViewRole
     video: Path | None = None
     timestamps_csv: Path | None = None
+    audio: Path | None = None
+    audio_offset_ms: float | None = Field(default=None, allow_inf_nan=False)
     segments: list[VideoSegmentInput] = Field(default_factory=list)
     calibration_hint_ms: float = 0.0
 
@@ -49,6 +53,8 @@ class ViewInput(BaseModel):
     def validate_source(self) -> "ViewInput":
         if self.video is None and not self.segments:
             raise ValueError("view must provide either video or segments")
+        if self.segments and (self.audio is not None or self.audio_offset_ms is not None):
+            raise ValueError("segmented views must declare audio on each segment")
         if self.video is not None and self.segments:
             raise ValueError("view cannot provide both video and segments")
         return self
@@ -274,6 +280,37 @@ class BoxEvidence(BaseModel):
         return value.strip().replace("-", "_")
 
 
+class DuplicateBoxRemoval(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    removed_input_index: int = Field(ge=0)
+    retained_input_index: int = Field(ge=0)
+    iou: float = Field(gt=0.0, le=1.0)
+
+
+class DetectionDuplicateSuppression(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["visioncortex-detection-duplicate-suppression/1"] = (
+        "visioncortex-detection-duplicate-suppression/1"
+    )
+    iou_threshold: float = Field(gt=0.0, le=1.0)
+    raw_detections: list[BoxEvidence]
+    retained_input_indices: list[int]
+    removals: list[DuplicateBoxRemoval]
+    scope: Literal["one_source_frame_before_tracking"] = "one_source_frame_before_tracking"
+
+    @model_validator(mode="after")
+    def validate_index_partition(self) -> "DetectionDuplicateSuppression":
+        kept = self.retained_input_indices
+        removed = [item.removed_input_index for item in self.removals]
+        if sorted(kept + removed) != list(range(len(self.raw_detections))):
+            raise ValueError("Duplicate suppression must account for every raw detection once")
+        if any(item.retained_input_index not in kept for item in self.removals):
+            raise ValueError("A suppressed box must reference a retained raw detection")
+        return self
+
+
 class FrameEvidence(BaseModel):
     view_id: str
     role: ViewRole
@@ -290,6 +327,7 @@ class FrameEvidence(BaseModel):
     camera_motion_method: str | None = None
     motion_quality_state: str = "usable"
     detections: list[BoxEvidence] = Field(default_factory=list)
+    duplicate_suppression: DetectionDuplicateSuppression | None = None
 
 
 class ActionCandidate(BaseModel):
@@ -406,6 +444,8 @@ class ExperimentGroup(BaseModel):
     first_person_view: str
     third_person_view: str
     continuity_reason: str
+    # Original-video reviews of proposed cuts; not physical-action acceptance.
+    boundary_reviews: list[dict[str, Any]] = Field(default_factory=list)
     experiment_name: str = "待模型命名实验"
     experiment_name_en: str = "Unnamed-Experiment"
     archive_folder: str | None = None

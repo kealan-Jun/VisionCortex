@@ -1,0 +1,83 @@
+extends: ./rtx3050-6gb-ubuntu20-production.yaml
+
+# Relocatable offline installation, local uploads/storage, online Ark analysis.
+# The launcher fixes cwd to the package and clears inherited deployment env.
+project:
+  portable_desktop: true
+  output_root: ./Runtime/Archives/.VisionCortex-Run-Staging
+
+# The offline Windows runtime does not include the Ubuntu speech environment.
+# An optional speech installation must be configured and verified on its host.
+speech_recognition:
+  enabled: false
+  python_executable: null
+  model_directory: null
+
+models:
+  first_person: ./models/ClosedSetYOLO/first_person/best.pt
+  third_person: ./models/ClosedSetYOLO/third_person/best.pt
+  first_person_engine: ./Runtime/Engines/first_person.engine
+  third_person_engine: ./Runtime/Engines/third_person.engine
+  open_vocabulary_key_frame:
+    model_path: ./models/Public/yolov8s-worldv2.pt
+    clip_model_path: ./models/Public/ViT-B-32.pt
+    grounding_dino_fallback:
+      model_path: ./models/Public/grounding-dino-base
+      device: cpu
+      temporal_rescue_device: cuda
+  temporal_participant_segmentation:
+    checkpoint_path: ./models/Public/sam2.1_hiera_base_plus.pt
+    offload_video_to_cpu: true
+    offload_state_to_cpu: true
+    apply_postprocessing: false
+    vos_optimized: false
+  liquid_semantic_sidecar:
+    checkpoint_path: ./models/Public/labpics-semantic-materials.torch
+    source_archive_path: ./models/Public/LabPicsSemantic.zip
+    device: cpu
+    half: false
+
+performance:
+  profile: rtx4050-6gb-windows-local-full-chain
+  engine_batch_candidates: [16, 8, 4, 2, 1]
+  engine_autotune_max_gpu_memory_fraction: 0.78
+  max_gpu_memory_fraction: 0.86
+  concurrent_role_scanners: false
+  release_auxiliary_models_after_event: true
+  # CPU count is detected by the launcher; RAM is a cache, not a fill target.
+  source_workers: 6  # Concurrency budget, not a camera-count limit.
+  decode_queue_depth: 64
+  fine_decode_prefetch_frames: 16
+  cpu_decode_threads: 4
+  materialization_workers: 1
+  io_workers: 4
+
+mllm:
+  enabled: true
+  workers: 2
+  group_workers: 2
+
+storage:
+  index_csv: ./Runtime/local-experiment-index.csv
+  device_registry_path: ./Runtime/local-device-registry.json
+  archive_root: ./Runtime/Archives
+  local_input_root: ./Runtime/Input-Manifests
+  local_runtime_root: ./Runtime
+  local_cache_root: ./Runtime/Cache
+  local_staging_root: ./Runtime/Archives/.VisionCortex-Run-Staging
+  sync_to_nas: false
+  run_output_mode: local
+  manifest_storage: local
+  require_nas_source_paths: false
+  web_upload_retention_mode: local_only
+
+collection_ingest:
+  enabled: false
+  mode: index_metadata
+  source_root: ./Runtime/Input-Manifests
+  snapshot_path: ./Runtime/collection-snapshot.json
+
+validation:
+  # Keep inherited evidence/quality gates. No certificate is fabricated.
+  model_certification:
+    path: ./Runtime/Model-Quality/production_model_certification.json

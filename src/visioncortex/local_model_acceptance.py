@@ -129,7 +129,7 @@ def _yolo_world_acceptance(
     frame: np.ndarray, config: dict[str, Any]
 ) -> dict[str, Any]:
     import torch
-    from ultralytics import YOLOWorld
+    from .open_vocabulary_runtime import load_yolo_world_with_local_clip
 
     settings = config["models"]["open_vocabulary_key_frame"]
     prompts = [
@@ -139,7 +139,7 @@ def _yolo_world_acceptance(
         "pipette tip",
     ]
     started = time.perf_counter()
-    model = YOLOWorld(str(settings["model_path"]))
+    model = load_yolo_world_with_local_clip(settings)
     model.set_classes(prompts)
     result = model.predict(
         frame,

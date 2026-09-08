@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#1e4a52" />
     <link id="product-favicon" rel="icon" href="data:," />
     <title>VisionCortex · 多视角湿实验分析</title>
-    <link rel="stylesheet" href="/ui/styles.css?v=20260904-product-shell-32" />
+    <link rel="stylesheet" href="/ui/styles.css?v=20260908-responsive-providers-70" />
   </head>
   <body>
     <a class="skip-link" href="#main-content">跳到主要内容</a>
@@ -29,6 +29,7 @@
             <a class="nav-link" data-route="reports" href="#/reports"><span class="nav-icon" data-icon="file"></span><span class="nav-label">实验室日报</span></a>
             <div class="nav-separator"></div>
             <p class="nav-section-label">系统</p>
+            <a class="nav-link" data-route="ai-settings" data-ai-settings-link href="#/ai-settings" hidden><span class="nav-icon" data-icon="brain"></span><span class="nav-label">AI 服务设置</span></a>
             <a class="nav-link" data-route="operations" href="#/operations"><span class="nav-icon" data-icon="server"></span><span class="nav-label">运行状态</span></a>
             <button class="nav-link mobile-more-button" id="mobile-more-button" type="button"><span class="nav-icon" data-icon="boxes"></span><span class="nav-label">更多</span></button>
           </nav>
@@ -63,10 +64,15 @@
         <a href="#/materials"><span data-icon="boxes"></span><div><strong>关键素材库</strong><small>跨实验查看关键画面</small></div><span data-icon="arrow"></span></a>
         <a href="#/reports"><span data-icon="file"></span><div><strong>实验室日报</strong><small>汇总实验过程与结论</small></div><span data-icon="arrow"></span></a>
         <a href="#/operations"><span data-icon="server"></span><div><strong>运行状态</strong><small>查看服务与存储状态</small></div><span data-icon="arrow"></span></a>
+        <a href="#/ai-settings" data-ai-settings-link hidden><span data-icon="brain"></span><div><strong>AI 服务设置</strong><small>选择厂商、模型与密钥</small></div><span data-icon="arrow"></span></a>
       </nav>
     </dialog>
     <div class="toast-region" id="toast-region" aria-live="polite"></div>
     <script src="/ui/brand-logo.js" defer></script>
-    <script src="/ui/app.js?v=20260904-product-shell-32" defer></script>
+    <script src="/ui/ai-settings.js?v=20260908-provider-discovery-3" defer></script>
+    <script src="/ui/speech-sync.js?v=20260908-sync-1" defer></script>
+    <script src="/ui/speech-tools.js?v=20260908-speech-2" defer></script>
+    <script src="/ui/speech.js?v=20260908-speech-2" defer></script>
+    <script src="/ui/app.js?v=20260908-responsive-providers-70" defer></script>
   </body>
 </html>

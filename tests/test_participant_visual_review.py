@@ -47,6 +47,8 @@ def setup(tmp_path, monkeypatch):
             calls.append(deepcopy(metadata))
             return {
                 "status": "completed", "usage": {"total_tokens": 120, "input_tokens": 100, "output_tokens": 20},
+                "provider": "aliyun", "api_protocol": "chat_completions",
+                "request_id": "synthetic-review-request", "response_model": "synthetic-vision-model",
                 "views": [{"view_id": view["view_id"], "selected_candidate_ids": view["candidate_ids"][:1], "target_visible": True, "reason": "visible in the candidate"} for view in metadata["views"]],
             }
 
@@ -81,6 +83,21 @@ def test_completed_visual_request_reused_with_original_candidate_only(setup, tmp
     metrics = EvidencePipeline(config)._metrics([event, event])
     assert metrics["tokens"]["participant_visual_review"]["executed_call_count"] == 1
     assert metrics["tokens"]["run_total"]["total_tokens"] == 120
+    call = metrics["mllm_calls"][0]
+    assert call["provider"] == "aliyun"
+    assert call["request_id"] == "synthetic-review-request"
+    assert call["response_model"] == "synthetic-vision-model"
+
+
+def test_changed_thinking_policy_cannot_reuse_visual_answer(setup, tmp_path):
+    reviewer, config, views, calls = setup
+    first, _ = reviewer.review(_event(), views)
+    config["mllm"]["quality_mode"] = "quality"
+    new = review_module.ParticipantVisualReviewer(config, tmp_path / "next-work", tmp_path / "next-output", reviewer.detector)
+    second, _ = new.review(_event(), views)
+    assert len(calls) == 2
+    assert second["input_fingerprint"] != first["input_fingerprint"]
+    assert second["cache_reused"] is False
 
 
 def test_changed_input_respects_persistent_run_budget(setup):
@@ -110,6 +127,31 @@ def test_uncertain_or_failed_request_is_not_resubmitted(setup, cached_status):
     usage = EvidencePipeline(config)._metrics([event])["tokens"]["participant_visual_review"]
     assert usage["unknown_usage_call_count"] == 1
     assert usage["total_tokens"] is None
+
+
+@pytest.mark.parametrize("cached_status", ["pending", "failed", "invalid_response"])
+def test_explicit_recovery_retries_failed_visual_request_once_with_new_budget(
+    setup, cached_status,
+):
+    reviewer, config, views, calls = setup
+    record, _ = reviewer.review(_event(), views)
+    cache_path = reviewer.cache / "requests" / f"{record['input_fingerprint']}.json"
+    saved = json.loads(cache_path.read_text())
+    saved.update(status=cached_status, usage={})
+    cache_path.write_text(json.dumps(saved))
+    config["project"]["semantic_recovery_attempt"] = "original-run:2"
+    recovered = review_module.ParticipantVisualReviewer(
+        config, reviewer.work_root.parent, reviewer.index_path.parent, reviewer.detector
+    )
+    result, _ = recovered.review(_event(), views)
+    assert result["status"] == "completed"
+    assert len(calls) == 2
+    recovered.review(_event(), views)
+    assert len(calls) == 2
+    history = list((reviewer.cache / "request-recovery").rglob("*.previous.json"))
+    assert len(history) == 1
+    assert json.loads(history[0].read_text())["status"] == cached_status
+    assert list((reviewer.index_path.parent / "participant-visual-review-attempts").glob("*.json"))
 
 
 def test_explicit_invisible_selection_is_safely_normalized_without_box(

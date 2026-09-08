@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from visioncortex.actions import (
     refine_motion_candidates_with_coarse,
     select_fine_scan_views,
@@ -265,3 +267,56 @@ def test_concurrent_role_workers_partition_views_without_losing_order(
     assert scheduler["mode"] == "concurrent_role_workers"
     assert scheduler["active_scanner_count"] == 3
     assert scheduler["yolo_inference_workers_per_role"] == 2
+
+
+@pytest.mark.parametrize("decode_slots,contexts", [(8, 3), (2, 2)])
+def test_progressive_same_role_wave_uses_bounded_parallel_contexts(monkeypatch, tmp_path, default_config, decode_slots, contexts):
+    import threading
+    from types import SimpleNamespace
+
+    views = [ViewInput(view_id=f"tp{i}", role=ViewRole.THIRD_PERSON, video=Path(f"tp{i}.mp4"))
+             for i in range(3)]
+    default_config["performance"].update(concurrent_role_scanners=False,
+        fine_inference_workers_per_role=3, fine_active_decode_slots=decode_slots, source_workers=3)
+    barrier = threading.Barrier(contexts)
+    calls = []
+
+    def fake_scan(group, _infos, _transforms, _work, config, **kwargs):
+        calls.append((tuple(v.view_id for v in group), kwargs["scanner_id"],
+                      config["performance"]["fine_active_decode_slots"]))
+        barrier.wait(timeout=5)
+        return {v.view_id: tmp_path / f"{v.view_id}.jsonl" for v in group}
+
+    monkeypatch.setattr("visioncortex.pipeline.scan_videos", fake_scan)
+    pipeline = EvidencePipeline(default_config)
+    result = pipeline._scan_all_views_concurrently(SimpleNamespace(views=views), {}, {}, tmp_path, phase="fine")
+    assert set(result) == {v.view_id for v in views}
+    assert {c[1] for c in calls} == {f"worker_{i:02d}" for i in range(1, contexts + 1)}
+    assert sum(c[2] for c in calls) <= decode_slots
+    assert default_config["performance"]["fine_active_decode_slots"] == decode_slots
+    assert json.loads((tmp_path / "scheduler_fine.json").read_text())["mode"] == "concurrent_same_role_workers"
+
+
+def test_ten_view_scan_preserves_sources_in_shared_context_pool(monkeypatch, tmp_path, default_config):
+    import threading
+
+    views = [ViewInput(view_id=f"{role.value}-{i}", role=role, video=Path(f"{role.value}-{i}.mp4"))
+             for role in (ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON) for i in range(5)]
+    default_config["performance"].update(
+        source_workers=10, concurrent_role_scanners=True, yolo_inference_workers=3)
+    barrier = threading.Barrier(6)
+    calls = []
+
+    def fake_scan(group, _infos, _transforms, _work_dir, _config, **kwargs):
+        calls.append([v.view_id for v in group])
+        barrier.wait(timeout=5)
+        return {v.view_id: tmp_path / f"{v.view_id}.jsonl" for v in group}
+
+    monkeypatch.setattr("visioncortex.pipeline.scan_videos", fake_scan)
+    pipeline = EvidencePipeline(default_config)
+    result = pipeline._scan_all_views_concurrently(
+        RunManifest(experiment_id="ten-source-scheduling-contract", views=views),
+        {}, {}, tmp_path, phase="fine")
+    assert sorted(v for group in calls for v in group) == sorted(v.view_id for v in views)
+    assert set(result) == {v.view_id for v in views}
+    assert len(calls) == 6

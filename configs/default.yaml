@@ -1,3 +1,21 @@
+capture_quality:
+  enabled: true
+  sample_windows: 4
+  sample_seconds: 3
+
+speech_recognition:
+  enabled: false
+  python_executable: null
+  model_directory: null
+  model_registry: configs/models/speech-recognition.json
+  language: zh
+  cpu_threads: 4
+  # Budget per recorder segment; multi-segment work is queued separately.
+  max_audio_seconds: 1800
+  max_source_bytes: 134217728
+  context_max_segments: 80
+  context_max_characters: 8000
+
 project:
   output_root: ./outputs
   experiment_id_prefix: CHEM
@@ -367,6 +385,14 @@ segmentation:
     device_panel_operation: 0.45
   semantic_review_cross_role_context_support_min_confidence: 0.55
   movement_threshold_norm: 0.025
+  # Integrate motion across time instead of requiring a large per-frame jump.
+  movement_window_ms: 250
+  movement_window_threshold_norm: 0.01
+  movement_visual_verification:
+    enabled: true
+    max_pairs_per_candidate: 3
+    max_candidates: 2048
+    max_wall_seconds: 600
   # Wearable camera motion shifts every box together. Subtract the median
   # translation of at least two stable lab anchors before declaring movement.
   camera_motion_compensation_min_anchors: 2
@@ -377,6 +403,9 @@ segmentation:
   liquid_motion_threshold: 6.0
   liquid_transfer_max_sequence_gap_seconds: 20.0
   liquid_transfer_min_contact_observations: 2
+  # Duplicate boxes and simultaneous tool/vessel matches are not a transfer.
+  # Both exclusive contact runs must persist; intervening motion is unconfirmed.
+  liquid_transfer_min_contact_duration_seconds: 0.20
   require_both_roles: true
   # A physical action can be visually conclusive in only one role because of
   # occlusion. Delivery still requires aligned first/third-person media; this

@@ -18,10 +18,15 @@ storage:
   local_cache_root: /srv/sentinel-data/VisionCortex3090Ti/Runtime/NoNasWeb/Cache
   local_staging_root: /srv/sentinel-data/VisionCortex3090Ti/Runtime/NoNasWeb/Archives/.VisionCortex-Run-Staging
   sync_to_nas: false
+  run_output_mode: local
+  manifest_storage: local
+  require_nas_source_paths: false
   web_upload_retention_mode: local_only
 
 collection_ingest:
   enabled: false
+  source_root: /srv/sentinel-data/VisionCortex3090Ti/Runtime/NoNasWeb/Originals
+  snapshot_path: /srv/sentinel-data/VisionCortex3090Ti/Runtime/NoNasWeb/collection-snapshot.json
 
 validation:
   # The local UI remains available for inspecting already-built local

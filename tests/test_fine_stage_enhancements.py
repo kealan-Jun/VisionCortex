@@ -2,6 +2,7 @@ from copy import deepcopy
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from visioncortex.actions import audit_candidates, generate_candidates
 from visioncortex.candidate_index import (
@@ -25,6 +26,34 @@ from visioncortex.schemas import (
     ViewInput,
     ViewRole,
 )
+
+
+def test_frame_indexes_use_local_runtime_when_evidence_cache_is_remote(tmp_path, default_config):
+    remote_cache = tmp_path / "nas" / "experiment-cache"
+    local_runtime = tmp_path / "local-runtime"
+    config = deepcopy(default_config)
+    config["storage"]["local_runtime_root"] = str(local_runtime)
+    config["storage"]["local_cache_root"] = str(remote_cache)
+    pipeline = EvidencePipeline(config)
+    work = remote_cache / "experiment-A" / "cache-identity" / "detections-fine"
+    index_path = pipeline._frame_index_path(work, "fine_frame_index.sqlite3")
+    assert index_path.is_relative_to(local_runtime)
+    assert index_path == pipeline._frame_index_path(work, index_path.name)
+    assert index_path != pipeline._frame_index_path(
+        remote_cache / "experiment-B" / "cache-identity" / "detections-fine", index_path.name
+    )
+    index = create_fine_frame_index(index_path)
+    view = _view("fp")
+    source = work / "original.detections.jsonl"
+    source.parent.mkdir(parents=True)
+    _write_ledger(source, [_frame(view, 0, 0.0, [_box("tube", 1, (0.2, 0.2, 0.3, 0.4))])])
+    original = source.read_bytes()
+    ingest_fine_frame_ledgers(index, [view], {view.view_id: source}, source_pass="primary")
+    assert len(list(index.iter_frames(view.view_id))) == 1
+    assert source.read_bytes() == original
+    assert not list(remote_cache.rglob("*.sqlite3*"))
+    outputs = index.materialize_ledgers(work / "materialized", [view])
+    assert outputs[view.view_id].is_relative_to(remote_cache)
 
 
 def _view(view_id: str, role: ViewRole = ViewRole.FIRST_PERSON) -> ViewInput:
@@ -161,6 +190,37 @@ def test_fine_index_incrementally_stitches_tracks_and_proves_coverage(tmp_path):
     assert receipt["stitched_tracks"] == 1
     assert report["formal_evidence_ready"] is True
     assert report["views"][0]["coverage_ratio"] == 1.0
+
+
+@pytest.mark.parametrize("occluded", [False, True])
+def test_fine_index_keeps_nearby_source_tracks_distinct(tmp_path, occluded):
+    view = _view("fp")
+    ledger = tmp_path / "nearby.jsonl"
+    first = _box("tube", 10, (0.20, 0.20, 0.30, 0.40))
+    second = _box("tube", 20, (0.23, 0.20, 0.33, 0.40))
+    _write_ledger(ledger, [
+        _frame(view, 0, 0.0, [first]),
+        # The new detection is visited first. A frame-local exclusion is not
+        # sufficient, either here or when the original track is occluded.
+        _frame(view, 1, 50.0, [second] if occluded else [second, first]),
+        _frame(view, 2, 100.0, [first, second]),
+    ])
+    index = create_fine_frame_index(tmp_path / "fine.sqlite3")
+    receipt = ingest_fine_frame_ledgers(
+        index, [view], {view.view_id: ledger}, source_pass="primary"
+    )
+    frames = list(index.iter_frames(view.view_id))
+    first_id = frames[0].detections[0].track_id
+    second_id = frames[1].detections[0].track_id
+
+    assert first_id != second_id
+    assert [box.track_id for box in frames[2].detections] == [first_id, second_id]
+    assert all(
+        len({box.track_id for box in frame.detections}) == len(frame.detections)
+        for frame in frames
+    )
+    assert receipt["new_tracks"] == 2
+    assert receipt["stitched_tracks"] == 0
 
 
 def test_fine_index_rejects_internal_sampling_gap(tmp_path):

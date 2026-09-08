@@ -9,6 +9,22 @@ from urllib.parse import quote
 from .report_brand import BRAND_COLORS, brand_logo_data_url, brand_logo_png
 
 
+def _speech_note(group: dict[str, Any]) -> str:
+    speech = group.get("speech_interpretation") or {}
+    if not speech.get("summary"):
+        return ""
+    relations = {
+        "consistent": "与画面一致", "contradiction": "与画面有冲突",
+        "unrelated": "与画面无关", "uncertain": "与画面关系不确定",
+    }
+    refs = "、".join(speech.get("referenced_segment_ids") or [])
+    return (
+        f"录音相关说明（机器转写、未核实口述）：{speech['summary']} "
+        f"关系：{relations.get(speech.get('relation_to_visual'), '待核对')}。"
+        f"录音引用：{refs or '无'}。可在实验页面按引用回听。"
+    )
+
+
 def _duration(seconds: float | int | None) -> str:
     value = max(0.0, float(seconds or 0))
     hours, remainder = divmod(value, 3600)
@@ -70,6 +86,8 @@ def render_daily_markdown(report: dict[str, Any]) -> str:
                 f"- 结果摘要：{group.get('overall_summary') or '暂无摘要'}",
             ]
         )
+        if note := _speech_note(group):
+            lines.append(f"- {html.escape(note)}")
         visual = group.get("representative_visual")
         if visual:
             lines.extend(
@@ -161,12 +179,14 @@ def render_daily_html(report: dict[str, Any]) -> str:
             else "后续未知"
         )
         continuity = "连续实验" if group["continuity_type"] == "continuous" else "独立实验"
+        speech_html = f"<p>{e(_speech_note(group))}</p>" if _speech_note(group) else ""
         experiment_cards.append(
             f"<section class='experiment'><div class='section-kicker'>实验 {index:02d}</div>"
             f"<h2>{e(group['experiment_name'])}</h2>"
             f"<p class='meta'>{e(group['start_timecode'])}—{e(group['end_timecode'])} · {continuity} · {group['duration_seconds']:.1f} 秒</p>"
             f"<div class='experiment-grid'>{visual_html}<div class='brief'>"
             f"<h3>结果摘要</h3><p>{e(group.get('overall_summary') or '暂无摘要')}</p>"
+            f"{speech_html}"
             f"<dl><dt>开始阶段</dt><dd>{e(first_step.get('current_step') or '未说明')}</dd>"
             f"<dt>{next_label}</dt><dd>{e(last_step.get('next_step') or '证据不足')}</dd></dl>"
             f"<div class='pills'>{actions or empty_actions}</div>"
@@ -391,6 +411,8 @@ def render_professional_pdf(path: Path, report: dict[str, Any], archive_root: Pa
         else:
             story.append(image_flowable("", 165 * mm, 30 * mm))
         story.extend([Paragraph("实验结果摘要", h2), Paragraph(html.escape(group.get("overall_summary") or "暂无摘要"), body)])
+        if note := _speech_note(group):
+            story.append(Paragraph(html.escape(note), body))
         action_text = "；".join(f"{item['action_label']} {item['event_count']}" for item in group.get("key_action_summary") or [] if item["event_count"]) or "无保留动作"
         story.append(Paragraph(f"动作类别分布：{html.escape(action_text)}。", body))
         step_rows = [["步骤", "时间", "当前在做什么", "后续状态"]]

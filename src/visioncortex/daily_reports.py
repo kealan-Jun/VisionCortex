@@ -359,6 +359,7 @@ def build_daily_report(
                     "physical_change": raw.get("physical_change"),
                     "supporting_views": raw.get("supporting_views") or [],
                     "confidence": raw.get("confidence"),
+                    "speech_segment_ids": raw.get("speech_segment_ids") or [],
                     "claim_class": "supported_model_understanding",
                 }
             )
@@ -407,6 +408,8 @@ def build_daily_report(
                     "supporting_views": event.supporting_views,
                     "supporting_roles": [role.value for role in event.supporting_roles],
                     "observed_evidence": event.audit_reason,
+                    "speech_interpretation": event_understanding.get("speech_interpretation"),
+                    "speech_context": event_understanding.get("speech_context"),
                     "current_step": event_understanding.get("current_step"),
                     "next_step": event_understanding.get("next_step"),
                     "next_step_status": (
@@ -461,6 +464,8 @@ def build_daily_report(
                 "end_timecode": _clock(group.global_end_ms),
                 "duration_seconds": round(duration_seconds, 6),
                 "participating_views": group.participating_views,
+                "speech_interpretation": understanding.get("speech_interpretation"),
+                "speech_context": understanding.get("speech_context"),
                 "overall_summary": understanding.get("overall_summary"),
                 "model_status": understanding.get("status"),
                 "model_name": understanding.get("model"),
@@ -987,5 +992,9 @@ def generate_daily_report_from_archive(root: Path, config: dict[str, Any]) -> di
     summary = RunSummary.model_validate_json(
         (layout.json_config / "evidence_package.json").read_text(encoding="utf-8-sig")
     )
+    from .speech_refresh import apply
+    from .schemas import ExperimentGroup
+    summary.experiment_groups = [ExperimentGroup.model_validate(item) for item in
+                                 apply(root, [group.model_dump(mode="json") for group in summary.experiment_groups])]
     run_metrics = json.loads((layout.json_config / "run_metrics.json").read_text(encoding="utf-8-sig"))
     return generate_daily_report_archive(layout, summary, run_metrics, config)

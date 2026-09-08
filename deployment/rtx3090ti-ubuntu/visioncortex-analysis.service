@@ -12,6 +12,7 @@ Environment=VISIONCORTEX_RUNTIME_BASE=/srv/sentinel-data/VisionCortex3090Ti
 Environment=VISIONCORTEX_PYTHON=/srv/sentinel-data/VisionCortex3090Ti/.venv/bin/python
 Environment=VISIONCORTEX_WEB_HOST=127.0.0.1
 Environment=VISIONCORTEX_WEB_PORT=8001
+Environment=VISIONCORTEX_WEB_AI_SETTINGS=1
 Environment=VISIONCORTEX_TENSORRT=required
 Environment=VISIONCORTEX_FIRST_PERSON_ENGINE=/srv/sentinel-data/VisionCortex3090Ti/Engines/first_person.engine
 Environment=VISIONCORTEX_THIRD_PERSON_ENGINE=/srv/sentinel-data/VisionCortex3090Ti/Engines/third_person.engine

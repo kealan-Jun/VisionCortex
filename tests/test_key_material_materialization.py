@@ -1044,3 +1044,57 @@ def test_component_budget_applies_classic_path_limit_only_on_windows(monkeypatch
 
     monkeypatch.setattr(archive.os, "name", "nt")
     assert archive._component_budget(parent, 26, maximum_chars=40) == 12
+
+
+def test_expired_camera_candidate_cannot_displace_group_context_at_key(tmp_path):
+    views = [ViewInput(view_id=name, role=role, video=tmp_path/f'{name}.mp4')
+             for name, role in [('fp', 'first_person'), ('wrong-bench', 'third_person'),
+                                ('context-bench', 'third_person')]]
+    infos = {v.view_id: VideoInfo(path=v.video, duration_ms=60000, fps=30,
+                                 width=1280, height=720, frame_count=1800) for v in views}
+    transforms = {v.view_id: AlignmentTransform(view_id=v.view_id, reference_view_id='fp',
+                                                uncertainty_ms=25) for v in views}
+    candidates = [ActionCandidate(candidate_id=name, action_type=ActionType.OBJECT_MOVEMENT,
+                                  view_id=name, role=role, local_start_ms=start, local_end_ms=end,
+                                  global_start_ms=start, global_end_ms=end, key_global_ms=end,
+                                  objects=['pipette'], confidence=.7)
+                  for name,role,start,end in [('fp','first_person',27000,28300),
+                                              ('wrong-bench','third_person',24782,26731)]]
+    event = EvidenceEvent(event_id='E', action_type=ActionType.OBJECT_MOVEMENT,
+                          global_start_ms=27000, global_end_ms=28300, key_global_ms=27600,
+                          objects=['pipette'], confidence=.7, accepted=True, audit_reason='test',
+                          supporting_views=['fp','wrong-bench'],
+                          supporting_roles=[ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON], candidates=candidates)
+    group = ExperimentGroup(group_id='G', continuity_type='independent', atomic_experiment_ids=['S'],
+                            global_start_ms=9000, global_end_ms=60000,
+                            participating_views=[v.view_id for v in views], first_person_view='fp',
+                            third_person_view='context-bench', continuity_reason='test', key_event_ids=['E'])
+    pair, receipt = archive._select_key_material_view_pair(group, event, views, infos, transforms)
+    assert pair == ('fp', 'context-bench')
+    assert receipt['pair_evidence_status'] == 'context_only_missing_key_time_support'
+    assert receipt['same_action_pair_verified'] is False
+    assert next(c for c in receipt['candidates']['third_person']
+                if c['view_id']=='wrong-bench')['candidate_supported_at_key'] is False
+
+
+def test_derived_clip_seek_preserves_source_affine_speed_and_clipped_start(tmp_path):
+    view = ViewInput(view_id='fp', role='first_person', video=tmp_path/'raw.mp4')
+    derived = view.model_copy(update={'video':tmp_path/'derived.mp4'})
+    info = VideoInfo(path=view.video, duration_ms=60000, fps=30,
+                     width=1280, height=720, frame_count=1800)
+    event = EvidenceEvent(event_id='E', action_type=ActionType.OBJECT_MOVEMENT,
+                          global_start_ms=11000, global_end_ms=13000, key_global_ms=12000,
+                          objects=['tube'], confidence=.9, accepted=True, audit_reason='test',
+                          supporting_views=['fp'], supporting_roles=[ViewRole.FIRST_PERSON], candidates=[])
+    group = ExperimentGroup(group_id='G', continuity_type='independent', atomic_experiment_ids=['S'],
+                            global_start_ms=9000, global_end_ms=20000, participating_views=['fp','tp'],
+                            first_person_view='fp', third_person_view='tp', continuity_reason='test')
+    transform = AlignmentTransform(view_id='fp', reference_view_id='fp', scale=2, offset_ms=1000)
+    result = archive._select_key_material_media_source(view, info, transform, event, group,
+                                                       (derived, info), before_ms=0, after_ms=0)
+    assert result[0] == derived
+    assert result[2:5] == (1500, 1000, 2000)
+    group.global_start_ms = 0  # Actual source clip starts at local zero.
+    result = archive._select_key_material_media_source(view, info, transform, event, group,
+                                                       (derived, info), before_ms=0, after_ms=0)
+    assert result[2:5] == (5500, 5000, 6000)

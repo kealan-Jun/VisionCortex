@@ -1,0 +1,47 @@
+{
+  "schema_version": "visioncortex-windows-assets/1",
+  "assets": [
+    {
+      "file": "python-3.12.10-embed-amd64.zip",
+      "url": "https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip",
+      "size_bytes": 11133606,
+      "sha256": "4acbed6dd1c744b0376e3b1cf57ce906f9dc9e95e68824584c8099a63025a3c3"
+    },
+    {
+      "file": "Python-3.12.10.tgz",
+      "url": "https://www.python.org/ftp/python/3.12.10/Python-3.12.10.tgz",
+      "size_bytes": 27122929,
+      "sha256": "15d9c623abfd2165fe816ea1fb385d6ed8cf3c664661ab357f1782e3036a6dac"
+    },
+    {
+      "file": "sam2.zip",
+      "url": "https://codeload.github.com/facebookresearch/sam2/zip/2b90b9f5ceec907a1c18123530e92e794ad901a4",
+      "size_bytes": 55952852,
+      "sha256": "fe93082a71a885a427894b1eab76341768781b6b58a298a0717e03862097d137"
+    },
+    {
+      "file": "clip.zip",
+      "url": "https://codeload.github.com/ultralytics/CLIP/zip/68dce32140994dfcb645a1320c4ebdc034fc19fd",
+      "size_bytes": 4348365,
+      "sha256": "b182ad3021f7070c332ab92c178bc7d454818d4438e5291f1d18d488f8531258"
+    },
+    {
+      "file": "ffmpeg-7.0.2-essentials_build.zip",
+      "url": "https://github.com/GyanD/codexffmpeg/releases/download/7.0.2/ffmpeg-7.0.2-essentials_build.zip",
+      "size_bytes": 91406388,
+      "sha256": "d5308d30872b2739cf53169df61faba8639d39a19b20b91e611c177ef676f64c"
+    },
+    {
+      "file": "vc_redist.x64.exe",
+      "url": "https://aka.ms/vs/17/release/vc_redist.x64.exe",
+      "size_bytes": 25635768,
+      "sha256": "cc0ff0eb1dc3f5188ae6300faef32bf5beeba4bdd6e8e445a9184072096b713b"
+    },
+    {
+      "file": "electron-v44.2.0-win32-x64.zip",
+      "url": "https://github.com/electron/electron/releases/download/v44.2.0/electron-v44.2.0-win32-x64.zip",
+      "sha256": "4021363e3090d67a144ebedb90765cf193b0e61f300c519c83f0174502a481da",
+      "size_bytes": 158199548
+    }
+  ]
+}

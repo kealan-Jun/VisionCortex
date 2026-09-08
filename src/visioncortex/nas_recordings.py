@@ -115,6 +115,8 @@ def _inspect(root: Path, video: Path, now: float, settle: float, allow_plain: bo
     clock_name = merged.get("frames_file") or (f"{prefix}frames.csv" if prefix is not None else f"{video.stem}.csv")
     if plain and not video.with_name(clock_name).is_file() and video.stem.lower().endswith("_rgb"):
         clock_name = video.stem[:-4] + "_帧时间戳.csv"
+    if plain and not video.with_name(clock_name).is_file() and video.with_name(f"{video.stem}_frames.csv").is_file():
+        clock_name = f"{video.stem}_frames.csv"
     clock = _child(video.parent, clock_name)
     snapshots = []
     for path in (video, clock, meta_path, ready_path):

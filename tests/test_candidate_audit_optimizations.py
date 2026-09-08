@@ -90,6 +90,20 @@ def _optimized_config(default_config):
     return config
 
 
+def test_cross_camera_candidates_must_overlap_within_clock_uncertainty(default_config):
+    config = _optimized_config(default_config)
+    left = _candidate("rk", view_id="tp", role=ViewRole.THIRD_PERSON,
+                      start_ms=24782, end_ms=26731, objects=["pipette"])
+    right = _candidate("fp", start_ms=27000, end_ms=28300, objects=["pipette"])
+    transforms = {view: _transform(view) for view in ("fp", "tp")}
+    events, _ = audit_candidates([left, right], transforms, config)
+    assert not any({"fp", "rk"}.issubset({c.candidate_id for c in e.candidates}) for e in events)
+    # A gap inside the actual clock error remains eligible.
+    right.global_start_ms = 26740
+    events, _ = audit_candidates([left, right], transforms, config)
+    assert any({"fp", "rk"}.issubset({c.candidate_id for c in e.candidates}) for e in events)
+
+
 def test_constrained_clustering_prevents_transitive_bridge_and_keeps_stable_ids(
     default_config,
 ):
@@ -378,3 +392,36 @@ def test_liquid_context_rejects_unrelated_distant_hand(default_config, tmp_path)
     assert event.formal_admission_status == "rejected"
     assert rejected[0]["spatial_support_frame_counts"] == {"fp": 0}
     assert event.observability["liquid_context"]["hand_frame_counts"] == {"fp": 2}
+
+
+def test_liquid_support_loss_invalidates_previous_cross_view_admission(default_config):
+    config = _optimized_config(default_config)
+    first = _candidate("first", action_type=ActionType.LIQUID_MOVEMENT,
+                       objects=["pipette", "tube"], evidence=[{"tool_track_id": 7}])
+    third = first.model_copy(update={"candidate_id": "third", "view_id": "tp",
+                                     "role": ViewRole.THIRD_PERSON, "confidence": .7})
+    event = EvidenceEvent(event_id="support-loss", action_type=ActionType.LIQUID_MOVEMENT,
+        global_start_ms=1000, global_end_ms=2000, key_global_ms=1500, objects=first.objects,
+        confidence=.9, accepted=True, formal_admission_status="formal",
+        audit_reason="第一/第三人称动作一致", supporting_views=["fp", "tp"],
+        supporting_roles=[ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON], candidates=[first, third])
+
+    class Frames:
+        def iter_global_frames(self, view_id, **_kwargs):
+            for index, timestamp in enumerate((1100, 1600)):
+                yield FrameEvidence(view_id=view_id, role=ViewRole.THIRD_PERSON,
+                    frame_index=index, local_ms=timestamp, global_ms=timestamp,
+                    width=100, height=100, detections=[
+                        BoxEvidence(class_id=0, class_name="hand", confidence=.9,
+                                    xyxy_norm=(.0, .0, .1, .1)),
+                        BoxEvidence(class_id=1, class_name="pipette", confidence=.9,
+                                    track_id=7, xyxy_norm=(.1, .1, .2, .2) if view_id == "tp" else (.8, .8, .9, .9)),
+                    ])
+
+    assert refine_liquid_events_with_context([event], {}, frame_index=Frames(), config=config) == []
+    assert event.accepted is True
+    assert event.formal_admission_status == "provisional"
+    assert event.supporting_views == ["tp"]
+    assert event.confidence == .7
+    assert "第一/第三人称动作一致" not in event.audit_reason
+    assert event.observability["liquid_context"]["removed_supporting_views"] == ["fp"]

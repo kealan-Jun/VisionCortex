@@ -1,3 +1,5 @@
+import pytest
+
 from visioncortex.pipeline import (
     normalize_final_group_action_language,
     refine_groups_from_final_events,
@@ -72,6 +74,42 @@ def test_allows_lower_level_contact_claim():
     assert report["passed"] is True
 
 
+@pytest.mark.parametrize("text", [
+    "全片段未看到烧杯被放下、倾倒或任何内容物转移完成。",
+    "瓶盖未脱离，旋开或旋紧完成均未见。",
+    "双手扶握瓶盖，未看到旋紧完成。",
+    "清水标签瓶全程保持开盖，其紫色盖放在桌上未被操作。",
+    "移液器末端伸入蓝色吸头盒内；烧杯与各瓶液面未见变化。",
+])
+def test_real_run_denials_and_separate_clauses_do_not_become_positive_actions(text):
+    assert validate_final_step_action_consistency([_group(text)], [_event()])["passed"] is True
+
+
+@pytest.mark.parametrize("text", [
+    "未看到旋开，但随后旋紧瓶盖。",
+    "旋开瓶盖，随后旋紧完成未见。",
+    "清水瓶保持开盖，操作者拧开另一只瓶。",
+    "移液器末端伸入烧杯，完成移液操作。",
+])
+def test_a_nearby_denial_or_static_state_does_not_hide_a_positive_action(text):
+    assert validate_final_step_action_consistency([_group(text)], [_event()])["passed"] is False
+
+
+def test_single_container_contact_is_not_a_source_to_target_transfer_claim():
+    text = "移液器吸头伸入烧杯并提离，未见吸头进入第二个容器。"
+    assert validate_final_step_action_consistency([_group(text)], [_event()])["passed"] is True
+    text = "移液器从源烧杯到目标试剂瓶进行转移。"
+    assert validate_final_step_action_consistency([_group(text)], [_event()])["passed"] is False
+
+
+def test_explicit_before_state_and_unfinished_operation_are_not_completed_actions():
+    group = _group("盖合/旋紧动作正在进行，未看到旋紧完成。")
+    group.model_understanding["steps"][0]["physical_change"] = "各瓶开盖、瓶盖置于台面 → 各瓶仍开盖"
+    assert validate_final_step_action_consistency([group], [_event()])["passed"] is True
+    group.model_understanding["steps"][0]["physical_change"] = "操作者将瓶开盖 → 瓶口敞开"
+    assert validate_final_step_action_consistency([group], [_event()])["passed"] is False
+
+
 def test_final_group_steps_are_rebuilt_without_a_second_model_pass():
     event = _event()
     event.model_understanding = {
@@ -93,6 +131,7 @@ def test_final_group_steps_are_rebuilt_without_a_second_model_pass():
     refine_groups_from_final_events([group], [event])
 
     assert group.model_understanding["refinement_model_call_count"] == 0
+    assert group.model_understanding["operation_coverage"]["all_operator_steps_proven"] is False
     assert group.model_understanding["usage"] == {"total_tokens": 100}
     assert group.model_understanding["steps"] == [
         {
@@ -488,6 +527,39 @@ def test_no_clear_readout_is_not_a_positive_panel_claim():
     assert report["passed"] is True
 
 
+@pytest.mark.parametrize("text", [
+    "手持续握持已开盖的棕色样品瓶，候选开盖动作未确认",
+    "片段开始：瓶已开盖、瓶盖仰放 → 片段尾部：瓶仍开盖、瓶盖仍仰放",
+    "未见取放、开盖或液体转移",
+    "全程无拧盖/开盖动作，瓶保持开启状态",
+    "无试管被取出、无盖被拧开、无可见液体移动",
+])
+def test_existing_cap_state_and_scoped_denials_are_not_action_claims(text):
+    assert validate_final_step_action_consistency([_group(text)], [_event()])["passed"]
+
+
+@pytest.mark.parametrize("text", [
+    "手持已开盖的瓶子，随后开盖",
+    "操作者已开盖",
+    "未见取放、开盖或液体转移，但随后液体转移至烧杯",
+    "全程无拧盖/开盖动作，随后完成开盖",
+])
+def test_static_states_and_denials_do_not_hide_later_actions(text):
+    assert not validate_final_step_action_consistency([_group(text)], [_event()])["passed"]
+
+
+def test_final_title_drops_rejected_candidate_action_and_preserves_original_receipt():
+    group = _group("手接触称量纸")
+    group.experiment_name = "天平面板操作与称量纸拿取实验"
+    group.model_understanding["experiment_name"] = group.experiment_name
+    event = _event()
+    event.model_understanding = {"status": "completed", "current_step": "手接触称量纸"}
+    refine_groups_from_final_events([group], [event])
+    assert group.experiment_name == "手部与物体接触实验片段"
+    assert "面板操作" in group.model_understanding["pre_curation_understanding"]["experiment_name"]
+    assert validate_final_step_action_consistency([group], [event])["passed"]
+
+
 def test_unconfirmed_long_list_with_open_close_is_not_positive_claims():
     report = validate_final_step_action_consistency(
         [
@@ -500,3 +572,30 @@ def test_unconfirmed_long_list_with_open_close_is_not_positive_claims():
     )
 
     assert report["passed"] is True
+
+
+def test_metrics_count_original_group_call_once_after_deterministic_curation(default_config):
+    from visioncortex.pipeline import EvidencePipeline
+    group = _group("observed")
+    group.model_understanding.update(request_id="receipt-1", usage={"total_tokens": 100})
+    refine_groups_from_final_events([group], [])
+    metrics = EvidencePipeline(default_config)._metrics([], [group])
+    assert metrics["tokens"]["experiment_groups"]["total_tokens"] == 100
+    assert metrics["tokens"]["experiment_groups"]["call_count"] == 1
+    # A genuine second model pass still counts as a second call.
+    group.model_understanding.update(refinement_pass="model", request_id="receipt-2", usage={"total_tokens": 60})
+    metrics = EvidencePipeline(default_config)._metrics([], [group])
+    assert metrics["tokens"]["experiment_groups"]["total_tokens"] == 160
+    assert metrics["tokens"]["experiment_groups"]["call_count"] == 2
+
+
+def test_operation_title_is_preserved_and_cannot_bypass_action_evidence():
+    event = _event()
+    event.model_understanding = {"status": "completed", "operation_title": "旋开瓶盖",
+                                 "current_step": "手接触瓶盖"}
+    group = _group("手接触瓶盖")
+    refine_groups_from_final_events([group], [event])
+    assert group.model_understanding["steps"][0]["operation_title"] == "旋开瓶盖"
+    report = validate_final_step_action_consistency([group], [event])
+    assert not report["passed"]
+    assert any(item["field"] == "operation_title" for item in report["violations"])

@@ -1,0 +1,150 @@
+{
+  "volcengine": {
+    "label": "火山引擎 · 豆包",
+    "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+    "model": "doubao-seed-2-1-pro-260628",
+    "api_protocol": "ark_responses",
+    "recommendations": {
+      "quality": "doubao-seed-2-1-pro-260628",
+      "balanced": "doubao-seed-2-0-lite-260215"
+    },
+    "models": [
+      {
+        "id": "doubao-seed-2-1-pro-260628",
+        "label": "Seed 2.1 Pro · 质量优先候选",
+        "reason": "保留项目当前 Pro 系列候选，支持图像输入；适合先验证细粒度动作和跨图关系。固定日期 ID 便于追溯。",
+        "source": "https://github.com/volcengine/ark-runtime-python"
+      },
+      {
+        "id": "doubao-seed-2-0-lite-260215",
+        "label": "Seed 2.0 Lite · 轻量候选",
+        "reason": "可用于速度与成本优先的对照评估。先通过多图验证，再用相同实验样本判断质量是否足够。",
+        "source": "https://www.volcengine.com/docs/82379/1795150"
+      }
+    ],
+    "catalog_checked_at": "2026-09-07",
+    "recommendation_evidence": "official_capabilities_and_task_fit_not_project_quality_benchmark",
+    "real_experiment_ranking": "NOT_PROVEN"
+  },
+  "aliyun": {
+    "label": "阿里云百炼 · 通义千问",
+    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "model": "qwen3.8-max-0902",
+    "api_protocol": "chat_completions",
+    "recommendations": {
+      "quality": "qwen3.8-max-0902",
+      "balanced": "qwen3.7-flash-2026-07-15"
+    },
+    "models": [
+      {
+        "id": "qwen3.8-max-0902",
+        "label": "Qwen3.8 Max 0902 · 质量优先候选",
+        "reason": "官方推荐的图像与视频理解模型，支持 1M 上下文、多图与结构化输出；使用日期快照便于复现。",
+        "source": "https://www.alibabacloud.com/help/en/model-studio/vision-model"
+      },
+      {
+        "id": "qwen3.7-plus-2026-05-26",
+        "label": "Qwen3.7 Plus · 另一质量候选",
+        "reason": "官方视觉选型指南推荐的旗舰候选，支持 1M 上下文、多图和结构化输出。",
+        "source": "https://www.alibabacloud.com/help/en/model-studio/vision-model"
+      },
+      {
+        "id": "qwen3.7-flash-2026-07-15",
+        "label": "Qwen3.7 Flash · 速度与成本优先",
+        "reason": "官方定位为降低成本的视觉候选；保留多图与结构化输出能力，需用项目样本评估精度。",
+        "source": "https://www.alibabacloud.com/help/en/model-studio/vision-model"
+      },
+      {
+        "id": "qwen3-vl-plus",
+        "label": "Qwen3 VL Plus · 兼容候选",
+        "reason": "原有视觉系列，可在账号未开放新模型时手动选择并验证。",
+        "source": "https://www.alibabacloud.com/help/en/model-studio/qwen-vl-compatible-with-openai"
+      }
+    ],
+    "catalog_checked_at": "2026-09-07",
+    "recommendation_evidence": "official_capabilities_and_task_fit_not_project_quality_benchmark",
+    "real_experiment_ranking": "NOT_PROVEN"
+  },
+  "zhipu": {
+    "label": "智谱 · GLM",
+    "base_url": "https://open.bigmodel.cn/api/paas/v4",
+    "model": "glm-5.3-flash",
+    "api_protocol": "chat_completions",
+    "recommendations": {
+      "quality": "glm-5.3-flash",
+      "balanced": "glm-4.6v-flashx"
+    },
+    "models": [
+      {
+        "id": "glm-5.3-flash",
+        "label": "GLM-5.3-Flash · 新一代视觉候选",
+        "reason": "原生图像与视频、1M 上下文和结构化输出；仅支持开启思考，应用会采用对应参数。本项目质量排名待实测。",
+        "source": "https://docs.bigmodel.cn/cn/guide/models/vlm/glm-5.3-flash"
+      },
+      {
+        "id": "glm-4.6v",
+        "label": "GLM-4.6V · 高性能视觉候选",
+        "reason": "官方高性能视觉版本，支持多图、128K 上下文和视觉推理，可作为实验分析的对照候选。",
+        "source": "https://docs.bigmodel.cn/cn/guide/models/vlm/glm-4.6v"
+      },
+      {
+        "id": "glm-4.6v-flashx",
+        "label": "GLM-4.6V-FlashX · 轻量高速候选",
+        "reason": "官方轻量高速视觉版本。适合先做低延迟对照，不能据此降低动作证据门禁。",
+        "source": "https://docs.bigmodel.cn/cn/guide/models/vlm/glm-4.6v"
+      },
+      {
+        "id": "glm-5v-turbo",
+        "label": "GLM-5V-Turbo · 视觉 Agent 候选",
+        "reason": "支持图像与视频，但官方主要定位视觉编程与 Agent；不会仅因版本号更高就自动用于实验动作审核。",
+        "source": "https://docs.bigmodel.cn/cn/guide/models/vlm/glm-5v-turbo"
+      }
+    ],
+    "catalog_checked_at": "2026-09-07",
+    "recommendation_evidence": "official_capabilities_and_task_fit_not_project_quality_benchmark",
+    "real_experiment_ranking": "NOT_PROVEN"
+  },
+  "siliconflow": {
+    "label": "硅基流动 · SiliconFlow",
+    "base_url": "https://api.siliconflow.cn/v1",
+    "model": "",
+    "api_protocol": "chat_completions",
+    "models": [],
+    "source": "https://docs.siliconflow.cn/docs/userguide/quickstart",
+    "catalog_checked_at": "2026-09-08",
+    "discovery": "models",
+    "real_experiment_ranking": "NOT_PROVEN"
+  },
+  "google": {
+    "label": "Google · Gemini",
+    "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+    "model": "",
+    "api_protocol": "chat_completions",
+    "models": [],
+    "source": "https://ai.google.dev/gemini-api/docs/openai",
+    "catalog_checked_at": "2026-09-08",
+    "discovery": "models",
+    "real_experiment_ranking": "NOT_PROVEN"
+  },
+  "openrouter": {
+    "label": "OpenRouter · 多厂商模型",
+    "base_url": "https://openrouter.ai/api/v1",
+    "model": "",
+    "api_protocol": "chat_completions",
+    "models": [],
+    "source": "https://openrouter.ai/docs/api/api-reference/models/list-all-models-and-their-properties",
+    "catalog_checked_at": "2026-09-08",
+    "discovery": "models",
+    "real_experiment_ranking": "NOT_PROVEN"
+  },
+  "custom": {
+    "label": "其他厂商 / 自建兼容服务",
+    "base_url": "",
+    "model": "",
+    "api_protocol": "chat_completions",
+    "catalog_checked_at": "2026-09-07",
+    "recommendation_evidence": "official_capabilities_and_task_fit_not_project_quality_benchmark",
+    "real_experiment_ranking": "NOT_PROVEN",
+    "models": []
+  }
+}

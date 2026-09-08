@@ -123,14 +123,15 @@ def test_missing_nas_does_not_create_a_local_fallback(nas_config):
     assert not root.exists()
 
 
-def test_plain_video_csv_requires_user_completion_and_keeps_sources_unchanged(nas_config):
+@pytest.mark.parametrize("naming", ["capture", "frames_suffix"])
+def test_plain_video_csv_requires_user_completion_and_keeps_sources_unchanged(nas_config, naming):
     nas_config["collection_ingest"]["discover_plain_video_csv"] = True
     root = Path(nas_config["collection_ingest"]["source_root"])
     folder = root / "采集批次"
     folder.mkdir()
     for name in ("正面_RGB", "侧面_RGB"):
         (folder / f"{name}.mp4").write_bytes(b"catalog-fixture-no-decode")
-        (folder / f"{name[:-4]}_帧时间戳.csv").write_text(
+        (folder / (f"{name[:-4]}_帧时间戳.csv" if naming == "capture" else f"{name}_frames.csv")).write_text(
             "frame_system_timestamp_us,rgb_video_frame_index,rgb_recorded\n"
             "1788408000000000,0,1\n1788408001000000,1,1\n1788408002000000,2,1\n"
         )

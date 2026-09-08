@@ -8,9 +8,10 @@ import math
 import os
 import re
 import shutil
+import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from itertools import product
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -51,6 +52,8 @@ from .mllm import (
     GROUP_SYSTEM_PROMPT,
     normalize_uncalibrated_hand_identity,
 )
+from .mllm_provider import vision_request_identity
+from .speech_semantics import SpeechContext, prompt_with_speech
 from .material_naming import (
     ACTION_CATEGORY_FOLDERS,
     key_material_action_folder,
@@ -131,9 +134,16 @@ def _raise_for_incomplete_semantic_results(
         for subject_id, result in results
         if result.get("status") != "completed"
     ]
-    if not incomplete:
-        return []
     path = layout.json_config / f"{stage}_semantic_failures.json"
+    if not incomplete:
+        if path.exists():
+            write_json(path, {
+                "schema_version": "visioncortex-semantic-stage-failure/1",
+                "stage": stage,
+                "status": "completed",
+                "incomplete": [],
+            })
+        return []
     write_json(
         path,
         {
@@ -173,6 +183,7 @@ def _semantic_fingerprint(
     digest = hashlib.sha256()
     header = {
         "schema": "visioncortex-semantic-cache/1",
+        "request_policy_sha256": vision_request_identity(config["mllm"]),
         "kind": kind,
         "model": str(config["mllm"]["model"]),
         "base_url": str(config["mllm"].get("base_url") or ""),
@@ -344,6 +355,25 @@ def _link_or_copy_immutable(source: Path, destination: Path) -> str:
 _DERIVED_MEDIA_POPULATED_THIS_PROCESS: set[str] = set()
 
 
+def _generate_detached_media(destination: Path, generator: Callable[[], None]) -> None:
+    """Keep earlier cached/historical hardlinks immutable during regeneration."""
+    previous = destination.with_name(f".{destination.name}.previous-{uuid.uuid4().hex[:8]}")
+    had_previous = destination.exists()
+    if had_previous:
+        os.replace(destination, previous)
+    try:
+        generator()
+        if not destination.is_file() or destination.stat().st_size <= 0:
+            raise RuntimeError(f"Derived media generator produced no file: {destination}")
+    except BaseException:
+        destination.unlink(missing_ok=True)
+        if had_previous:
+            os.replace(previous, destination)
+        raise
+    else:
+        previous.unlink(missing_ok=True)
+
+
 def _materialize_derived_media(
     destination: Path,
     kind: str,
@@ -364,7 +394,7 @@ def _materialize_derived_media(
     """
 
     if not _derived_media_cache_enabled(config):
-        generator()
+        _generate_detached_media(destination, generator)
         return {
             "cache_enabled": False,
             "cache_reused": False,
@@ -426,7 +456,7 @@ def _materialize_derived_media(
             "cache_output_sha256": expected_sha,
         }
 
-    generator()
+    _generate_detached_media(destination, generator)
     if not destination.is_file() or destination.stat().st_size <= 0:
         raise RuntimeError(f"Derived media generator produced no file: {destination}")
     output_sha = _sha256_file(destination)
@@ -980,6 +1010,7 @@ def analyze_experiment_groups(
     *,
     final_adjudicated: bool = False,
 ) -> None:
+    speech_contexts = SpeechContext(layout.root, config)
     analyzer = ArkStepAnalyzer(config)
     cache_root = layout.work / "mllm-cache" / "experiment-groups"
     by_view = {view.view_id: view for view in views}
@@ -1053,6 +1084,8 @@ def analyze_experiment_groups(
             raise RuntimeError(
                 f"{group.group_id} has fewer than two complete aligned storyboard pairs"
             )
+        from .speech_refresh import retain_group_inputs
+        retain_group_inputs(layout, group, storyboard, config)
         semantic_evidence = {
             "continuity_type": group.continuity_type,
             "continuity_reason": group.continuity_reason,
@@ -1084,13 +1117,16 @@ def analyze_experiment_groups(
                 "atomic_experiment_count": len(atomic),
             },
         }
+        speech_context = speech_contexts.window(group.global_start_ms, group.global_end_ms, group.participating_views)
+        if speech_context is not None:
+            semantic_evidence["speech_context"] = speech_context
         system_prompt = (
             FINAL_GROUP_SYSTEM_PROMPT if final_adjudicated else GROUP_SYSTEM_PROMPT
         )
         fingerprint = _semantic_fingerprint(
             "experiment-group",
             config,
-            system_prompt,
+            prompt_with_speech(system_prompt, speech_context),
             semantic_evidence,
             storyboard,
         )
@@ -1112,6 +1148,7 @@ def analyze_experiment_groups(
             storyboard,
             system_prompt=system_prompt,
             final_adjudicated=final_adjudicated,
+            **({"speech_context": speech_context} if speech_context is not None else {}),
         )
         if result.get("status") == "completed":
             result = _write_semantic_cache(persistent_cache_path, fingerprint, result)
@@ -1237,6 +1274,13 @@ def _select_key_material_view_pair(
             duration_ms = float(infos[view_id].duration_ms)
             in_bounds = 0.0 <= local_ms <= duration_ms
             margin_ms = min(local_ms, duration_ms - local_ms) if in_bounds else -1.0
+            view_candidates = [item for item in event.candidates if item.view_id == view_id]
+            uncertainty_ms = max(0.0, float(transforms[view_id].uncertainty_ms))
+            supported_at_key = view_id in supported and (
+                any(item.global_start_ms - uncertainty_ms <= event.key_global_ms
+                    <= item.global_end_ms + uncertainty_ms for item in view_candidates)
+                if event.candidates else True
+            )
             role_candidates.append(
                 {
                     "view_id": view_id,
@@ -1246,6 +1290,9 @@ def _select_key_material_view_pair(
                     "in_physical_bounds": in_bounds,
                     "directly_supported": view_id in direct,
                     "candidate_supported": view_id in supported,
+                    "candidate_supported_at_key": supported_at_key,
+                    "candidate_time_bounds": [[item.global_start_ms, item.global_end_ms]
+                                              for item in view_candidates],
                     "group_preferred": view_id == preferred,
                     "physical_margin_ms": round(margin_ms, 6),
                     "stable_object_identities": sorted(
@@ -1278,7 +1325,7 @@ def _select_key_material_view_pair(
             }
             shared_identity_classes = sorted(first_classes & third_classes)
             both_action_supported = bool(
-                first["candidate_supported"] and third["candidate_supported"]
+                first["candidate_supported_at_key"] and third["candidate_supported_at_key"]
             )
             identity_conflict = bool(
                 both_action_supported
@@ -1298,6 +1345,8 @@ def _select_key_material_view_pair(
                     "both_views_candidate_supported": both_action_supported,
                     "candidate_support_count": int(first["candidate_supported"])
                     + int(third["candidate_supported"]),
+                    "key_time_support_count": int(first["candidate_supported_at_key"])
+                    + int(third["candidate_supported_at_key"]),
                     "shared_identity_classes": shared_identity_classes,
                     "stable_identity_available_in_both_views": bool(
                         first_classes and third_classes
@@ -1330,6 +1379,8 @@ def _select_key_material_view_pair(
             bool(item["both_views_directly_supported"]),
             int(item["direct_support_count"]),
             bool(item["both_views_candidate_supported"]),
+            int(item["key_time_support_count"]),
+            bool(item["group_preferred_pair"]),
             int(item["candidate_support_count"]),
             bool(item["shared_identity_classes"]),
             bool(item["stable_identity_available_in_both_views"]),
@@ -1366,6 +1417,13 @@ def _select_key_material_view_pair(
                 "group_preferred_pair",
             }
         },
+        "pair_evidence_status": (
+            "directly_supported" if winner["both_views_directly_supported"]
+            else "candidate_cooccurrence_unverified" if winner["both_views_candidate_supported"]
+            else "context_only_missing_key_time_support"
+        ),
+        "same_action_pair_verified": bool(winner["both_views_directly_supported"]),
+        "identity_policy": "shared classes and local track IDs do not establish cross-view physical identity",
     }
     return pair, receipt
 
@@ -1611,7 +1669,11 @@ def _artifact_json(
             ),
             "time_uncertainty_us": alignment_uncertainty_us,
             "consistency": understanding.get("cross_view_consistency", "unreviewed"),
-            "both_views_support_action": all(
+            "both_views_support_action": bool(
+                (event.observability.get("key_material_view_selection") or {}).get(
+                    "same_action_pair_verified", True
+                )
+            ) and all(
                 item in event.supporting_views
                 for item in (first_material_view, third_material_view)
             ),
@@ -2523,9 +2585,23 @@ def _event_key_frame_score(
     return score, receipt
 
 
+def _shared_candidate_time(
+    event: EvidenceEvent, transforms: dict[str, AlignmentTransform], timestamp_ms: float
+) -> bool:
+    roles = {
+        candidate.role for candidate in event.candidates
+        if candidate.view_id in event.supporting_views and candidate.view_id in transforms
+        and candidate.global_start_ms - transforms[candidate.view_id].uncertainty_ms
+        <= timestamp_ms
+        <= candidate.global_end_ms + transforms[candidate.view_id].uncertainty_ms
+    }
+    return {ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON}.issubset(roles)
+
+
 def _best_event_frames_many(
     path: Path,
     events: Sequence[EvidenceEvent],
+    transforms: dict[str, AlignmentTransform] | None = None,
 ) -> dict[str, tuple[FrameEvidence, float, dict[str, Any]] | None]:
     """Select participant-rich frames for all events in one ledger pass."""
 
@@ -2548,8 +2624,12 @@ def _best_event_frames_many(
             if not event.global_start_ms <= timestamp <= event.global_end_ms:
                 continue
             score, receipt = _event_key_frame_score(event, frame)
+            shared_time = _shared_candidate_time(event, transforms or {}, timestamp)
+            receipt["shared_candidate_time"] = shared_time
             previous = results[event.event_id]
-            if previous is None or score > previous[1]:
+            if previous is None or (shared_time, score) > (
+                previous[2].get("shared_candidate_time", False), previous[1]
+            ):
                 results[event.event_id] = (frame, score, receipt)
     return results
 
@@ -4874,7 +4954,7 @@ def _open_vocabulary_key_frame_supplement(
     ]
     if not prompts:
         raise RuntimeError("Open-vocabulary prompt_map is empty")
-    from ultralytics import YOLOWorld
+    from .open_vocabulary_runtime import load_yolo_world_with_local_clip
 
     cache_key = str(model_path)
     cached = _OPEN_VOCABULARY_MODEL_CACHE.get(cache_key)
@@ -4883,7 +4963,7 @@ def _open_vocabulary_key_frame_supplement(
     if cached is None:
         model_load_started = time.perf_counter()
         cached = {
-            "model": YOLOWorld(str(model_path)),
+            "model": load_yolo_world_with_local_clip(settings),
             "prompts": None,
         }
         model_load_seconds = time.perf_counter() - model_load_started
@@ -5520,11 +5600,14 @@ def _select_key_material_media_source(
         )
 
     candidate_view, candidate_info = local_experiment_source
-    candidate_key_ms = event.key_global_ms - group.global_start_ms
-    candidate_event_start_ms = event.global_start_ms - group.global_start_ms
-    candidate_event_end_ms = event.global_end_ms - group.global_start_ms
-    requested_start_ms = clip_start_global - group.global_start_ms
-    requested_end_ms = clip_end_global - group.global_start_ms
+    # Per-view experiment clips preserve source playback speed. Their zero is
+    # the actual (possibly clipped) local source start, not the global start.
+    source_start_ms = max(0.0, transform.to_local(group.global_start_ms))
+    candidate_key_ms = transform.to_local(event.key_global_ms) - source_start_ms
+    candidate_event_start_ms = transform.to_local(event.global_start_ms) - source_start_ms
+    candidate_event_end_ms = transform.to_local(event.global_end_ms) - source_start_ms
+    requested_start_ms = transform.to_local(clip_start_global) - source_start_ms
+    requested_end_ms = transform.to_local(clip_end_global) - source_start_ms
     candidate_start_ms = max(
         0.0,
         requested_start_ms,
@@ -5541,6 +5624,7 @@ def _select_key_material_media_source(
     selection.update(
         {
             "experiment_clip_path": str(candidate_view.video),
+            "experiment_source_local_start_ms": float(source_start_ms),
             "experiment_clip_duration_ms": float(candidate_info.duration_ms),
             "experiment_relative_key_ms": float(candidate_key_ms),
             "experiment_relative_event_start_ms": float(
@@ -5584,6 +5668,23 @@ def _select_key_material_media_source(
         original_end_ms,
         selection,
     )
+
+
+def _prune_replaced_key_material_views(event: EvidenceEvent, first_view: str, third_view: str) -> None:
+    """Drop obsolete aliases after both replacement views finish extracting."""
+    expected = {first_view, third_view, "aligned_first_third"}
+    removed = {
+        field: {key: value for key, value in getattr(event, field).items() if key not in expected}
+        for field in ("key_frames", "key_clips")
+    }
+    if not any(removed.values()):
+        return
+    event.observability.setdefault("key_material_view_reference_history", []).append({
+        "reason": "final_material_view_pair_changed", "removed_aliases": removed,
+        "final_view_ids": [first_view, third_view], "source_media_modified": False,
+    })
+    for field in removed:
+        setattr(event, field, {key: value for key, value in getattr(event, field).items() if key in expected})
 
 
 def materialize_key_materials(
@@ -5630,7 +5731,7 @@ def materialize_key_materials(
         include_empty_categories=include_empty_categories,
     )
     best_frames_by_view = {
-        view_id: _best_event_frames_many(path, accepted_events)
+        view_id: _best_event_frames_many(path, accepted_events, transforms)
         for view_id, path in detection_paths.items()
     }
     material_view_pairs: dict[str, tuple[str, str]] = {}
@@ -5640,9 +5741,9 @@ def materialize_key_materials(
             progress_callback(event_index, len(accepted_events))
         group = group_by_event[event.event_id]
         ranked: list[tuple[float, int, str, FrameEvidence, dict[str, Any]]] = []
-        for role_rank, view_id in enumerate(
-            (group.first_person_view, group.third_person_view)
-        ):
+        for role_rank, view_id in enumerate(dict.fromkeys(
+            (group.first_person_view, group.third_person_view, *event.supporting_views)
+        )):
             selected = (best_frames_by_view.get(view_id) or {}).get(event.event_id)
             if selected is None:
                 continue
@@ -5659,9 +5760,12 @@ def materialize_key_materials(
             directly_supported_ranked = [
                 item for item in ranked if item[2] in directly_supported_view_ids
             ]
-            eligible_ranked = directly_supported_ranked or ranked
+            cv_supported_ranked = [item for item in ranked if item[2] in event.supporting_views]
+            use_cv_support = (event.model_understanding or {}).get("status") != "completed"
+            eligible_ranked = directly_supported_ranked or (cv_supported_ranked if use_cv_support else []) or ranked
             score, _, source_view_id, frame, receipt = max(
-                eligible_ranked, key=lambda item: (item[0], item[1])
+                eligible_ranked,
+                key=lambda item: (_shared_candidate_time(event, transforms, float(item[3].global_ms)), item[0], item[1]),
             )
             event.key_global_ms = float(frame.global_ms)
             event.observability["key_frame_selection"] = {
@@ -5674,6 +5778,10 @@ def materialize_key_materials(
                 "direct_support_priority_applied": bool(
                     directly_supported_ranked
                 ),
+                "cv_source_priority_applied": bool(
+                    not directly_supported_ranked and use_cv_support and cv_supported_ranked
+                ),
+                "shared_candidate_time_priority_applied": _shared_candidate_time(event, transforms, float(frame.global_ms)),
                 "previous_key_global_ms": previous_key_global_ms,
                 "selected_key_global_ms": event.key_global_ms,
                 "selection_offset_ms": round(
@@ -6099,7 +6207,7 @@ def materialize_key_materials(
                     "role_label": role_label,
                     "requested_key_global_ms": float(event.key_global_ms),
                     "decoded_key_global_ms": (
-                        group.global_start_ms + local_key_ms + used_offset_ms
+                        transform.to_global(material_source_selection["experiment_source_local_start_ms"] + local_key_ms + used_offset_ms)
                         if material_source == "verified_local_experiment_clip"
                         else transform.to_global(local_key_ms + used_offset_ms)
                     ),
@@ -6198,6 +6306,7 @@ def materialize_key_materials(
             for role_label, future in futures.items():
                 role_results[role_label] = future.result()
 
+        _prune_replaced_key_material_views(event, first_material_view, third_material_view)
         # Keep archive mutation and incremental publication ordered. Readers
         # never see a sidecar before the corresponding media is complete.
         for role_label, view_id in (
@@ -6659,23 +6768,70 @@ def _run_bounded_semantic_waves(
     *,
     workers: int,
     failure_threshold: int,
+    on_result: Callable[[Any], None] | None = None,
 ) -> list[Any]:
-    """Run semantic calls in waves no larger than the transport failure gate."""
+    """Probe in failure-bounded waves, then keep healthy workers occupied.
+
+    A wholly unavailable provider sees only the original small failure wave.
+    After a real successful wave, at most ``workers`` tasks may be in flight;
+    a slow response no longer stalls every other worker at a batch barrier.
+    """
 
     wave_size = max(1, min(int(workers), int(failure_threshold)))
     completed: list[Any] = []
+    exhausted = object()
+
+    def record(result):
+        completed.append(result)
+        if on_result:
+            on_result(result)
+
     for wave_start in range(0, len(items), wave_size):
         wave = items[wave_start : wave_start + wave_size]
         with ThreadPoolExecutor(max_workers=len(wave)) as executor:
             futures = [executor.submit(analyze, item) for item in wave]
-            completed.extend(future.result() for future in as_completed(futures))
+            results = [future.result() for future in as_completed(futures)]
+        for result in results:
+            record(result)
+        healthy = all(
+            isinstance(result, tuple) and len(result) == 2
+            and isinstance(result[1], dict)
+            and result[1].get("status") == "completed"
+            and not result[1].get("cache_reused")
+            for result in results
+        )
+        if healthy:
+            remaining = iter(items[wave_start + wave_size :])
+            with ThreadPoolExecutor(max_workers=max(1, int(workers))) as executor:
+                pending = set()
+                for _ in range(max(1, int(workers))):
+                    item = next(remaining, exhausted)
+                    if item is not exhausted:
+                        pending.add(executor.submit(analyze, item))
+                while pending:
+                    done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                    for future in done:
+                        record(future.result())
+                        item = next(remaining, exhausted)
+                        if item is not exhausted:
+                            pending.add(executor.submit(analyze, item))
+            break
     return completed
 
 
-def analyze_key_materials(layout: ArchiveLayout, events: Sequence[EvidenceEvent], config: dict[str, Any]) -> None:
+def analyze_key_materials(
+    layout: ArchiveLayout, events: Sequence[EvidenceEvent], config: dict[str, Any],
+    *, progress_callback: Callable[[int, int], None] | None = None,
+) -> None:
+    speech_contexts = SpeechContext(layout.root, config)
     analyzer = ArkStepAnalyzer(config)
     accepted = [event for event in events if event.accepted]
     cache_root = layout.work / "mllm-cache" / "key-materials"
+    runtime_started = time.perf_counter()
+    runtime_lock = threading.Lock()
+    active_calls = 0
+    peak_calls = 0
+    call_records: list[dict[str, Any]] = []
 
     def analyze(event: EvidenceEvent) -> tuple[EvidenceEvent, dict[str, Any]]:
         images = key_material_review_images(layout, event, config)
@@ -6683,10 +6839,13 @@ def analyze_key_materials(layout: ArchiveLayout, events: Sequence[EvidenceEvent]
             mode="json",
             exclude={"model_understanding", "key_frames", "key_clips"},
         )
+        speech_context = speech_contexts.window(event.global_start_ms, event.global_end_ms, event.supporting_views)
+        if speech_context is not None:
+            semantic_evidence["speech_context"] = speech_context
         fingerprint = _semantic_fingerprint(
             "key-material",
             config,
-            EVENT_SYSTEM_PROMPT,
+            prompt_with_speech(EVENT_SYSTEM_PROMPT, speech_context),
             semantic_evidence,
             images,
         )
@@ -6701,7 +6860,15 @@ def analyze_key_materials(layout: ArchiveLayout, events: Sequence[EvidenceEvent]
                 cached = _read_semantic_cache(run_cache_path, fingerprint)
         if cached is not None:
             return event, cached
-        result = analyzer.analyze_event(event, images)
+        nonlocal active_calls, peak_calls
+        with runtime_lock:
+            active_calls += 1
+            peak_calls = max(peak_calls, active_calls)
+        try:
+            result = analyzer.analyze_event(event, images, **({"speech_context": speech_context} if speech_context is not None else {}))
+        finally:
+            with runtime_lock:
+                active_calls -= 1
         if result.get("status") == "completed":
             result = _write_semantic_cache(persistent_cache_path, fingerprint, result)
             write_json(run_cache_path, result)
@@ -6712,16 +6879,39 @@ def analyze_key_materials(layout: ArchiveLayout, events: Sequence[EvidenceEvent]
         1, int(config["mllm"].get("failure_circuit_breaker_threshold", 4))
     )
     semantic_results: list[tuple[str, dict[str, Any]]] = []
+
+    def record_progress(value):
+        event, result = value
+        call_records.append({"event_id": event.event_id, **{
+            key: result.get(key) for key in (
+                "status", "provider", "model", "request_id", "response_model",
+                "attempts", "latency_seconds", "cache_reused", "usage", "attempt_receipts",
+            )
+        }})
+        # Save bounded progress during long model stages, including incomplete
+        # responses and unknown token usage. This is not a quality acceptance.
+        if len(call_records) <= min(workers, failure_threshold) or len(call_records) % 4 == 0 or len(call_records) == len(accepted):
+            write_json(layout.json_config / "key_material_semantic_runtime.json", {
+                "schema_version": "visioncortex-semantic-runtime/1",
+                "configured_workers": workers,
+                "initial_failure_wave_size": min(workers, failure_threshold),
+                "peak_analyzer_calls": peak_calls,
+                "concurrency_scope": "analyzer calls including retries; not server-side GPU utilization",
+                "completed_items": len(call_records), "total_items": len(accepted),
+                "duration_seconds": round(time.perf_counter() - runtime_started, 6),
+                "calls": call_records,
+            })
+            if progress_callback:
+                progress_callback(len(call_records), len(accepted))
     try:
-        # Submit one failure-bounded wave at a time.  Submitting the entire queue
-        # lets every worker enter the transport before the shared circuit can
-        # observe a complete failed wave, defeating the circuit breaker during
-        # a provider outage.
+        # Start with the failure gate; a successful live wave permits configured
+        # concurrency. The shared transport circuit still stops repeated outages.
         completed = _run_bounded_semantic_waves(
             accepted,
             analyze,
             workers=workers,
             failure_threshold=failure_threshold,
+            on_result=record_progress,
         )
         for event, result in completed:
             result = normalize_uncalibrated_hand_identity(result)
@@ -7970,6 +8160,7 @@ def curate_semantically_reviewed_key_materials(
                     )
                     or event.supporting_views
                 ),
+                "view_pairing": dict(event.observability.get("key_material_view_selection") or {}),
                 "media": sorted(
                     _relative(path, layout.root)
                     for path in media_root.rglob("*")
@@ -8603,6 +8794,15 @@ def finalize_archive(
             "run_metrics": run_metrics or {},
         },
     )
+    speech_path = layout.json_config / "speech.json"
+    if speech_path.is_file():
+        speech_result = json.loads(speech_path.read_text(encoding="utf-8"))
+        summary.stats["speech"] = {
+            "manifest": "JSON-Config-Files/speech.json", "status": speech_result["status"],
+            "source_count": len(speech_result["sources"]),
+            "transcript_segments": sum(chunk["segment_count"] for source in speech_result["sources"] for chunk in source["chunks"]),
+            "accuracy": "NOT_PROVEN", "physical_action_confirmation": False,
+        }
     write_json(layout.json_config / "run_manifest.json", manifest.model_dump(mode="json"))
     write_json(layout.json_config / "time_alignment.json", [item.model_dump(mode="json") for item in transforms.values()])
     write_json(layout.json_config / "physical_change_log.json", [item.model_dump(mode="json") for item in physical_changes])

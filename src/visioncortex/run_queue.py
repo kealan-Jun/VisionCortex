@@ -222,7 +222,7 @@ class DurableRunQueue:
         error: str | None = None,
         now: float | None = None,
     ) -> bool:
-        if status not in {"completed", "failed"}:
+        if status not in {"completed", "partial", "failed"}:
             raise ValueError(f"Unsupported terminal queue status: {status}")
         finished_at = time.time() if now is None else float(now)
         with self._connect() as connection:
@@ -233,7 +233,10 @@ class DurableRunQueue:
                     lease_owner = NULL, lease_expires_at = NULL
                 WHERE run_id = ? AND status = 'running' AND lease_owner = ?
                 """,
-                (status, finished_at, finished_at, error, run_id, worker_id),
+                # Queue completion records execution, while run_records retains
+                # the partial evidence outcome. Existing databases need no migration.
+                ("completed" if status == "partial" else status,
+                 finished_at, finished_at, error, run_id, worker_id),
             ).rowcount
         return updated == 1
 
@@ -254,6 +257,59 @@ class DurableRunQueue:
         payload = dict(row)
         payload["payload"] = json.loads(payload.pop("payload_json"))
         return payload
+
+    def retry_failed(self, run_id: str, *, verified_mllm: dict | None = None) -> dict[str, Any]:
+        """Requeue the saved job atomically, preserving inputs and attempt history."""
+        now = time.time()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT j.*, r.state_json FROM run_jobs j JOIN run_records r "
+                "USING (run_id) WHERE j.run_id = ?", (run_id,),
+            ).fetchone()
+            if row is None or row["status"] not in {"failed", "completed"}:
+                raise ValueError("Only a finished failed job can be retried")
+            previous = json.loads(row["state_json"])
+            if row["status"] == "completed" and previous.get("state") != "partial":
+                raise ValueError("A completed formal result cannot be retried")
+            if previous.get("state") not in {"failed", "interrupted", "partial"}:
+                raise ValueError("Run state does not permit retry")
+            payload = json.loads(row["payload_json"])
+            settings = payload["settings"]
+            previous_credential = (settings.get("mllm") or {}).get("credential_ref")
+            if verified_mllm is not None:
+                settings["mllm"] = verified_mllm
+            project = settings.setdefault("project", {})
+            project["cache_mode"] = "reuse"
+            project["semantic_cache_mode"] = "reuse"
+            project["semantic_recovery_attempt"] = f"{run_id}:{int(row['attempts']) + 1}"
+            history = list(previous.get("attempt_history") or [])
+            history.append({
+                "attempt": row["attempts"],
+                "finished_at": row["finished_at"],
+                "state": previous.get("state"),
+                "error": previous.get("error"),
+                "retry_requested_at": now,
+                "previous_credential_ref": previous_credential,
+            })
+            state = {**previous, "state": "queued", "progress": 0.0,
+                     "error": None, "attempt_history": history,
+                     "message": "已保留原输入与阶段产出，等待复跑并校验可复用缓存"}
+            # Move to the tail so a retry cannot jump ahead of waiting users.
+            sequence = connection.execute(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM run_jobs"
+            ).fetchone()[0]
+            connection.execute(
+                "UPDATE run_jobs SET sequence = ?, payload_json = ?, status = 'queued', "
+                "queued_at = ?, updated_at = ?, finished_at = NULL, last_error = NULL, "
+                "lease_owner = NULL, lease_expires_at = NULL WHERE run_id = ?",
+                (sequence, self._json(payload), now, now, run_id),
+            )
+            connection.execute(
+                "UPDATE run_records SET state_json = ?, updated_at = ? WHERE run_id = ?",
+                (self._json(state), now, run_id),
+            )
+        return state
 
     def stats(self) -> dict[str, int]:
         with self._connect() as connection:

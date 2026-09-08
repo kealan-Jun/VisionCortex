@@ -75,3 +75,18 @@ def test_cache_identity_isolated_by_namespace_but_shared_by_cold_hot_mode(
     assert cold["execution_cache_policy"]["mode"] == "cold"
     assert hot["execution_cache_policy"]["mode"] == "reuse"
     assert isolated["cache_key"] != hot["cache_key"]
+
+
+def test_downstream_settings_do_not_invalidate_cv(default_config, tmp_path):
+    manifest = _manifest(tmp_path)
+    original = build_cache_identity(default_config, manifest)
+    default_config['mllm']['model'] = 'another-understanding-model'
+    default_config['mllm']['timeout_seconds'] = 321
+    default_config['speech_recognition'] = {'enabled': True, 'language': 'en'}
+    default_config['daily_report'] = {'title': 'new format'}
+    manifest.views[0].audio_offset_ms = 2500
+    changed = build_cache_identity(default_config, manifest)
+    assert changed['cache_key'] == original['cache_key']
+    assert changed['downstream_dependencies'] != original['downstream_dependencies']
+    manifest.views[0].view_id = 'different-camera'
+    assert build_cache_identity(default_config, manifest)['cache_key'] != original['cache_key']

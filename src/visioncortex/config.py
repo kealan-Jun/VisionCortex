@@ -228,6 +228,9 @@ def load_manifest(path: Path) -> RunManifest:
             view.video = (base / view.video).resolve()
         if view.timestamps_csv and not view.timestamps_csv.is_absolute():
             view.timestamps_csv = (base / view.timestamps_csv).resolve()
+        for item in view.segments or [view]:
+            if item.audio is not None and not item.audio.is_absolute():
+                item.audio = (base / item.audio).resolve()
         for segment in view.segments:
             if not segment.video.is_absolute():
                 segment.video = (base / segment.video).resolve()

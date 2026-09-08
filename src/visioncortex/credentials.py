@@ -5,6 +5,8 @@ import stat
 from pathlib import Path
 from typing import Any
 
+from .provider_credentials import model_api_key
+
 
 DEFAULT_ARK_API_KEY_FILE = Path("/home/x1/.config/VisionCortex/ark_api_key")
 
@@ -24,6 +26,18 @@ def ensure_ark_api_key(
     mllm = config.get("mllm") or {}
     enabled = bool(mllm.get("enabled", False))
     environment_name = str(mllm.get("api_key_env") or "ARK_API_KEY")
+    if mllm.get("credential_ref") or mllm.get("provider") in {"aliyun", "zhipu", "custom"}:
+        key = model_api_key(mllm)
+        if key and (len(key) > 4096 or any(ord(c) < 32 for c in key)):
+            raise RuntimeError("Multimodal credential format is invalid")
+        if not key and enabled and required:
+            raise RuntimeError("请在 AI 服务设置中配置并验证所选厂商的密钥。")
+        if key:
+            os.environ[environment_name] = key
+        return {"enabled": enabled, "configured": bool(key),
+                "source": "private_credential_revision" if mllm.get("credential_ref") else "environment",
+                "environment_name": environment_name, "format_validated": bool(key),
+                "secret_recorded": False, "provider": mllm.get("provider")}
     existing = os.getenv(environment_name, "").strip()
     if existing:
         if not existing.startswith("ark-"):

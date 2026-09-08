@@ -54,6 +54,20 @@ def test_visible_staging_preserves_legacy_run_discovery(tmp_path):
         run_staging_roots(config)
 
 
+def test_preflight_failure_can_retry_without_pipeline_status(tmp_path, monkeypatch):
+    config = {"storage": {"archive_root": str(tmp_path / "archive")}}
+    _, staging, _ = fixed_archive_staging_paths(config, "experiment", "run-preflight")
+    staging.mkdir(parents=True)
+    monkeypatch.setattr(api, "_runs", {"run-preflight": {"nas_staging": str(staging)}})
+    assert api._find_staging_run(config, "run-preflight") == staging.resolve()
+    outside = tmp_path / "elsewhere/experiment/run-preflight"
+    outside.mkdir(parents=True)
+    api._runs["run-preflight"]["nas_staging"] = str(outside)
+    assert api._find_staging_run(config, "run-preflight") is None
+    api._runs["another-run"] = {"nas_staging": str(staging)}
+    assert api._find_staging_run(config, "another-run") is None
+
+
 def test_stage_preview_reads_completed_clips_without_final_package(tmp_path, monkeypatch):
     config = {"storage": {"archive_root": str(tmp_path), "staging_directory_name": "Processing"}}
     _, root, _ = fixed_archive_staging_paths(config, "experiment", "run-preview")
@@ -116,6 +130,31 @@ def test_stage_preview_reads_completed_clips_without_final_package(tmp_path, mon
     assert preview["key_events"] == []
     assert preview["preliminary_materials"][0]["review_status"] == "pending_semantic_review"
     assert preview["preliminary_materials"][0]["timestamp_ms"] == 123
+
+
+def test_stage_preview_includes_both_candidate_indexes_without_double_counting(tmp_path, monkeypatch):
+    config = {"storage": {"archive_root": str(tmp_path), "staging_directory_name": "Processing"}}
+    _, root, _ = fixed_archive_staging_paths(config, "experiment", "run-candidates")
+    json_dir = root / "JSON-Config-Files"
+    json_dir.mkdir(parents=True)
+    (json_dir / "pipeline_status.json").write_text(json.dumps({"stage": "failed"}))
+    for directory, filename, ids in (
+        ("Machine-Quarantine", "Machine-Quarantine-Index.json", ["EVT-1", "EVT-2"]),
+        ("Review-Candidates", "Candidate-Index.json", ["EVT-2", "EVT-3"]),
+    ):
+        folder = root / "Key-Materials" / directory
+        folder.mkdir(parents=True)
+        entries = []
+        for event_id in ids:
+            media = folder / f"{event_id}.jpg"
+            media.write_bytes(b"contract-fixture-not-a-real-image")
+            entries.append({"event_id": event_id, "media": [str(media.relative_to(root))]})
+        (folder / filename).write_text(json.dumps({"candidates": entries}))
+    monkeypatch.setattr(api, "_settings", lambda: config)
+    preview = api.staging_archive_detail("run-candidates")
+    assert {item["event_id"] for item in preview["quarantined_materials"]} == {"EVT-1", "EVT-2", "EVT-3"}
+    assert len(preview["quarantined_materials"]) == 3
+    assert not preview["key_events"]
 
 
 def test_understanding_checkpoint_survives_later_revision_and_failure(tmp_path):
@@ -217,7 +256,7 @@ def test_task_page_exposes_each_completed_stage_output():
     assert 'videoTile("第三人称", experiment.third_person_video_url)' in app_js
 
 
-def test_operations_page_exposes_only_user_facing_nas_locations():
+def test_operations_page_shows_selected_output_and_cache_locations():
     app_js = (
         Path(__file__).parents[1]
         / "src"
@@ -229,13 +268,76 @@ def test_operations_page_exposes_only_user_facing_nas_locations():
     operations = app_js.split("function renderOperations()", 1)[1].split(
         "async function loadArchive", 1
     )[0]
-    assert "NAS / VisionCortexExperimentArchive" in operations
-    assert "NAS / VisionCortexExperimentCache" in operations
+    assert "NAS / VisionCortexExperimentArchive" not in operations
+    assert "NAS / VisionCortexExperimentCache" not in operations
+    assert 'isNasMode() ? "NAS 存储" : "本地存储"' in operations
+    assert 'esc(health.archive_root || "未配置")' in operations
+    assert 'esc(health.fixed_benchmark?.local_cache_root || "未配置")' in operations
+    assert "health.fixed_benchmark?.enabled !== false" in operations
     assert "管理员工具" in operations
     assert "modelCandidatePanel" not in operations
-    assert "health.archive_root" not in operations
     assert "health.nas_archive_root" not in operations
     assert "local_runtime_root" not in operations
-    assert "local_cache_root" not in operations
     assert "benchmark.index_csv" not in operations
     assert "health.model" not in operations
+
+
+def test_retry_preview_uses_current_groups_and_receipts(tmp_path):
+    root = tmp_path / "archive"
+    config = root / "JSON-Config-Files"
+    receipts = config / "Stage-Receipts"
+    receipts.mkdir(parents=True)
+    def save(path, value):
+        path.write_text(json.dumps(value))
+    save(config / "pipeline_status.json", {
+        "stage": "mllm", "updated_at": "2026-09-07T10:05:00+00:00",
+        "elapsed_seconds": 300,
+    })
+    save(config / "run_metrics.json", {"run_started_at": "2026-09-07T09:00:00+00:00", "total_duration_seconds": 2400})
+    save(config / "run_metrics_live.json", {"run_started_at": "2026-09-07T10:00:00+00:00", "total_duration_seconds": 300})
+    save(config / "delivery_metrics.json", {"total_duration_seconds": 2500})
+    old = {"group_id": "GROUP-1", "archive_folder": "old", "experiment_name": "previous"}
+    current = {"group_id": "GROUP-1", "archive_folder": "current", "experiment_name": "current", "model_understanding": {"steps": [{"description": "observed"}]}}
+    save(config / "evidence_package.json", {"experiment_groups": [old]})
+    save(config / "experiment_group_understanding.json", {"groups": [current]})
+    for name in ("old", "current"):
+        folder = root / "Experiment-Clips" / name
+        folder.mkdir(parents=True)
+        (folder / "First-Person.mp4").write_bytes(b"test-media")
+    save(receipts / "experiment_understanding.json", {"stage": "experiment_understanding", "status": "completed", "completed_at": "2026-09-07T10:04:00+00:00"})
+    save(receipts / "semantic_refinement.json", {"stage": "semantic_refinement", "status": "completed", "completed_at": "2026-09-07T09:40:00+00:00"})
+    detail = api._archive_detail_from_root(root, "experiment", staging_run_id="retry")
+    assert [item["name"] for item in detail["experiments"]] == ["current"]
+    assert detail["experiments"][0]["steps"] == [{"description": "observed"}]
+    assert detail["metrics"]["total_duration_seconds"] == 300
+    assert [item["stage"] for item in detail["observability"]["stage_receipts"]] == ["experiment_understanding"]
+    assert (root / "Experiment-Clips/old/First-Person.mp4").exists()
+    # The completed package also excludes orphan folders from older attempts.
+    save(config / "evidence_package.json", {"experiment_groups": [current]})
+    assert api._archive_detail_from_root(root, "experiment")["counts"]["experiments"] == 1
+
+
+def test_retry_retains_derived_media_without_touching_originals(tmp_path):
+    root = tmp_path / "archive"
+    sources = {"Original-Experiment-Videos/fp/video.mp4": b"original",
+               "JSON-Config-Files/Input-Manifests/input_seal.json": b"seal",
+               "JSON-Config-Files/run_manifest.json": b"input-manifest"}
+    derived = {"Key-Materials/Machine-Quarantine/event/Key-Frames/frame.jpg": b"old-frame",
+               "Experiment-Clips/old/First-Person.mp4": b"old-clip",
+               "JSON-Config-Files/evidence_package.json": b"old-package",
+               "JSON-Config-Files/Stage-Receipts/mllm.json": b"old-receipt"}
+    for relative, payload in {**sources, **derived}.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+    api._retain_retry_outputs(root, 3)
+    for relative, payload in sources.items():
+        assert (root / relative).read_bytes() == payload
+    for relative, payload in derived.items():
+        assert not (root / relative).exists()
+        assert (root / "JSON-Config-Files/Retry-Attempts/3/Derived" / relative).read_bytes() == payload
+    fresh = root / "Key-Materials/Machine-Quarantine/event/Key-Frames/frame.jpg"
+    fresh.parent.mkdir(parents=True)
+    fresh.write_bytes(b"new-frame")
+    api._retain_retry_outputs(root, 4)
+    assert (root / "JSON-Config-Files/Retry-Attempts/4/Derived/Key-Materials/Machine-Quarantine/event/Key-Frames/frame.jpg").read_bytes() == b"new-frame"

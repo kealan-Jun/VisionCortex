@@ -60,6 +60,7 @@ from .model_registry import install_registered_models, validate_model_registry
 from .model_promotion import evaluate_yolo_candidate_promotion
 from .local_acceptance import run_local_six_view_acceptance
 from .local_model_acceptance import run_local_real_model_acceptance
+from .partial_delivery import partial_result_available, register_partial_result
 from .pipeline import (
     EvidencePipeline,
     _synchronize_final_event_state_receipts,
@@ -824,6 +825,16 @@ def generate_daily_report_command(
     typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
 
 
+@app.command("register-partial-result")
+def register_partial_result_command(
+    root: Annotated[Path, typer.Option("--root", exists=True, file_okay=False)],
+    config: Annotated[Path, typer.Option("--config", "-c", exists=True, dir_okay=False)],
+) -> None:
+    """Register retained local outputs for Web lookup without running analysis."""
+    result = register_partial_result(root, load_config(config))
+    typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+
+
 @app.command("run")
 def run_command(
     manifest: Annotated[
@@ -845,6 +856,8 @@ def run_command(
     if output:
         settings["project"]["output_root"] = str(output)
     result = EvidencePipeline(settings, _progress).run(load_manifest(manifest))
+    if partial_result_available(Path(result)):
+        typer.echo("PARTIAL_EVIDENCE：分析结束，阶段成果已保存；详见 Partial-Results/Partial-Evidence-Report.html")
     typer.echo(str(result))
 
 
@@ -2058,6 +2071,9 @@ def run_fixed_benchmark_command(
         f"nas_staging={nas_root} fixed_output={fixed_root}"
     )
     result = EvidencePipeline(settings, _progress).run(manifest)
+    if partial_result_available(Path(result)):
+        typer.echo(f"{result} state=partial evidence=PARTIAL_EVIDENCE fixed_archive_promotion=skipped")
+        return
     if preprocessing_only:
         typer.echo(
             f"{result} total_seconds={time.perf_counter() - started:.6f} "
@@ -2178,7 +2194,14 @@ def run_index_collection_command(
             f"input_mode={ingest['input_mode']} source_copy_bytes="
             f"{ingest['copied_source_bytes']} staging={staging_root}"
         )
-        EvidencePipeline(settings, _progress).run(manifest)
+        result = EvidencePipeline(settings, _progress).run(manifest)
+        if partial_result_available(Path(result)):
+            record_collection_state(
+                settings, experiment_id, archive_name=safe_name, run_id=run_id,
+                state="partial", details={"staging": str(staging_root)},
+            )
+            typer.echo(f"{result} state=partial evidence=PARTIAL_EVIDENCE fixed_archive_promotion=skipped")
+            return
         # Final participant key-frame selection can move two independently
         # proposed events onto the same physical transition.  Re-run the
         # deterministic presentation/semantic deduplication before promotion;
@@ -2354,7 +2377,7 @@ def run_index_staging_command(
         result = EvidencePipeline(settings, _progress).run(manifest)
         receipt.update(
             {
-                "state": "completed",
+                "state": "partial" if partial_result_available(Path(result)) else "completed",
                 "completed_at": datetime.now().astimezone().isoformat(),
                 "total_seconds": round(time.perf_counter() - started, 6),
                 "pipeline_result": str(result),

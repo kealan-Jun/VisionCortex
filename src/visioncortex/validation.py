@@ -420,8 +420,30 @@ def validate_experiment_and_material_quality(
     canonical_pair_coverage_passed = all(
         item["passed"] for item in pair_coverage
     )
+    incomplete_boundaries = []
+    for group in groups:
+        assessment = (group.model_understanding or {}).get("boundary_assessment") or {}
+        reasons = []
+        if assessment.get("start_complete") is False:
+            reasons.append("experiment_start_incomplete")
+        if assessment.get("end_complete") is False:
+            reasons.append("experiment_end_incomplete")
+        if assessment.get("localized_rescan_needed") is True:
+            reasons.append("boundary_context_review_needed")
+        for review in group.boundary_reviews:
+            if review.get("joined"):
+                continue
+            result = review.get("result") or {}
+            decision = result.get("decision") or {}
+            if result.get("status") != "completed" or decision.get("relation") == "uncertain":
+                reasons.append("neighboring_cut_unresolved")
+            elif decision.get("left_experiment_complete") is False:
+                reasons.append("ongoing_experiment_at_cut")
+        if reasons:
+            incomplete_boundaries.append({"group_id": group.group_id, "reasons": sorted(set(reasons))})
     segmentation_integrity_passed = bool(
         stable_group_uid_gate_passed and canonical_pair_coverage_passed
+        and not incomplete_boundaries
     )
     cross_view_rate = cross_view_count / event_count if event_count else 0.0
     participant_only_annotation_gate_passed = bool(
@@ -517,6 +539,8 @@ def validate_experiment_and_material_quality(
             ),
             "stable_group_uid_gate_passed": stable_group_uid_gate_passed,
             "canonical_pair_coverage_passed": canonical_pair_coverage_passed,
+            "boundary_completion_passed": not incomplete_boundaries,
+            "incomplete_boundaries": incomplete_boundaries,
             "groups": pair_coverage,
         },
         "key_materials": {

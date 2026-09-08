@@ -1022,6 +1022,9 @@ def _opencv_indexed_seek_iterator(
         while requested_ms < end_ms:
             capture.set(cv2.CAP_PROP_POS_MSEC, requested_ms)
             ok, frame = capture.read()
+            if ok and not _seek_frame_matches_timestamp(capture, requested_ms):
+                frame = _read_frame_at_ffmpeg(path, requested_ms)
+                ok = frame is not None
             if ok:
                 if info.width > max_width:
                     width, height = _scaled_size(info.width, info.height, max_width)
@@ -1543,6 +1546,14 @@ def _read_frame_at_ffmpeg(path: Path, local_ms: float) -> np.ndarray | None:
     return frame if frame is not None and frame.size else None
 
 
+def _seek_frame_matches_timestamp(capture: cv2.VideoCapture, local_ms: float) -> bool:
+    """A successful read can still return a stale frame after an indexed seek."""
+    decoded_ms = float(capture.get(cv2.CAP_PROP_POS_MSEC))
+    fps = float(capture.get(cv2.CAP_PROP_FPS))
+    tolerance_ms = max(50.0, 2000.0 / fps) if math.isfinite(fps) and fps > 0 else 100.0
+    return bool(math.isfinite(decoded_ms) and abs(decoded_ms - max(0.0, local_ms)) <= tolerance_ms)
+
+
 def read_frame_at(path: Path, local_ms: float) -> np.ndarray | None:
     capture = cv2.VideoCapture(str(path))
     if not capture.isOpened():
@@ -1550,8 +1561,9 @@ def read_frame_at(path: Path, local_ms: float) -> np.ndarray | None:
         return _read_frame_at_ffmpeg(path, local_ms)
     capture.set(cv2.CAP_PROP_POS_MSEC, max(0.0, local_ms))
     ok, frame = capture.read()
+    timestamp_valid = ok and _seek_frame_matches_timestamp(capture, local_ms)
     capture.release()
-    return frame if ok else _read_frame_at_ffmpeg(path, local_ms)
+    return frame if timestamp_valid else _read_frame_at_ffmpeg(path, local_ms)
 
 
 def read_view_frame_at(view: ViewInput, info: VideoInfo, local_ms: float) -> np.ndarray | None:
@@ -1600,7 +1612,7 @@ class ViewFrameReader:
             old_capture.release()
         capture.set(cv2.CAP_PROP_POS_MSEC, max(0.0, source_ms))
         ok, frame = capture.read()
-        if ok:
+        if ok and _seek_frame_matches_timestamp(capture, source_ms):
             return frame
         capture.release()
         self._captures.pop(path, None)
@@ -1641,6 +1653,9 @@ def motion_signature(path: Path, local_times_ms: Sequence[float]) -> np.ndarray:
                 ok, frame = capture.read()
                 while ok and float(capture.get(cv2.CAP_PROP_POS_MSEC)) + 2.0 < requested:
                     ok, frame = capture.read()
+            if ok and not _seek_frame_matches_timestamp(capture, requested):
+                frame = _read_frame_at_ffmpeg(path, requested)
+                ok = frame is not None
             if not ok:
                 values.append(0.0)
                 previous = None
