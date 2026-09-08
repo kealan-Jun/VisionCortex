@@ -127,6 +127,7 @@ def install_desktop(build: Path, output: Path, source: dict) -> None:
         (output / name).unlink(missing_ok=True)
     mappings = {
         "tools/rtx4050_portable.py": "tools/rtx4050_portable.py",
+        "tools/rtx4050_hardware.py": "tools/rtx4050_hardware.py",
         "tools/desktop_storage.py": "tools/desktop_storage.py",
         "tools/windows_desktop_lifecycle.py": "tools/windows_desktop_lifecycle.py",
         "tools/verify_mllm_connection.py": "tools/verify_mllm_connection.py",
@@ -136,6 +137,7 @@ def install_desktop(build: Path, output: Path, source: dict) -> None:
         "src/visioncortex/provider_connection.py": "src/visioncortex/provider_connection.py",
         "src/visioncortex/provider_credentials.py": "src/visioncortex/provider_credentials.py",
         "deployment/rtx4050-windows/README.md": "README.md",
+        "docs/RTX4050-GIT-UPDATES.md": "docs/RTX4050-GIT-UPDATES.md",
         "deployment/rtx4050-windows/assets-lock.json": "receipts/assets-lock.json",
         "deployment/rtx4050-windows/desktop/sitecustomize.py": "python/Lib/sitecustomize.py",
     }
@@ -225,13 +227,19 @@ def connection_update(base: Path, output: Path) -> Path:
     original = json.loads((base / "SHA256SUMS.json").read_text(encoding="utf-8"))
     indexed = {item["path"]: item for item in original["files"]}
     mappings = {"tools/rtx4050_portable.py": "tools/rtx4050_portable.py",
+                "tools/rtx4050_hardware.py": "tools/rtx4050_hardware.py",
                 "tools/verify_mllm_connection.py": "tools/verify_mllm_connection.py",
                 "deployment/rtx4050-windows/README.md": "README.md"}
     for name in ("connection.cjs", "main.cjs", "setup.js"):
         mappings[f"deployment/rtx4050-windows/desktop/{name}"] = f"resources/app/{name}"
     # Only these files are read; unchanged runtime/model integrity remains a startup gate.
     for name in [*mappings.values(), "receipts/source-snapshot.json", "BUNDLE-METADATA.json", "python/python.exe"]:
-        if sha256(safe_path(base, name)) != indexed[name]["sha256"]:
+        path = safe_path(base, name)
+        if name not in indexed:
+            if path.exists():
+                raise RuntimeError(f"Untracked base file: {name}")
+            continue
+        if sha256(path) != indexed[name]["sha256"]:
             raise RuntimeError(f"Base file checksum mismatch: {name}")
     source = json.loads((base / "receipts/source-snapshot.json").read_text(encoding="utf-8"))
     metadata = json.loads((base / "BUNDLE-METADATA.json").read_text(encoding="utf-8"))
@@ -253,16 +261,21 @@ def connection_update(base: Path, output: Path) -> Path:
     write_json(payload / "BUNDLE-METADATA.json", metadata)
     changed = [*mappings.values(), "receipts/source-snapshot.json", "BUNDLE-METADATA.json"]
     manifest = json.loads(json.dumps(original))
+    new_names = [name for name in changed if name not in indexed]
+    for name in new_names:
+        manifest["files"].append({"path": name})
     for item in manifest["files"]:
         if item["path"] in changed:
             item.update(sha256=sha256(payload / item["path"]), size_bytes=(payload / item["path"]).stat().st_size)
     manifest["total_bytes"] = sum(item["size_bytes"] for item in manifest["files"])
+    manifest["file_count"] = len(manifest["files"])
     write_json(payload / "SHA256SUMS.json", manifest)
     spec = {**identity, "base_package_name": base.name,
             "updated_manifest_sha256": sha256(payload / "SHA256SUMS.json"),
             "python_sha256": indexed["python/python.exe"]["sha256"], "files": []}
     for name in [*changed, "SHA256SUMS.json"]:
-        spec["files"].append({"path": name, "before_sha256": sha256(base / name), "after_sha256": sha256(payload / name)})
+        spec["files"].append({"path": name, "before_sha256": sha256(base / name) if (base / name).is_file() else None,
+                              "after_sha256": sha256(payload / name)})
     write_json(output / "update.json", spec)
     for name in ("apply-update.py", "Apply-Update.ps1"):
         copy_file(DEPLOYMENT / name, output / name)

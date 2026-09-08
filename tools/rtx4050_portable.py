@@ -6,7 +6,6 @@ import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
-import platform
 import shutil
 import socket
 import subprocess
@@ -148,49 +147,9 @@ def write_json(path: Path, payload: dict) -> None:
 
 
 def hardware_preflight() -> dict:
-    if sys.platform != "win32" or platform.machine().lower() not in {"amd64", "x86_64"}:
-        raise RuntimeError("此压缩包只适用于 Windows 10/11 64 位。")
-    if sys.version_info[:2] != (3, 12):
-        raise RuntimeError("必须使用包内 Python 3.12。")
-    import psutil
-    import torch
-    import tensorrt
+    from rtx4050_hardware import hardware_preflight as check
 
-    if torch.__version__ != "2.6.0+cu124" or tensorrt.__version__ != "10.4.0":
-        raise RuntimeError("运行环境版本与离线包不一致。")
-    if not torch.cuda.is_available():
-        raise RuntimeError("CUDA 不可用；请检查 NVIDIA 驱动，然后重新启动。")
-    name = torch.cuda.get_device_name(0)
-    if "4050" not in name:
-        raise RuntimeError(f"本包固定适配 RTX 4050，当前 GPU：{name}")
-    smi = shutil.which("nvidia-smi")
-    if not smi:
-        candidate = Path(os.environ.get("WINDIR", "C:/Windows")) / "System32/nvidia-smi.exe"
-        smi = str(candidate) if candidate.is_file() else None
-    if not smi:
-        raise RuntimeError("未找到 nvidia-smi，无法核验驱动和显卡身份。")
-    result = subprocess.run([smi, "--query-gpu=uuid,driver_version,memory.total", "--format=csv,noheader,nounits", "-i", "0"],
-                            check=True, capture_output=True, text=True)
-    uuid, driver, memory = [part.strip() for part in result.stdout.strip().split(",")]
-    if tuple(map(int, driver.split("."))) < (551, 78):
-        raise RuntimeError("NVIDIA 驱动低于 CUDA 12.4 要求，请更新驱动。")
-    if float(memory) < 5700:
-        raise RuntimeError("显卡总显存不足 6GB 配置要求。")
-    if psutil.virtual_memory().available < 8 * 1024**3:
-        raise RuntimeError("可用系统内存不足 8 GiB，请关闭其他大型程序。")
-    # A real CUDA operation proves invocation only; no real-video quality claim.
-    probe = torch.ones((128, 128), device="cuda", dtype=torch.float16)
-    if not torch.isfinite(probe @ probe).all().item():
-        raise RuntimeError("CUDA FP16 自检失败。")
-    torch.cuda.synchronize()
-    del probe
-    torch.cuda.empty_cache()
-    return {"gpu": name, "gpu_uuid": uuid, "driver": driver, "vram_mib": float(memory),
-            "ram_gib": round(psutil.virtual_memory().total / 1024**3, 2),
-            "cpu_logical_count": os.cpu_count(), "torch": torch.__version__,
-            "tensorrt": tensorrt.__version__, "python": platform.python_version(),
-            "windows": platform.version(), "cuda_fp16_invocation": "PROVEN",
-            "real_video_quality": "NOT_PROVEN"}
+    return check(ROOT, desktop_state)
 
 
 def effective_config(root: Path, hardware: dict) -> tuple[Path, dict]:

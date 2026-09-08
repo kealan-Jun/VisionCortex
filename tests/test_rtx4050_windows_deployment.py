@@ -137,7 +137,10 @@ def test_launcher_uses_offline_runtime_and_user_bound_secret():
 
 
 def test_check_only_does_not_build_engines_or_serve(portable, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
     monkeypatch.setattr(portable, "ROOT", tmp_path)
+    monkeypatch.setattr(portable.shutil, "disk_usage", lambda _: SimpleNamespace(free=20 * 1024**3))
     monkeypatch.setattr(sys, "argv", ["launcher", "--check-only"])
     monkeypatch.setattr(portable, "verify_package", lambda _: {})
     monkeypatch.setattr(portable, "configure_environment", lambda _: None)

@@ -11,7 +11,7 @@ from visioncortex.mllm_provider import build_vision_request, connection_identity
 from visioncortex.provider_connection import adapter_identity, connection_health, verification_matches, verify_connection
 
 
-CATALOG = json.loads((Path(__file__).resolve().parents[1] / 'configs/mllm-providers.json').read_text())
+CATALOG = json.loads((Path(__file__).resolve().parents[1] / 'configs/mllm-providers.json').read_text(encoding="utf-8"))
 
 
 def selection(provider='aliyun', **overrides):
