@@ -25,7 +25,7 @@ const html=stageDeliveryView({observability:{stage_receipts:[
  {stage:"clips",status:"completed",receipt_url:"/receipt",version_url:"/version",artifacts:[{name:"clips.json",url:"/clips"}]},
  {stage:"speech",status:"skipped",receipt_url:"/speech",reason:"没有录音"}]}});
 assert.ok(html.includes("/version"));assert.ok(html.includes("没有录音"));
-assert.ok(html.includes("历史阶段仅有完成记录"));assert.ok(!html.includes("/retry"));
+assert.ok(html.includes("此历史阶段的文件与完成记录可查看"));assert.ok(!html.includes("/retry"));
 ''')
 
 
