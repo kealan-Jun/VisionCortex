@@ -44,6 +44,7 @@ def installation(tmp_path):
     root.mkdir()
     patch.mkdir()
     contents = {name: b"synthetic source\n" for name in update.MAPPINGS}
+    contents.update({name: b"# synthetic executor\n" for name in update.EXECUTORS})
     contents.update({"pyproject.toml": b'[project]\ndependencies = []\n',
                      "deployment/rtx4050-windows/assets-lock.json": b'{}\n',
                      "src/visioncortex/keep.py": b'identity = "retained"\n',
@@ -54,6 +55,8 @@ def installation(tmp_path):
         path = source / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
+        if name in update.EXECUTORS:
+            continue
         if name in {"src/visioncortex/new.py", "tools/rtx4050_hardware.py"}:
             continue
         target = update.MAPPINGS.get(name, name)
@@ -146,3 +149,27 @@ def test_source_update_rejects_path_traversal(installation):
             update.safe(patch, name)
         with pytest.raises(RuntimeError):
             apply.safe(root, name)
+
+
+def test_update_executor_is_committed_and_staged_before_use(installation):
+    update, _, source, root, patch = installation
+    update.prepare(root, source, patch)
+    assert (patch / "apply-update.py").read_bytes() == (source / update.EXECUTORS[1]).read_bytes()
+    executor = source / update.EXECUTORS[1]
+    executor.unlink()
+    commit(source)
+    executor.write_bytes(b"# untracked replacement\n")
+    before = (root / "SHA256SUMS.json").read_bytes()
+    with pytest.raises(RuntimeError, match="executor"):
+        update.prepare(root, source, patch)
+    assert (root / "SHA256SUMS.json").read_bytes() == before
+
+
+def test_windows_crlf_checkout_keeps_the_committed_executor(installation):
+    update, _, source, root, patch = installation
+    checkout = source.with_name("windows-checkout")
+    subprocess.run(["git", "clone", "--config", "core.autocrlf=true", "--no-local", str(source), str(checkout)],
+                   check=True, capture_output=True)
+    assert b"\r\n" in (checkout / update.EXECUTORS[0]).read_bytes()
+    update.prepare(root, checkout, patch)
+    assert (patch / "apply-update.py").read_bytes() == b"# synthetic executor\n"

@@ -11,6 +11,9 @@ import tempfile
 import tomllib
 
 
+EXECUTORS = ("tools/update_rtx4050_source.py", "deployment/rtx4050-windows/apply-update.py")
+
+
 MAPPINGS = {
     "README.md": "SOURCE-README.md", "pyproject.toml": "pyproject.toml", "AGENTS.md": "AGENTS.md",
     "docs/DUAL-REPOSITORY-RELEASE-POLICY.md": "docs/DUAL-REPOSITORY-RELEASE-POLICY.md",
@@ -19,7 +22,7 @@ MAPPINGS = {
     "deployment/rtx4050-windows/assets-lock.json": "receipts/assets-lock.json",
     "deployment/rtx4050-windows/desktop/sitecustomize.py": "python/Lib/sitecustomize.py",
 }
-for _name in ("rtx4050_portable.py", "rtx4050_hardware.py", "desktop_storage.py",
+for _name in ("rtx4050_portable.py", "rtx4050_hardware.py", "rtx4050_integrity.py", "desktop_storage.py",
               "windows_desktop_lifecycle.py", "verify_mllm_connection.py"):
     MAPPINGS[f"tools/{_name}"] = f"tools/{_name}"
 for _name in ("package.json", "main.cjs", "controller.cjs", "connection.cjs", "storage.cjs",
@@ -64,7 +67,7 @@ def committed_source(source):
         header, name = raw.split(b"\t", 1)
         mode, kind, oid = header.decode().split()
         name = name.decode()
-        if name not in MAPPINGS and not name.startswith(("src/", "configs/", "examples/")):
+        if name not in MAPPINGS and name not in EXECUTORS and not name.startswith(("src/", "configs/", "examples/")):
             continue
         if mode not in {"100644", "100755"} or kind != "blob":
             raise RuntimeError("Source update requires regular committed files")
@@ -99,14 +102,21 @@ def committed_source(source):
         raise RuntimeError("Source revision changed during update preparation")
     if not set(MAPPINGS) <= set(data):
         raise RuntimeError("Git revision is missing required desktop source files")
-    return revision, data
+    if not set(EXECUTORS) <= set(data):
+        raise RuntimeError("Git revision is missing a required update executor")
+    executors = {name: data.pop(name) for name in EXECUTORS}
+    for name, content in executors.items():
+        checkout = safe(source, name).read_bytes()
+        if checkout.replace(b"\r\n", b"\n") != content.replace(b"\r\n", b"\n"):
+            raise RuntimeError("Update executor does not match the selected commit")
+    return revision, data, executors
 
 
 def prepare(root, source, patch):
     root, source = root.resolve(), source.resolve()
     if root == source or root in source.parents or source in root.parents:
         raise RuntimeError("Keep the Git checkout separate from the installed application")
-    revision, files = committed_source(source)
+    revision, files, executors = committed_source(source)
     original_bytes = (root / "SHA256SUMS.json").read_bytes()
     original = json.loads(original_bytes)
     indexed = {item["path"]: item for item in original["files"]}
@@ -199,6 +209,7 @@ def prepare(root, source, patch):
             "base_manifest_sha256": digest(original_bytes), "updated_manifest_sha256": digest(updated),
             "python_sha256": indexed["python/python.exe"]["sha256"]}
     (patch / "update.json").write_bytes(encoded(spec))
+    (patch / "apply-update.py").write_bytes(executors["deployment/rtx4050-windows/apply-update.py"])
     return spec
 
 
@@ -218,7 +229,7 @@ def main():
             print(json.dumps({"status": "prepared", "source_git_commit": spec["source_git_commit"],
                               "changed_files": len(spec["files"])}))
             return
-        module_spec = importlib.util.spec_from_file_location("source_updater", args.source / "deployment/rtx4050-windows/apply-update.py")
+        module_spec = importlib.util.spec_from_file_location("source_updater", patch / "apply-update.py")
         module = importlib.util.module_from_spec(module_spec)
         module_spec.loader.exec_module(module)
         print(json.dumps(module.apply(args.root, patch)))

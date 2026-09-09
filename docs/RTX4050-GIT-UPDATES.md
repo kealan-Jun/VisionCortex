@@ -29,9 +29,18 @@ powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File .\deployment\rtx405
 
 ## 后续更新
 
-若代码目录此前克隆自 `RealityLoopAI/VisionCortex`，先在该代码目录将更新来源切到
-开发仓库一次：`git remote set-url origin https://github.com/kealan-Jun/VisionCortex.git`。
-已有源文件、安装目录和运行数据不受此远端地址设置影响。
+若代码目录此前克隆自 `RealityLoopAI/VisionCortex`，两个仓库的 4050 分支目前已有
+不同提交。首次切换按以下命令创建独立本地分支，保留原分支，避免直接 `pull` 冲突：
+
+```powershell
+cd D:\VisionCortexSource
+git remote set-url origin https://github.com/kealan-Jun/VisionCortex.git
+git fetch origin codex/rtx4050-optimization-20260908
+git switch --create codex/rtx4050-startup-cache --track origin/codex/rtx4050-optimization-20260908
+```
+
+已切换的代码目录以后只需执行下述 `git pull --ff-only`。如提示有本地修改，先保留
+修改再处理，不使用强制重置。此过程只拉取源码，原应用目录和运行数据保留。
 
 ```powershell
 cd D:\VisionCortexSource
@@ -42,9 +51,43 @@ git pull --ff-only
 代码快照；同一提交重复执行会核对源码后直接返回。未跟踪的本地文件不会进入更新。
 
 更新会验证旧文件与补丁文件，备份变更内容到原应用的 `Runtime/Updates`，支持新增
-与删除源码文件，最后替换完整性清单。失败会恢复已替换的文件；下次启动仍执行原有
-全包校验。若所选提交改变了运行环境资产或核心/视觉依赖，更新会拒绝继续，须单独
+与删除源码文件，最后替换完整性清单。失败会恢复已替换的文件；下次启动核对新清单，
+重新哈希变化的文件，复用满足下述条件的未变化文件。若所选提交改变了运行环境资产或核心/视觉依赖，更新会拒绝继续，须单独
 准备兼容运行环境。它不会把缺失依赖伪装为已安装。
+
+## 首次校验与再次启动
+
+原 R6 包清单有 32,381 个文件，共 10,659,197,771 字节。旧版每次启动都重新读取
+整包计算 SHA-256，首次 AI 连接验证之后启动应用还会再次计算。
+
+桌面启动和 AI 连接验证现在共享 `Runtime/Cache/PackageIntegrity` 中的一份小型
+校验缓存。首次仍完整检查；后续核对文件身份与修改记录，仅对新增或变化文件重新
+计算哈希。普通退出重开、再次验证连接不会主动清除缓存；源码更新也可继续复用
+哈希预期与文件身份均未变化的大模型和运行库。
+
+Windows 使用 NTFS/ReFS 的卷与文件 ID、大小、创建时间、写入时间和 ChangeTime，
+不将 Python 的 Windows `st_ctime` 创建时间误当修改记录。刚写入的文件在时间戳
+精度窗口内重新校验；FAT/exFAT、网络盘或无法取得可靠修改记录时回退到完整读取。
+缓存用本机随机密钥认证，Windows 密钥通过当前用户 DPAPI 保护；缓存损坏、换账户
+或移动程序目录时先重新验证；校验器本身更新也会重新建立缓存。缓存只是上次内容校验的复用，不声称每次启动都重新
+完成了全量哈希，也不替代磁盘介质诊断。
+
+`Runtime/Logs/package-verification.json` 记录本次实际读取字节、复用字节、文件数、
+耗时和清单 SHA。缓存和日志都覆盖固定文件，不生成新的离线包或多份运行环境。
+需要主动完整复检时，在安装目录运行以下命令；它刷新同一缓存，不启动 GPU 或调用 AI：
+
+```powershell
+.\python\python.exe -I -B .\tools\rtx4050_portable.py --verify-package-only
+```
+
+本机复用原 R6 解压目录实测（Ubuntu/ext4/NVMe，清单 SHA
+`9f0ddf6c77811a083a9bb3e2d67c0d9cb038e4708eefcaac3f34f99458b85c72`）：首次校验
+10.36 秒、读取全部 10.66 GB；紧接的重复校验 1.52 秒、内容重读 0 字节，所有文件
+均复用记录。这里只测文件校验，不能推定 Windows 机械盘耗时、整机启动耗时或推理质量。
+
+开发分支同时保留了客户侧启动修复所需的非阻塞命令管道处理，以及更新执行器绑定
+Git 提交、从已暂存的提交内容执行和 CRLF 检出兼容性，避免升级后重新引入旧启动问题。
+Windows 原生管道与缓存回归纳入跨平台 CI；4050 原机再次启动耗时仍需客户实测。
 
 ## 初始化停滞的诊断
 

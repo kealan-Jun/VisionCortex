@@ -41,9 +41,18 @@ def supervise_desktop_parent(parent_pid: int) -> None:
         ("OpenProcess", [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32], ctypes.c_void_p),
         ("WaitForSingleObject", [ctypes.c_void_p, ctypes.c_uint32], ctypes.c_uint32),
         ("CloseHandle", [ctypes.c_void_p], ctypes.c_int),
+        ("GetStdHandle", [ctypes.c_int32], ctypes.c_void_p),
+        ("GetFileType", [ctypes.c_void_p], ctypes.c_uint32),
+        ("ReadFile", [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32,
+                      ctypes.POINTER(ctypes.c_uint32), ctypes.c_void_p], ctypes.c_int),
+        ("PeekNamedPipe", [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32,
+                           ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32), ctypes.c_void_p], ctypes.c_int),
     ):
         function = getattr(kernel, name)
         function.argtypes, function.restype = args, result
+    command_pipe = kernel.GetStdHandle(-10)
+    if not command_pipe or kernel.GetFileType(command_pipe) != 3:
+        raise RuntimeError("Desktop process supervision requires its command pipe")
     job = kernel.CreateJobObjectW(None, None)
     if not job:
         raise OSError(ctypes.get_last_error(), "Cannot create the desktop process job")
@@ -71,10 +80,28 @@ def supervise_desktop_parent(parent_pid: int) -> None:
                 os._exit(0 if result == 0 else 1)
 
     def watch_commands():
-        for line in sys.stdin:
-            if line.strip() == "stop":
+        # Blocking stdin reads can interfere with native library initialization
+        # on Windows. Read only bytes already available in the owned pipe.
+        buffer = ctypes.create_string_buffer(4096)
+        received, available = ctypes.c_uint32(), ctypes.c_uint32()
+        idle = threading.Event()
+        pending = b""
+        while kernel.PeekNamedPipe(command_pipe, None, 0, None, ctypes.byref(available), None):
+            if not available.value:
+                idle.wait(0.1)
+                continue
+            if not kernel.ReadFile(command_pipe, buffer, min(available.value, len(buffer)),
+                                   ctypes.byref(received), None):
+                break
+            if not received.value:
                 os._exit(0)
-        os._exit(0)  # Parent's pipe closed.
+            lines = (pending + buffer.raw[:received.value]).split(b"\n")
+            pending = lines.pop()
+            if any(line.strip() == b"stop" for line in lines):
+                os._exit(0)
+            if len(pending) > 4096:
+                os._exit(1)
+        os._exit(0 if ctypes.get_last_error() == 109 else 1)
 
     threading.Thread(target=watch_parent, daemon=True).start()
     threading.Thread(target=watch_commands, daemon=True).start()

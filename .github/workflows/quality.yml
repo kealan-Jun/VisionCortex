@@ -167,6 +167,10 @@ jobs:
         run: |
           python -m compileall -q src tests
           python -m pip check
+      - name: Validate portable cache and native Windows startup
+        run: >-
+          python -m pytest tests/test_rtx4050_integrity.py
+          tests/test_windows_desktop_lifecycle.py tests/test_rtx4050_source_update.py
       - name: Provision and verify the FFmpeg runtime dependency
         if: runner.os == 'Windows'
         shell: pwsh

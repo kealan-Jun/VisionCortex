@@ -48,7 +48,10 @@ def safe_path(root: Path, relative: str) -> Path:
     return result
 
 
-def verify_package(root: Path, *, progress=None) -> dict:
+def verify_package(root: Path, *, progress=None, use_cache=False, force_full=False) -> dict:
+    if use_cache:
+        from rtx4050_integrity import verify
+        return verify(root, hash_file=sha256, safe_path=safe_path, progress=progress, force_full=force_full)
     manifest = json.loads((root / "SHA256SUMS.json").read_text(encoding="utf-8"))
     seen = set()
     total_bytes = sum(entry["size_bytes"] for entry in manifest["files"])
@@ -398,6 +401,7 @@ def main() -> int:
     global DESKTOP_MODE
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check-only", action="store_true")
+    parser.add_argument("--verify-package-only", action="store_true", help="完整检查文件并刷新启动缓存，不启动 GPU 或 AI 服务")
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--smoke-stage", choices=("world", "dino", "labpics", "sam2"), help=argparse.SUPPRESS)
@@ -421,7 +425,24 @@ def main() -> int:
         return 0
     print("正在核验离线包完整性，请稍候……", flush=True)
     desktop_state("integrity", "正在检查应用文件完整性…")
-    verify_package(ROOT)
+    last_progress = float("-inf")
+
+    def progress(counts):
+        nonlocal last_progress
+        now = time.monotonic()
+        if now - last_progress >= .5 or counts["checked_files"] == counts["total_files"]:
+            last_progress = now
+            reused = counts.get("reused_files", 0)
+            message = f"正在核对应用文件：{counts['checked_files']} / {counts['total_files']}"
+            if reused:
+                message += f"，已复用 {reused} 个未变化文件的校验记录"
+            desktop_state("integrity", message + "…", **counts)
+
+    verify_package(ROOT, use_cache=DESKTOP_MODE or args.verify_package_only,
+                   force_full=args.check_only or args.verify_package_only, progress=progress)
+    if args.verify_package_only:
+        print("完整文件校验通过，启动缓存已刷新；未启动 GPU 或 AI 服务。")
+        return 0
     configure_environment(ROOT)
     desktop_state("hardware", "正在检查本机运行环境…")
     hardware = hardware_preflight()
