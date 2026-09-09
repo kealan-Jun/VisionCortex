@@ -508,7 +508,7 @@ def run_stage(
     index_path = layout.json_config / "speech.json"
     # A full run supersedes derived search/interpretation revisions. Retain their
     # exact bytes for audit before the new transcript identity becomes visible.
-    for name in ("speech_search.json", "speech_search_receipt.json", "speech_group_understanding.json"):
+    for name in ("speech_search.json", "speech_search_receipt.json", "speech_group_understanding.json", "speech_timeline.json"):
         previous = layout.json_config / name
         if previous.is_file():
             import time

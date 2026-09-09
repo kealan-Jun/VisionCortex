@@ -185,12 +185,14 @@ def test_bounded_sam2_receipt_refines_boxes_and_reuses_cache(
         }
     ]
 
+    config = _config()
+    config['storage'] = {'local_cache_root': str(tmp_path / 'cache')}
     refined, receipt = module.audit_participant_continuity(
         clip,
         seed,
         boxes,
         tmp_path / "work",
-        _config(),
+        config,
         event_id="evt-1",
         view_id="fp",
         action_type="liquid_movement",
@@ -203,13 +205,15 @@ def test_bounded_sam2_receipt_refines_boxes_and_reuses_cache(
     assert receipt["full_timeline_inference"] is False
     assert receipt["sampled_frame_count"] <= 5
     assert refined[0]["segmentation_refined"] is True
+    assert (tmp_path / 'cache/s2' / receipt['input_fingerprint'] / 'frames/00000.jpg').is_file()
+    assert not (tmp_path / 'work').exists()
 
     cached_boxes, cached = module.audit_participant_continuity(
         clip,
         seed,
         boxes,
         tmp_path / "work",
-        _config(),
+        config,
         event_id="evt-1",
         view_id="fp",
         action_type="liquid_movement",
@@ -218,6 +222,48 @@ def test_bounded_sam2_receipt_refines_boxes_and_reuses_cache(
 
     assert cached["cache_reused"] is True
     assert cached_boxes == refined
+
+
+@pytest.mark.parametrize("changed_identity", [
+    "work_root", "minimum_presence_ratio", "jpeg_quality", "model_config", "source_revision",
+])
+def test_flat_cache_rejects_other_audit_identities(tmp_path, monkeypatch, changed_identity):
+    clip = tmp_path / "key.mp4"
+    seed = _video(clip)
+    predictor = _FakePredictor()
+    model_loads = []
+
+    def load_predictor(_config):
+        model_loads.append(True)
+        return predictor, {}
+
+    monkeypatch.setattr(module, "_load_predictor", load_predictor)
+    config = _config()
+    config["storage"] = {"local_cache_root": str(tmp_path / "cache")}
+    work_root = tmp_path / "work-one"
+    boxes = [{"class_name": "paper", "confidence": 0.8,
+              "xyxy_norm": [30 / 160, 24 / 96, 70 / 160, 70 / 96]}]
+
+    def audit():
+        return module.audit_participant_continuity(
+            clip, seed, boxes, work_root, config, event_id="evt-1", view_id="fp",
+            action_type="liquid_movement", seed_fraction=0.6,
+        )[1]
+
+    first = audit()
+    if changed_identity == "work_root":
+        work_root = tmp_path / "work-two"
+    else:
+        values = {"minimum_presence_ratio": 1.0, "jpeg_quality": 80,
+                  "model_config": "different-model.yaml", "source_revision": "different-source"}
+        config["models"]["temporal_participant_segmentation"][changed_identity] = values[changed_identity]
+    second = audit()
+    assert second["cache_reused"] is False
+    assert second["input_fingerprint"] != first["input_fingerprint"]
+    if changed_identity == "minimum_presence_ratio":
+        assert second["minimum_presence_ratio"] == 1.0
+    assert audit()["cache_reused"] is True
+    assert len(model_loads) == 2
 
 
 def test_runtime_validation_fails_closed_when_checkpoint_is_missing(tmp_path: Path):

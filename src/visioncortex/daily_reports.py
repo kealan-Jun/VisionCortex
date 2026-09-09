@@ -340,6 +340,7 @@ def build_daily_report(
             }
         )
 
+    from .activity_review import assessment
     for group in sorted(summary.experiment_groups, key=lambda item: item.global_start_ms):
         understanding = group.model_understanding or {}
         steps = []
@@ -352,8 +353,14 @@ def build_daily_report(
                     "start_timecode": _clock(raw.get("start_global_ms")),
                     "end_timecode": _clock(raw.get("end_global_ms")),
                     "current_step": raw.get("current_step"),
+                    "operation_title": raw.get("operation_title"),
+                    "observed_result": raw.get("observed_result"),
+                    "time_scope": raw.get("time_scope"),
                     "next_step": raw.get("next_step"),
                     "next_step_status": raw.get("next_step_status") or "unknown",
+                    "next_step_evidence": raw.get("next_step_evidence") or {},
+                    "source_next_step": raw.get("source_next_step"),
+                    "source_operation_records": raw.get("source_operation_records") or [],
                     "supporting_event_ids": raw.get("supporting_event_ids") or [],
                     "objects": raw.get("objects") or [],
                     "physical_change": raw.get("physical_change"),
@@ -453,7 +460,9 @@ def build_daily_report(
         timeline.append(
             {
                 "group_id": group.group_id,
-                "experiment_name": group.experiment_name,
+                "experiment_name": ((assessment(group.model_dump(mode="json"))["label"] + "记录") if assessment(group.model_dump(mode="json"))["is_auxiliary"] else group.experiment_name),
+                "source_experiment_name": group.experiment_name,
+                "activity_assessment": assessment(group.model_dump(mode="json")),
                 "experiment_name_en": group.experiment_name_en,
                 "continuity_type": group.continuity_type,
                 "workflow_kind": group.workflow_kind,
@@ -573,7 +582,9 @@ def build_daily_report(
             "input_view_count": summary.stats.get("input_view_count", len(summary.views)),
             "first_person_views": sum(view.role.value == "first_person" for view in summary.views),
             "third_person_views": sum(view.role.value == "third_person" for view in summary.views),
-            "experiment_group_count": len(summary.experiment_groups),
+            "experiment_group_count": sum(not assessment(g.model_dump(mode="json"))["is_auxiliary"] for g in summary.experiment_groups),
+            "activity_record_count": len(summary.experiment_groups),
+            "auxiliary_activity_count": sum(assessment(g.model_dump(mode="json"))["is_auxiliary"] for g in summary.experiment_groups),
             "key_event_count": sum(len(item["key_events"]) for item in timeline),
             "physical_change_count": len(accepted_physical_changes),
             "accepted_event_count": summary.stats.get("accepted_event_count"),
@@ -1000,7 +1011,8 @@ def generate_daily_report_from_archive(root: Path, config: dict[str, Any]) -> di
     from .speech_refresh import apply
     from .operation_review import apply as apply_operations
     from .schemas import ExperimentGroup
+    from .activity_review import apply as apply_activity
     summary.experiment_groups = [ExperimentGroup.model_validate(item) for item in
-                                 apply_operations(root, apply(root, [group.model_dump(mode="json") for group in summary.experiment_groups]))]
+                                 apply_activity(root, apply_operations(root, apply(root, [group.model_dump(mode="json") for group in summary.experiment_groups])))]
     run_metrics = json.loads((layout.json_config / "run_metrics.json").read_text(encoding="utf-8-sig"))
     return generate_daily_report_archive(layout, summary, run_metrics, config)

@@ -108,7 +108,7 @@ def test_prose_response_keeps_timing_views_and_outcome_from_event_ledger():
     row = validate_steps(group(), events, result)[0]
     assert (row["start_global_ms"], row["end_global_ms"]) == (1000, 2400)
     assert row["supporting_views"] == ["tp"]
-    assert row["next_step_status"] == "predicted"
+    assert row["next_step_status"] == "inferred"
     assert row["source_operation_records"][0]["current_step"] == "拿起瓶子"
     assert [e.model_dump() for e in events] == original
 
@@ -117,6 +117,7 @@ def test_operation_response_contract_cannot_rewrite_experiment_boundary():
     from pydantic import ValidationError
     from visioncortex.mllm import _validate_response_payload
     payload = {"steps": [{"operation_title": "拿起瓶子", "current_step": "抬离台面。",
+                           "observed_result": "瓶子离开台面。",
                            "supporting_event_ids": ["e1"]}]}
     assert _validate_response_payload(payload, "operations") == payload
     with pytest.raises(ValidationError):
@@ -159,6 +160,7 @@ def test_allocations_share_one_bounded_pool_and_verified_results_are_reused(tmp_
             barrier.wait(timeout=5)
             return {"status": "completed", "attempts": 1, "steps": [
                 {"operation_title": "拿起瓶子", "current_step": "手握瓶子并抬离台面。",
+                 "observed_result": "瓶子离开台面。",
                  "supporting_event_ids": [e["event_id"]]} for e in metadata["events"]]}
 
         def close(self):

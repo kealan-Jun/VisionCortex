@@ -393,7 +393,9 @@ def test_speech_runtime_preserves_virtual_environment_executable(tmp_path):
     assert request["python_executable"] != str(base)
 
 
-def test_pipeline_stops_at_failed_speech_before_visual_scan(tmp_path, monkeypatch):
+@pytest.mark.parametrize("required", [True, False])
+@pytest.mark.parametrize("prior_index", ["missing", "utf8", "partial", "non_object"])
+def test_speech_failure_only_blocks_video_when_explicitly_required(tmp_path, monkeypatch, required, prior_index):
     from visioncortex import pipeline as pipeline_module
     from visioncortex.config import load_config
     from visioncortex.schemas import AlignmentTransform, VideoInfo
@@ -410,6 +412,7 @@ def test_pipeline_stops_at_failed_speech_before_visual_scan(tmp_path, monkeypatc
     config["storage"]["local_cache_root"] = str(tmp_path / "cache")
     config["performance"]["media_pipeline_preflight_enabled"] = False
     config["speech_recognition"]["enabled"] = True
+    config["speech_recognition"]["required"] = required
     config["capture_quality"]["enabled"] = False  # This test isolates the speech-stage failure boundary.
     infos = {
         view.view_id: VideoInfo(
@@ -443,6 +446,14 @@ def test_pipeline_stops_at_failed_speech_before_visual_scan(tmp_path, monkeypatc
         lambda path, *_args: path.write_text("time\n"),
     )
     calls = []
+    original_read_text = Path.read_text
+
+    def windows_default_read(path, *args, **kwargs):
+        if path.name == "speech.json" and not args and not kwargs.get("encoding"):
+            kwargs["encoding"] = "cp1252"
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", windows_default_read)
 
     def reject_speech(
         received_config,
@@ -457,9 +468,34 @@ def test_pipeline_stops_at_failed_speech_before_visual_scan(tmp_path, monkeypatc
         assert received_infos is infos and received_transforms is transforms
         assert (layout.json_config / "time_alignment.json").is_file()
         progress("录音哈希验证失败")
+        if prior_index != "missing":
+            body = {"utf8": '{"status":"processing","source_note":"实验录音"}',
+                    "partial": '{"status":', "non_object": "[]"}[prior_index]
+            (layout.json_config / "speech.json").write_text(body, encoding="utf-8")
         raise ValueError("audio hash mismatch")
 
     monkeypatch.setattr(speech, "run_stage", reject_speech)
+    if not required:
+        class ReachedVideo(BaseException):
+            pass
+
+        def reached_video(self, _manifest):
+            from visioncortex.speech_semantics import SpeechContext
+            root = next((tmp_path / "output").rglob("speech.json")).parent.parent
+            assert SpeechContext(root, config).rows == []
+            receipt = json.loads((root / "JSON-Config-Files/Stage-Receipts/speech.json").read_text(encoding="utf-8"))
+            assert receipt["status"] == "failed" and "视频分析继续" in receipt["reason"]
+            saved = json.loads((root / "JSON-Config-Files/speech.json").read_text(encoding="utf-8"))
+            assert saved["optional"] and saved["status"] == "failed"
+            if prior_index == "utf8":
+                assert saved["source_note"] == "实验录音"
+            assert (root / "阶段产出清单.json").is_file()
+            raise ReachedVideo()
+
+        monkeypatch.setattr(pipeline_module.EvidencePipeline, "_motion_probe_views", reached_video)
+        with pytest.raises(ReachedVideo):
+            pipeline_module.EvidencePipeline(config).run(manifest)
+        return
     with pytest.raises(ValueError, match="audio hash mismatch"):
         pipeline_module.EvidencePipeline(config).run(manifest)
     assert calls == ["speech-gate"]
@@ -520,3 +556,22 @@ def test_complete_asr_cache_checks_runtime_request_and_every_artifact(tmp_path):
     assert speech_worker.completed_cache(tmp_path, 'request', 'changed') is None
     (tmp_path / 'audio.m4a').write_bytes(b'tampered')
     assert speech_worker.completed_cache(tmp_path, 'request', 'runtime') is None
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_missing_audio_skips_model_start_and_keeps_video_inputs(tmp_path, monkeypatch, enabled):
+    from visioncortex.archive import ArchiveLayout
+    from visioncortex.speech_semantics import SpeechContext
+    layout = ArchiveLayout(tmp_path / "archive")
+    layout.create()
+    video = tmp_path / "silent.mp4"
+    video.write_bytes(b"source-identity-only")
+    manifest = RunManifest(experiment_id="no-audio", views=[ViewInput(view_id=name, role=role, video=video) for name, role in [("fp", "first_person"), ("tp", "third_person")]])
+    config = {"speech_recognition": {"enabled": enabled}, "collection_ingest": {"enabled": False}}
+    monkeypatch.setattr(speech, "probe_audio", lambda _: None)
+    monkeypatch.setattr(speech, "runtime_request", lambda _: pytest.fail("No audio must not start an ASR runtime"))
+    result = speech.run_stage(config, manifest, layout, {}, {})
+    assert result["status"] == ("completed" if enabled else "disabled")
+    assert not any(item["available"] for item in result["sources"])
+    assert SpeechContext(layout.root, config).rows == []
+    assert video.read_bytes() == b"source-identity-only"

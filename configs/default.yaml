@@ -4,6 +4,8 @@ capture_quality:
   sample_seconds: 3
 
 speech_recognition:
+  # Audio is optional. A failed transcript must not stop independent video work.
+  required: false
   enabled: false
   python_executable: null
   model_directory: null
@@ -563,6 +565,10 @@ mllm:
     minimum_confidence: 0.85
     tail_window_seconds: 90
     maximum_tail_windows: 8
+    # Extra lookahead remains within maximum_tail_windows; uncertainty never
+    # extends a clip. Completion needs later samples of the entire workflow.
+    maximum_uncertain_tail_windows: 2
+    completion_followup_seconds: 12
   max_images_per_group: 12
   group_workers: 4
   operation_review:

@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import stat as stat_module
+import subprocess
 import threading
 import time
 from copy import deepcopy
@@ -590,7 +591,9 @@ def refine_groups_from_final_events(
     initial model receipt and token usage available for audit.
     """
 
-    event_by_id = {event.event_id: event for event in key_events if event.accepted}
+    from .step_evidence import next_operation, timing_scope
+
+    event_by_id = {event.event_id: event for event in key_events if event_is_formal(event)}
     for group in groups:
         previous = deepcopy(group.model_understanding or {})
         events = sorted(
@@ -606,22 +609,6 @@ def refine_groups_from_final_events(
         for index, event in enumerate(events, 1):
             understanding = dict(event.model_understanding or {})
             physical_change = dict(understanding.get("physical_change") or {})
-            next_step_evidence = dict(
-                understanding.get("next_step_evidence") or {}
-            )
-            next_step_status = str(
-                next_step_evidence.get("status") or "unknown"
-            )
-            if next_step_status not in {"observed", "inferred", "unknown"}:
-                next_step_status = "unknown"
-            supporting_event_ids = {
-                event.event_id,
-                *(
-                    str(item)
-                    for item in next_step_evidence.get("evidence_event_ids") or []
-                    if item
-                ),
-            }
             before = str(physical_change.get("before") or "")
             after = str(physical_change.get("after") or "")
             physical_change_text = (
@@ -647,12 +634,9 @@ def refine_groups_from_final_events(
                         understanding.get("current_step")
                         or ACTION_LABELS_ZH[event.action_type.value]
                     ),
-                    "next_step": str(
-                        understanding.get("next_step") or "未知"
-                    ),
-                    "next_step_status": next_step_status,
-                    "next_step_evidence": next_step_evidence,
-                    "supporting_event_ids": sorted(supporting_event_ids),
+                    **next_operation(event, events, {event.event_id}),
+                    "supporting_event_ids": [event.event_id],
+                    "time_scope": timing_scope([event]),
                     "objects": list(event.objects),
                     "physical_change": physical_change_text,
                     "supporting_views": list(event.supporting_views),
@@ -1051,6 +1035,17 @@ def validate_final_step_action_consistency(
                     )
         for step in steps:
             step_index = step.get("step_index")
+            # An action elsewhere in this experiment is not evidence for this
+            # step. Legacy single-event groups have only one possible reference.
+            ids = step.get("supporting_event_ids")
+            if ids is None:
+                ids = ([step["event_id"]] if step.get("event_id") else
+                       group.key_event_ids if len(group.key_event_ids) == 1 else [])
+            step_actions = {
+                event_by_id[identity].action_type.value for identity in ids
+                if identity in group.key_event_ids and identity in event_by_id
+                and event_is_formal(event_by_id[identity])
+            }
             for field in ("operation_title", "current_step", "physical_change"):
                 text = str(step.get(field) or "").strip()
                 if not text:
@@ -1059,7 +1054,7 @@ def validate_final_step_action_consistency(
                     {"step_index": step_index, "field": field, "text": text}
                 )
                 for action_type, patterns in FINAL_STEP_ACTION_PATTERNS.items():
-                    if action_type in confirmed_actions:
+                    if action_type in step_actions:
                         continue
                     matched = [
                         pattern
@@ -1535,6 +1530,7 @@ class EvidencePipeline:
         self._active_stage_started = 0.0
         self._active_stage_started_iso = ""
         self._stage_metrics: list[dict[str, Any]] = []
+        self._stage_outcomes: dict[str, dict[str, Any]] = {}
         self._startup_metrics: dict[str, Any] = {}
         self._speech_understanding: dict[str, Any] = {}
         self._preprocessing_completed_seconds: float | None = None
@@ -1603,7 +1599,7 @@ class EvidencePipeline:
             self._stage_metrics.append(
                 {
                     "stage": self._active_stage,
-                    "status": "failed" if stage == "failed" else "completed",
+                    "status": "failed" if stage == "failed" else self._stage_outcomes.get(self._active_stage, {}).get("status", "completed"),
                     "started_at": self._active_stage_started_iso,
                     "ended_at": now_iso,
                     "duration_seconds": round(now_perf - self._active_stage_started, 6),
@@ -1628,6 +1624,7 @@ class EvidencePipeline:
             "input_view_count": self._input_view_count,
             "input_mode": self._input_mode,
             "views": self._view_runtime,
+            "stage_outcomes": self._stage_outcomes,
             "completed_stages": [
                 item["stage"]
                 for item in self._stage_metrics
@@ -1640,7 +1637,7 @@ class EvidencePipeline:
                     if item.get("status") == "failed"
                 ),
                 None,
-            ),
+            ) if stage == "failed" else None,
         }
         write_json(
             layout.root / "run_status.json",
@@ -1679,8 +1676,11 @@ class EvidencePipeline:
         layout: ArchiveLayout,
         stage: str,
         artifacts: list[Path] | tuple[Path, ...] = (),
+        *, status: str = "completed", reason: str | None = None,
     ) -> Path:
-        """Publish a durable, atomic NAS receipt only after a stage succeeds."""
+        """Publish saved artifacts and an explicit outcome for this component."""
+        if status not in {"completed", "skipped", "failed"}:
+            raise ValueError("Invalid stage outcome")
 
         completed_at = datetime.now(timezone.utc).isoformat()
         elapsed_seconds = round(time.perf_counter() - self._run_started_perf, 6)
@@ -1711,7 +1711,8 @@ class EvidencePipeline:
         receipt = {
             "schema_version": "visioncortex-stage-receipt/1",
             "stage": stage,
-            "status": "completed",
+            "status": status,
+            "reason": reason,
             "completed_at": completed_at,
             "run_elapsed_seconds": elapsed_seconds,
             "stage_duration_seconds": stage_duration,
@@ -1720,10 +1721,30 @@ class EvidencePipeline:
             "artifacts": relative_artifacts,
             "token_ledger": "JSON-Config-Files/run_metrics.json",
         }
+        from .stage_versions import save_version
+        version = save_version(layout.root, list(map(Path, artifacts)), receipt)
+        if self._publisher is not None:
+            self._publisher.publish_directory(version.parent.relative_to(layout.root))
+        receipt["version_manifest"] = version.relative_to(layout.root).as_posix()
         receipt_path = layout.json_config / "Stage-Receipts" / f"{stage}.json"
         write_json(receipt_path, receipt)
         if self._publisher is not None:
             self._publisher.publish_file(receipt_path)
+        self._stage_outcomes[stage] = {"status": status, "reason": reason,
+                                       "completed_at": completed_at}
+        # A visible inventory advances only after the actual files and receipt
+        # have been written/published. It is never a formal release pointer.
+        completed = []
+        for path in sorted(receipt_path.parent.glob("*.json")):
+            item = json.loads(path.read_text(encoding="utf-8"))
+            if item.get("completed_at", "") >= self._run_started_iso:
+                completed.append(item)
+        index_path = layout.root / "阶段产出清单.json"
+        write_json(index_path, {"schema_version": "visioncortex-stage-outputs/1",
+                               "formal_release": False, "updated_at": completed_at,
+                               "stages": completed})
+        if self._publisher is not None:
+            self._publisher.publish_file(index_path)
         return receipt_path
 
     def _checkpoint_key_material_understanding(
@@ -4658,11 +4679,11 @@ class EvidencePipeline:
         self._startup_metrics["cache_identity_source_snapshot"] = cache_identity.get(
             "source_snapshot_report", {}
         )
-        layout.work = (
-            Path(self.config["storage"]["local_cache_root"]).resolve()
-            / manifest.experiment_id
-            / cache_identity["cache_key"]
-        )
+        from .cache_paths import model_cache_directory, windows_path
+        local_cache = Path(os.path.abspath(self.config["storage"]["local_cache_root"]))
+        layout.work = (model_cache_directory(local_cache, "work", cache_identity["cache_key"])
+                       if windows_path(local_cache) else
+                       local_cache.resolve() / manifest.experiment_id / cache_identity["cache_key"])
         layout.create()
         self._active_layout = layout
         write_json(layout.json_config / "cache_identity.json", cache_identity)
@@ -4888,18 +4909,38 @@ class EvidencePipeline:
             )
 
             self._status(layout, "speech", 0.09, "整理实验录音与转写")
-            speech.run_stage(
-                self.config, manifest, layout, infos, transforms,
-                progress=lambda message: self._status(layout, "speech", 0.09, message),
-            )
-            if speech.enabled(self.config) and (layout.json_config / "Input-Manifests/input_seal.json").is_file():
-                from .speech_timeline import build as build_speech_timeline
-                build_speech_timeline(layout.root)
+            speech_status, speech_reason = "completed", None
+            try:
+                speech_result = speech.run_stage(
+                    self.config, manifest, layout, infos, transforms,
+                    progress=lambda message: self._status(layout, "speech", 0.09, message),
+                )
+                if not speech.enabled(self.config):
+                    speech_status, speech_reason = "skipped", "未启用录音转写，视频分析继续"
+                elif not any(source.get("available") for source in speech_result.get("sources", [])):
+                    speech_status, speech_reason = "skipped", "没有可用录音，视频分析继续"
+                if speech_status == "completed" and (layout.json_config / "Input-Manifests/input_seal.json").is_file():
+                    from .speech_timeline import build as build_speech_timeline
+                    build_speech_timeline(layout.root)
+            except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                if self.config.get("speech_recognition", {}).get("required", False):
+                    raise
+                speech_status, speech_reason = "failed", "录音处理未完成，已保留记录；视频分析继续"
+                # Exclude partially written transcripts from model context.
+                speech_path = layout.json_config / "speech.json"
+                try:
+                    previous = json.loads(speech_path.read_text(encoding="utf-8")) if speech_path.is_file() else {}
+                except (OSError, ValueError):
+                    previous = {}
+                if not isinstance(previous, dict):
+                    previous = {}
+                write_json(speech_path, {**previous, "status": "failed", "optional": True,
+                                        "error_type": type(exc).__name__, "message": speech_reason})
             self._complete_stage(layout, "speech", [
                 layout.json_config / "speech.json",
-                *([layout.json_config / "speech_timeline.json"] if (layout.json_config / "speech_timeline.json").is_file() else []),
+                *([layout.json_config / "speech_timeline.json"] if speech_status == "completed" and (layout.json_config / "speech_timeline.json").is_file() else []),
                 *([layout.key_materials / "Experiment-Audio"] if (layout.key_materials / "Experiment-Audio").is_dir() else []),
-            ])
+            ], status=speech_status, reason=speech_reason)
 
             motion_probe_views = self._motion_probe_views(manifest)
             preselected_coarse_views = self._coarse_scan_views(manifest)
@@ -6457,11 +6498,18 @@ class EvidencePipeline:
                 self.config,
                 publisher=self._publisher,
             )
+            # Clip generation assigns folder names and media paths. Publish
+            # them now, before later model work, so completed videos can play.
+            write_json(group_understanding_path, {
+                "schema_version": "visioncortex-experiment-group-understanding/1",
+                "groups": [group.model_dump(mode="json") for group in groups],
+            })
             self._complete_stage(
                 layout,
                 "experiment_clips",
                 [
                     layout.experiment_clips,
+                    group_understanding_path,
                     layout.json_config / "experiment_clip_materialization_runtime.json",
                 ],
             )

@@ -1967,12 +1967,14 @@ def _stage_receipts_from_root(root: Path) -> list[dict[str, Any]]:
             {
                 "stage": payload["stage"],
                 "status": payload.get("status", "completed"),
+                "reason": payload.get("reason"),
                 "completed_at": payload.get("completed_at"),
                 "run_elapsed_seconds": payload.get("run_elapsed_seconds"),
                 "stage_duration_seconds": payload.get("stage_duration_seconds"),
                 "archive_mode": payload.get("archive_mode"),
                 "artifacts": artifacts,
                 "receipt": f"JSON-Config-Files/Stage-Receipts/{path.name}",
+                "version_manifest": payload.get("version_manifest"),
             }
         )
     return receipts
@@ -4077,6 +4079,7 @@ def _archive_section_payload(
         if not groups:
             legacy_package = _read_json(json_root / "evidence_package.json", {}) or {}
             groups = list(legacy_package.get("experiment_groups") or [])
+        from .activity_review import assessment
         source_page = groups[offset : offset + limit + 1]
         has_more = len(source_page) > limit
         source_page = source_page[:limit]
@@ -4094,6 +4097,7 @@ def _archive_section_payload(
                 {
                     "folder": folder_name,
                     "name": group.get("experiment_name") or folder_name,
+                    "activity_assessment": assessment(group),
                     "continuity_type": group.get("continuity_type"),
                     "workflow_kind": group.get("workflow_kind", "unresolved"),
                     "source_archive_folders": group.get("source_archive_folders") or [],
@@ -4228,6 +4232,23 @@ def staging_archive_detail(run_id: str, section: str = "all") -> dict[str, Any]:
     return result
 
 
+def _stage_clip_group(folder: Path, groups: dict[str, dict], status: dict) -> dict | None:
+    started = _current_attempt_started_at(status)
+    sidecar = folder / "First-Person.json"
+    if not sidecar.is_file() or (started is not None and sidecar.stat().st_mtime < started):
+        return None
+    saved = _read_json(sidecar, {}) or {}
+    source = saved.get("group") or {}
+    current = groups.get(str(source.get("group_id")))
+    if not current or current.get("archive_folder"):
+        return None
+    if any(source.get(key) != current.get(key) for key in ("global_start_ms", "global_end_ms")):
+        return None
+    if saved.get("artifact_type") != "experiment_view_video" or source.get("archive_folder") != folder.name:
+        return None
+    return {**current, "archive_folder": folder.name}
+
+
 def _archive_detail_from_root(
     root: Path, archive_name: str, *, staging_run_id: str | None = None,
     library_section: str | None = None
@@ -4248,6 +4269,14 @@ def _archive_detail_from_root(
                  "partial_delivery": _read_json(root / "JSON-Config-Files/partial_delivery.json", {}) or {}}
                 if library_section else _run_snapshot_from_root(root))
     status = snapshot.get("status") or {}
+    for receipt in snapshot.get("stage_receipts", []):
+        receipt["receipt_url"] = file_url(archive_name, receipt["receipt"])
+        version = receipt.get("version_manifest")
+        if version and (root / version).is_file():
+            receipt["version_url"] = file_url(archive_name, version)
+        for artifact in receipt.get("artifacts", []):
+            if artifact.get("available") and artifact.get("relative_path") and artifact.get("kind") == "file":
+                artifact["url"] = file_url(archive_name, artifact["relative_path"])
     active_preview = bool(staging_run_id) and status.get("stage") not in {"completed", "partial", "failed", "interrupted", "cancelled"}
     completed_stages = {
         item["stage"] for item in snapshot.get("stage_receipts", [])
@@ -4307,6 +4336,8 @@ def _archive_detail_from_root(
     package_groups = apply_speech_revision(root, package_groups)
     from .operation_review import apply as apply_operation_revision, coverage
     package_groups = apply_operation_revision(root, package_groups)
+    from .activity_review import apply as apply_activity, assessment, counts as activity_counts
+    package_groups = apply_activity(root, package_groups)
     group_by_folder = {
         str(group.get("archive_folder")): group for group in package_groups
     }
@@ -4319,8 +4350,16 @@ def _archive_detail_from_root(
     experiment_root = root / "Experiment-Clips"
     if experiment_root.is_dir():
         for folder in sorted(item for item in experiment_root.iterdir() if item.is_dir()):
+            if staging_run_id and folder.name not in group_by_folder:
+                # Older runs published their group index before clip paths
+                # were assigned. Recover only matching, finished clip metadata.
+                recovered = _stage_clip_group(folder, group_by_id, status)
+                if recovered:
+                    group_by_folder[folder.name] = recovered
             if (package_groups or active_preview) and folder.name not in group_by_folder:
                 continue
+            if active_preview and "experiment_clips" not in completed_stages:
+                continue  # A directory/MP4 may still be under construction.
             group = group_by_folder.get(folder.name, {})
             understanding = group.get("model_understanding") or {}
             first_person = folder / "First-Person.mp4"
@@ -4331,6 +4370,7 @@ def _archive_detail_from_root(
                     "folder": folder.name,
                     "group_id": group.get("group_id"),
                     "name": group.get("experiment_name") or folder.name,
+                    "activity_assessment": assessment(group),
                     "continuity_type": group.get("continuity_type"),
                     "workflow_kind": group.get("workflow_kind", "unresolved"),
                     "source_archive_folders": group.get("source_archive_folders") or [],
@@ -4571,7 +4611,7 @@ def _archive_detail_from_root(
             else "legacy_archive_not_release_verified"
         ),
         "counts": {
-            "experiments": len(experiments),
+            **activity_counts(experiments),
             "key_events": len(normalized_events),
         },
         "experiments": experiments,
@@ -6447,7 +6487,7 @@ def create_nas_batch_run(
             raise HTTPException(
                 409,
                 {
-                    "message": "该采集批次尚未完成",
+                    "message": "该采集批次尚不具备分析条件，请查看各项原因",
                     "issues": batch.get("issues") or [],
                 },
             )

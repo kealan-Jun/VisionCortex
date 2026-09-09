@@ -496,6 +496,7 @@ class ExperimentGroup(BaseModel):
     source_archive_folders: list[str] = Field(default_factory=list)
     model_understanding: dict[str, Any] | None = None
     videos: dict[str, str] = Field(default_factory=dict)
+    activity_assessment: dict[str, Any] | None = None
     video_json: dict[str, str] = Field(default_factory=dict)
     key_event_ids: list[str] = Field(default_factory=list)
 
