@@ -81,7 +81,10 @@ def test_selection_routes_uploads_archives_staging_and_local_database(storage, t
     package, selected = tmp_path / "package", tmp_path / "选择的数据"
     shutil.copytree(ROOT / "configs", package / "configs")
     (package / "Runtime").mkdir()
-    (package / "SHA256SUMS.json").write_text("{}")
+    (package / "SHA256SUMS.json").write_text(json.dumps({"files": [
+        {"path": name, "sha256": "synthetic-hash"} for name in (
+            "python/python.exe", "src/visioncortex/cli.py",
+            "models/ClosedSetYOLO/first_person/best.pt", "models/ClosedSetYOLO/third_person/best.pt")]}))
     monkeypatch.setattr(portable, "DESKTOP_MODE", True)
     monkeypatch.setattr(portable.os, "environ", dict(portable.os.environ))
     source = tmp_path / "Original recordings"

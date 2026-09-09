@@ -50,7 +50,10 @@ def test_profile_preserves_full_chain_and_has_only_local_storage():
 
 def test_old_host_overrides_cannot_redirect_portable_config(portable, tmp_path, monkeypatch):
     shutil.copytree(ROOT / "configs", tmp_path / "configs")
-    (tmp_path / "SHA256SUMS.json").write_text('{}')
+    (tmp_path / "SHA256SUMS.json").write_text(json.dumps({"files": [
+        {"path": name, "sha256": "synthetic-hash"} for name in (
+            "python/python.exe", "src/visioncortex/cli.py",
+            "models/ClosedSetYOLO/first_person/best.pt", "models/ClosedSetYOLO/third_person/best.pt")]}))
     monkeypatch.setenv("VISIONCORTEX_DEFAULT_CONFIG", "/old-host/missing.yaml")
     monkeypatch.setenv("VISIONCORTEX_NAS_ARCHIVE_ROOT", "/old-nas/archive")
     monkeypatch.setenv("VISIONCORTEX_FIRST_PERSON_ENGINE", "/old-gpu/engine")
@@ -101,14 +104,16 @@ def test_engine_reuse_requires_model_and_engine_hashes(portable, tmp_path):
     source.write_bytes(b"test model")
     engine.write_bytes(b"test engine")
     config = {"models": {role: str(source) for role in ("first_person", "third_person")},
-              "performance": {"image_size": 640, "engine_batch_candidates": [16, 8, 4, 2, 1]}}
+              "performance": {"image_size": 640, "half": True, "engine_batch_candidates": [16, 8, 4, 2, 1]}}
     for role in ("first_person", "third_person"):
         config["models"][f"{role}_engine"] = str(engine)
     with pytest.raises(RuntimeError, match="身份回执"):
         portable.verify_engine_receipts(config)
     engine.with_suffix(".engine.build.json").write_text(json.dumps({
         "engine_sha256": portable.sha256(engine), "source_sha256": portable.sha256(source),
-        "image_size": 640, "selected_batch": 4}))
+        "image_size": 640, "selected_batch": 4, "half": True, "dynamic": True,
+        "workspace_gib": 3.0, "autotune_iterations": 4, "autotune_max_gpu_memory_fraction": 0.9,
+        "batch_candidates": [16, 8, 4, 2, 1]}))
     portable.verify_engine_receipts(config)
     source.write_bytes(b"changed model")
     with pytest.raises(RuntimeError, match="身份校验失败"):
@@ -158,6 +163,8 @@ def test_sam_smoke_accepts_execution_receipt_without_claiming_quality(portable, 
     from visioncortex import local_model_acceptance, temporal_segmentation
     config_path = tmp_path / "active.yaml"
     config_path.write_text("test config")
+    monkeypatch.setattr(portable, "ROOT", tmp_path)
+    (tmp_path / "SHA256SUMS.json").write_text("{}")
     engine = tmp_path / "Engines/fp.engine"
     monkeypatch.setattr(config_module, "load_config", lambda _: {"models": {"first_person_engine": str(engine)}})
     monkeypatch.setattr(local_model_acceptance, "_write_bounded_clip", lambda *_: None)
