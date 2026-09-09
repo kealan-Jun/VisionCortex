@@ -4928,7 +4928,12 @@ class EvidencePipeline:
                 speech_status, speech_reason = "failed", "录音处理未完成，已保留记录；视频分析继续"
                 # Exclude partially written transcripts from model context.
                 speech_path = layout.json_config / "speech.json"
-                previous = json.loads(speech_path.read_text()) if speech_path.is_file() else {}
+                try:
+                    previous = json.loads(speech_path.read_text(encoding="utf-8")) if speech_path.is_file() else {}
+                except (OSError, ValueError):
+                    previous = {}
+                if not isinstance(previous, dict):
+                    previous = {}
                 write_json(speech_path, {**previous, "status": "failed", "optional": True,
                                         "error_type": type(exc).__name__, "message": speech_reason})
             self._complete_stage(layout, "speech", [

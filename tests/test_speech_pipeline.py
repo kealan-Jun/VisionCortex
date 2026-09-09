@@ -394,7 +394,8 @@ def test_speech_runtime_preserves_virtual_environment_executable(tmp_path):
 
 
 @pytest.mark.parametrize("required", [True, False])
-def test_speech_failure_only_blocks_video_when_explicitly_required(tmp_path, monkeypatch, required):
+@pytest.mark.parametrize("prior_index", ["missing", "utf8", "partial", "non_object"])
+def test_speech_failure_only_blocks_video_when_explicitly_required(tmp_path, monkeypatch, required, prior_index):
     from visioncortex import pipeline as pipeline_module
     from visioncortex.config import load_config
     from visioncortex.schemas import AlignmentTransform, VideoInfo
@@ -445,6 +446,14 @@ def test_speech_failure_only_blocks_video_when_explicitly_required(tmp_path, mon
         lambda path, *_args: path.write_text("time\n"),
     )
     calls = []
+    original_read_text = Path.read_text
+
+    def windows_default_read(path, *args, **kwargs):
+        if path.name == "speech.json" and not args and not kwargs.get("encoding"):
+            kwargs["encoding"] = "cp1252"
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", windows_default_read)
 
     def reject_speech(
         received_config,
@@ -459,6 +468,10 @@ def test_speech_failure_only_blocks_video_when_explicitly_required(tmp_path, mon
         assert received_infos is infos and received_transforms is transforms
         assert (layout.json_config / "time_alignment.json").is_file()
         progress("录音哈希验证失败")
+        if prior_index != "missing":
+            body = {"utf8": '{"status":"processing","source_note":"实验录音"}',
+                    "partial": '{"status":', "non_object": "[]"}[prior_index]
+            (layout.json_config / "speech.json").write_text(body, encoding="utf-8")
         raise ValueError("audio hash mismatch")
 
     monkeypatch.setattr(speech, "run_stage", reject_speech)
@@ -470,8 +483,12 @@ def test_speech_failure_only_blocks_video_when_explicitly_required(tmp_path, mon
             from visioncortex.speech_semantics import SpeechContext
             root = next((tmp_path / "output").rglob("speech.json")).parent.parent
             assert SpeechContext(root, config).rows == []
-            receipt = json.loads((root / "JSON-Config-Files/Stage-Receipts/speech.json").read_text())
+            receipt = json.loads((root / "JSON-Config-Files/Stage-Receipts/speech.json").read_text(encoding="utf-8"))
             assert receipt["status"] == "failed" and "视频分析继续" in receipt["reason"]
+            saved = json.loads((root / "JSON-Config-Files/speech.json").read_text(encoding="utf-8"))
+            assert saved["optional"] and saved["status"] == "failed"
+            if prior_index == "utf8":
+                assert saved["source_note"] == "实验录音"
             assert (root / "阶段产出清单.json").is_file()
             raise ReachedVideo()
 
