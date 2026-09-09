@@ -29,6 +29,7 @@ from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
+from .run_insights import hardware_summary, timing_summary, token_summary, with_operation_refreshes
 from .archive_catalog import (
     archive_catalog_path,
     catalog_archive_release,
@@ -1871,6 +1872,14 @@ def _pipeline_status_from_root(root: Path) -> dict[str, Any]:
     ) or {}
 
 
+def _latest_result_review(root: Path, *, save=False) -> dict:
+    from .result_review import inspect
+    try:
+        return inspect(root, save=save)
+    except (OSError, ValueError, KeyError, TypeError):
+        return {"available":False, "reason":"当前记录不足以执行版本与完整性检查"}
+
+
 def _merged_run_metrics(root: Path) -> dict[str, Any]:
     json_root = root / "JSON-Config-Files"
     final = _read_json(json_root / "run_metrics.json", {}) or {}
@@ -1890,7 +1899,9 @@ def _merged_run_metrics(root: Path) -> dict[str, Any]:
                 for key, value in publication.items()
                 if key != "metric_key"
             }
-    return metrics
+    # Add operation-only refresh receipts once; never replace the original run's
+    # wall clock with follow-up request time or count local reuse as new usage.
+    return with_operation_refreshes(root, metrics)
 
 
 def _current_attempt_started_at(status: dict[str, Any]) -> float | None:
@@ -1998,6 +2009,11 @@ def _run_snapshot_from_root(root: Path) -> dict[str, Any]:
         "root": str(root),
         "status": status,
         "live_telemetry": live_telemetry,
+        "insights": {
+            "hardware": hardware_summary(telemetry, live_telemetry, metrics.get("run_started_at")),
+            "tokens": token_summary(metrics),
+            "timing": timing_summary(metrics, scans),
+        },
         "telemetry_summary": {
             "sample_count": telemetry.get("sample_count"),
             "sampling_interval_seconds": telemetry.get("sampling_interval_seconds"),
@@ -3922,6 +3938,9 @@ def _archive_links(
             "Key-Materials/Key-Material-Category-Index.json"
         ),
         "metrics": existing("JSON-Config-Files/run_metrics.json"),
+        "resource_telemetry": existing("JSON-Config-Files/resource_telemetry.json"),
+        "resource_telemetry_journal": existing("JSON-Config-Files/resource_telemetry.jsonl"),
+        "operation_review": existing("JSON-Config-Files/operation_review.json"),
         "delivery_metrics": existing("JSON-Config-Files/delivery_metrics.json"),
         "acceptance": existing("JSON-Config-Files/acceptance_report.json"),
         "quality_acceptance": existing("JSON-Config-Files/quality_acceptance.json"),
@@ -4076,6 +4095,13 @@ def _archive_section_payload(
                     "folder": folder_name,
                     "name": group.get("experiment_name") or folder_name,
                     "continuity_type": group.get("continuity_type"),
+                    "workflow_kind": group.get("workflow_kind", "unresolved"),
+                    "source_archive_folders": group.get("source_archive_folders") or [],
+                    "workflow_units": group.get("workflow_units") or [],
+                    "completion_status": group.get("completion_status", "unreviewed"),
+                    "completion_reason": group.get("completion_reason") or "",
+                    "boundary_extension_requires_step_review": group.get("boundary_extension_requires_step_review", False),
+                    "view_timeline": group.get("view_timeline") or [],
                     "start_ms": group.get("global_start_ms"),
                     "end_ms": group.get("global_end_ms"),
                     "speech_interpretation": understanding.get("speech_interpretation"),
@@ -4112,6 +4138,13 @@ def _archive_section_payload(
                         or group.get("archive_folder"),
                         "folder": group.get("archive_folder"),
                         "continuity_type": group.get("continuity_type"),
+                        "workflow_kind": group.get("workflow_kind", "unresolved"),
+                        "source_archive_folders": group.get("source_archive_folders") or [],
+                        "workflow_units": group.get("workflow_units") or [],
+                        "completion_status": group.get("completion_status", "unreviewed"),
+                        "completion_reason": group.get("completion_reason") or "",
+                        "boundary_extension_requires_step_review": group.get("boundary_extension_requires_step_review", False),
+                        "view_timeline": group.get("view_timeline") or [],
                         "start_ms": group.get("global_start_ms"),
                         "end_ms": group.get("global_end_ms"),
                         "key_event_count": len(group.get("key_event_ids") or []),
@@ -4183,18 +4216,21 @@ def archive_detail(
 
 
 @app.get("/api/staging-runs/{run_id}/archive")
-def staging_archive_detail(run_id: str) -> dict[str, Any]:
+def staging_archive_detail(run_id: str, section: str = "all") -> dict[str, Any]:
+    if section not in {"all", "library-materials", "library-reports"}:
+        raise HTTPException(status_code=400, detail="Unsupported staging section")
     root = _resolve_staging_run(run_id)
     record = _runs.get(run_id) or {}
     name = record.get("experiment_id") or root.parent.name
-    result = _archive_detail_from_root(root, name, staging_run_id=run_id)
+    result = _archive_detail_from_root(root, name, staging_run_id=run_id, library_section=section if section != "all" else None)
     if record.get("read_only"):
         result.update(read_only=True, retry_available=False)
     return result
 
 
 def _archive_detail_from_root(
-    root: Path, archive_name: str, *, staging_run_id: str | None = None
+    root: Path, archive_name: str, *, staging_run_id: str | None = None,
+    library_section: str | None = None
 ) -> dict[str, Any]:
     release_pointer = read_current_release_pointer(root) or {}
     release_id = str(release_pointer.get("release_id") or "") or None
@@ -4207,17 +4243,20 @@ def _archive_detail_from_root(
 
     index_manifest_path = root / "JSON-Config-Files" / INDEX_MANIFEST_NAME
     index_manifest = _read_json(index_manifest_path, {}) or {}
-    snapshot = _run_snapshot_from_root(root)
+    snapshot = ({"status": _pipeline_status_from_root(root),
+                 "stage_receipts": _stage_receipts_from_root(root),
+                 "partial_delivery": _read_json(root / "JSON-Config-Files/partial_delivery.json", {}) or {}}
+                if library_section else _run_snapshot_from_root(root))
     status = snapshot.get("status") or {}
     active_preview = bool(staging_run_id) and status.get("stage") not in {"completed", "partial", "failed", "interrupted", "cancelled"}
     completed_stages = {
         item["stage"] for item in snapshot.get("stage_receipts", [])
         if item.get("status") == "completed"
     }
-    package = _read_json(root / "JSON-Config-Files" / "evidence_package.json", {}) or {}
+    package = {} if library_section else _read_json(root / "JSON-Config-Files" / "evidence_package.json", {}) or {}
     if active_preview:
         package = {}
-    metrics = _merged_run_metrics(root)
+    metrics = {} if library_section else _merged_run_metrics(root)
     acceptance = _read_json(root / "JSON-Config-Files" / "acceptance_report.json", {}) or {}
     quality_path = root / "JSON-Config-Files" / "quality_acceptance.json"
     quality_acceptance = _read_json(quality_path, {}) or {}
@@ -4230,7 +4269,7 @@ def _archive_detail_from_root(
     final_annotation_path = (
         root / "JSON-Config-Files" / "final_key_material_annotation.json"
     )
-    final_annotation = _read_json(final_annotation_path, {}) or {}
+    final_annotation = {} if library_section else _read_json(final_annotation_path, {}) or {}
     if active_preview:
         quality_acceptance = {}
         evidence_eval = {}
@@ -4266,6 +4305,8 @@ def _archive_detail_from_root(
             package_groups = []
     from .speech_refresh import apply as apply_speech_revision
     package_groups = apply_speech_revision(root, package_groups)
+    from .operation_review import apply as apply_operation_revision, coverage
+    package_groups = apply_operation_revision(root, package_groups)
     group_by_folder = {
         str(group.get("archive_folder")): group for group in package_groups
     }
@@ -4291,12 +4332,21 @@ def _archive_detail_from_root(
                     "group_id": group.get("group_id"),
                     "name": group.get("experiment_name") or folder.name,
                     "continuity_type": group.get("continuity_type"),
+                    "workflow_kind": group.get("workflow_kind", "unresolved"),
+                    "source_archive_folders": group.get("source_archive_folders") or [],
+                    "workflow_units": group.get("workflow_units") or [],
+                    "completion_status": group.get("completion_status", "unreviewed"),
+                    "completion_reason": group.get("completion_reason") or "",
+                    "boundary_extension_requires_step_review": group.get("boundary_extension_requires_step_review", False),
+                    "view_timeline": group.get("view_timeline") or [],
                     "start_ms": group.get("global_start_ms"),
                     "end_ms": group.get("global_end_ms"),
                     "speech_interpretation": understanding.get("speech_interpretation"),
                     "speech_context": understanding.get("speech_context"),
                     "summary": understanding.get("overall_summary"),
                     "steps": understanding.get("steps") or [],
+                    "operation_coverage": coverage(group, understanding.get("steps") or []),
+                    "operation_review_accepted": (understanding.get("operation_review") or {}).get("accepted"),
                     "uncertainties": understanding.get("uncertainties") or [],
                     "first_person_video_url": file_url(
                         archive_name,
@@ -4359,6 +4409,13 @@ def _archive_detail_from_root(
                     "name": group.get("experiment_name") or event.get("parent_event_id"),
                     "folder": group.get("archive_folder"),
                     "continuity_type": group.get("continuity_type"),
+                    "workflow_kind": group.get("workflow_kind", "unresolved"),
+                    "source_archive_folders": group.get("source_archive_folders") or [],
+                    "workflow_units": group.get("workflow_units") or [],
+                    "completion_status": group.get("completion_status", "unreviewed"),
+                    "completion_reason": group.get("completion_reason") or "",
+                    "boundary_extension_requires_step_review": group.get("boundary_extension_requires_step_review", False),
+                    "view_timeline": group.get("view_timeline") or [],
                     "start_ms": group.get("global_start_ms"),
                     "end_ms": group.get("global_end_ms"),
                 },
@@ -4483,7 +4540,7 @@ def _archive_detail_from_root(
                 **media,
             })
     quarantine_materials, retained_review = prioritize_retained_candidates(quarantine_materials)
-    movement_screening = _movement_screening_payload(
+    movement_screening = None if library_section else _movement_screening_payload(
         root, file_url(archive_name, "JSON-Config-Files/movement_visual_verification.json")
     )
     partial_delivery = snapshot.get("partial_delivery") or {}
@@ -4493,7 +4550,16 @@ def _archive_detail_from_root(
         )
         if (root / "Partial-Results/Analysis-Result.json").is_file():
             links["partial_json"] = file_url(archive_name, "Partial-Results/Analysis-Result.json")
-    return {
+        for key, kind, relative in (
+            ("partial_pdf", "pdf", "Partial-Results/Stage-Evidence-Report.pdf"),
+            ("partial_daily_report", "daily_html", "Partial-Results/Stage-Lab-Daily-Report.html"),
+        ):
+            presentation = (partial_delivery.get("readable_reports") or {}).get(kind) or {}
+            path = root / relative
+            if (presentation.get("path") == relative and path.is_file()
+                    and hashlib.sha256(path.read_bytes()).hexdigest() == presentation.get("sha256")):
+                links[key] = file_url(archive_name, relative)
+    result = {
         "name": archive_name,
         "path": str(root),
         "staging_run_id": staging_run_id,
@@ -4515,6 +4581,13 @@ def _archive_detail_from_root(
                 "name": group.get("experiment_name") or group.get("archive_folder"),
                 "folder": group.get("archive_folder"),
                 "continuity_type": group.get("continuity_type"),
+                "workflow_kind": group.get("workflow_kind", "unresolved"),
+                "source_archive_folders": group.get("source_archive_folders") or [],
+                "workflow_units": group.get("workflow_units") or [],
+                "completion_status": group.get("completion_status", "unreviewed"),
+                "completion_reason": group.get("completion_reason") or "",
+                "boundary_extension_requires_step_review": group.get("boundary_extension_requires_step_review", False),
+                "view_timeline": group.get("view_timeline") or [],
                 "start_ms": group.get("global_start_ms"),
                 "end_ms": group.get("global_end_ms"),
                 "key_event_count": len(group.get("key_event_ids", [])),
@@ -4529,6 +4602,7 @@ def _archive_detail_from_root(
         "partial_delivery": partial_delivery,
         "metrics": metrics,
         "quality_acceptance": quality_acceptance,
+        "result_review": _latest_result_review(root) if not active_preview and not library_section else {"available":False},
         "key_material_recall_eval": key_material_recall_eval,
         "key_material_verification": key_material_verification,
         "observability": snapshot,
@@ -4542,6 +4616,11 @@ def _archive_detail_from_root(
         } if index_manifest else None,
         "links": links,
     }
+
+    if library_section:
+        from .library_projection import project_staging_library
+        return project_staging_library(result, library_section)
+    return result
 
 
 @app.get("/api/archive-file")
@@ -4605,7 +4684,13 @@ def staging_file(run_id: str, path: str, poster: bool = False) -> FileResponse:
         raise HTTPException(404, "staging 文件不存在")
     if poster:
         return _video_poster_response(candidate, root)
-    return FileResponse(candidate)
+    # Staging media can be rebuilt at the same URL. Revalidate cached ranges so
+    # the browser does not combine an earlier MP4 index with newer media bytes.
+    return FileResponse(candidate, headers={
+        "Cache-Control": "private, no-cache",
+        "X-Content-Type-Options": "nosniff",
+    })
+
 
 
 def _video_poster_response(candidate: Path, root: Path) -> FileResponse:
@@ -4646,6 +4731,18 @@ def _folder_open_command(
 @app.post("/api/archives/{archive_name}/open")
 def open_archive_folder(archive_name: str) -> dict[str, str]:
     root = _resolve_archive(archive_name)
+    try:
+        command = _folder_open_command(root)
+    except RuntimeError as exc:
+        raise HTTPException(501, str(exc)) from exc
+    subprocess.Popen(command, start_new_session=True)
+    return {"status": "opened", "path": str(root)}
+
+
+@app.post("/api/staging-runs/{run_id}/open")
+def open_staging_folder(run_id: str) -> dict[str, str]:
+    """Open an already resolved run directory without promoting its evidence."""
+    root = _resolve_staging_run(run_id)
     try:
         command = _folder_open_command(root)
     except RuntimeError as exc:
@@ -5942,8 +6039,8 @@ def _refresh_in_progress(run_id: str) -> bool:
 
 @app.post("/api/runs/{run_id}/refresh/{scope}", status_code=202)
 def refresh_stage(run_id: str, scope: str, target: str | None = None, revision: str | None = None) -> dict[str, Any]:
-    if scope not in {"understanding", "reports", "timeline", "capture_quality", "search"}:
-        raise HTTPException(422, "请选择录音理解或报告")
+    if scope not in {"understanding", "reports", "timeline", "capture_quality", "search", "operations", "result_check", "gap_review"}:
+        raise HTTPException(422, "请选择需要更新的阶段")
     store = _persistent_queue
     job = store.get_job(run_id) if store else None
     if not job or job["status"] not in {"failed", "completed"}:
@@ -5952,6 +6049,30 @@ def refresh_stage(run_id: str, scope: str, target: str | None = None, revision: 
     if root is None or read_current_release_pointer(root):
         raise HTTPException(409, "仅可刷新尚未正式发布的实验")
     settings = copy.deepcopy(job["payload"]["settings"])
+    if scope in {"result_check", "gap_review"}:
+        from .result_review import inspect
+        try:
+            plan = inspect(root)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise HTTPException(422, "当前保存记录不足以检查，请先核对实验产出") from exc
+        if not revision or revision != plan["revision"]:
+            raise HTTPException(409, "结果版本已改变，请刷新后重新检查")
+        if scope == "gap_review":
+            if target not in {w["window_id"] for w in plan["windows"]}:
+                raise HTTPException(422, "请选择当前检查中的缺口区间")
+            try:
+                settings["mllm"] = ai_settings.reverified_job_mllm(settings)
+            except (OSError, ValueError, RuntimeError) as exc:
+                raise HTTPException(422, str(exc)) from exc
+    if scope == "operations":
+        from .operation_review import bindings, GROUPS, EVENTS
+        bound = bindings(root)
+        if not bound.get(EVENTS) or not revision or revision != bound[GROUPS]:
+            raise HTTPException(422, "缺少已审核事件，或步骤版本已经变化，请刷新后重试")
+        try:
+            settings["mllm"] = ai_settings.reverified_job_mllm(settings)
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise HTTPException(422, str(exc)) from exc
     if scope == "understanding":
         groups = _read_json(root / "JSON-Config-Files/experiment_group_understanding.json", {}) or {}
         if target is not None:
@@ -5986,8 +6107,48 @@ def refresh_stage(run_id: str, scope: str, target: str | None = None, revision: 
             "status_url": f"/api/runs/{refresh_id}", "scope": scope}
 
 
+@app.get("/api/runs/{run_id}/recovery-plan")
+def recovery_plan(run_id: str) -> dict[str, Any]:
+    store = _persistent_queue
+    job = store.get_job(run_id) if store else None
+    if job is None:
+        raise HTTPException(404, "原持久任务不存在，请重新选择原输入")
+    root = _find_staging_run(_settings(), run_id)
+    if root is None or read_current_release_pointer(root):
+        raise HTTPException(409, "仅可恢复尚未正式发布的暂存任务")
+    from .operation_review import bindings, GROUPS, EVENTS
+    bound = bindings(root)
+    status = _pipeline_status_from_root(root)
+    stopped = job["status"] in {"failed", "completed"} and not _refresh_in_progress(run_id)
+    retryable = stopped and (job["status"] == "failed" or (store.load_runs().get(run_id) or {}).get("state") == "partial")
+    model = job["payload"]["settings"].get("mllm") or {}
+    model_ready = False
+    model_message = "原任务未启用模型理解"
+    if model.get("enabled"):
+        try:
+            ai_settings.reverified_job_mllm(job["payload"]["settings"])
+            model_ready = True
+            model_message = "已保存的连接验证可用于原任务；提交时再次检查"
+        except (OSError, ValueError, RuntimeError) as exc:
+            model_message = str(exc)
+    identity = {"run_id":run_id, "attempt":job["attempts"], "status":job["status"], "bindings":bound,
+                "updated_at":status.get("updated_at"), "refresh_in_progress":_refresh_in_progress(run_id)}
+    revision = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+    return {"run_id":run_id, "revision":revision, "group_revision":bound[GROUPS],
+            "failed_stage":status.get("failed_stage") or status.get("stage"),
+            "provider":model.get("provider"), "model":model.get("model"),
+            "output_path":str(root), "retained_stage_count":len(_stage_receipts_from_root(root)),
+            "model_ready":model_ready, "model_check_message":model_message,
+            "actions": {"retry":retryable and (model_ready or not model.get("enabled")), "reports":stopped,
+                        "operations":stopped and model_ready and bool(bound[GROUPS] and bound[EVENTS])},
+            "cache_policy":"校验源文件、代码、配置和模型身份后复用；未通过校验的部分重新计算。",
+            "retry_effect":"原输入不复制；已有派生产出移入 Retry-Attempts 历史目录，本轮重新生成可见成果。",
+            "model_cost":"完整复跑与操作整理可能产生新的模型费用；缓存命中数与新增用量以执行回执为准，当前不作费用承诺。",
+            "quality_policy":"操作整理复用已保存画面与已审核事件；不能补出未观察的动作或证明实验已结束。报告刷新不调用模型，未通过质量门时仅生成阶段报告。"}
+
+
 @app.post("/api/runs/{run_id}/retry", status_code=202)
-def retry_run(run_id: str) -> dict[str, Any]:
+def retry_run(run_id: str, revision: str | None = None) -> dict[str, Any]:
     store = _persistent_queue
     if store is None:
         raise HTTPException(503, "持久任务队列未就绪")
@@ -6009,6 +6170,11 @@ def retry_run(run_id: str) -> dict[str, Any]:
     # No source media or derived video is copied for a retry.
     attempt_root = root / "JSON-Config-Files" / "Retry-Attempts" / str(job["attempts"])
     with _lock:
+        current = store.get_job(run_id)
+        if current is None or current["status"] != job["status"] or current["attempts"] != job["attempts"]:
+            raise HTTPException(409, "任务状态已改变，请刷新恢复方案")
+        if revision is not None and recovery_plan(run_id)["revision"] != revision:
+            raise HTTPException(409, "恢复方案已过期，请刷新后重试")
         if _refresh_in_progress(run_id):
             raise HTTPException(409, "此实验正在刷新阶段，请等待完成")
         try:

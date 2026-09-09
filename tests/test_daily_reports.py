@@ -267,3 +267,15 @@ def test_daily_report_reconciles_local_validation_package(default_config):
         "accepted_existing_model_understanding"
     )
     assert report["performance"]["total_tokens"] == 219535
+
+
+def test_professional_pdf_uses_shared_brand_cover_and_still_renders(tmp_path, default_config):
+    from reportlab.platypus import Image
+    from visioncortex.report_presentations import professional_cover_flowables, render_professional_pdf
+    cover = professional_cover_flowables([["质量状态", "待核对"]], "阶段成果", stage=True)
+    assert sum(isinstance(item, Image) for item in cover) == 1
+    summary = _summary_with_post_curation_rejection()
+    report = build_daily_report(summary, {}, {"passed":True,"checks":[]}, default_config, _accepted_quality())
+    target = tmp_path / 'professional.pdf'
+    render_professional_pdf(target, report, tmp_path)
+    assert target.read_bytes().startswith(b'%PDF-')

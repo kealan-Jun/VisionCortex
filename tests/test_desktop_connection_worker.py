@@ -32,8 +32,9 @@ def test_slow_package_reports_progress_before_loading_and_calling(worker, monkey
     monkeypatch.setattr(worker.time, "monotonic", lambda: clock[0])
     stages = []
 
-    def verify(root, *, progress):
+    def verify(root, *, progress, use_cache):
         assert root == tmp_path
+        assert use_cache is True
         stages.append("package")
         progress({"checked_bytes": 0, "total_bytes": 100, "checked_files": 0, "total_files": 1})
         clock[0] = 600.0

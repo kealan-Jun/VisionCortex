@@ -71,7 +71,7 @@ def digest(value: dict) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
-def invalidate_reports(root: Path) -> None:
+def invalidate_reports(root: Path, *, reason: str = "录音理解已更新，报告等待重新生成") -> None:
     for filename in ("daily_report_manifest.json", "professional_report_manifest.json"):
         path = root / "JSON-Config-Files" / filename
         if path.is_file():
@@ -79,7 +79,7 @@ def invalidate_reports(root: Path) -> None:
             (root / "JSON-Config-Files/Stage-Refreshes").mkdir(parents=True, exist_ok=True)
             speech_worker.atomic_json(root / f"JSON-Config-Files/Stage-Refreshes/{time.time_ns()}-previous-{filename}", original)
             # Remove navigable artifact references until a report uses the new revision.
-            speech_worker.atomic_json(path, {"passed": False, "status": "stale", "reason": "录音理解已更新，报告等待重新生成"})
+            speech_worker.atomic_json(path, {"passed": False, "status": "stale", "reason": reason})
 
 
 def refresh_group(root: Path, config: dict, target: str) -> dict:

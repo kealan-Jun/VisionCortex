@@ -31,6 +31,12 @@ assert.ok(player.includes('preload="none"'));
 assert.ok(player.includes('poster="'));
 assert.ok(player.includes('aria-label="播放同步双视角"'));
 assert.ok(!player.includes("autoplay"));
+const focus=videoPreview(url,"关键片段",poster,{focus:true});
+assert.ok(focus.includes('data-focus-video'));
+assert.ok(focus.includes('aria-label="播放关键片段"'));
+assert.ok(focus.includes('poster="'));
+assert.ok(!focus.includes('autoplay'));
+assert.ok(videoPreview(url,"关键片段",poster,{materialId:"E1"}).includes('data-material-video="E1"'));
 const data={name:"demo",staging_run_id:"run",key_events:[],quarantined_materials:[
  {event_id:"full",group_folder:"001",cv_action_type:"object_movement",cv_objects:["tube"],clip_url:url,preview_review:{priority:true,duration_ms:2000}},
  {event_id:"short",group_folder:"002",cv_action_type:"object_movement",clip_url:url,preview_review:{priority:false,duration_ms:150,reason_codes:["short_candidate"]}}
@@ -55,12 +61,13 @@ assert.equal(data.quarantined_materials.length,2);
 data.movement_screening={counts:{contradicted:3,unverified:2,supported:1},total_candidates:6,
   candidates:[{view_id:"fp",start_ms:1000,end_ms:1500,objects:["pipette"],status:"contradicted"}]};
 html=materialsView(data);
-assert.ok(html.includes("物体移动筛选结果"));
-assert.ok(html.includes("画面不支持移动"));
-assert.ok(html.includes("查看完整实验片段"));
+assert.ok(!html.includes("物体移动筛选结果"));
+assert.ok(html.includes("查看素材筛选与核验记录"));
+assert.ok(html.includes("#/stage/run/metrics"));
+assert.ok(movementScreeningView(data).includes("不支持移动"));
 assert.ok(html.includes("候选持续不足 1 秒"));
 data.quarantined_materials=[];
-assert.ok(materialsView(data).includes("物体移动筛选结果"));
+assert.ok(materialsView(data).includes("查看素材筛选与核验记录"));
 '''
     result = subprocess.run([node, "-e", script], capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr

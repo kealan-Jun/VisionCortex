@@ -103,7 +103,7 @@ class TrainingEvidence:
         # Source trace files are closed between batches. Immutable snapshots keep
         # earlier complete epochs readable even if a later append is interrupted.
         sources = [self.optimization.path, Path(trainer.csv), Path(trainer.save_dir) / "args.yaml"]
-        for key in ("sampling_plan_path", "sampling_trace_path"):
+        for key in ("sampling_plan_path", "sampling_trace_path", "branch_loss_trace_path"):
             path = getattr(trainer, key, None)
             if path is not None:
                 sources.append(Path(path))
@@ -125,13 +125,16 @@ class TrainingEvidence:
             directory_fsync=os.name != "nt",
             observed_usage=self.usage_observer(trainer) if self.usage_observer else {},
         )
+        if getattr(trainer, "branch_loss_trace_path", None) is not None:
+            record["branch_loss_trace_required"] = True
+            record["branch_loss_policy"] = getattr(getattr(trainer, "branch_loss_trace", None), "policy", "native")
         durable_json(destination / "receipt.json", record)
         durable_json(self.root / "latest.json", file_identity(destination / "receipt.json"))
         staging.rmdir()
         return result
 
 
-def verify_training_evidence(output: Path) -> dict:
+def verify_training_evidence(output: Path, *, require_branch_loss: bool = False) -> dict:
     """Require the final native operation and every saved immutable trace snapshot."""
     root = output.resolve() / "training-evidence"
     latest = json.loads((root / "latest.json").read_text())
@@ -162,6 +165,23 @@ def verify_training_evidence(output: Path) -> dict:
                 raise ValueError("Training evidence snapshot changed")
             if path == final and artifact.read_bytes() != Path(item["source_path"]).read_bytes():
                 raise ValueError("Final training trace differs from its durable snapshot")
+        if require_branch_loss or record.get("branch_loss_trace_required"):
+            from .project_branch_loss import branch_loss_trace_usage
+
+            artifacts = {Path(item["source_path"]).name: item for item in record["artifacts"]}
+            if not record.get("branch_loss_trace_required") or not {
+                "branch-loss-trace.jsonl", "source-sampling-trace.jsonl"
+            }.issubset(artifacts):
+                raise ValueError("Training evidence lacks required branch-loss snapshots")
+            branch = artifacts["branch-loss-trace.jsonl"]
+            sampling = artifacts["source-sampling-trace.jsonl"]
+            usage = branch_loss_trace_usage(
+                Path(branch["path"]), Path(sampling["path"]), expected_epochs=expected_epoch + 1,
+                expected_policy=record.get("branch_loss_policy", "native"),
+            )
+            usage.update(path=branch["source_path"], sampling_trace_path=sampling["source_path"])
+            if usage != record["observed_usage"].get("branch_loss_usage"):
+                raise ValueError("Observed branch-loss usage differs from durable snapshot")
         if path == final:
             for item in record["checkpoint_hashes_at_publication"]:
                 if file_identity(Path(item["path"])) != item:

@@ -311,6 +311,40 @@ class DetectionDuplicateSuppression(BaseModel):
         return self
 
 
+class SourceFrameIdentity(BaseModel):
+    """Physical decoder provenance, distinct from the requested sampling grid."""
+
+    schema_version: Literal["decoder-position-pts/1"] = "decoder-position-pts/1"
+    source_path: Path
+    source_size_bytes: int = Field(ge=0)
+    source_mtime_ns: int = Field(ge=0)
+    status: Literal["resolved", "unavailable", "ambiguous"]
+    packet_position: int | None = Field(default=None, ge=0)
+    source_pts: int | None = None
+    time_base: str | None = None
+    source_frame_index: int | None = Field(default=None, ge=0)
+    decoded_pixels_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    reason: str | None = None
+    terminal_frame_hold: bool = False
+
+    @model_validator(mode="after")
+    def validate_resolved_identity(self) -> "SourceFrameIdentity":
+        from fractions import Fraction
+
+        if self.status == "resolved":
+            if self.packet_position is None or self.source_pts is None or self.time_base is None:
+                raise ValueError("Resolved source frames require decoder position and native PTS")
+            try:
+                time_base = Fraction(self.time_base)
+            except (ValueError, ZeroDivisionError) as exc:
+                raise ValueError("Invalid source frame time base") from exc
+            if time_base <= 0:
+                raise ValueError("Source frame time base must be positive")
+        elif any(value is not None for value in (self.source_pts, self.time_base, self.source_frame_index)):
+            raise ValueError("Unresolved source frames cannot claim native timestamps or indices")
+        return self
+
+
 class FrameEvidence(BaseModel):
     view_id: str
     role: ViewRole
@@ -328,6 +362,7 @@ class FrameEvidence(BaseModel):
     motion_quality_state: str = "usable"
     detections: list[BoxEvidence] = Field(default_factory=list)
     duplicate_suppression: DetectionDuplicateSuppression | None = None
+    source_frame: SourceFrameIdentity | None = None
 
 
 class ActionCandidate(BaseModel):
@@ -446,9 +481,19 @@ class ExperimentGroup(BaseModel):
     continuity_reason: str
     # Original-video reviews of proposed cuts; not physical-action acceptance.
     boundary_reviews: list[dict[str, Any]] = Field(default_factory=list)
+    # Semantic workflow units are distinct from CV atomic_experiment_ids.
+    workflow_units: list[dict[str, Any]] = Field(default_factory=list)
+    workflow_kind: Literal["unresolved", "independent_experiment", "continuous_workflow"] = "unresolved"
+    completion_status: Literal["unreviewed", "observed_complete", "ongoing_at_recording_end", "unresolved"] = "unreviewed"
+    completion_reason: str = ""
+    boundary_extension_requires_step_review: bool = False
+    # Half-open global intervals; an absent third-person view means no verified
+    # workstation correspondence, not permission to reuse the previous camera.
+    view_timeline: list[dict[str, Any]] = Field(default_factory=list)
     experiment_name: str = "待模型命名实验"
     experiment_name_en: str = "Unnamed-Experiment"
     archive_folder: str | None = None
+    source_archive_folders: list[str] = Field(default_factory=list)
     model_understanding: dict[str, Any] | None = None
     videos: dict[str, str] = Field(default_factory=dict)
     video_json: dict[str, str] = Field(default_factory=dict)

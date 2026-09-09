@@ -128,6 +128,7 @@ def install_desktop(build: Path, output: Path, source: dict) -> None:
     mappings = {
         "tools/rtx4050_portable.py": "tools/rtx4050_portable.py",
         "tools/rtx4050_hardware.py": "tools/rtx4050_hardware.py",
+        "tools/rtx4050_integrity.py": "tools/rtx4050_integrity.py",
         "tools/desktop_storage.py": "tools/desktop_storage.py",
         "tools/windows_desktop_lifecycle.py": "tools/windows_desktop_lifecycle.py",
         "tools/verify_mllm_connection.py": "tools/verify_mllm_connection.py",
@@ -228,6 +229,7 @@ def connection_update(base: Path, output: Path) -> Path:
     indexed = {item["path"]: item for item in original["files"]}
     mappings = {"tools/rtx4050_portable.py": "tools/rtx4050_portable.py",
                 "tools/rtx4050_hardware.py": "tools/rtx4050_hardware.py",
+                "tools/rtx4050_integrity.py": "tools/rtx4050_integrity.py",
                 "tools/verify_mllm_connection.py": "tools/verify_mllm_connection.py",
                 "deployment/rtx4050-windows/README.md": "README.md"}
     for name in ("connection.cjs", "main.cjs", "setup.js"):

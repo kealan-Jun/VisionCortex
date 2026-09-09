@@ -34,7 +34,7 @@ def local_settings(tmp_path, monkeypatch):
     monkeypatch.setenv("VISIONCORTEX_WEB_AI_SETTINGS", "1")
     monkeypatch.setenv("VISIONCORTEX_AI_SETTINGS_DIR", str(tmp_path / "private-ai"))
     monkeypatch.setenv("VISIONCORTEX_WEB_ACCESS_MODE", "local")
-    monkeypatch.setenv("ARK_API_KEY", "ark-local-test-key")
+    monkeypatch.setenv("ARK_API_KEY", "synthetic-legacy-test-value")
     config = load_config(Path("configs/development-local.yaml"))
     for key in (
         "archive_root",
@@ -91,7 +91,7 @@ def test_local_web_page_catalog_never_returns_legacy_key(local_settings):
         "openrouter",
         "siliconflow",
     }
-    assert "ark-local-test-key" not in response.text
+    assert "synthetic-legacy-test-value" not in response.text
     assert not settings_directory().exists()
 
 

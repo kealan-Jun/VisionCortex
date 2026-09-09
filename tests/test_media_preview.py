@@ -55,3 +55,35 @@ def test_poster_cache_cannot_escape_local_runtime(tmp_path):
     with pytest.raises(ValueError, match="local runtime"):
         media_preview.cached_video_poster(source, runtime)
     assert list(outside.iterdir()) == []
+
+
+def test_rebuilt_staging_media_revalidates_cached_byte_ranges(tmp_path, monkeypatch):
+    root = tmp_path / "staging"
+    source = root / "Experiment-Clips" / "aligned.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"old-mp4-index-and-frames")
+    monkeypatch.setattr(api, "_resolve_staging_run", lambda _: root)
+    client = TestClient(api.app)
+    params = {"run_id": "test", "path": "Experiment-Clips/aligned.mp4"}
+    first = client.get("/api/staging-file", params=params, headers={"Range": "bytes=0-6"})
+    assert first.status_code == 206
+    assert first.content == b"old-mp4"
+    assert first.headers["cache-control"] == "private, no-cache"
+
+    # Replacing the source invalidates a browser's previously cached MP4 index.
+    replacement = source.with_suffix(".replacement")
+    replacement.write_bytes(b"new-mp4-index-with-longer-media-frames")
+    replacement.replace(source)
+    refreshed = client.get("/api/staging-file", params=params, headers={
+        "Range": "bytes=7-12", "If-Range": first.headers["etag"],
+    })
+    assert refreshed.status_code == 200
+    assert refreshed.content == source.read_bytes()
+    assert refreshed.headers["etag"] != first.headers["etag"]
+    assert refreshed.headers["cache-control"] == "private, no-cache"
+
+    resumed = client.get("/api/staging-file", params=params, headers={
+        "Range": "bytes=7-12", "If-Range": refreshed.headers["etag"],
+    })
+    assert resumed.status_code == 206
+    assert resumed.content == source.read_bytes()[7:13]

@@ -147,7 +147,7 @@ def test_check_only_does_not_build_engines_or_serve(portable, tmp_path, monkeypa
     monkeypatch.setattr(portable, "ROOT", tmp_path)
     monkeypatch.setattr(portable.shutil, "disk_usage", lambda _: SimpleNamespace(free=20 * 1024**3))
     monkeypatch.setattr(sys, "argv", ["launcher", "--check-only"])
-    monkeypatch.setattr(portable, "verify_package", lambda _: {})
+    monkeypatch.setattr(portable, "verify_package", lambda _, **kwargs: {})
     monkeypatch.setattr(portable, "configure_environment", lambda _: None)
     monkeypatch.setattr(portable, "hardware_preflight", lambda: {"gpu": "test"})
     monkeypatch.setattr(portable, "effective_config", lambda *_: (tmp_path / "config.yaml", {}))
@@ -207,7 +207,7 @@ def test_windows_job_owns_descendants_and_watches_original_parent_handle(monkeyp
         "CreateJobObjectW": 101, "SetInformationJobObject": 1,
         "AssignProcessToJobObject": 1, "GetCurrentProcess": -1,
         "OpenProcess": 202, "WaitForSingleObject": 0, "CloseHandle": 1,
-        "GetStdHandle": 303, "GetFileType": 3, "ReadFile": 0, "PeekNamedPipe": 0,
+        "GetStdHandle": 303, "GetFileType": 3, "ReadFile": 1, "PeekNamedPipe": 1,
     }.items()})
     targets = []
     monkeypatch.setattr(lifecycle.sys, "platform", "win32")

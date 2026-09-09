@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import ast
 import re
+import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -46,6 +48,32 @@ def test_heavy_model_imports_remain_lazy_in_production_modules():
                 violations.append(f"{path.name}:{statement.lineno}:{package}")
 
     assert violations == []
+
+
+def test_optional_training_entry_is_lazy_and_runtime_source_is_traced():
+    script = """
+import sys
+sys.path.insert(0, sys.argv[1])
+class RejectModelImports:
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in {'torch', 'ultralytics'}:
+            raise RuntimeError('Unexpected optional model import')
+sys.meta_path.insert(0, RejectModelImports())
+import visioncortex.project_ignore_training as adapter
+assert 'IgnoreTrainer' in dir(adapter)
+assert 'visioncortex.training_runtime.ignore' not in sys.modules
+from visioncortex.project_annotation_training import _CODE_AT_IMPORT
+assert any(name.endswith('training_runtime/ignore.py') or name.endswith('training_runtime\\\\ignore.py')
+           for name in _CODE_AT_IMPORT)
+try:
+    adapter.not_a_public_adapter
+except AttributeError:
+    pass
+else:
+    raise AssertionError('Unknown names must not load the optional runtime')
+"""
+    subprocess.run([sys.executable, "-I", "-B", "-c", script, str(ROOT / "src")],
+                   check=True, capture_output=True, timeout=20)
 
 
 def test_production_installers_exclude_development_extras():

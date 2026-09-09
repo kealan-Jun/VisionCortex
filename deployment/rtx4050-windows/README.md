@@ -137,6 +137,10 @@ Windows 双击启动、4050 真实模型全链路、六路真实实验质量或�
 
 ## 故障回传
 
+再次启动通过文件身份和修改记录复用已通过的校验，不重复读取未变化的大模型及运行库。
+首次启动、变化文件和无法使用可靠缓存的文件仍执行完整哈希。详情及手动复检命令见
+`docs/RTX4050-GIT-UPDATES.md`；本次读取量和耗时记录在 `Runtime/Logs/package-verification.json`。
+
 保留应用窗口报错、`Runtime/Logs/desktop.log`、`Runtime/Logs/connection-verification.jsonl`、`Runtime/target-preflight.json`、
 `Runtime/Engines/*/*.build.json`、`Runtime/Logs/web.log` 及该任务的
 `JSON-Config-Files` 回执。不要把密钥或原视频当作普通日志发送。

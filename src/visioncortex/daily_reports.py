@@ -456,6 +456,11 @@ def build_daily_report(
                 "experiment_name": group.experiment_name,
                 "experiment_name_en": group.experiment_name_en,
                 "continuity_type": group.continuity_type,
+                "workflow_kind": group.workflow_kind,
+                "workflow_units": group.workflow_units,
+                "completion_status": group.completion_status,
+                "completion_reason": group.completion_reason,
+                "boundary_extension_requires_step_review": group.boundary_extension_requires_step_review,
                 "continuity_reason": group.continuity_reason,
                 "atomic_experiment_ids": group.atomic_experiment_ids,
                 "start_global_ms": group.global_start_ms,
@@ -993,8 +998,9 @@ def generate_daily_report_from_archive(root: Path, config: dict[str, Any]) -> di
         (layout.json_config / "evidence_package.json").read_text(encoding="utf-8-sig")
     )
     from .speech_refresh import apply
+    from .operation_review import apply as apply_operations
     from .schemas import ExperimentGroup
     summary.experiment_groups = [ExperimentGroup.model_validate(item) for item in
-                                 apply(root, [group.model_dump(mode="json") for group in summary.experiment_groups])]
+                                 apply_operations(root, apply(root, [group.model_dump(mode="json") for group in summary.experiment_groups]))]
     run_metrics = json.loads((layout.json_config / "run_metrics.json").read_text(encoding="utf-8-sig"))
     return generate_daily_report_archive(layout, summary, run_metrics, config)

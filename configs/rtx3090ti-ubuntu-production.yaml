@@ -455,13 +455,6 @@ archive:
   include_empty_action_categories: false
 
 mllm:
-  boundary_review:
-    enabled: true
-    # Review scope limits API input, not the allowed experiment duration.
-    maximum_gap_seconds: 120
-    context_seconds: 12
-    maximum_pairs: 20
-    minimum_confidence: 0.85
   candidate_review_stratified_queue_enabled: true
   candidate_review_time_bucket_seconds: 1800
   # Keep the evidence originals untouched while bounding only the request

@@ -65,6 +65,20 @@ def test_semantic_recovery_clears_previous_failure_receipt(tmp_path):
     assert report["status"] == "completed"
 
 
+def test_material_failures_have_separate_retry_scope_in_partial_report(tmp_path):
+    failure = {"event_id": "EVT-1", "view_id": "fp", "artifact_kind": "key_frame", "status": "failed"}
+    write_json(tmp_path / "JSON-Config-Files/key_material_materialization_runtime.json", {
+        "status": "partial", "incomplete_artifacts": [failure], "retry_event_ids": ["EVT-1"],
+    })
+    report = write_partial_delivery(tmp_path, {})
+    assert report["pending_material_outputs"] == [failure]
+    assert report["material_retry_event_ids"] == ["EVT-1"]
+    assert report["pending_semantic_results"] == []
+    assert report["formal_archive_promotion_allowed"] is False
+    assert "待补全素材：1" in (tmp_path / report["report"]).read_text()
+    assert any(item["path"].endswith("key_material_materialization_runtime.json") for item in report["artifact_references"])
+
+
 def test_partial_report_distinguishes_quality_failure_and_counts_all_retained_candidates(tmp_path):
     write_json(tmp_path / "JSON-Config-Files/quality_acceptance.json", {"passed": False})
     write_json(tmp_path / "JSON-Config-Files/key_material_semantic_failures.json", {
@@ -170,6 +184,15 @@ def test_retry_preserves_job_input_and_cache_and_survives_restart(tmp_path, monk
     monkeypatch.setattr(api, "_persistent_queue", store)
     monkeypatch.setattr(api, "_runs", {})
     client = TestClient(api.app)
+    plan = client.get("/api/runs/run-retry/recovery-plan").json()
+    assert plan["actions"]["retry"] is True
+    assert plan["actions"]["reports"] is True
+    assert plan["actions"]["operations"] is False
+    assert "key" not in plan and "credential_ref" not in plan
+    assert store.get_job("run-retry")["status"] in {"failed", "completed"}
+    rejected = client.post("/api/runs/run-retry/retry?revision=outdated")
+    assert rejected.status_code == 409
+    assert (root / "JSON-Config-Files/partial_delivery.json").is_file()
     response = client.post("/api/runs/run-retry/retry")
     assert response.status_code == 202
     assert response.json()["source_copy_bytes"] == 0
@@ -393,3 +416,43 @@ def test_refresh_queue_is_durable_and_excludes_parent_retry(tmp_path, monkeypatc
     assert api._runs[job.run_id]['state'] == 'completed'
     assert api._runs['parent']['state'] == 'failed'
     assert (root/'JSON-Config-Files/reports_refresh.json').is_file()
+
+
+def test_readable_partial_reports_bind_exports_without_promoting_and_hide_tampering(tmp_path, monkeypatch):
+    layout = ArchiveLayout(tmp_path)
+    layout.create()
+    write_json(layout.json_config / "pipeline_status.json", {"stage":"failed"})
+    write_json(layout.json_config / "quality_acceptance.json", {"passed":False})
+    write_json(layout.json_config / "run_metrics.json", {"tokens":{"run_total":{"input_tokens":0,"output_tokens":None,"total_tokens":None}}})
+    quality_before = (layout.json_config / "quality_acceptance.json").read_bytes()
+    receipt = write_partial_delivery(tmp_path, {"tokens":{"run_total":{"input_tokens":0,"output_tokens":None,"total_tokens":None}}})
+    assert "readable_report_error" not in receipt
+    for item in receipt["readable_reports"].values():
+        assert hashlib.sha256((tmp_path/item["path"]).read_bytes()).hexdigest() == item["sha256"]
+    assert (tmp_path/receipt["readable_reports"]["pdf"]["path"]).read_bytes().startswith(b'%PDF-')
+    assert (layout.json_config/"quality_acceptance.json").read_bytes() == quality_before
+    assert not (layout.json_config/"daily_report_manifest.json").exists()
+    export = json.loads((tmp_path/receipt["export"]).read_text())
+    assert export["artifact_references"]
+    assert export["traceability"]["source_video_bodies_revalidated"] is False
+    monkeypatch.setattr(api,"_resolve_staging_run",lambda _:tmp_path)
+    detail = api.staging_archive_detail('R')
+    assert '/api/staging-file?' in detail['links']['partial_pdf']
+    (tmp_path/receipt['readable_reports']['pdf']['path']).write_bytes(b'tampered')
+    assert 'partial_pdf' not in api.staging_archive_detail('R')['links']
+
+
+def test_stage_report_images_reference_only_linked_retained_frames(tmp_path):
+    from visioncortex.partial_reports import retained_report_visuals
+    frame = tmp_path / 'Key-Materials/frame.jpg'
+    frame.parent.mkdir()
+    frame.write_bytes(b'existing derived image')
+    groups = [{"group_id":"G","model_understanding":{"steps":[{"supporting_event_ids":["E"]}]}}]
+    events = [{"event_id":"E","key_frames":{"aligned_first_third":"Key-Materials/frame.jpg"}},
+              {"event_id":"unused","key_frames":{"aligned_first_third":"Key-Materials/missing.jpg"}}]
+    rows = retained_report_visuals(tmp_path,groups,events)
+    assert len(rows) == 1 and rows[0]['event_id'] == 'E'
+    assert rows[0]['sha256'] == hashlib.sha256(frame.read_bytes()).hexdigest()
+    assert rows[0]['evidence_classification'] == 'PARTIAL_EVIDENCE'
+    events[0]['key_frames']['aligned_first_third'] = '../outside.jpg'
+    assert retained_report_visuals(tmp_path,groups,events) == []

@@ -20,6 +20,7 @@ import cv2
 import numpy as np
 
 from .schemas import VideoInfo, VideoSegmentInfo, ViewInput
+from .source_frames import SOURCE_FRAME_FILTER, SampledFrame, SourceFrameTrace, retime_sampled_frame
 from .storage import read_source_file_edges
 
 
@@ -516,13 +517,16 @@ def _ffmpeg_frame_iterator(
 ) -> Iterator[tuple[int, float, np.ndarray]]:
     width, height = _scaled_size(info.width, info.height, max_width)
     use_cuda_scale = bool(cuda_scale and hwaccel == "cuda")
+    trace = SourceFrameTrace(path, start_ms, end_ms, sample_fps)
+    identity_filter = f",{SOURCE_FRAME_FILTER}" if trace.enabled and not trace.encoder_stats else ""
     filter_graph = (
-        f"fps={sample_fps:.8f},scale_cuda={width}:{height}:interp_algo=bicubic,"
+        f"fps={sample_fps:.8f}{identity_filter},scale_cuda={width}:{height}:interp_algo=bicubic,"
         "hwdownload,format=nv12,format=bgr24"
         if use_cuda_scale
-        else f"fps={sample_fps:.8f},scale={width}:{height}"
+        else f"fps={sample_fps:.8f}{identity_filter},scale={width}:{height}"
     )
-    command = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
+    filter_graph = trace.filter_prefix() + filter_graph
+    command = ["ffmpeg", "-hide_banner", "-loglevel", "info" if trace.enabled else "error", *trace.input_options()]
     if hwaccel:
         command += ["-hwaccel", hwaccel]
         if use_cuda_scale:
@@ -546,26 +550,34 @@ def _ffmpeg_frame_iterator(
         "rawvideo",
         "-pix_fmt",
         "bgr24",
+        *trace.output_options(),
         "pipe:1",
     ]
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    trace.start(process.stderr)
     assert process.stdout is not None
     frame_bytes = width * height * 3
     index = 0
+    exhausted = False
     try:
         while True:
             raw = process.stdout.read(frame_bytes)
             if len(raw) != frame_bytes:
+                if raw:
+                    raise RuntimeError("FFmpeg returned a truncated source frame")
+                exhausted = True
                 break
             frame = np.frombuffer(raw, dtype=np.uint8).reshape((height, width, 3)).copy()
             local_ms = start_ms + index * 1000.0 / sample_fps
             frame_index = int(round(local_ms * info.fps / 1000.0))
-            yield frame_index, local_ms, frame
+            yield SampledFrame(frame_index, local_ms, frame, trace.identity(index, frame))
             index += 1
     finally:
+        if not exhausted and hasattr(process, "terminate"):
+            process.terminate()
         process.stdout.close()
         process.wait()
-        stderr = process.stderr.read() if process.stderr is not None else b""
+        stderr = trace.finish(process.stderr)
         if process.stderr is not None:
             process.stderr.close()
     if process.returncode not in (0, None):
@@ -843,12 +855,15 @@ def _ffmpeg_multi_window_iterator(
         f"fps={sample_fps:.8f}:round=near:eof_action=round,"
         f"select={select_expression}"
     )
+    trace = SourceFrameTrace(path, start_ms, end_ms, sample_fps)
+    if trace.enabled and not trace.encoder_stats:
+        filter_graph += f",{SOURCE_FRAME_FILTER}"
     filter_graph += (
         f",scale_cuda={width}:{height}:interp_algo=bicubic,hwdownload,format=nv12,format=bgr24"
         if use_cuda_scale
         else f",scale={width}:{height}"
     )
-    command = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
+    command = ["ffmpeg", "-hide_banner", "-loglevel", "info" if trace.enabled else "error", *trace.input_options()]
     if hwaccel:
         command += ["-hwaccel", hwaccel]
         if use_cuda_scale:
@@ -873,17 +888,24 @@ def _ffmpeg_multi_window_iterator(
         "rawvideo",
         "-pix_fmt",
         "bgr24",
+        *trace.output_options(),
         "pipe:1",
     ]
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    trace.start(process.stderr)
     assert process.stdout is not None
     frame_bytes = width * height * 3
     emitted = 0
+    exhausted = False
     last_frame: np.ndarray | None = None
+    last_identity = None
     try:
         while True:
             raw = process.stdout.read(frame_bytes)
             if len(raw) != frame_bytes:
+                if raw:
+                    raise RuntimeError("Persistent FFmpeg returned a truncated source frame")
+                exhausted = True
                 break
             if emitted >= len(expected_timestamps):
                 if receipt is not None:
@@ -898,12 +920,15 @@ def _ffmpeg_multi_window_iterator(
             local_ms = expected_timestamps[emitted]
             frame = np.frombuffer(raw, dtype=np.uint8).reshape((height, width, 3)).copy()
             last_frame = frame
-            yield int(round(local_ms * info.fps / 1000.0)), local_ms, frame
+            last_identity = trace.identity(emitted, frame)
+            yield SampledFrame(int(round(local_ms * info.fps / 1000.0)), local_ms, frame, last_identity)
             emitted += 1
     finally:
+        if not exhausted and hasattr(process, "terminate"):
+            process.terminate()
         process.stdout.close()
         process.wait()
-        stderr = process.stderr.read() if process.stderr is not None else b""
+        stderr = trace.finish(process.stderr)
         if process.stderr is not None:
             process.stderr.close()
     if process.returncode not in (0, None):
@@ -928,10 +953,12 @@ def _ffmpeg_multi_window_iterator(
         assert last_frame is not None
         for fill_index in range(emitted, len(expected_timestamps)):
             local_ms = expected_timestamps[fill_index]
-            yield (
+            yield SampledFrame(
                 int(round(local_ms * info.fps / 1000.0)),
                 local_ms,
                 last_frame.copy(),
+                last_identity.model_copy(update={"terminal_frame_hold": True})
+                if last_identity is not None else None,
             )
         emitted = len(expected_timestamps)
         if receipt is not None:
@@ -1055,15 +1082,25 @@ def iter_sampled_frames(
     sparse_strategy: str = "indexed_seek",
     cuda_scale: bool = False,
 ) -> Iterator[tuple[int, float, np.ndarray]]:
+    emitted = False
+
+    def observed(frames):
+        nonlocal emitted
+        for item in frames:
+            emitted = True
+            yield item
+
     if sparse_strategy not in {"indexed_seek", "sequential_keyframes"}:
         raise ValueError(f"unsupported sparse decode strategy: {sparse_strategy}")
     if keyframes_only and sample_fps <= 1.0 and sparse_strategy == "indexed_seek":
         try:
-            yield from _opencv_indexed_seek_iterator(
+            yield from observed(_opencv_indexed_seek_iterator(
                 path, info, start_ms, end_ms, sample_fps, max_width
-            )
+            ))
             return
         except RuntimeError as exc:
+            if emitted:
+                raise
             # Preserve the sequential FFmpeg path as a compatibility fallback
             # for containers whose seek index is unavailable or damaged.
             LOGGER.warning(
@@ -1073,12 +1110,14 @@ def iter_sampled_frames(
             )
     if shutil.which("ffmpeg"):
         try:
-            yield from _ffmpeg_frame_iterator(
+            yield from observed(_ffmpeg_frame_iterator(
                 path, info, start_ms, end_ms, sample_fps, max_width, hwaccel, keyframes_only,
                 decoder_threads, cuda_scale,
-            )
+            ))
             return
         except RuntimeError as exc:
+            if emitted:
+                raise
             LOGGER.warning(
                 "FFmpeg decode attempt failed: path=%s hwaccel=%s cuda_scale=%s error=%s",
                 path,
@@ -1092,7 +1131,7 @@ def iter_sampled_frames(
                         # Some Windows FFmpeg/CUDA combinations decode on the
                         # GPU but do not expose scale_cuda. Preserve hardware
                         # decode before falling all the way back to CPU.
-                        yield from _ffmpeg_frame_iterator(
+                        yield from observed(_ffmpeg_frame_iterator(
                             path,
                             info,
                             start_ms,
@@ -1103,21 +1142,25 @@ def iter_sampled_frames(
                             keyframes_only,
                             decoder_threads,
                             False,
-                        )
+                        ))
                         return
                     except RuntimeError as scaled_exc:
+                        if emitted:
+                            raise
                         LOGGER.warning(
                             "FFmpeg CUDA decode without scale_cuda failed: path=%s error=%s",
                             path,
                             scaled_exc,
                         )
                 try:
-                    yield from _ffmpeg_frame_iterator(
+                    yield from observed(_ffmpeg_frame_iterator(
                         path, info, start_ms, end_ms, sample_fps, max_width, None, keyframes_only,
                         decoder_threads, False,
-                    )
+                    ))
                     return
                 except RuntimeError as cpu_exc:
+                    if emitted:
+                        raise
                     LOGGER.warning(
                         "FFmpeg CPU decode fallback failed; using OpenCV: path=%s error=%s",
                         path,
@@ -1200,11 +1243,12 @@ def iter_physical_segment_session_frames(
     def convert(
         frames: Iterator[tuple[int, float, np.ndarray]],
     ) -> Iterator[tuple[int, float, np.ndarray]]:
-        for frame_index, source_ms, frame in frames:
-            yield (
+        for item in frames:
+            frame_index, source_ms, _frame = item
+            yield retime_sampled_frame(
+                item,
                 segment.frame_start_index + frame_index,
                 segment.virtual_start_ms + source_ms,
-                frame,
             )
 
     if shutil.which("ffmpeg"):
@@ -1360,14 +1404,15 @@ def iter_view_sampled_frames(
         )
         segment_start = overlap_start - segment.virtual_start_ms
         segment_end = overlap_end - segment.virtual_start_ms
-        for frame_index, source_ms, frame in iter_sampled_frames(
+        for item in iter_sampled_frames(
             segment.path, source_info, segment_start, segment_end, sample_fps, max_width,
             hwaccel, keyframes_only, decoder_threads, sparse_strategy, cuda_scale,
         ):
-            yield (
+            frame_index, source_ms, _frame = item
+            yield retime_sampled_frame(
+                item,
                 segment.frame_start_index + frame_index,
                 segment.virtual_start_ms + source_ms,
-                frame,
             )
 
 

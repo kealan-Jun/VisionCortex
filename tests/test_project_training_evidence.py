@@ -153,3 +153,72 @@ t.save_model()
     assert result.returncode == 77
     assert trainer.last.read_bytes() == b"previous completed checkpoint"
     assert (tmp_path / "training-evidence/epoch-0000/checkpoint-staging/last.pt").stat().st_size == 0
+
+
+def test_opted_in_branch_evidence_cannot_use_legacy_snapshots(tmp_path):
+    trainer, optimization = trainer_fixture(tmp_path)
+    evidence = TrainingEvidence(tmp_path, optimization)
+    evidence.install(trainer)
+    trainer.save_model()
+    trainer.final_eval()
+    assert verify_training_evidence(tmp_path)["completed_epochs"] == 1
+    with pytest.raises(ValueError, match="branch-loss snapshots"):
+        verify_training_evidence(tmp_path, require_branch_loss=True)
+
+
+@pytest.mark.parametrize("policy", ["native", "one2many"])
+def test_branch_trace_is_snapshotted_and_observed_summary_is_recomputed(tmp_path, policy):
+    from visioncortex.project_branch_loss import branch_loss_trace_usage
+    from visioncortex.project_annotation_training import recover_evaluated_experiment
+
+    trainer, optimization = trainer_fixture(tmp_path)
+    trainer.branch_loss_trace_path = tmp_path / "branch-loss-trace.jsonl"
+    trainer.sampling_trace_path = trainer.save_dir / "source-sampling-trace.jsonl"
+    row = dict(
+        schema_version="visioncortex-branch-loss/1", phase="train", policy="native",
+        call=1, epoch=0, epochs=2, batch_size=1, files=["/train/image.png"],
+        gains=dict(one2many=.8, one2one=.2),
+        branch_vectors=dict(one2many=[2., 4., 6.], one2one=[1., 3., 5.]),
+        weighted_vector=[1.8, 3.8, 5.8], logged_one2one_items=[1., 3., 5.],
+    )
+    if policy == "one2many":
+        row.update(policy=policy, gains=dict(one2many=1., one2one=0.), weighted_vector=[2., 4., 6.])
+    trainer.branch_loss_trace = SimpleNamespace(policy=policy)
+    trainer.branch_loss_trace_path.write_text(json.dumps(row) + "\n")
+    trainer.sampling_trace_path.write_text(json.dumps(dict(epoch=0, files=row["files"])) + "\n")
+    def observe(t):
+        return dict(branch_loss_usage=branch_loss_trace_usage(t.branch_loss_trace_path, t.sampling_trace_path))
+    evidence = TrainingEvidence(tmp_path, optimization, observe)
+    evidence.install(trainer)
+    trainer.save_model()
+    trainer.final_eval()
+    verified = verify_training_evidence(tmp_path, require_branch_loss=True)
+    assert verified["completed_epochs"] == 1
+    completed = dict(status="completed", trace_branch_loss=True, training_evidence_required=True,
+                     training_evidence=verified, branch_loss_usage=observe(trainer)["branch_loss_usage"])
+    if policy == "one2many":
+        completed["branch_loss_policy"] = policy
+    durable_json(tmp_path / "experiment.json", completed)
+    assert recover_evaluated_experiment(tmp_path) == completed
+    if policy == "one2many":
+        changed = dict(completed, branch_loss_policy="native")
+        durable_json(tmp_path / "experiment.json", changed)
+        with pytest.raises(ValueError, match="objective policy"):
+            recover_evaluated_experiment(tmp_path)
+        changed = dict(completed, trace_branch_loss=False)
+        durable_json(tmp_path / "experiment.json", changed)
+        with pytest.raises(ValueError, match="declared, traced"):
+            recover_evaluated_experiment(tmp_path)
+    completed["branch_loss_usage"]["calls"] = 999
+    durable_json(tmp_path / "experiment.json", completed)
+    with pytest.raises(ValueError, match="observed branch-loss evidence"):
+        recover_evaluated_experiment(tmp_path)
+    snap = evidence.root / "epoch-0000/branch-loss-trace.jsonl"
+    assert snap.read_bytes() == trainer.branch_loss_trace_path.read_bytes()
+    # A false summary is rejected even when file identities remain valid.
+    receipt = evidence.root / "epoch-0000/receipt.json"
+    saved = json.loads(receipt.read_text())
+    saved["observed_usage"]["branch_loss_usage"]["calls"] = 999
+    receipt.write_text(json.dumps(saved))
+    with pytest.raises(ValueError, match="usage differs"):
+        verify_training_evidence(tmp_path, require_branch_loss=True)

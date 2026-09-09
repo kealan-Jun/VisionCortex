@@ -308,6 +308,8 @@ def test_bad_identity_aborts_before_gpu_startup(tmp_path):
     {"patience": -1}, {"patience": 1.5},
     {"freeze_layers": -1}, {"freeze_layers": 11},
     {"freeze_layers": True}, {"freeze_layers": 0.5},
+    {"trace_branch_loss": "true"},
+    {"branch_loss_policy": "guess"}, {"branch_loss_policy": None},
 ])
 def test_invalid_optimization_schedule_stops_before_data_or_gpu(tmp_path, setting):
     with pytest.raises(ValueError, match="bounded experiment settings"):
@@ -321,6 +323,27 @@ def test_backbone_override_cannot_misrepresent_class_output_probe(tmp_path):
         run_experiment(tmp_path / "missing", "0" * 64, "third_person",
                        tmp_path / "missing.pt", "0" * 64, tmp_path / "run",
                        training_scope="class_outputs", freeze_layers=0)
+    assert not (tmp_path / "run").exists()
+
+
+def test_branch_trace_requires_explicit_supported_supervision(tmp_path):
+    with pytest.raises(ValueError, match="outside_ignore"):
+        run_experiment(tmp_path / "missing", "0" * 64, "third_person",
+                       tmp_path / "missing.pt", "0" * 64, tmp_path / "run",
+                       trace_branch_loss=True)
+    assert not (tmp_path / "run").exists()
+
+
+@pytest.mark.parametrize("override", [
+    {"trace_branch_loss": False}, {"patience": 20}, {"training_scope": "class_outputs"},
+])
+def test_one2many_objective_requires_trace_and_fixed_detector_recipe(tmp_path, override):
+    settings = dict(branch_loss_policy="one2many", trace_branch_loss=True,
+                    patience=0, supervision="outside_ignore", training_scope="detector")
+    settings.update(override)
+    with pytest.raises(ValueError, match="One2many objective requires"):
+        run_experiment(tmp_path / "missing", "0" * 64, "third_person",
+                       tmp_path / "missing.pt", "0" * 64, tmp_path / "run", **settings)
     assert not (tmp_path / "run").exists()
 
 

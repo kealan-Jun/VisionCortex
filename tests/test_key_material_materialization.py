@@ -10,9 +10,11 @@ from visioncortex.schemas import (
     ActionCandidate,
     ActionType,
     AlignmentTransform,
+    BoxEvidence,
     EvidenceEvent,
     ExperimentGroup,
     ExperimentSegment,
+    FrameEvidence,
     VideoInfo,
     ViewInput,
     ViewRole,
@@ -711,15 +713,27 @@ def test_key_material_roles_export_concurrently_and_write_runtime(monkeypatch, t
             frame_count=120,
         ),
     )
+    # Nearby detections without native frame identity must not be borrowed
+    # for the separately decoded experiment-clip frame.
+    by_id = {view.view_id: view for view in views}
     monkeypatch.setattr(
         archive,
         "nearest_frame_evidence_many",
-        lambda path, timestamps: {float(timestamp): None for timestamp in timestamps},
+        lambda path, timestamps: {float(timestamp): FrameEvidence(
+            view_id=path.stem, role=by_id[path.stem].role, frame_index=330,
+            local_ms=timestamp, global_ms=timestamp, width=32, height=24,
+            detections=[BoxEvidence(class_id=0, class_name="tube", confidence=.9, xyxy_norm=(.1, .1, .2, .5))],
+        ) for timestamp in timestamps},
     )
+    rendered_boxes = []
+
+    def retain_render(frame, boxes, destination):
+        rendered_boxes.extend(boxes)
+        destination.write_bytes(b"frame")
     monkeypatch.setattr(
         archive,
         "write_annotated_frame",
-        lambda frame, boxes, destination: destination.write_bytes(b"frame"),
+        retain_render,
     )
     monkeypatch.setattr(archive, "extract_view_clip", fake_extract)
     monkeypatch.setattr(
@@ -763,6 +777,13 @@ def test_key_material_roles_export_concurrently_and_write_runtime(monkeypatch, t
     } == {(0.0, 4_000.0)}
     assert len(event.key_frames) == 3
     assert len(event.key_clips) == 3
+    assert rendered_boxes == []
+    for view_id in ("fp", "tp"):
+        sidecar = json.loads((layout.root / event.key_frames[view_id]).with_suffix(".json").read_text())
+        proof = sidecar["provenance"]["frame_sources"][view_id]
+        assert proof["status"] == "unverified"
+        assert proof["decoded_global_ms"] is None
+        assert proof["detections_bound_to_pixels"] is False
     expected_category = "01-Hand-Object-Contact"
     for relative in (*event.key_frames.values(), *event.key_clips.values()):
         assert f"/{group.archive_folder}/{expected_category}/" in relative
