@@ -3,6 +3,7 @@ const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
 const { PassThrough } = require("node:stream");
+const path = require("node:path");
 const { BackendController, STATE_PREFIX, serviceUrlAllowed } = require("../deployment/rtx4050-windows/desktop/controller.cjs");
 
 const settings={connection:{provider:"aliyun",base_url:"https://example.test/v1",model:"vision-model",api_protocol:"chat_completions",quality_mode:"quality"},verification:{status:"verified"}};
@@ -40,7 +41,7 @@ test("starts only its bundled Python, hides console, and passes the secret only 
   const { controller, calls } = fixture();
   controller.start("synthetic-test-key", 8123, settings);
   const [executable, args, options] = calls[0];
-  assert.equal(executable, "/package with spaces/python/python.exe");
+  assert.equal(executable, path.normalize("/package with spaces/python/python.exe"));
   assert.equal(args.includes("synthetic-test-key"), false);
   assert.equal(options.env.MLLM_API_KEY, "synthetic-test-key");
   assert.equal(options.windowsHide, true);
