@@ -22,7 +22,7 @@ MAPPINGS = {
     "deployment/rtx4050-windows/assets-lock.json": "receipts/assets-lock.json",
     "deployment/rtx4050-windows/desktop/sitecustomize.py": "python/Lib/sitecustomize.py",
 }
-for _name in ("rtx4050_portable.py", "rtx4050_hardware.py", "desktop_storage.py",
+for _name in ("rtx4050_portable.py", "rtx4050_hardware.py", "rtx4050_integrity.py", "desktop_storage.py",
               "windows_desktop_lifecycle.py", "verify_mllm_connection.py"):
     MAPPINGS[f"tools/{_name}"] = f"tools/{_name}"
 for _name in ("package.json", "main.cjs", "controller.cjs", "connection.cjs", "storage.cjs",
@@ -107,7 +107,6 @@ def committed_source(source):
     executors = {name: data.pop(name) for name in EXECUTORS}
     for name, content in executors.items():
         checkout = safe(source, name).read_bytes()
-        # Git may materialize text as CRLF in a clean Windows checkout.
         if checkout.replace(b"\r\n", b"\n") != content.replace(b"\r\n", b"\n"):
             raise RuntimeError("Update executor does not match the selected commit")
     return revision, data, executors
@@ -210,7 +209,6 @@ def prepare(root, source, patch):
             "base_manifest_sha256": digest(original_bytes), "updated_manifest_sha256": digest(updated),
             "python_sha256": indexed["python/python.exe"]["sha256"]}
     (patch / "update.json").write_bytes(encoded(spec))
-    # Execute the immutable blob we reviewed, not a later checkout version.
     (patch / "apply-update.py").write_bytes(executors["deployment/rtx4050-windows/apply-update.py"])
     return spec
 

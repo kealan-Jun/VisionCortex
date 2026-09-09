@@ -37,7 +37,7 @@ def main(root: Path | None = None) -> int:
         value = json.loads(sys.stdin.readline(16384))
         key = value.get("api_key", "")
         emit("package")
-        verify_package(root, progress=package_progress)
+        verify_package(root, progress=package_progress, use_cache=True)
         next_stage("loading")
         from visioncortex.provider_connection import verify_connection
         next_stage("request")

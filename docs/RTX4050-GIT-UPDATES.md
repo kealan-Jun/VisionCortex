@@ -5,13 +5,14 @@
 
 ## 首次连接代码仓库
 
-Windows 需安装 Git，并具备私有仓库 `RealityLoopAI/VisionCortex` 的读取权限。
+Windows 需安装 Git，并具备开发仓库 `kealan-Jun/VisionCortex` 的读取权限。
+4050 修复在开发分支验收；稳定仓库按双仓发布门禁晋级。
 使用 Git 的账户登录方式，不把访问令牌写进命令、远端 URL 或聊天。
 
 在 PowerShell 中执行，代码目录与已解压的应用目录必须分开放置：
 
 ```powershell
-git clone --depth 1 --branch codex/rtx4050-optimization-20260908 --single-branch https://github.com/RealityLoopAI/VisionCortex.git D:\VisionCortexSource
+git clone --depth 1 --branch codex/rtx4050-optimization-20260908 --single-branch https://github.com/kealan-Jun/VisionCortex.git D:\VisionCortexSource
 cd D:\VisionCortexSource
 ```
 
@@ -28,6 +29,19 @@ powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File .\deployment\rtx405
 
 ## 后续更新
 
+若代码目录此前克隆自 `RealityLoopAI/VisionCortex`，两个仓库的 4050 分支目前已有
+不同提交。首次切换按以下命令创建独立本地分支，保留原分支，避免直接 `pull` 冲突：
+
+```powershell
+cd D:\VisionCortexSource
+git remote set-url origin https://github.com/kealan-Jun/VisionCortex.git
+git fetch origin codex/rtx4050-optimization-20260908
+git switch --create codex/rtx4050-startup-cache --track origin/codex/rtx4050-optimization-20260908
+```
+
+已切换的代码目录以后只需执行下述 `git pull --ff-only`。如提示有本地修改，先保留
+修改再处理，不使用强制重置。此过程只拉取源码，原应用目录和运行数据保留。
+
 ```powershell
 cd D:\VisionCortexSource
 git pull --ff-only
@@ -36,14 +50,44 @@ git pull --ff-only
 随后再次运行 `Update-From-Source.cmd`。程序只接受已提交、无受版本控制文件修改的
 代码快照；同一提交重复执行会核对源码后直接返回。未跟踪的本地文件不会进入更新。
 
-更新器自身和 `apply-update.py` 也必须存在于选定提交，工作区内容须与提交一致。
-执行阶段使用从 Git blob 提取并暂存的 `apply-update.py`，避免读到未跟踪或随后改变的
-工作区脚本。干净 Windows 检出中的 CRLF 换行可以正常校验，实际补丁仍使用提交字节。
-
 更新会验证旧文件与补丁文件，备份变更内容到原应用的 `Runtime/Updates`，支持新增
-与删除源码文件，最后替换完整性清单。失败会恢复已替换的文件；下次启动仍执行原有
-全包校验。若所选提交改变了运行环境资产或核心/视觉依赖，更新会拒绝继续，须单独
+与删除源码文件，最后替换完整性清单。失败会恢复已替换的文件；下次启动核对新清单，
+重新哈希变化的文件，复用满足下述条件的未变化文件。若所选提交改变了运行环境资产或核心/视觉依赖，更新会拒绝继续，须单独
 准备兼容运行环境。它不会把缺失依赖伪装为已安装。
+
+## 首次校验与再次启动
+
+原 R6 包清单有 32,381 个文件，共 10,659,197,771 字节。旧版每次启动都重新读取
+整包计算 SHA-256，首次 AI 连接验证之后启动应用还会再次计算。
+
+桌面启动和 AI 连接验证现在共享 `Runtime/Cache/PackageIntegrity` 中的一份小型
+校验缓存。首次仍完整检查；后续核对文件身份与修改记录，仅对新增或变化文件重新
+计算哈希。普通退出重开、再次验证连接不会主动清除缓存；源码更新也可继续复用
+哈希预期与文件身份均未变化的大模型和运行库。
+
+Windows 使用 NTFS/ReFS 的卷与文件 ID、大小、创建时间、写入时间和 ChangeTime，
+不将 Python 的 Windows `st_ctime` 创建时间误当修改记录。刚写入的文件在时间戳
+精度窗口内重新校验；FAT/exFAT、网络盘或无法取得可靠修改记录时回退到完整读取。
+缓存用本机随机密钥认证，Windows 密钥通过当前用户 DPAPI 保护；缓存损坏、换账户
+或移动程序目录时先重新验证；校验器本身更新也会重新建立缓存。缓存只是上次内容校验的复用，不声称每次启动都重新
+完成了全量哈希，也不替代磁盘介质诊断。
+
+`Runtime/Logs/package-verification.json` 记录本次实际读取字节、复用字节、文件数、
+耗时和清单 SHA。缓存和日志都覆盖固定文件，不生成新的离线包或多份运行环境。
+需要主动完整复检时，在安装目录运行以下命令；它刷新同一缓存，不启动 GPU 或调用 AI：
+
+```powershell
+.\python\python.exe -I -B .\tools\rtx4050_portable.py --verify-package-only
+```
+
+本机复用原 R6 解压目录实测（Ubuntu/ext4/NVMe，清单 SHA
+`9f0ddf6c77811a083a9bb3e2d67c0d9cb038e4708eefcaac3f34f99458b85c72`）：首次校验
+10.36 秒、读取全部 10.66 GB；紧接的重复校验 1.52 秒、内容重读 0 字节，所有文件
+均复用记录。这里只测文件校验，不能推定 Windows 机械盘耗时、整机启动耗时或推理质量。
+
+开发分支同时保留了客户侧启动修复所需的非阻塞命令管道处理，以及更新执行器绑定
+Git 提交、从已暂存的提交内容执行和 CRLF 检出兼容性，避免升级后重新引入旧启动问题。
+Windows 原生管道与缓存回归纳入跨平台 CI；4050 原机再次启动耗时仍需客户实测。
 
 ## 初始化停滞的诊断
 
@@ -51,6 +95,18 @@ git pull --ff-only
 CUDA 设备查询、设备属性、TensorRT 导入、CUDA 分配、FP16 运算、同步和释放。
 每一步有独立等待上限，完成后立即进入下一步，没有固定等待 15 分钟的行为。
 `nvidia-smi` 的调用另有 20 秒超时。
+
+桌面进程另有独立硬件检查看门狗：硬件入口或同一步骤最多等待 4 分钟，整个硬件
+检查最多 20 分钟。新步骤会获得自己的等待预算；重复步骤消息、普通日志不会续期。
+正常完成立即进入下一阶段。即使 Python 监督进程本身没有继续输出，桌面也会显示
+超时错误并请求退出，必要时只终止本次应用创建的进程树；不会自动重试。
+这层保护只覆盖硬件检查，不改变引擎构建、AI 服务验证或视频分析的超时策略。
+
+`Runtime/Logs` 位于包含 `VisionCortex.exe` 的安装目录，和 Git 代码目录不同。
+可直接点击窗口的「应用 → 打开诊断目录」。通过聊天附件回传诊断文件即可，
+不要把运行日志提交到代码仓库。若要确认更新是否实际应用，再提供安装目录的
+`BUNDLE-METADATA.json`；其中的 `source_git_commit` 才是已应用的 Git 源码版本。
+旧 R6 包可能没有该字段；仅看到文件夹名 R6 不能判断是否已更新。
 
 失败时保留以下文件及窗口报错，无需发送 Key 或原视频：
 
@@ -62,16 +118,18 @@ CUDA 设备查询、设备属性、TensorRT 导入、CUDA 分配、FP16 运算�
 前两份诊断文件在下一次硬件预检时更新，回传前先保留当前失败记录。检查失败不会
 生成新的成功回执；旧的 `target-preflight.json` 不能当作本次成功证明。
 
-截至 `6ebb97d` 的证据证明诊断、超时终止和源码更新的确定性合同；Windows/RTX 4050 原机执行
+当前改动证明诊断、超时终止和源码更新的确定性合同；Windows/RTX 4050 原机执行
 仍为 **NOT_PROVEN**。用户提供的三次等待态采样属于 **PARTIAL_EVIDENCE**，尚不足以
 认定具体库或驱动缺陷已定位或解决。真实视频质量和稳定发布资格另行验收。
 
-2026-09-09 已在本机复现另一处启动阻塞：后台线程持续等待标准输入，会让 NumPy
-导入停顿。修复以 `PeekNamedPipe` 检查已有字节，再作有界读取，保留关闭指令、父进程
-监控及所属进程树清理。独立硬件预检通过后，主进程也必须使用这一修复才能继续启动。
-原机修复快照已完成硬件、两个引擎、四个模型及桌面工作页面验证；证据绑定的源码快照、
-实测耗时、回归方法及分支整体运行仍缺少的验证，见
-[RTX 4050 启动修复复盘](RTX4050-STARTUP-REPAIR-20260909.md)。
+2026-09-09 回传的 293 字节 `desktop.log` 仅包含全包校验开始、硬件检查入口，
+没有任何硬件子步骤。它能证明程序已进入硬件检查，不能确认安装目录是否应用了
+分步检查修复，也不能确定具体阻塞库。需要已安装版本及硬件日志补齐证据。
+
+本次桌面监督改动的本地确定性检查：33 项 Node 桌面测试、44 项 Python 4050 硬件、
+部署与源码更新测试通过，JavaScript 语法及 diff 检查通过。新增回归模拟了监督
+进程无输出、重复进度、总预算耗尽和超时后的迟到成功消息；跨平台 CI 增加同组
+桌面测试。此结果不代表 Windows 原机上的 CUDA 初始化已成功。
 
 ## 本轮开发验证（2026-09-08）
 
