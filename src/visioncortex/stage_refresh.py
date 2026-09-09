@@ -23,7 +23,26 @@ def refresh(root: Path, scope: str, config: dict, *, target: str | None = None,
     calls = []
     source_decodes = 0
     dependencies = {}
-    if scope == "capture_quality":
+    if scope in {"result_check", "gap_review"}:
+        from .result_review import inspect, investigate
+        if inspect(root)["revision"] != revision:
+            raise ValueError("结果版本已经改变，请刷新后重试")
+        if scope == "gap_review":
+            result = investigate(root, config, target, revision)
+            calls = [result["result"]]
+            dependencies = {"window_id":target,"derived_frame_reads":result["derived_frame_reads"],
+                            "supplementary_observation_count":len(result["observations"]),
+                            "supplement_status":result["status"]}
+        checked = inspect(root, save=True)
+        dependencies.update(result_revision=checked["revision"], finding_count=len(checked["findings"]),
+                            step_consistency_passed=checked["step_consistency_passed"], full_quality_rechecked=False)
+    elif scope == "operations":
+        from .operation_review import refresh as refresh_operations
+        result = refresh_operations(root, config, revision)
+        calls = result["calls"]
+        dependencies = {key: result[key] for key in ("accepted_group_count", "group_count")}
+        dependencies["reports"] = "partial_only_quality_gate_not_recomputed"
+    elif scope == "capture_quality":
         from .capture_quality import inspect_archive
         capture = inspect_archive(root, {**config, "capture_quality": {**(config.get("capture_quality") or {}), "enabled": True}})
         source_decodes = sum(len(row["video_samples"])+len(row["audio_samples"]) for row in capture.get("records", []))

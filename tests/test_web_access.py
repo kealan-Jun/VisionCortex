@@ -197,8 +197,9 @@ def test_frontend_has_2k_4k_density_without_forcing_1080p_zoom():
     assert ".home-launchpad {" in large_screen
     assert ".library-card-grid { grid-template-columns: repeat(4" in large_screen
     assert "width: min(2100px,calc(100vw - 96px))" in large_screen
-    assert "styles.css?v=20260908-responsive-providers-70" in index
-    assert "app.js?v=20260908-responsive-providers-70" in index
+    style_version = index.split("styles.css?v=", 1)[1].split('"', 1)[0]
+    assert f"app.js?v={style_version}" in index
+    assert f"run-insights.js?v={style_version}" in index
 
     app_js = (web_root / "app.js").read_text(encoding="utf-8")
     assert "function bindHomeLaunchpad()" in app_js

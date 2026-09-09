@@ -1,3 +1,4 @@
+import hashlib
 import json
 
 from visioncortex import archive
@@ -162,6 +163,30 @@ def test_selected_frames_have_own_times_and_preserve_sequence(tmp_path):
     result = archive._with_selected_keyframe_review_images(layout, event, {"mllm": {}}, temporal)
     assert result[:3] == temporal and len(result) == 5
     assert all("sample_scope=selected_keyframe" in label and "requested_global_ms=1500.000; decoded_global_ms=1600.000" in label for label, _ in result[3:])
+
+
+def test_native_selected_frames_require_image_binding_and_preserve_uncertainty(tmp_path):
+    layout = archive.ArchiveLayout(tmp_path)
+    event = _event(ActionType.HAND_OBJECT_CONTACT)
+    root = _retained_frames(layout, event)
+    for view in ("fp", "tp"):
+        path = root / f"{view}.json"
+        meta = json.loads(path.read_text())
+        meta.update(
+            schema_version="visioncortex-key-material-annotation-input/2",
+            image_sha256=hashlib.sha256(path.with_suffix(".jpg").read_bytes()).hexdigest(),
+            source_frame_verification={
+                "status": "verified", "detections_bound_to_pixels": True,
+                "view_id": view, "decoded_global_ms": meta["decoded_key_global_ms"],
+            },
+        )
+        path.write_text(json.dumps(meta))
+    temporal = [("clip_timeline", tmp_path / "frame.jpg")]
+    result = archive._with_selected_keyframe_review_images(layout, event, {"mllm": {}}, temporal)
+    assert len(result) == 3
+    assert all("exact_frame_pts=verified; physical_cross_view_sync=unverified" in label for label, _ in result[1:])
+    (root / "tp.jpg").write_bytes(b"replaced image")
+    assert archive._with_selected_keyframe_review_images(layout, event, {"mllm": {}}, temporal) == temporal
 
 
 def test_stale_or_legacy_raw_frames_are_not_claimed_as_selected(tmp_path):

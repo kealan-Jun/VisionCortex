@@ -134,3 +134,74 @@ def test_loader_and_letterbox_transform_ignores_exactly_like_known_boxes(
     metadata.clear()
     with pytest.raises(ValueError, match="Missing"):
         dataset[0]
+
+
+@pytest.mark.parametrize("has_ignore", [False, True])
+@pytest.mark.parametrize("batch_size", [1, 2])
+@pytest.mark.parametrize("policy", ["native", "one2many"])
+def test_observation_matches_requested_loss_and_every_branch_gradient(tmp_path, has_ignore, batch_size, policy):
+    from visioncortex.project_branch_loss import BranchLossTrace, branch_loss_trace_usage
+    import json
+
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.parameter = torch.nn.Parameter(torch.zeros(1))
+            self.args = SimpleNamespace(box=7.5, cls=0.5, dfl=1.5, epochs=3)
+            self.model = [SimpleNamespace(stride=torch.tensor([8., 16., 32.]), nc=2, reg_max=16)]
+            self.end2end = True
+
+    model = Model()
+    native = make_ignore_criterion(model)
+    trace = BranchLossTrace(tmp_path / "branch-loss-trace.jsonl", 3, policy=policy)
+    observed = make_ignore_criterion(model, trace)
+    samples = tmp_path / "source-sampling-trace.jsonl"
+    for epoch in range(3):
+        trace.start_epoch(epoch)
+        def branch():
+            return dict(
+                boxes=torch.zeros((batch_size, 64, 84), requires_grad=True),
+                scores=torch.zeros((batch_size, 2, 84), requires_grad=True),
+                feats=[torch.zeros((batch_size, 1, n, n)) for n in (8, 4, 2)],
+            )
+        a = dict(one2many=branch(), one2one=branch())
+        b = dict(one2many=branch(), one2one=branch())
+        batch = dict(
+            img=torch.zeros((batch_size, 3, 64, 64)),
+            im_file=[str(tmp_path / f"training-{i}.png") for i in range(batch_size)],
+            batch_idx=torch.arange(batch_size), cls=torch.zeros((batch_size, 1)),
+            bboxes=torch.tensor([[0.5, 0.5, 0.8, 0.8]]).repeat(batch_size, 1),
+            ignore_xyxy_px=(torch.tensor([[0., 0., 32., 64.]]) if has_ignore else torch.empty((0, 4)),) * batch_size,
+        )
+        if policy == "one2many":
+            total_a = native.one2many.loss(a["one2many"], batch)[0]
+            items_a = native.one2one.loss(a["one2one"], batch)[1]
+        else:
+            total_a, items_a = native(a, batch)
+        total_b, items_b = observed(b, batch)
+        torch.testing.assert_close(total_a, total_b, atol=0, rtol=0)
+        torch.testing.assert_close(items_a, items_b, atol=0, rtol=0)
+        total_a.sum().backward()
+        total_b.sum().backward()
+        for name in ["one2many", "one2one"]:
+            for field in ["boxes", "scores"]:
+                if policy == "one2many" and name == "one2one":
+                    assert a[name][field].grad is None and b[name][field].grad is None
+                else:
+                    torch.testing.assert_close(a[name][field].grad, b[name][field].grad, atol=0, rtol=0)
+        assert loss_usage(native) == loss_usage(observed)
+        with samples.open("a") as f:
+            f.write(json.dumps(dict(epoch=epoch, files=batch["im_file"])) + "\n")
+        native.update()
+        observed.update()
+    usage = branch_loss_trace_usage(trace.path, samples, expected_epochs=3, expected_policy=policy)
+    assert usage["calls"] == 3
+    assert usage["image_visits"] == 3 * batch_size
+    expected = [.8, .45, .1] if policy == "native" else [1., 1., 1.]
+    assert [r["gains"]["one2many"] for r in usage["per_epoch"]] == pytest.approx(expected)
+    with torch.no_grad(), pytest.raises(ValueError, match="validation"):
+        observed(b, batch)
+    with pytest.raises(ValueError, match="consecutive"):
+        trace.start_epoch(0)
+    with pytest.raises(FileExistsError):
+        BranchLossTrace(trace.path, 3)

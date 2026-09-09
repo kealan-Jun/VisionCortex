@@ -699,6 +699,15 @@ def refine_groups_from_final_events(
             }
         )
         group.model_understanding = refined
+        from .operation_review import coverage
+        refined["operation_coverage"] = coverage(group.model_dump(mode="json"), steps)
+        # A completed naming/step request is not an experiment-end receipt.
+        # This applies to every future run, including profiles that skip the
+        # dedicated boundary pass. Preserve the original response above.
+        if group.completion_status != "observed_complete":
+            refined["boundary_assessment"] = {**(refined.get("boundary_assessment") or {}),
+                "end_complete": False, "localized_rescan_needed": True,
+                "end_reason": group.completion_reason or "尚未取得实验完成的边界复核证据"}
         title_violations = [
             item for item in validate_final_step_action_consistency([group], events)["violations"]
             if item["field"] in {"experiment_name", "understanding.experiment_name"}
@@ -906,7 +915,8 @@ def validate_final_step_action_consistency(
         after_denial = re.match(
             r"(?:状态|动作)?(?:不可|无法|不能|未能|尚未|未)"
             r"(?:确认|判断|观察到|看见|证明|辨认)"
-            r"|(?:不可见|未见|不确定|是否发生不可确认)"
+            r"|(?:不可见|不可读|无法读取|不能读取|未见|不确定|是否发生不可确认)"
+            r"|是否(?:已)?(?:发生|完成)[^，。；！？]{0,8}(?:无法|不能|未能)确认"
             r"|(?:完成|发生)(?:均|都)?(?:未见|未看到|未观察到|无法确认)"
             r"|(?:动作)?正在进行(?=，未(?:看到|看见|观察到|见))"
             r"|(?:(?:或|、)[^，。；！？或、]{1,8}){0,3}"
@@ -2014,6 +2024,11 @@ class EvidencePipeline:
                         "usage": candidate.get("usage", {}),
                     })
             understanding = group.model_understanding or {}
+            for candidate in (understanding.get("operation_review") or {}).get("calls", []):
+                group_calls.append({"stage": "operation_review", "group_id": group.group_id,
+                    **{key: candidate.get(key) for key in ("provider", "model", "request_id", "response_model", "status", "latency_seconds", "attempts", "input_fingerprint")},
+                    "cache_reused": bool(candidate.get("cache_reused")),
+                    "attempt_receipts": candidate.get("attempt_receipts", []), "usage": candidate.get("usage", {})})
             candidates = [
                 (
                     "experiment_group_understanding_pre_curation",
@@ -4537,7 +4552,14 @@ class EvidencePipeline:
         else:
             bottleneck = "mixed_or_balanced"
             next_action = "use per-role telemetry before changing concurrency"
+        component_reports = [r["component_timings"] for r in role_reports if r.get("component_timings")]
+        component_keys = {k for r in component_reports for k, v in r.items()
+                          if isinstance(v, (int, float)) and not isinstance(v, bool)}
+        components = {k: round(sum(r.get(k, 0) for r in component_reports), 6) for k in component_keys}
         bottleneck_diagnosis = {
+            "component_timings": components,
+            "component_profiled_workers": len(component_reports),
+            "component_expected_workers": len(role_reports),
             "classification": bottleneck,
             "next_action": next_action,
             "observed_role_seconds": round(observed_seconds, 6),
@@ -6651,6 +6673,9 @@ class EvidencePipeline:
             # adjudication, so rebuild them deterministically instead of paying
             # for a duplicate group MLLM pass over the same evidence.
             refine_groups_from_final_events(groups, key_events)
+            if self.config.get("mllm", {}).get("enabled") and self.config["mllm"].get("operation_review", {}).get("enabled", False):
+                from .operation_review import review
+                review(layout.root, groups, key_events, self.config)
             normalize_final_group_action_language(groups, key_events)
             for group in groups:
                 for segment in segments:
@@ -6714,6 +6739,8 @@ class EvidencePipeline:
             quality_acceptance = self._run_quality_acceptance(
                 layout, groups, key_events
             )
+            from .result_review import inspect as inspect_result_completeness
+            inspect_result_completeness(layout.root, save=True)
             if quality_acceptance.get("passed") is not True:
                 return self._finish_quality_attention(layout, events, groups)
             # A successful retry must not publish the previous attempt's

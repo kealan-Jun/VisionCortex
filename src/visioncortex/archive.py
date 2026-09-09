@@ -8,6 +8,7 @@ import math
 import os
 import re
 import shutil
+import subprocess
 import threading
 import time
 import uuid
@@ -54,6 +55,7 @@ from .mllm import (
 )
 from .mllm_provider import vision_request_identity
 from .speech_semantics import SpeechContext, prompt_with_speech
+from .source_frames import read_evidence_frame
 from .material_naming import (
     ACTION_CATEGORY_FOLDERS,
     key_material_action_folder,
@@ -666,6 +668,8 @@ def materialize_experiment_clips(
     config: dict[str, Any],
     publisher: Any | None = None,
 ) -> None:
+    from .workflow_video import materialize_third_person_timeline, routed_intervals
+
     by_view = {view.view_id: view for view in views}
     by_segment = {segment.segment_id: segment for segment in segments}
     encoder = config["performance"]["ffmpeg_video_encoder"]
@@ -710,6 +714,7 @@ def materialize_experiment_clips(
                 "global_end_ms": group.global_end_ms,
                 "layout": "first_person_left,third_person_right",
                 "grid_shape": "2x1@640x360_each",
+                "view_timeline": group.view_timeline,
             },
             [path for _, path in aligned_inputs],
             config,
@@ -726,13 +731,11 @@ def materialize_experiment_clips(
                 "layout": "first_person_left, third_person_right",
                 "global_start_ms": group.global_start_ms,
                 "global_end_ms": group.global_end_ms,
-                "views": [group.first_person_view, group.third_person_view],
+                "views": group.participating_views,
+                "view_timeline": group.view_timeline,
                 "alignments": {
                     view_id: transforms[view_id].model_dump(mode="json")
-                    for view_id in (
-                        group.first_person_view,
-                        group.third_person_view,
-                    )
+                    for view_id in group.participating_views
                 },
                 "atomic_experiments": [
                     by_segment[item].model_dump(mode="json")
@@ -769,6 +772,18 @@ def materialize_experiment_clips(
 
         def extract_role(role_label: str, view_id: str) -> dict[str, Any]:
             started = time.perf_counter()
+            if role_label == "Third-Person" and group.view_timeline:
+                destination = videos_dir / f"{role_label}.mp4"
+                rows = routed_intervals(group)
+                source_ids = sorted({row["third_person_view"] for row in rows if row.get("third_person_view")})
+                cache = _materialize_derived_media(
+                    destination, "workflow-third-person-timeline",
+                    {"timeline": rows, "alignments": {v: transforms[v].model_dump(mode="json") for v in source_ids}},
+                    [p for v in source_ids for p in view_source_files(by_view[v])], config,
+                    lambda: materialize_third_person_timeline(group, by_view, infos, transforms, destination, encoder))
+                return {"group_id": group.group_id, "role_label": role_label, "view_id": "routed",
+                        "duration_seconds": round(time.perf_counter() - started, 6),
+                        "output_bytes": destination.stat().st_size, **cache}
             view = by_view[view_id]
             transform = transforms[view_id]
             local_start = max(0.0, transform.to_local(group.global_start_ms))
@@ -857,6 +872,11 @@ def materialize_experiment_clips(
                     by_segment[item].model_dump(mode="json") for item in group.atomic_experiment_ids
                 ],
             }
+            if role_label == "Third-Person" and group.view_timeline:
+                metadata.update(view_id=None, alignment=None, local_start_ms=None, local_end_ms=None,
+                                view_timeline=group.view_timeline,
+                                alignments={v: transforms[v].model_dump(mode="json")
+                                            for v in group.participating_views})
             json_path = json_dir / f"{base}.json"
             write_json(json_path, metadata)
             if publisher is not None:
@@ -874,10 +894,9 @@ def materialize_experiment_clips(
         group.video_json["aligned_first_third"] = _relative(aligned_json, layout.root)
         for segment_id in group.atomic_experiment_ids:
             segment = by_segment[segment_id]
-            segment.clips = {
-                group.first_person_view: group.videos["first-person"],
-                group.third_person_view: group.videos["third-person"],
-            }
+            segment.clips = {group.first_person_view: group.videos["first-person"]}
+            if not group.view_timeline:
+                segment.clips[group.third_person_view] = group.videos["third-person"]
             segment.aligned_multiview_clip = group.videos["aligned_first_third"]
         aligned_arguments = (
             group,
@@ -1047,10 +1066,14 @@ def analyze_experiment_groups(
                 _storyboard_times(group, group_events, pair_limit, atomic), 1
             ):
                 role_paths: dict[str, Path] = {}
+                from .boundary_review import third_person_at
+                sampled_third = third_person_at(group, global_ms)
                 for role_label, view_id in (
                     ("first_person", group.first_person_view),
-                    ("third_person", group.third_person_view),
+                    ("third_person", sampled_third),
                 ):
+                    if view_id is None:
+                        continue
                     local_ms = transforms[view_id].to_local(global_ms)
                     if not 0.0 <= local_ms <= infos[view_id].duration_ms:
                         continue
@@ -1070,25 +1093,44 @@ def analyze_experiment_groups(
                         aligned,
                         (
                             f"First-Person {group.first_person_view}",
-                            f"Third-Person {group.third_person_view}",
+                            f"Third-Person {sampled_third}",
                         ),
                     )
                     storyboard.append(
                         (
                             f"t={global_ms:.3f}ms; aligned_first_third; "
-                            f"first={group.first_person_view}; third={group.third_person_view}",
+                            f"first={group.first_person_view}; third={sampled_third}",
                             aligned,
                         )
                     )
+                elif "first_person" in role_paths:
+                    storyboard.append((f"t={global_ms:.3f}ms; first={group.first_person_view}; "
+                                       "third_person_correspondence_unverified", role_paths["first_person"]))
         if len(storyboard) < 2:
             raise RuntimeError(
                 f"{group.group_id} has fewer than two complete aligned storyboard pairs"
             )
         from .speech_refresh import retain_group_inputs
         retain_group_inputs(layout, group, storyboard, config)
+        if group.boundary_reviews:
+            retained = []
+            directory = layout.json_config / "Workflow-Storyboards" / group.group_id
+            directory.mkdir(parents=True, exist_ok=True)
+            for label, image_path in storyboard:
+                digest = _sha256_file(image_path)
+                target = directory / f"{digest}.jpg"
+                if not target.exists():
+                    shutil.copyfile(image_path, target)
+                retained.append({"label": label, "image": _relative(target, layout.root), "sha256": digest})
+            write_json(directory / "manifest.json", {"group_uid": group.group_uid, "samples": retained,
+                "policy": "model understanding inputs; not human ground truth"})
         semantic_evidence = {
             "continuity_type": group.continuity_type,
             "continuity_reason": group.continuity_reason,
+            "workflow_kind": group.workflow_kind,
+            "workflow_units": group.workflow_units,
+            "completion_status": group.completion_status,
+            "view_timeline": group.view_timeline,
             "global_start_ms": group.global_start_ms,
             "global_end_ms": group.global_end_ms,
             "first_person_view": group.first_person_view,
@@ -1163,7 +1205,14 @@ def analyze_experiment_groups(
             for future in as_completed(futures):
                 group, result = future.result()
                 semantic_results.append((group.group_id, result))
+                if group.completion_status in {"unresolved", "ongoing_at_recording_end"}:
+                    result = dict(result)
+                    result["boundary_assessment"] = {**(result.get("boundary_assessment") or {}),
+                        "end_complete": False, "end_reason": group.completion_reason,
+                        "localized_rescan_needed": True}
                 group.model_understanding = result
+                from .boundary_review import apply_semantic_units
+                apply_semantic_units(group, result)
                 if result.get("status") == "completed":
                     group.experiment_name = str(
                         result.get("experiment_name") or group.experiment_name
@@ -1939,6 +1988,11 @@ def _artifact_json(
                 "view_id": view_id,
                 "view_role": role_for,
             },
+            "frame_sources": {
+                key: value
+                for key, value in (event.observability.get("key_frame_sources") or {}).items()
+                if view_id is None or key == view_id
+            } if artifact_type in {"key_frame", "aligned_first_third_key_frame"} else {},
             "cv": {
                 "action_type": pre_curation_action,
                 "objects": pre_curation_objects,
@@ -5687,6 +5741,20 @@ def _prune_replaced_key_material_views(event: EvidenceEvent, first_view: str, th
         setattr(event, field, {key: value for key, value in getattr(event, field).items() if key in expected})
 
 
+
+def _attempt_key_material(kind: str, generate: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+    """Contain one media failure without claiming its old output is current."""
+    started = time.perf_counter()
+    try:
+        return {**generate(), "status": "completed", "artifact_kind": kind}
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError, cv2.error) as error:
+        return {
+            "status": "failed", "artifact_kind": kind,
+            "error_type": type(error).__name__, "error": str(error)[:2000],
+            "duration_seconds": round(time.perf_counter() - started, 6),
+            "retryable": True,
+        }
+
 def materialize_key_materials(
     layout: ArchiveLayout,
     events: Sequence[EvidenceEvent],
@@ -6012,99 +6080,108 @@ def materialize_key_materials(
     )
     aligned_jobs: list[Any] = []
 
+    def register_artifact(event, group, artifact_type, view_id, result, field):
+        mapping = getattr(event, field)
+        key = view_id or "aligned_first_third"
+        path = result.get("frame_path" if field == "key_frames" else "clip_path")
+        if result["status"] != "completed" or path is None:
+            previous = mapping.pop(key, None)
+            if previous:
+                event.observability.setdefault("key_material_unavailable_history", []).append({
+                    "view_id": key, "artifact_type": artifact_type, "previous_path": previous,
+                    "reason": result.get("error") or result.get("reason"),
+                    "previous_file_retained": True,
+                })
+            return None
+        path = Path(path)
+        relative = _relative(path, layout.root)
+        mapping[key] = relative
+        sidecar = path.with_suffix(".json")
+        write_json(sidecar, _artifact_json(group, event, artifact_type, relative, view_id, transforms, archive_id))
+        if publisher is not None:
+            publisher.publish_file(path)
+            publisher.publish_file(sidecar)
+        return path
+
     def materialize_aligned(
-        event: EvidenceEvent,
-        group: ExperimentGroup,
-        action_folder: str,
-        frame_dir: Path,
-        clip_dir: Path,
-        first_material_view: str,
-        third_material_view: str,
-        frame_paths: dict[str, Path],
-        clip_paths: dict[str, Path],
-        event_started: float,
-    ) -> dict[str, Any]:
+        event, group, action_folder, frame_dir, clip_dir, first_material_view,
+        third_material_view, frame_paths, clip_paths, event_started,
+    ):
         aligned_started = time.perf_counter()
         aligned_frame = frame_dir / "Aligned_First+Third.jpg"
-        _write_aligned_frame(
-            frame_paths["First-Person"],
-            frame_paths["Third-Person"],
-            aligned_frame,
-            (first_material_view, third_material_view),
-        )
-        aligned_frame_relative = _relative(aligned_frame, layout.root)
-        event.key_frames["aligned_first_third"] = aligned_frame_relative
-        aligned_frame_json = frame_dir / "Aligned_First+Third.json"
-        write_json(
-            aligned_frame_json,
-            _artifact_json(
-                group,
-                event,
-                "aligned_first_third_key_frame",
-                aligned_frame_relative,
-                None,
-                transforms,
-                archive_id,
-            ),
-        )
         aligned_clip = clip_dir / "Aligned_First+Third.mp4"
-        aligned_inputs = [
-            (first_material_view, clip_paths["First-Person"]),
-            (third_material_view, clip_paths["Third-Person"]),
-        ]
-        aligned_cache = _materialize_derived_media(
-            aligned_clip,
-            "key-aligned-clip",
-            {
-                "event_id": event.event_id,
-                "global_start_ms": max(event.global_start_ms - before, 0.0),
-                "global_end_ms": event.global_end_ms + after,
-                "layout": "first_person_left,third_person_right",
-                "grid_shape": "2x1@640x360_each",
-            },
-            [path for _, path in aligned_inputs],
-            config,
-            lambda: create_grid_video(aligned_inputs, aligned_clip, encoder),
-            content_address_inputs=True,
+
+        def generate_frame():
+            _generate_detached_media(aligned_frame, lambda: _write_aligned_frame(
+                frame_paths["First-Person"], frame_paths["Third-Person"], aligned_frame,
+                (first_material_view, third_material_view),
+            ))
+            return {"frame_path": aligned_frame, "frame_output_bytes": aligned_frame.stat().st_size}
+
+        def generate_clip():
+            aligned_inputs = [
+                (first_material_view, clip_paths["First-Person"]),
+                (third_material_view, clip_paths["Third-Person"]),
+            ]
+            cache = _materialize_derived_media(
+                aligned_clip, "key-aligned-clip",
+                {"event_id": event.event_id,
+                 "global_start_ms": max(event.global_start_ms - before, 0.0),
+                 "global_end_ms": event.global_end_ms + after,
+                 "layout": "first_person_left,third_person_right", "grid_shape": "2x1@640x360_each"},
+                [path for _, path in aligned_inputs], config,
+                lambda: create_grid_video(aligned_inputs, aligned_clip, encoder),
+                content_address_inputs=True,
+            )
+            return {"clip_path": aligned_clip, "clip_output_bytes": aligned_clip.stat().st_size, **cache}
+
+        def attempt_pair(kind, paths, generate):
+            missing = sorted({"First-Person", "Third-Person"} - paths.keys())
+            if missing:
+                return {"status": "unavailable", "artifact_kind": kind,
+                        "reason": "missing_source_material", "missing_roles": missing, "retryable": True}
+            return _attempt_key_material(kind, generate)
+
+        frame_result = attempt_pair("aligned_key_frame", frame_paths, generate_frame)
+        clip_result = attempt_pair("aligned_key_clip", clip_paths, generate_clip)
+        results = event.observability["key_material_materialization"]["artifacts"]
+        results["aligned_first_third"] = {"key_frame": frame_result, "key_clip": clip_result}
+        # Do not preserve Path objects in event state/checkpoint serialization.
+        results["aligned_first_third"] = {
+            kind: {k: v for k, v in item.items() if k not in {"frame_path", "clip_path"}}
+            for kind, item in results["aligned_first_third"].items()
+        }
+        complete = all(item["status"] == "completed" for view in results.values() for item in view.values())
+        event.observability["key_material_materialization"].update(
+            status="completed" if complete else "partial", retry_required=not complete,
+            analysis_continuation_allowed=True,
         )
-        aligned_clip_relative = _relative(aligned_clip, layout.root)
-        event.key_clips["aligned_first_third"] = aligned_clip_relative
-        aligned_clip_json = clip_dir / "Aligned_First+Third.json"
-        write_json(
-            aligned_clip_json,
-            _artifact_json(
-                group,
-                event,
-                "aligned_first_third_key_clip",
-                aligned_clip_relative,
-                None,
-                transforms,
-                archive_id,
-            ),
-        )
-        if publisher is not None:
-            for artifact in (
-                aligned_frame,
-                aligned_frame_json,
-                aligned_clip,
-                aligned_clip_json,
-            ):
-                publisher.publish_file(artifact)
+        register_artifact(event, group, "aligned_first_third_key_frame", None, frame_result, "key_frames")
+        register_artifact(event, group, "aligned_first_third_key_clip", None, clip_result, "key_clips")
+        # Finalize all surviving sidecars with the same completion state and
+        # current media references after both role and composition attempts.
+        for field, kind in (("key_frames", "key_frame"), ("key_clips", "key_clip")):
+            for view_id, relative in getattr(event, field).items():
+                aligned = view_id == "aligned_first_third"
+                sidecar = (layout.root / relative).with_suffix(".json")
+                write_json(sidecar, _artifact_json(
+                    group, event, f"aligned_first_third_{kind}" if aligned else kind,
+                    relative, None if aligned else view_id, transforms, archive_id,
+                ))
+                if publisher is not None:
+                    publisher.publish_file(sidecar)
         return {
-            "event_id": event.event_id,
-            "experiment_group_id": group.group_id,
-            "action_type": event.action_type.value,
-            "action_category_folder": action_folder,
-            "role_label": "Aligned-First-Third",
-            "view_id": "aligned_first_third",
+            "event_id": event.event_id, "experiment_group_id": group.group_id,
+            "action_type": event.action_type.value, "action_category_folder": action_folder,
+            "role_label": "Aligned-First-Third", "view_id": "aligned_first_third",
             "duration_seconds": round(time.perf_counter() - aligned_started, 6),
-            "frame_output_bytes": aligned_frame.stat().st_size,
-            "clip_output_bytes": aligned_clip.stat().st_size,
-            "event_wall_duration_seconds": round(
-                time.perf_counter() - event_started, 6
-            ),
+            "frame_output_bytes": frame_result.get("frame_output_bytes", 0),
+            "clip_output_bytes": clip_result.get("clip_output_bytes", 0),
+            "event_wall_duration_seconds": round(time.perf_counter() - event_started, 6),
             "overlapped_with_next_event": overlap_aligned,
-            **aligned_cache,
+            **{k: v for k, v in clip_result.items() if k.startswith("cache_")},
+            "artifact_results": results["aligned_first_third"],
+            "status": "completed" if complete else "partial",
         }
 
     selected_event_ids = {event.event_id for event in accepted_events}
@@ -6160,135 +6237,171 @@ def materialize_key_materials(
                 if material_source == "verified_local_experiment_clip"
                 else None
             )
-            if not 0.0 <= local_key_ms < material_info.duration_ms:
-                raise ValueError(
-                    f"{event.event_id}/{view_id} key timestamp is outside the material source"
-                )
-            frame_started = time.perf_counter()
-            frame = None
-            used_offset_ms = 0.0
-            frame_reader = frame_readers[view_id]
-            for offset_ms in (0.0, -100.0, 100.0, -250.0, 250.0):
-                candidate_ms = local_key_ms + offset_ms
-                if not 0.0 <= candidate_ms <= material_info.duration_ms:
-                    continue
-                frame = frame_reader.read(
-                    material_view, material_info, candidate_ms
-                )
+            def generate_frame():
+                if not 0.0 <= local_key_ms < material_info.duration_ms:
+                    raise ValueError(
+                        f"{event.event_id}/{view_id} key timestamp is outside the material source"
+                    )
+                frame_started = time.perf_counter()
+                nearest = nearest_by_view[view_id].get(float(event.key_global_ms))
+                frame, frame_provenance = read_evidence_frame(view, infos[view_id], nearest)
+                decoded_key_global_ms = None
+                used_offset_ms = 0.0
                 if frame is not None:
-                    used_offset_ms = offset_ms
-                    break
-            if frame is None:
-                raise RuntimeError(f"{event.event_id}/{view_id} key frame decode failed")
-            frame_seconds = time.perf_counter() - frame_started
-            nearest = nearest_by_view[view_id].get(float(event.key_global_ms))
-            detected_boxes = (
-                [box.model_dump() for box in nearest.detections] if nearest else []
-            )
-            annotation_input_root = (
-                layout.work / "key-material-annotation-inputs" / event.event_id
-            )
-            annotation_input_root.mkdir(parents=True, exist_ok=True)
-            raw_annotation_frame = annotation_input_root / f"{role_label}.jpg"
-            if not cv2.imwrite(
-                str(raw_annotation_frame),
-                frame,
-                [cv2.IMWRITE_JPEG_QUALITY, 95],
-            ):
-                raise RuntimeError(
-                    f"Unable to retain raw key-material annotation frame: {raw_annotation_frame}"
+                    decoded_key_global_ms = transform.to_global(frame_provenance["view_local_ms"])
+                    if not clip_start_global <= decoded_key_global_ms < clip_end_global:
+                        frame = None
+                        decoded_key_global_ms = None
+                        frame_provenance.update(
+                            status="unverified", reason="native_frame_outside_event_context",
+                            detections_bound_to_pixels=False,
+                        )
+                    else:
+                        used_offset_ms = decoded_key_global_ms - event.key_global_ms
+                if frame is None:
+                    frame_reader = frame_readers[view_id]
+                    for offset_ms in (0.0, -100.0, 100.0, -250.0, 250.0):
+                        candidate_ms = local_key_ms + offset_ms
+                        if not 0.0 <= candidate_ms <= material_info.duration_ms:
+                            continue
+                        frame = frame_reader.read(
+                            material_view, material_info, candidate_ms
+                        )
+                        if frame is not None:
+                            used_offset_ms = offset_ms
+                            break
+                if frame is None:
+                    raise RuntimeError(f"{event.event_id}/{view_id} key frame decode failed")
+                frame_seconds = time.perf_counter() - frame_started
+                detected_boxes = (
+                    [box.model_dump() for box in nearest.detections]
+                    if nearest and frame_provenance["detections_bound_to_pixels"] else []
                 )
-            write_json(
-                annotation_input_root / f"{role_label}.json",
-                {
-                    "schema_version": "visioncortex-key-material-annotation-input/1",
-                    "event_id": event.event_id,
-                    "view_id": view_id,
-                    "role_label": role_label,
-                    "requested_key_global_ms": float(event.key_global_ms),
-                    "decoded_key_global_ms": (
-                        transform.to_global(material_source_selection["experiment_source_local_start_ms"] + local_key_ms + used_offset_ms)
-                        if material_source == "verified_local_experiment_clip"
-                        else transform.to_global(local_key_ms + used_offset_ms)
-                    ),
-                    "key_frame_time_basis": (
-                        "verified_experiment_clip_relative_time; source_frame_pts_not_recorded"
-                        if material_source == "verified_local_experiment_clip"
-                        else "decoder_seek_target; source_frame_pts_not_recorded"
-                    ),
-                    "material_source": material_source,
-                    "material_source_path": material_source_path,
-                    "material_source_selection": material_source_selection,
-                    "upstream_source_files": [
-                        str(path) for path in view_source_files(view)
-                    ],
-                    "frame_decode_offset_ms": used_offset_ms,
-                    "detections": detected_boxes,
-                    "retention": "existing_persistent_run_cache",
-                    "formally_published": False,
-                },
-            )
-            boxes, annotation_filter = _event_participant_boxes(
-                event, detected_boxes, view_id=view_id
-            )
-            base = role_label
-            frame_path = frame_dir / f"{base}.jpg"
-            write_annotated_frame(frame, boxes, frame_path)
-            if local_end <= local_start:
-                raise ValueError(
-                    f"{event.event_id}/{view_id} key clip boundary is outside the material source"
+                frame_provenance["decoded_global_ms"] = decoded_key_global_ms
+                frame_provenance["alignment_uncertainty_ms"] = transform.uncertainty_ms
+                frame_provenance["physical_cross_view_sync_verified"] = False
+                frame_provenance["display_source"] = (
+                    "verified_native_source_frame"
+                    if frame_provenance["detections_bound_to_pixels"] else material_source
                 )
-            clip_path = clip_dir / f"{base}.mp4"
-            clip_started = time.perf_counter()
-            clip_cache = _materialize_derived_media(
-                clip_path,
-                "key-view-clip",
-                {
-                    "event_id": event.event_id,
-                    "role_label": role_label,
-                    "view_id": view_id,
-                    "local_start_ms": local_start,
-                    "local_end_ms": local_end,
-                    "global_start_ms": clip_start_global,
-                    "global_end_ms": clip_end_global,
-                    "material_source": material_source,
-                },
-                view_source_files(material_view),
-                config,
-                lambda: extract_view_clip(
-                    material_view,
-                    material_info,
+                annotation_input_root = (
+                    layout.work / "key-material-annotation-inputs" / event.event_id
+                )
+                annotation_input_root.mkdir(parents=True, exist_ok=True)
+                raw_annotation_frame = annotation_input_root / f"{role_label}.jpg"
+                if not cv2.imwrite(
+                    str(raw_annotation_frame),
+                    frame,
+                    [cv2.IMWRITE_JPEG_QUALITY, 95],
+                ):
+                    raise RuntimeError(
+                        f"Unable to retain raw key-material annotation frame: {raw_annotation_frame}"
+                    )
+                write_json(
+                    annotation_input_root / f"{role_label}.json",
+                    {
+                        "schema_version": "visioncortex-key-material-annotation-input/2",
+                        "event_id": event.event_id,
+                        "view_id": view_id,
+                        "role_label": role_label,
+                        "requested_key_global_ms": float(event.key_global_ms),
+                        "decoded_key_global_ms": decoded_key_global_ms,
+                        "seek_target_global_ms": (
+                            None if decoded_key_global_ms is not None else
+                            transform.to_global(material_source_selection["experiment_source_local_start_ms"] + local_key_ms + used_offset_ms)
+                            if material_source == "verified_local_experiment_clip"
+                            else transform.to_global(local_key_ms + used_offset_ms)
+                        ),
+                        "key_frame_time_basis": (
+                            "verified_native_frame_with_alignment_transform"
+                            if frame_provenance["detections_bound_to_pixels"]
+                            else "decoder_seek_target_only; actual_frame_time_unverified"
+                        ),
+                        "source_frame_verification": frame_provenance,
+                        "image_sha256": hashlib.sha256(raw_annotation_frame.read_bytes()).hexdigest(),
+                        "material_source": frame_provenance["display_source"],
+                        "material_source_path": (
+                            str(nearest.source_frame.source_path)
+                            if frame_provenance["detections_bound_to_pixels"] else material_source_path
+                        ),
+                        "clip_material_source_selection": material_source_selection,
+                        "upstream_source_files": [
+                            str(path) for path in view_source_files(view)
+                        ],
+                        "frame_decode_offset_ms": used_offset_ms,
+                        "detections": detected_boxes,
+                        "retention": "existing_persistent_run_cache",
+                        "formally_published": False,
+                    },
+                )
+                boxes, annotation_filter = _event_participant_boxes(
+                    event, detected_boxes, view_id=view_id
+                )
+                annotation_filter["source_frame_verification"] = frame_provenance
+                base = role_label
+                frame_path = frame_dir / f"{base}.jpg"
+                _generate_detached_media(
+                    frame_path, lambda: write_annotated_frame(frame, boxes, frame_path)
+                )
+                return {
+                    "frame_path": frame_path, "frame_decode_offset_ms": used_offset_ms,
+                    "frame_duration_seconds": round(frame_seconds, 6),
+                    "frame_output_bytes": frame_path.stat().st_size,
+                    "annotation_filter": annotation_filter,
+                    "source_frame_verification": frame_provenance,
+                }
+
+            def generate_clip():
+                if local_end <= local_start:
+                    raise ValueError(
+                        f"{event.event_id}/{view_id} key clip boundary is outside the material source"
+                    )
+                clip_path = clip_dir / f"{role_label}.mp4"
+                clip_started = time.perf_counter()
+                clip_cache = _materialize_derived_media(
                     clip_path,
-                    local_start,
-                    local_end - local_start,
-                    encoder,
-                ),
-            )
-            clip_seconds = time.perf_counter() - clip_started
+                    "key-view-clip",
+                    {
+                        "event_id": event.event_id,
+                        "role_label": role_label,
+                        "view_id": view_id,
+                        "local_start_ms": local_start,
+                        "local_end_ms": local_end,
+                        "global_start_ms": clip_start_global,
+                        "global_end_ms": clip_end_global,
+                        "material_source": material_source,
+                    },
+                    view_source_files(material_view),
+                    config,
+                    lambda: extract_view_clip(
+                        material_view,
+                        material_info,
+                        clip_path,
+                        local_start,
+                        local_end - local_start,
+                        encoder,
+                    ),
+                )
+                clip_seconds = time.perf_counter() - clip_started
+                return {
+                    "clip_path": clip_path, "clip_duration_seconds": round(clip_seconds, 6),
+                    "clip_source_duration_seconds": round((local_end - local_start) / 1000.0, 6),
+                    "clip_output_bytes": clip_path.stat().st_size, **clip_cache,
+                }
+
+            frame_result = _attempt_key_material("key_frame", generate_frame)
+            clip_result = _attempt_key_material("key_clip", generate_clip)
             return {
-                "event_id": event.event_id,
-                "experiment_group_id": group.group_id,
-                "action_type": event.action_type.value,
-                "action_category_folder": action_folder,
-                "role_label": role_label,
-                "view_id": view_id,
-                "frame_path": frame_path,
-                "clip_path": clip_path,
-                "frame_decode_offset_ms": used_offset_ms,
-                "material_source": material_source,
-                "material_source_path": material_source_path,
+                "event_id": event.event_id, "experiment_group_id": group.group_id,
+                "action_type": event.action_type.value, "action_category_folder": action_folder,
+                "role_label": role_label, "view_id": view_id,
+                "material_source": material_source, "material_source_path": material_source_path,
                 "material_source_selection": material_source_selection,
-                "upstream_source_files": [
-                    str(path) for path in view_source_files(view)
-                ],
-                "frame_duration_seconds": round(frame_seconds, 6),
-                "clip_duration_seconds": round(clip_seconds, 6),
+                "upstream_source_files": [str(path) for path in view_source_files(view)],
                 "duration_seconds": round(time.perf_counter() - role_started, 6),
-                "clip_source_duration_seconds": round((local_end - local_start) / 1000.0, 6),
-                "frame_output_bytes": frame_path.stat().st_size,
-                "clip_output_bytes": clip_path.stat().st_size,
-                "annotation_filter": annotation_filter,
-                **clip_cache,
+                **{k: v for item in (frame_result, clip_result) for k, v in item.items()
+                   if k not in {"status", "artifact_kind", "duration_seconds", "error", "error_type", "retryable"}},
+                "frame_result": frame_result, "clip_result": clip_result,
             }
 
         role_results: dict[str, dict[str, Any]] = {}
@@ -6297,78 +6410,70 @@ def materialize_key_materials(
             thread_name_prefix="key-material-media",
         ) as executor:
             futures = {
-                role_label: executor.submit(extract_role, role_label, view_id)
+                role_label: executor.submit(
+                    _attempt_key_material, "role",
+                    lambda role_label=role_label, view_id=view_id: extract_role(role_label, view_id),
+                )
                 for role_label, view_id in (
                     ("First-Person", first_material_view),
                     ("Third-Person", third_material_view),
                 )
             }
             for role_label, future in futures.items():
-                role_results[role_label] = future.result()
+                result = future.result()
+                if result["status"] == "failed":
+                    view_id = first_material_view if role_label == "First-Person" else third_material_view
+                    result = {
+                        "event_id": event.event_id, "experiment_group_id": group.group_id,
+                        "action_type": event.action_type.value, "action_category_folder": action_folder,
+                        "role_label": role_label, "view_id": view_id,
+                        "frame_result": {**result, "artifact_kind": "key_frame"},
+                        "clip_result": {**result, "artifact_kind": "key_clip"},
+                    }
+                role_results[role_label] = result
 
         _prune_replaced_key_material_views(event, first_material_view, third_material_view)
-        # Keep archive mutation and incremental publication ordered. Readers
-        # never see a sidecar before the corresponding media is complete.
+        event.observability["key_material_materialization"] = {
+            "schema_version": "visioncortex-key-material-completion/1", "status": "in_progress",
+            "analysis_continuation_allowed": True, "artifacts": {},
+        }
         for role_label, view_id in (
-            ("First-Person", first_material_view),
-            ("Third-Person", third_material_view),
+            ("First-Person", first_material_view), ("Third-Person", third_material_view),
         ):
             result = role_results[role_label]
-            frame_path = Path(result["frame_path"])
-            clip_path = Path(result["clip_path"])
-            relative_frame = _relative(frame_path, layout.root)
-            relative_clip = _relative(clip_path, layout.root)
-            event.key_frames[view_id] = relative_frame
-            event.key_clips[view_id] = relative_clip
-            frame_paths[role_label] = frame_path
-            clip_paths[role_label] = clip_path
-            if result["frame_decode_offset_ms"]:
-                event.uncertainty.append(
-                    f"{view_id} key frame decode offset {result['frame_decode_offset_ms']:+.0f} ms"
-                )
-            frame_json = frame_dir / f"{role_label}.json"
-            clip_json = clip_dir / f"{role_label}.json"
-            write_json(
-                frame_json,
-                _artifact_json(
-                    group,
-                    event,
-                    "key_frame",
-                    relative_frame,
-                    view_id,
-                    transforms,
-                    archive_id,
-                ),
-            )
-            write_json(
-                clip_json,
-                _artifact_json(
-                    group,
-                    event,
-                    "key_clip",
-                    relative_clip,
-                    view_id,
-                    transforms,
-                    archive_id,
-                ),
-            )
-            if publisher is not None:
-                for artifact in (frame_path, frame_json, clip_path, clip_json):
-                    publisher.publish_file(artifact)
-            runtime_records.append(
-                {
-                    key: value
-                    for key, value in result.items()
-                    if key not in {"frame_path", "clip_path"}
-                }
-            )
-            event.observability.setdefault(
-                "key_material_annotation", {
-                    "schema_version": "visioncortex-key-material-annotation/1",
-                    "mode": "event_participants_only",
-                    "views": {},
-                }
-            )["views"][view_id] = dict(result["annotation_filter"])
+            frame_result, clip_result = result["frame_result"], result["clip_result"]
+            artifact_results = {
+                kind: {k: v for k, v in item.items() if k not in {"frame_path", "clip_path"}}
+                for kind, item in (("key_frame", frame_result), ("key_clip", clip_result))
+            }
+            event.observability["key_material_materialization"]["artifacts"][view_id] = artifact_results
+            annotations = event.observability.setdefault("key_material_annotation", {
+                "schema_version": "visioncortex-key-material-annotation/1",
+                "mode": "event_participants_only", "views": {},
+            })["views"]
+            sources = event.observability.setdefault("key_frame_sources", {})
+            if frame_result["status"] == "completed":
+                sources[view_id] = frame_result["source_frame_verification"]
+                annotations[view_id] = frame_result["annotation_filter"]
+                offset = frame_result["frame_decode_offset_ms"]
+                note = f"{view_id} key frame decode offset {offset:+.0f} ms"
+                if offset and note not in event.uncertainty:
+                    event.uncertainty.append(note)
+            else:
+                sources.pop(view_id, None)
+                annotations.pop(view_id, None)
+            frame_path = register_artifact(event, group, "key_frame", view_id, frame_result, "key_frames")
+            clip_path = register_artifact(event, group, "key_clip", view_id, clip_result, "key_clips")
+            if frame_path is not None:
+                frame_paths[role_label] = frame_path
+            if clip_path is not None:
+                clip_paths[role_label] = clip_path
+            runtime_records.append({
+                **{key: value for key, value in result.items()
+                   if key not in {"frame_path", "clip_path", "frame_result", "clip_result"}},
+                "artifact_results": artifact_results,
+                "status": "completed" if all(x["status"] == "completed" for x in artifact_results.values()) else "partial",
+            })
 
         aligned_arguments = (
             event,
@@ -6461,10 +6566,26 @@ def materialize_key_materials(
             "duration_seconds": current_duration,
         }
     ]
+    combined_records = previous_records + runtime_records
+    incomplete_artifacts = [
+        {"event_id": record["event_id"], "view_id": record["view_id"],
+         "artifact_kind": kind, "status": item["status"],
+         "reason": item.get("error") or item.get("reason"), "retryable": True}
+        for record in combined_records
+        for kind, item in (record.get("artifact_results") or {}).items()
+        if item["status"] != "completed"
+    ]
+    materialization_passes[-1]["incomplete_artifacts"] = [
+        item for item in incomplete_artifacts if item["event_id"] in selected_event_ids
+    ]
     write_json(
         runtime_path,
         {
             "schema_version": "visioncortex-key-materialization-runtime/1",
+            "status": "partial" if incomplete_artifacts else "completed",
+            "incomplete_artifacts": incomplete_artifacts,
+            "retry_event_ids": sorted({item["event_id"] for item in incomplete_artifacts}),
+            "analysis_continuation_allowed": True,
             "workers": workers,
             "frame_reader_reuse": True,
             "frame_reader_count": len(frame_readers),
@@ -6496,7 +6617,7 @@ def materialize_key_materials(
             ),
             "last_pass_materialized_event_count": len(accepted_events),
             "materialization_passes": materialization_passes,
-            "records": previous_records + runtime_records,
+            "records": combined_records,
         },
     )
     if publisher is not None:
@@ -6619,13 +6740,28 @@ def _with_selected_keyframe_review_images(
             or not image_path.is_file()
         ):
             continue
+        native_verified = False
+        if meta.get("schema_version") == "visioncortex-key-material-annotation-input/2":
+            proof = meta.get("source_frame_verification") or {}
+            native_verified = bool(
+                proof.get("status") == "verified"
+                and proof.get("detections_bound_to_pixels") is True
+                and proof.get("view_id") == view_id
+                and proof.get("decoded_global_ms") == decoded
+                and hashlib.sha256(image_path.read_bytes()).hexdigest() == meta.get("image_sha256")
+            )
+            if not native_verified:
+                continue
         if view_id in selected:
             # Multiple candidate files cannot establish which raw image is current.
             return timeline_images
         selected[view_id] = (
             f"view_id={view_id}; sample_scope=selected_keyframe; "
             f"requested_global_ms={requested:.3f}; decoded_global_ms={decoded:.3f}; "
-            "time_basis=decoder_seek_target; exact_frame_pts=unverified",
+            + (
+                "time_basis=native_pts_with_alignment_transform; exact_frame_pts=verified; physical_cross_view_sync=unverified"
+                if native_verified else "time_basis=decoder_seek_target; exact_frame_pts=unverified"
+            ),
             image_path,
         )
     if set(selected) != set(views):

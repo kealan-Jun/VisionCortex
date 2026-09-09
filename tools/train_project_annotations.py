@@ -28,6 +28,10 @@ def main():
                    help="验证早停耐心；0 禁用早停，仍受 epochs 和时间上限约束")
     p.add_argument("--freeze-layers", type=int, default=10,
                    help="冻结前 N 层，范围 0–10；0 允许主干参与训练，默认保持 10")
+    p.add_argument("--trace-branch-loss", action="store_true",
+                   help="记录两个分支的实际训练损失/权重；仅用于区域外监督")
+    p.add_argument("--branch-loss-policy", choices=["native", "one2many"], default="native",
+                   help="默认原生目标；one2many 仅优化一对多分支，须启用分支记录并禁用早停")
     p.add_argument("--supervision", choices=["complete", "outside_ignore"], default="complete",
                    help="区域外训练仅接受独立部分监督导出及显式忽略区域")
     p.add_argument("--sampling-policy", choices=["image_uniform", "source_balanced"],
@@ -69,6 +73,8 @@ def main():
         warmup_bias_lr=a.warmup_bias_lr,
         patience=a.patience,
         freeze_layers=a.freeze_layers,
+        trace_branch_loss=a.trace_branch_loss,
+        branch_loss_policy=a.branch_loss_policy,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 

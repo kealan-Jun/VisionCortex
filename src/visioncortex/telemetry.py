@@ -12,6 +12,8 @@ from typing import Any
 
 import psutil
 
+from .run_insights import hardware_summary
+
 
 class _NvmlSampler:
     def __init__(self) -> None:
@@ -305,6 +307,8 @@ class ResourceMonitor:
                         "cpu_percent": psutil.cpu_percent(interval=None),
                         "memory_percent": memory.percent,
                         "memory_used_bytes": memory.used,
+                        "memory_total_bytes": memory.total,
+                        "sample_interval_seconds": elapsed,
                         "gpu": self._gpu(),
                         "host_network": {
                             "received_bytes_delta": network_received,
@@ -407,7 +411,7 @@ class ResourceMonitor:
                 sample["pipeline_process_tree_io"]["write_bytes_delta"] for sample in samples
             )
             summaries[stage] = summary
-        return {
+        report = {
             "schema_version": "visioncortex-resource-telemetry/2",
             "sample_count": len(self._samples),
             "sampling_interval_seconds": self.interval,
@@ -428,3 +432,5 @@ class ResourceMonitor:
             "stage_summaries": summaries,
             "samples": self._samples,
         }
+        report["hardware_summary"] = hardware_summary(report)
+        return report

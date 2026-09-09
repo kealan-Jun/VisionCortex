@@ -5,14 +5,16 @@
 
 ## 首次连接代码仓库
 
-Windows 需安装 Git，并具备开发仓库 `kealan-Jun/VisionCortex` 的读取权限。
-4050 修复在开发分支验收；稳定仓库按双仓发布门禁晋级。
+Windows 需安装 Git，并具备 `RealityLoopAI/VisionCortex` 的读取权限。
+按 2026-09-09 用户明确要求，客户更新统一使用该仓库的
+`codex/rtx4050-optimization-20260908` 分支；此分支是产品集成与目标机验收入口，
+不能当作 `main` 稳定发布已验收。
 使用 Git 的账户登录方式，不把访问令牌写进命令、远端 URL 或聊天。
 
 在 PowerShell 中执行，代码目录与已解压的应用目录必须分开放置：
 
 ```powershell
-git clone --depth 1 --branch codex/rtx4050-optimization-20260908 --single-branch https://github.com/kealan-Jun/VisionCortex.git D:\VisionCortexSource
+git clone --depth 1 --branch codex/rtx4050-optimization-20260908 --single-branch https://github.com/RealityLoopAI/VisionCortex.git D:\VisionCortexSource
 cd D:\VisionCortexSource
 ```
 
@@ -29,23 +31,20 @@ powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File .\deployment\rtx405
 
 ## 后续更新
 
-若代码目录此前克隆自 `RealityLoopAI/VisionCortex`，两个仓库的 4050 分支目前已有
-不同提交。首次切换按以下命令创建独立本地分支，保留原分支，避免直接 `pull` 冲突：
+两边此前分叉的 4050 启动修复已合并，保留原提交历史。已有代码目录只需将
+远端统一到下列地址，切换到客户更新分支；`D:\VisionCortexSource` 替换为自己的代码目录：
 
 ```powershell
 cd D:\VisionCortexSource
-git remote set-url origin https://github.com/kealan-Jun/VisionCortex.git
-git fetch origin codex/rtx4050-optimization-20260908
-git switch --create codex/rtx4050-startup-cache --track origin/codex/rtx4050-optimization-20260908
-```
-
-已切换的代码目录以后只需执行下述 `git pull --ff-only`。如提示有本地修改，先保留
-修改再处理，不使用强制重置。此过程只拉取源码，原应用目录和运行数据保留。
-
-```powershell
-cd D:\VisionCortexSource
+git remote set-url origin https://github.com/RealityLoopAI/VisionCortex.git
+git fetch origin
+git switch codex/rtx4050-optimization-20260908
+git branch --set-upstream-to=origin/codex/rtx4050-optimization-20260908
 git pull --ff-only
 ```
+
+完成一次设置后，以后在代码目录执行 `git pull --ff-only` 即可。如提示有本地修改，
+先保留修改再处理，不使用强制重置。Git 只更新代码目录，必须继续执行安装目录更新入口。
 
 随后再次运行 `Update-From-Source.cmd`。程序只接受已提交、无受版本控制文件修改的
 代码快照；同一提交重复执行会核对源码后直接返回。未跟踪的本地文件不会进入更新。

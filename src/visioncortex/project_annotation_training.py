@@ -29,9 +29,12 @@ _CODE_AT_IMPORT = {
         Path(__file__).resolve(),
         Path(__file__).resolve().with_name("yolo_evaluation.py"),
         Path(__file__).resolve().with_name("project_ignore_training.py"),
+        Path(__file__).resolve().parent / "training_runtime" / "__init__.py",
+        Path(__file__).resolve().parent / "training_runtime" / "ignore.py",
         Path(__file__).resolve().with_name("project_sampling.py"),
         Path(__file__).resolve().with_name("project_training_evidence.py"),
         Path(__file__).resolve().with_name("project_augmentation.py"),
+        Path(__file__).resolve().with_name("project_branch_loss.py"),
     ]
 }
 
@@ -465,6 +468,8 @@ def run_experiment(
     warmup_bias_lr: float = 0.1,
     patience: int = 20,
     freeze_layers: int = 10,
+    trace_branch_loss: bool = False,
+    branch_loss_policy: str = "native",
 ) -> dict:
     root, model_path, output = root.resolve(), model_path.resolve(), output.resolve()
     if output.exists():
@@ -485,10 +490,18 @@ def run_experiment(
         or not math.isfinite(warmup_bias_lr) or not 0 <= warmup_bias_lr <= 0.1
         or type(patience) is not int or not 0 <= patience <= 500
         or type(freeze_layers) is not int or not 0 <= freeze_layers <= 10
+        or type(trace_branch_loss) is not bool
+        or branch_loss_policy not in ("native", "one2many")
     ):
         raise ValueError("Invalid bounded experiment settings")
     if training_scope == "class_outputs" and freeze_layers != 10:
         raise ValueError("Class-output probes use their own fixed training scope")
+    if trace_branch_loss and supervision != "outside_ignore":
+        raise ValueError("Branch-loss tracing requires explicit outside_ignore supervision")
+    if branch_loss_policy != "native" and (
+        not trace_branch_loss or training_scope != "detector" or patience != 0
+    ):
+        raise ValueError("One2many objective requires branch tracing, detector scope and patience=0")
     if sampling_policy == "source_balanced" and supervision != "outside_ignore":
         raise ValueError("Source balancing requires verified outside_ignore supervision")
     receipt, rows = validate_export(root, receipt_sha, role, supervision=supervision)
@@ -601,6 +614,8 @@ def run_experiment(
         training_scope=training_scope,
         supervision=supervision,
         sampling_policy=sampling_policy,
+        trace_branch_loss=trace_branch_loss,
+        branch_loss_policy=branch_loss_policy,
         derived_training_images=receipt.get("augmentation", {})
         .get("derived_roles", {})
         .get(role, 0),
@@ -703,7 +718,16 @@ def run_experiment(
                 return {}
             from .project_ignore_training import loss_usage
 
-            return dict(ignore_loss_usage=loss_usage(trainer.model.criterion))
+            usage = dict(ignore_loss_usage=loss_usage(trainer.model.criterion))
+            if trace_branch_loss:
+                from .project_branch_loss import branch_loss_trace_usage
+
+                usage["branch_loss_usage"] = branch_loss_trace_usage(
+                    trainer.branch_loss_trace_path, trainer.sampling_trace_path,
+                    expected_epochs=int(trainer.epoch) + 1,
+                    expected_policy=branch_loss_policy,
+                )
+            return usage
 
         evidence = TrainingEvidence(output, optimization, observe_usage)
         model.add_callback("on_pretrain_routine_end", evidence.install)
@@ -793,10 +817,16 @@ def run_experiment(
             from .project_ignore_training import IgnoreTrainer, loss_usage
 
             metadata = json.loads((root / "ignore-regions.json").read_text(encoding="utf-8"))
+            branch_trace = None
+            if trace_branch_loss:
+                from .project_branch_loss import BranchLossTrace
+
+                branch_trace = BranchLossTrace(output / "branch-loss-trace.jsonl", epochs, policy=branch_loss_policy)
             model.train(
                 trainer=partial(IgnoreTrainer, ignore_metadata={
                     str(root / name): value for name, value in metadata.items()
-                }, sampling_sources=sampling_sources, sampling_policy=sampling_policy), **config,
+                }, sampling_sources=sampling_sources, sampling_policy=sampling_policy,
+                    branch_loss_trace=branch_trace), **config,
             )
             from .project_sampling import sampling_usage
 
@@ -805,6 +835,8 @@ def run_experiment(
                 sampling_sources, sampling_policy,
             )
             preflight["ignore_loss_usage"] = loss_usage(model.trainer.model.criterion)
+            if trace_branch_loss:
+                preflight["branch_loss_usage"] = observe_usage(model.trainer)["branch_loss_usage"]
             if any(r["annotation"]["ignore_regions"] for r in rows) and not all(
                 r["ignored_anchor_visits"] > 0 for r in preflight["ignore_loss_usage"].values()
             ):
@@ -812,7 +844,9 @@ def run_experiment(
         else:
             model.train(**config)
         preflight["optimization_usage"] = optimization.finish()
-        preflight["training_evidence"] = verify_training_evidence(output)
+        preflight["training_evidence"] = verify_training_evidence(
+            output, require_branch_loss=trace_branch_loss,
+        )
         if preflight["training_evidence"]["optimizer_steps"] != optimization.steps:
             raise RuntimeError("Durable evidence differs from actual optimizer steps")
         if (
@@ -866,16 +900,32 @@ def recover_evaluated_experiment(output: Path) -> dict:
     """Revalidate completed prediction artifacts after a final receipt failure."""
     path = output / "experiment.json"
     previous = json.loads(path.read_text(encoding="utf-8"))
+    policy = previous.get("branch_loss_policy", "native")
+    if policy not in ("native", "one2many") or policy != "native" and not previous.get("trace_branch_loss"):
+        raise ValueError("Recovery requires a declared, traced branch objective")
+    if previous.get("trace_branch_loss"):
+        from .project_branch_loss import branch_loss_trace_usage
+
+        usage = branch_loss_trace_usage(
+            output / "branch-loss-trace.jsonl", output / "candidate/source-sampling-trace.jsonl",
+            expected_policy=policy,
+        )
+        if usage != previous.get("branch_loss_usage"):
+            raise ValueError("Recovery requires matching observed branch-loss evidence")
     if previous["status"] == "completed":
         if previous.get("training_evidence_required") and (
-            previous.get("training_evidence") != verify_training_evidence(output)
+            previous.get("training_evidence") != verify_training_evidence(
+                output, require_branch_loss=previous.get("trace_branch_loss", False),
+            )
         ):
             raise ValueError("Completed receipt differs from durable training evidence")
         return previous
     if previous["status"] != "failed":
         raise ValueError("Only a stopped failed experiment can be recovered")
     if previous.get("training_evidence_required"):
-        evidence = verify_training_evidence(output)
+        evidence = verify_training_evidence(
+            output, require_branch_loss=previous.get("trace_branch_loss", False),
+        )
         if previous.get("training_evidence") != evidence:
             raise ValueError("Recovery requires matching durable training evidence")
     root = Path(previous["configuration"]["data"]).parent.parent

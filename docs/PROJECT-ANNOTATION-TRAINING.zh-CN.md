@@ -63,6 +63,27 @@ python tools/train_project_annotations.py \
 `experiment.json` 的 `ignore_loss_usage` 记录每分支调用、忽略 anchor 访问和保留正项数；这些是重复训练访问次数，不是新样本数量。
 部分监督复跑还须保留实际损失调用记录，不能只凭预测文件补成完成。
 
+部分监督双分支训练可显式加 `--trace-branch-loss`，默认关闭。它沿用本机已核对的
+Ultralytics 8.4.28 原生分支权重与更新规则，在 `branch-loss-trace.jsonl` 逐批记录
+one2many、one2one 的 box/分类/DFL 损失、实际权重、加权结果及输入图片。
+原生训练 CSV 的损失栏只返回 one2one 项，不能用它代表 one2many 或加权目标；
+新记录是实际训练前向值，不是梯度范数，也不把 EMA 验证调用算作训练。
+每批记录必须与实际预处理顺序一致，逐轮快照和完成回执绑定其摘要；恢复时重新核对，
+缺失或不一致即失败。每轮均值按实际图片访问数计算，包括最后不足一整批的情况。
+该选项不改变优化目标、分支权重或生产配置，也不自动按损失选择候选。
+记录通过检查只能证明训练观测契约，效果仍须单独完成真实系统对照。
+
+`--branch-loss-policy one2many` 是单独的目标对照，默认 `native` 不变。
+此模式仅允许 `--supervision outside_ignore --trace-branch-loss --training-scope detector --patience 0`。
+每轮实际损失权重固定为 one2many=1、one2one=0，返回一对多分支的原始损失张量；
+另一分支仍前向计算以便记录，但其损失不参与反向传播。不能用“乘零”代替这个处理，
+因为零梯度仍可能让 AdamW 对闲置参数施加权重衰减。此处不宣称另一分支的全部状态冻结：
+共用特征和训练前向中的统计量仍可能改变。
+逐批记录和恢复核对绑定明确的目标策略，混合策略、错误权重或漏记不能补成完成。
+原生验证、CSV、best 保存规则仍使用 one2one，因此必须事先固定最终轮次及 last 权重作为
+系统 one2many 对照终点，不依据这个原生 best 宣称系统最佳或启用早停。
+该选项不更改系统推理路由，不自动晋升候选；单独改变目标能否改善真实视频须实测。
+
 工作台显式离线增强导出采用 `annotation-workbench-partial-training-export/2`，
 `supervision.augmentation=offline_affine_ignore_regions/1`。训练入口仍须显式 `--supervision outside_ignore`。
 模型启动前逐个核对派生图的父图版本、原图和原标注哈希、训练来源组、角色、逐件实物与未知区域、

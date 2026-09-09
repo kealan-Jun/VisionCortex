@@ -78,7 +78,7 @@ assert.equal(guidedStageState(run,{stages:["daily_report"],completedBy:[]},new M
 
 
 def test_long_experiment_evidence_stays_available_without_filling_the_overview():
-    run_javascript(("experimentCard", "experimentExecutiveSummary", "nextStepLabel", "readableEvidenceParts", "evidenceParagraphs", "experimentStepDescription", "experimentLimitations", "evidenceSentences", "experimentObjects", "experimentStepTitle"), r'''
+    run_javascript(("readerClock", "readerStepSections", "workflowCompletionLabel", "workflowLabel", "experimentCard", "experimentExecutiveSummary", "nextStepLabel", "readableEvidenceParts", "evidenceParagraphs", "experimentStepDescription", "experimentLimitations", "evidenceSentences", "experimentObjects", "experimentStepTitle"), r'''
 const esc=x=>String(x??""),icon=()=>"",number=x=>Number(x||0),timecode=x=>String(x);
 const ACTION_LABELS={object_movement:"物体移动"},OBJECT_LABELS={},productObjectLabel=()=>"样品瓶";
 const videoPreview=(url,label)=>`<video src="${url}" aria-label="${label}"></video>`;
@@ -97,7 +97,7 @@ assert.ok(card.includes('data-expand-steps aria-expanded="false"'));
 assert.equal(experimentStepTitle({operation_title:"拿起试管架",action_type:"object_movement"}),"拿起试管架");
 assert.ok(!card.includes("独立实验"));
 assert.ok(card.includes('class="experiment-reader-audit"><summary>'));
-assert.equal((card.match(/未观察到开盖，不能确认容器状态变化。/g)||[]).length,360,"all three evidence presentations retain the original negations");
+assert.ok((card.match(/未观察到开盖，不能确认容器状态变化。/g)||[]).length>=360,"all evidence presentations retain the original negations alongside the directory excerpt");
 assert.ok(card.includes('class="step-evidence"><summary>'));
 assert.ok(card.includes("后续未知"));
 assert.ok(card.includes("操作过程"));
@@ -125,7 +125,7 @@ assert.ok(experimentCard({...group,aligned_video_url:null}).includes('src="/firs
 
 
 def test_experiment_browser_selects_one_group_and_preserves_all_navigation_targets():
-    run_javascript(("experimentGroupBrowser",), r'''
+    run_javascript(("readerClock", "experimentGroupBrowser",), r'''
 const esc=String,number=x=>Number(x||0),timecode=String;
 const experimentRecordRoute=()=>"#/stage/R/experiments";
 const archiveProcessStopped=()=>true,productState=(_a,_b,title)=>title;
@@ -800,7 +800,8 @@ const document={querySelector:()=>null,querySelectorAll:selector=>selector==="vi
 
 
 def test_focus_navigation_preserves_identity_and_pauses_hidden_media():
-    run_javascript(("openMaterialFocus", "materialFocusMarkup", "materialSelectionKey", "pauseMaterialVideos"), r'''
+    run_javascript(("openMaterialFocus", "materialFocusMarkup", "materialSelectionKey", "pauseMaterialVideos", "videoPosterUrl", "videoPreview"), r'''
+const location={href:"http://test/",origin:"http://test"},bindVideoPreviews=()=>{};
 const state={},events=[1,2].map(i=>({event_id:"E",event_uid:`u${i}`,parent_event_id:`G${i}`,
  action_type:"move",start_us:i*1000000,end_us:(i+1)*1000000,aligned_clip_url:`/clip${i}.mp4`}));
 const data={name:"A",key_events:events},filteredMaterialEvents=()=>events,notices=[];
@@ -878,10 +879,10 @@ scrolled=null;activateAdjacentMaterial("E","next");assert.equal(scrolled,null,"a
 
 @pytest.mark.parametrize("entry", ["retry", "archive", "benchmark", "staging"])
 def test_acknowledged_run_remains_queued_without_secondary_directory_reads(entry):
-    run_javascript(("retryRetainedRun", "rerunArchive", "rerunBenchmark", "showAcceptedRun",
+    run_javascript(("submitRecoveryAction", "rerunArchive", "rerunBenchmark", "showAcceptedRun",
                     "rememberRunSnapshot"), r'''
 const state={runs:[{run_id:"old",state:"failed",experiment_id:"A",source_collection_id:"C",error:"old failure"}],archiveCache:new Map(),runPollRequestId:10};
-const notices=[],requests=[];const button={disabled:false,innerHTML:"retry"};
+const notices=[],requests=[];const button={disabled:false,innerHTML:"retry",dataset:{}};
 const document={querySelector:()=>button},location={hash:"#/stage/old/experiments"};
 const icon=()=>"",toast=(...args)=>notices.push(args),updateServiceChrome=()=>{};
 let renders=0;const renderTasks=()=>renders++;
@@ -889,8 +890,7 @@ const loadAll=async()=>{throw Error("directory unavailable")};
 let accept;const api=(url,options)=>{requests.push({url,options});return new Promise(resolve=>accept=resolve)};
 ''' + f'const entry={entry!r};\n' + r'''
 (async()=>{
-  const invoke=()=>entry==="retry"?retryRetainedRun("old",button):entry==="archive"?rerunArchive({name:"A"},button)
-    :entry==="staging"?rerunArchive({name:"A",staging_run_id:"old"},button):rerunBenchmark();
+  const invoke=()=>["retry","staging"].includes(entry)?submitRecoveryAction("old","retry",{revision:"checked"},button):entry==="archive"?rerunArchive({name:"A"},button):rerunBenchmark();
   const pending=invoke();await invoke();assert.equal(requests.length,1,"duplicate click must not issue another POST");
   const id=["retry","staging"].includes(entry)?"old":"new";
   accept({run_id:id,state:"queued",archive_name:"A"});await pending;
@@ -1326,7 +1326,7 @@ for(const scope of [{name:"B",release_id:"r2"},{name:"B",staging_run_id:"run1"},
 
 @pytest.mark.parametrize(("loaded", "total"), [(0, 0), (24, 40), (40, 40)])
 def test_material_counts_distinguish_loaded_pages_from_matching_total(loaded, total):
-    run_javascript(("materialsView", "materialResults"), r'''
+    run_javascript(("workflowLabel", "workflowCompletionLabel", "materialsView", "materialResults"), r'''
 const state={materialFilters:{group:"all",action:"all",object:"all",support:"all",query:""}};
 const ensureMaterialSelection=()=>{},ensureMaterialFilters=()=>{},movementScreeningView=()=>"",retainedMaterialsView=()=>"";
 const eventHasAlignedDualViewMaterial=event=>event.ready,filteredMaterialEvents=data=>data.key_events.filter(eventHasAlignedDualViewMaterial);
@@ -1351,7 +1351,7 @@ if(loaded){
 
 @pytest.mark.parametrize("filter_kind", ["group", "action", "object", "support", "query"])
 def test_material_counts_use_filtered_ready_items_for_unpaginated_results(filter_kind):
-    run_javascript(("materialsView", "materialResults", "filteredMaterialEvents"), r'''
+    run_javascript(("workflowLabel", "workflowCompletionLabel", "materialsView", "materialResults", "filteredMaterialEvents"), r'''
 const state={materialFilters:{group:"all",action:"all",object:"all",support:"all",query:""}};
 const ensureMaterialSelection=()=>{},ensureMaterialFilters=()=>{},movementScreeningView=()=>"",retainedMaterialsView=()=>"";
 const eventHasAlignedDualViewMaterial=event=>event.ready,eventHasDualViewSupport=event=>event.dual;
@@ -2102,8 +2102,9 @@ const notice={hidden:true,textContent:""},main={innerHTML:"",contains:element=>e
 const document={get activeElement(){return active;},querySelector:selector=>selector==="dialog[open]"?dialog:selector==="#archive-sync-notice"?notice:null};
 const pending=[],loadArchiveView=()=>new Promise((resolve,reject)=>pending.push({resolve,reject}));
 const setChrome=()=>{},productExperimentName=String,pageSkeleton=()=>"loading",archiveLabel=()=>"archive";
-const archiveProcessStopped=()=>false,resultHeader=()=>"",dailyReportView=data=>data.marker;
-const componentResultCards=()=>"";
+const archiveProcessStopped=()=>false,resultHeader=()=>"",resultReviewPanel=()=>"",dailyReportView=data=>data.marker;
+const componentResultCards=()=>"",experimentResultTools=()=>"";
+const resultWorkspaceContent=data=>data.marker;
 const materialsView=dailyReportView,professionalReportsView=dailyReportView,experimentExecutiveSummary=dailyReportView;
 const experimentGroupBrowser=dailyReportView;
 const bindArchiveActions=()=>{},bindVideoPreviews=()=>{},bindExperimentReaders=()=>{},bindDetailAnchors=()=>{},bindRerunActions=()=>{};
@@ -2194,8 +2195,9 @@ const state={},location={hash:"#/archive/A/reports"},main={innerHTML:""};
 const pending=[];
 const loadArchiveView=()=>new Promise((resolve,reject)=>pending.push({resolve,reject}));
 const setChrome=()=>{},productExperimentName=x=>x,pageSkeleton=()=>"loading",archiveLabel=()=>"archive";
-const archiveProcessStopped=()=>false,resultHeader=()=>"",dailyReportView=data=>data.marker;
-const componentResultCards=()=>"";
+const archiveProcessStopped=()=>false,resultHeader=()=>"",resultReviewPanel=()=>"",dailyReportView=data=>data.marker;
+const componentResultCards=()=>"",experimentResultTools=()=>"";
+const resultWorkspaceContent=data=>data.marker;
 const bindArchiveActions=()=>{},bindVideoPreviews=()=>{},bindExperimentReaders=()=>{},bindDetailAnchors=()=>{},bindRerunActions=()=>{};
 const requestAnimationFrame=()=>{},routeQuery=()=>new URLSearchParams();
 const productState=()=>"ERROR",document={querySelector:()=>null};
@@ -2479,4 +2481,22 @@ state.health.collection_ingest.enabled=false;
 renderNew();
 assert.ok(!main.innerHTML.includes("INDEX_BATCH_SELECTION"));
 assert.ok(main.innerHTML.includes('id="batch-input"'));
+''')
+
+
+def test_latest_check_does_not_hide_full_quality_failure_or_expand_all_observations():
+    run_javascript(("resultReviewPanel", "evidenceParagraphs", "evidenceSentences"), r'''
+const esc=String, number=Number, readerClock=String, archiveProcessStopped=()=>true;
+const data={staging_run_id:"r",result_review:{available:true,revision:"1234567890",
+  latest_check_current:true,step_consistency_passed:true,original_quality_passed:false,
+  findings:[{kind:"unrecorded_interval"}],windows:[{window_id:"w",group_id:"g",start_ms:0,end_ms:30000}],
+  gap_observations:[{group_id:"g",start_ms:0,end_ms:30000,sample_count:8,
+    status:"supplementary_observations",observations:[{title:"拿起纸包",description:"双手拿起纸包；尚未打开。",frame_ids:["F001","F002"]}]}]}};
+const html=resultReviewPanel(data);
+assert.ok(html.includes("步骤引用与文字检查通过"));
+assert.ok(html.includes("未通过（历史记录）"));
+assert.ok(html.includes("仍需视频核验"));
+assert.ok(html.includes('<details class="gap-observation">'));
+assert.ok(html.includes("尚未打开。"));
+assert.ok(!html.includes("<details open"));
 ''')

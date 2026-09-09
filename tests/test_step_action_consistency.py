@@ -80,6 +80,8 @@ def test_allows_lower_level_contact_claim():
     "双手扶握瓶盖，未看到旋紧完成。",
     "清水标签瓶全程保持开盖，其紫色盖放在桌上未被操作。",
     "移液器末端伸入蓝色吸头盒内；烧杯与各瓶液面未见变化。",
+    "天平显示读数不可读，未观察到按键或去皮操作。",
+    "仅为持瓶倾斜姿态，倾倒是否发生液体移动无法确认。",
 ])
 def test_real_run_denials_and_separate_clauses_do_not_become_positive_actions(text):
     assert validate_final_step_action_consistency([_group(text)], [_event()])["passed"] is True
@@ -90,6 +92,8 @@ def test_real_run_denials_and_separate_clauses_do_not_become_positive_actions(te
     "旋开瓶盖，随后旋紧完成未见。",
     "清水瓶保持开盖，操作者拧开另一只瓶。",
     "移液器末端伸入烧杯，完成移液操作。",
+    "读数不可读，但随后读取面板读数。",
+    "倾倒是否发生液体移动无法确认，但随后向烧杯倾倒液体。",
 ])
 def test_a_nearby_denial_or_static_state_does_not_hide_a_positive_action(text):
     assert validate_final_step_action_consistency([_group(text)], [_event()])["passed"] is False

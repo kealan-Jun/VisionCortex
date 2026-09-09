@@ -219,7 +219,7 @@ async function api(url) {
   await state.libraryLoadPromise;
   state.runs[1].observability.partial_delivery.created_at="updated";
   await ensureLibraryDetails();
-  assert.equal(requests.at(-1),"/api/staging-runs/latest/archive");
+  assert.equal(requests.at(-1),"/api/staging-runs/latest/archive?section=library-materials");
 })().catch(error=>{console.error(error);process.exitCode=1;});
 '''
     # Formal pagination is covered separately; keep the existing cached page here.

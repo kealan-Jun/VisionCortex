@@ -36,6 +36,10 @@ def partial_result_available(root: Path) -> bool:
 def quality_gap_summary(quality: dict[str, Any]) -> list[dict[str, Any]]:
     """Explain failed gates without inventing evidence or diagnosing CV accuracy."""
     gaps = []
+    for item in quality.get("segmentation_integrity", {}).get("incomplete_boundaries", []):
+        gaps.append({"code": "experiment_boundary_incomplete", "group_id": item.get("group_id"),
+                     "message": "实验起止尚未确认完整，已保留操作片段；需要继续核对切点前后的视频。",
+                     "automatic_retry": False})
     for group in quality.get("segmentation_integrity", {}).get("groups", []):
         if group.get("passed") is not False:
             continue
@@ -242,9 +246,11 @@ def component_results(root: Path) -> list[dict[str, Any]]:
 def write_partial_delivery(root: Path, metrics: dict[str, Any], *, analysis_finished: bool = False) -> dict[str, Any]:
     """Describe retained stage outputs without issuing a release/quality receipt.
 
-    Only bounded control files are read and hashed. Original media, detection
-    ledgers and derived video bodies are not reread to produce this report.
+    Bounded control files and step-linked derived stills are read and hashed.
+    Original media, detection ledgers and derived video bodies are not reread.
     """
+    from .run_insights import with_operation_refreshes
+    metrics = with_operation_refreshes(root, metrics)
     json_root = root / "JSON-Config-Files"
 
     def read(relative: str) -> dict[str, Any]:
@@ -255,6 +261,8 @@ def write_partial_delivery(root: Path, metrics: dict[str, Any], *, analysis_fini
         return value if isinstance(value, dict) else {}
 
     pending = []
+    materialization = read("JSON-Config-Files/key_material_materialization_runtime.json")
+    pending_materials = materialization.get("incomplete_artifacts") or []
     for stage in ("experiment_group", "key_material"):
         failure = read(f"JSON-Config-Files/{stage}_semantic_failures.json")
         pending.extend(
@@ -274,13 +282,26 @@ def write_partial_delivery(root: Path, metrics: dict[str, Any], *, analysis_fini
     groups = read("JSON-Config-Files/experiment_group_understanding.json").get("groups", [])
     from .speech_refresh import apply
     groups = apply(root, groups)
+    from .operation_review import apply as apply_operations
+    groups = apply_operations(root, groups)
+    from .result_review import inspect as inspect_result
+    try:
+        result_check = inspect_result(root, save=True)
+    except (OSError, ValueError, KeyError, TypeError):
+        result_check = {"available":False}
     controls = [
+        "JSON-Config-Files/result_check.json",
+        "JSON-Config-Files/operation_review.json",
         "JSON-Config-Files/input_manifest.yaml",
         "JSON-Config-Files/run_manifest.json",
         "JSON-Config-Files/Input-Manifests/input_seal.json",
         "JSON-Config-Files/cache_identity.json",
         "JSON-Config-Files/input_volume_report.json",
         "JSON-Config-Files/experiment_group_understanding.json",
+        "JSON-Config-Files/key_material_model_understanding.json",
+        "JSON-Config-Files/experiment_boundary_review.json",
+        "JSON-Config-Files/video_probe.json",
+        "JSON-Config-Files/time_alignment.json",
         "JSON-Config-Files/quality_acceptance.json",
         "JSON-Config-Files/evidence_package_eval.json",
         "JSON-Config-Files/run_metrics.json",
@@ -291,6 +312,7 @@ def write_partial_delivery(root: Path, metrics: dict[str, Any], *, analysis_fini
         "JSON-Config-Files/speech_search.json",
         "JSON-Config-Files/experiment_group_semantic_failures.json",
         "JSON-Config-Files/key_material_semantic_failures.json",
+        "JSON-Config-Files/key_material_materialization_runtime.json",
         "JSON-Config-Files/semantic_key_material_curation.json",
         "Key-Materials/Machine-Quarantine/Machine-Quarantine-Index.json",
         "Key-Materials/Review-Candidates/Candidate-Index.json",
@@ -316,6 +338,8 @@ def write_partial_delivery(root: Path, metrics: dict[str, Any], *, analysis_fini
         "failed_stage": status.get("failed_stage") or status.get("stage"),
         "completed_stages": status.get("completed_stages", []),
         "pending_semantic_results": pending,
+        "pending_material_outputs": pending_materials,
+        "material_retry_event_ids": materialization.get("retry_event_ids") or [],
         "quarantined_event_count": len(retained_ids),
         "input_volume": volume,
         "run_metrics": metrics,
@@ -346,17 +370,31 @@ def write_partial_delivery(root: Path, metrics: dict[str, Any], *, analysis_fini
     # without issuing an accepted daily report or rereading media bodies.
     export = {
         "schema_version": "visioncortex-partial-analysis/1",
+        "experiment_id": read("JSON-Config-Files/run_manifest.json").get("experiment_id") or root.parent.name,
         "evidence_classification": "PARTIAL_EVIDENCE",
         "formal_archive_promotion_allowed": False,
         "experiment_groups": groups,
+        "result_review": result_check,
         "recording_understanding": read("JSON-Config-Files/speech_understanding.json"),
         "capture_quality": read("JSON-Config-Files/capture_quality.json"),
         "quality_acceptance": quality,
         "quality_gaps": report["quality_gaps"],
         "pending_semantic_results": pending,
+        "pending_material_outputs": pending_materials,
         "retained_candidate_ids": sorted(retained_ids),
         "run_metrics": metrics,
+        "artifact_references": [dict(item) for item in artifacts],
+        "traceability": {
+            "step_event_reference": "experiment_groups[].model_understanding.steps[].supporting_event_ids",
+            "event_source": "JSON-Config-Files/key_material_model_understanding.json",
+            "source_manifest": "JSON-Config-Files/input_manifest.yaml",
+            "source_video_bodies_revalidated": False,
+        },
     }
+    from .partial_reports import retained_report_visuals
+    export["representative_visuals"] = retained_report_visuals(
+        root, groups, read("JSON-Config-Files/key_material_model_understanding.json").get("events", []))
+    report["presentation_derived_frame_count"] = len(export["representative_visuals"])
     export_path = root / "Partial-Results/Analysis-Result.json"
     write_json(export_path, export)
     report["export"] = export_path.relative_to(root).as_posix()
@@ -416,6 +454,23 @@ def write_partial_delivery(root: Path, metrics: dict[str, Any], *, analysis_fini
         )) for item in calls
     )
     total_tokens = metrics.get("tokens", {}).get("run_total", {}).get("total_tokens")
+    latest_check = ""
+    if result_check.get("available"):
+        latest_check = (
+            "<h2>最新结果检查</h2>"
+            f"<p>结果版本：{text(result_check['revision'][:8])}；检查时间：{text(result_check['checked_at'])}。</p>"
+            f"<p>步骤引用与文字检查：{'通过' if result_check['step_consistency_passed'] else '仍需核对'}；"
+            f"另有 {len(result_check['findings'])} 项完整性提示。无记录可能是等待、遮挡或漏识别，需对照视频核验。</p>"
+            "<p>这项检查不替代完整实验验收，不修改原质量决定，也不能证明全部操作均已识别。</p>"
+        )
+        for gap in result_check.get("gap_observations", []):
+            latest_check += (
+                f"<h3>补充观察 · {text(gap['group_id'])} · {seconds(gap['start_ms']/1000)} → {seconds(gap['end_ms']/1000)}</h3>"
+                f"<p>{text(gap['sample_count'])} 张派生视频采样画面；尚未纳入已审核操作。</p>"
+                + "".join(f"<p><strong>{text(item['title'])}</strong>：{text(item['description'])}</p>"
+                          for item in gap.get("observations", []))
+                + f"<p>{text(gap.get('limitation') or '采样有限，完整操作仍需视频核验。')}</p>"
+            )
     readable_record = (
         "<h2>已完成成果与待补全环节</h2><ul>"
         + "".join(f"<li>{text(item['label'])}：{text({'completed': '已完成', 'partial': '部分完成', 'insufficient': '证据不足', 'not_generated': '未生成', 'not_available': '暂无产出', 'failed': '未完成', 'running': '处理中', 'pending': '待检查', 'disabled': '未启用'}.get(item['state'], item['state']))} · {text(item['detail'])}</li>" for item in report["components"])
@@ -452,10 +507,13 @@ def write_partial_delivery(root: Path, metrics: dict[str, Any], *, analysis_fini
         '尚未正式发布</strong><p>' + explanation + '</p></aside>'
         '<p>本报告记录已保存产出，不确认候选动作，不替代实验室日报、'
         '质量验收或正式归档回执。</p>'
-        f"<p>待补全语义结果：{len(pending)}；隔离事件：{report['quarantined_event_count']}。</p>"
+        f"<p>待补全语义结果：{len(pending)}；待补全素材：{len(pending_materials)}；隔离事件：{report['quarantined_event_count']}。</p>"
+        + ("<p>部分素材提取未完成，其他已保存画面和片段可继续查看。"
+           "请修复任务记录中的素材读取或编码问题后复跑对应事件。</p>" if pending_materials else "")
+        +
         '<p>复跑仅复用身份与完整性校验通过的缓存。代码、配置、模型或输入变化'
         '可能导致重新计算；未知 Token 用量不记作零。</p>'
-        + readable_record +
+        + latest_check + readable_record +
         '<h2>溯源引用</h2><p>以下哈希绑定控制文件；不代表已重新校验全部视频正文。</p>'
         '<table><thead><tr><th>文件</th><th>字节数</th><th>SHA-256</th></tr></thead>'
         f'<tbody>{rows}</tbody></table></html>'
@@ -466,5 +524,12 @@ def write_partial_delivery(root: Path, metrics: dict[str, Any], *, analysis_fini
     temporary.write_text(document, encoding="utf-8")
     temporary.replace(destination)
     report["report_sha256"] = hashlib.sha256(destination.read_bytes()).hexdigest()
+    from .partial_reports import render_stage_reports
+    from reportlab.platypus import LayoutError
+    try:
+        report["readable_reports"] = render_stage_reports(root, export, report)
+    except (OSError, ValueError, RuntimeError, ImportError, LayoutError) as exc:
+        # Preserve the existing stage export if optional presentation fails.
+        report["readable_report_error"] = f"{type(exc).__name__}: {exc}"
     write_json(json_root / "partial_delivery.json", report)
     return report

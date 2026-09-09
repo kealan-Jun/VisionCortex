@@ -6,6 +6,7 @@ import random
 import re
 import threading
 import time
+from datetime import datetime, timezone
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Literal, Sequence
@@ -89,6 +90,7 @@ GROUP_SYSTEM_PROMPT = OBJECT_IDENTITY_RULES + OPERATION_DESCRIPTION_RULES + """�
 5. 步骤的单位是一个可辨识的实验操作，不是一个实验室场景或一条 CV 候选。同一操作的多条证据可以共同支持一个步骤；不同操作不能只因属于同一个 CV 类别而合成一句概述。按实际观察到的先后写清具体动作、对象、时间与结果，不用预设的标准实验流程补齐未见动作。
 6. 稀疏采样之间存在未观察区间时，在 uncertainties 中说明步骤覆盖缺口，不声称已完整还原每一步。保留所有支持判断的事件与视角编号；编号属于证据关联，不能代替操作描述。
 7. 输入边界只是候选取材范围，不是实验已经开始或结束的事实。打开包装、整理称量纸、取工具等准备步骤结束，不代表整场实验结束。末帧仍在操作或准备后续实验时，end_complete 必须为 false，localized_rescan_needed 为 true。不能用“片段内没有后续事件”“下一段间隔若干秒”“到达片段尾部”作为完成依据；看不到后续时应明确结束状态未知。
+8. atomic_experiments 表示语义上的实验单元，不能照抄 CV 片段，也不能把开纸、开瓶等单步操作各当一场实验。连续实验链中可保留称量、配液、移液等不同单元及其时间范围；换台不能自动断链。单元名称应简明，完整操作写在 steps 中。时间边界只写画面支持的范围，不假定单元结束就代表整条实验链完成。completion_status 为 ongoing_at_recording_end 或 unresolved 时不得宣称链已完成。
 输出单个 JSON 对象，字段固定为：
 {
   "experiment_name": "中文具体实验名称",
@@ -274,13 +276,23 @@ class _GroupResponse(_StrictResponse):
     uncertainties: list[str]
 
 
+class _OperationStepResponse(_StrictResponse):
+    operation_title: str = Field(min_length=1, max_length=100)
+    current_step: str = Field(min_length=1, max_length=800)
+    supporting_event_ids: list[str] = Field(min_length=1)
+
+
+class _OperationResponse(_StrictResponse):
+    steps: list[_OperationStepResponse]
+
+
 def _validate_response_payload(
     payload: dict[str, Any],
-    response_kind: Literal["event", "group", "speech"] | None,
+    response_kind: Literal["event", "group", "speech", "operations"] | None,
 ) -> dict[str, Any]:
     if response_kind is None:
         return payload
-    contract = {"event": _EventResponse, "group": _GroupResponse, "speech": _SpeechResponse}[response_kind]
+    contract = {"event": _EventResponse, "group": _GroupResponse, "speech": _SpeechResponse, "operations": _OperationResponse}[response_kind]
     return contract.model_validate(payload).model_dump(mode="json")
 
 
@@ -590,7 +602,7 @@ class ArkAnalyzer:
         image_paths: Sequence[tuple[str, Path]],
         *,
         max_images: int | None = None,
-        response_kind: Literal["event", "group", "speech"] | None = None,
+        response_kind: Literal["event", "group", "speech", "operations"] | None = None,
     ) -> dict[str, Any]:
         if not self.enabled:
             return {"status": "disabled", "uncertainties": ["多模态分析已在配置中关闭"]}
@@ -668,7 +680,9 @@ class ArkAnalyzer:
 
         for attempt in range(int(self.config["max_retries"])):
             attempt_started = time.perf_counter()
-            receipt: dict[str, Any] = {"attempt": attempt + 1, "status": "pending"}
+            receipt: dict[str, Any] = {"attempt": attempt + 1, "status": "pending",
+                                       "started_at": datetime.now(timezone.utc).isoformat(),
+                                       "retry_wait_seconds": 0.0}
             attempt_receipts.append(receipt)
             try:
                 if request.get("stream"):
@@ -707,7 +721,7 @@ class ArkAnalyzer:
                     result = bind_speech_result(expand_speech_references(result, speech_aliases), metadata.get("speech_context"))
                 if speech_transport is not None:
                     result["speech_input_transport"] = speech_transport
-                receipt.update(status="completed", latency_seconds=round(time.perf_counter() - attempt_started, 6))
+                receipt.update(status="completed", ended_at=datetime.now(timezone.utc).isoformat(), latency_seconds=round(time.perf_counter() - attempt_started, 6))
                 result.update(
                     {
                         "status": "completed",
@@ -734,12 +748,13 @@ class ArkAnalyzer:
                 return normalize_uncalibrated_hand_identity(result)
             except (httpx.HTTPError, ValueError, json.JSONDecodeError) as exc:
                 last_error = exc
-                receipt.update(status="failed", error_type=type(exc).__name__, latency_seconds=round(time.perf_counter() - attempt_started, 6))
+                receipt.update(status="failed", ended_at=datetime.now(timezone.utc).isoformat(), error_type=type(exc).__name__, latency_seconds=round(time.perf_counter() - attempt_started, 6))
+                receipt["http_status"] = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
                 if isinstance(exc, (ValidationError, json.JSONDecodeError)) and response_kind:
                     # A format retry still uses every original image and the
                     # same strict validator. Report schema locations, never the
                     # provider's untrusted raw answer or credential-bearing input.
-                    contract = {"event": _EventResponse, "group": _GroupResponse, "speech": _SpeechResponse}[response_kind]
+                    contract = {"event": _EventResponse, "group": _GroupResponse, "speech": _SpeechResponse, "operations": _OperationResponse}[response_kind]
                     issues = [
                         {"path": ".".join(str(part) for part in item["loc"]), "type": item["type"]}
                         for item in exc.errors(include_input=False, include_context=False)[:20]
@@ -776,7 +791,9 @@ class ArkAnalyzer:
                         )
                         + random.uniform(0.0, 0.75)
                     )
+                    wait_started = time.perf_counter()
                     time.sleep(max(0.0, delay))
+                    receipt["retry_wait_seconds"] = round(time.perf_counter() - wait_started, 6)
         circuit_opened = False
         if isinstance(last_error, httpx.HTTPError):
             threshold = max(
@@ -860,6 +877,11 @@ class ArkAnalyzer:
                 **({"speech_context": speech_context} if speech_context is not None else {}),
                 "group_id": group.group_id,
                 "boundary_scope": "candidate video interval; experiment completion is not established by CV grouping",
+                "workflow_kind": group.workflow_kind,
+                "workflow_units": group.workflow_units,
+                "completion_status": group.completion_status,
+                "completion_reason": group.completion_reason,
+                "view_timeline": group.view_timeline,
                 "global_start_ms": group.global_start_ms,
                 "global_end_ms": group.global_end_ms,
                 "first_person_view": group.first_person_view,
@@ -879,6 +901,10 @@ class ArkAnalyzer:
                         "objects": event.objects,
                         "confidence": event.confidence,
                         "supporting_views": event.supporting_views,
+                        **({"reviewed_operation": {key: (event.model_understanding or {}).get(key) for key in (
+                            "operation_title", "current_step", "physical_change", "next_step", "next_step_evidence",
+                            "per_view_observations", "confidence", "uncertainties")}}
+                           if final_adjudicated else {}),
                     }
                     for event in events
                     if event_is_formal(event)
