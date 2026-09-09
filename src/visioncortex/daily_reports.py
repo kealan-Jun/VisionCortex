@@ -885,6 +885,7 @@ def generate_daily_report_archive(
     summary: RunSummary,
     run_metrics: dict[str, Any],
     config: dict[str, Any],
+    *, defer_pdf: bool = False,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     evidence_eval_path = layout.json_config / "evidence_package_eval.json"
@@ -938,7 +939,7 @@ def generate_daily_report_archive(
         layout.professional_pdfs
         / f"VisionCortex-Professional-Evidence-Report-{report_date}.pdf"
     )
-    if config.get("daily_report", {}).get("generate_pdf", True):
+    if not defer_pdf and config.get("daily_report", {}).get("generate_pdf", True):
         render_professional_pdf(pdf_path, report, layout.root)
     professional_manifest_path = layout.json_config / "professional_report_manifest.json"
     professional_manifest = {
@@ -947,9 +948,9 @@ def generate_daily_report_archive(
         "template_sha256": _sha256(PROFESSIONAL_TEMPLATE_PATH),
         "renderer_sha256": _sha256(PROFESSIONAL_RENDERER_PATH),
         "report_date": report_date,
-        "status": "generated" if pdf_path.is_file() else "not_generated",
+        "status": "generated" if (not defer_pdf and pdf_path.is_file()) else "not_generated",
         "pdf": archive_relative_posix(pdf_path, layout.root)
-        if pdf_path.is_file()
+        if (not defer_pdf and pdf_path.is_file())
         else None,
         "visual_policy": {
             "accepted_key_materials_only": True,
@@ -958,7 +959,7 @@ def generate_daily_report_archive(
         },
         "narrative_source": "accepted_existing_model_understanding",
         "additional_model_tokens": 0,
-        "checksum_sha256": _sha256(pdf_path) if pdf_path.is_file() else None,
+        "checksum_sha256": _sha256(pdf_path) if (not defer_pdf and pdf_path.is_file()) else None,
     }
     write_json(professional_manifest_path, professional_manifest)
     artifacts = {
@@ -966,7 +967,7 @@ def generate_daily_report_archive(
         "json": archive_relative_posix(json_path, layout.root),
         "markdown": archive_relative_posix(markdown_path, layout.root),
         "html": archive_relative_posix(html_path, layout.root),
-        "pdf": archive_relative_posix(pdf_path, layout.root) if pdf_path.is_file() else None,
+        "pdf": archive_relative_posix(pdf_path, layout.root) if (not defer_pdf and pdf_path.is_file()) else None,
         "professional_report_manifest": str(
             archive_relative_posix(professional_manifest_path, layout.root)
         ),
@@ -996,11 +997,33 @@ def generate_daily_report_archive(
                 pdf_path,
                 professional_manifest_path,
             )
-            if path.is_file()
+            if path.is_file() and (path != pdf_path or not defer_pdf)
         },
     }
     write_json(layout.json_config / "daily_report_manifest.json", artifacts)
     return artifacts
+
+
+def generate_professional_report_archive(layout: ArchiveLayout) -> dict[str, Any]:
+    daily_path = layout.json_config / "daily_report_manifest.json"
+    daily = json.loads(daily_path.read_text(encoding="utf-8"))
+    report_path = layout.root / daily["json"]
+    if _sha256(report_path) != daily["checksums"][report_path.name] or daily.get("passed") is not True:
+        raise ValueError("Daily report changed before PDF generation")
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    quality = json.loads((layout.json_config / "quality_acceptance.json").read_text(encoding="utf-8"))
+    if quality.get("passed") is not True:
+        raise ValueError("Quality acceptance is required for a professional PDF")
+    pdf = layout.professional_pdfs / f"VisionCortex-Professional-Evidence-Report-{report['report_date']}.pdf"
+    render_professional_pdf(pdf, report, layout.root)
+    manifest_path = layout.json_config / "professional_report_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.update(status="generated", pdf=archive_relative_posix(pdf, layout.root), checksum_sha256=_sha256(pdf))
+    write_json(manifest_path, manifest)
+    daily.update(pdf=manifest["pdf"])
+    daily["checksums"].update({pdf.name: _sha256(pdf), manifest_path.name: _sha256(manifest_path)})
+    write_json(daily_path, daily)
+    return manifest
 
 
 def generate_daily_report_from_archive(root: Path, config: dict[str, Any]) -> dict[str, Any]:

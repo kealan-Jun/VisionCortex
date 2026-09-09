@@ -395,7 +395,7 @@ def test_speech_runtime_preserves_virtual_environment_executable(tmp_path):
 
 @pytest.mark.parametrize("required", [True, False])
 @pytest.mark.parametrize("prior_index", ["missing", "utf8", "partial", "non_object"])
-def test_speech_failure_only_blocks_video_when_explicitly_required(tmp_path, monkeypatch, required, prior_index):
+def test_speech_failure_keeps_vision_independent_and_required_audio_blocks_publication(tmp_path, monkeypatch, required, prior_index):
     from visioncortex import pipeline as pipeline_module
     from visioncortex.config import load_config
     from visioncortex.schemas import AlignmentTransform, VideoInfo
@@ -465,7 +465,7 @@ def test_speech_failure_only_blocks_video_when_explicitly_required(tmp_path, mon
     ):
         calls.append(received_manifest.experiment_id)
         assert received_config["speech_recognition"]["enabled"]
-        assert received_infos is infos and received_transforms is transforms
+        assert received_infos == infos and received_transforms == transforms
         assert (layout.json_config / "time_alignment.json").is_file()
         progress("录音哈希验证失败")
         if prior_index != "missing":
@@ -496,8 +496,14 @@ def test_speech_failure_only_blocks_video_when_explicitly_required(tmp_path, mon
         with pytest.raises(ReachedVideo):
             pipeline_module.EvidencePipeline(config).run(manifest)
         return
+    video_reached = []
+    def independent_video(self, context, layout, manifest):
+        video_reached.append(True)
+        raise RuntimeError("video fixture stopped after proving independent execution")
+    monkeypatch.setattr(pipeline_module.EvidencePipeline, "_stage_motion_probe", independent_video)
     with pytest.raises(ValueError, match="audio hash mismatch"):
         pipeline_module.EvidencePipeline(config).run(manifest)
+    assert video_reached == [True]
     assert calls == ["speech-gate"]
     status = json.loads(
         next((tmp_path / "output").rglob("run_status.json")).read_text()

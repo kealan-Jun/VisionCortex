@@ -14,7 +14,7 @@ def save_version(root: Path, artifacts: list[Path], receipt: dict) -> Path:
     target = root / 'JSON-Config-Files/Stage-Versions' / uuid4().hex[:16]
     target.mkdir(parents=True, exist_ok=False)
     paths = set()
-    excluded = {'Stage-Versions', 'Stage-Receipts', 'Stage-Refreshes', 'Retry-Attempts'}
+    excluded = {'Stage-Versions', 'Stage-Receipts', 'Stage-Refreshes', 'Retry-Attempts', 'Recovery'}
     for artifact in artifacts:
         if artifact.is_dir():
             for parent, directories, files in os.walk(artifact, followlinks=False):
