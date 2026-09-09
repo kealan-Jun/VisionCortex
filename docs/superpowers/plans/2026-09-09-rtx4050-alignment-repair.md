@@ -29,9 +29,10 @@ Use existing Python 3.12 dependencies and Node; no new application dependencies.
   location, without changing historical receipts or relaxing quality gates.
 - [x] Review diff and evidence. Transfer only the two tested source changes into
   the installed-version repair checkout, preserving unrelated version differences.
-- [ ] Commit the repair snapshot locally and apply through the existing verified,
+- [x] Commit the repair snapshot locally and apply through the existing verified,
   backup-producing updater after the application is idle and closed.
-- [ ] Verify installed source identity and user-visible failure classification.
+- [x] Verify installed source identity and the failure formatter against actual
+  failure records. Desktop reopen and full analysis remain unverified.
 
 ## Evidence boundaries
 
@@ -52,3 +53,12 @@ in Git. Keep 0.65 alignment confidence and 1000 ms role overlap requirements.
   alignment gate. One pair retains a partial-timeline coverage warning. Input
   file sizes and SHA-256 values were rechecked against upload receipts.
 - No full model pipeline or stable promotion is claimed.
+
+## Installation result
+
+Installed local repair snapshot `8e15b93b10e50f324f2aafd1a13d8a6464313f8b`
+through the existing updater. Only two source files and four version/integrity
+metadata files changed. Automatic backup was retained. All 160 installed source
+identities matched the new manifest, and six regressions using installed code
+passed. The application was closed while idle before updating; no automatic
+full analysis or engine rebuild was started. Neither repository was pushed.
