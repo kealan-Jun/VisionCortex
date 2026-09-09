@@ -103,6 +103,9 @@ class SpeechContext:
             raise ValueError("模型理解前缺少本实验录音阶段回执")
         index = speech_worker.read_json(index_path, 16 * 1024 * 1024)
         self.state = index["status"]
+        if self.state == "failed" and index.get("optional") and not options.get("required", False):
+            self.identity = speech_worker.sha256(index_path)
+            return  # Keep the failure visible; no partial transcript is evidence.
         if self.state != "completed":
             raise ValueError("模型理解前录音阶段尚未完成")
         self.identity = speech_worker.sha256(index_path)

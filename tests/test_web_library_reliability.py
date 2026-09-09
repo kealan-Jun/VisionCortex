@@ -2081,7 +2081,7 @@ assert.equal(Boolean(state.archiveView.refreshPending),expected);
 
 
 def test_background_archive_read_failure_preserves_content_and_schedules_retry():
-    run_javascript(("renderArchive",), r'''
+    run_javascript(("renderArchive", "stageSnapshotVersion",), r'''
 const state={},location={hash:"#/archive/A/reports"},main={innerHTML:"LAST REPORT"};
 let reject;const notices=[];
 const loadArchiveView=()=>new Promise((_,fail)=>reject=fail);
@@ -2099,7 +2099,7 @@ const productState=()=>"ERROR",document={querySelector:()=>null};
 
 
 def run_archive_live_sync(script):
-    run_javascript(("renderArchive", "invalidateArchiveCache", "refreshLibraryOverview",
+    run_javascript(("renderArchive", "stageSnapshotVersion", "invalidateArchiveCache", "refreshLibraryOverview",
                     "refreshOpenArchive", "archiveViewBusy", "archiveRefreshNotice"), r'''
 const state={archiveCache:new Map(),materialCache:new Map()},location={hash:"#/archive/A/reports"},window={};
 let active=null,dialog=null,media=[];
@@ -2195,7 +2195,7 @@ def test_archive_sync_retries_failures_and_discards_responses_after_navigation(o
 
 @pytest.mark.parametrize("old_fails", [False, True])
 def test_same_route_detail_requests_only_publish_the_latest_response(old_fails):
-    run_javascript(("renderArchive",), r'''
+    run_javascript(("renderArchive", "stageSnapshotVersion",), r'''
 const state={},location={hash:"#/archive/A/reports"},main={innerHTML:""};
 const pending=[];
 const loadArchiveView=()=>new Promise((resolve,reject)=>pending.push({resolve,reject}));
@@ -2504,4 +2504,51 @@ assert.ok(html.includes("仍需视频核验"));
 assert.ok(html.includes('<details class="gap-observation">'));
 assert.ok(html.includes("尚未打开。"));
 assert.ok(!html.includes("<details open"));
+''')
+
+
+def test_stage_status_does_not_turn_skipped_or_failed_audio_green():
+    run_javascript(("stageDisplayState", "guidedStageState"), r'''
+const run={state:"mllm",observability:{status:{stage:"mllm",completed_stages:["alignment"]},stage_receipts:[
+ {stage:"speech",status:"skipped",reason:"没有可用录音，视频分析继续"}]}};
+assert.equal(stageDisplayState(run,"speech").label,"已跳过");
+assert.equal(stageDisplayState(run,"mllm").label,"处理中");
+assert.equal(stageDisplayState(run,"semantic_refinement").label,"待处理");
+run.observability.stage_receipts[0].status="failed";
+assert.equal(stageDisplayState(run,"speech").label,"未完成");
+assert.equal(run.state,"mllm");
+const definition={stages:["alignment","speech"],completedBy:["alignment"]};
+run.state="speech";run.observability.status.stage="speech";
+assert.equal(guidedStageState(run,definition,new Map([["alignment",{status:"completed"}]]),1).state,"active");
+''')
+
+
+def test_follow_navigation_only_uses_saved_results_and_never_cancels_analysis():
+    run_javascript(("beginStageFollow", "followStageResults", "routeFromNavigation", "stageResultRoute"), r'''
+const state={},location={hash:"#/new"},STAGE_LABELS={experiment_clips:"实验片段"};
+let routes=0;const router=()=>{routes++},toast=()=>{},window={scrollTo(){}};
+const run={run_id:"R",experiment_id:"A",state:"mllm",observability:{stage_receipts:[]}};
+beginStageFollow("R");followStageResults(run);assert.equal(location.hash,"#/new");
+run.observability.stage_receipts=[{stage:"speech",status:"skipped",completed_at:"1"},
+ {stage:"experiment_clips",status:"completed",completed_at:"2"}];
+followStageResults(run);assert.equal(location.hash,"#/stage/R/experiments");
+routeFromNavigation();assert.equal(state.followRun.enabled,true);
+assert.equal(run.state,"mllm","navigation cannot change the backend task state");
+const before=routes;followStageResults(run);assert.equal(routes,before,"same receipt does not interrupt playback");
+location.hash="#/materials";routeFromNavigation();assert.equal(state.followRun.enabled,false);
+run.observability.stage_receipts.push({stage:"mllm",status:"completed",completed_at:"3"});
+followStageResults(run);assert.equal(location.hash,"#/materials");
+beginStageFollow("R");followStageResults({...run,run_id:"OTHER"});assert.equal(location.hash,"#/materials");
+followStageResults(run);assert.equal(location.hash,"#/stage/R/materials");
+''')
+
+
+def test_closed_bad_nas_batch_is_actionable_instead_of_recording_forever():
+    run_javascript(("nasBatchPicker", "captureQualityCopy"), r'''
+const state={nasBatches:[{available:false,camera_count:2,issues:["采集程序报告数据不完整","采集相机视角待确认"],
+ issue_details:[{camera_key:"cam01",issues:["采集程序报告数据不完整"],capture_quality:{reason:"rgb coverage below 98 percent",rgb_coverage_ratio:.22}}]}]};
+const esc=String,number=String,duration=String,formatBytes=String,formatDate=String,icon=()=>"";
+const html=nasBatchPicker();assert.ok(html.includes("需要处理"));assert.ok(html.includes("22.0%"));
+assert.ok(html.includes("视频时间覆盖率低于 98%"));assert.ok(html.includes("采集相机视角待确认"));
+assert.ok(!html.includes(">采集中<"));assert.ok(html.includes("disabled"));
 ''')

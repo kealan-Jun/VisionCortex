@@ -1967,6 +1967,7 @@ def _stage_receipts_from_root(root: Path) -> list[dict[str, Any]]:
             {
                 "stage": payload["stage"],
                 "status": payload.get("status", "completed"),
+                "reason": payload.get("reason"),
                 "completed_at": payload.get("completed_at"),
                 "run_elapsed_seconds": payload.get("run_elapsed_seconds"),
                 "stage_duration_seconds": payload.get("stage_duration_seconds"),
@@ -4228,6 +4229,23 @@ def staging_archive_detail(run_id: str, section: str = "all") -> dict[str, Any]:
     return result
 
 
+def _stage_clip_group(folder: Path, groups: dict[str, dict], status: dict) -> dict | None:
+    started = _current_attempt_started_at(status)
+    sidecar = folder / "First-Person.json"
+    if not sidecar.is_file() or (started is not None and sidecar.stat().st_mtime < started):
+        return None
+    saved = _read_json(sidecar, {}) or {}
+    source = saved.get("group") or {}
+    current = groups.get(str(source.get("group_id")))
+    if not current or current.get("archive_folder"):
+        return None
+    if any(source.get(key) != current.get(key) for key in ("global_start_ms", "global_end_ms")):
+        return None
+    if saved.get("artifact_type") != "experiment_view_video" or source.get("archive_folder") != folder.name:
+        return None
+    return {**current, "archive_folder": folder.name}
+
+
 def _archive_detail_from_root(
     root: Path, archive_name: str, *, staging_run_id: str | None = None,
     library_section: str | None = None
@@ -4319,8 +4337,16 @@ def _archive_detail_from_root(
     experiment_root = root / "Experiment-Clips"
     if experiment_root.is_dir():
         for folder in sorted(item for item in experiment_root.iterdir() if item.is_dir()):
+            if staging_run_id and folder.name not in group_by_folder:
+                # Older runs published their group index before clip paths
+                # were assigned. Recover only matching, finished clip metadata.
+                recovered = _stage_clip_group(folder, group_by_id, status)
+                if recovered:
+                    group_by_folder[folder.name] = recovered
             if (package_groups or active_preview) and folder.name not in group_by_folder:
                 continue
+            if active_preview and "experiment_clips" not in completed_stages:
+                continue  # A directory/MP4 may still be under construction.
             group = group_by_folder.get(folder.name, {})
             understanding = group.get("model_understanding") or {}
             first_person = folder / "First-Person.mp4"
@@ -6447,7 +6473,7 @@ def create_nas_batch_run(
             raise HTTPException(
                 409,
                 {
-                    "message": "该采集批次尚未完成",
+                    "message": "该采集批次尚不具备分析条件，请查看各项原因",
                     "issues": batch.get("issues") or [],
                 },
             )

@@ -4,6 +4,8 @@ capture_quality:
   sample_seconds: 3
 
 speech_recognition:
+  # Audio is optional. A failed transcript must not stop independent video work.
+  required: false
   enabled: false
   python_executable: null
   model_directory: null

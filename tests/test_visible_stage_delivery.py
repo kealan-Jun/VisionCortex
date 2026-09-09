@@ -74,6 +74,10 @@ def test_stage_preview_reads_completed_clips_without_final_package(tmp_path, mon
     json_dir = root / "JSON-Config-Files"
     json_dir.mkdir(parents=True)
     (json_dir / "pipeline_status.json").write_text(json.dumps({"stage": "mllm"}))
+    (json_dir / "Stage-Receipts").mkdir()
+    (json_dir / "Stage-Receipts/experiment_clips.json").write_text(json.dumps({
+        "stage": "experiment_clips", "status": "completed",
+    }))
     (json_dir / "experiment_group_understanding.json").write_text(json.dumps({
         "groups": [{"group_id": "GROUP-1", "archive_folder": "weighing",
                     "experiment_name": "称量", "global_start_ms": 0,
@@ -124,7 +128,7 @@ def test_stage_preview_reads_completed_clips_without_final_package(tmp_path, mon
     # A folder alone must not make an unfinished stage appear delivered.
     assert api.staging_archive_detail("run-preview")["preliminary_materials"] == []
     receipts = json_dir / "Stage-Receipts"
-    receipts.mkdir()
+    receipts.mkdir(exist_ok=True)
     (receipts / "key_materials.json").write_text(json.dumps({"stage": "key_materials", "status": "completed"}))
     preview = api.staging_archive_detail("run-preview")
     assert preview["key_events"] == []
@@ -218,6 +222,12 @@ def test_checkpoint_receipt_waits_for_successful_publication(tmp_path, monkeypat
     first = pipeline._checkpoint_key_material_understanding(layout, "mllm", [], [])
     pipeline._complete_stage(layout, "mllm", first)
     preserved = (nas / "JSON-Config-Files/Stage-Outputs/mllm.json").read_bytes()
+    inventory_path = nas / "阶段产出清单.json"
+    inventory_before = inventory_path.read_bytes()
+    inventory = json.loads(inventory_before)
+    assert inventory["formal_release"] is False
+    assert [item["stage"] for item in inventory["stages"]] == ["mllm"]
+    assert all((nas / name).exists() for item in inventory["stages"] for name in item["artifacts"])
     next_paths = pipeline._checkpoint_key_material_understanding(
         layout, "material_refinement", [], []
     )
@@ -232,6 +242,7 @@ def test_checkpoint_receipt_waits_for_successful_publication(tmp_path, monkeypat
     assert (nas / "JSON-Config-Files/Stage-Receipts/mllm.json").exists()
     assert not (layout.json_config / "Stage-Receipts/material_refinement.json").exists()
     assert not (nas / "JSON-Config-Files/Stage-Receipts/material_refinement.json").exists()
+    assert inventory_path.read_bytes() == inventory_before
 
 
 def test_task_page_exposes_each_completed_stage_output():
@@ -305,12 +316,13 @@ def test_retry_preview_uses_current_groups_and_receipts(tmp_path):
         folder.mkdir(parents=True)
         (folder / "First-Person.mp4").write_bytes(b"test-media")
     save(receipts / "experiment_understanding.json", {"stage": "experiment_understanding", "status": "completed", "completed_at": "2026-09-07T10:04:00+00:00"})
+    save(receipts / "experiment_clips.json", {"stage": "experiment_clips", "status": "completed", "completed_at": "2026-09-07T10:04:30+00:00"})
     save(receipts / "semantic_refinement.json", {"stage": "semantic_refinement", "status": "completed", "completed_at": "2026-09-07T09:40:00+00:00"})
     detail = api._archive_detail_from_root(root, "experiment", staging_run_id="retry")
     assert [item["name"] for item in detail["experiments"]] == ["current"]
     assert detail["experiments"][0]["steps"] == [{"description": "observed"}]
     assert detail["metrics"]["total_duration_seconds"] == 300
-    assert [item["stage"] for item in detail["observability"]["stage_receipts"]] == ["experiment_understanding"]
+    assert {item["stage"] for item in detail["observability"]["stage_receipts"]} == {"experiment_understanding", "experiment_clips"}
     assert (root / "Experiment-Clips/old/First-Person.mp4").exists()
     # The completed package also excludes orphan folders from older attempts.
     save(config / "evidence_package.json", {"experiment_groups": [current]})
@@ -341,3 +353,76 @@ def test_retry_retains_derived_media_without_touching_originals(tmp_path):
     fresh.write_bytes(b"new-frame")
     api._retain_retry_outputs(root, 4)
     assert (root / "JSON-Config-Files/Retry-Attempts/4/Derived/Key-Materials/Machine-Quarantine/event/Key-Frames/frame.jpg").read_bytes() == b"new-frame"
+
+
+def test_running_video_preview_retains_queue_lease_and_recovers_early_clip_paths(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from visioncortex.run_queue import DurableRunQueue
+
+    root = tmp_path / "archive"
+    config = root / "JSON-Config-Files"
+    receipts = config / "Stage-Receipts"
+    receipts.mkdir(parents=True)
+    def save(path, value):
+        path.write_text(json.dumps(value))
+    save(config / "pipeline_status.json", {"stage": "mllm", "updated_at": "2026-09-07T10:05:00+00:00", "elapsed_seconds": 300})
+    group = {"group_id": "G1", "archive_folder": None, "global_start_ms": 0, "global_end_ms": 1000,
+             "experiment_name": "current", "model_understanding": {"steps": []}}
+    save(config / "experiment_group_understanding.json", {"groups": [group]})
+    for stage in ("experiment_understanding", "experiment_clips"):
+        save(receipts / f"{stage}.json", {"stage": stage, "status": "completed", "completed_at": "2026-09-07T10:04:30+00:00"})
+    folder = root / "Experiment-Clips/001_current"
+    folder.mkdir(parents=True)
+    video = folder / "First-Person.mp4"
+    video.write_bytes(b"range-contract-fixture")
+    save(folder / "First-Person.json", {"artifact_type": "experiment_view_video", "group": {**group, "archive_folder": folder.name}})
+    store = DurableRunQueue(tmp_path / "queue.sqlite3")
+    store.save_run("R", {"state": "mllm"})
+    store.enqueue("R", "run", {})
+    assert store.claim_next("worker", lease_seconds=600)
+    before = store.get_job("R")
+    monkeypatch.setattr(api, "_resolve_staging_run", lambda _: root)
+    monkeypatch.setattr(api, "_runs", {"R": {"run_id": "R", "experiment_id": "current", "state": "mllm"}})
+    # No ASGI lifespan: start no runtime workers in this contract test.
+    client = TestClient(api.app, client=("127.0.0.1", 30000))
+    detail = client.get("/api/staging-runs/R/archive").json()
+    assert detail["experiments"][0]["folder"] == folder.name
+    response = client.get(detail["experiments"][0]["first_person_video_url"], headers={"Range": "bytes=0-4"})
+    assert response.status_code == 206 and response.content == b"range"
+    assert store.get_job("R") == before
+    assert api._runs["R"]["state"] == "mllm"
+    assert store.finish("R", "worker", "completed")
+    # Before clips finish, unfinished MP4s are not advertised as playable.
+    (receipts / "experiment_clips.json").unlink()
+    assert api._archive_detail_from_root(root, "current", staging_run_id="R")["experiments"] == []
+
+
+def test_old_clip_metadata_cannot_recover_a_different_current_boundary(tmp_path):
+    folder = tmp_path / "clip"
+    folder.mkdir()
+    source = {"group_id": "G1", "archive_folder": "clip", "global_start_ms": 0, "global_end_ms": 1000}
+    (folder / "First-Person.json").write_text(json.dumps({"artifact_type": "experiment_view_video", "group": source}))
+    groups = {"G1": {**source, "archive_folder": None, "global_end_ms": 2000}}
+    assert api._stage_clip_group(folder, groups, {}) is None
+
+
+@pytest.mark.parametrize("outcome", ["skipped", "failed"])
+def test_optional_component_outcome_is_visible_without_failing_video(tmp_path, outcome):
+    layout = ArchiveLayout(tmp_path / "archive")
+    layout.create()
+    pipeline = EvidencePipeline(load_config())
+    pipeline._run_started_iso = "2026-01-01T00:00:00+00:00"
+    pipeline._run_started_perf = time.perf_counter()
+    receipts = layout.json_config / "Stage-Receipts"
+    receipts.mkdir()
+    (receipts / "old.json").write_text(json.dumps({"stage": "old", "completed_at": "2025-01-01T00:00:00+00:00"}))
+    pipeline._status(layout, "speech", .09, "录音")
+    pipeline._complete_stage(layout, "speech", status=outcome, reason="没有可用转写，视频分析继续")
+    pipeline._status(layout, "motion_probe", .1, "视频处理中")
+    status = json.loads((layout.root / "run_status.json").read_text())
+    assert status["stage"] == "motion_probe" and status["failed_stage"] is None
+    assert "speech" not in status["completed_stages"]
+    assert status["stage_outcomes"]["speech"]["status"] == outcome
+    inventory = json.loads((layout.root / "阶段产出清单.json").read_text())
+    assert [item["stage"] for item in inventory["stages"]] == ["speech"]
+    assert inventory["stages"][0]["reason"] == "没有可用转写，视频分析继续"

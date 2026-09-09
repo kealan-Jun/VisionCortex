@@ -254,6 +254,9 @@ const MODEL_LABELS = {
   labpics_pspnet_liquid_semantic: "LabPics PSPNet 液体语义",
 };
 const STAGE_LABELS = {
+  capacity_reservation: "检查可用空间",
+  source_transfer: "传入实验视频",
+  input_seal: "核对输入文件",
   reserving: "准备实验空间",
   original_ingest: "保存实验视频",
   nas_ingest: "读取实验视频",
@@ -407,6 +410,13 @@ function setPhase(run) {
   const stage = run?.state || "idle";
   chip.className = `phase-chip ${stage === "partial" ? "partial" : stage === "completed" ? "completed" : ["failed", "interrupted"].includes(stage) ? "failed" : run ? "running" : ""}`;
   chip.querySelector("span").textContent = run?.parent_run_id ? (stage === "completed" ? "阶段结果已更新" : ["failed","interrupted"].includes(stage) ? "阶段更新未完成" : "正在处理所选阶段") : run ? (STAGE_LABELS[stage] || run.message || stage) : "暂无进行中的任务";
+  const follow = document.querySelector("#follow-stage-results");
+  if (follow) {
+    follow.hidden = !run || ["completed","partial","failed","interrupted"].includes(stage);
+    follow.textContent = state.followRun?.enabled ? "自动跟随中 · 暂停" : "跟随分析进度";
+    follow.ariaPressed = String(Boolean(state.followRun?.enabled));
+    follow.title = "环节产出保存后自动打开对应页面；手动切换页面会暂停跟随。";
+  }
 }
 
 function updateServiceChrome() {
@@ -538,7 +548,12 @@ async function refreshTaskSnapshots() {
     if (state.activeRun?.run_id) {
       state.activeRun = state.runs.find((run) => run.run_id === state.activeRun.run_id) || state.activeRun;
     }
+    if (state.archiveView?.staging && !state.archiveView.loading) {
+      const run = state.runs.find(item=>item.run_id === state.archiveView.name);
+      if (run?.observability && stageSnapshotVersion(run.observability) !== state.archiveView.stageVersion) state.archiveView.refreshPending = true;
+    }
     updateServiceChrome();
+    if (state.followRun) followStageResults(state.runs.find(run=>run.run_id === state.followRun.runId));
     const route = routeParts()[0] || "home";
     if (route === "tasks") renderTasks();
     const current = JSON.stringify(experimentRecords().map((record)=>[libraryRecordKey(record), record.material_revision, record.key_event_count]));
@@ -1306,6 +1321,17 @@ function nasRecordingPicker() {
   return `<section class="form-section" id="nas-recordings"><div class="section-heading"><span>01</span><div><h2>选择已采集素材 <span class="count-pill">${items.length}</span></h2><p>选择同一次实验的不同视角，无需重复上传视频。</p></div></div>${state.nasError ? `<p class="nas-recording-issue" role="status">${esc(state.nasError)}</p>` : ""}<label class="collection-search">${icon("search")}<input id="nas-search" value="${esc(state.nasQuery)}" placeholder="按实验、文件夹或文件名查找" aria-label="搜索已采集素材"></label><div class="nas-recordings-list">${rows || `<div class="empty-state compact"><strong>${state.nasLoading ? "正在读取已采集素材…" : state.nasSyncError ? "暂时无法读取采集素材" : "还没有采集素材"}</strong></div>`}</div>${items.some((item) => item.requires_completion_confirmation) ? `<label class="nas-completion-confirmation"><input id="nas-complete-confirmed" type="checkbox" ${state.nasCompleteConfirmed ? "checked" : ""}>我确认所选视频已采集完成，不再写入</label>` : ""}<div class="nas-selection-actions"><span id="nas-selection-count">已选择 ${Object.keys(state.nasSelection).length} 个片段</span><button class="secondary-button" type="button" id="save-nas-selection">保存为实验批次</button></div></section>`;
 }
 
+function captureQualityCopy(reason) {
+  const labels = {
+    "rgb coverage below 98 percent": "视频时间覆盖率低于 98%",
+    "rgb contains a gap over 500 ms": "视频存在超过 0.5 秒的帧间隔",
+    "depth coverage below 98 percent": "深度数据时间覆盖率低于 98%",
+    "depth contains a gap over 500 ms": "深度数据存在超过 0.5 秒的帧间隔",
+    "RGB/depth duration drift exceeds 500 ms": "视频与深度数据的时长差超过 0.5 秒",
+  };
+  return String(reason || "").split(";").map(part=>labels[part.trim()] || part.trim()).join("；");
+}
+
 function nasBatchPicker() {
   const monitor = state.nasMonitor || {};
   const monitorWatching = !state.nasSyncError && monitor.status === "watching";
@@ -1315,12 +1341,15 @@ function nasBatchPicker() {
     ? "NAS 连接中断，正在自动重试"
     : "正在启动采集监控";
   const rows = state.nasBatches.map((batch) => {
-    const status = batch.available ? "可分析" : "采集中";
-    const issue = batch.issues?.[0] || "";
-    return `<article class="collection-card ${batch.available ? "ready" : "recording"}">
-      <header><div title="采集编号：${esc(batch.recording_session_id)}"><small>${formatDate(batch.recording_start_time)}</small><strong>多视角采集 · ${number(batch.camera_count)} 个视角</strong></div><span class="collection-status ${batch.available ? "ready" : "recording"}">${status}</span></header>
+    const issues = batch.issues || [];
+    const writing = issues.some(issue=>/正在写入|尚未写入|尚未关闭|等待采集完成|等待文件写入|尚未就绪/.test(issue));
+    const status = batch.available ? "可分析" : writing ? "等待采集完成" : "需要处理";
+    return `<article class="collection-card ${batch.available ? "ready" : "blocked"}">
+      <header><div title="采集编号：${esc(batch.recording_session_id)}"><small>${formatDate(batch.recording_start_time)}</small><strong>多视角采集 · ${number(batch.camera_count)} 个视角</strong></div><span class="collection-status ${batch.available ? "ready" : "blocked"}">${status}</span></header>
       <div class="collection-metrics"><span><b>${number(batch.camera_count)}</b> 路相机</span><span><b>${number(batch.recording_count)}</b> 个视频</span><span><b>${duration(batch.duration_seconds)}</b></span><span><b>${formatBytes(batch.size_bytes)}</b></span></div>
-      ${issue ? `<small class="collection-issues">${esc(issue)}</small>` : ""}
+      ${issues.length ? `<ul class="collection-blockers">${issues.map(issue=>`<li>${esc(issue)}</li>`).join("")}</ul>` : ""}
+      ${!batch.available ? `<p class="batch-next-action">${issues.some(issue=>/视角/.test(issue)) ? '请在下方“选择视频”中指定第一／第三人称视角。' : ""}${issues.some(issue=>/不完整/.test(issue)) ? "采集质量未通过，请查看相机记录；等待分析不会修复缺失的数据。" : ""}</p>` : ""}
+      ${(batch.issue_details || []).length ? `<details class="batch-capture-details"><summary>查看各相机原因</summary>${batch.issue_details.map(item=>`<section><strong>${esc(item.camera_key)}</strong><p>${esc((item.issues || []).join("；"))}</p>${item.capture_quality?.reason ? `<p>采集程序记录：${esc(captureQualityCopy(item.capture_quality.reason))}</p>` : ""}${item.capture_quality?.rgb_coverage_ratio != null ? `<p>采集程序报告的视频覆盖率：${(Number(item.capture_quality.rgb_coverage_ratio)*100).toFixed(1)}%${item.capture_quality.rgb_max_frame_gap_us != null ? ` · 最大帧间隔 ${(Number(item.capture_quality.rgb_max_frame_gap_us)/1000000).toFixed(2)} 秒` : ""}</p>` : ""}</section>`).join("")}</details>` : ""}
       <button class="primary-button" type="button" data-run-nas-batch="${esc(batch.batch_id)}" ${batch.available ? "" : "disabled"}>${icon("arrow")}分析此批次</button>
     </article>`;
   }).join("");
@@ -1886,12 +1915,29 @@ async function uploadPlanFiles(plan, initialSession, onProgress) {
 }
 
 function renderStages(activeStage, progressValue) {
-  const stages = ["capacity_reservation","source_transfer","original_ingest","nas_ingest","input_seal","input_preflight","queued","preflight","alignment","speech","motion_probe","candidate_coarse","candidate_fine","candidate_audit","experiment_understanding","experiment_clips","key_materials","mllm","package","daily_report","finalizing"];
-  const activeIndex = stages.indexOf(activeStage);
+  const stages = ["preflight","alignment","speech","motion_probe","candidate_coarse","candidate_fine","candidate_audit","experiment_understanding","experiment_clips","key_materials","mllm","material_refinement","semantic_refinement","package","daily_report","finalizing"];
+  if (!stages.includes(activeStage) && !["completed","partial","failed","interrupted"].includes(activeStage)) stages.unshift(activeStage);
   const element = document.querySelector("#run-stages");
   if (!element) return;
-  element.innerHTML = stages.map((stage, index) => `<div class="${activeStage === "completed" || index < activeIndex ? "done" : index === activeIndex ? "active" : ""}"><i></i><span>${esc(STAGE_LABELS[stage])}</span></div>`).join("");
-  setProgress(progressValue, STAGE_LABELS[activeStage] || activeStage);
+  const run = state.activeRun || {state: activeStage};
+  element.innerHTML = stages.map(stage => {
+    const outcome = stageDisplayState(run, stage, activeStage);
+    return `<div class="${outcome.state}" title="${esc(outcome.reason || "")}" ${outcome.state === "active" ? 'aria-current="step"' : ""}><i aria-hidden="true">${outcome.symbol}</i><span>${esc(STAGE_LABELS[stage] || stage)}</span><small>${outcome.label}</small>${outcome.reason ? `<p>${esc(outcome.reason)}</p>` : ""}</div>`;
+  }).join("");
+  setProgress(progressValue, run.message || STAGE_LABELS[activeStage] || activeStage);
+}
+
+function stageDisplayState(run, stage, activeStage = run.observability?.status?.stage || run.state) {
+  const snapshot = run.observability || {}, status = snapshot.status || {};
+  const receipt = (snapshot.stage_receipts || []).find(item=>item.stage === stage);
+  const outcome = receipt || status.stage_outcomes?.[stage];
+  if (outcome?.status === "skipped") return {state:"skipped",label:"已跳过",symbol:"−",reason:outcome.reason};
+  if (outcome?.status === "failed") return {state:"failed",label:"未完成",symbol:"!",reason:outcome.reason};
+  if (["failed","interrupted"].includes(run.state) && status.failed_stage === stage) return {state:"failed",label:"已停止",symbol:"!"};
+  if (activeStage === stage) return {state:"active",label:stage === "queued" ? "排队中" : "处理中",symbol:"↻"};
+  if (outcome?.status === "completed") return {state:"done",label:"已完成",symbol:"✓"};
+  if ((status.completed_stages || []).includes(stage)) return {state:"passed",label:"已通过",symbol:"✓"};
+  return {state:"waiting",label:["completed","partial","failed","interrupted"].includes(run.state) ? "未执行" : "待处理",symbol:"·"};
 }
 
 function setProgress(value, message) {
@@ -1949,6 +1995,7 @@ async function submitRun() {
       forgetUploadSession();
       state.activeUploadSessionId = null;
       document.querySelector("#cancel-upload")?.classList.add("hidden");
+      beginStageFollow(session.run_id);
       await pollRun(session.run_id, archiveName);
       return;
     }
@@ -1971,6 +2018,7 @@ async function submitRun() {
     document.querySelector("#cancel-upload")?.classList.add("hidden");
     renderStages("queued", .15);
     setPhase(state.activeRun);
+    beginStageFollow(created.run_id);
     await pollRun(created.run_id, archiveName);
   } catch (error) {
     if (state.uploadCancelled || error.name === "AbortError") return;
@@ -1999,6 +2047,7 @@ async function submitCollectionRun(review) {
     };
     setPhase(state.activeRun);
     setProgress(.02, "已开始分析，正在检查视频与时间记录");
+    beginStageFollow(created.run_id);
     await pollRun(created.run_id, created.archive_name);
   } catch (error) {
     toast(error.message, "error");
@@ -2030,6 +2079,7 @@ async function submitNasBatchRun(batch, button) {
     };
     setPhase(state.activeRun);
     setProgress(.02, "批次已接管，正在校验视频与时间戳");
+    beginStageFollow(created.run_id);
     await pollRun(created.run_id, created.archive_name);
   } catch (error) {
     toast(error.message, "error");
@@ -2064,6 +2114,7 @@ async function pollRun(runId, archiveName) {
     }
     if (!isCurrent()) return;
     rememberRunSnapshot(run);
+    if (state.followRun) followStageResults(run);
     if (["completed", "partial", "failed", "interrupted"].includes(run.state)) state.runPollRequestId += 1;
     setPhase(run);
     renderStages(run.state, .15 + Number(run.progress || 0) * .85);
@@ -2097,6 +2148,31 @@ async function pollRun(runId, archiveName) {
       return;
     }
   }
+}
+
+function beginStageFollow(runId) {
+  state.followRun = {runId, enabled: true, seen: new Set(), expectedHash: null};
+}
+
+function followStageResults(run) {
+  const follow = state.followRun;
+  if (!run || !follow?.enabled || follow.runId !== run.run_id) return;
+  const receipts = (run.observability?.stage_receipts || []).filter(item=>item.status === "completed")
+    .sort((a,b)=>String(a.completed_at || "").localeCompare(String(b.completed_at || "")));
+  const fresh = receipts.filter(item=>!follow.seen.has(`${item.stage}:${item.completed_at}`))
+    .sort((a,b)=>String(a.completed_at || "").localeCompare(String(b.completed_at || "")));
+  const finished = run.state === "completed" && !follow.finished;
+  const latest = fresh.at(-1) || (finished ? receipts.at(-1) : null);
+  if (!latest) return;
+  if (state.archiveView && archiveViewBusy()) return;
+  for (const item of receipts) follow.seen.add(`${item.stage}:${item.completed_at}`);
+  if (finished) follow.finished = true;
+  const tabs = {speech:"speech", experiment_understanding:"experiments", experiment_clips:"experiments", key_materials:"materials", mllm:"materials", material_refinement:"materials", semantic_refinement:"experiments", package:"metrics", daily_report:"reports", finalizing:"reports"};
+  const target = tabs[latest.stage] ? stageResultRoute(run, tabs[latest.stage]) : "#/tasks";
+  toast(`${STAGE_LABELS[latest.stage] || latest.stage}已完成，产出已保存。`, "");
+  if (location.hash === target) { void router(); return; }
+  follow.expectedHash = target;
+  location.hash = target;
 }
 
 function rememberRunSnapshot(run) {
@@ -2204,10 +2280,10 @@ function guidedStageState(run, definition, receipts, index) {
   const failed = status.failed_stage || (run.state === "failed"
     ? run.observability?.metrics?.nas_index_ingest?.failure_stage || current : null);
   if (["failed","interrupted"].includes(run.state) && definition.stages.includes(failed)) return { state: run.state, receipt: null };
-  const completedReceipt = definition.completedBy.map((stage)=>receipts.get(stage)).find(Boolean);
-  if (run.state === "completed" || completedReceipt) return { state: "done", receipt: completedReceipt };
+  const completedReceipt = definition.completedBy.map((stage)=>receipts.get(stage)).find(item=>item?.status === "completed");
+  if (!["completed","partial","failed","interrupted"].includes(run.state) && definition.stages.includes(current)) return { state: "active", receipt: completedReceipt };
+  if (completedReceipt) return { state: "done", receipt: completedReceipt };
   if (run.state === "partial") return { state: "withheld", receipt: null };
-  if (definition.stages.includes(current)) return { state: "active", receipt: null };
   const currentIndex = GUIDED_PIPELINE.findIndex((item)=>item.stages.includes(current));
   if (currentIndex > index) return { state: "done-unreceipted", receipt: null };
   return { state: "waiting", receipt: null };
@@ -2240,7 +2316,7 @@ function guidedPipelineView(run, outputsOpen = false) {
   const activeIndex = rows.indexOf(active);
   const next = rows.slice(activeIndex+1).find((item)=>item.state === "waiting");
   const status = snapshot.status || {};
-  const stateLabel = { active:"正在进行", done:"已归档", "done-unreceipted":"已通过", waiting:"等待中", partial:"证据不足", withheld:"未发布", failed:"本环节失败", interrupted:"等待续跑" };
+  const stateLabel = { active:"正在进行", done:"已完成", "done-unreceipted":"已通过", waiting:"等待中", partial:"证据不足", withheld:"未发布", failed:"本环节失败", interrupted:"等待续跑" };
   const cards = rows.map(({definition,state:stageState,receipt})=>{
     const deliveredReceipts = definition.stages.map((stage)=>receipts.get(stage)).filter(Boolean);
     const artifacts = deliveredReceipts.flatMap((item)=>item.artifacts || []).filter((item)=>item.available);
@@ -2248,7 +2324,7 @@ function guidedPipelineView(run, outputsOpen = false) {
     const featured = (definition.outputs || []).map(([name,label])=>({ item: filesByName.get(name), label })).filter(({item})=>item);
     const latestReceipt = receipt || deliveredReceipts.at(-1);
     const receiptUrl = latestReceipt ? stageArtifactUrl(run, latestReceipt.receipt) : "";
-    const resultLink = definition.resultTab && deliveredReceipts.length
+    const resultLink = definition.resultTab && deliveredReceipts.some(item=>item.status === "completed")
       ? `<a href="${esc(stageResultRoute(run,definition.resultTab[0]))}">${icon("arrow")}${esc(definition.resultTab[1])}</a>` : "";
     const artifactLinks = deliveredReceipts.length ? `<div class="journey-artifacts">${resultLink}${featured.map(({item,label})=>`<a target="_blank" href="${esc(stageArtifactUrl(run,item.relative_path))}">${icon("file")}${esc(label)}</a>`).join("")}${receiptUrl ? `<a class="receipt-link" target="_blank" href="${esc(receiptUrl)}">${icon("check")}完整清单</a>` : ""}</div>` : "";
     const detail = stageState === "done"
@@ -2260,7 +2336,8 @@ function guidedPipelineView(run, outputsOpen = false) {
       : stageState === "interrupted" ? "已完成内容会保留，可以稍后重新分析。"
       : stageState === "done-unreceipted" ? "该环节已通过，后续分析已经开始。"
       : "等待前序环节完成";
-    return `<article class="journey-step ${stageState}"><span class="journey-number">${definition.number}</span><div class="journey-copy"><header><strong>${esc(definition.title)}</strong><span>${esc(stateLabel[stageState])}</span></header><p>${esc(detail)}</p>${artifactLinks}</div></article>`;
+    const componentNotes = deliveredReceipts.filter(item=>["skipped","failed"].includes(item.status)).map(item=>`<p class="component-outcome">${esc(STAGE_LABELS[item.stage] || item.stage)} · ${item.status === "skipped" ? "已跳过" : "未完成"}：${esc(item.reason || "请查看该环节记录")}</p>`).join("");
+    return `<article class="journey-step ${stageState}"><span class="journey-number">${definition.number}</span><div class="journey-copy"><header><strong>${esc(definition.title)}</strong><span>${esc(stateLabel[stageState])}</span></header><p>${esc(detail)}</p>${componentNotes}${artifactLinks}</div></article>`;
   }).join("");
   return `<section class="current-guide ${active.state}"><div><span class="guide-kicker">${esc(stateLabel[active.state])} · 第 ${esc(active.definition.number)} 步，共 7 步</span><h3>${esc(active.definition.title)}</h3><p>${esc(productRunMessage(run, active.definition.doing))}</p></div><aside><small>${run.state === "partial" ? "本次结果" : next ? "接下来" : "最终结果"}</small><strong>${esc(run.state === "partial" ? "阶段成果已保存，完整结论未发布" : next?.definition.title || "实验成果已完整保存")}</strong></aside></section><div class="task-progress-line"><span>${["failed", "interrupted"].includes(run.state) ? "处理已停止" : `已完成 ${Math.round(Number(run.progress || 0) * 100)}%`}</span><span>已用 ${duration(elapsedForRun(run, status))}</span></div><details class="technical-observability" ${outputsOpen ? "open" : ""}><summary>查看各环节与生成文件</summary><div class="pipeline-journey">${cards}</div></details>`;
 }
@@ -2705,7 +2782,7 @@ function experimentGroupBrowser(data, preliminary = false, selectedFolder = "") 
   const groups = data.experiments || [];
   if (!groups.length) {
     const stopped = archiveProcessStopped(data);
-    return `<section id="experiment-results">${productState(stopped?"error":"progress",stopped?"x":"clock",stopped?"本次处理未生成实验片段":"实验片段正在生成",stopped?"可以在任务记录中查看停止位置，并按原设置重新分析。":"分析完成后会在这里显示同步视频与步骤理解。",'<a class="secondary-button" href="#/tasks">查看任务进度</a>')}</section>`;
+    return `<section id="experiment-results">${productState(stopped?"error":"progress",stopped?"x":"clock",stopped?"本次处理未生成实验片段":"实验片段正在生成",stopped?"可以在任务记录中查看停止位置，并按原设置重新分析。":"视频片段保存后即可播放，后续模型分析会继续。开启顶部的跟随分析进度可自动查看。",'<a class="secondary-button" href="#/tasks">查看任务进度</a>')}</section>`;
   }
   const matched = groups.findIndex(group=>group.folder===selectedFolder||(group.source_archive_folders||[]).includes(selectedFolder));
   const selected = Math.max(0,matched);
@@ -3534,10 +3611,14 @@ function archiveRefreshNotice(message) {
 
 function refreshOpenArchive() {
   const view = state.archiveView;
-  if (!view?.refreshPending || view.loading || view.staging || view.hash !== location.hash) return;
+  if (!view?.refreshPending || view.loading || view.hash !== location.hash) return;
   const busy = archiveViewBusy();
   archiveRefreshNotice(busy ? "实验结果已更新，将在当前播放或编辑结束后自动同步。" : "正在同步最新实验结果，当前显示上次载入的内容。");
-  if (!busy) return renderArchive(view.name, view.tab, false, true);
+  if (!busy) return renderArchive(view.name, view.tab, view.staging, true);
+}
+
+function stageSnapshotVersion(snapshot) {
+  return JSON.stringify([snapshot?.status?.stage, (snapshot?.stage_receipts || []).map(item=>[item.stage,item.status,item.completed_at])]);
 }
 
 function resultWorkspaceContent(data, tab, staging, notice, experimentResults) {
@@ -3567,6 +3648,7 @@ async function renderArchive(name, tab = "experiments", staging = false, backgro
     // Playback or editing may have started while the background request was in flight.
     if (background && archiveViewBusy()) { view.refreshPending = true; return; }
     const status = data.observability?.status || {};
+    view.stageVersion = stageSnapshotVersion(data.observability);
     const stage = status.stage;
     const pending = stage ? stage !== "completed" : staging;
     const stopped = archiveProcessStopped(data);
@@ -4065,10 +4147,25 @@ document.querySelector("#mobile-more-button")?.addEventListener("click", ()=>mob
 document.querySelectorAll("[data-close-mobile-more]").forEach((button)=>button.addEventListener("click", ()=>mobileMoreDialog?.close()));
 mobileMoreDialog?.querySelectorAll("a").forEach((link)=>link.addEventListener("click", ()=>mobileMoreDialog.close()));
 function routeFromNavigation() {
+  const follow = state.followRun;
+  if (follow?.enabled) {
+    if (location.hash !== follow.expectedHash) follow.enabled = false;
+    follow.expectedHash = null;
+  }
   window.scrollTo({ top: 0, left: 0, behavior: "auto" });
   return router();
 }
 
+document.querySelector("#follow-stage-results")?.addEventListener("click", () => {
+  if (state.followRun?.enabled) state.followRun.enabled = false;
+  else {
+    const run = state.activeRun || state.runs.find(item=>!["completed","partial","failed","interrupted"].includes(item.state));
+    if (!run) return;
+    beginStageFollow(run.run_id);
+    followStageResults(run);
+  }
+  updateServiceChrome();
+});
 window.addEventListener("hashchange", routeFromNavigation);
 window.addEventListener("scroll", updateResultNavDensity, { passive: true });
 window.addEventListener("resize", updateResultNavDensity, { passive: true });
