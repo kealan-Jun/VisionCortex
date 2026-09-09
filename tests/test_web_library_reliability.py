@@ -230,7 +230,7 @@ const run={run_id:"original-run",state:"failed",nas_staging:"/local/staging",
 const html=runObservabilityCard(run);
 assert.ok(!html.includes("阶段产出已保存"));
 assert.ok(!html.includes("预览已完成内容"));
-assert.ok(html.includes("复跑并补全"));
+assert.ok(html.includes("继续未完成环节"));
 assert.ok(friendlyFailureReason(run).includes("分析尚未开始"));
 const definition={stages:["original_ingest","input_preflight"],completedBy:["original_ingest"]};
 assert.equal(guidedStageState(run,definition,new Map([["original_ingest",{}]]),0).state,"failed");
@@ -907,7 +907,7 @@ scrolled=null;activateAdjacentMaterial("E","next");assert.equal(scrolled,null,"a
 
 @pytest.mark.parametrize("entry", ["retry", "archive", "benchmark", "staging"])
 def test_acknowledged_run_remains_queued_without_secondary_directory_reads(entry):
-    run_javascript(("submitRecoveryAction", "rerunArchive", "rerunBenchmark", "showAcceptedRun",
+    run_javascript(("submitRecoveryAction", "beginStageFollow", "rerunArchive", "rerunBenchmark", "showAcceptedRun",
                     "rememberRunSnapshot"), r'''
 const state={runs:[{run_id:"old",state:"failed",experiment_id:"A",source_collection_id:"C",error:"old failure"}],archiveCache:new Map(),runPollRequestId:10};
 const notices=[],requests=[];const button={disabled:false,innerHTML:"retry",dataset:{}};

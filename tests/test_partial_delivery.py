@@ -164,7 +164,8 @@ def test_quarantine_media_remains_previewable_without_becoming_formal(tmp_path, 
 
 
 @pytest.mark.parametrize("previous_state", ["failed", "partial"])
-def test_retry_preserves_job_input_and_cache_and_survives_restart(tmp_path, monkeypatch, previous_state):
+@pytest.mark.parametrize("mode", ["full", "resume"])
+def test_retry_preserves_job_input_and_cache_and_survives_restart(tmp_path, monkeypatch, previous_state, mode):
     settings = {"project": {"cache_mode": "cold"}, "mllm": {"enabled": False}, "storage": {
         "archive_root": str(tmp_path / "nas"), "staging_directory_name": "Processing",
         "local_runtime_root": str(tmp_path / "runtime"),
@@ -193,7 +194,16 @@ def test_retry_preserves_job_input_and_cache_and_survives_restart(tmp_path, monk
     rejected = client.post("/api/runs/run-retry/retry?revision=outdated")
     assert rejected.status_code == 409
     assert (root / "JSON-Config-Files/partial_delivery.json").is_file()
-    response = client.post("/api/runs/run-retry/retry")
+    video = root / "Experiment-Clips/kept.mp4"
+    video.parent.mkdir(parents=True, exist_ok=True)
+    video.write_bytes(b"synthetic-media-identity")
+    before = video.stat().st_mtime_ns
+    if mode == "resume":
+        assert client.post("/api/runs/run-retry/retry?mode=resume").status_code == 422
+    response = client.post("/api/runs/run-retry/retry", params={"mode": mode, "revision": plan["revision"]})
+    if mode == "resume":
+        assert video.read_bytes() == b"synthetic-media-identity"
+        assert video.stat().st_mtime_ns == before
     assert response.status_code == 202
     assert response.json()["source_copy_bytes"] == 0
     queued = client.get("/api/runs/run-retry").json()
@@ -211,7 +221,8 @@ def test_retry_preserves_job_input_and_cache_and_survives_restart(tmp_path, monk
     after_restart = client.get("/api/runs/run-retry").json()["observability"]
     assert after_restart["status"]["stage"] == "queued"
     assert after_restart["previous_attempt_status"]["stage"] == previous_state
-    assert after_restart["partial_delivery"] == {}
+    assert after_restart["partial_delivery"] == ({"status": "incomplete"} if mode == "resume" else {})
+    assert bool(job["payload"]["settings"]["project"].get("resume_stages")) == (mode == "resume")
     assert reopened.claim_next("new-worker", lease_seconds=60).run_id == "waiting"
     assert (root / "JSON-Config-Files/Retry-Attempts/1/partial_delivery.json").is_file()
 

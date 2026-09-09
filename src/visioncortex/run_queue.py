@@ -258,7 +258,7 @@ class DurableRunQueue:
         payload["payload"] = json.loads(payload.pop("payload_json"))
         return payload
 
-    def retry_failed(self, run_id: str, *, verified_mllm: dict | None = None) -> dict[str, Any]:
+    def retry_failed(self, run_id: str, *, verified_mllm: dict | None = None, resume_stages: bool = False) -> dict[str, Any]:
         """Requeue the saved job atomically, preserving inputs and attempt history."""
         now = time.time()
         with self._connect() as connection:
@@ -280,6 +280,7 @@ class DurableRunQueue:
             if verified_mllm is not None:
                 settings["mllm"] = verified_mllm
             project = settings.setdefault("project", {})
+            project["resume_stages"] = resume_stages
             project["cache_mode"] = "reuse"
             project["semantic_cache_mode"] = "reuse"
             project["semantic_recovery_attempt"] = f"{run_id}:{int(row['attempts']) + 1}"
@@ -294,7 +295,7 @@ class DurableRunQueue:
             })
             state = {**previous, "state": "queued", "progress": 0.0,
                      "error": None, "attempt_history": history,
-                     "message": "已保留原输入与阶段产出，等待复跑并校验可复用缓存"}
+                     "message": "已保留阶段产出，等待校验恢复点并继续未完成环节" if resume_stages else "已保留原输入与阶段产出，等待复跑并校验可复用缓存"}
             # Move to the tail so a retry cannot jump ahead of waiting users.
             sequence = connection.execute(
                 "SELECT COALESCE(MAX(sequence), 0) + 1 FROM run_jobs"
