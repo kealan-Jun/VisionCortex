@@ -965,9 +965,9 @@ def test_short_microbatch_does_not_permanently_contract_engine_capacity(monkeypa
     assert scanner.batch_contractions == []
 
 
-@pytest.mark.parametrize("mux_stats", [False, True])
-def test_ffmpeg_cuda_scale_resizes_before_host_download(monkeypatch, tmp_path, mux_stats):
-    monkeypatch.setattr("visioncortex.source_frames._mux_stats_supported", lambda _: mux_stats)
+@pytest.mark.parametrize("encoder_stats", [False, True])
+def test_ffmpeg_cuda_scale_resizes_before_host_download(monkeypatch, tmp_path, encoder_stats):
+    monkeypatch.setattr("visioncortex.source_frames._encoder_stats_supported", lambda _: encoder_stats)
     monkeypatch.setattr("visioncortex.source_frames._native_rows", lambda *_: [])
     monkeypatch.setattr(
         "visioncortex.source_frames.SourceFrameTrace._probe",

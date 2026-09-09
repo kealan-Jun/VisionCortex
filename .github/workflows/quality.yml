@@ -207,6 +207,8 @@ jobs:
         run: |
           ffmpeg -version
           ffprobe -version
+      - name: Validate source frame provenance with the installed FFmpeg
+        run: python -m pytest tests/test_source_frames.py -o faulthandler_timeout=120
       - name: Run the complete deterministic test suite
         run: >-
           python -m pytest

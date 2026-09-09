@@ -1,7 +1,7 @@
 """Link selected decoder frames to native PTS and packet positions.
 
 Legacy FFmpeg exposes packet positions through showinfo; FFmpeg 6+ exposes
-original decoder PTS through mux statistics. Resolve either against ffprobe's
+original decoder PTS through pre-encoding statistics. Resolve either against ffprobe's
 decoded-frame ledger, never average FPS or pixel similarity. Missing or
 non-unique identities remain unresolved.
 """
@@ -32,11 +32,11 @@ _FRAME_LINE = re.compile(r"\bn:\s*(\d+)\b")
 _POSITION = re.compile(r"\bpos:\s*(-?\d+)\b")
 _PTS = re.compile(r"\bpts:\s*(-?\d+)\b")
 _TIME_BASE = re.compile(r"config in time_base:\s*(\d+/\d+)")
-_MUX_LINE = re.compile(r"^VC_SOURCE (\d+) (-?\d+) (\d+/\d+)\s*$")
+_ENCODER_LINE = re.compile(r"^VC_SOURCE (\d+) (-?\d+) (\d+/\d+)\s*$")
 
 
 @lru_cache(maxsize=8)
-def _mux_stats_supported(executable):
+def _encoder_stats_supported(executable):
     if not executable:
         return False
     try:
@@ -47,8 +47,8 @@ def _mux_stats_supported(executable):
         return False
 
 
-def _mux_options():
-    return ["-stats_mux_pre", "pipe:2", "-stats_mux_pre_fmt", "VC_SOURCE {n} {ptsi} {tbi}"]
+def _encoder_stats_options():
+    return ["-stats_enc_pre", "pipe:2", "-stats_enc_pre_fmt", "VC_SOURCE {n} {ptsi} {tbi}"]
 
 
 def _native_rows(path, start, end, *, timeout=120):
@@ -123,8 +123,10 @@ def read_evidence_frame(
         # NVDEC returns NV12; at native size its BGR conversion can differ
         # from software YUV420P. Try that CPU conversion only after a pixel
         # mismatch, retaining the same exact PTS, packet and digest checks.
-        mux_stats = _mux_stats_supported(shutil.which("ffmpeg"))
-        if mux_stats:
+        encoder_stats = _encoder_stats_supported(shutil.which("ffmpeg"))
+        from .video_io import _ffmpeg_passthrough_arguments
+        passthrough = _ffmpeg_passthrough_arguments()
+        if encoder_stats:
             rows = _native_rows(path, float(source_seconds + origin) - min(1.0, float(source_seconds)),
                                 float(source_seconds + origin) + 1.1, timeout=20)
             matches = [row for row in rows if str(row.get("best_effort_timestamp")) == str(identity.source_pts)]
@@ -141,8 +143,8 @@ def read_evidence_frame(
                 "ffmpeg", "-hide_banner", "-loglevel", "info", "-nostdin", "-copyts",
                 "-threads", "2", "-ss", f"{seek_seconds:.9f}", "-t", "2.1",
                 "-i", str(path), "-map", "0:v:0", "-vf", filters,
-                "-an", "-sn", "-vsync", "0", "-frames:v", "1",
-                *(_mux_options() if mux_stats else []),
+                "-an", "-sn", *passthrough, "-frames:v", "1",
+                *(_encoder_stats_options() if encoder_stats else []),
                 "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1",
             ], capture_output=True, check=True, timeout=20)
             records = []
@@ -156,8 +158,8 @@ def read_evidence_frame(
                 if _FRAME_LINE.search(line):
                     pts, position = _PTS.search(line), _POSITION.search(line)
                     records.append((int(pts[1]) if pts else None, int(position[1]) if position else None))
-            if mux_stats:
-                mux_records = [_MUX_LINE.fullmatch(line.strip()) for line in decoded.stderr.decode("utf-8", errors="replace").splitlines()]
+            if encoder_stats:
+                mux_records = [_ENCODER_LINE.fullmatch(line.strip()) for line in decoded.stderr.decode("utf-8", errors="replace").splitlines()]
                 mux_records = [m for m in mux_records if m]
                 if (len(mux_records) != 1 or int(mux_records[0][1]) != 0
                         or int(mux_records[0][2]) != identity.source_pts
@@ -215,7 +217,7 @@ class SourceFrameTrace:
         self.ended = False
         self.positions: dict[int, list[tuple[int, int | None]]] = {}
         self.native_pts: dict[int, list[int]] = {}
-        self.mux_stats = self.enabled and _mux_stats_supported(shutil.which("ffmpeg"))
+        self.encoder_stats = self.enabled and _encoder_stats_supported(shutil.which("ffmpeg"))
         self.timestamp_offset = 0
         self.time_base: str | None = None
         self.failure: str | None = None
@@ -251,15 +253,15 @@ class SourceFrameTrace:
             self.failure = "native_frame_probe_unavailable"
 
     def input_options(self):
-        return ["-copyts"] if self.mux_stats else []
+        return ["-copyts"] if self.encoder_stats else []
 
     def output_options(self):
-        return _mux_options() if self.mux_stats else []
+        return _encoder_stats_options() if self.encoder_stats else []
 
     def filter_prefix(self):
-        # Preserve native decoder PTS in mux statistics while presenting the
+        # Preserve native decoder PTS in pre-encoding statistics while presenting the
         # original zero-based timestamps to the existing FPS filter.
-        return f"setpts=PTS-({self.timestamp_offset})," if self.mux_stats else ""
+        return f"setpts=PTS-({self.timestamp_offset})," if self.encoder_stats else ""
 
     def _probe(self, arguments: list[str]) -> dict:
         result = subprocess.run(
@@ -277,8 +279,10 @@ class SourceFrameTrace:
             try:
                 for line in iter(stderr.readline, b""):
                     text = line.decode("utf-8", errors="replace")
-                    if self.mux_stats:
-                        match = _MUX_LINE.fullmatch(text.strip())
+                    if self.encoder_stats:
+                        # Human progress uses carriage returns on the same
+                        # stderr line; the following encoder record is independent.
+                        match = _ENCODER_LINE.fullmatch(text.rstrip("\r\n").rsplit("\r", 1)[-1].strip())
                         if match:
                             try:
                                 valid = (self.failure is None and self.time_base is not None

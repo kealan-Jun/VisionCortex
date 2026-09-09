@@ -518,7 +518,7 @@ def _ffmpeg_frame_iterator(
     width, height = _scaled_size(info.width, info.height, max_width)
     use_cuda_scale = bool(cuda_scale and hwaccel == "cuda")
     trace = SourceFrameTrace(path, start_ms, end_ms, sample_fps)
-    identity_filter = f",{SOURCE_FRAME_FILTER}" if trace.enabled and not trace.mux_stats else ""
+    identity_filter = f",{SOURCE_FRAME_FILTER}" if trace.enabled and not trace.encoder_stats else ""
     filter_graph = (
         f"fps={sample_fps:.8f}{identity_filter},scale_cuda={width}:{height}:interp_algo=bicubic,"
         "hwdownload,format=nv12,format=bgr24"
@@ -856,7 +856,7 @@ def _ffmpeg_multi_window_iterator(
         f"select={select_expression}"
     )
     trace = SourceFrameTrace(path, start_ms, end_ms, sample_fps)
-    if trace.enabled and not trace.mux_stats:
+    if trace.enabled and not trace.encoder_stats:
         filter_graph += f",{SOURCE_FRAME_FILTER}"
     filter_graph += (
         f",scale_cuda={width}:{height}:interp_algo=bicubic,hwdownload,format=nv12,format=bgr24"

@@ -57,6 +57,8 @@ git switch -c codex/resume-release-readme archive/20260909/release-readme
   时间戳、包位置和像素摘要必须同时通过，缺失或冲突时保持未验证。
   使用 [FFmpeg 原生帧统计接口](https://www.ffmpeg.org/ffmpeg.html#Advanced-options)，
   并验证非零起点、变帧率、B 帧、跳转和不连续窗口的采样像素保持一致。
+  后续回归改用编码前原生输入记录，以兼容 FFmpeg 6；FFmpeg 9 复用项目已有的
+  帧率参数探测。额外验证了实时抽帧时进度回车与 Windows 换行不会吞掉来源记录。
 
 上述为集成实现和确定性证据。跨平台结果以对应提交的 GitHub Actions 为准；
 局部真实调用或局部图像指标不能替代完整多视角实验验收。4050 原机启动耗时、
