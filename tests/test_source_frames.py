@@ -162,9 +162,12 @@ def test_ambiguous_or_missing_positions_never_acquire_invented_timestamps(tmp_pa
     monkeypatch.setattr("visioncortex.source_frames.shutil.which", lambda _name: "ffprobe")
     monkeypatch.setattr(SourceFrameTrace, "_probe", lambda *_: {
         "streams": [{"time_base": "1/30"}],
-        "frames": [{"pkt_pos": "20", "best_effort_timestamp": 1},
-                   {"pkt_pos": "20", "best_effort_timestamp": 2}],
     })
+    monkeypatch.setattr("visioncortex.source_frames._native_rows", lambda *_: [
+        {"pkt_pos": "20", "best_effort_timestamp": 1},
+        {"pkt_pos": "20", "best_effort_timestamp": 2},
+    ])
+    monkeypatch.setattr("visioncortex.source_frames._mux_stats_supported", lambda _: False)
     trace = SourceFrameTrace(source, 0, 1000, 8)
     log = io.BytesIO(b"[showinfo@source_identity] n: 0 pts: 0 pos: 20 fmt:yuv420p\n"
                      b"[showinfo@source_identity] n: 1 pts: 1 pos: -1 fmt:yuv420p\n")
@@ -187,6 +190,7 @@ def test_metadata_probe_failure_keeps_pixels_without_claiming_native_identity(tm
         raise OSError("probe unavailable")
 
     monkeypatch.setattr(SourceFrameTrace, "_probe", fail)
+    monkeypatch.setattr("visioncortex.source_frames._mux_stats_supported", lambda _: False)
     trace = SourceFrameTrace(source, 0, 1000, 8)
     trace.start(io.BytesIO(b"[showinfo@source_identity] n: 0 pts: 0 pos: 20 fmt:yuv420p\n"))
     identity = trace.identity(0, np.zeros((8, 8, 3), dtype=np.uint8))
@@ -203,6 +207,8 @@ def test_showinfo_without_packet_position_reports_missing_identity_without_waiti
     monkeypatch.setattr(SourceFrameTrace, "_probe", lambda *_: {
         "streams": [{"time_base": "1/30"}], "frames": [],
     })
+    monkeypatch.setattr("visioncortex.source_frames._native_rows", lambda *_: [])
+    monkeypatch.setattr("visioncortex.source_frames._mux_stats_supported", lambda _: False)
     trace = SourceFrameTrace(source, 0, 1000, 8)
     trace.start(io.BytesIO(b"[showinfo@source_identity] n: 0 pts: 0 pts_time:0 duration:1 fmt:yuv420p\n"))
     trace.thread.join()
@@ -212,6 +218,75 @@ def test_showinfo_without_packet_position_reports_missing_identity_without_waiti
     assert identity.reason == "decoder_frame_position_unavailable"
     assert identity.source_pts is None
     trace.finish(None)
+
+
+@pytest.mark.parametrize("case", [
+    "match", "duplicate_pts", "missing_pts", "wrong_timebase", "invalid_timebase",
+    "unknown_pts", "missing_stats", "wrong_index", "probe_failure",
+])
+def test_mux_identity_requires_unique_native_pts_and_matching_timebase(tmp_path, monkeypatch, case):
+    source = tmp_path / "video.mp4"
+    source.write_bytes(b"mux parser fixture")
+    monkeypatch.setattr("visioncortex.source_frames.shutil.which", lambda name: name)
+    monkeypatch.setattr("visioncortex.source_frames._mux_stats_supported", lambda _: True)
+
+    def metadata(*_):
+        if case == "probe_failure":
+            raise OSError("probe unavailable")
+        return {"streams": [{"time_base": "1/30"}]}
+
+    monkeypatch.setattr(SourceFrameTrace, "_probe", metadata)
+    rows = [{"pkt_pos": "20", "best_effort_timestamp": 1}]
+    if case == "duplicate_pts":
+        rows.append({"pkt_pos": "21", "best_effort_timestamp": 1})
+    monkeypatch.setattr("visioncortex.source_frames._native_rows", lambda *_: rows)
+    trace = SourceFrameTrace(source, 0, 1000, 8)
+    pts = {"missing_pts": 2, "unknown_pts": 9223372036854775807}.get(case, 1)
+    time_base = {"wrong_timebase": "1/60", "invalid_timebase": "1/0"}.get(case, "1/30")
+    index = 1 if case == "wrong_index" else 0
+    log = f"VC_SOURCE {index} {pts} {time_base}\n" if case != "missing_stats" else "unrelated log\n"
+    trace.start(io.BytesIO(log.encode()))
+    trace.thread.join(timeout=2)
+    assert not trace.thread.is_alive()
+    identity = trace.identity(0, np.zeros((8, 8, 3), dtype=np.uint8))
+    assert identity.status == ("resolved" if case == "match" else "unavailable")
+    if case == "match":
+        assert (identity.source_pts, identity.packet_position, identity.time_base) == (1, 20, "1/30")
+    else:
+        assert identity.source_pts is identity.time_base is None
+    trace.finish(None)
+
+
+@pytest.mark.parametrize("start_ms", [111.345, 375])
+@pytest.mark.parametrize("multi_window", [False, True])
+def test_mux_trace_preserves_existing_sampling_with_fractional_origin(tmp_path, monkeypatch, start_ms, multi_window):
+    from visioncortex import source_frames
+    if not source_frames._mux_stats_supported(shutil.which("ffmpeg")):
+        pytest.skip("requires FFmpeg 6+ mux statistics")
+    path = tmp_path / "fractional-origin.mp4"
+    subprocess.run([
+        "ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=96x64:r=30:d=2",
+        "-vf", "select=not(eq(mod(n\\,5)\\,1)),setpts=PTS+4.037/TB",
+        "-vsync", "0", "-c:v", "libx264", "-bf", "3", str(path),
+    ], capture_output=True, check=True)
+    info = probe_video(path)
+
+    def sample():
+        if multi_window:
+            return list(_ffmpeg_multi_window_iterator(
+                path, info, start_ms, start_ms + 1250,
+                [(start_ms, start_ms + 375), (start_ms + 875, start_ms + 1250)], 8, 96, None, 1,
+            ))
+        return list(_ffmpeg_frame_iterator(path, info, start_ms, start_ms + 1000, 8, 96, None, False, 1))
+
+    current = sample()
+    monkeypatch.setattr(source_frames, "_mux_stats_supported", lambda _: False)
+    reference = sample()
+    assert current and len(current) == len(reference)
+    for actual, expected in zip(current, reference, strict=True):
+        assert actual[:2] == expected[:2]
+        assert np.array_equal(actual[2], expected[2])
+        assert actual.source_frame.status == "resolved"
 
 
 def test_frame_identity_reaches_model_packet_without_retiming(default_config, monkeypatch, tmp_path):
@@ -297,13 +372,15 @@ def test_material_frame_reproduces_native_size_nv12_conversion(source_video):
     assert receipt["reproduction_pixel_format"] == expected_format
 
 
+@pytest.mark.parametrize("mux_stats", [False, True])
 @pytest.mark.parametrize("second_result,reason", [
     ("match", None),
-    ("wrong_position", "decoded_native_identity_mismatch"),
+    ("wrong_identity", "decoded_native_identity_mismatch"),
     ("wrong_pixels", "decoded_pixels_do_not_match_ledger"),
     ("changed_source", "source_file_changed_during_decode"),
 ])
-def test_nv12_retry_is_bounded_and_preserves_source_checks(tmp_path, monkeypatch, second_result, reason):
+def test_nv12_retry_is_bounded_and_preserves_source_checks(tmp_path, monkeypatch, second_result, reason, mux_stats):
+    monkeypatch.setattr("visioncortex.source_frames._mux_stats_supported", lambda _: mux_stats)
     from visioncortex.schemas import VideoInfo
     path = tmp_path / "fixture.mp4"
     path.write_bytes(b"decoder contract fixture")
@@ -327,18 +404,23 @@ def test_nv12_retry_is_bounded_and_preserves_source_checks(tmp_path, monkeypatch
         if command[0] == "ffprobe":
             return subprocess.CompletedProcess(command, 0, json.dumps({
                 "streams": [{"time_base": "1/30"}], "format": {"start_time": "0"},
+                "frames": [{"pkt_pos": "42", "best_effort_timestamp": 1}],
             }).encode(), b"")
         calls.append(command)
         assert len(calls) <= 2
         assert kwargs["timeout"] == 20
         is_retry = len(calls) == 2
         assert ("format=nv12," in command[command.index("-vf") + 1]) == is_retry
-        position = 43 if is_retry and second_result == "wrong_position" else 42
+        wrong_identity = is_retry and second_result == "wrong_identity"
+        position = 43 if wrong_identity else 42
         pixels = target if is_retry and second_result != "wrong_pixels" else wrong
         if is_retry and second_result == "changed_source":
             path.write_bytes(b"changed file")
         log = ("[showinfo@source_identity] config in time_base: 1/30\n"
                f"[showinfo@source_identity] n: 0 pts: 1 pos: {position}\n")
+        if mux_stats:
+            assert "-stats_mux_pre" in command
+            log += f"VC_SOURCE 0 {2 if wrong_identity else 1} 1/30\n"
         return subprocess.CompletedProcess(command, 0, pixels, log.encode())
 
     monkeypatch.setattr("visioncortex.source_frames.subprocess.run", decode)

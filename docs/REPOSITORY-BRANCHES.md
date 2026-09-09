@@ -52,6 +52,11 @@ git switch -c codex/resume-release-readme archive/20260909/release-readme
   的 CPU 损失/采样检查另有 40 passed，桌面 Node 测试 33 passed。
   模拟 Key 夹具改用无真实凭据外形的固定测试值，相关 29 项测试通过；未放宽凭据检查。
 - Ruff、Python 编译、Web JavaScript 和部署脚本语法、差异空白检查通过。
+- 集成后的跨平台 CI 发现 FFmpeg 6+ 不再提供旧版 showinfo 包位置，随后补齐
+  原生输入 PTS 统计与 ffprobe 帧记录的唯一映射；保留旧版 FFmpeg 的追溯路径。
+  时间戳、包位置和像素摘要必须同时通过，缺失或冲突时保持未验证。
+  使用 [FFmpeg 原生帧统计接口](https://www.ffmpeg.org/ffmpeg.html#Advanced-options)，
+  并验证非零起点、变帧率、B 帧、跳转和不连续窗口的采样像素保持一致。
 
 上述为集成实现和确定性证据。跨平台结果以对应提交的 GitHub Actions 为准；
 局部真实调用或局部图像指标不能替代完整多视角实验验收。4050 原机启动耗时、

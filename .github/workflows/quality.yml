@@ -210,6 +210,7 @@ jobs:
       - name: Run the complete deterministic test suite
         run: >-
           python -m pytest
+          -o faulthandler_timeout=120
           --cov=visioncortex
           --cov-report=term:skip-covered
           --cov-fail-under=66

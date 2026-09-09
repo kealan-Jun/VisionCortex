@@ -1,8 +1,9 @@
-"""Link the decoder's selected packet position to native frame PTS.
+"""Link selected decoder frames to native PTS and packet positions.
 
-The fps filter rewrites timestamps but preserves AVFrame packet positions.
-Resolve positions against ffprobe's decoded-frame ledger, never average FPS
-or pixel similarity. A missing or non-unique position remains unresolved.
+Legacy FFmpeg exposes packet positions through showinfo; FFmpeg 6+ exposes
+original decoder PTS through mux statistics. Resolve either against ffprobe's
+decoded-frame ledger, never average FPS or pixel similarity. Missing or
+non-unique identities remain unresolved.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import subprocess
 import threading
 from collections import deque
 from fractions import Fraction
+from functools import lru_cache
 from pathlib import Path
 from typing import BinaryIO
 
@@ -24,12 +26,38 @@ import numpy as np
 from .schemas import FrameEvidence, SourceFrameIdentity, VideoInfo, ViewInput
 
 
-SOURCE_FRAME_CONTRACT = "decoder-position-pts/1"
+SOURCE_FRAME_CONTRACT = "decoder-position-pts/2"
 SOURCE_FRAME_FILTER = "showinfo@source_identity=checksum=0"
 _FRAME_LINE = re.compile(r"\bn:\s*(\d+)\b")
 _POSITION = re.compile(r"\bpos:\s*(-?\d+)\b")
 _PTS = re.compile(r"\bpts:\s*(-?\d+)\b")
 _TIME_BASE = re.compile(r"config in time_base:\s*(\d+/\d+)")
+_MUX_LINE = re.compile(r"^VC_SOURCE (\d+) (-?\d+) (\d+/\d+)\s*$")
+
+
+@lru_cache(maxsize=8)
+def _mux_stats_supported(executable):
+    if not executable:
+        return False
+    try:
+        version = subprocess.run([executable, "-version"], capture_output=True, check=True, timeout=10)
+        match = re.search(rb"ffmpeg version (?:n)?(\d+)\.", version.stdout)
+        return bool(match and int(match[1]) >= 6)
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _mux_options():
+    return ["-stats_mux_pre", "pipe:2", "-stats_mux_pre_fmt", "VC_SOURCE {n} {ptsi} {tbi}"]
+
+
+def _native_rows(path, start, end, *, timeout=120):
+    return json.loads(subprocess.run([
+        "ffprobe", "-v", "error", "-select_streams", "v:0",
+        "-skip_loop_filter", "all", "-skip_idct", "all", "-threads", "2",
+        "-read_intervals", f"{start:.9f}%{end:.9f}",
+        "-show_entries", "frame=best_effort_timestamp,pkt_pos", "-of", "json", str(path),
+    ], capture_output=True, check=True, timeout=timeout).stdout).get("frames", [])
 
 
 def read_evidence_frame(
@@ -95,6 +123,13 @@ def read_evidence_frame(
         # NVDEC returns NV12; at native size its BGR conversion can differ
         # from software YUV420P. Try that CPU conversion only after a pixel
         # mismatch, retaining the same exact PTS, packet and digest checks.
+        mux_stats = _mux_stats_supported(shutil.which("ffmpeg"))
+        if mux_stats:
+            rows = _native_rows(path, float(source_seconds + origin) - min(1.0, float(source_seconds)),
+                                float(source_seconds + origin) + 1.1, timeout=20)
+            matches = [row for row in rows if str(row.get("best_effort_timestamp")) == str(identity.source_pts)]
+            if len(matches) != 1 or str(matches[0].get("pkt_pos")) != str(identity.packet_position):
+                return unavailable("decoded_native_identity_mismatch")
         for format_filter in ("", "format=nv12,"):
             filters = (
                 f"select=eq(pts\\,{identity.source_pts}),{SOURCE_FRAME_FILTER},{format_filter}"
@@ -107,6 +142,7 @@ def read_evidence_frame(
                 "-threads", "2", "-ss", f"{seek_seconds:.9f}", "-t", "2.1",
                 "-i", str(path), "-map", "0:v:0", "-vf", filters,
                 "-an", "-sn", "-vsync", "0", "-frames:v", "1",
+                *(_mux_options() if mux_stats else []),
                 "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1",
             ], capture_output=True, check=True, timeout=20)
             records = []
@@ -120,7 +156,14 @@ def read_evidence_frame(
                 if _FRAME_LINE.search(line):
                     pts, position = _PTS.search(line), _POSITION.search(line)
                     records.append((int(pts[1]) if pts else None, int(position[1]) if position else None))
-            if filter_time_bases != [time_base] or records != [(identity.source_pts, identity.packet_position)]:
+            if mux_stats:
+                mux_records = [_MUX_LINE.fullmatch(line.strip()) for line in decoded.stderr.decode("utf-8", errors="replace").splitlines()]
+                mux_records = [m for m in mux_records if m]
+                if (len(mux_records) != 1 or int(mux_records[0][1]) != 0
+                        or int(mux_records[0][2]) != identity.source_pts
+                        or Fraction(mux_records[0][3]) != time_base):
+                    return unavailable("decoded_native_identity_mismatch")
+            elif filter_time_bases != [time_base] or records != [(identity.source_pts, identity.packet_position)]:
                 return unavailable("decoded_native_identity_mismatch")
             if len(decoded.stdout) != evidence.width * evidence.height * 3:
                 return unavailable("decoded_frame_size_mismatch")
@@ -171,6 +214,9 @@ class SourceFrameTrace:
         self.thread: threading.Thread | None = None
         self.ended = False
         self.positions: dict[int, list[tuple[int, int | None]]] = {}
+        self.native_pts: dict[int, list[int]] = {}
+        self.mux_stats = self.enabled and _mux_stats_supported(shutil.which("ffmpeg"))
+        self.timestamp_offset = 0
         self.time_base: str | None = None
         self.failure: str | None = None
         self.stat = path.stat() if path.is_file() else None
@@ -181,24 +227,21 @@ class SourceFrameTrace:
             self.time_base = metadata["streams"][0]["time_base"]
             if Fraction(self.time_base) <= 0:
                 raise ValueError("invalid native time base")
-            origin = float(metadata.get("format", {}).get("start_time", 0))
+            origin_fraction = Fraction(str(metadata.get("format", {}).get("start_time", "0")))
+            origin = float(origin_fraction)
+            # Match the CLI's microsecond seek and nearest timebase rescale.
+            offset = (origin_fraction + Fraction(f"{start_ms / 1000:.6f}")) / Fraction(self.time_base)
+            self.timestamp_offset = int(offset + Fraction(1, 2)) if offset >= 0 else -int(-offset + Fraction(1, 2))
             start = origin + max(0.0, start_ms / 1000.0)
             end = origin + end_ms / 1000.0 + max(1.0, 1.0 / sample_fps)
-            payload = self._probe([
-                # Keep every decoded frame and its reordering metadata; this
-                # index does not consume reconstructed pixels or loop filtering.
-                "-skip_loop_filter", "all", "-skip_idct", "all", "-threads", "2",
-                "-read_intervals", f"{start:.9f}%{end:.9f}",
-                "-show_entries", "frame=best_effort_timestamp,pkt_pos",
-            ])
-            for index, row in enumerate(payload.get("frames", [])):
+            for index, row in enumerate(_native_rows(path, start, end)):
                 if row.get("pkt_pos") in (None, "N/A") or row.get("best_effort_timestamp") is None:
                     continue
                 position = int(row["pkt_pos"])
                 if position >= 0:
-                    self.positions.setdefault(position, []).append((
-                        int(row["best_effort_timestamp"]), index if start_ms == 0 else None,
-                    ))
+                    pts = int(row["best_effort_timestamp"])
+                    self.positions.setdefault(position, []).append((pts, index if start_ms == 0 else None))
+                    self.native_pts.setdefault(pts, []).append(position)
             after = path.stat()
             if (after.st_size, after.st_mtime_ns) != (self.stat.st_size, self.stat.st_mtime_ns):
                 self.positions.clear()
@@ -206,6 +249,17 @@ class SourceFrameTrace:
         except (OSError, subprocess.SubprocessError, KeyError, ValueError, TypeError, ZeroDivisionError):
             self.positions.clear()
             self.failure = "native_frame_probe_unavailable"
+
+    def input_options(self):
+        return ["-copyts"] if self.mux_stats else []
+
+    def output_options(self):
+        return _mux_options() if self.mux_stats else []
+
+    def filter_prefix(self):
+        # Preserve native decoder PTS in mux statistics while presenting the
+        # original zero-based timestamps to the existing FPS filter.
+        return f"setpts=PTS-({self.timestamp_offset})," if self.mux_stats else ""
 
     def _probe(self, arguments: list[str]) -> dict:
         result = subprocess.run(
@@ -222,8 +276,21 @@ class SourceFrameTrace:
         def consume():
             try:
                 for line in iter(stderr.readline, b""):
-                    if b"showinfo@source_identity" in line:
-                        text = line.decode("utf-8", errors="replace")
+                    text = line.decode("utf-8", errors="replace")
+                    if self.mux_stats:
+                        match = _MUX_LINE.fullmatch(text.strip())
+                        if match:
+                            try:
+                                valid = (self.failure is None and self.time_base is not None
+                                         and Fraction(match[3]) == Fraction(self.time_base)
+                                         and int(match[2]) != 9223372036854775807)
+                            except (ValueError, ZeroDivisionError):
+                                valid = False
+                            candidates = self.native_pts.get(int(match[2]), []) if valid else []
+                            position = candidates[0] if len(candidates) == 1 else -1
+                            self.records.put((int(match[1]), position))
+                            continue
+                    elif b"showinfo@source_identity" in line:
                         match = _FRAME_LINE.search(text)
                         if match:
                             position = _POSITION.search(text)
