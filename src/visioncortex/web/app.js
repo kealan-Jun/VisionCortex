@@ -2525,6 +2525,7 @@ function friendlyFailureReason(data) {
     return `原分析未通过完整质量检查，之后步骤结果已有更新。${review.latest_check_current ? (review.step_consistency_passed ? "最新步骤文字与引用动作的检查已通过。" : "最新步骤检查仍有问题需要处理。") : "最新结果尚未重新检查。"}实验完整性和跨视角证据仍需分别核验。`;
   }
   const raw = String(status.error || status.message || data?.error || "");
+  if (/WinError\s*206|ENAMETOOLONG|文件名或扩展名太长|路径过长|filename.{0,20}too long|path.{0,20}too long/i.test(raw)) return "Windows 文件路径过长，当前环节未能继续。已保存的阶段成果仍可查看；请更新应用的短路径缓存修复后重试。";
   const failedStage = status.failed_stage || data?.observability?.metrics?.nas_index_ingest?.failure_stage;
   if (["nas_ingest", "input_preflight"].includes(failedStage)) {
     return "实验输入检查未通过，分析尚未开始。请检查所选视频、时间记录与拍摄视角，再重试该任务。";
@@ -2770,16 +2771,23 @@ function readerSeekVideo(video, seconds, startPlayback, onSeek) {
   return () => video.removeEventListener("loadedmetadata",apply);
 }
 
+function stageDeliveryView(data) {
+  const receipts = (data.observability?.stage_receipts || []).filter(item=>item.receipt_url);
+  if (!receipts.length) return "";
+  const ordered = [...receipts].sort((a,b)=>(Date.parse(a.completed_at)||0)-(Date.parse(b.completed_at)||0));
+  return `<section class="stage-delivery" aria-label="已保存的阶段成果"><header><div><strong>阶段成果</strong><p>各环节独立留存，后续处理不会清除已保存记录。</p></div><label>选择环节<select data-stage-version>${ordered.map((item,index)=>`<option value="${index}" ${index===ordered.length-1?"selected":""}>${esc(STAGE_LABELS[item.stage]||item.stage)} · ${item.status==="completed"?"已保存":item.status==="skipped"?"已跳过":"未完成"}</option>`).join("")}</select></label></header>${ordered.map((item,index)=>`<div data-stage-version-panel="${index}" ${index===ordered.length-1?"":"hidden"}><p>${esc(item.reason||"本阶段文件已保存，可在后续分析进行时查看。")}</p><nav aria-label="阶段文件">${item.version_url?`<a class="secondary-button" href="${esc(item.version_url)}" target="_blank" rel="noopener">当时的结果与溯源</a>`:""}<a class="text-button" href="${esc(item.receipt_url)}" target="_blank" rel="noopener">完成记录</a>${(item.artifacts||[]).filter(x=>x.url).slice(0,3).map(x=>`<a class="text-button" href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.name)}</a>`).join("")}</nav>${!item.version_url?'<small>历史阶段仅有完成记录，未保存独立版本快照。</small>':""}</div>`).join("")}</section>`;
+}
+
 function experimentResultTools(data, staging = false) {
   const links = data.links || {}, path = data.path || data.network_path || "";
   const report = links.partial_pdf || links.daily_report_pdf || links.partial_daily_report || links.partial_report || links.daily_report_json;
   const exported = links.partial_json || links.daily_report_json;
   const source = staging ? data.staging_run_id : data.name;
-  return `<section class="experiment-result-tools" aria-label="成果与保存位置"><div><strong>${staging?"已保存的阶段成果":"实验成果"}</strong>${path?`<details><summary>查看保存位置</summary><code>${esc(path)}</code><button type="button" class="text-button" data-copy-path="${esc(path)}">复制路径</button></details>`:"<small>保存位置未提供</small>"}</div><nav aria-label="成果操作">${report?`<a class="secondary-button" href="${esc(report)}" target="_blank" rel="noopener">${links.partial_report?"查看阶段报告":"查看报告"}</a>`:'<span class="result-pending">报告尚未生成</span>'}${exported?`<a class="secondary-button" href="${esc(exported)}" download="VisionCortex-${staging?"阶段结果":"实验报告"}.json">导出 JSON</a>`:""}${path&&source?`<button type="button" class="primary-button" ${staging?"data-open-staging-folder":"data-open-folder"}="${esc(source)}">${icon("folder")}打开产出文件夹</button>`:""}</nav></section>`;
+  return `<section class="experiment-result-tools" aria-label="成果与保存位置"><div><strong>${staging?"已保存的阶段成果":"实验成果"}</strong>${path?`<p class="output-location"><span>实际保存目录</span><code>${esc(path)}</code><button type="button" class="text-button" data-copy-path="${esc(path)}">复制路径</button></p>`:"<small>保存位置未提供</small>"}</div><nav aria-label="成果操作">${report?`<a class="secondary-button" href="${esc(report)}" target="_blank" rel="noopener">${links.partial_report?"查看阶段报告":"查看报告"}</a>`:'<span class="result-pending">报告尚未生成</span>'}${exported?`<a class="secondary-button" href="${esc(exported)}" download="VisionCortex-${staging?"阶段结果":"实验报告"}.json">导出 JSON</a>`:""}${path&&source?`<button type="button" class="primary-button" ${staging?"data-open-staging-folder":"data-open-folder"}="${esc(source)}">${icon("folder")}打开产出文件夹</button>`:""}</nav></section>`;
 }
 
 function experimentGroupBrowser(data, preliminary = false, selectedFolder = "") {
-  const groups = data.experiments || [];
+  const groups = [...(data.experiments || [])].sort((a,b)=>Number(Boolean(a.activity_assessment?.is_auxiliary))-Number(Boolean(b.activity_assessment?.is_auxiliary)));
   if (!groups.length) {
     const stopped = archiveProcessStopped(data);
     return `<section id="experiment-results">${productState(stopped?"error":"progress",stopped?"x":"clock",stopped?"本次处理未生成实验片段":"实验片段正在生成",stopped?"可以在任务记录中查看停止位置，并按原设置重新分析。":"视频片段保存后即可播放，后续模型分析会继续。开启顶部的跟随分析进度可自动查看。",'<a class="secondary-button" href="#/tasks">查看任务进度</a>')}</section>`;
@@ -2787,15 +2795,17 @@ function experimentGroupBrowser(data, preliminary = false, selectedFolder = "") 
   const matched = groups.findIndex(group=>group.folder===selectedFolder||(group.source_archive_folders||[]).includes(selectedFolder));
   const selected = Math.max(0,matched);
   const route = group=>`${experimentRecordRoute(data)}?group=${encodeURIComponent(group.folder)}`;
-  return `<section class="experiment-browser" id="experiment-results"><div class="experiment-switcher"><label><span>选择实验片段</span><select data-experiment-group>${groups.map((group,index)=>`<option title="${timecode(group.start_ms)} — ${timecode(group.end_ms)}" value="${esc(route(group))}" ${index===selected?"selected":""}>片段 ${index+1} · ${readerClock(group.start_ms)} — ${readerClock(group.end_ms)} · ${number(group.steps?.length)} 条记录</option>`).join("")}</select></label><nav aria-label="切换实验片段">${selected>0?`<a class="secondary-button" href="${esc(route(groups[selected-1]))}">上一个片段</a>`:'<button class="secondary-button" disabled>上一个片段</button>'}<span>${selected+1} / ${groups.length}</span>${selected<groups.length-1?`<a class="secondary-button" href="${esc(route(groups[selected+1]))}">下一个片段</a>`:'<button class="secondary-button" disabled>下一个片段</button>'}</nav></div>${selectedFolder&&matched<0?'<p class="analysis-readiness-note" role="status">指定片段尚未载入，当前显示已载入的第一段。</p>':""}${data.next_cursor?'<p class="analysis-readiness-note">这里列出已载入的片段，可在下方加载更多。</p>':""}${experimentCard(groups[selected],preliminary)}</section>`;
+  return `<section class="experiment-browser" id="experiment-results"><div class="experiment-switcher"><label><span>选择视频片段</span><select data-experiment-group>${groups.map((group,index)=>`<option title="${timecode(group.start_ms)} — ${timecode(group.end_ms)}" value="${esc(route(group))}" ${index===selected?"selected":""}>${group.activity_assessment?.is_auxiliary?"辅助活动":"片段"} ${index+1} · ${readerClock(group.start_ms)} — ${readerClock(group.end_ms)} · ${number(group.steps?.length)} 条记录</option>`).join("")}</select></label><nav aria-label="切换实验片段">${selected>0?`<a class="secondary-button" href="${esc(route(groups[selected-1]))}">上一个片段</a>`:'<button class="secondary-button" disabled>上一个片段</button>'}<span>${selected+1} / ${groups.length}</span>${selected<groups.length-1?`<a class="secondary-button" href="${esc(route(groups[selected+1]))}">下一个片段</a>`:'<button class="secondary-button" disabled>下一个片段</button>'}</nav></div>${selectedFolder&&matched<0?'<p class="analysis-readiness-note" role="status">指定片段尚未载入，当前显示已载入的第一段。</p>':""}${data.next_cursor?'<p class="analysis-readiness-note">这里列出已载入的片段，可在下方加载更多。</p>':""}${experimentCard(groups[selected],preliminary)}</section>`;
 }
 
 function workflowCompletionLabel(experiment) {
+  if (experiment.activity_assessment?.is_auxiliary) return "辅助活动 · 不计入实验";
   return {ongoing_at_recording_end:"录像结束，实验待续",unresolved:"实验结束位置待核实",
     observed_complete:"已观察到实验结束",unreviewed:"实验边界尚未复核"}[experiment.completion_status] || "实验边界尚未复核";
 }
 
 function workflowLabel(experiment) {
+  if (experiment.activity_assessment?.is_auxiliary) return experiment.activity_assessment.label || "辅助活动";
   return experiment.workflow_kind === "continuous_workflow" ? "连续实验链"
     : experiment.workflow_kind === "independent_experiment" ? "独立实验" : "实验操作片段";
 }
@@ -2803,7 +2813,7 @@ function workflowLabel(experiment) {
 function experimentCard(experiment, preliminary = false) {
   const steps = experiment.steps || [], units = experiment.workflow_units || [];
   const sections = readerStepSections(experiment), objects = experimentObjects(steps);
-  const title = experiment.workflow_kind === "continuous_workflow" ? experiment.name || "连续实验链" : objects.length ? `${objects.slice(0,3).join("、")}操作记录` : "实验操作记录";
+  const title = experiment.activity_assessment?.is_auxiliary ? `${experiment.activity_assessment.label}记录` : experiment.workflow_kind === "continuous_workflow" ? experiment.name || "连续实验链" : objects.length ? `${objects.slice(0,3).join("、")}操作记录` : "实验操作记录";
   const uncertainties = experiment.uncertainties || [];
   const directoryOpen = steps.length <= 6;
   const videoTile = (label, url, className = "") => `<article class="experiment-media ${className}"><p class="video-caption"><span>${icon("video")}${esc(label)}</span><small>${className.includes("experiment-primary-video") ? "同步回看" : "独立播放"}</small></p><div class="video-frame">${url ? videoPreview(url, label) : `<div class="empty-state">${esc(label)}尚未生成</div>`}</div></article>`;
@@ -2817,6 +2827,7 @@ function experimentCard(experiment, preliminary = false) {
   };
   return `<article id="experiment-${esc(experiment.folder)}" class="experiment-card experiment-card--understanding experiment-reader" data-reader-start="${Number(experiment.start_ms)}">
     <header class="experiment-card-header"><div class="experiment-title-copy"><span class="experiment-label" title="${timecode(experiment.start_ms)} — ${timecode(experiment.end_ms)}">${workflowLabel(experiment)} · ${readerClock(experiment.start_ms)} — ${readerClock(experiment.end_ms)}</span><h2>${esc(title)}</h2><p class="experiment-reader-caption">${number(steps.length)} 条操作记录 · 选择步骤定位画面，或跟随视频阅读</p></div><span class="badge">${workflowCompletionLabel(experiment)}</span></header>
+    ${experiment.activity_assessment?.is_auxiliary?`<p class="activity-classification-note">${esc(experiment.activity_assessment.reason)} · ${experiment.activity_assessment.source==="user_review"?"用户复核":"模型分类"}，原视频与操作依据已保留。</p>`:""}
     ${units.length > 1 ? `<nav class="workflow-unit-nav" aria-label="连续实验中的单元">${units.map(unit=>`<button type="button" class="compact-button" data-step-seek="${Math.max(0,(unit.start_ms-experiment.start_ms)/1000)}">${esc(unit.name)}<small title="${timecode(unit.start_ms)} — ${timecode(unit.end_ms)}">${readerClock(unit.start_ms)} — ${readerClock(unit.end_ms)}</small></button>`).join("")}</nav>` : ""}
     <div class="experiment-reader-layout"><div class="experiment-reader-overview"><div class="experiment-reader-media"><div class="experiment-media-set">${videos}</div><p class="reader-playback-status" data-reader-playing role="status">${hasVideo?"选择步骤可定位画面":"本段尚无可播放视频"}</p><p class="experiment-reader-source">说明由模型根据画面整理。同步视频提供对照，不代表每一步都获得两个视角共同支持。${(experiment.view_timeline||[]).some(row=>!row.third_person_view)?"移动途中或尚未确认机位的部分保留第一人称，右侧标明无对应机位。":""}</p></div>
     <aside class="experiment-reader-companion" aria-label="操作目录与步骤说明"><header class="reader-controls"><div class="reader-controls-heading"><h3>操作与步骤</h3><button type="button" class="text-button" data-reader-focus aria-expanded="false">扩大阅读区</button></div>
@@ -3631,7 +3642,7 @@ function resultWorkspaceContent(data, tab, staging, notice, experimentResults) {
     : tab === "reports" ? `${professionalReportsView(data)}<div id="report-refresh-controls"></div>${dailyReportView(data)}`
     : tab === "metrics" ? `<div class="analysis-record-workspace">${insights}${resultReviewPanel(data)}${stopped ? experimentAttentionPanel(data,tab) : ""}${componentResultCards(data,data.staging_run_id || data.name,staging)}${movementScreeningView(data)}${metricsView(data)}</div>`
     : `${experimentResults}${experimentResultTools(data,staging)}`;
-  return `<div class="page result-workspace result-workspace--${esc(tab)}"><p id="archive-sync-notice" class="analysis-readiness-note" role="status" hidden></p>${resultHeader(data,tab,staging)}${tab === "metrics" ? "" : status}${content}</div>`;
+  return `<div class="page result-workspace result-workspace--${esc(tab)}"><p id="archive-sync-notice" class="analysis-readiness-note" role="status" hidden></p>${resultHeader(data,tab,staging)}${tab === "metrics" ? "" : status}${stageDeliveryView(data)}${content}</div>`;
 }
 
 async function renderArchive(name, tab = "experiments", staging = false, background = false) {
@@ -4209,3 +4220,10 @@ async function refreshNasRecordings() {
 }
 window.setInterval(refreshNasRecordings, 30000);
 document.addEventListener("focusout", flushNasPickersAfterFocus);
+
+// Browsing a retained stage changes only this view, never the running job.
+document.addEventListener("change", event => {
+  if (!event.target.matches("[data-stage-version]")) return;
+  const section=event.target.closest(".stage-delivery");
+  section.querySelectorAll("[data-stage-version-panel]").forEach(panel=>{panel.hidden=panel.dataset.stageVersionPanel!==event.target.value;});
+});

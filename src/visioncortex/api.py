@@ -1974,6 +1974,7 @@ def _stage_receipts_from_root(root: Path) -> list[dict[str, Any]]:
                 "archive_mode": payload.get("archive_mode"),
                 "artifacts": artifacts,
                 "receipt": f"JSON-Config-Files/Stage-Receipts/{path.name}",
+                "version_manifest": payload.get("version_manifest"),
             }
         )
     return receipts
@@ -4078,6 +4079,7 @@ def _archive_section_payload(
         if not groups:
             legacy_package = _read_json(json_root / "evidence_package.json", {}) or {}
             groups = list(legacy_package.get("experiment_groups") or [])
+        from .activity_review import assessment
         source_page = groups[offset : offset + limit + 1]
         has_more = len(source_page) > limit
         source_page = source_page[:limit]
@@ -4095,6 +4097,7 @@ def _archive_section_payload(
                 {
                     "folder": folder_name,
                     "name": group.get("experiment_name") or folder_name,
+                    "activity_assessment": assessment(group),
                     "continuity_type": group.get("continuity_type"),
                     "workflow_kind": group.get("workflow_kind", "unresolved"),
                     "source_archive_folders": group.get("source_archive_folders") or [],
@@ -4266,6 +4269,14 @@ def _archive_detail_from_root(
                  "partial_delivery": _read_json(root / "JSON-Config-Files/partial_delivery.json", {}) or {}}
                 if library_section else _run_snapshot_from_root(root))
     status = snapshot.get("status") or {}
+    for receipt in snapshot.get("stage_receipts", []):
+        receipt["receipt_url"] = file_url(archive_name, receipt["receipt"])
+        version = receipt.get("version_manifest")
+        if version and (root / version).is_file():
+            receipt["version_url"] = file_url(archive_name, version)
+        for artifact in receipt.get("artifacts", []):
+            if artifact.get("available") and artifact.get("relative_path") and artifact.get("kind") == "file":
+                artifact["url"] = file_url(archive_name, artifact["relative_path"])
     active_preview = bool(staging_run_id) and status.get("stage") not in {"completed", "partial", "failed", "interrupted", "cancelled"}
     completed_stages = {
         item["stage"] for item in snapshot.get("stage_receipts", [])
@@ -4325,6 +4336,8 @@ def _archive_detail_from_root(
     package_groups = apply_speech_revision(root, package_groups)
     from .operation_review import apply as apply_operation_revision, coverage
     package_groups = apply_operation_revision(root, package_groups)
+    from .activity_review import apply as apply_activity, assessment, counts as activity_counts
+    package_groups = apply_activity(root, package_groups)
     group_by_folder = {
         str(group.get("archive_folder")): group for group in package_groups
     }
@@ -4357,6 +4370,7 @@ def _archive_detail_from_root(
                     "folder": folder.name,
                     "group_id": group.get("group_id"),
                     "name": group.get("experiment_name") or folder.name,
+                    "activity_assessment": assessment(group),
                     "continuity_type": group.get("continuity_type"),
                     "workflow_kind": group.get("workflow_kind", "unresolved"),
                     "source_archive_folders": group.get("source_archive_folders") or [],
@@ -4597,7 +4611,7 @@ def _archive_detail_from_root(
             else "legacy_archive_not_release_verified"
         ),
         "counts": {
-            "experiments": len(experiments),
+            **activity_counts(experiments),
             "key_events": len(normalized_events),
         },
         "experiments": experiments,

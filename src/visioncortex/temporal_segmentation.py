@@ -12,6 +12,8 @@ from typing import Any, Sequence
 import cv2
 import numpy as np
 
+from .cache_paths import model_cache_directory
+
 
 SEGMENTATION_SCHEMA = "visioncortex-sam2-participant-continuity/1"
 
@@ -373,7 +375,8 @@ def audit_participant_continuity(
             fingerprint_payload, ensure_ascii=False, sort_keys=True
         ).encode("utf-8")
     ).hexdigest()
-    run_root = work_root / event_id / view_id / fingerprint
+    cache_root = Path((config.get("storage") or {}).get("local_cache_root") or work_root)
+    run_root = model_cache_directory(cache_root, "s2", fingerprint)
     frames_root = run_root / "frames"
     receipt_path = run_root / "receipt.json"
     if receipt_path.is_file():
@@ -519,6 +522,7 @@ def audit_participant_continuity(
         "view_id": view_id,
         "action_type": action_type,
         "input_fingerprint": fingerprint,
+        "cache_path_policy": "flat_full_digest_v1",
         "cache_reused": False,
         "source_scope": "already_derived_key_clip",
         "source_copy_bytes": 0,

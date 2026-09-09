@@ -19,6 +19,29 @@ from visioncortex.storage import (
 )
 
 
+def test_stage_versions_retain_overwritten_json_and_do_not_copy_media(tmp_path):
+    from visioncortex.stage_versions import save_version
+    root = tmp_path / 'archive'
+    directory = root / 'JSON-Config-Files'
+    directory.mkdir(parents=True)
+    source = directory / 'groups.json'
+    source.write_text('{"phase":1}')
+    video = root / 'clip.mp4'
+    video.write_bytes(b'fixture-video-not-real')
+    first = save_version(root, [directory, video], {'stage':'clips'})
+    source.write_text('{"phase":2}')
+    second = save_version(root, [directory], {'stage':'review'})
+    payload = json.loads(first.read_text())
+    row = next(item for item in payload['files'] if item['path'].endswith('groups.json'))
+    assert (root / row['snapshot']).read_text() == '{"phase":1}'
+    import hashlib
+    assert hashlib.sha256((root / row['snapshot']).read_bytes()).hexdigest() == row['sha256']
+    assert payload['media_bodies_revalidated'] is False
+    assert not any(first.parent.rglob('*.mp4'))
+    assert len(json.loads(second.read_text())['files']) == 1  # no recursive snapshot copying
+    assert first != second
+
+
 def test_completed_stage_visible_before_final_acceptance(tmp_path):
     config = {"storage": {"archive_root": str(tmp_path / "nas"), "staging_directory_name": "Processing"}}
     final, staging, history = fixed_archive_staging_paths(config, "experiment", "run-1")
@@ -134,6 +157,26 @@ def test_stage_preview_reads_completed_clips_without_final_package(tmp_path, mon
     assert preview["key_events"] == []
     assert preview["preliminary_materials"][0]["review_status"] == "pending_semantic_review"
     assert preview["preliminary_materials"][0]["timestamp_ms"] == 123
+
+
+def test_stage_api_keeps_auxiliary_video_without_counting_it_as_experiment(tmp_path):
+    from visioncortex.activity_review import binding, save
+    root = tmp_path / 'archive'
+    controls = root / 'JSON-Config-Files'
+    controls.mkdir(parents=True)
+    (controls / 'pipeline_status.json').write_text(json.dumps({'stage':'failed'}))
+    group = {'group_id':'G', 'archive_folder':'one', 'global_start_ms':0,
+             'global_end_ms':1000, 'model_understanding':{'steps':[]}}
+    (controls / 'experiment_group_understanding.json').write_text(json.dumps({'groups':[group]}))
+    clip = root / 'Experiment-Clips/one/First-Person.mp4'
+    clip.parent.mkdir(parents=True)
+    clip.write_bytes(b'fixture')
+    save(root, group, binding(root, group), {'kind':'equipment_organization','workflow_relation':'standalone','reason':'整理仪器'})
+    data = api._archive_detail_from_root(root, 'example', staging_run_id='run-1')
+    assert data['counts']['experiments'] == 0
+    assert data['counts']['auxiliary_activities'] == 1
+    assert data['experiments'][0]['first_person_video_url']
+    assert data['experiments'][0]['activity_assessment']['label'] == '器材整理'
 
 
 def test_stage_preview_includes_both_candidate_indexes_without_double_counting(tmp_path, monkeypatch):

@@ -16,6 +16,7 @@ import httpx
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from .activity_review import ActivityAssessment
 from .mllm_provider import build_vision_request
 from .provider_credentials import model_api_key
 from .speech_semantics import (bind_speech_result, compact_speech_label,
@@ -91,8 +92,11 @@ GROUP_SYSTEM_PROMPT = OBJECT_IDENTITY_RULES + OPERATION_DESCRIPTION_RULES + """�
 6. 稀疏采样之间存在未观察区间时，在 uncertainties 中说明步骤覆盖缺口，不声称已完整还原每一步。保留所有支持判断的事件与视角编号；编号属于证据关联，不能代替操作描述。
 7. 输入边界只是候选取材范围，不是实验已经开始或结束的事实。打开包装、整理称量纸、取工具等准备步骤结束，不代表整场实验结束。末帧仍在操作或准备后续实验时，end_complete 必须为 false，localized_rescan_needed 为 true。不能用“片段内没有后续事件”“下一段间隔若干秒”“到达片段尾部”作为完成依据；看不到后续时应明确结束状态未知。
 8. atomic_experiments 表示语义上的实验单元，不能照抄 CV 片段，也不能把开纸、开瓶等单步操作各当一场实验。连续实验链中可保留称量、配液、移液等不同单元及其时间范围；换台不能自动断链。单元名称应简明，完整操作写在 steps 中。时间边界只写画面支持的范围，不假定单元结束就代表整条实验链完成。completion_status 为 ongoing_at_recording_end 或 unresolved 时不得宣称链已完成。
+9. 先区分活动性质，不把实验室内发生的所有动作都称为实验。单独搬放或整理仪器、清洁台面，且没有可见实验承接时，kind 为 equipment_organization 或 cleanup；有明确独立依据时 workflow_relation 为 standalone。仅凭“手接触物体”“移动管架”等 CV 类别不能确认实验成立。
+10. 准备动作若与同一实验员后续称量、配液、移液等存在可见对象/状态承接，属于同一实验链，kind 为 preparation、workflow_relation 为 part_of_experiment；不得从链中删去或当作单独一场实验。看不到后续或关联证据时用 unresolved，不把未看见实验当作证明没有实验。reason 写可见分类依据；此分类不能证明物理动作或实验已完成。
 输出单个 JSON 对象，字段固定为：
 {
+  "activity_assessment": {"kind":"experiment/equipment_organization/cleanup/preparation/uncertain", "workflow_relation":"standalone/part_of_experiment/unresolved", "reason":"可见的活动性质及承接依据"},
   "experiment_name": "中文具体实验名称",
   "experiment_name_en": "ASCII-English-Experiment-Name",
   "continuity_type_confirmed": "independent/continuous/uncertain",
@@ -263,6 +267,7 @@ class _BoundaryAssessment(_StrictResponse):
 
 
 class _GroupResponse(_StrictResponse):
+    activity_assessment: ActivityAssessment | None = None
     speech_interpretation: _SpeechInterpretation | None = None
     experiment_name: str
     experiment_name_en: str

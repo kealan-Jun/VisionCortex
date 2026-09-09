@@ -1721,6 +1721,11 @@ class EvidencePipeline:
             "artifacts": relative_artifacts,
             "token_ledger": "JSON-Config-Files/run_metrics.json",
         }
+        from .stage_versions import save_version
+        version = save_version(layout.root, list(map(Path, artifacts)), receipt)
+        if self._publisher is not None:
+            self._publisher.publish_directory(version.parent.relative_to(layout.root))
+        receipt["version_manifest"] = version.relative_to(layout.root).as_posix()
         receipt_path = layout.json_config / "Stage-Receipts" / f"{stage}.json"
         write_json(receipt_path, receipt)
         if self._publisher is not None:
@@ -4674,11 +4679,11 @@ class EvidencePipeline:
         self._startup_metrics["cache_identity_source_snapshot"] = cache_identity.get(
             "source_snapshot_report", {}
         )
-        layout.work = (
-            Path(self.config["storage"]["local_cache_root"]).resolve()
-            / manifest.experiment_id
-            / cache_identity["cache_key"]
-        )
+        from .cache_paths import model_cache_directory, windows_path
+        local_cache = Path(os.path.abspath(self.config["storage"]["local_cache_root"]))
+        layout.work = (model_cache_directory(local_cache, "work", cache_identity["cache_key"])
+                       if windows_path(local_cache) else
+                       local_cache.resolve() / manifest.experiment_id / cache_identity["cache_key"])
         layout.create()
         self._active_layout = layout
         write_json(layout.json_config / "cache_identity.json", cache_identity)

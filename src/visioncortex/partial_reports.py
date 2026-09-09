@@ -186,7 +186,7 @@ def render_stage_reports(root: Path, export: dict, receipt: dict) -> dict:
         ],
         notes,
         stage=True,
-    ) + [p("1. 已保存的实验过程", "h1"), p(notes)]
+    ) + [p("1. 已保存的操作与辅助活动", "h1"), p(notes)]
     overview_index = len(story)
     overview_rows = [["片段", "时间范围", "操作记录", "结束状态"]]
     states = {
@@ -196,9 +196,14 @@ def render_stage_reports(root: Path, export: dict, receipt: dict) -> dict:
         "unreviewed": "边界尚未核对",
     }
     sections = []
+    from .activity_review import assessment
     for index, (g, steps) in enumerate(groups, 1):
+        activity = assessment(g)
         title = g.get("experiment_name") or f"实验操作片段 {index}"
         state = states.get(g.get("completion_status"), "结束位置待核对")
+        if activity["is_auxiliary"]:
+            title = activity["label"] + "记录"
+            state = "辅助活动，不计入实验"
         interval = (
             f"{clock(g.get('global_start_ms'))} - {clock(g.get('global_end_ms'))}"
         )
@@ -283,7 +288,7 @@ def render_stage_reports(root: Path, export: dict, receipt: dict) -> dict:
             story.append(p("本段需要核对的内容", "h2"))
             story.extend(p(x, "small") for x in limits)
         sections.append(
-            f'<section><header><small>实验片段 {index:02d} · {interval}</small><h2>{html.escape(title)}</h2><span class="badge">{state}</span></header>'
+            f'<section><header><small>{"辅助活动" if activity["is_auxiliary"] else "操作片段"} {index:02d} · {interval}</small><h2>{html.escape(title)}</h2><span class="badge">{state}</span></header>'
             + visual_html
             + "".join(step_html)
             + (

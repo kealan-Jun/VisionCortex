@@ -10,6 +10,25 @@ import pytest
 SOURCE = Path(__file__).parents[1] / "src/visioncortex/web/app.js"
 
 
+def test_auxiliary_activity_is_labeled_without_suggesting_unfinished_experiment():
+    run_javascript(('workflowCompletionLabel','workflowLabel'), r'''
+const item={completion_status:"unresolved",activity_assessment:{is_auxiliary:true,label:"器材整理"}};
+assert.equal(workflowLabel(item),"器材整理");
+assert.equal(workflowCompletionLabel(item),"辅助活动 · 不计入实验");
+''')
+
+
+def test_stage_version_links_are_read_only_and_legacy_snapshot_is_not_invented():
+    run_javascript(('stageDeliveryView',), r'''
+const esc=String,STAGE_LABELS={clips:"视频片段",speech:"录音转写"};
+const html=stageDeliveryView({observability:{stage_receipts:[
+ {stage:"clips",status:"completed",receipt_url:"/receipt",version_url:"/version",artifacts:[{name:"clips.json",url:"/clips"}]},
+ {stage:"speech",status:"skipped",receipt_url:"/speech",reason:"没有录音"}]}});
+assert.ok(html.includes("/version"));assert.ok(html.includes("没有录音"));
+assert.ok(html.includes("历史阶段仅有完成记录"));assert.ok(!html.includes("/retry"));
+''')
+
+
 def test_global_library_retains_staging_events_without_promoting_or_losing_their_links():
     run_javascript(("materialLibraryEntries", "globalMaterialCard", "materialFocusRoute"), r'''
 const archive={name:"A",staging_run_id:"R"},experimentRecords=()=>[archive];
@@ -187,6 +206,10 @@ for (const statuses of [[],["error"],["disabled","error"]]) {
 }
 assert.ok(friendlyFailureReason({observability:{status:{error:"connection timeout"}}}).includes("连接暂时中断"));
 assert.ok(friendlyFailureReason({observability:{status:{error:"CUDA out of memory"}}}).includes("计算资源暂时不足"));
+for (const error of ["FileNotFoundError: [WinError 206] sam2/frames 文件名或扩展名太长", "ENAMETOOLONG frames"]) {
+  const reason=friendlyFailureReason({observability:{status:{error}},partial_delivery:partial(["error"])});
+  assert.ok(reason.includes("路径过长"));assert.ok(!reason.includes("无法读取"));
+}
 assert.ok(friendlyFailureReason({}).includes("没有完整结束"));
 const qualityReason=friendlyFailureReason({partial_delivery:partial(["error"]),quality_acceptance:{passed:false,
  segmentation_integrity:{canonical_pair_coverage_passed:false},step_action_consistency:{passed:false}}});

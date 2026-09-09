@@ -284,6 +284,8 @@ def write_partial_delivery(root: Path, metrics: dict[str, Any], *, analysis_fini
     groups = apply(root, groups)
     from .operation_review import apply as apply_operations
     groups = apply_operations(root, groups)
+    from .activity_review import apply as apply_activity, counts as activity_counts, assessment
+    groups = apply_activity(root, groups)
     from .result_review import inspect as inspect_result
     try:
         result_check = inspect_result(root, save=True)
@@ -319,6 +321,7 @@ def write_partial_delivery(root: Path, metrics: dict[str, Any], *, analysis_fini
     ]
     receipts = sorted((json_root / "Stage-Receipts").glob("*.json"))
     receipts.extend(sorted((json_root / "Stage-Refreshes").glob("*.json")))
+    receipts.extend(sorted((json_root / "Activity-Reviews").glob("*.json")))
     controls.extend(path.relative_to(root).as_posix() for path in receipts)
     artifacts = []
     for relative in controls:
@@ -374,6 +377,7 @@ def write_partial_delivery(root: Path, metrics: dict[str, Any], *, analysis_fini
         "evidence_classification": "PARTIAL_EVIDENCE",
         "formal_archive_promotion_allowed": False,
         "experiment_groups": groups,
+        "activity_counts": activity_counts(groups),
         "result_review": result_check,
         "recording_understanding": read("JSON-Config-Files/speech_understanding.json"),
         "capture_quality": read("JSON-Config-Files/capture_quality.json"),
@@ -428,7 +432,7 @@ def write_partial_delivery(root: Path, metrics: dict[str, Any], *, analysis_fini
         for item in metrics.get("stage_durations", [])
     )
     timeline = "".join(
-        f"<li><strong>片段 {index + 1}</strong> · "
+        f"<li><strong>{text(assessment(group)['label'])} {index + 1}</strong> · "
         f"{seconds(group.get('global_start_ms') / 1000 if group.get('global_start_ms') is not None else None)}"
         f" → {seconds(group.get('global_end_ms') / 1000 if group.get('global_end_ms') is not None else None)}"
         f"<p>{len(group.get('model_understanding', {}).get('steps', []))} 个模型步骤；"

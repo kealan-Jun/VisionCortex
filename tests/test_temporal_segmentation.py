@@ -185,12 +185,14 @@ def test_bounded_sam2_receipt_refines_boxes_and_reuses_cache(
         }
     ]
 
+    config = _config()
+    config['storage'] = {'local_cache_root': str(tmp_path / 'cache')}
     refined, receipt = module.audit_participant_continuity(
         clip,
         seed,
         boxes,
         tmp_path / "work",
-        _config(),
+        config,
         event_id="evt-1",
         view_id="fp",
         action_type="liquid_movement",
@@ -203,13 +205,15 @@ def test_bounded_sam2_receipt_refines_boxes_and_reuses_cache(
     assert receipt["full_timeline_inference"] is False
     assert receipt["sampled_frame_count"] <= 5
     assert refined[0]["segmentation_refined"] is True
+    assert (tmp_path / 'cache/s2' / receipt['input_fingerprint'] / 'frames/00000.jpg').is_file()
+    assert not (tmp_path / 'work').exists()
 
     cached_boxes, cached = module.audit_participant_continuity(
         clip,
         seed,
         boxes,
         tmp_path / "work",
-        _config(),
+        config,
         event_id="evt-1",
         view_id="fp",
         action_type="liquid_movement",

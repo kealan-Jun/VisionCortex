@@ -111,7 +111,7 @@ assert.equal(typeof readerSeekVideo(null,NaN,null,()=>{}),"function");
 
 
 def test_video_first_workspace_keeps_checks_reachable_and_performance_on_its_tab():
-    run_javascript(('resultWorkspaceContent',), r'''
+    run_javascript(('resultWorkspaceContent', 'stageDeliveryView'), r'''
 const esc=String,number=Number,icon=()=>'',STAGE_LABELS={};
 const archiveProcessStopped=()=>true,resultHeader=()=>'<nav>RESULT NAV</nav>';
 const experimentAttentionPanel=()=>'<p>FAILURE REASON</p>',resultReviewPanel=()=>'<button data-result-check>CHECK</button>';
