@@ -10,6 +10,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+EXECUTOR_PATHS = ("tools/update_rtx4050_source.py", "deployment/rtx4050-windows/apply-update.py")
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="Git is required for source updates")
 
 
@@ -44,6 +45,7 @@ def installation(tmp_path):
     root.mkdir()
     patch.mkdir()
     contents = {name: b"synthetic source\n" for name in update.MAPPINGS}
+    contents.update({name: b"# synthetic committed executor\n" for name in EXECUTOR_PATHS})
     contents.update({"pyproject.toml": b'[project]\ndependencies = []\n',
                      "deployment/rtx4050-windows/assets-lock.json": b'{}\n',
                      "src/visioncortex/keep.py": b'identity = "retained"\n',
@@ -54,7 +56,7 @@ def installation(tmp_path):
         path = source / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
-        if name in {"src/visioncortex/new.py", "tools/rtx4050_hardware.py"}:
+        if name in {"src/visioncortex/new.py", "tools/rtx4050_hardware.py", *EXECUTOR_PATHS}:
             continue
         target = update.MAPPINGS.get(name, name)
         path = root / target
@@ -146,3 +148,34 @@ def test_source_update_rejects_path_traversal(installation):
             update.safe(patch, name)
         with pytest.raises(RuntimeError):
             apply.safe(root, name)
+
+
+def test_untracked_executor_cannot_enter_verified_update(installation):
+    update, apply, source, root, patch = installation
+    executor = source / "deployment/rtx4050-windows/apply-update.py"
+    executor.unlink()
+    commit(source)
+    executor.write_bytes(b"# untracked leftover executor\n")
+    before = (root / "SHA256SUMS.json").read_bytes()
+    with pytest.raises(RuntimeError, match="executor"):
+        update.prepare(root, source, patch)
+    assert (root / "SHA256SUMS.json").read_bytes() == before
+
+
+def test_update_stages_the_committed_executor(installation):
+    update, apply, source, root, patch = installation
+    update.prepare(root, source, patch)
+    assert (patch / "apply-update.py").is_file(), "executor is still loaded from a mutable checkout"
+    assert (patch / "apply-update.py").read_bytes() == (source / "deployment/rtx4050-windows/apply-update.py").read_bytes()
+
+
+def test_clean_windows_crlf_executors_are_accepted(installation):
+    update, apply, source, root, patch = installation
+    checkout = source.with_name("windows-checkout")
+    subprocess.run(["git", "clone", "--config", "core.autocrlf=true", "--no-local", str(source), str(checkout)],
+                   check=True, capture_output=True)
+    source = checkout
+    assert b"\r\n" in (source / EXECUTOR_PATHS[0]).read_bytes()
+    assert subprocess.check_output(["git", "-C", str(source), "status", "--porcelain", "--untracked-files=no"]) == b""
+    update.prepare(root, source, patch)
+    assert (patch / "apply-update.py").read_bytes() == b"# synthetic committed executor\n"

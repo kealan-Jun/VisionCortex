@@ -200,6 +200,7 @@ def test_windows_job_owns_descendants_and_watches_original_parent_handle(monkeyp
         "CreateJobObjectW": 101, "SetInformationJobObject": 1,
         "AssignProcessToJobObject": 1, "GetCurrentProcess": -1,
         "OpenProcess": 202, "WaitForSingleObject": 0, "CloseHandle": 1,
+        "GetStdHandle": 303, "GetFileType": 3, "ReadFile": 0, "PeekNamedPipe": 0,
     }.items()})
     targets = []
     monkeypatch.setattr(lifecycle.sys, "platform", "win32")
