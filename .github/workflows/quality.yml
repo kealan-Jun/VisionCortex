@@ -157,6 +157,10 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           cache: pip
+      - name: Validate desktop lifecycle and hardware watchdog contracts
+        run: |
+          node --check deployment/rtx4050-windows/desktop/controller.cjs
+          node --test tests/desktop_controller.test.cjs tests/desktop_main.test.cjs tests/desktop_connection.test.cjs tests/desktop_storage.test.cjs
       - name: Install the project and test dependencies
         run: python -m pip install --disable-pip-version-check -e ".[dev]"
       - name: Compile and validate the installed dependency graph

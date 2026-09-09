@@ -5,13 +5,14 @@
 
 ## 首次连接代码仓库
 
-Windows 需安装 Git，并具备私有仓库 `RealityLoopAI/VisionCortex` 的读取权限。
+Windows 需安装 Git，并具备开发仓库 `kealan-Jun/VisionCortex` 的读取权限。
+4050 修复在开发分支验收；稳定仓库按双仓发布门禁晋级。
 使用 Git 的账户登录方式，不把访问令牌写进命令、远端 URL 或聊天。
 
 在 PowerShell 中执行，代码目录与已解压的应用目录必须分开放置：
 
 ```powershell
-git clone --depth 1 --branch codex/rtx4050-optimization-20260908 --single-branch https://github.com/RealityLoopAI/VisionCortex.git D:\VisionCortexSource
+git clone --depth 1 --branch codex/rtx4050-optimization-20260908 --single-branch https://github.com/kealan-Jun/VisionCortex.git D:\VisionCortexSource
 cd D:\VisionCortexSource
 ```
 
@@ -27,6 +28,10 @@ powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File .\deployment\rtx405
 源码或配置变更可能使引擎身份失效，后续启动仍按现有规则检查是否需要重新准备。
 
 ## 后续更新
+
+若代码目录此前克隆自 `RealityLoopAI/VisionCortex`，先在该代码目录将更新来源切到
+开发仓库一次：`git remote set-url origin https://github.com/kealan-Jun/VisionCortex.git`。
+已有源文件、安装目录和运行数据不受此远端地址设置影响。
 
 ```powershell
 cd D:\VisionCortexSource
@@ -48,6 +53,18 @@ CUDA 设备查询、设备属性、TensorRT 导入、CUDA 分配、FP16 运算�
 每一步有独立等待上限，完成后立即进入下一步，没有固定等待 15 分钟的行为。
 `nvidia-smi` 的调用另有 20 秒超时。
 
+桌面进程另有独立硬件检查看门狗：硬件入口或同一步骤最多等待 4 分钟，整个硬件
+检查最多 20 分钟。新步骤会获得自己的等待预算；重复步骤消息、普通日志不会续期。
+正常完成立即进入下一阶段。即使 Python 监督进程本身没有继续输出，桌面也会显示
+超时错误并请求退出，必要时只终止本次应用创建的进程树；不会自动重试。
+这层保护只覆盖硬件检查，不改变引擎构建、AI 服务验证或视频分析的超时策略。
+
+`Runtime/Logs` 位于包含 `VisionCortex.exe` 的安装目录，和 Git 代码目录不同。
+可直接点击窗口的「应用 → 打开诊断目录」。通过聊天附件回传诊断文件即可，
+不要把运行日志提交到代码仓库。若要确认更新是否实际应用，再提供安装目录的
+`BUNDLE-METADATA.json`；其中的 `source_git_commit` 才是已应用的 Git 源码版本。
+旧 R6 包可能没有该字段；仅看到文件夹名 R6 不能判断是否已更新。
+
 失败时保留以下文件及窗口报错，无需发送 Key 或原视频：
 
 - `Runtime/Logs/hardware-preflight.json`：当前步骤、已完成步骤耗时、失败或超时位置。
@@ -61,6 +78,15 @@ CUDA 设备查询、设备属性、TensorRT 导入、CUDA 分配、FP16 运算�
 当前改动证明诊断、超时终止和源码更新的确定性合同；Windows/RTX 4050 原机执行
 仍为 **NOT_PROVEN**。用户提供的三次等待态采样属于 **PARTIAL_EVIDENCE**，尚不足以
 认定具体库或驱动缺陷已定位或解决。真实视频质量和稳定发布资格另行验收。
+
+2026-09-09 回传的 293 字节 `desktop.log` 仅包含全包校验开始、硬件检查入口，
+没有任何硬件子步骤。它能证明程序已进入硬件检查，不能确认安装目录是否应用了
+分步检查修复，也不能确定具体阻塞库。需要已安装版本及硬件日志补齐证据。
+
+本次桌面监督改动的本地确定性检查：33 项 Node 桌面测试、44 项 Python 4050 硬件、
+部署与源码更新测试通过，JavaScript 语法及 diff 检查通过。新增回归模拟了监督
+进程无输出、重复进度、总预算耗尽和超时后的迟到成功消息；跨平台 CI 增加同组
+桌面测试。此结果不代表 Windows 原机上的 CUDA 初始化已成功。
 
 ## 本轮开发验证（2026-09-08）
 
