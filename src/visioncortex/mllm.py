@@ -279,6 +279,7 @@ class _GroupResponse(_StrictResponse):
 class _OperationStepResponse(_StrictResponse):
     operation_title: str = Field(min_length=1, max_length=100)
     current_step: str = Field(min_length=1, max_length=800)
+    observed_result: str | None = Field(default=None, min_length=1, max_length=600)
     supporting_event_ids: list[str] = Field(min_length=1)
 
 

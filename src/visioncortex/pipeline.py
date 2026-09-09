@@ -590,7 +590,9 @@ def refine_groups_from_final_events(
     initial model receipt and token usage available for audit.
     """
 
-    event_by_id = {event.event_id: event for event in key_events if event.accepted}
+    from .step_evidence import next_operation, timing_scope
+
+    event_by_id = {event.event_id: event for event in key_events if event_is_formal(event)}
     for group in groups:
         previous = deepcopy(group.model_understanding or {})
         events = sorted(
@@ -606,22 +608,6 @@ def refine_groups_from_final_events(
         for index, event in enumerate(events, 1):
             understanding = dict(event.model_understanding or {})
             physical_change = dict(understanding.get("physical_change") or {})
-            next_step_evidence = dict(
-                understanding.get("next_step_evidence") or {}
-            )
-            next_step_status = str(
-                next_step_evidence.get("status") or "unknown"
-            )
-            if next_step_status not in {"observed", "inferred", "unknown"}:
-                next_step_status = "unknown"
-            supporting_event_ids = {
-                event.event_id,
-                *(
-                    str(item)
-                    for item in next_step_evidence.get("evidence_event_ids") or []
-                    if item
-                ),
-            }
             before = str(physical_change.get("before") or "")
             after = str(physical_change.get("after") or "")
             physical_change_text = (
@@ -647,12 +633,9 @@ def refine_groups_from_final_events(
                         understanding.get("current_step")
                         or ACTION_LABELS_ZH[event.action_type.value]
                     ),
-                    "next_step": str(
-                        understanding.get("next_step") or "未知"
-                    ),
-                    "next_step_status": next_step_status,
-                    "next_step_evidence": next_step_evidence,
-                    "supporting_event_ids": sorted(supporting_event_ids),
+                    **next_operation(event, events, {event.event_id}),
+                    "supporting_event_ids": [event.event_id],
+                    "time_scope": timing_scope([event]),
                     "objects": list(event.objects),
                     "physical_change": physical_change_text,
                     "supporting_views": list(event.supporting_views),
@@ -1051,6 +1034,17 @@ def validate_final_step_action_consistency(
                     )
         for step in steps:
             step_index = step.get("step_index")
+            # An action elsewhere in this experiment is not evidence for this
+            # step. Legacy single-event groups have only one possible reference.
+            ids = step.get("supporting_event_ids")
+            if ids is None:
+                ids = ([step["event_id"]] if step.get("event_id") else
+                       group.key_event_ids if len(group.key_event_ids) == 1 else [])
+            step_actions = {
+                event_by_id[identity].action_type.value for identity in ids
+                if identity in group.key_event_ids and identity in event_by_id
+                and event_is_formal(event_by_id[identity])
+            }
             for field in ("operation_title", "current_step", "physical_change"):
                 text = str(step.get(field) or "").strip()
                 if not text:
@@ -1059,7 +1053,7 @@ def validate_final_step_action_consistency(
                     {"step_index": step_index, "field": field, "text": text}
                 )
                 for action_type, patterns in FINAL_STEP_ACTION_PATTERNS.items():
-                    if action_type in confirmed_actions:
+                    if action_type in step_actions:
                         continue
                     matched = [
                         pattern

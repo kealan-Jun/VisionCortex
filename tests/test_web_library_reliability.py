@@ -106,6 +106,11 @@ assert.ok(evidence.includes("<li>未观察到开盖；</li>"));
 assert.ok(evidence.includes("<li>物体移动。</li>"));
 assert.ok(evidence.indexOf("CV 标签")>evidence.indexOf("<details"));
 assert.ok(evidence.includes("推测，画面尚未确认"));
+const scoped=experimentStepDescription({current_step:"手指按触面板",physical_change:"读数变化未确认",
+  observed_result:"读数变化未确认",time_scope:{complete_operation_boundaries_proven:false}});
+assert.ok(scoped.includes("完整操作的起止位置尚未核对"));
+assert.ok(scoped.includes("当前结果"));
+assert.ok(!scoped.includes("精确原片时间"));
 const candidate=readableEvidenceParts("未观察到开盖。候选 container_state_change 未被证明。");
 assert.deepEqual(candidate.narrative,["未观察到开盖。"]);
 assert.deepEqual(candidate.technical,["候选 container_state_change 未被证明。"]);
