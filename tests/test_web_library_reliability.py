@@ -192,6 +192,30 @@ assert.ok(friendlyFailureReason({error:"Automatic experiment/material quality ac
 ''')
 
 
+def test_alignment_gate_failure_is_not_reported_as_gpu_resource_exhaustion():
+    run_javascript(("friendlyFailureReason",), r'''
+for (const role of ["first", "third"]) {
+  const error=`RuntimeError: alignment quality gate failed before GPU scans: no_aligned_${role}_person_coverage; insufficient_first_third_person_overlap:0.0<1000.0`;
+  for (const run of [{error}, {observability:{status:{failed_stage:"alignment",message:error}}}]) {
+    const reason=friendlyFailureReason(run);
+    assert.ok(reason.includes("时间对齐"));
+    assert.ok(!reason.includes("计算资源暂时不足"));
+  }
+}
+''')
+
+
+def test_only_explicit_memory_exhaustion_uses_resource_failure_message():
+    run_javascript(("friendlyFailureReason",), r'''
+for (const error of ["CUDA out of memory", "torch.OutOfMemoryError", "MemoryError", "SAM2 CUDA out of memory", "Unable to allocate 64.0 MiB for an array"]) {
+  assert.ok(friendlyFailureReason({error}).includes("计算资源暂时不足"),error);
+}
+for (const error of ["CUDA driver initialization failed", "GPU device unavailable", "invalid memory access", "CUDA illegal memory access"]) {
+  assert.ok(!friendlyFailureReason({error}).includes("计算资源暂时不足"),error);
+}
+''')
+
+
 def test_preflight_failure_does_not_claim_saved_analysis_or_offer_empty_preview():
     run_javascript(("friendlyFailureReason", "runObservabilityCard", "guidedStageState"), r'''
 const esc=x=>String(x??""),icon=()=>"",productExperimentName=String;

@@ -2400,6 +2400,9 @@ function friendlyFailureReason(data) {
   if (["nas_ingest", "input_preflight"].includes(failedStage)) {
     return "实验输入检查未通过，分析尚未开始。请检查所选视频、时间记录与拍摄视角，再重试该任务。";
   }
+  if (/alignment quality gate failed|no_aligned_(?:first|third)_person_coverage|insufficient_first_third_person_overlap/i.test(raw)) {
+    return "第一与第三人称视频的时间对齐未通过质量检查，任务已停止。请检查视频与配套时间戳；已保存的原片和阶段记录仍可查看。";
+  }
   const quality = data?.quality_acceptance || {};
   if (quality.passed === false || /quality acceptance failed/i.test(raw)) {
     const reasons = [];
@@ -2414,8 +2417,8 @@ function friendlyFailureReason(data) {
     if (pending.some((item)=>item.status === "skipped_missing_api_key")) return "该任务运行时缺少可用的 AI 密钥，智能理解未完成。已完成内容已保留；请确认当前 AI 配置后，在新建实验中重新分析原视频。";
     return "该任务的智能理解尚未完成，已完成片段和候选素材已保留。请查看任务记录中的具体原因，确认 AI 配置后重新分析；此状态不代表当前账户不可用。";
   }
+  if (/out[\s_-]*of[\s_-]*memory|memoryerror|(?:cannot|unable to|failed to) allocate (?:[\d.,]+\s*[kmgt]?i?b|memory)|not enough (?:device |gpu |system )?memory/i.test(raw)) return "视频分析所需的计算资源暂时不足，任务已安全停止。";
   if (/decode|frame|sam2/i.test(raw)) return "关键素材精细处理时，系统无法读取其中一段视频的指定画面。";
-  if (/cuda|gpu|memory|out of memory/i.test(raw)) return "视频分析所需的计算资源暂时不足，任务已安全停止。";
   if (/network|timeout|connection/i.test(raw)) return "分析过程中连接暂时中断，已完成的内容仍然保留。";
   return "本次分析没有完整结束，系统已保留停止前完成的内容。";
 }
