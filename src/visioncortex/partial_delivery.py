@@ -362,7 +362,7 @@ def write_partial_delivery(root: Path, metrics: dict[str, Any], *, analysis_fini
         "missing_gates": ["complete_chain_quality_acceptance", "atomic_archive_publication"],
     }
     explanation = (
-        "本次结果未通过自动质量检查，具体缺口记录在 quality_acceptance.json。"
+        "本次结果未通过自动质量检查，具体缺口可在任务记录中查看。"
         "已完成的本地分析、片段与阶段素材均已保存，无需人工批准候选。"
         if quality.get("passed") is False else
         "智能理解尚有待补全结果。已完成的本地分析、片段与隔离素材仍然保留；"
@@ -396,6 +396,8 @@ def write_partial_delivery(root: Path, metrics: dict[str, Any], *, analysis_fini
         },
     }
     from .partial_reports import retained_report_visuals
+    from .report_references import export_reference_index
+    export["reference_index"] = export_reference_index(root, groups)
     export["representative_visuals"] = retained_report_visuals(
         root, groups, read("JSON-Config-Files/key_material_model_understanding.json").get("events", []))
     report["presentation_derived_frame_count"] = len(export["representative_visuals"])
@@ -404,10 +406,6 @@ def write_partial_delivery(root: Path, metrics: dict[str, Any], *, analysis_fini
     report["export"] = export_path.relative_to(root).as_posix()
     artifacts.append({"path": report["export"], "size_bytes": export_path.stat().st_size,
                       "sha256": hashlib.sha256(export_path.read_bytes()).hexdigest()})
-    rows = "".join(
-        f"<tr><td>{html.escape(item['path'])}</td><td>{item['size_bytes']}</td>"
-        f"<td><code>{item['sha256']}</code></td></tr>" for item in artifacts
-    )
     # Summarize saved control records only; never turn partial evidence into a
     # formal daily report or change the original quality decision.
     def text(value: Any) -> str:
@@ -416,21 +414,6 @@ def write_partial_delivery(root: Path, metrics: dict[str, Any], *, analysis_fini
     def seconds(value: Any) -> str:
         return f"{value:.1f} 秒" if isinstance(value, (int, float)) else "未记录"
 
-    stage_labels = {
-        "speech": "录音转写",
-        "preflight": "启动检查", "alignment": "多视角对齐", "motion_probe": "活动筛选",
-        "candidate_coarse": "粗扫", "candidate_fine": "精扫", "candidate_audit": "候选检查",
-        "experiment_understanding": "片段理解", "experiment_clips": "生成实验片段",
-        "key_materials": "生成关键素材", "mllm": "云端动作理解",
-        "material_refinement": "素材与步骤复核", "package": "最终质量检查",
-        "daily_report": "生成日报",
-    }
-    stage_rows = "".join(
-        f"<tr><td>{text(stage_labels.get(item.get('stage'), item.get('stage')))}</td>"
-        f"<td>{seconds(item.get('duration_seconds'))}</td>"
-        f"<td>{'完成' if item.get('status') == 'completed' else '未完成'}</td></tr>"
-        for item in metrics.get("stage_durations", [])
-    )
     timeline = "".join(
         f"<li><strong>{text(assessment(group)['label'])} {index + 1}</strong> · "
         f"{seconds(group.get('global_start_ms') / 1000 if group.get('global_start_ms') is not None else None)}"
@@ -440,29 +423,22 @@ def write_partial_delivery(root: Path, metrics: dict[str, Any], *, analysis_fini
         f"<details><summary>原始模型说明与证据限制</summary>"
         f"<p>{text(group.get('model_understanding', {}).get('overall_summary'))}</p>"
         + "".join(f"<p>{text(item)}</p>" for item in group.get("model_understanding", {}).get("uncertainties", []))
-        + "</details><details><summary>查看已保存步骤及证据编号</summary><ol>"
+        + "</details><details><summary>查看已保存步骤</summary><ol>"
         + "".join(
             f"<li><strong>{text(step.get('operation_title') or '步骤说明')}</strong>"
             f"<p>{text(step.get('current_step'))}</p>"
-            f"<p>证据编号：{text('、'.join(str(value) for value in step.get('supporting_event_ids', [])))}</p></li>"
+            f"<p>关联关键素材：{len(step.get('supporting_event_ids', []))} 项</p></li>"
             for step in group.get("model_understanding", {}).get("steps", [])
         )
         + "</ol></details></li>"
         for index, group in enumerate(groups)
     )
     gaps = [item["message"] for item in report["quality_gaps"]]
-    calls = [item for item in metrics.get("mllm_calls", []) if not item.get("cache_reused")]
-    unknown = sum(
-        int(item.get("usage", {}).get("unknown_attempt_count") or (
-            item.get("attempts", 0) if item.get("usage", {}).get("total_tokens") is None else 0
-        )) for item in calls
-    )
-    total_tokens = metrics.get("tokens", {}).get("run_total", {}).get("total_tokens")
     latest_check = ""
     if result_check.get("available"):
         latest_check = (
             "<h2>最新结果检查</h2>"
-            f"<p>结果版本：{text(result_check['revision'][:8])}；检查时间：{text(result_check['checked_at'])}。</p>"
+            f"<p>检查时间：{text(result_check['checked_at'])}。</p>"
             f"<p>步骤引用与文字检查：{'通过' if result_check['step_consistency_passed'] else '仍需核对'}；"
             f"另有 {len(result_check['findings'])} 项完整性提示。无记录可能是等待、遮挡或漏识别，需对照视频核验。</p>"
             "<p>这项检查不替代完整实验验收，不修改原质量决定，也不能证明全部操作均已识别。</p>"
@@ -480,12 +456,6 @@ def write_partial_delivery(root: Path, metrics: dict[str, Any], *, analysis_fini
         + "".join(f"<li>{text(item['label'])}：{text({'completed': '已完成', 'partial': '部分完成', 'insufficient': '证据不足', 'not_generated': '未生成', 'not_available': '暂无产出', 'failed': '未完成', 'running': '处理中', 'pending': '待检查', 'disabled': '未启用'}.get(item['state'], item['state']))} · {text(item['detail'])}</li>" for item in report["components"])
         + "</ul>"
         +
-        "<h2>本次运行记录</h2>"
-        f"<p>分析开始（UTC）：{text(metrics.get('run_started_at'))}；"
-        f"结束（UTC）：{text(metrics.get('run_ended_at'))}。</p>"
-        f"<p>本轮分析耗时：{seconds(metrics.get('total_duration_seconds'))}；"
-        f"已知 Token 用量：{text(total_tokens)}；另有 {unknown} 次请求尝试用量未知。</p>"
-        "<p>未知用量不计为零；上次运行的缓存响应不计入本轮实际调用。</p>"
         "<h2>完整报告未生成的原因</h2>"
         + ("<ul>" + "".join(f"<li>{text(gap)}</li>" for gap in gaps) + "</ul>" if gaps else "<p>前序分析或质量检查尚未完成，详见任务记录。</p>")
         + "<p>最终质量检查通过后才生成完整日报与正式 PDF / JSON，并执行归档发布。"
@@ -493,11 +463,9 @@ def write_partial_delivery(root: Path, metrics: dict[str, Any], *, analysis_fini
         + (f"<ol>{timeline}</ol>" if timeline else "<p>尚无已记录片段。</p>")
         + "<h2>录音理解与引用</h2><p>机器转写，声源未确认；录音提及不证明动作完成。</p>"
         + "".join(f"<p>{text(part.get('speech_interpretation', {}).get('summary'))}</p>"
-                  f"<p>录音引用：{text('、'.join(part.get('speech_interpretation', {}).get('referenced_segment_ids', [])))}</p>"
+                  f"<p>关联口述记录：{len(part.get('speech_interpretation', {}).get('referenced_segment_ids', []))} 条</p>"
                   for part in [*export["recording_understanding"].get("parts", []),
                                *(group.get("model_understanding", {}) for group in groups)])
-        + "<h2>分阶段耗时</h2><table><thead><tr><th>环节</th><th>用时</th>"
-        f"<th>状态</th></tr></thead><tbody>{stage_rows}</tbody></table>"
     )
     document = (
         '<!doctype html><html lang="zh-CN"><meta charset="utf-8">'
@@ -507,20 +475,16 @@ def write_partial_delivery(root: Path, metrics: dict[str, Any], *, analysis_fini
         'font:16px/1.6 sans-serif;color:#172b35}td,th{padding:8px;border-bottom:'
         '1px solid #ccd6dc;text-align:left;overflow-wrap:anywhere}table{width:100%;'
         'table-layout:fixed}code{font-size:12px}aside{padding:16px;background:#fff3d6}</style>'
-        '<h1>VisionCortex 阶段结果报告</h1><aside><strong>PARTIAL_EVIDENCE · '
+        '<h1>VisionCortex 阶段结果报告</h1><aside><strong>阶段成果 · '
         '尚未正式发布</strong><p>' + explanation + '</p></aside>'
         '<p>本报告记录已保存产出，不确认候选动作，不替代实验室日报、'
         '质量验收或正式归档回执。</p>'
         f"<p>待补全语义结果：{len(pending)}；待补全素材：{len(pending_materials)}；隔离事件：{report['quarantined_event_count']}。</p>"
         + ("<p>部分素材提取未完成，其他已保存画面和片段可继续查看。"
            "请修复任务记录中的素材读取或编码问题后复跑对应事件。</p>" if pending_materials else "")
-        +
-        '<p>复跑仅复用身份与完整性校验通过的缓存。代码、配置、模型或输入变化'
-        '可能导致重新计算；未知 Token 用量不记作零。</p>'
         + latest_check + readable_record +
-        '<h2>溯源引用</h2><p>以下哈希绑定控制文件；不代表已重新校验全部视频正文。</p>'
-        '<table><thead><tr><th>文件</th><th>字节数</th><th>SHA-256</th></tr></thead>'
-        f'<tbody>{rows}</tbody></table></html>'
+        '<h2>查阅实验档案</h2><p>可在应用中按步骤回看视频和关键素材，'
+        '来源引用随实验档案保存。</p></html>'
     )
     destination = root / report["report"]
     destination.parent.mkdir(parents=True, exist_ok=True)

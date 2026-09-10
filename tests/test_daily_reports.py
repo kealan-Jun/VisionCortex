@@ -298,3 +298,28 @@ def test_professional_pdf_uses_shared_brand_cover_and_still_renders(tmp_path, de
     target = tmp_path / 'professional.pdf'
     render_professional_pdf(target, report, tmp_path)
     assert target.read_bytes().startswith(b'%PDF-')
+
+
+def test_pdf_failure_keeps_completed_daily_files_and_can_retry(tmp_path, default_config, monkeypatch):
+    from visioncortex import daily_reports as module
+    from visioncortex.archive import ArchiveLayout, write_json
+    layout = ArchiveLayout(tmp_path)
+    layout.create()
+    summary = _summary_with_post_curation_rejection()
+    summary.events = [event for event in summary.events if event.event_id == "EVT-ACCEPTED"]
+    write_json(layout.json_config / "evidence_package_eval.json", {"passed": True, "checks": []})
+    write_json(layout.json_config / "quality_acceptance.json", _accepted_quality())
+    monkeypatch.setattr(module, "collect_runtime_audit", lambda *_: {})
+    monkeypatch.setattr(module, "render_professional_pdf", lambda *_: (_ for _ in ()).throw(OSError("PDF output unavailable")))
+    receipt = module.generate_daily_report_archive(layout, summary, {}, default_config, defer_pdf=True)
+    before = {key: (tmp_path / receipt[key]).read_bytes() for key in ("json", "html", "markdown")}
+    assert receipt["pdf"] is None
+    with pytest.raises(OSError, match="PDF output unavailable"):
+        module.generate_professional_report_archive(layout)
+    assert all((tmp_path / receipt[key]).read_bytes() == value for key, value in before.items())
+    assert json.loads((layout.json_config / "daily_report_manifest.json").read_text())["passed"] is True
+    # Renderer stub validates orchestration only, not PDF appearance or validity.
+    monkeypatch.setattr(module, "render_professional_pdf", lambda path, *_: path.write_bytes(b"synthetic-renderer-output"))
+    pdf = module.generate_professional_report_archive(layout)
+    assert pdf["status"] == "generated"
+    assert all((tmp_path / receipt[key]).read_bytes() == value for key, value in before.items())

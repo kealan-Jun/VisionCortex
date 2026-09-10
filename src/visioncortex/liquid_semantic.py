@@ -46,11 +46,15 @@ _MODEL_CACHE: dict[tuple[str, str, str, str], Any] = {}
 _VALIDATED: dict[tuple[str, str], tuple[int, int]] = {}
 
 
-def release_liquid_semantic_model_cache() -> int:
-    """Release cached LabPics networks between events on low-memory hosts."""
+def release_liquid_semantic_model_cache(*, retain_on_cpu: bool = False) -> int:
+    """Release VRAM, optionally retaining the validated network on the CPU."""
 
     released = len(_MODEL_CACHE)
-    _MODEL_CACHE.clear()
+    if retain_on_cpu:
+        for model in _MODEL_CACHE.values():
+            model.to("cpu")
+    else:
+        _MODEL_CACHE.clear()
     gc.collect()
     try:
         import torch
@@ -255,12 +259,41 @@ def _load_model(config: dict[str, Any]) -> tuple[Any, dict[str, Any], float]:
     use_half = bool(settings.get("half", True))
     key = (str(checkpoint), str(runtime["checkpoint_sha256"]), device, str(use_half))
     started = time.perf_counter()
+    runtime["model_cache_reused"] = key in _MODEL_CACHE
     if key not in _MODEL_CACHE:
         _MODEL_CACHE[key] = _build_model(checkpoint, device, use_half)
+    else:
+        _MODEL_CACHE[key].to(device)
+    if device.startswith("cuda"):
+        import torch
+
+        torch.cuda.synchronize()
     return _MODEL_CACHE[key], runtime, time.perf_counter() - started
 
 
 def predict_liquid_masks(
+    frame: np.ndarray,
+    config: dict[str, Any],
+) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+    settings = _settings(config)
+    if not (str(settings.get("device", "cuda")).startswith("cuda")
+            and settings.get("cuda_oom_fallback_cpu")):
+        return _predict_liquid_masks_once(frame, config)
+    import torch
+
+    try:
+        return _predict_liquid_masks_once(frame, config)
+    except torch.cuda.OutOfMemoryError:
+        pass
+    release_liquid_semantic_model_cache(retain_on_cpu=True)
+    cpu_config = {**config, "models": {**config.get("models", {}),
+        "liquid_semantic_sidecar": {**settings, "device": "cpu"}}}
+    masks, receipt = _predict_liquid_masks_once(frame, cpu_config)
+    receipt["device_fallback"] = "cuda_out_of_memory_to_cpu"
+    return masks, receipt
+
+
+def _predict_liquid_masks_once(
     frame: np.ndarray,
     config: dict[str, Any],
 ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:

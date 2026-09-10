@@ -149,7 +149,9 @@ def test_group_refresh_only_changes_selected_speech_refs_and_invalidates_report(
     assert updated[0]["model_understanding"]["steps"][0]["current_step"]=="retained visual action"
     assert speech_worker.sha256(tmp_path/"JSON-Config-Files/quality_acceptance.json")==quality
     assert speech_worker.read_json(tmp_path/"JSON-Config-Files/daily_report_manifest.json")["status"]=="stale"
-    assert "chunk:one" in (tmp_path/"Partial-Results/Partial-Evidence-Report.html").read_text()
+    assert "关联口述记录：1 条" in (tmp_path/"Partial-Results/Partial-Evidence-Report.html").read_text()
+    exported = speech_worker.read_json(tmp_path/"Partial-Results/Analysis-Result.json")
+    assert any(row["reference_id"] == "chunk:one" for row in exported["reference_index"]["speech"]["utterances"])
     replay=stage_refresh.refresh(tmp_path,"understanding",config,target="group:G1")
     assert len(calls)==1 and replay["model_invocations"]==0
     groups[0]["global_end_ms"]=5000
@@ -243,3 +245,18 @@ def test_cross_experiment_search_returns_replay_links_and_surfaces_unavailable_s
     (right/"Key-Materials/audio/aligned-transcript.json").write_text("{}")
     result=client.get("/api/speech-search?q=移液").json()
     assert len(result["segments"])==5 and result["unavailable"][0]["name"]=="two"
+
+
+@pytest.mark.parametrize('required', [False, True])
+def test_missing_optional_audio_is_not_a_capture_warning(tmp_path, monkeypatch, required):
+    video = tmp_path/'video.mp4'
+    video.write_bytes(b'fixture')
+    view = SimpleNamespace(view_id='fp', segments=[], video=video, audio=None)
+    monkeypatch.setattr(capture_quality, '_decode', lambda *_: bytes([127]) * (160*90))
+    monkeypatch.setattr(speech, 'probe_audio', lambda _: None)
+    result = capture_quality.inspect(SimpleNamespace(views=[view]),
+        {'capture_quality':{'enabled':True},'speech_recognition':{'required':required}},
+        {'fp':SimpleNamespace(segments=[], duration_ms=27000)})
+    assert bool(result['records'][0]['warnings']) is required
+    assert result['records'][0]['audio_status'] == 'no_audio'
+    assert result['records'][0]['notes']

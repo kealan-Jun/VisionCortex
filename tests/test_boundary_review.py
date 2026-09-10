@@ -207,6 +207,27 @@ def test_video_route_requires_complete_ordered_coverage_and_marks_transfers():
         routed_intervals(g)
 
 
+def test_routed_video_splits_s06_preroll_and_postroll_outside_source():
+    from types import SimpleNamespace
+    from visioncortex.schemas import AlignmentTransform
+    from visioncortex.workflow_video import covered_intervals
+
+    g = groups()[1]
+    g.global_start_ms, g.global_end_ms = 0, 30471.013
+    g.view_timeline = [{"start_ms": 0, "end_ms": g.global_end_ms, "third_person_view": "tp"}]
+    transform = AlignmentTransform(view_id="tp", reference_view_id="fp", scale=.9975073966494874,
+        offset_ms=2088.811875535515, visual_correction_ms=-1750)
+    info = SimpleNamespace(duration_ms=27257.789)
+    rows = covered_intervals(g, {"tp": info}, {"tp": transform})
+    assert [r["third_person_view"] for r in rows] == [None, "tp", None]
+    assert rows[1]["start_ms"] == pytest.approx(338.811875535515)
+    assert rows[1]["end_ms"] == pytest.approx(transform.to_global(info.duration_ms))
+    assert sum(r["end_ms"] - r["start_ms"] for r in rows) == pytest.approx(g.global_end_ms)
+    assert transform.to_local(rows[1]["start_ms"]) == pytest.approx(0)
+    assert transform.to_local(rows[1]["end_ms"]) == pytest.approx(info.duration_ms)
+    assert g.view_timeline[0]["third_person_view"] == "tp", "preserve original requested route"
+
+
 def test_future_run_reviews_cross_station_chain_and_continues_to_recording_end(tmp_path, monkeypatch):
     from types import SimpleNamespace
     from visioncortex import boundary_review as module

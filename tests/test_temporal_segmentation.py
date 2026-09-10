@@ -140,6 +140,12 @@ def test_sampling_keeps_frame_ordinals_when_random_seek_is_unreliable(
         def read(self):
             return self.capture.read()
 
+        def grab(self):
+            return self.capture.grab()
+
+        def retrieve(self):
+            return self.capture.retrieve()
+
         def release(self):
             self.capture.release()
 
@@ -157,6 +163,49 @@ def test_sampling_keeps_frame_ordinals_when_random_seek_is_unreliable(
         assert seed_position == 2
         assert shape == (96, 160)
         assert len(list((tmp_path / "frames").glob("*.jpg"))) == 5
+
+
+def test_sparse_sampling_preserves_pixels_without_retrieving_skipped_frames(tmp_path, monkeypatch):
+    clip = tmp_path / "source.mp4"
+    seed = _video(clip)
+    original_capture = cv2.VideoCapture
+    reference = original_capture(str(clip))
+    decoded = []
+    while True:
+        ok, frame = reference.read()
+        if not ok:
+            break
+        decoded.append(frame)
+    reference.release()
+    calls = {"grab": 0, "retrieve": 0}
+
+    class SparseCapture:
+        def __init__(self, path):
+            self.capture = original_capture(path)
+
+        def get(self, property_id):
+            return self.capture.get(property_id)
+
+        def grab(self):
+            calls["grab"] += 1
+            return self.capture.grab()
+
+        def retrieve(self):
+            calls["retrieve"] += 1
+            return self.capture.retrieve()
+
+        def release(self):
+            self.capture.release()
+
+    monkeypatch.setattr(module.cv2, "VideoCapture", SparseCapture)
+    indices, seed_position, _ = module._sample_clip(
+        clip, seed, tmp_path / "frames", seed_fraction=.6, maximum_frames=3, jpeg_quality=95
+    )
+    assert calls == {"grab": 6, "retrieve": 3}
+    for i, source_index in enumerate(indices):
+        frame = seed if i == seed_position else decoded[source_index]
+        ok, expected = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        assert ok and (tmp_path / "frames" / f"{i:05d}.jpg").read_bytes() == expected.tobytes()
 
 
 def test_bounded_sam2_receipt_refines_boxes_and_reuses_cache(

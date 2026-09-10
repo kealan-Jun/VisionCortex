@@ -45,7 +45,8 @@ def test_partial_report_preserves_unknown_usage_and_does_not_read_source_media(t
     assert report["pending_semantic_results"][0]["subject_id"] == "EVT-1"
     for reference in report["artifact_references"]:
         assert hashlib.sha256((layout.root / reference["path"]).read_bytes()).hexdigest() == reference["sha256"]
-    assert "PARTIAL_EVIDENCE" in (layout.root / report["report"]).read_text()
+    assert "阶段成果" in (layout.root / report["report"]).read_text()
+    assert report["evidence_classification"] == "PARTIAL_EVIDENCE"
     assert not (layout.json_config / "quality_acceptance.json").exists()
     assert not (layout.root / ".VisionCortex-Current-Release.json").exists()
 
@@ -121,11 +122,12 @@ def test_partial_report_records_timeline_cost_and_quality_gap_without_releasing(
     assert "1.0 秒 → 5.0 秒" in document
     assert "未观察到开盖" in document
     assert "&lt;script&gt;unknown&lt;/script&gt;" in document
-    assert "已知 Token 用量：800" in document
-    assert "另有 1 次请求尝试用量未知" in document
-    assert "云端动作理解" in document
-    assert "查看已保存步骤及证据编号" in document
+    assert "Token" not in document
+    assert "quality_acceptance.json" not in document
+    assert "控制文件" not in document
+    assert "查看已保存步骤" in document
     exported = json.loads((tmp_path / report["export"]).read_text())
+    assert exported["run_metrics"] == metrics
     assert exported["evidence_classification"] == "PARTIAL_EVIDENCE"
     assert exported["formal_archive_promotion_allowed"] is False
     assert exported["experiment_groups"][0]["model_understanding"]["overall_summary"] == "未观察到开盖"
@@ -164,7 +166,8 @@ def test_quarantine_media_remains_previewable_without_becoming_formal(tmp_path, 
 
 
 @pytest.mark.parametrize("previous_state", ["failed", "partial"])
-def test_retry_preserves_job_input_and_cache_and_survives_restart(tmp_path, monkeypatch, previous_state):
+@pytest.mark.parametrize("mode", ["full", "resume"])
+def test_retry_preserves_job_input_and_cache_and_survives_restart(tmp_path, monkeypatch, previous_state, mode):
     settings = {"project": {"cache_mode": "cold"}, "mllm": {"enabled": False}, "storage": {
         "archive_root": str(tmp_path / "nas"), "staging_directory_name": "Processing",
         "local_runtime_root": str(tmp_path / "runtime"),
@@ -193,7 +196,16 @@ def test_retry_preserves_job_input_and_cache_and_survives_restart(tmp_path, monk
     rejected = client.post("/api/runs/run-retry/retry?revision=outdated")
     assert rejected.status_code == 409
     assert (root / "JSON-Config-Files/partial_delivery.json").is_file()
-    response = client.post("/api/runs/run-retry/retry")
+    video = root / "Experiment-Clips/kept.mp4"
+    video.parent.mkdir(parents=True, exist_ok=True)
+    video.write_bytes(b"synthetic-media-identity")
+    before = video.stat().st_mtime_ns
+    if mode == "resume":
+        assert client.post("/api/runs/run-retry/retry?mode=resume").status_code == 422
+    response = client.post("/api/runs/run-retry/retry", params={"mode": mode, "revision": plan["revision"]})
+    if mode == "resume":
+        assert video.read_bytes() == b"synthetic-media-identity"
+        assert video.stat().st_mtime_ns == before
     assert response.status_code == 202
     assert response.json()["source_copy_bytes"] == 0
     queued = client.get("/api/runs/run-retry").json()
@@ -211,7 +223,8 @@ def test_retry_preserves_job_input_and_cache_and_survives_restart(tmp_path, monk
     after_restart = client.get("/api/runs/run-retry").json()["observability"]
     assert after_restart["status"]["stage"] == "queued"
     assert after_restart["previous_attempt_status"]["stage"] == previous_state
-    assert after_restart["partial_delivery"] == {}
+    assert after_restart["partial_delivery"] == ({"status": "incomplete"} if mode == "resume" else {})
+    assert bool(job["payload"]["settings"]["project"].get("resume_stages")) == (mode == "resume")
     assert reopened.claim_next("new-worker", lease_seconds=60).run_id == "waiting"
     assert (root / "JSON-Config-Files/Retry-Attempts/1/partial_delivery.json").is_file()
 

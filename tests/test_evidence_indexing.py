@@ -39,6 +39,7 @@ def _indexed_archive(
     *,
     event_count: int = 1,
     stable_group_uids: bool = False,
+    pair_verified: bool = True,
 ):
     archive_id = root.name
     transforms = {
@@ -83,6 +84,8 @@ def _indexed_archive(
             supporting_views=["fp", "tp"],
             supporting_roles=[ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON],
             candidates=[candidate],
+            observability={"key_material_view_selection": {"same_action_pair_verified": True}}
+            if pair_verified else {},
             model_understanding={
                 "status": "completed",
                 "model": "doubao-seed-2.1-pro",
@@ -354,6 +357,13 @@ def test_search_archive_index_filters_full_text_and_returns_material_hashes(
     ]
     assert len(artifact_queries) == 1
     assert " IN (" in artifact_queries[0]
+
+
+def test_unreviewed_pair_does_not_match_dual_view_evidence_filter(tmp_path):
+    root = tmp_path / "Archive-Unreviewed"
+    _indexed_archive(root, pair_verified=False)
+    assert len(search_archive_index(root, query="吸取液体")) == 1
+    assert search_archive_index(root, query="吸取液体", cross_view=True) == []
 
 
 def test_quality_decision_receipts_are_indexed_by_rule_verdict_and_subject(tmp_path):

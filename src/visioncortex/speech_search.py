@@ -59,6 +59,12 @@ def _build(root: Path, payload: dict, identity: str) -> dict:
         for row in speech_worker.read_json(path, 32*1024*1024)["segments"]:
             text = normalize(row["text"])
             item = {**row, "chunk_id": chunk["id"], "view_id": source["view_id"],
+                    "source_id": source.get("id"),
+                    "speaker_identity": {"status": "unknown", "person_id": None, "name": None},
+                    "alignment": source.get("alignment", "NOT_PROVEN"),
+                    "alignment_basis": source.get("alignment_basis"),
+                    "audio": chunk.get("files", {}).get("audio.m4a"),
+                    "original_recording": source.get("original"),
                     "reference_id": f"{chunk['id']}:{row['id']}", "normalized_text": text,
                     "phrase_id": hashlib.sha256((chunk["id"] + "\0" + text).encode()).hexdigest()[:24],
                     "source_hint": source_hint(row), "evidence_kind": "spoken_mention",

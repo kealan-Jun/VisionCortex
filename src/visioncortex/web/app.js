@@ -72,6 +72,7 @@ const state = {
   search: "",
   refreshingTasks: false,
   taskSyncError: false,
+  taskDisclosures: new Map(),
   archiveFilters: { status: "all", date: "all", owner: "all", tag: "all", view: "list" },
   materialFilters: { archive: null, group: null, action: "all", object: "all", support: "all", query: "" },
   globalMaterialFilters: { date: "all", action: "all", object: "all", support: "all" },
@@ -278,7 +279,11 @@ const STAGE_LABELS = {
   semantic_refinement: "复核实验步骤",
   package: "检查结果完整性",
   quality_attention: "保存阶段成果与缺口",
-  daily_report: "生成实验报告",
+  daily_report: "生成实验室日报",
+  professional_pdf: "生成专业 PDF",
+  stage_report: "保存阶段报告",
+  archive_sync: "归档到所选目录",
+  capture_quality: "检查采集质量",
   finalizing: "封存溯源并正式发布",
   completed: "分析完成",
   partial: "分析结束 · 证据不足",
@@ -297,7 +302,7 @@ const GUIDED_PIPELINE = [
   },
   {
     id: "alignment", number: "02", title: "同步不同视角",
-    stages: ["preflight", "alignment", "speech"], completedBy: ["alignment"],
+    stages: ["preflight", "capture_quality", "alignment", "speech"], completedBy: ["alignment"],
     folder: "JSON-Config-Files",
     outputs: [["time_alignment.json","对齐结果"],["aligned_timestamps.csv","对齐时间戳"]],
     doing: "检查视频质量，并把第一人称与第三人称画面对齐到同一时间轴。",
@@ -337,7 +342,7 @@ const GUIDED_PIPELINE = [
   },
   {
     id: "reports", number: "07", title: "生成报告并完成归档",
-    stages: ["daily_report", "finalizing", "completed"], completedBy: ["daily_report", "finalizing", "completed"],
+    stages: ["daily_report", "professional_pdf", "stage_report", "archive_sync", "finalizing", "completed"], completedBy: ["daily_report", "finalizing", "completed"],
     folder: "Lab-Daily-Reports / Professional-PDFs",
     outputs: [], resultTab: ["reports","实验室日报"],
     doing: "汇总实验过程与关键发现，生成实验室日报、专业 PDF 和结构化 JSON 报告。",
@@ -1112,7 +1117,7 @@ function globalMaterialCard(entry) {
   const imageUrl = event.aligned_frame_url || event.frame_url;
   const eventId = String(event.event_id || "");
   const target = preliminary && !staged ? `${experimentRecordRoute(archive, "materials")}${eventId ? `?candidate=${encodeURIComponent(eventId)}` : ""}` : materialFocusRoute(archive, event);
-  return `<a class="global-material-card ${preliminary ? "is-preliminary" : ""}" href="${target}"><figure>${imageUrl ? `<img loading="lazy" src="${esc(imageUrl)}" alt="${esc(productExperimentName(archive.name))}的关键画面"/>` : `<span class="material-image-fallback">${icon("image")}<small>画面暂不可用</small></span>`}<em>${staged ? "尚未通过整体验收" : preliminary ? automaticReviewLabel(event) : dual ? "双视角印证" : "主要视角清晰"}</em></figure><div class="global-material-copy"><small>${esc(productExperimentName(archive.name))} · ${formatDate(archive.modified_at)}</small><h2>${esc(preliminary ? `${staged ? "阶段素材" : "候选"} · ${ACTION_LABELS[event.cv_action_type || event.action_type] || "动作待确认"}` : ACTION_LABELS[event.action_type] || "关键实验动作")}</h2><p>${esc(current)}</p><span>查看素材 ${icon("arrow")}</span></div></a>`;
+  return `<a class="global-material-card ${preliminary ? "is-preliminary" : ""}" href="${target}"><figure>${imageUrl ? `<img loading="lazy" src="${esc(imageUrl)}" alt="${esc(productExperimentName(archive.name))}的关键画面"/>` : `<span class="material-image-fallback">${icon("image")}<small>画面暂不可用</small></span>`}<em>${staged ? "尚未通过整体验收" : preliminary ? automaticReviewLabel(event) : dual ? "双视角支持" : "动作待核对"}</em></figure><div class="global-material-copy"><small>${esc(productExperimentName(archive.name))} · ${formatDate(archive.modified_at)}</small><h2>${esc(preliminary ? `${staged ? "阶段素材" : "候选"} · ${ACTION_LABELS[event.cv_action_type || event.action_type] || "动作待确认"}` : ACTION_LABELS[event.action_type] || "关键实验动作")}</h2><p>${esc(current)}</p><span>查看素材 ${icon("arrow")}</span></div></a>`;
 }
 
 function bindLibraryImageFallbacks() {
@@ -1347,6 +1352,8 @@ function nasBatchPicker() {
     return `<article class="collection-card ${batch.available ? "ready" : "blocked"}">
       <header><div title="采集编号：${esc(batch.recording_session_id)}"><small>${formatDate(batch.recording_start_time)}</small><strong>多视角采集 · ${number(batch.camera_count)} 个视角</strong></div><span class="collection-status ${batch.available ? "ready" : "blocked"}">${status}</span></header>
       <div class="collection-metrics"><span><b>${number(batch.camera_count)}</b> 路相机</span><span><b>${number(batch.recording_count)}</b> 个视频</span><span><b>${duration(batch.duration_seconds)}</b></span><span><b>${formatBytes(batch.size_bytes)}</b></span></div>
+      <p>按此批次的全部 ${number(batch.camera_count)} 路相机建立分析输入。</p>
+      ${(batch.unconfigured_cameras || []).length ? `<p class="batch-next-action">待确认第一／第三人称：${esc(batch.unconfigured_cameras.join("、"))}。</p>` : ""}
       ${issues.length ? `<ul class="collection-blockers">${issues.map(issue=>`<li>${esc(issue)}</li>`).join("")}</ul>` : ""}
       ${!batch.available ? `<p class="batch-next-action">${issues.some(issue=>/视角/.test(issue)) ? '请在下方“选择视频”中指定第一／第三人称视角。' : ""}${issues.some(issue=>/不完整/.test(issue)) ? "采集质量未通过，请查看相机记录；等待分析不会修复缺失的数据。" : ""}</p>` : ""}
       ${(batch.issue_details || []).length ? `<details class="batch-capture-details"><summary>查看各相机原因</summary>${batch.issue_details.map(item=>`<section><strong>${esc(item.camera_key)}</strong><p>${esc((item.issues || []).join("；"))}</p>${item.capture_quality?.reason ? `<p>采集程序记录：${esc(captureQualityCopy(item.capture_quality.reason))}</p>` : ""}${item.capture_quality?.rgb_coverage_ratio != null ? `<p>采集程序报告的视频覆盖率：${(Number(item.capture_quality.rgb_coverage_ratio)*100).toFixed(1)}%${item.capture_quality.rgb_max_frame_gap_us != null ? ` · 最大帧间隔 ${(Number(item.capture_quality.rgb_max_frame_gap_us)/1000000).toFixed(2)} 秒` : ""}</p>` : ""}</section>`).join("")}</details>` : ""}
@@ -1915,7 +1922,7 @@ async function uploadPlanFiles(plan, initialSession, onProgress) {
 }
 
 function renderStages(activeStage, progressValue) {
-  const stages = ["preflight","alignment","speech","motion_probe","candidate_coarse","candidate_fine","candidate_audit","experiment_understanding","experiment_clips","key_materials","mllm","material_refinement","semantic_refinement","package","daily_report","finalizing"];
+  const stages = ["preflight","alignment","speech","motion_probe","candidate_coarse","candidate_fine","candidate_audit","experiment_understanding","experiment_clips","key_materials","mllm","material_refinement","semantic_refinement","package","daily_report","professional_pdf","finalizing"];
   if (!stages.includes(activeStage) && !["completed","partial","failed","interrupted"].includes(activeStage)) stages.unshift(activeStage);
   const element = document.querySelector("#run-stages");
   if (!element) return;
@@ -1931,11 +1938,13 @@ function stageDisplayState(run, stage, activeStage = run.observability?.status?.
   const snapshot = run.observability || {}, status = snapshot.status || {};
   const receipt = (snapshot.stage_receipts || []).find(item=>item.stage === stage);
   const outcome = receipt || status.stage_outcomes?.[stage];
+  if (outcome?.status === "blocked") return {state:"blocked",label:"等待依赖",symbol:"↳",reason:outcome.reason};
+  if (outcome?.status === "completed" && outcome.archive_status === "pending") return {state:"pending",label:"已完成 · 待归档",symbol:"↑",reason:outcome.reason};
   if (outcome?.status === "skipped") return {state:"skipped",label:"已跳过",symbol:"−",reason:outcome.reason};
   if (outcome?.status === "failed") return {state:"failed",label:"未完成",symbol:"!",reason:outcome.reason};
   if (["failed","interrupted"].includes(run.state) && status.failed_stage === stage) return {state:"failed",label:"已停止",symbol:"!"};
   if (activeStage === stage) return {state:"active",label:stage === "queued" ? "排队中" : "处理中",symbol:"↻"};
-  if (outcome?.status === "completed") return {state:"done",label:"已完成",symbol:"✓"};
+  if (outcome?.status === "completed") return {state:"done",label:outcome.reused ? "已复用" : "已完成",symbol:"✓"};
   if ((status.completed_stages || []).includes(stage)) return {state:"passed",label:"已通过",symbol:"✓"};
   return {state:"waiting",label:["completed","partial","failed","interrupted"].includes(run.state) ? "未执行" : "待处理",symbol:"·"};
 }
@@ -2151,13 +2160,13 @@ async function pollRun(runId, archiveName) {
 }
 
 function beginStageFollow(runId) {
-  state.followRun = {runId, enabled: true, seen: new Set(), expectedHash: null};
+  state.followRun = {runId, enabled: true, seen: new Set(), expectedHash: location.hash};
 }
 
 function followStageResults(run) {
   const follow = state.followRun;
   if (!run || !follow?.enabled || follow.runId !== run.run_id) return;
-  const receipts = (run.observability?.stage_receipts || []).filter(item=>item.status === "completed")
+  const receipts = (run.observability?.stage_receipts || []).filter(item=>item.status === "completed" && !item.reused)
     .sort((a,b)=>String(a.completed_at || "").localeCompare(String(b.completed_at || "")));
   const fresh = receipts.filter(item=>!follow.seen.has(`${item.stage}:${item.completed_at}`))
     .sort((a,b)=>String(a.completed_at || "").localeCompare(String(b.completed_at || "")));
@@ -2167,7 +2176,7 @@ function followStageResults(run) {
   if (state.archiveView && archiveViewBusy()) return;
   for (const item of receipts) follow.seen.add(`${item.stage}:${item.completed_at}`);
   if (finished) follow.finished = true;
-  const tabs = {speech:"speech", experiment_understanding:"experiments", experiment_clips:"experiments", key_materials:"materials", mllm:"materials", material_refinement:"materials", semantic_refinement:"experiments", package:"metrics", daily_report:"reports", finalizing:"reports"};
+  const tabs = {speech:"speech", experiment_understanding:"experiments", experiment_clips:"experiments", key_materials:"materials", mllm:"materials", material_refinement:"materials", semantic_refinement:"experiments", stage_report:"reports", package:"metrics", daily_report:"reports", professional_pdf:"reports", finalizing:"reports", capture_quality:"metrics", alignment:"metrics", motion_probe:"metrics", candidate_coarse:"metrics", candidate_fine:"materials", candidate_audit:"experiments"};
   const target = tabs[latest.stage] ? stageResultRoute(run, tabs[latest.stage]) : "#/tasks";
   toast(`${STAGE_LABELS[latest.stage] || latest.stage}已完成，产出已保存。`, "");
   if (location.hash === target) { void router(); return; }
@@ -2197,6 +2206,7 @@ function showAcceptedRun(result, archiveName = "") {
 }
 
 function renderTasks() {
+  rememberRunDisclosures();
   setChrome("tasks");
   const terminal = new Set(["completed", "partial", "failed", "interrupted"]);
   const runs = [...state.runs].sort((a, b) => Number(terminal.has(a.state)) - Number(terminal.has(b.state)) || String(b.updated_at || b.observability?.status?.updated_at || "").localeCompare(String(a.updated_at || a.observability?.status?.updated_at || "")));
@@ -2212,7 +2222,7 @@ async function retryRetainedRun(runId, button) {
     const plan = await api(`/api/runs/${encodeURIComponent(runId)}/recovery-plan`);
     document.getElementById("recovery-dialog")?.remove();
     const dialog=document.createElement("dialog");dialog.id="recovery-dialog";dialog.className="recovery-dialog";
-    dialog.innerHTML=`<header><div><p class="eyebrow">继续处理已保存的实验</p><h2>恢复与补全</h2></div><button class="dialog-close" type="button" data-recovery-close aria-label="关闭恢复方案">${icon("x")}</button></header><p>已保存 ${number(plan.retained_stage_count)} 个阶段回执。原任务模型：${esc(plan.provider||"未记录")} · ${esc(plan.model||"未记录")}。</p>${plan.model_ready?"":`<p class="recovery-model-notice">${esc(plan.model_check_message)} <a href="#/ai-settings" data-recovery-settings>前往 AI 服务设置</a></p>`}<div class="recovery-options"><button type="button" data-recovery-action="operations" ${plan.actions.operations?'':'disabled'}><strong>重新整理操作步骤</strong><span>使用已审核事件和保存画面，整理具体操作、减少重复记录。可能产生模型费用。</span></button><button type="button" data-recovery-action="reports" ${plan.actions.reports?'':'disabled'}><strong>更新已有结果的报告</strong><span>不调用模型；质量未通过时更新阶段报告。</span></button><button type="button" data-recovery-action="retry" ${plan.actions.retry?'':'disabled'}><strong>复跑完整流程</strong><span>使用原输入，重新检查并补全各环节；校验通过的缓存继续使用。</span></button></div><details><summary>复用范围、历史产出与费用说明</summary><p>${esc(plan.cache_policy)}</p><p>${esc(plan.retry_effect)}</p><p>${esc(plan.model_cost)}</p><p>${esc(plan.quality_policy)}</p><p class="recovery-path">产出路径：${esc(plan.output_path)}</p></details><p role="status" data-recovery-status>请选择本次需要处理的范围。</p>`;
+    dialog.innerHTML=`<header><div><p class="eyebrow">继续处理已保存的实验</p><h2>恢复与补全</h2></div><button class="dialog-close" type="button" data-recovery-close aria-label="关闭恢复方案">${icon("x")}</button></header><p>已保存 ${number(plan.retained_stage_count)} 个阶段回执。原任务模型：${esc(plan.provider||"未记录")} · ${esc(plan.model||"未记录")}。</p>${plan.model_ready?"":`<p class="recovery-model-notice">${esc(plan.model_check_message)} <a href="#/ai-settings" data-recovery-settings>前往 AI 服务设置</a></p>`}<div class="recovery-options"><button type="button" data-recovery-action="resume" ${plan.actions.resume?'':'disabled'}><strong>继续未完成环节</strong><span>保留现有视频和产物；逐环节校验后继续处理。${number((plan.checkpoint_stages||[]).length)} 个环节有恢复点，实际复用以执行记录为准。</span></button><button type="button" data-recovery-action="operations" ${plan.actions.operations?'':'disabled'}><strong>重新整理操作步骤</strong><span>使用已审核事件和保存画面，整理具体操作、减少重复记录。可能产生模型费用。</span></button><button type="button" data-recovery-action="reports" ${plan.actions.reports?'':'disabled'}><strong>更新已有结果的报告</strong><span>不调用模型；质量未通过时更新阶段报告。</span></button><button type="button" data-recovery-action="retry" ${plan.actions.retry?'':'disabled'}><strong>复跑完整流程</strong><span>使用原输入，重新检查并补全各环节；校验通过的缓存继续使用。</span></button></div><details><summary>复用范围、历史产出与费用说明</summary><p>${esc(plan.cache_policy)}</p><p>${esc(plan.resume_effect || plan.retry_effect)}</p><p>${esc(plan.model_cost)}</p><p>${esc(plan.quality_policy)}</p><p class="recovery-path">产出路径：${esc(plan.output_path)}</p></details><p role="status" data-recovery-status>请选择本次需要处理的范围。</p>`;
     document.body.append(dialog);dialog.showModal();
     dialog.querySelector('[data-recovery-close]').addEventListener('click',()=>dialog.close());
     dialog.querySelector('[data-recovery-settings]')?.addEventListener('click',()=>dialog.close());
@@ -2240,9 +2250,9 @@ async function submitRecoveryAction(runId, scope, plan, button) {
   if(button.dataset)button.dataset.submitting='true';
   button.disabled=true;
   const base=`/api/runs/${encodeURIComponent(runId)}`;
-  const url=scope==='retry'?`${base}/retry?revision=${encodeURIComponent(plan.revision)}`:`${base}/refresh/${scope}${scope==='operations'?`?revision=${encodeURIComponent(plan.group_revision)}`:''}`;
+  const url=['retry','resume'].includes(scope)?`${base}/retry?revision=${encodeURIComponent(plan.revision)}&mode=${scope==='resume'?'resume':'full'}`:`${base}/refresh/${scope}${scope==='operations'?`?revision=${encodeURIComponent(plan.group_revision)}`:''}`;
   const result=await api(url,{method:'POST'});
-  state.archiveCache.clear();showAcceptedRun(result);
+  state.archiveCache.clear();showAcceptedRun(result);beginStageFollow(result.run_id);
   toast('任务已排队，可在任务进度中查看实际复用与新增用量。','success');
 }
 
@@ -2273,15 +2283,38 @@ function elapsedForRun(run, status) {
   return value;
 }
 
+function rememberRunDisclosures(root = main) {
+  root.querySelectorAll("details[data-run-disclosure]").forEach(item => {
+    state.taskDisclosures.set(item.dataset.runDisclosure, item.open);
+  });
+}
+
+function updateRunElapsedLabels(root = main) {
+  if (document.hidden) return;
+  root.querySelectorAll("[data-run-elapsed][data-elapsed-running='true']").forEach(item => {
+    const updated = Date.parse(item.dataset.elapsedUpdated);
+    if (!Number.isFinite(updated)) return;
+    const seconds = Number(item.dataset.elapsedSeconds) + Math.max(0, (Date.now() - updated) / 1000);
+    item.textContent = `分析用时 ${duration(Math.floor(seconds))}`;
+  });
+}
+
 function guidedStageState(run, definition, receipts, index) {
   const status = run.observability?.status || {};
   const current = status.stage || run.state;
+  const outcome = stage => receipts.get(stage) || status.stage_outcomes?.[stage];
   if (run.state === "partial" && definition.stages.includes("package")) return { state: "partial", receipt: null };
   const failed = status.failed_stage || (run.state === "failed"
     ? run.observability?.metrics?.nas_index_ingest?.failure_stage || current : null);
   if (["failed","interrupted"].includes(run.state) && definition.stages.includes(failed)) return { state: run.state, receipt: null };
-  const completedReceipt = definition.completedBy.map((stage)=>receipts.get(stage)).find(item=>item?.status === "completed");
+  const componentFailure = definition.stages.map(outcome).find(item=>["failed","blocked"].includes(item?.status));
+  if (componentFailure) return {state:componentFailure.status,receipt:componentFailure};
+  const completedReceipt = definition.completedBy.map(outcome).find(item=>item?.status === "completed");
   if (!["completed","partial","failed","interrupted"].includes(run.state) && definition.stages.includes(current)) return { state: "active", receipt: completedReceipt };
+  if (definition.id === "reports" && run.state !== "completed") return {state:"withheld",receipt:null};
+  if (["partial","failed","interrupted"].includes(run.state) && run.observability?.retained_experiment_count === 0
+      && ["discovery","clips","materials"].includes(definition.id) && completedReceipt) return {state:"empty",receipt:completedReceipt};
+  if (completedReceipt?.archive_status === "pending") return {state:"pending",receipt:completedReceipt};
   if (completedReceipt) return { state: "done", receipt: completedReceipt };
   if (run.state === "partial") return { state: "withheld", receipt: null };
   const currentIndex = GUIDED_PIPELINE.findIndex((item)=>item.stages.includes(current));
@@ -2309,6 +2342,8 @@ function stageResultRoute(run, tabName) {
 }
 
 function guidedPipelineView(run, outputsOpen = false) {
+  const disclosureKey = `${run.run_id}:outputs`;
+  outputsOpen = typeof state !== "undefined" ? state.taskDisclosures?.get(disclosureKey) ?? outputsOpen : outputsOpen;
   const snapshot = run.observability || {};
   const receipts = new Map((snapshot.stage_receipts || []).map((item)=>[item.stage,item]));
   const rows = GUIDED_PIPELINE.map((definition,index)=>({ definition, ...guidedStageState(run,definition,receipts,index) }));
@@ -2316,7 +2351,7 @@ function guidedPipelineView(run, outputsOpen = false) {
   const activeIndex = rows.indexOf(active);
   const next = rows.slice(activeIndex+1).find((item)=>item.state === "waiting");
   const status = snapshot.status || {};
-  const stateLabel = { active:"正在进行", done:"已完成", "done-unreceipted":"已通过", waiting:"等待中", partial:"证据不足", withheld:"未发布", failed:"本环节失败", interrupted:"等待续跑" };
+  const stateLabel = { active:"正在进行", done:"已完成", empty:"未生成实验成果", pending:"已完成 · 待归档", "done-unreceipted":"已通过", waiting:"等待中", partial:"证据不足", withheld:"未发布", failed:"本环节失败", blocked:"未生成 · 缺少依赖", interrupted:"等待续跑" };
   const cards = rows.map(({definition,state:stageState,receipt})=>{
     const deliveredReceipts = definition.stages.map((stage)=>receipts.get(stage)).filter(Boolean);
     const artifacts = deliveredReceipts.flatMap((item)=>item.artifacts || []).filter((item)=>item.available);
@@ -2324,11 +2359,16 @@ function guidedPipelineView(run, outputsOpen = false) {
     const featured = (definition.outputs || []).map(([name,label])=>({ item: filesByName.get(name), label })).filter(({item})=>item);
     const latestReceipt = receipt || deliveredReceipts.at(-1);
     const receiptUrl = latestReceipt ? stageArtifactUrl(run, latestReceipt.receipt) : "";
-    const resultLink = definition.resultTab && deliveredReceipts.some(item=>item.status === "completed")
+    const resultLink = definition.resultTab && !["empty","blocked","withheld"].includes(stageState) && deliveredReceipts.some(item=>item.status === "completed")
       ? `<a href="${esc(stageResultRoute(run,definition.resultTab[0]))}">${icon("arrow")}${esc(definition.resultTab[1])}</a>` : "";
     const artifactLinks = deliveredReceipts.length ? `<div class="journey-artifacts">${resultLink}${featured.map(({item,label})=>`<a target="_blank" href="${esc(stageArtifactUrl(run,item.relative_path))}">${icon("file")}${esc(label)}</a>`).join("")}${receiptUrl ? `<a class="receipt-link" target="_blank" href="${esc(receiptUrl)}">${icon("check")}完整清单</a>` : ""}</div>` : "";
+    const timings = (snapshot.metrics?.stage_durations || []).filter(item=>definition.stages.includes(item.stage));
+    const seconds = timings.length ? timings.reduce((sum,item)=>sum + Number(item.duration_seconds || 0),0) : receipt?.stage_duration_seconds;
     const detail = stageState === "done"
-      ? `${receipt?.stage_duration_seconds != null ? `耗时 ${duration(receipt.stage_duration_seconds)}` : "产出已保存"}`
+      ? `${seconds != null ? `${definition.id === "originals" ? "输入准备（含上传与等待）" : "处理耗时"} ${duration(seconds)}` : "完成记录已保存"}`
+      : stageState === "empty" ? "未得到通过分组检查的实验；保存了筛选记录，没有生成对应实验视频或步骤成果。"
+      : stageState === "pending" ? "计算已完成，正在等待文件同步归档。"
+      : stageState === "blocked" ? "本环节未执行，缺少必要结果；阶段报告与正式报告分开保留。"
       : stageState === "withheld" ? "完整质量检查通过后生成；当前阶段成果可正常查看。"
       : stageState === "partial" ? "分析已结束，阶段成果和具体证据缺口已保存。"
       : stageState === "active" ? definition.doing
@@ -2336,10 +2376,10 @@ function guidedPipelineView(run, outputsOpen = false) {
       : stageState === "interrupted" ? "已完成内容会保留，可以稍后重新分析。"
       : stageState === "done-unreceipted" ? "该环节已通过，后续分析已经开始。"
       : "等待前序环节完成";
-    const componentNotes = deliveredReceipts.filter(item=>["skipped","failed"].includes(item.status)).map(item=>`<p class="component-outcome">${esc(STAGE_LABELS[item.stage] || item.stage)} · ${item.status === "skipped" ? "已跳过" : "未完成"}：${esc(item.reason || "请查看该环节记录")}</p>`).join("");
+    const componentNotes = deliveredReceipts.filter(item=>["skipped","failed","blocked"].includes(item.status)).map(item=>`<p class="component-outcome">${esc(STAGE_LABELS[item.stage] || item.stage)} · ${item.status === "skipped" ? "已跳过" : item.status === "blocked" ? "等待依赖" : "未完成"}：${esc(item.reason || "请查看该环节记录")}</p>`).join("");
     return `<article class="journey-step ${stageState}"><span class="journey-number">${definition.number}</span><div class="journey-copy"><header><strong>${esc(definition.title)}</strong><span>${esc(stateLabel[stageState])}</span></header><p>${esc(detail)}</p>${componentNotes}${artifactLinks}</div></article>`;
   }).join("");
-  return `<section class="current-guide ${active.state}"><div><span class="guide-kicker">${esc(stateLabel[active.state])} · 第 ${esc(active.definition.number)} 步，共 7 步</span><h3>${esc(active.definition.title)}</h3><p>${esc(productRunMessage(run, active.definition.doing))}</p></div><aside><small>${run.state === "partial" ? "本次结果" : next ? "接下来" : "最终结果"}</small><strong>${esc(run.state === "partial" ? "阶段成果已保存，完整结论未发布" : next?.definition.title || "实验成果已完整保存")}</strong></aside></section><div class="task-progress-line"><span>${["failed", "interrupted"].includes(run.state) ? "处理已停止" : `已完成 ${Math.round(Number(run.progress || 0) * 100)}%`}</span><span>已用 ${duration(elapsedForRun(run, status))}</span></div><details class="technical-observability" ${outputsOpen ? "open" : ""}><summary>查看各环节与生成文件</summary><div class="pipeline-journey">${cards}</div></details>`;
+  return `<section class="current-guide ${active.state}"><div><span class="guide-kicker">${esc(stateLabel[active.state])} · 第 ${esc(active.definition.number)} 步，共 7 步</span><h3>${esc(active.definition.title)}</h3><p>${esc(productRunMessage(run, active.definition.doing))}</p></div><aside><small>${run.state === "partial" ? "本次结果" : next ? "接下来" : "最终结果"}</small><strong>${esc(run.state === "partial" ? "分析记录已保存，完整结论未发布" : next?.definition.title || "实验成果已完整保存")}</strong></aside></section><div class="task-progress-line"><span>${["failed", "interrupted"].includes(run.state) ? "处理已停止" : run.state === "partial" ? "处理已结束 · 完整分析未通过" : `已完成 ${Math.round(Number(run.progress || 0) * 100)}%`}</span><span data-run-elapsed data-elapsed-seconds="${Number(status.elapsed_seconds || 0)}" data-elapsed-updated="${esc(status.updated_at || "")}" data-elapsed-running="${!["completed","partial","failed","interrupted"].includes(run.state)}">分析用时 ${duration(elapsedForRun(run, status))}</span></div><details class="technical-observability" data-run-disclosure="${esc(disclosureKey)}" ${outputsOpen ? "open" : ""}><summary>查看各环节与生成文件</summary><div class="pipeline-journey">${cards}</div></details>`;
 }
 
 function runObservabilityCard(run, outputsOpen = false) {
@@ -2357,20 +2397,28 @@ function runObservabilityCard(run, outputsOpen = false) {
   const freshnessNote = freshness.stale && !["completed","partial","failed","interrupted"].includes(run.state)
     ? `<div class="freshness-warning">任务状态已 ${duration(freshness.age)} 未更新；分析可能仍在后台继续，页面会自动刷新。</div>` : "";
   const partial = snapshot.partial_delivery?.status;
-  const captureWarnings = (snapshot.capture_quality?.records || []).flatMap(item=>(item.warnings || []).map(message=>`${item.view_id}：${message}`));
-  const captureNotice = captureWarnings.length ? `<details class="analysis-readiness-note" open><summary>采集质量预检发现问题（仅限抽样）</summary>${captureWarnings.map(message=>`<p>${esc(message)}</p>`).join("")}</details>` : "";
+  // Legacy receipts classified optional missing audio as a capture defect.
+  const optionalAudioNotes = new Set(["此路没有可用录音","此路没有音轨"]);
+  const audioOptional = status.stage_outcomes?.speech?.status === "skipped";
+  const captureWarnings = (snapshot.capture_quality?.records || []).flatMap(item=>(item.warnings || [])
+    .filter(message=>!audioOptional || !optionalAudioNotes.has(message)).map(message=>`${item.view_id}：${message}`));
+  const audioNote = audioOptional ? '<p class="component-outcome">录音已跳过 · 视频分析不受影响</p>' : "";
+  const captureKey = `${run.run_id}:capture`;
+  const captureOpen = typeof state !== "undefined" ? state.taskDisclosures?.get(captureKey) ?? true : true;
+  const captureNotice = captureWarnings.length ? `<details class="analysis-readiness-note" data-run-disclosure="${esc(captureKey)}" ${captureOpen ? "open" : ""}><summary>采集质量预检发现问题（仅限抽样）</summary>${captureWarnings.map(message=>`<p>${esc(message)}</p>`).join("")}</details>` : "";
   const retryButton = ["partial", "failed", "interrupted"].includes(run.state) && run.nas_staging && run.retry_available !== false
-    ? `<button class="secondary-button" data-retry-run="${esc(run.run_id)}" type="button">${icon("refresh")}复跑并补全</button>` : "";
+    ? `<button class="secondary-button" data-retry-run="${esc(run.run_id)}" type="button">${icon("refresh")}继续未完成环节</button>` : "";
   const previewAvailable = (snapshot.stage_receipts || []).some((receipt)=>
     ["experiment_understanding", "experiment_clips", "key_materials", "mllm", "material_refinement", "semantic_refinement", "package", "daily_report"].includes(receipt.stage));
   const resultRoute = run.nas_staging && run.state !== "completed"
     ? `stage/${encodeURIComponent(run.run_id)}` : `archive/${encodeURIComponent(run.experiment_id || "")}`;
   const archiveLink = run.state === "completed" || previewAvailable
     ? `<a class="secondary-button" href="#/${resultRoute}/experiments">${run.state === "completed" ? "查看实验结果" : "预览已完成内容"}</a>` : "";
-  return `<section class="panel live-run-card"><header class="panel-heading"><div><p class="panel-kicker">实验分析</p><h2>${esc(productExperimentName(run.experiment_id || run.run_id))}</h2></div><div class="run-heading-actions">${archiveLink}${retryButton}<span class="queue-status ${esc(run.state)}"><i></i>${esc(run.state === "failed" && partial ? "阶段产出已保存 · 待补全" : STAGE_LABELS[current] || (run.state === "failed" ? "处理失败" : "处理中"))}</span></div></header>${freshnessNote}${captureNotice}${guidedPipelineView(run,outputsOpen)}</section>`;
+  return `<section class="panel live-run-card"><header class="panel-heading"><div><p class="panel-kicker">实验分析</p><h2>${esc(productExperimentName(run.experiment_id || run.run_id))}</h2></div><div class="run-heading-actions">${archiveLink}${retryButton}<span class="queue-status ${esc(run.state)}"><i></i>${esc(run.state === "failed" && partial ? "阶段产出已保存 · 待补全" : STAGE_LABELS[current] || (run.state === "failed" ? "处理失败" : "处理中"))}</span></div></header>${freshnessNote}${captureNotice}${audioNote}${guidedPipelineView(run,outputsOpen)}</section>`;
 }
 
 function productRunMessage(run, fallback) {
+  if (run?.state === "partial" && run.observability?.retained_experiment_count === 0) return "本次未生成实验片段。筛选与诊断记录已保存；这不代表视频中没有实验操作。";
   if (run?.state === "partial") return "分析结束，已完成成果和证据缺口均已保存，可查看阶段报告。";
   if (["failed", "interrupted"].includes(run?.state)) return friendlyFailureReason(run);
   const raw = String(run?.observability?.status?.message || "").trim();
@@ -2956,6 +3004,13 @@ function verificationTrace(verification) {
   return `<details class="verification-trace"><summary>查看分析依据与复核信息</summary><div class="verification-grid"><div><small>结论</small><strong>${esc(status)}</strong></div><div><small>置信度范围</small><strong>${confidence.minimum == null ? "—" : `${percent(confidence.minimum)}–${percent(confidence.maximum)}`}</strong></div><div><small>视觉分析</small><strong>${duration(timing.inference_seconds)}</strong></div><div><small>准备模型</small><strong>${duration(timing.model_load_seconds)}</strong></div></div><div class="model-chip-list">${models.map((model)=>`<span>${esc(MODEL_LABELS[model] || model)}</span>`).join("") || "<span>无模型记录</span>"}</div>${views.length ? `<table class="metric-table verification-view-table"><thead><tr><th>视角</th><th>参与对象</th><th>最低置信度</th><th>复核状态</th></tr></thead><tbody>${views.map((view)=>`<tr><td>${esc(view.role_label || view.view_id)}</td><td>${esc((view.rendered_classes || []).join("、") || "无")}</td><td>${percent(view.minimum_rendered_confidence)}</td><td>${esc(VERIFICATION_STATUS_LABELS[view.status] || view.status)}</td></tr>`).join("")}</tbody></table>` : ""}${reasons.length ? `<p class="verification-warning"><strong>需要注意：</strong>${esc(reasons.join("；"))}</p>` : `<p class="verification-pass">当前没有需要特别说明的不确定项。</p>`}</details>`;
 }
 
+function materialOperationTitle(event) {
+  const model = event.provenance?.mllm || {};
+  const title = String(model.operation_title || "").trim();
+  if (title) return productEvidenceText(title, "操作对象待核对");
+  return `${ACTION_LABELS[event.action_type] || "实验操作"} · 对象待核对`;
+}
+
 function materialCard(event, index = 0) {
   const mllm = event.provenance?.mllm || {};
   const facts = event.decision?.observed_facts || [];
@@ -2969,7 +3024,7 @@ function materialCard(event, index = 0) {
   const supportCopy = dualView
     ? "两个视角共同支持这一关键动作"
     : cross
-      ? "画面已同步；这一动作在其中一个视角中更清晰"
+      ? "画面已同步；尚不能确认两个视角共同支持这一动作"
       : "双视角画面已保存，动作关联等待进一步复核";
   const clipSeconds = Math.max(0, (Number(event.end_us) - Number(event.start_us)) / 1_000_000);
   const peakOffset = Math.min(clipSeconds, Math.max(0, (Number(event.peak_timestamp_us ?? event.start_us) - Number(event.start_us)) / 1_000_000));
@@ -2977,7 +3032,7 @@ function materialCard(event, index = 0) {
   const selected = state.selectedMaterials.has(selectionKey);
   const uncertainty = nextStatus === "unknown" || /不足|无法|不能|待确认|不确定|未明确/.test(next);
   return `<article class="material-card product-material-card ${selected ? "is-selected" : ""}" data-material-card="${esc(event.event_id)}" data-material-selection-key="${esc(selectionKey)}">
-    <header class="material-card-header"><div><span class="material-sequence">关键素材 ${String(index + 1).padStart(2,"0")}</span><h2>${esc(ACTION_LABELS[event.action_type] || "关键实验动作")}</h2><p>${timecode(Number(event.start_us)/1000)} → ${timecode(Number(event.end_us)/1000)}</p></div><div class="material-card-actions"><button class="material-focus-button" type="button" data-material-focus="${esc(event.event_id)}">${icon("video")}聚焦查看</button><label class="material-select"><input type="checkbox" data-material-select="${esc(event.event_id)}" ${selected ? "checked" : ""}/><span>选择</span></label><span class="material-support-badge ${dualView ? "trusted" : "partial"}">${dualView ? icon("check") : icon("image")}${dualView ? "双视角印证" : "主要视角清晰"}</span></div></header>
+    <header class="material-card-header"><div><span class="material-sequence">关键素材 ${String(index + 1).padStart(2,"0")}</span><h2>${esc(materialOperationTitle(event))}</h2><p>${timecode(Number(event.start_us)/1000)} → ${timecode(Number(event.end_us)/1000)}</p></div><div class="material-card-actions"><button class="material-focus-button" type="button" data-material-focus="${esc(event.event_id)}">${icon("video")}聚焦查看</button><label class="material-select"><input type="checkbox" data-material-select="${esc(event.event_id)}" ${selected ? "checked" : ""}/><span>选择</span></label><span class="material-support-badge ${dualView ? "trusted" : "partial"}">${dualView ? icon("check") : icon("image")}${dualView ? "双视角支持" : "动作待核对"}</span></div></header>
     <figure class="material-visual"><div class="material-frame">${event.aligned_frame_url ? `<img loading="lazy" src="${esc(event.aligned_frame_url)}" alt="第一人称与第三人称关键画面对照"/>` : `<div class="empty-state compact"><strong>关键画面准备中</strong></div>`}</div><figcaption><span>${icon("video")}第一 / 第三人称画面对照</span><span>关键时刻 ${timecode(Number(event.peak_timestamp_us ?? event.start_us)/1000)}</span></figcaption></figure>
     <section class="material-preview-note"><span class="evidence-kind interpreted">步骤理解</span><p>${esc(current)}</p></section>
     <details class="material-product-details"><summary><span>查看详情与播放</span><small>${event.aligned_clip_url ? `视频 ${duration(clipSeconds)}` : "查看分析"}</small>${icon("chevron")}</summary><div class="material-product-content">
@@ -2989,7 +3044,9 @@ function materialCard(event, index = 0) {
 }
 
 function eventHasDualViewSupport(event) {
-  return (event.cross_view_associations || []).some((association) => association.both_views_support_action === true);
+  return (event.cross_view_associations || []).some((association) =>
+    association.both_views_support_action === true && association.consistency === "consistent"
+  );
 }
 
 function eventHasAlignedDualViewMaterial(event) {
@@ -3499,7 +3556,7 @@ function professionalReportsView(data) {
   const partial = !report.report_id;
   const reportFiles = [
     {key:partial ? "partial_pdf" : "daily_report_pdf", format:"PDF", title:partial ? "实验报告 · 阶段版" : "专业实验报告", copy:"按实验过程整理操作与证据，适合阅读和打印。"},
-    {key:partial ? "partial_json" : "daily_report_json", format:"JSON", title:"可追溯实验数据", copy:"保留步骤、事件引用、时间、用量与控制文件版本。"},
+    {key:partial ? "partial_json" : "daily_report_json", format:"JSON", title:"可追溯实验数据", copy:"关联实验步骤、关键素材、原始录音及对应时间，方便检索和回看。"},
     {key:partial ? "partial_daily_report" : "daily_report_html", format:"HTML", title:"实验室日报", copy:"在独立页面阅读本次已记录的实验过程。"},
   ].filter(item=>data.links?.[item.key]);
   const extraFiles = [
@@ -4185,6 +4242,13 @@ window.addEventListener("scroll", updateResultNavDensity, { passive: true });
 window.addEventListener("resize", updateResultNavDensity, { passive: true });
 window.addEventListener("keydown", handleMaterialReviewShortcut);
 window.setInterval(refreshTaskSnapshots, 4000);
+window.setInterval(updateRunElapsedLabels, 1000);
+main.addEventListener("toggle", event => {
+  const item = event.target;
+  if (item.isConnected && item.matches?.("details[data-run-disclosure]")) {
+    state.taskDisclosures.set(item.dataset.runDisclosure, item.open);
+  }
+}, true);
 
 hydrateIcons();
 const legacyArchive = new URLSearchParams(location.search).get("archive");

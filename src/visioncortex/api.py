@@ -665,7 +665,9 @@ def _renew_queue_lease(
 
 def _dispatch_persisted_job(job: QueuedRunJob) -> None:
     payload = job.payload
-    settings = payload["settings"]
+    settings = copy.deepcopy(payload["settings"])
+    if job.reclaimed and job.kind != "stage_refresh":
+        settings.setdefault("project", {})["resume_stages"] = True
     if job.kind == "stage_refresh":
         from .stage_refresh import refresh
         root = _find_staging_run(settings, payload["parent_run_id"])
@@ -1968,6 +1970,8 @@ def _stage_receipts_from_root(root: Path) -> list[dict[str, Any]]:
                 "stage": payload["stage"],
                 "status": payload.get("status", "completed"),
                 "reason": payload.get("reason"),
+                "reused": bool(payload.get("reused")),
+                "archive_status": payload.get("archive_status"),
                 "completed_at": payload.get("completed_at"),
                 "run_elapsed_seconds": payload.get("run_elapsed_seconds"),
                 "stage_duration_seconds": payload.get("stage_duration_seconds"),
@@ -6171,7 +6175,9 @@ def recovery_plan(run_id: str) -> dict[str, Any]:
             model_message = "已保存的连接验证可用于原任务；提交时再次检查"
         except (OSError, ValueError, RuntimeError) as exc:
             model_message = str(exc)
-    identity = {"run_id":run_id, "attempt":job["attempts"], "status":job["status"], "bindings":bound,
+    from .stage_recovery import index as recovery_index, DEPENDENCIES
+    checkpoints = recovery_index(root).get("stages", {})
+    identity = {"recovery": checkpoints, "run_id":run_id, "attempt":job["attempts"], "status":job["status"], "bindings":bound,
                 "updated_at":status.get("updated_at"), "refresh_in_progress":_refresh_in_progress(run_id)}
     revision = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     return {"run_id":run_id, "revision":revision, "group_revision":bound[GROUPS],
@@ -6179,7 +6185,9 @@ def recovery_plan(run_id: str) -> dict[str, Any]:
             "provider":model.get("provider"), "model":model.get("model"),
             "output_path":str(root), "retained_stage_count":len(_stage_receipts_from_root(root)),
             "model_ready":model_ready, "model_check_message":model_message,
-            "actions": {"retry":retryable and (model_ready or not model.get("enabled")), "reports":stopped,
+            "checkpoint_stages": list(checkpoints), "dependencies": DEPENDENCIES,
+            "resume_effect": "已完成产物保留在原位置；执行时逐环节校验恢复点，重算失败、缺失、改变及受影响的后续环节。旧任务没有恢复点时使用原有缓存重新执行。",
+            "actions": {"resume":retryable and (model_ready or not model.get("enabled")), "retry":retryable and (model_ready or not model.get("enabled")), "reports":stopped,
                         "operations":stopped and model_ready and bool(bound[GROUPS] and bound[EVENTS])},
             "cache_policy":"校验源文件、代码、配置和模型身份后复用；未通过校验的部分重新计算。",
             "retry_effect":"原输入不复制；已有派生产出移入 Retry-Attempts 历史目录，本轮重新生成可见成果。",
@@ -6188,7 +6196,11 @@ def recovery_plan(run_id: str) -> dict[str, Any]:
 
 
 @app.post("/api/runs/{run_id}/retry", status_code=202)
-def retry_run(run_id: str, revision: str | None = None) -> dict[str, Any]:
+def retry_run(run_id: str, revision: str | None = None, mode: str = "full") -> dict[str, Any]:
+    if mode not in {"full", "resume"}:
+        raise HTTPException(422, "请选择恢复未完成环节或完整复跑")
+    if mode == "resume" and not revision:
+        raise HTTPException(422, "恢复需要当前方案版本，请重新打开恢复方案")
     store = _persistent_queue
     if store is None:
         raise HTTPException(503, "持久任务队列未就绪")
@@ -6233,15 +6245,16 @@ def retry_run(run_id: str, revision: str | None = None) -> dict[str, Any]:
                     if not destination.exists():
                         destination.parent.mkdir(parents=True, exist_ok=True)
                         shutil.copyfile(source, destination)
-            _retain_retry_outputs(root, int(job["attempts"]))
-            state = store.retry_failed(run_id, verified_mllm=verified_mllm)
+            if mode == "full":
+                _retain_retry_outputs(root, int(job["attempts"]))
+            state = store.retry_failed(run_id, verified_mllm=verified_mllm, resume_stages=mode == "resume")
         except ValueError as exc:
             raise HTTPException(409, "任务已重新排队或尚未停止") from exc
         _runs[run_id] = state
     _queue_wakeup.set()
     return {"run_id": run_id, "state": "queued", "status_url": f"/api/runs/{run_id}",
             "source_copy_bytes": 0, "queue_persistence": "sqlite",
-            "reuses_original_inputs": True, "cache_policy": "verified_reuse"}
+            "reuses_original_inputs": True, "cache_policy": "verified_reuse", "recovery_mode": mode}
 
 
 def _experiment_speech_response(root: Path, name: str, staging: bool, query: str,
@@ -6294,6 +6307,12 @@ def _experiment_speech_response(root: Path, name: str, staging: bool, query: str
                 for video in timeline["videos"]]
         result["timeline"] = timeline
         for source in result["sources"]:
+            original = (source.get("original") or {}).get("file")
+            if original:
+                source_path = (root / original["path"]).resolve()
+                if not archive_contains(source_path, root) or not source_path.is_file() or source_path.stat().st_size != original["size"]:
+                    raise ValueError("原始录音归档不可用")
+                original["url"] = (_staging_file_url(name, original["path"]) if staging else _file_url(name, original["path"], current))
             for part in source["chunks"]:
                 for spec in part["files"].values():
                     spec["url"] = (_staging_file_url(name, spec["path"]) if staging else

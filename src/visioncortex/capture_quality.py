@@ -82,7 +82,9 @@ def inspect(manifest, config: dict, infos: dict | None = None) -> dict:
                 item["warnings"].append("抽样画面持续偏暗；请检查遮挡、镜头与照明，完整时段尚未逐帧确认")
             source = by_part.get((view.view_id, ordinal))
             if source and not source.get("available"):
-                item["warnings"].append("此路没有可用录音")
+                item["notes"] = ["未提供可用录音，视频分析不受影响"]
+                if config.get("speech_recognition", {}).get("required", False):
+                    item["warnings"].append("此配置要求录音，但此路没有可用录音")
                 item["audio_status"] = source.get("status", "no_audio")
                 continue
             sealed = (source or {}).get("_sealed") or {}
@@ -91,7 +93,9 @@ def inspect(manifest, config: dict, infos: dict | None = None) -> dict:
             probe = speech.probe_audio(audio)
             if probe is None:
                 item["audio_status"] = "no_audio"
-                item["warnings"].append("此路没有音轨")
+                item["notes"] = ["视频无音轨，视频分析不受影响"]
+                if config.get("speech_recognition", {}).get("required", False):
+                    item["warnings"].append("此配置要求录音，但此路没有音轨")
                 continue
             audio_duration = probe["duration_seconds"]
             # Nonoverlapping windows, including short clips.

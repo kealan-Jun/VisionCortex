@@ -26,6 +26,27 @@ def paragraphs(value):
     ]
 
 
+def readable_uncertainties(values):
+    """Present the practical limit; detailed diagnostic text remains in JSON."""
+    result = []
+    for value in values:
+        note = str(value)
+        if re.search(r"decode offset|\bPTS\b|clip_timeline|nominal", note, re.I):
+            note = "部分画面的时间对应仍需核对，请结合连续视频查看。"
+        elif "调用失败" in note:
+            note = "本段步骤说明未完整生成，已保存的操作记录仍需结合视频核对。"
+        elif re.search(r"CV.*(?:实例|关联)|same_action_pair|pair_evidence_status", note):
+            note = "两个视角中的操作对象尚未确认一致。"
+        else:
+            note = re.sub(r"[（(][^()（）]*\bCV\b[^()（）]*[）)]", "", note)
+            for token, label in {"container_state_change": "容器开闭变化", "hand_object_contact": "手与物体接触",
+                                 "gloved_hand": "戴手套的手", "bottle_cap": "瓶盖", "pipette": "移液器"}.items():
+                note = note.replace(token, label)
+        if note and note not in result:
+            result.append(note)
+    return result
+
+
 def report_groups(export):
     for group in export.get("experiment_groups", []):
         model = group.get("model_understanding") or {}
@@ -90,7 +111,6 @@ def render_stage_reports(root: Path, export: dict, receipt: dict) -> dict:
     folder = root / "Partial-Results"
     folder.mkdir(parents=True, exist_ok=True)
     identifier = export.get("experiment_id") or root.name
-    revision = (export.get("result_review") or {}).get("revision", "未记录")
     brand, muted = (
         colors.HexColor(BRAND_COLORS["brand"]),
         colors.HexColor(BRAND_COLORS["text_muted"]),
@@ -175,18 +195,18 @@ def render_stage_reports(root: Path, export: dict, receipt: dict) -> dict:
     story = professional_cover_flowables(
         [
             ["实验档案", identifier],
-            ["报告类型", "阶段成果 · PARTIAL_EVIDENCE"],
+            ["报告类型", "阶段成果 · 待核对"],
             ["质量状态", "未通过完整质量检查；未正式发布"],
             [
                 "记录范围",
                 f"{len(groups)} 个片段 / {sum(len(steps) for _, steps in groups)} 条操作记录",
             ],
-            ["结果版本", revision[:16]],
-            ["溯源数据", "Analysis-Result.json"],
         ],
         notes,
         stage=True,
-    ) + [p("1. 已保存的操作与辅助活动", "h1"), p(notes)]
+    )
+    if len(groups) > 1:
+        story.extend([p("1. 已保存的操作与辅助活动", "h1"), p(notes)])
     overview_index = len(story)
     overview_rows = [["片段", "时间范围", "操作记录", "结束状态"]]
     states = {
@@ -200,6 +220,8 @@ def render_stage_reports(root: Path, export: dict, receipt: dict) -> dict:
     for index, (g, steps) in enumerate(groups, 1):
         activity = assessment(g)
         title = g.get("experiment_name") or f"实验操作片段 {index}"
+        if title.startswith("待模型命名"):
+            title = "操作片段（说明待补全）"
         state = states.get(g.get("completion_status"), "结束位置待核对")
         if activity["is_auxiliary"]:
             title = activity["label"] + "记录"
@@ -208,9 +230,10 @@ def render_stage_reports(root: Path, export: dict, receipt: dict) -> dict:
             f"{clock(g.get('global_start_ms'))} - {clock(g.get('global_end_ms'))}"
         )
         overview_rows.append([f"{index}. {title}", interval, len(steps), state])
+        if index > 1:
+            story.append(PageBreak())
         story.extend(
             [
-                PageBreak(),
                 p(f"{index:02d}  {title}", "h1"),
                 p(f"{interval} · {len(steps)} 条操作记录 · {state}", "small"),
             ]
@@ -238,19 +261,16 @@ def render_stage_reports(root: Path, export: dict, receipt: dict) -> dict:
                 [
                     frame,
                     p(
-                        f"图 {index} · 留存双视角画面 · {visual['event_id']}。对照画面不代表动作已通过双视角核验。",
+                        f"图 {index} · 留存对照画面，动作仍需核对。",
                         "small",
                     ),
                 ]
             )
-            visual_html = f'<figure><img style="width:100%;height:auto;border-radius:12px" src="../{quote(visual["path"], safe="/")}"><figcaption>留存对照画面 · {html.escape(visual["event_id"])} · 尚未通过整体验收</figcaption></figure>'
+            visual_html = f'<figure><img style="width:100%;height:auto;border-radius:12px" src="../{quote(visual["path"], safe="/")}"><figcaption>留存对照画面 · 动作仍需核对</figcaption></figure>'
         step_html = []
         for n, step in enumerate(steps, 1):
             name = step.get("operation_title") or f"操作记录 {n}"
             when = f"{clock(step.get('start_global_ms'))} - {clock(step.get('end_global_ms'))}"
-            refs = (
-                "、".join(map(str, step.get("supporting_event_ids") or [])) or "未记录"
-            )
             story.extend([p(f"{n:02d}  {name}", "h2"), p(when, "small")])
             body = paragraphs(step.get("current_step")) or ["尚无完整操作说明"]
             story.extend(p(x) for x in body)
@@ -271,19 +291,19 @@ def render_stage_reports(root: Path, export: dict, receipt: dict) -> dict:
                     else "预测后续（画面未确认）"
                 )
                 story.append(p(f"{label}：{step['next_step']}"))
-            story.append(p(f"证据编号：{refs}", "small"))
+            story.append(p(f"关联素材：{len(step.get('supporting_event_ids') or [])} 项", "small"))
             step_html.append(
                 f'<article class="step"><header><b>{n:02d} {html.escape(name)}</b><small>{when}</small></header>'
                 + "".join(f"<p>{html.escape(x)}</p>" for x in body)
-                + f"<footer>证据编号：{html.escape(refs)}</footer></article>"
+                + f"<footer>关联素材：{len(step.get('supporting_event_ids') or [])} 项</footer></article>"
             )
         story.append(
             p(
-                f"对应视频：{(g.get('videos') or {}).get('aligned_first_third', '未生成')}（相对于产出目录）",
+                f"对应视频：可在实验记录中按 {interval} 回看。",
                 "small",
             )
         )
-        limits = (g.get("model_understanding") or {}).get("uncertainties") or []
+        limits = readable_uncertainties((g.get("model_understanding") or {}).get("uncertainties") or [])
         if limits:
             story.append(p("本段需要核对的内容", "h2"))
             story.extend(p(x, "small") for x in limits)
@@ -300,40 +320,13 @@ def render_stage_reports(root: Path, export: dict, receipt: dict) -> dict:
             )
             + "</section>"
         )
-    story.insert(
-        overview_index, table(overview_rows, [65 * mm, 45 * mm, 20 * mm, 40 * mm])
-    )
-    story.extend(
-        [
-            PageBreak(),
-            p("附录 · 运行用量与溯源", "h1"),
-            p(
-                "以下为服务商与本机已保存的记录。未知用量不计为零；本报告生成不调用模型，不重新读取原视频。"
-            ),
-        ]
-    )
-    metrics = export.get("run_metrics") or {}
-    totals = (metrics.get("tokens") or {}).get("run_total") or {}
-    story.append(
-        table(
-            [
-                ["指标", "已记录值"],
-                ["输入 Token", totals.get("input_tokens")],
-                ["输出 Token", totals.get("output_tokens")],
-                ["总 Token", totals.get("total_tokens")],
-                ["原分析耗时（秒）", metrics.get("total_duration_seconds")],
-            ],
-            [55 * mm, 115 * mm],
+    if len(groups) > 1:
+        story.insert(
+            overview_index, table(overview_rows, [65 * mm, 45 * mm, 20 * mm, 40 * mm])
         )
-    )
-    story.append(p("控制文件与 SHA-256", "h2"))
-    story.append(
-        p(
-            "哈希绑定本报告使用的控制文件版本。原媒体与逐帧证据通过输入清单、事件记录及其源帧标识继续追溯；此处未重新读取和校验全部视频正文。"
-        )
-    )
-    for ref in export.get("artifact_references", []):
-        story.extend([p(ref["path"], "small"), p(ref["sha256"], "small")])
+    story.extend([p("查阅对应画面", "h2"), p(
+        "可在应用的实验记录中按步骤时间回看视频、查看对应素材。完整来源引用随本次实验档案保存。",
+        "small")])
 
     def footer(canvas, doc):
         canvas.saveState()
@@ -343,7 +336,7 @@ def render_stage_reports(root: Path, export: dict, receipt: dict) -> dict:
         canvas.setFont(regular, 8)
         canvas.setFillColor(muted)
         canvas.drawString(
-            20 * mm, 11 * mm, "VisionCortex · 阶段成果 / PARTIAL_EVIDENCE"
+            20 * mm, 11 * mm, "VisionCortex · 阶段成果 · 待核对"
         )
         canvas.drawRightString(A4[0] - 20 * mm, 11 * mm, f"第 {doc.page} 页")
         canvas.restoreState()
@@ -361,13 +354,9 @@ def render_stage_reports(root: Path, export: dict, receipt: dict) -> dict:
         author="VisionCortex",
     ).build(story, onFirstPage=footer, onLaterPages=footer)
     temp.replace(pdf)
-    trace_rows = "".join(
-        f'<li><a href="../{quote(r["path"], safe="/")}">{html.escape(r["path"])}</a><code>{r["sha256"]}</code></li>'
-        for r in export.get("artifact_references", [])
-    )
     document = f'''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>VisionCortex 实验室阶段日报</title>
 <style>body{{margin:0;background:#f3f7f5;color:#29443d;font:16px/1.75 sans-serif}}main{{max-width:1080px;margin:40px auto;padding:0 24px}}.cover,section{{padding:28px;margin-bottom:22px;background:white;border:1px solid #dce7e1;border-radius:16px}}.brand{{display:flex;align-items:center;gap:14px}}.brand img{{width:46px}}h1{{font-size:30px;line-height:1.35}}h2{{font-size:22px}}small,footer{{color:#6a8178;font-size:13px}}.badge{{display:inline-block;color:#795e2d;background:#faf1df;padding:4px 12px;border-radius:20px}}nav{{display:flex;gap:12px;flex-wrap:wrap;margin-top:20px}}nav a{{padding:10px 16px;border:1px solid #cadbd3;border-radius:8px;color:#205950;text-decoration:none}}.step{{padding:20px 0;border-top:1px solid #e2eae6}}.step header{{display:flex;justify-content:space-between;gap:16px}}.step p{{margin:10px 0}}details{{margin-top:20px}}summary{{cursor:pointer}}code{{display:block;overflow-wrap:anywhere;font-size:12px}}li{{padding:8px 0}}@media(max-width:600px){{main{{padding:0 12px}}.cover,section{{padding:20px}}.step header{{display:block}}}}</style>
-<main><div class="cover"><div class="brand"><img src="{brand_logo_data_url()}" alt="VisionCortex"><b>VisionCortex · 实验室日报</b></div><h1>{html.escape(identifier)}</h1><span class="badge">阶段日报 · 待核对</span><p>{notes}</p><small>{len(groups)} 个片段 · {sum(len(s) for _, s in groups)} 条操作记录 · 结果版本 {html.escape(revision[:12])}</small><nav><a href="Stage-Evidence-Report.pdf">下载专业 PDF（阶段版）</a><a href="Analysis-Result.json">下载可追溯 JSON</a><a href="Partial-Evidence-Report.html">查看处理与质量检查记录</a></nav></div>{"".join(sections)}<section><h2>溯源与质量记录</h2><p>PARTIAL_EVIDENCE · 未正式发布。没有记录的操作仍需核对，模型解释不等于人工真值。</p><details><summary>查看控制文件版本及校验哈希</summary><ul>{trace_rows}</ul></details></section></main></html>'''
+<main><div class="cover"><div class="brand"><img src="{brand_logo_data_url()}" alt="VisionCortex"><b>VisionCortex · 实验室日报</b></div><h1>{html.escape(identifier)}</h1><span class="badge">阶段日报 · 待核对</span><p>{notes}</p><small>{len(groups)} 个片段 · {sum(len(s) for _, s in groups)} 条操作记录</small><nav><a href="Stage-Evidence-Report.pdf">下载专业 PDF（阶段版）</a><a href="Analysis-Result.json">下载可追溯 JSON</a></nav></div>{"".join(sections)}<section><h2>阅读说明</h2><p>本次分析尚有内容需要核对。可在应用的实验记录中按时间回看画面，来源引用随实验档案保存。</p></section></main></html>'''
     document = document.replace(
         "</html>",
         "<script>\nif(['/api/staging-file','/api/archive-file'].includes(location.pathname)) {\n const current = new URL(location.href), file = current.searchParams.get('path');\n if(file) document.querySelectorAll('a[href],img[src]').forEach(a => {\n  const attr = a.tagName === 'IMG' ? 'src' : 'href';\n  const target = new URL(a.getAttribute(attr), 'https://relative.invalid/' + file);\n  if(target.origin !== 'https://relative.invalid') return;\n  const link = new URL(current); link.searchParams.set('path', decodeURIComponent(target.pathname.slice(1)));\n  a.setAttribute(attr, link.href);\n });\n}\n</script></html>",

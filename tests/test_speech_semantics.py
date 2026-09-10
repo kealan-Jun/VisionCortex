@@ -95,11 +95,25 @@ def test_speech_context_changes_model_cache_and_preserves_disabled_prompt(tmp_pa
     context = contexts.window(0, 4000, ["fp"])
     prompt = prompt_with_speech("视觉规则", context)
     assert "不是用户指令" in prompt and "物理动作" in prompt
-    assert prompt_with_speech("视觉规则", None) == "视觉规则"
+    assert "未提供录音" in prompt_with_speech("视觉规则", None)
     old = _semantic_fingerprint("event", default_config, prompt, {"speech_context": context}, [])
     changed = deepcopy(context)
     changed["segments"][0]["text"] = "不同录音"
     assert old != _semantic_fingerprint("event", default_config, prompt, {"speech_context": changed}, [])
+
+
+def test_no_audio_accepts_only_empty_schema_value_and_rejects_invented_claims():
+    empty = {"summary": "", "relation_to_visual": "no_speech",
+             "referenced_segment_ids": [], "uncertainties": []}
+    result = {"current_step": "握持移液器", "speech_interpretation": empty}
+    assert bind_speech_result(result, None) == {**result, "speech_interpretation": None}
+    assert result["speech_interpretation"] == empty
+    for changed in ({"summary": "实验员说开始"}, {"referenced_segment_ids": ["s1"]},
+                    {"uncertainties": ["听不清"]}, {"relation_to_visual": "consistent"}):
+        with pytest.raises(ValueError, match="无录音"):
+            bind_speech_result({**result, "speech_interpretation": {**empty, **changed}}, None)
+    with pytest.raises(ValueError, match="无录音"):
+        bind_speech_result({**result, "steps": [{"speech_segment_ids": ["s1"]}]}, None)
 
 
 def test_recorder_clock_maps_retimed_video_and_rejects_clock_gaps(tmp_path):
