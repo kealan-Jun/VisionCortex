@@ -64,7 +64,6 @@ def _workflow_label(group: dict[str, Any]) -> str:
 
 def render_daily_markdown(report: dict[str, Any]) -> str:
     overview = report["overview"]
-    performance = report["performance"]
     status, _ = _headline_status(report)
     lines = [
         f"# VisionCortex 实验室日报 · {report['report_date']}",
@@ -76,8 +75,6 @@ def render_daily_markdown(report: dict[str, Any]) -> str:
         "",
         f"- {overview['experiment_group_count']} 个有界实验，{overview['input_view_count']} 路输入视角",
         f"- {overview['key_event_count']} 个关键事件，{overview['physical_change_count']} 项物理状态变化",
-        f"- 流水线耗时 {_duration(performance.get('total_duration_seconds'))}，总 Token {performance.get('total_tokens') or 0:,}",
-        "- 日报复用已有理解，不新增模型调用或 Token",
         "",
         "> “当前步骤/下一步骤”属于双视角证据支持的模型理解；直接观察事实和不确定项在 JSON 中分别保留。",
         "",
@@ -157,7 +154,6 @@ def render_daily_html(report: dict[str, Any]) -> str:
 
     status, status_class = _headline_status(report)
     overview = report["overview"]
-    performance = report["performance"]
     experiment_cards: list[str] = []
     for index, group in enumerate(report["experiment_timeline"], 1):
         visual = group.get("representative_visual")
@@ -205,16 +201,16 @@ def render_daily_html(report: dict[str, Any]) -> str:
 <title>VisionCortex 实验室日报 {e(report['report_date'])}</title>
 <style>
 :root{{--brand:{BRAND_COLORS['brand']};--brand2:{BRAND_COLORS['brand_secondary']};--soft:{BRAND_COLORS['brand_soft']};--accent:{BRAND_COLORS['accent']};--bg:{BRAND_COLORS['background']};--surface:{BRAND_COLORS['surface']};--text:{BRAND_COLORS['text']};--muted:{BRAND_COLORS['text_muted']};--border:{BRAND_COLORS['border']};--success:{BRAND_COLORS['success']};--warning:{BRAND_COLORS['warning']};--danger:{BRAND_COLORS['danger']}}}
-*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--text);font:15px/1.68 "Microsoft YaHei","Noto Sans CJK SC",sans-serif}}main{{max-width:1120px;margin:auto;padding:28px 22px 48px}}.hero,.experiment,.panel{{background:var(--surface);border:1px solid var(--border);border-radius:18px;box-shadow:0 8px 24px rgba(30,74,82,.07)}}.hero{{overflow:hidden;margin-bottom:18px}}.brandbar{{height:9px;background:linear-gradient(90deg,var(--brand),var(--brand2),var(--accent))}}.hero-body{{padding:26px 28px}}.brand{{display:flex;align-items:center;gap:14px}}.brand img{{width:58px;height:58px}}.brand-name{{font-size:14px;letter-spacing:.12em;color:var(--brand);font-weight:700}}h1{{font-size:30px;line-height:1.25;margin:3px 0 8px}}h2{{font-size:22px;margin:0 0 5px}}h3{{font-size:15px;color:var(--brand);margin:0 0 7px}}.meta,.note{{color:var(--muted)}}.status{{display:inline-block;padding:5px 11px;border-radius:999px;color:white;font-weight:700;background:var(--{status_class})}}.stats{{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-top:22px}}.stat{{padding:14px;background:#f2f7f7;border-radius:12px}}.stat b{{display:block;font-size:23px;color:var(--brand)}}.stat span{{color:var(--muted);font-size:13px}}.section-title{{margin:27px 2px 12px;font-size:20px}}.experiment{{padding:22px;margin-bottom:16px}}.section-kicker{{font-size:12px;font-weight:700;letter-spacing:.12em;color:var(--brand2)}}.experiment-grid{{display:grid;grid-template-columns:minmax(330px,1.04fr) minmax(320px,.96fr);gap:22px;margin-top:14px}}.visual{{display:block;color:var(--muted);text-decoration:none;border:1px solid var(--border);border-radius:13px;overflow:hidden;background:#edf3f3}}.visual img{{display:block;width:100%;aspect-ratio:16/9;object-fit:cover}}.visual span{{display:block;padding:8px 11px;font-size:12px}}.visual.missing{{min-height:220px;display:grid;place-items:center;padding:20px}}.brief p{{margin-top:0}}dl{{display:grid;grid-template-columns:76px 1fr;gap:7px 12px;margin:14px 0}}dt{{font-weight:700;color:var(--brand)}}dd{{margin:0}}.pills{{display:flex;flex-wrap:wrap;gap:7px}}.pill{{background:var(--soft);color:var(--brand);padding:5px 9px;border-radius:999px;font-size:12px}}.panel{{padding:22px;margin-top:16px}}.attention{{border-left:5px solid var(--accent)}}.footer-note{{font-size:12px;color:var(--muted);margin-top:18px}}@media(max-width:850px){{.stats{{grid-template-columns:1fr 1fr}}.experiment-grid{{grid-template-columns:1fr}}}}@media print{{body{{background:white}}main{{max-width:none;padding:0}}.hero,.experiment,.panel{{box-shadow:none;break-inside:avoid}}}}
+*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--text);font:15px/1.68 "Microsoft YaHei","Noto Sans CJK SC",sans-serif}}main{{max-width:1120px;margin:auto;padding:28px 22px 48px}}.hero,.experiment,.panel{{background:var(--surface);border:1px solid var(--border);border-radius:18px;box-shadow:0 8px 24px rgba(30,74,82,.07)}}.hero{{overflow:hidden;margin-bottom:18px}}.brandbar{{height:9px;background:linear-gradient(90deg,var(--brand),var(--brand2),var(--accent))}}.hero-body{{padding:26px 28px}}.brand{{display:flex;align-items:center;gap:14px}}.brand img{{width:58px;height:58px}}.brand-name{{font-size:14px;letter-spacing:.12em;color:var(--brand);font-weight:700}}h1{{font-size:30px;line-height:1.25;margin:3px 0 8px}}h2{{font-size:22px;margin:0 0 5px}}h3{{font-size:15px;color:var(--brand);margin:0 0 7px}}.meta,.note{{color:var(--muted)}}.status{{display:inline-block;padding:5px 11px;border-radius:999px;color:white;font-weight:700;background:var(--{status_class})}}.stats{{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:22px}}.stat{{padding:14px;background:#f2f7f7;border-radius:12px}}.stat b{{display:block;font-size:23px;color:var(--brand)}}.stat span{{color:var(--muted);font-size:13px}}.section-title{{margin:27px 2px 12px;font-size:20px}}.experiment{{padding:22px;margin-bottom:16px}}.section-kicker{{font-size:12px;font-weight:700;letter-spacing:.12em;color:var(--brand2)}}.experiment-grid{{display:grid;grid-template-columns:minmax(330px,1.04fr) minmax(320px,.96fr);gap:22px;margin-top:14px}}.visual{{display:block;color:var(--muted);text-decoration:none;border:1px solid var(--border);border-radius:13px;overflow:hidden;background:#edf3f3}}.visual img{{display:block;width:100%;aspect-ratio:16/9;object-fit:cover}}.visual span{{display:block;padding:8px 11px;font-size:12px}}.visual.missing{{min-height:220px;display:grid;place-items:center;padding:20px}}.brief p{{margin-top:0}}dl{{display:grid;grid-template-columns:76px 1fr;gap:7px 12px;margin:14px 0}}dt{{font-weight:700;color:var(--brand)}}dd{{margin:0}}.pills{{display:flex;flex-wrap:wrap;gap:7px}}.pill{{background:var(--soft);color:var(--brand);padding:5px 9px;border-radius:999px;font-size:12px}}.panel{{padding:22px;margin-top:16px}}.attention{{border-left:5px solid var(--accent)}}.footer-note{{font-size:12px;color:var(--muted);margin-top:18px}}@media(max-width:850px){{.stats{{grid-template-columns:1fr 1fr}}.experiment-grid{{grid-template-columns:1fr}}}}@media print{{body{{background:white}}main{{max-width:none;padding:0}}.hero,.experiment,.panel{{box-shadow:none;break-inside:avoid}}}}
 </style></head><body><main>
 <header class="hero"><div class="brandbar"></div><div class="hero-body"><div class="brand"><img src="{brand_logo_data_url()}" alt="VisionCortex Logo"><div><div class="brand-name">VISIONCORTEX</div><h1>实验室日报 · {e(report['report_date'])}</h1></div></div>
 <p class="meta">档案：{e(report['experiment_id'])}</p><span class="status">{e(status)}</span>
-<div class="stats"><div class="stat"><b>{overview['experiment_group_count']}</b><span>有界实验</span></div><div class="stat"><b>{overview['input_view_count']}</b><span>输入视角</span></div><div class="stat"><b>{overview['key_event_count']}</b><span>关键事件</span></div><div class="stat"><b>{overview['physical_change_count']}</b><span>状态变化</span></div><div class="stat"><b>{performance.get('total_tokens') or 0:,}</b><span>总 Token</span></div></div>
-<p class="note">本日报面向日常查看与交接，呈现已归档分析和代表性双视角证据，质量状态以复核记录为准。完整技术账本保留在同一档案中。</p></div></header>
+<div class="stats"><div class="stat"><b>{overview['experiment_group_count']}</b><span>有界实验</span></div><div class="stat"><b>{overview['input_view_count']}</b><span>输入视角</span></div><div class="stat"><b>{overview['key_event_count']}</b><span>关键事件</span></div><div class="stat"><b>{overview['physical_change_count']}</b><span>状态变化</span></div></div>
+<p class="note">本日报面向日常查看与交接，呈现已归档分析和代表性双视角证据，质量状态以复核记录为准。来源记录随实验档案保存。</p></div></header>
 <h2 class="section-title">实验简报</h2>{''.join(experiment_cards)}
-<section class="panel attention"><h2>关注事项与交接</h2><p>质量状态：<b>{e(status)}</b>。时间对齐完成 {report['alignment_summary']['aligned']}/{report['alignment_summary']['view_count']} 路；记录不确定性 {len(report['uncertainties'])} 组、跨视角矛盾 {len(report['contradictions'])} 项。</p><p>流水线总耗时 {_duration(performance.get('total_duration_seconds'))}；预处理 {_duration((performance.get('preprocessing_sla') or {}).get('actual_seconds'))}；模型用量 {performance.get('total_input_tokens') or 0:,} 输入 + {performance.get('total_output_tokens') or 0:,} 输出 = {performance.get('total_tokens') or 0:,} Token。</p></section>
+<section class="panel attention"><h2>关注事项与交接</h2><p>质量状态：<b>{e(status)}</b>。时间对齐完成 {report['alignment_summary']['aligned']}/{report['alignment_summary']['view_count']} 路；记录不确定性 {len(report['uncertainties'])} 组、跨视角矛盾 {len(report['contradictions'])} 项。</p></section>
   <section class="panel"><h2>自动验收与不确定项</h2><p>状态：仅以自动证据与质量门禁结果为准。</p><p>证据不足的事件自动隔离，不进入正式事实。</p></section>
-<p class="footer-note">当前步骤和下一步骤属于已归档证据支持的模型理解；图片可点击打开对应关键片段。日报生成不新增模型调用或 Token。</p>
+<p class="footer-note">当前步骤和下一步骤属于已归档证据支持的模型理解；图片可点击打开对应关键片段。</p>
 </main></body></html>"""
 
 
@@ -292,7 +288,6 @@ def render_professional_pdf(path: Path, report: dict[str, Any], archive_root: Pa
     from reportlab.platypus import (
         CondPageBreak,
         Image,
-        KeepTogether,
         PageBreak,
         Paragraph,
         SimpleDocTemplate,
@@ -398,7 +393,7 @@ def render_professional_pdf(path: Path, report: dict[str, Any], archive_root: Pa
             Paragraph("2. 报告范围与证据口径", h1),
             Paragraph("本报告使用已归档的分析证据，结构检查不能替代内容质量复核。图片必须来自第一人称与第三人称对齐产物；模型生成的“当前步骤、下一步骤和实验摘要”作为证据支持的解释呈现，不替代直接观察事实。任何不确定或矛盾内容都保留为显式记录。", body),
             Paragraph("阅读方式", h2),
-            Paragraph("先阅读本节结论，再按实验查看过程与图片。质量负责人可在最后的附录中核对时间对齐、耗时、Token 和来源路径；无需理解检测模型、解码队列等工程细节即可使用正文。", body),
+            Paragraph("先阅读本节结论，再按实验查看过程与图片。需要核对时，可在应用中按步骤时间回看原视频及关键素材。", body),
         ]
     )
     for index, group in enumerate(report["experiment_timeline"], 1):
@@ -480,69 +475,12 @@ def render_professional_pdf(path: Path, report: dict[str, Any], archive_root: Pa
             gallery_table.setStyle(TableStyle([("VALIGN", (0,0), (-1,-1), "TOP"), ("LEFTPADDING", (0,0), (-1,-1), 2), ("RIGHTPADDING", (0,0), (-1,-1), 2), ("TOPPADDING", (0,0), (-1,-1), 4), ("BOTTOMPADDING", (0,0), (-1,-1), 5)]))
             story.append(gallery_table)
     story.extend([CondPageBreak(78 * mm), Paragraph("4. 质量、局限与可追溯性", h1)])
-    alignment_rows = [["视角", "角色", "状态", "置信度", "CSV RMSE(ms)"]]
+    alignment_rows = [["拍摄视角", "时间对齐状态"]]
     for item in report["alignment_summary"]["views"]:
-        alignment_rows.append([p(item.get("view_id"), small), item.get("role"), item.get("state"), f"{float(item.get('confidence') or 0):.4f}", "-" if item.get("csv_rmse_ms") is None else f"{float(item['csv_rmse_ms']):.3f}"])
+        alignment_rows.append([p(item.get("view_id"), small), "已对齐" if item.get("state") == "aligned" else "同步仍需核对"])
     story.extend([
         Paragraph(f"对齐完成 {report['alignment_summary']['aligned']}/{report['alignment_summary']['view_count']} 路，平均置信度 {report['alignment_summary']['mean_confidence']}。记录不确定性 {len(report['uncertainties'])} 组、跨视角矛盾 {len(report['contradictions'])} 项。", body),
-        styled_table(alignment_rows, [62*mm,30*mm,25*mm,24*mm,25*mm]),
-        Paragraph("5. 耗时与模型用量", h1),
+        styled_table(alignment_rows, [90*mm, 76*mm]),
     ])
-    performance = report["performance"]
-    token_by_stage = {"experiment_understanding": performance.get("tokens", {}).get("experiment_groups", {}), "mllm": performance.get("tokens", {}).get("key_materials", {}), "daily_report": performance.get("tokens", {}).get("daily_report", {})}
-    stage_rows = [["阶段", "耗时(s)", "输入 Token", "输出 Token", "总 Token", "调用"]]
-    for stage in performance.get("stage_durations") or []:
-        usage = token_by_stage.get(stage.get("stage"), {})
-        stage_rows.append([p(stage.get("stage"), small), f"{float(stage.get('duration_seconds') or 0):.2f}", usage.get("input_tokens") or 0, usage.get("output_tokens") or 0, usage.get("total_tokens") or 0, usage.get("call_count") or 0])
-    stage_rows.append(["TOTAL", f"{float(performance.get('total_duration_seconds') or 0):.2f}", performance.get("total_input_tokens") or 0, performance.get("total_output_tokens") or 0, performance.get("total_tokens") or 0, sum(int(item.get("call_count") or 0) for item in token_by_stage.values())])
-    story.append(styled_table(stage_rows, [54*mm,25*mm,28*mm,28*mm,27*mm,17*mm]))
-    story.extend([
-        CondPageBreak(112 * mm),
-        Paragraph("6. 运行审计与归档索引", h1),
-        Paragraph("完整证据不重复塞入 PDF。本页摘录零拷贝、TensorRT、火山引擎、GPU/内存与质量真值账本；机器可读原始记录保留在同一实验档案。", body),
-    ])
-    runtime_audit = performance.get("runtime_audit") or {}
-    source_audit = runtime_audit.get("source") or {}
-    trt_audit = runtime_audit.get("tensorrt") or {}
-    encoder_audit = runtime_audit.get("video_encoder") or {}
-    mllm_audit = runtime_audit.get("mllm") or {}
-    telemetry_audit = runtime_audit.get("telemetry") or {}
-    peaks = telemetry_audit.get("peaks") or {}
-    quality_audit = runtime_audit.get("quality") or {}
-
-    def peak_text(name: str, suffix: str) -> str:
-        item = peaks.get(name) or {}
-        if item.get("value") is None:
-            return "-"
-        return f"{item['value']}{suffix} @ {item.get('stage') or '-'}"
-
-    def metric_text(value: Any) -> str:
-        if value is None:
-            return "-"
-        return f"{float(value):.3f}"
-
-    audit_rows = [
-        ["审计项", "结果"],
-        ["输入/零拷贝", p(f"{source_audit.get('input_mode') or '-'}；source_copy_bytes={source_audit.get('source_copy_bytes') if source_audit.get('source_copy_bytes') is not None else '-'}；新建连续源副本={source_audit.get('continuous_source_copies_created') if source_audit.get('continuous_source_copies_created') is not None else '-'}", small)],
-        ["源文件验证", p(f"已验证 {source_audit.get('verified_file_count') or 0}；冷 stat {source_audit.get('fresh_stat_count') or 0}；命中验证缓存 {source_audit.get('cache_hit_count') or 0}", small)],
-        ["TensorRT", p(f"v{trt_audit.get('version') or '-'}；{trt_audit.get('role_count') or 0} 个角色引擎；全部反序列化={trt_audit.get('all_deserialized')}；batch={','.join(str(item) for item in trt_audit.get('build_batches') or []) or '-'}", small)],
-        ["NVENC", p(f"{encoder_audit.get('selected') or '-'}；可用={encoder_audit.get('usable')}；软件回退={encoder_audit.get('software_fallback_active')}", small)],
-        ["火山引擎/Ark", p(f"{mllm_audit.get('completed_count') or 0}/{mllm_audit.get('call_count') or 0} completed；failed={mllm_audit.get('failed_count') or 0}；reused={mllm_audit.get('cache_reused_call_count') or 0}；model={','.join(mllm_audit.get('models') or []) or '-'}", small)],
-        ["GPU / VRAM / RAM 峰值", p(f"{peak_text('gpu_compute_percent', '%')}；{peak_text('gpu_memory_used_mib', ' MiB')}；{peak_text('host_memory_percent', '%')}", small)],
-        ["NVDEC / NVENC 峰值", p(f"{peak_text('nvdec_percent', '%')}；{peak_text('nvenc_percent', '%')}", small)],
-        ["功耗 / 温度峰值", p(f"{peak_text('gpu_power_w', ' W')}；{peak_text('gpu_temperature_c', ' °C')}；监控样本={telemetry_audit.get('sample_count') or 0}；错误={telemetry_audit.get('sampling_error_count') or 0}", small)],
-        ["质量真值", p(f"边界 P/R={metric_text(quality_audit.get('boundary_precision'))}/{metric_text(quality_audit.get('boundary_recall'))}；关键素材 @IoU0.5 P/R/F1={metric_text(quality_audit.get('key_material_precision_at_iou_0_5'))}/{metric_text(quality_audit.get('key_material_recall_at_iou_0_5'))}/{metric_text(quality_audit.get('key_material_f1_at_iou_0_5'))}；状态={quality_audit.get('status') or '-'}", small)],
-    ]
-    story.extend([Spacer(1, 3*mm), styled_table(audit_rows, [43*mm,122*mm])])
-    provenance_rows = [["用途", "归档相对路径"]] + [[p(key.replace("_", " "), small), p(value, small)] for key, value in report.get("provenance", {}).items()]
-    provenance_rows.extend([["可检索数据库", p("JSON-Config-Files/evidence_index.sqlite", small)], ["关键素材", p("Key-Materials/", small)], ["实验片段", p("Experiment-Clips/", small)]])
-    story.append(
-        KeepTogether(
-            [
-                Spacer(1, 3 * mm),
-                Paragraph("归档路径索引", h2),
-                styled_table(provenance_rows, [46 * mm, 119 * mm]),
-            ]
-        )
-    )
+    story.append(Paragraph("可在应用中按步骤时间查阅原视频和对应关键素材。来源记录随实验档案保存。", body))
     document.build(story, onFirstPage=footer, onLaterPages=footer)

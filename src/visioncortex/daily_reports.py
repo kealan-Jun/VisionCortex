@@ -927,6 +927,10 @@ def generate_daily_report_archive(
     html_path = report_dir / f"{stem}.html"
     eval_path = report_dir / "Daily-Report-Eval.json"
     acceptance_path = report_dir / "Automatic-Acceptance.json"
+    from .report_references import export_reference_index
+    report["reference_index"] = export_reference_index(
+        layout.root, [group.model_dump(mode="json") for group in summary.experiment_groups]
+    )
     write_json(json_path, report)
     markdown_path.write_text(render_daily_markdown(report), encoding="utf-8")
     html_path.write_text(render_daily_html(report), encoding="utf-8")

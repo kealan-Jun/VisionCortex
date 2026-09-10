@@ -122,6 +122,45 @@ def test_legacy_result_without_recovery_points_is_not_inferred_complete(tmp_path
     assert all(calls[name] == 1 for name in DEPENDENCIES)
 
 
+def test_quality_attention_retries_archive_after_partial_report_is_written(tmp_path, monkeypatch):
+    runner, _, layout = fixture(tmp_path)
+    finished = []
+    original_package = runner.pipeline._stage_package
+
+    def package(context, current_layout, manifest):
+        original_package(context, current_layout, manifest)
+        write_json(layout.json_config / "quality_acceptance.json", {"passed": False})
+        context.quality_attention = True
+
+    def report(*_):
+        finished.append("report_written")
+        return layout.root
+
+    def flush():
+        finished.append("archive_retry")
+        return True
+
+    monkeypatch.setattr(runner.pipeline, "_stage_package", package)
+    monkeypatch.setattr(runner.pipeline, "_finish_quality_attention", report)
+    monkeypatch.setattr(runner, "flush_archive", flush)
+    assert runner.run() == layout.root
+    assert finished[-2:] == ["report_written", "archive_retry"]
+
+
+def test_failed_stage_retries_archive_after_saving_partial_outputs(tmp_path, monkeypatch):
+    runner, _, layout = fixture(tmp_path, {"material_refinement"})
+    reports_at_flush = []
+
+    def flush():
+        reports_at_flush.append((layout.root / "Partial-Results/Analysis-Result.json").is_file())
+        return True
+
+    monkeypatch.setattr(runner, "flush_archive", flush)
+    with pytest.raises(RuntimeError, match="material_refinement"):
+        runner.run()
+    assert reports_at_flush[-1] is True
+
+
 def test_data_codec_preserves_event_aliases_and_rejects_executable_types(tmp_path):
     value = {"some": [1, 2]}
     shared = {"a": value, "b": value, "path": tmp_path, "set": {"a", "b"}}

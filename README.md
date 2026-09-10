@@ -29,11 +29,19 @@ Windows SAM2 缓存使用本地缓存根目录下的完整指纹，不再叠加�
 Windows 工作缓存同样省去实验名称层级；不依赖启用系统长路径支持。超出剩余路径预算时
 提前显示路径错误，网页不会再将 `WinError 206` 误称为读帧失败。Windows 实机回归仍需回执。
 
-已有离线包的客户统一从 [4050 更新分支](https://github.com/RealityLoopAI/VisionCortex/tree/codex/rtx4050-optimization-20260908)
+已有离线包的客户统一从 [4050 更新分支](https://github.com/kealan-Jun/VisionCortex/tree/codex/rtx4050-optimization-20260908)
 拉取源码，再运行代码目录的 `deployment\rtx4050-windows\Update-From-Source.cmd`，选择原解压目录。
 更新后仍从原目录启动 `VisionCortex.exe`，无需反复下载模型和大压缩包。
 [详细更新步骤](docs/RTX4050-GIT-UPDATES.md) · [分支与历史归档](docs/REPOSITORY-BRANCHES.md)。
 该分支用于产品集成和客户验收，真实视频质量及稳定发布门禁仍需各自的执行回执。
+
+独立录音的保存与文字转写分开：本次输入附带的录音、或已完成 NAS 采集说明明确引用的录音，
+在启动语音模型之前保存到 `Key-Materials/Experiment-Audio/Sources/`，并逐段同步归档。
+关闭转写或语音模型失败仍保留原录音；视频内的音轨继续随原视频保留，不重复复制整段视频。
+录音索引保留采集设备、时钟依据、原始文件及字幕引用；逐句记录文字、录音时间、已知的实验时间、
+试听位置和步骤引用。当前没有经过验证的说话人识别，身份明确记为未知，设备编号不代表人员身份。
+阶段 JSON 和日报 JSON 提供统一的 `reference_index`；缺少来源或引用时明确记录缺口。
+这些行为已有确定性测试，真实录音转写准确率和 Windows NAS 归档仍需实机验证。
 
 ## 交付与使用文档
 

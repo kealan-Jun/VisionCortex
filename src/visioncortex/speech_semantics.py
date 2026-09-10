@@ -27,7 +27,14 @@ current_step、physical_change、action_proof、evidence_verdict、实验名称�
 
 
 def prompt_with_speech(prompt: str, context: dict | None) -> str:
-    return prompt + SPEECH_RULES if context is not None else prompt
+    return prompt + (SPEECH_RULES if context is not None else NO_SPEECH_RULES)
+
+
+NO_SPEECH_RULES = """
+本次未提供录音或转写上下文。请依据视频画面分析操作，不生成录音结论。
+speech_interpretation 应省略或为 null；步骤 speech_segment_ids 应省略或为空数组。
+无录音不妨碍视觉分析，也不代表画面没有实验操作。
+"""
 
 
 def compact_speech_metadata(metadata: dict) -> tuple[dict, dict[str, str], dict | None]:
@@ -195,11 +202,23 @@ class SpeechContext:
 def bind_speech_result(result: dict, context: dict | None) -> dict:
     """Fail closed on fabricated, omitted or out-of-window transcript references."""
     if context is None:
-        if result.get("speech_interpretation") or any(
+        interpretation = result.get("speech_interpretation")
+        # Providers may fill the optional schema with an explicit empty value.
+        # This asserts no speech; it is not a fabricated transcript conclusion.
+        empty_speech = isinstance(interpretation, dict) and (
+            interpretation.get("relation_to_visual") == "no_speech"
+            and not interpretation.get("summary")
+            and not interpretation.get("referenced_segment_ids")
+            and not interpretation.get("uncertainties")
+            and set(interpretation) <= {
+                "relation_to_visual", "summary", "referenced_segment_ids", "uncertainties"
+            }
+        )
+        if (interpretation and not empty_speech) or any(
             step.get("speech_segment_ids") for step in result.get("steps", [])
         ):
             raise ValueError("模型在无录音上下文时生成了录音结论")
-        return result
+        return {**result, "speech_interpretation": None} if empty_speech else result
     interpretation = result.get("speech_interpretation")
     if not isinstance(interpretation, dict):
         raise ValueError("模型未返回录音关联结果")

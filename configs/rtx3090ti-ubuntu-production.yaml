@@ -25,8 +25,10 @@ collection_ingest:
   camera_role_map:
     lubancat-4df661d7_cam01: first_person
     lubancat-e8cc0cb3_cam01: first_person
+    lubancat-52d2ef0c_cam01: first_person
     orangepi5pro-ab748372_cam01: third_person
     orangepi5pro-b439137c_cam02: third_person
+    orangepi5pro-fe0f7222_cam01: third_person
     orangepi5pro-d12a4719_cam01: first_person
     orangepi5pro-f022c4_cam01: third_person
     rk3588-ubuntu_cam01: third_person
@@ -528,6 +530,7 @@ resource_limits:
   gpu_temperature_warning_c: 82
 
 storage:
+  staging_directory_name: Processing
   index_csv: /home/x1/桌面/nas/experiment_record_index.csv
   archive_root: /home/x1/桌面/nas/VisionCortexExperimentArchive
   # This contains only small generated manifests/bookkeeping. Original videos

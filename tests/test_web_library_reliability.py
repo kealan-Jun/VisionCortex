@@ -81,6 +81,18 @@ def run_javascript(names, script):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_material_title_and_support_do_not_promote_partial_cv_pairing():
+    run_javascript(("materialOperationTitle", "eventHasDualViewSupport"), r'''
+const ACTION_LABELS={hand_object_contact:"手部接触"};
+const productEvidenceText=value=>value;
+assert.equal(materialOperationTitle({action_type:"hand_object_contact",provenance:{mllm:{operation_title:"握持移液器"}}}),"握持移液器");
+assert.ok(materialOperationTitle({action_type:"hand_object_contact"}).includes("对象待核对"));
+assert.equal(eventHasDualViewSupport({cross_view_associations:[{both_views_support_action:true,consistency:"partial"}]}),false);
+assert.equal(eventHasDualViewSupport({cross_view_associations:[{both_views_support_action:true,consistency:"consistent"}]}),true);
+assert.equal(eventHasDualViewSupport({}),false);
+''')
+
+
 def test_partial_analysis_is_terminal_and_never_links_to_formal_archive():
     run_javascript(("archiveProductStatus", "elapsedForRun", "stageResultRoute", "friendlyFailureReason", "guidedStageState"), r'''
 const run={state:"partial",run_id:"R",experiment_id:"A",observability:{
@@ -1747,10 +1759,10 @@ globalSearchInput.addEventListener("input",
 
 
 def test_task_sync_failure_is_visible_and_recovery_keeps_the_last_snapshot():
-    run_javascript(("refreshTaskSnapshots", "refreshLibraryOverview", "renderTasks"), r'''
+    run_javascript(("refreshTaskSnapshots", "refreshLibraryOverview", "renderTasks", "rememberRunDisclosures"), r'''
 const saved={run_id:"R",experiment_id:"A",state:"key_materials"};
 const state={runs:[saved],libraryLoadErrors:new Set()};
-const document={hidden:false,querySelectorAll:()=>[]},main={innerHTML:""};
+const document={hidden:false,querySelectorAll:()=>[]},main={innerHTML:"",querySelectorAll:()=>[]};
 const experimentRecords=()=>[],routeParts=()=>["tasks"],updateServiceChrome=()=>{};
 const setChrome=()=>{},statusCard=()=>"",number=x=>x,icon=()=>"",bindArchiveActions=()=>{};
 const runObservabilityCard=run=>`<article>${run.run_id}:${run.state}</article>`;
@@ -2574,4 +2586,42 @@ const esc=String,number=String,duration=String,formatBytes=String,formatDate=Str
 const html=nasBatchPicker();assert.ok(html.includes("需要处理"));assert.ok(html.includes("22.0%"));
 assert.ok(html.includes("视频时间覆盖率低于 98%"));assert.ok(html.includes("采集相机视角待确认"));
 assert.ok(!html.includes(">采集中<"));assert.ok(html.includes("disabled"));
+''')
+
+
+def test_run_disclosure_survives_snapshot_and_timer_changes_text_only():
+    run_javascript(('rememberRunDisclosures','updateRunElapsedLabels','guidedPipelineView','guidedStageState','elapsedForRun','productRunMessage'), r'''
+const state={taskDisclosures:new Map()},document={hidden:false},esc=String,icon=()=>'',duration=s=>String(Math.floor(s));
+const STAGE_LABELS={},stageArtifactUrl=()=>'',stageResultRoute=()=>'/result';
+const GUIDED_PIPELINE=[{id:'clips',number:'04',title:'理解实验步骤',doing:'处理中',stages:['experiment_clips'],completedBy:['experiment_clips'],resultTab:['experiments','实验片段']}];
+const item={dataset:{runDisclosure:'R:outputs'},open:true};
+rememberRunDisclosures({querySelectorAll:()=>[item]});
+const run={run_id:'R',state:'experiment_clips',observability:{status:{stage:'experiment_clips'},stage_receipts:[]}};
+assert.ok(guidedPipelineView(run).includes('data-run-disclosure="R:outputs" open'));
+item.open=false;rememberRunDisclosures({querySelectorAll:()=>[item]});
+assert.ok(!guidedPipelineView(run,true).includes('data-run-disclosure="R:outputs" open'));
+const now=Date.now;Date.now=()=>100000;
+const label={dataset:{elapsedUpdated:new Date(98000).toISOString(),elapsedSeconds:'58'},textContent:''};
+let selector='';const root={querySelectorAll:s=>{selector=s;return [label];}};
+updateRunElapsedLabels(root);assert.equal(label.textContent,'分析用时 60');
+Date.now=()=>101000;updateRunElapsedLabels(root);assert.equal(label.textContent,'分析用时 61');
+assert.ok(selector.includes("data-elapsed-running='true'"),'finished runs must not tick');
+Date.now=now;
+''')
+
+
+def test_partial_empty_stages_are_not_published_as_experiments():
+    run_javascript(('guidedStageState','guidedPipelineView','elapsedForRun','productRunMessage'), r'''
+const esc=String,icon=()=>'',duration=String,STAGE_LABELS={},stageArtifactUrl=()=>'/receipt',stageResultRoute=()=>'/experiments';
+const GUIDED_PIPELINE=[{id:'clips',number:'04',title:'理解实验步骤',doing:'处理中',stages:['experiment_understanding','experiment_clips'],completedBy:['experiment_clips'],resultTab:['experiments','实验片段']}];
+const receipt={stage:'experiment_clips',status:'completed',receipt:'clips.json',stage_duration_seconds:.2};
+const run={run_id:'R',state:'partial',progress:1,observability:{retained_experiment_count:0,status:{stage:'package'},stage_receipts:[receipt]}};
+const html=guidedPipelineView(run,true);
+assert.ok(html.includes('未生成实验成果'));assert.ok(html.includes('不代表视频中没有实验操作'));
+assert.ok(!html.includes('已完成 100%'));assert.ok(!html.includes('href="/experiments"'));
+const reports={id:'reports',stages:['daily_report','professional_pdf'],completedBy:['daily_report']};
+run.observability.status.stage_outcomes={daily_report:{status:'blocked'}};
+assert.equal(guidedStageState(run,reports,new Map(),6).state,'blocked');
+run.state='completed';run.observability.retained_experiment_count=1;run.observability.metrics={stage_durations:[{stage:'experiment_understanding',duration_seconds:180},{stage:'experiment_clips',duration_seconds:20}]};
+assert.ok(guidedPipelineView(run).includes('处理耗时 200'));
 ''')

@@ -6307,6 +6307,12 @@ def _experiment_speech_response(root: Path, name: str, staging: bool, query: str
                 for video in timeline["videos"]]
         result["timeline"] = timeline
         for source in result["sources"]:
+            original = (source.get("original") or {}).get("file")
+            if original:
+                source_path = (root / original["path"]).resolve()
+                if not archive_contains(source_path, root) or not source_path.is_file() or source_path.stat().st_size != original["size"]:
+                    raise ValueError("原始录音归档不可用")
+                original["url"] = (_staging_file_url(name, original["path"]) if staging else _file_url(name, original["path"], current))
             for part in source["chunks"]:
                 for spec in part["files"].values():
                     spec["url"] = (_staging_file_url(name, spec["path"]) if staging else

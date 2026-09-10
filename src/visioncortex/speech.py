@@ -46,11 +46,11 @@ def enabled(settings: dict[str, Any]) -> bool:
     return bool((settings.get("speech_recognition") or {}).get("enabled"))
 
 
-def _source_root(settings: dict[str, Any]) -> Path:
+def _source_root(settings: dict[str, Any], *, for_archive: bool = False) -> Path:
     ingest = settings.get("collection_ingest") or {}
     # A local/no-NAS profile must return before touching an inherited path.
     if (
-        not enabled(settings)
+        (not enabled(settings) and not for_archive)
         or not ingest.get("enabled")
         or ingest.get("mode") != "directory_metadata"
     ):
@@ -96,8 +96,8 @@ def _child(folder: Path, name: Any) -> Path:
     return path
 
 
-def inspect_source(settings: dict[str, Any], relative: str) -> dict[str, Any]:
-    root = _source_root(settings)
+def inspect_source(settings: dict[str, Any], relative: str, *, for_archive: bool = False) -> dict[str, Any]:
+    root = _source_root(settings, for_archive=True) if for_archive else _source_root(settings)
     parts = PurePosixPath(relative).parts
     if len(parts) != 3 or not fnmatch.fnmatchcase(
         parts[0],
@@ -284,9 +284,9 @@ def probe_audio(path: Path) -> dict[str, Any] | None:
     }
 
 
-def discover(config: dict[str, Any], manifest: Any) -> list[dict[str, Any]]:
+def discover(config: dict[str, Any], manifest: Any, *, include_untranscribed: bool = False) -> list[dict[str, Any]]:
     """Discover only sources belonging to this submitted experiment, never scan NAS."""
-    if not enabled(config):
+    if not enabled(config) and not include_untranscribed:
         return []
     items = []
     ingest = config.get("collection_ingest") or {}
@@ -307,7 +307,7 @@ def discover(config: dict[str, Any], manifest: Any) -> list[dict[str, Any]]:
             if part.audio is None and nas_enabled:
                 # Use the frozen video path's own explicit references. Do not
                 # infer a nearby recording merely from a timestamp or filename.
-                root = _source_root(config)
+                root = _source_root(config, for_archive=True) if include_untranscribed else _source_root(config)
                 if video.parent.resolve().is_relative_to(root):
                     relative = video.parent.resolve().relative_to(root).as_posix()
                     # Upload archives may live below the same NAS root. Only
@@ -324,6 +324,7 @@ def discover(config: dict[str, Any], manifest: Any) -> list[dict[str, Any]]:
                         except ValueError:
                             recorder_folder = False
                     paired = (
+                        inspect_source(config, relative, for_archive=True) if include_untranscribed and recorder_folder else
                         inspect_source(config, relative)
                         if recorder_folder else {"status": "missing"}
                     )
@@ -348,6 +349,10 @@ def discover(config: dict[str, Any], manifest: Any) -> list[dict[str, Any]]:
                                     item["alignment_basis"] = "recorder_shared_clock"
                         items.append(item)
                         continue
+            if include_untranscribed and not enabled(config) and part.audio is None:
+                item.update(status="not_transcribed", message="未启用转写，原视频音轨随视频保留")
+                items.append(item)
+                continue
             path = part.audio or video
             if path.is_symlink() or not path.is_file():
                 raise ValueError("实验录音源文件不可用")
@@ -503,6 +508,7 @@ def run_stage(
     infos: Any,
     transforms: Any,
     progress: Any = None,
+    publisher: Any = None,
 ) -> dict[str, Any]:
     """Produce derived audio and ASR in the same experiment's archive transaction."""
     index = {
@@ -532,21 +538,31 @@ def run_stage(
             retained.parent.mkdir(parents=True, exist_ok=True)
             previous.replace(retained)
     speech_worker.atomic_json(index_path, index)
-    if not enabled(config):
-        return index
     try:
-        sources = discover(config, manifest)
-        runtime = (
-            runtime_request(config)
-            if any(item["available"] for item in sources)
-            else None
-        )
+        sources = discover(config, manifest) if enabled(config) else discover(config, manifest, include_untranscribed=True)
+        from .speech_archive import preserve
         for item in sources:
             public = {
                 key: value for key, value in item.items() if not key.startswith("_")
             }
             public["chunks"] = []
             index["sources"].append(public)
+            if item["available"]:
+                public["original"] = preserve(layout.root, item)
+            speech_worker.atomic_json(index_path, index)
+            if publisher is not None:
+                if (layout.key_materials / "Experiment-Audio").is_dir():
+                    publisher.publish_directory("Key-Materials/Experiment-Audio")
+                publisher.publish_file(index_path)
+        if not enabled(config):
+            index["archive_status"] = "saved" if any(s.get("original", {}).get("status") == "saved" for s in index["sources"]) else "no_separate_recording"
+            speech_worker.atomic_json(index_path, index)
+            if publisher is not None:
+                publisher.publish_file(index_path)
+            return index
+        # All original recordings survive even if ASR initialization fails.
+        runtime = runtime_request(config) if any(item["available"] for item in sources) else None
+        for item, public in zip(sources, index["sources"], strict=True):
             if not item["available"]:
                 continue
             clock_mapper = None
@@ -602,6 +618,11 @@ def run_stage(
                 )
                 transform = transforms[item["view_id"]]
                 for row in transcript["segments"]:
+                    row["speaker_identity"] = {"status": "unknown", "person_id": None, "name": None}
+                    row["source_id"] = item["id"]
+                    epoch = item["_sealed"].get("start_global_us")
+                    row["recorded_start_global_us"] = round(epoch + row["start_seconds"] * 1000000) if epoch is not None else None
+                    row["recorded_end_global_us"] = round(epoch + row["end_seconds"] * 1000000) if epoch is not None else None
                     row["playback_start_seconds"] = row["start_seconds"] - start
                     row["playback_end_seconds"] = row["end_seconds"] - start
                     # Recorder clocks establish pairing, but variable video
@@ -677,6 +698,9 @@ def run_stage(
                     }
                 )
                 speech_worker.atomic_json(index_path, index)
+                if publisher is not None:
+                    publisher.publish_directory(relative)
+                    publisher.publish_file(index_path)
         index["status"] = "completed"
     except Exception:
         index["status"] = "failed"

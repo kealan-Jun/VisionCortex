@@ -400,10 +400,15 @@ class StageRunner:
             except (OSError, ValueError, KeyError, TypeError) as exc:
                 self.pipeline._complete_stage(self.layout, "stage_report", [], status="failed", reason=f"{type(exc).__name__}: {exc}")
         if self.errors:
+            # Delivery is independent of formal quality or computation success.
+            # Include reports created during error handling in the last retry.
+            self.flush_archive()
             self.pipeline._active_stage = self.errors[0][0]
             raise self.errors[0][1]
         if self.context.quality_attention:
-            return self.pipeline._finish_quality_attention(self.layout, getattr(self.context, "events", []), getattr(self.context, "groups", []))
+            result = self.pipeline._finish_quality_attention(self.layout, getattr(self.context, "events", []), getattr(self.context, "groups", []))
+            self.flush_archive()
+            return result
         if not self.flush_archive():
             raise OSError("阶段产物已保存，NAS 归档仍待恢复")
         self.pipeline._status(self.layout, "completed", 1.0, "处理完成并通过自动发布前验收")

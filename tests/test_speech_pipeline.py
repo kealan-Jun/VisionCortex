@@ -194,6 +194,8 @@ def test_stage_archives_results_search_and_integrity(tmp_path, monkeypatch):
     layout = ArchiveLayout(tmp_path / "experiment")
     layout.create()
     manifest = SimpleNamespace(experiment_id="experiment")
+    original = tmp_path / "original.wav"
+    original.write_bytes(b"fixture-original-audio")
     source = {
         "id": "fp-0001",
         "view_id": "fp",
@@ -202,7 +204,8 @@ def test_stage_archives_results_search_and_integrity(tmp_path, monkeypatch):
         "duration_seconds": 5,
         "audio_offset_ms": 250,
         "alignment": "PARTIAL_EVIDENCE",
-        "_sealed": {},
+        "_sealed": {"folder": str(tmp_path), "resolved_folder": str(tmp_path.resolve()),
+                    "audio_file": original.name, "files": {original.name: speech_worker.file_record(original)}},
     }
     monkeypatch.setattr(speech, "discover", lambda *_: [source])
     monkeypatch.setattr(speech, "runtime_request", lambda _: {"max_audio_seconds": 3})
@@ -496,6 +499,7 @@ def test_speech_failure_keeps_vision_independent_and_required_audio_blocks_publi
         received_infos,
         received_transforms,
         progress,
+        publisher=None,
     ):
         calls.append(received_manifest.experiment_id)
         assert received_config["speech_recognition"]["enabled"]

@@ -4992,12 +4992,16 @@ class EvidencePipeline:
             speech_result = speech.run_stage(
                 self.config, manifest, layout, c.infos, c.transforms,
                 progress=lambda message: self._status(layout, "speech", 0.09, message),
+                publisher=self._publisher,
             )
             if not speech.enabled(self.config):
-                speech_status, speech_reason = "skipped", "未启用录音转写，视频分析继续"
+                if speech_result.get("archive_status") == "saved":
+                    speech_status, speech_reason = "completed", "原始录音已保存；未启用文字转写，视频分析继续"
+                else:
+                    speech_status, speech_reason = "skipped", "未启用录音转写，视频分析继续"
             elif not any(source.get("available") for source in speech_result.get("sources", [])):
                 speech_status, speech_reason = "skipped", "没有可用录音，视频分析继续"
-            if speech_status == "completed" and (layout.json_config / "Input-Manifests/input_seal.json").is_file():
+            if speech.enabled(self.config) and speech_status == "completed" and (layout.json_config / "Input-Manifests/input_seal.json").is_file():
                 from .speech_timeline import build as build_speech_timeline
                 build_speech_timeline(layout.root)
         except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as exc:
@@ -5016,6 +5020,7 @@ class EvidencePipeline:
                                     "error_type": type(exc).__name__, "message": speech_reason})
         self._complete_stage(layout, "speech", [
             layout.json_config / "speech.json",
+            *[layout.json_config / name for name in ("speech_search.json", "speech_search_receipt.json") if (layout.json_config / name).is_file()],
             *([layout.json_config / "speech_timeline.json"] if speech_status == "completed" and (layout.json_config / "speech_timeline.json").is_file() else []),
             *([layout.key_materials / "Experiment-Audio"] if (layout.key_materials / "Experiment-Audio").is_dir() else []),
         ], status=speech_status, reason=speech_reason)

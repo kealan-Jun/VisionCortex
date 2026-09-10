@@ -46,6 +46,14 @@ def test_profile_preserves_full_chain_and_has_only_local_storage():
     assert config["speech_recognition"]["enabled"] is False
     assert config["speech_recognition"]["python_executable"] is None
     assert config["speech_recognition"]["model_directory"] is None
+    assert config["mllm"]["workers"] == config["mllm"]["group_workers"] == 4
+    assert config["performance"]["release_auxiliary_models_between_stages"]
+    assert config["performance"]["auxiliary_cpu_cache_min_available_gib"] == 8
+    dino = config["models"]["open_vocabulary_key_frame"]["grounding_dino_fallback"]
+    liquid = config["models"]["liquid_semantic_sidecar"]
+    assert dino["device"] == liquid["device"] == "cuda"
+    assert dino["cuda_oom_fallback_cpu"] and liquid["cuda_oom_fallback_cpu"]
+    assert not liquid["half"]
 
 
 def test_old_host_overrides_cannot_redirect_portable_config(portable, tmp_path, monkeypatch):

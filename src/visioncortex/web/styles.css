@@ -358,6 +358,8 @@ svg { display: block; width: 17px; height: 17px; fill: none; stroke: currentColo
 .current-guide.partial, .journey-step.partial { border-color: #d5ba7c; background: #fff9eb; }
 .queue-status.partial i { background: #ad7b23; }
 .journey-step.withheld { opacity: .75; }
+.journey-step.empty, .journey-step.pending, .journey-step.blocked { background: #fffaf0; border-color: #e6d4ab; }
+.journey-step.empty .journey-copy header span, .journey-step.pending .journey-copy header span, .journey-step.blocked .journey-copy header span { color: #896220; }
 .current-guide.interrupted { border-color: rgba(182,106,36,.28); background: rgba(182,106,36,.05); }
 .current-guide h3 { margin: 4px 0 6px; font-size: 1.125rem; }
 .current-guide p { margin: 0; color: var(--text-2); font-size: 0.75rem; line-height: 1.65; }

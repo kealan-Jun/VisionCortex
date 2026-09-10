@@ -765,3 +765,20 @@ def test_event_prompt_example_matches_strict_response_contract():
     example["temporal_support"] = {"before": "a", "peak": "b", "after": "c"}
     with pytest.raises(ValueError):
         _validate_response_payload(example, "event")
+
+
+def test_one_slow_probe_does_not_hold_healthy_capacity_idle():
+    release = threading.Event()
+    calls = []
+
+    def analyze(item):
+        calls.append(item)
+        if item == 0:
+            assert release.wait(timeout=3), 'slow probe blocked healthy workers'
+        elif item == 2:
+            release.set()
+        return item, {'status': 'completed'}
+
+    results = _run_bounded_semantic_waves(list(range(8)), analyze, workers=4, failure_threshold=2)
+    assert sorted(item for item, _ in results) == list(range(8))
+    assert sorted(calls) == list(range(8))
