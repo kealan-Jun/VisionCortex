@@ -15,6 +15,7 @@ import subprocess
 import sys
 import shutil
 from typing import Any
+from types import SimpleNamespace
 
 
 from . import speech_worker
@@ -392,6 +393,24 @@ def discover(config: dict[str, Any], manifest: Any, *, include_untranscribed: bo
     return items
 
 
+def _stage_sources(config: dict[str, Any], manifest: Any):
+    """Discover each physical recording independently; retain failed identities."""
+    for view in manifest.views:
+        for ordinal, part in enumerate(view.segments or [view]):
+            selected = SimpleNamespace(views=[SimpleNamespace(view_id=view.view_id, segments=[part])])
+            try:
+                rows = discover(config, selected) if enabled(config) else discover(config, selected, include_untranscribed=True)
+                for row in rows:
+                    yield {**row, "id": f"{view.view_id}-{ordinal + 1:04d}", "segment_ordinal": ordinal}, None
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                yield {"id": f"{view.view_id}-{ordinal + 1:04d}", "view_id": view.view_id,
+                       "segment_ordinal": ordinal, "video": str(part.video),
+                       "available": False, "status": "source_unavailable",
+                       "alignment": "NOT_PROVEN", "audio_offset_ms": None,
+                       "message": "录音来源暂时无法读取或核对，请稍后重试；其他录音继续保存。",
+                       "error_type": type(exc).__name__, "error_errno": getattr(exc, "errno", None)}, exc
+
+
 def runtime_request(config: dict[str, Any]) -> dict[str, Any]:
     options = config.get("speech_recognition") or {}
     model_directory = Path(options.get("model_directory") or "")
@@ -539,16 +558,27 @@ def run_stage(
             previous.replace(retained)
     speech_worker.atomic_json(index_path, index)
     try:
-        sources = discover(config, manifest) if enabled(config) else discover(config, manifest, include_untranscribed=True)
+        sources, source_errors = [], []
         from .speech_archive import preserve
-        for item in sources:
+        for item, discovery_error in _stage_sources(config, manifest):
+            sources.append(item)
+            if discovery_error is not None:
+                source_errors.append(discovery_error)
             public = {
                 key: value for key, value in item.items() if not key.startswith("_")
             }
             public["chunks"] = []
             index["sources"].append(public)
             if item["available"]:
-                public["original"] = preserve(layout.root, item)
+                try:
+                    public["original"] = preserve(layout.root, item)
+                except (OSError, ValueError) as exc:
+                    source_errors.append(exc)
+                    failure = {"available": False, "status": "source_unavailable",
+                               "message": "原始录音尚未保存成功，请重试；其他录音继续保存。",
+                               "error_type": type(exc).__name__, "error_errno": getattr(exc, "errno", None)}
+                    item.update(failure)
+                    public.update(failure)
             speech_worker.atomic_json(index_path, index)
             if publisher is not None:
                 if (layout.key_materials / "Experiment-Audio").is_dir():
@@ -559,6 +589,8 @@ def run_stage(
             speech_worker.atomic_json(index_path, index)
             if publisher is not None:
                 publisher.publish_file(index_path)
+            if source_errors:
+                raise source_errors[0]
             return index
         # All original recordings survive even if ASR initialization fails.
         runtime = runtime_request(config) if any(item["available"] for item in sources) else None
@@ -701,6 +733,8 @@ def run_stage(
                 if publisher is not None:
                     publisher.publish_directory(relative)
                     publisher.publish_file(index_path)
+        if source_errors:
+            raise source_errors[0]
         index["status"] = "completed"
     except Exception:
         index["status"] = "failed"

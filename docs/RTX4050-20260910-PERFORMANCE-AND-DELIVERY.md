@@ -35,6 +35,11 @@ Changes go to development `codex/rtx4050-optimization-20260908`.
 - Preserve originals and completed transcription chunks independently of ASR,
   final quality acceptance and formal publication. Retry NAS delivery after
   generating partial reports, including failure and quality-attention exits.
+  Discover and preserve each physical recording independently: an unavailable
+  source or failed copy keeps its failure identity while the other originals
+  continue to be saved. The stage retains a failed status instead of claiming
+  all recordings were archived. Busy-source and copy-failure cases are covered
+  by deterministic tests; this is not a real-ASR accuracy receipt.
 - Export visual and speech references in a portable JSON graph. Speaker identity
   remains unknown; aligned time and temporal association do not prove an action.
 - Keep product reports focused on operations and evidence limitations. Technical

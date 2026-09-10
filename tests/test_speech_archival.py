@@ -53,6 +53,41 @@ def test_local_attachment_archived_before_asr_setup_failure(tmp_path, monkeypatc
     assert (layout.root / saved["sources"][0]["original"]["file"]["path"]).read_bytes() == b"audio-source"
 
 
+@pytest.mark.parametrize("failure_stage", ["discovery", "copy"])
+def test_one_unavailable_recording_does_not_prevent_other_originals_being_saved(tmp_path, monkeypatch, failure_stage):
+    from visioncortex import speech_archive
+
+    folder, config = recorder(tmp_path / "nas")
+    config["speech_recognition"]["enabled"] = False
+    (folder / "rgb.mp4").write_bytes(b"video")
+    part = SimpleNamespace(video=folder / "rgb.mp4", audio=None, timestamps_csv=None)
+    manifest = SimpleNamespace(experiment_id="exp", views=[SimpleNamespace(view_id="fp", segments=[part, part])])
+    layout = ArchiveLayout(tmp_path / "archive")
+    layout.create()
+    original = speech.inspect_source if failure_stage == "discovery" else speech_archive.preserve
+    calls = 0
+
+    def first_unavailable(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError(16, "recording busy")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(speech if failure_stage == "discovery" else speech_archive,
+                        "inspect_source" if failure_stage == "discovery" else "preserve", first_unavailable)
+    monkeypatch.setattr(speech, "runtime_request", lambda _: pytest.fail("ASR initialized while disabled"))
+    with pytest.raises(OSError, match="recording busy"):
+        speech.run_stage(config, manifest, layout, {}, {})
+    result = speech_worker.read_json(layout.json_config / "speech.json")
+    assert result["status"] == "failed"
+    failed, saved = result["sources"]
+    assert failed["status"] == "source_unavailable" and not failed["available"]
+    assert failed["error_errno"] == 16 and "original" not in failed
+    assert saved["id"] == "fp-0002" and saved["segment_ordinal"] == 1
+    assert (layout.root / saved["original"]["file"]["path"]).read_bytes() == (folder / "audio.opus").read_bytes()
+
+
 def test_source_changes_are_rejected_and_existing_archive_is_not_replaced(tmp_path, monkeypatch):
     from visioncortex.speech_archive import preserve
     audio = tmp_path / "voice.opus"

@@ -193,7 +193,7 @@ def test_subtitles_use_listening_chunk_timeline_and_escape_cues(tmp_path):
 def test_stage_archives_results_search_and_integrity(tmp_path, monkeypatch):
     layout = ArchiveLayout(tmp_path / "experiment")
     layout.create()
-    manifest = SimpleNamespace(experiment_id="experiment")
+    manifest = SimpleNamespace(experiment_id="experiment", views=[SimpleNamespace(view_id="fp", segments=[], video=tmp_path / "video.mp4")])
     original = tmp_path / "original.wav"
     original.write_bytes(b"fixture-original-audio")
     source = {
@@ -286,7 +286,7 @@ def test_failed_speech_cannot_publish_completed_receipt(tmp_path, monkeypatch):
     with pytest.raises(ValueError):
         speech.run_stage(
             {"speech_recognition": {"enabled": True}},
-            SimpleNamespace(experiment_id="test"),
+            SimpleNamespace(experiment_id="test", views=[SimpleNamespace(view_id="fp", segments=[], video=tmp_path / "video.mp4")]),
             layout,
             {},
             {},
