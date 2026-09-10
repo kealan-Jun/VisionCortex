@@ -136,6 +136,40 @@ def test_local_audio_has_no_inferred_video_sync(tmp_path, monkeypatch):
     assert sources[0]["_sealed"]["start_global_us"] is None
 
 
+@pytest.mark.parametrize("relative", [
+    "VisionCortexExperimentArchive/experiment/Original-Experiment-Videos/first/video.mp4",
+    "archive/experiment/video.mp4",
+    "device_cam01/not-a-date/segment/video.mp4",
+])
+@pytest.mark.parametrize("embedded_audio", [False, True])
+def test_uploaded_video_under_nas_root_is_not_a_recorder_folder(
+    tmp_path, monkeypatch, relative, embedded_audio,
+):
+    video = tmp_path / relative
+    video.parent.mkdir(parents=True)
+    video.write_bytes(b"uploaded-video")
+    config = {
+        "speech_recognition": {"enabled": True},
+        "collection_ingest": {
+            "enabled": True, "mode": "directory_metadata",
+            "source_root": str(tmp_path),
+        },
+    }
+    monkeypatch.setattr(
+        speech, "inspect_source", lambda *_: pytest.fail("upload treated as recorder")
+    )
+    monkeypatch.setattr(
+        speech, "probe_audio",
+        lambda _: {"duration_seconds": 3} if embedded_audio else None,
+    )
+    view = ViewInput(view_id="fp", role="first_person", video=video)
+    sources = speech.discover(config, SimpleNamespace(views=[view]))
+    assert sources[0]["available"] is embedded_audio
+    assert sources[0]["status"] == ("complete" if embedded_audio else "no_audio")
+    if embedded_audio:
+        assert sources[0]["_sealed"]["audio_file"] == "video.mp4"
+
+
 def test_subtitles_use_listening_chunk_timeline_and_escape_cues(tmp_path):
     request = {"source": {}, "model": {}, "start_seconds": 60, "end_seconds": 90}
     rows = [

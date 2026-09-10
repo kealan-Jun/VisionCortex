@@ -310,7 +310,23 @@ def discover(config: dict[str, Any], manifest: Any) -> list[dict[str, Any]]:
                 root = _source_root(config)
                 if video.parent.resolve().is_relative_to(root):
                     relative = video.parent.resolve().relative_to(root).as_posix()
-                    paired = inspect_source(config, relative)
+                    # Upload archives may live below the same NAS root. Only
+                    # recorder-native camera/date/segment folders own automatic
+                    # audio references; other videos use their explicit audio
+                    # attachment or embedded track below.
+                    parts = PurePosixPath(relative).parts
+                    recorder_folder = len(parts) == 3 and fnmatch.fnmatchcase(
+                        parts[0], ingest.get("camera_directory_glob") or "*_cam*"
+                    )
+                    if recorder_folder:
+                        try:
+                            date.fromisoformat(parts[1])
+                        except ValueError:
+                            recorder_folder = False
+                    paired = (
+                        inspect_source(config, relative)
+                        if recorder_folder else {"status": "missing"}
+                    )
                     if paired.get("status") != "missing":
                         item.update(paired)
                         if paired["available"]:
