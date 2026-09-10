@@ -29,8 +29,10 @@
       const views = [...new Set(videos.map(item => item.view_id))];
       const steps = experiments.flatMap(item => (item.steps || []).map(step => ({...step, experiment_name:item.name})));
       const statusLabels = {disabled:"本次分析未启用录音转写。", not_available:"该实验尚无录音转写产出。", running:"录音转写进行中，以下为已完成的部分。", failed:"录音处理未完成，以下内容仅为已保存的阶段产出。", completed:"录音处理已完成。"};
-      container.innerHTML = `<header class="panel-heading"><div><h2>录音与转写</h2><p>${esc(statusLabels[data.status] || "录音状态待核验")}</p></div></header>
-        <p>转写文字尚未经人工校对；录音中的说法不能直接证明实验动作已完成。</p>
+      const noRecording = data.status === "completed" && !data.sources.some(source => source.available || source.original?.file?.url);
+      const statusText = noRecording ? "本次没有可用录音，视频分析结果可在实验记录中查看。" : statusLabels[data.status] || "录音状态待核验";
+      container.innerHTML = `<header class="panel-heading"><div><h2>录音与转写</h2><p>${esc(statusText)}</p></div></header>
+        ${chunks.length ? "<p>点击文字可回听对应录音。转写内容与说话人身份仍需核对。</p>" : ""}
         ${data.sources.filter(source => source.original?.file?.url).map(source => `<section class="speech-original"><h3>${esc(source.view_id)} · 原始录音</h3><p>原始录音已保存 · 说话人身份未确认${data.status === "disabled" ? " · 本次未转写文字" : ""}</p><audio controls preload="none" src="${esc(source.original.file.url)}"></audio><a class="secondary-button" href="${esc(source.original.file.url)}" download>下载原始录音</a></section>`).join("")}
         ${data.sources.filter(source => !source.available).map(source => `<p class="analysis-readiness-note">${esc(source.view_id)} · 第 ${source.segment_ordinal + 1} 段：${esc(source.message || "没有可用录音")}</p>`).join("")}
         ${chunks.length ? `<div class="speech-search"><label class="field-label">录音来源<select id="speech-source"><option value="">搜索本实验全部录音</option>${chunks.map(chunk=>`<option value="${esc(chunk.id)}">${esc(chunk.source.view_id)} · 视频第 ${chunk.source.segment_ordinal + 1} 段 · ${clock(chunk.start_seconds)}–${clock(chunk.end_seconds)}</option>`).join("")}</select></label></div>

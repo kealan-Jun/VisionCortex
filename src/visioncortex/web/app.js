@@ -3553,7 +3553,7 @@ function professionalReportsView(data) {
   const partial = !report.report_id;
   const reportFiles = [
     {key:partial ? "partial_pdf" : "daily_report_pdf", format:"PDF", title:partial ? "实验报告 · 阶段版" : "专业实验报告", copy:"按实验过程整理操作与证据，适合阅读和打印。"},
-    {key:partial ? "partial_json" : "daily_report_json", format:"JSON", title:"可追溯实验数据", copy:"保留步骤、事件引用、时间、用量与控制文件版本。"},
+    {key:partial ? "partial_json" : "daily_report_json", format:"JSON", title:"可追溯实验数据", copy:"关联实验步骤、关键素材、原始录音及对应时间，方便检索和回看。"},
     {key:partial ? "partial_daily_report" : "daily_report_html", format:"HTML", title:"实验室日报", copy:"在独立页面阅读本次已记录的实验过程。"},
   ].filter(item=>data.links?.[item.key]);
   const extraFiles = [
