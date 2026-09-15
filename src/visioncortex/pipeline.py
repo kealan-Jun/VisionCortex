@@ -9,7 +9,6 @@ import stat as stat_module
 import threading
 import time
 from copy import deepcopy
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -20,6 +19,7 @@ import numpy as np
 from .actions import (
     audit_candidates,
     build_experiment_segments,
+    build_view_activity_intervals,
     build_physical_change_log,
     generate_candidates,
     generate_coarse_activity_candidates,
@@ -83,10 +83,13 @@ from .daily_reports import generate_daily_report_archive
 from .decisions import decision_receipt
 from .model_certification import audit_production_model_certification
 from .provenance import write_run_provenance
+from .partial_delivery import write_partial_delivery
 from .schema_contracts import (
     validate_archive_contracts_or_raise,
     write_archive_contract_manifest,
 )
+from . import speech
+from .runtime_control import analysis_execution
 from .schemas import (
     ActionCandidate,
     ActionType,
@@ -331,8 +334,8 @@ def _recover_group_storyboard_state_events(
                 accepted=True,
                 formal_admission_status="provisional",
                 audit_reason=(
-                    "完整组故事板豆包显式提出容器开合状态转换；"
-                    "仅作为召回候选，必须通过独立事件级豆包状态证明"
+                    "完整组故事板视觉模型显式提出容器开合状态转换；"
+                    "仅作为召回候选，必须通过独立事件级视觉模型状态证明"
                 ),
                 supporting_views=sorted(required_views),
                 supporting_roles=[
@@ -436,8 +439,8 @@ FINAL_STEP_ACTION_PATTERNS: dict[str, tuple[str, ...]] = {
     "pipette_transfer_operation": (
         r"移液操作",
         r"移液流程",
-        r"源.{0,12}目标.{0,12}移液器",
-        r"移液器.{0,8}(?:伸入|进入).{0,12}(?:容器|离心管|试剂瓶|烧杯)",
+        r"源[^，。；！？]{0,12}目标[^，。；！？]{0,12}移液器",
+        r"移液器[^，。；！？]{0,12}源[^，。；！？]{0,12}(?:到|至|进入)[^，。；！？]{0,8}目标",
     ),
     "container_state_change": (
         r"开盖",
@@ -659,6 +662,8 @@ def refine_groups_from_final_events(
                     ),
                     "action_type": event.action_type.value,
                     "event_id": event.event_id,
+                    **({"operation_title": understanding["operation_title"]}
+                       if understanding.get("operation_title") else {}),
                 }
             )
         action_labels = [
@@ -667,14 +672,9 @@ def refine_groups_from_final_events(
                 event.action_type.value for event in events
             )
         ]
-        step_summaries = [
-            str(step["current_step"])
-            for step in steps
-            if str(step.get("current_step") or "").strip()
-        ]
         summary = (
-            f"已自动验收 {len(events)} 个关键动作：{'、'.join(action_labels)}；"
-            f"步骤依次为：{'；'.join(step_summaries)}。"
+            f"已整理 {len(events)} 条有事件证据支持的操作记录；"
+            "具体过程、前后状态和后续判断见各步骤。"
             if events
             else "当前有界实验没有通过自动验收的关键动作。"
         )
@@ -689,11 +689,49 @@ def refine_groups_from_final_events(
                 "refinement_source": "final_adjudicated_key_events",
                 "refinement_model_call_count": 0,
                 "refinement_key_event_count": len(events),
+                "operation_coverage": {
+                    "status": "PARTIAL_EVIDENCE",
+                    "basis": "adjudicated_event_intervals",
+                    "all_operator_steps_proven": False,
+                    "missing_gate": "real_video_operation_level_coverage_review",
+                },
                 "archive_folder_frozen_after_initial_materialization": True,
                 "display_identity_refined_after_event_curation": False,
             }
         )
         group.model_understanding = refined
+        from .operation_review import coverage
+        refined["operation_coverage"] = coverage(group.model_dump(mode="json"), steps)
+        # A completed naming/step request is not an experiment-end receipt.
+        # This applies to every future run, including profiles that skip the
+        # dedicated boundary pass. Preserve the original response above.
+        if group.completion_status != "observed_complete":
+            refined["boundary_assessment"] = {**(refined.get("boundary_assessment") or {}),
+                "end_complete": False, "localized_rescan_needed": True,
+                "end_reason": group.completion_reason or "尚未取得实验完成的边界复核证据"}
+        title_violations = [
+            item for item in validate_final_step_action_consistency([group], events)["violations"]
+            if item["field"] in {"experiment_name", "understanding.experiment_name"}
+        ]
+        if title_violations:
+            # A candidate-stage title may claim an action removed by event
+            # adjudication. Rebuild only that display title from final actions;
+            # preserve the original model receipt and all material paths.
+            title = "、".join(action_labels) + "实验片段" if events else "待确认实验片段"
+            english_title = "Reviewed Experiment Segment" if events else "Unconfirmed Experiment Segment"
+            refined["title_refinement"] = {
+                "reason": "candidate_title_asserted_rejected_action",
+                "previous_title": group.experiment_name,
+                "previous_title_en": group.experiment_name_en,
+                "final_title": title,
+                "final_title_en": english_title,
+                "unsupported_action_types": sorted({item["unsupported_action_type"] for item in title_violations}),
+            }
+            group.experiment_name = title
+            group.experiment_name_en = english_title
+            refined["experiment_name"] = title
+            refined["experiment_name_en"] = english_title
+            refined["display_identity_refined_after_event_curation"] = True
 
 
 def _synchronize_final_event_state_receipts(
@@ -866,19 +904,24 @@ def validate_final_step_action_consistency(
         before = text[max(0, start - 12) : start]
         after = text[end : min(len(text), end + 14)]
         before_denial = re.search(
-            r"(?:(?:未(?:观察到|观测到|看见|见到|见|确认|证明|发生)?|"
-            r"没有(?:观察到|看见|确认|证明)?|"
+            r"(?:(?:未(?:观察到|观测到|看到|看见|见到|见|确认|证明|发生)?|"
+            r"没有(?:观察到|看到|看见|确认|证明)?|"
             r"无法确认|不能确认|不可确认|不确定|"
             r"是否(?:已)?(?:完成|发生)?)"
-            r"[^，。；！？]{0,4}|无(?:可见|明确)?|"
+            r"[^，。；！？]{0,4}|无(?:可见|明确|[^，。；！？]{0,2}被)?|"
             r"无已审核通过的事件支持|"
             r"未发生(?:经证实的|已确认的)?)$",
             before,
         )
         after_denial = re.match(
-            r"(?:状态)?(?:不可|无法|不能|未能|尚未)"
+            r"(?:状态|动作)?(?:不可|无法|不能|未能|尚未|未)"
             r"(?:确认|判断|观察到|看见|证明|辨认)"
-            r"|(?:不可见|未见|不确定|是否发生不可确认)"
+            r"|(?:不可见|不可读|无法读取|不能读取|未见|不确定|是否发生不可确认)"
+            r"|是否(?:已)?(?:发生|完成)[^，。；！？]{0,8}(?:无法|不能|未能)确认"
+            r"|(?:完成|发生)(?:均|都)?(?:未见|未看到|未观察到|无法确认)"
+            r"|(?:动作)?正在进行(?=，未(?:看到|看见|观察到|见))"
+            r"|(?:(?:或|、)[^，。；！？或、]{1,8}){0,3}"
+            r"(?:完成(?:均|都)?未见|(?:均|都)?未见完成)"
             r"|[^，。；！？]{0,6}(?:无法|不能|未能|尚未)"
             r"(?:确认|判断|证实)",
             after,
@@ -897,11 +940,11 @@ def validate_final_step_action_consistency(
             r"实际|清晰(?:可读|可见)?)|"
             r"未确认(?:存在|发生)?(?:其他)?|"
             r"未发生(?:经证实的|已确认的)?|"
-            r"未(?:观察到|观测到|看见|见到|证明)(?:实际|任何|其他|"
+            r"未(?:观察到|观测到|看到|看见|见到|见|证明)(?:实际|任何|其他|"
             r"明确的|完整的)?|"
-            r"没有(?:观察到|看见|确认|证明)(?:任何|其他)?|"
+            r"没有(?:观察到|看到|看见|确认|证明)(?:任何|其他)?|"
             r"无法(?:证实|确认|认定)(?:存在|发生)?(?:完整的)?|"
-            r"不能确认|不可确认)"
+            r"不能确认|不可确认|无(?=拧盖|开盖|合盖|取放|液体|吸液|排液))"
             r"[^，。；！？]{0,96}$",
             clause_before,
         )
@@ -935,9 +978,30 @@ def validate_final_step_action_consistency(
             or parenthetical_list_denial
         )
 
-    def has_positive_occurrence(pattern: str, text: str) -> bool:
+    def has_positive_occurrence(pattern: str, text: str, field: str = "") -> bool:
+        def describes_existing_state(match: re.Match[str]) -> bool:
+            if match.group() != "开盖":
+                return False
+            before = text[max(0, match.start() - 8):match.start()]
+            after = text[match.end():match.end() + 1]
+            clause_start = max(text.rfind(mark, 0, match.start()) for mark in "，。；！？") + 1
+            subject = text[clause_start:match.start()]
+            before_state = bool(
+                field == "physical_change" and "→" in text
+                and match.start() < text.index("→")
+                and re.search(r"(?:瓶|容器)$", subject)
+                and not re.search(r"操作者|手|将|把|使|拿|拧|旋|取|进行|完成", subject)
+            )
+            return bool(
+                before_state
+                or
+                (after == "的" and re.search(r"(?:已|已经)$", before))
+                or re.search(r"(?:瓶|容器)(?:已|仍然|仍|全程保持|始终保持)$", before)
+            )
+
         return any(
             not is_explicitly_negated(text, match.start(), match.end())
+            and not describes_existing_state(match)
             for match in re.finditer(pattern, text)
         )
 
@@ -973,7 +1037,7 @@ def validate_final_step_action_consistency(
                 matched = [
                     pattern
                     for pattern in patterns
-                    if has_positive_occurrence(pattern, text)
+                    if has_positive_occurrence(pattern, text, field)
                 ]
                 if matched:
                     violations.append(
@@ -988,7 +1052,7 @@ def validate_final_step_action_consistency(
                     )
         for step in steps:
             step_index = step.get("step_index")
-            for field in ("current_step", "physical_change"):
+            for field in ("operation_title", "current_step", "physical_change"):
                 text = str(step.get(field) or "").strip()
                 if not text:
                     continue
@@ -1001,7 +1065,7 @@ def validate_final_step_action_consistency(
                     matched = [
                         pattern
                         for pattern in patterns
-                        if has_positive_occurrence(pattern, text)
+                        if has_positive_occurrence(pattern, text, field)
                     ]
                     if matched:
                         violations.append(
@@ -1305,7 +1369,20 @@ def build_cache_identity(config: dict[str, Any], manifest: RunManifest) -> dict[
 
     package_root = Path(__file__).resolve().parent
     code_digest = hashlib.sha256()
+    # Shared orchestration/schema changes still invalidate conservatively. These
+    # modules only affect downstream interpretation, reports, speech or the UI.
+    downstream_modules = {
+        "mllm.py", "mllm_provider.py", "provider_connection.py", "provider_credentials.py",
+        "provider_discovery.py", "ai_settings.py", "speech.py", "speech_worker.py",
+        "speech_semantics.py", "daily_reports.py", "report_presentations.py",
+        "report_brand.py", "partial_delivery.py", "api.py", "cli.py", "stage_refresh.py", "speech_timeline.py",
+        "speech_search.py", "speech_refresh.py", "capture_quality.py",
+    }
+    from .stage_dependencies import CONTROL_MODULES
+    downstream_modules.update(name + ".py" for name in CONTROL_MODULES)
     for source in sorted(package_root.glob("*.py")):
+        if source.name in downstream_modules:
+            continue
         code_digest.update(source.name.encode("utf-8"))
         code_digest.update(source.read_bytes())
 
@@ -1331,13 +1408,14 @@ def build_cache_identity(config: dict[str, Any], manifest: RunManifest) -> dict[
         view.view_id: {
             "videos": [absolute(path) for path in view_source_files(view)],
             "timestamps_csvs": [absolute(path) for path in view_timestamp_files(view)],
+            "audio": [absolute(path) for path in speech.audio_files(view)],
         }
         for view in manifest.views
     }
     all_source_paths = [
         path
         for files in files_by_view.values()
-        for file_type in ("videos", "timestamps_csvs")
+        for file_type in ("videos", "timestamps_csvs", "audio")
         for path in files[file_type]
     ]
     source_snapshots, source_snapshot_report = snapshot_source_paths(
@@ -1356,6 +1434,8 @@ def build_cache_identity(config: dict[str, Any], manifest: RunManifest) -> dict[
                 "view_id": view.view_id,
                 "role": view.role.value,
                 "input_mode": "segmented" if view.segments else "continuous_file",
+                "audio": [{"path": str(path), "snapshot": source_snapshots[path]} for path in files_by_view[view.view_id]["audio"]],
+                "audio_offsets_ms": [part.audio_offset_ms for part in (view.segments or [view])],
                 "videos": [
                     {
                         "path": str(path),
@@ -1386,6 +1466,7 @@ def build_cache_identity(config: dict[str, Any], manifest: RunManifest) -> dict[
     # CV artifacts.  Excluding it lets a recovery run reuse the exact verified
     # scan while forcing fresh semantic calls.
     stable_config.get("project", {}).pop("semantic_cache_mode", None)
+    stable_config.get("project", {}).pop("semantic_recovery_attempt", None)
     # This switch changes only how far a run proceeds. Keeping it out of the
     # CV cache identity lets a later authorized full pipeline reuse the exact
     # accepted cold-start preprocessing ledgers without weakening provenance.
@@ -1401,8 +1482,12 @@ def build_cache_identity(config: dict[str, Any], manifest: RunManifest) -> dict[
     ):
         stable_config.get("storage", {}).pop(key, None)
 
+    downstream_config = {key: stable_config.pop(key, None)
+                         for key in ("mllm", "speech_recognition", "daily_report", "capture_quality")}
+    audio_inputs = [{"view_id": item["view_id"], "audio": item.pop("audio"),
+                     "audio_offsets_ms": item.pop("audio_offsets_ms")} for item in inputs]
     payload = {
-        "schema_version": "visioncortex-cache-identity/1",
+        "schema_version": "visioncortex-cache-identity/2",
         "code_sha256": code_digest.hexdigest(),
         "config": stable_config,
         "models": models,
@@ -1410,6 +1495,10 @@ def build_cache_identity(config: dict[str, Any], manifest: RunManifest) -> dict[
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
     payload["cache_key"] = hashlib.sha256(encoded).hexdigest()[:20]
+    payload["downstream_dependencies"] = {
+        "config": downstream_config, "audio_inputs": audio_inputs,
+        "identity_policy": "ASR worker/runtime/source identity; semantic prompt/provider/evidence identity",
+    }
     payload["execution_cache_policy"] = {
         "mode": str(config.get("project", {}).get("cache_mode") or "reuse"),
         "semantic_mode": str(
@@ -1427,6 +1516,21 @@ def build_cache_identity(config: dict[str, Any], manifest: RunManifest) -> dict[
 class EvidencePipeline:
     def __init__(self, config: dict[str, Any], progress: ProgressCallback | None = None):
         self.config = config
+        mllm = config.get("mllm") or {}
+        configured_timeout = float(mllm.get("timeout_seconds", 180))
+        # Selected-provider connections are verified with a 180 s budget.
+        # Legacy hardware profiles (including retained jobs) must not silently
+        # shorten that budget for the larger real-experiment request.
+        selected_provider = bool(mllm.get("provider") and mllm.get("quality_mode"))
+        effective_timeout = max(180.0, configured_timeout) if selected_provider else configured_timeout
+        if effective_timeout != configured_timeout:
+            self.config = {**config, "mllm": {**mllm, "timeout_seconds": effective_timeout}}
+        self._mllm_timeout_policy = {
+            "configured_timeout_seconds": configured_timeout,
+            "effective_timeout_seconds": effective_timeout,
+            "selected_provider_minimum_seconds": 180 if selected_provider else None,
+            "request_content_changed": False,
+        }
         self.progress = progress or _noop_progress
         self._run_started_perf = 0.0
         self._run_started_iso = ""
@@ -1435,6 +1539,7 @@ class EvidencePipeline:
         self._active_stage_started_iso = ""
         self._stage_metrics: list[dict[str, Any]] = []
         self._startup_metrics: dict[str, Any] = {}
+        self._speech_understanding: dict[str, Any] = {}
         self._preprocessing_completed_seconds: float | None = None
         self._input_view_count = 0
         self._input_mode = "unknown"
@@ -1453,6 +1558,24 @@ class EvidencePipeline:
             "required": False,
             "status": "not_required_by_profile",
         }
+
+    def _run_speech_stage(self, layout, manifest, infos, transforms):
+        started = time.perf_counter()
+        speech.run_stage(
+            self.config, manifest, layout, infos, transforms,
+            progress=lambda message: None,
+        )
+        if speech.enabled(self.config) and (layout.json_config / "Input-Manifests/input_seal.json").is_file():
+            from .speech_timeline import build as build_speech_timeline
+            build_speech_timeline(layout.root)
+        return time.perf_counter() - started
+
+    def _frame_index_path(self, work_dir: Path, filename: str) -> Path:
+        # The evidence cache may live on SMB/NAS. SQLite locking and WAL shared
+        # memory require a local filesystem; only rebuildable query indexes go
+        # here. Authoritative JSONL ledgers remain in their configured cache.
+        from .candidate_index import local_frame_index_path
+        return local_frame_index_path(self.config, work_dir, filename)
 
     def _scan_progress(
         self, phase: str, view_id: str, completed_units: int, total_units: int
@@ -1500,7 +1623,7 @@ class EvidencePipeline:
                 }
             )
         if stage != self._active_stage:
-            if stage in {"completed", "failed"}:
+            if stage in {"completed", "partial", "failed"}:
                 self._active_stage = None
             else:
                 self._active_stage = stage
@@ -1538,7 +1661,8 @@ class EvidencePipeline:
         )
         if self.config.get("storage", {}).get("run_output_mode") == "nas_direct":
             write_json(layout.json_config / "pipeline_status.json", status_payload)
-            stage_note = "处理中" if stage not in {"completed", "failed"} else (
+            stage_note = "处理中" if stage not in {"completed", "partial", "failed"} else (
+                "分析结束，阶段成果已保存" if stage == "partial" else
                 "分析已结束，等待归档校验" if stage == "completed" else "处理失败，已完成的阶段产出保留"
             )
             note_path = layout.root / "处理状态.txt"
@@ -1550,6 +1674,18 @@ class EvidencePipeline:
             temporary_note.replace(note_path)
         if self._publisher is not None:
             self._publisher.publish_status(status_payload)
+
+    def _finish_quality_attention(self, layout: ArchiveLayout, events, groups) -> Path:
+        """Finish an evaluated run without granting formal publication rights."""
+        self._status(layout, "quality_attention", .995, "质量检查已结束，正在保存阶段成果与证据缺口")
+        metrics = self._metrics(events, groups)
+        write_json(layout.json_config / "run_metrics.json", metrics)
+        write_partial_delivery(layout.root, metrics, analysis_finished=True)
+        if self._publisher is not None:
+            self._publisher.publish_directory("Partial-Results")
+            self._publisher.publish_directory("JSON-Config-Files")
+        self._status(layout, "partial", 1.0, "分析结束，部分证据不足；阶段成果与缺口报告已保存")
+        return layout.root
 
     def _complete_stage(
         self,
@@ -1853,12 +1989,14 @@ class EvidencePipeline:
                 key_calls.append(
                     {
                         "stage": "key_material_understanding",
+                        **{key: understanding.get(key) for key in ("provider", "api_protocol", "request_id", "response_model")},
                         "event_id": event.event_id,
                         "model": understanding.get("model", self.config["mllm"]["model"]),
                         "status": understanding.get("status"),
                         "latency_seconds": understanding.get("latency_seconds"),
                         "attempts": understanding.get("attempts"),
                         "cache_reused": bool(understanding.get("cache_reused")),
+                        "attempt_receipts": understanding.get("attempt_receipts", []),
                         "usage": understanding.get("usage", {}),
                     }
                 )
@@ -1867,6 +2005,7 @@ class EvidencePipeline:
                     continue
                 call = {
                     "stage": "participant_visual_review",
+                    **{key: review.get(key) for key in ("provider", "api_protocol", "request_id", "response_model")},
                     "event_id": event.event_id,
                     "input_fingerprint": fingerprint,
                     "model": review.get("model", self.config["mllm"]["model"]),
@@ -1881,8 +2020,28 @@ class EvidencePipeline:
                     visual_calls_by_fingerprint[fingerprint] = call
 
         group_calls = []
+        seen_boundary_reviews = set()
         for group in groups:
+            for review in group.boundary_reviews:
+                identity = review.get("input_fingerprint")
+                if identity in seen_boundary_reviews:
+                    continue
+                seen_boundary_reviews.add(identity)
+                candidate = review.get("result") or {}
+                if "usage" in candidate:
+                    group_calls.append({
+                        "stage": "experiment_boundary_review", "group_id": group.group_id,
+                        **{key: candidate.get(key) for key in ("provider", "model", "api_protocol", "request_id", "response_model", "status", "latency_seconds", "attempts")},
+                        "cache_reused": bool(candidate.get("cache_reused")),
+                        "attempt_receipts": candidate.get("attempt_receipts", []),
+                        "usage": candidate.get("usage", {}),
+                    })
             understanding = group.model_understanding or {}
+            for candidate in (understanding.get("operation_review") or {}).get("calls", []):
+                group_calls.append({"stage": "operation_review", "group_id": group.group_id,
+                    **{key: candidate.get(key) for key in ("provider", "model", "request_id", "response_model", "status", "latency_seconds", "attempts", "input_fingerprint")},
+                    "cache_reused": bool(candidate.get("cache_reused")),
+                    "attempt_receipts": candidate.get("attempt_receipts", []), "usage": candidate.get("usage", {})})
             candidates = [
                 (
                     "experiment_group_understanding_pre_curation",
@@ -1890,6 +2049,14 @@ class EvidencePipeline:
                 ),
                 ("experiment_group_understanding", understanding),
             ]
+            if (
+                understanding.get("refinement_pass") == "deterministic_post_event_semantic_curation"
+                and understanding.get("refinement_model_call_count") == 0
+                and understanding.get("pre_curation_understanding")
+            ):
+                # Deterministic curation preserves the original call receipt in
+                # both views; it does not make or charge a second model call.
+                candidates = candidates[:1]
             for stage_name, candidate in candidates:
                 if not (
                     "usage" in candidate
@@ -1899,6 +2066,7 @@ class EvidencePipeline:
                 group_calls.append(
                     {
                         "stage": stage_name,
+                        **{key: candidate.get(key) for key in ("provider", "api_protocol", "request_id", "response_model")},
                         "group_id": group.group_id,
                         "model": candidate.get(
                             "model", self.config["mllm"]["model"]
@@ -1907,6 +2075,7 @@ class EvidencePipeline:
                         "latency_seconds": candidate.get("latency_seconds"),
                         "attempts": candidate.get("attempts"),
                         "cache_reused": bool(candidate.get("cache_reused")),
+                        "attempt_receipts": candidate.get("attempt_receipts", []),
                         "usage": candidate.get("usage", {}),
                     }
                 )
@@ -1955,7 +2124,13 @@ class EvidencePipeline:
                 for call in visual_calls
             ),
         }
-        all_calls = group_calls + key_calls + visual_calls
+        speech_calls = [
+            {"stage": "recording_speech_understanding", **{
+                key: part.get(key) for key in ("provider", "api_protocol", "request_id", "response_model", "status", "latency_seconds", "attempts", "input_fingerprint")
+            }, "cache_reused": bool(part.get("cache_reused")), "usage": part.get("usage") or {}}
+            for part in self._speech_understanding.get("parts", [])
+        ]
+        all_calls = group_calls + key_calls + visual_calls + speech_calls
         return {
             "run_started_at": self._run_started_iso,
             "run_ended_at": datetime.now(timezone.utc).isoformat(),
@@ -1977,6 +2152,11 @@ class EvidencePipeline:
                 "experiment_groups": experiment_groups,
                 "key_materials": key_materials,
                 "participant_visual_review": visual_review_metrics,
+                "recording_speech_understanding": {
+                    "call_count": len(speech_calls),
+                    "executed_call_count": sum(not call["cache_reused"] for call in speech_calls),
+                    **{field: token_sum(speech_calls, field) for field in ("input_tokens", "output_tokens", "total_tokens")},
+                },
                 "daily_report": {
                     "input_tokens": 0,
                     "output_tokens": 0,
@@ -1992,6 +2172,7 @@ class EvidencePipeline:
                 },
             },
             "mllm_calls": all_calls,
+            "mllm_request_policy": getattr(self, "_mllm_timeout_policy", None),
             "performance_mode": {
                 "concurrent_input_views": self._input_view_count,
                 "concurrent_role_scanners": bool(
@@ -2023,191 +2204,14 @@ class EvidencePipeline:
         phase="fine",
         decode_backends: dict[str, str] | None = None,
     ):
-        role_groups = [
-            [view for view in manifest.views if view.role == ViewRole.FIRST_PERSON],
-            [view for view in manifest.views if view.role == ViewRole.THIRD_PERSON],
-        ]
-        role_groups = [group for group in role_groups if group]
-        kwargs = {
-            "windows": windows,
-            "sample_fps": sample_fps,
-            "image_size": image_size,
-            "keyframes_only": keyframes_only,
-            "phase": phase,
-            "progress_callback": lambda view_id, completed, total: self._scan_progress(
-                phase, view_id, completed, total
-            ),
-        }
-        perf = self.config["performance"]
-        concurrent_roles = (
-            bool(perf.get("concurrent_role_scanners", True))
-            and len(role_groups) > 1
+        from .scan_scheduler import scan_views_concurrently
+        return scan_views_concurrently(
+            self.config, manifest.views, infos, transforms, work_dir,
+            windows=windows, sample_fps=sample_fps, image_size=image_size,
+            keyframes_only=keyframes_only, phase=phase, decode_backends=decode_backends,
+            progress_callback=self._scan_progress, view_runtime=self._view_runtime,
+            scanner=scan_videos,
         )
-        workers_per_role = max(
-            1, int(perf.get("yolo_inference_workers", 1))
-        )
-        scanner_groups: list[tuple[list[ViewInput], str | None]] = []
-        for role_group in role_groups:
-            worker_count = (
-                min(workers_per_role, len(role_group))
-                if concurrent_roles
-                else 1
-            )
-            partitions = [role_group[index::worker_count] for index in range(worker_count)]
-            partitions = [partition for partition in partitions if partition]
-            for index, partition in enumerate(partitions, start=1):
-                scanner_groups.append(
-                    (
-                        partition,
-                        (
-                            f"worker_{index:02d}"
-                            if len(partitions) > 1
-                            else None
-                        ),
-                    )
-                )
-        requested_sources = int(perf.get("source_workers", len(manifest.views)))
-        if requested_sources < len(manifest.views):
-            raise ValueError(
-                f"source_workers={requested_sources} cannot keep {len(manifest.views)} views active"
-            )
-        lanes = list(
-            perf.get(
-                "coarse_decode_lanes"
-                if phase in {"motion_probe", "coarse"}
-                else "fine_decode_lanes",
-                [],
-            )
-        )
-        if not lanes:
-            lanes = ["cuda" if perf.get("ffmpeg_hwaccel") else "cpu"] * len(manifest.views)
-        if len(lanes) < len(manifest.views):
-            lanes.extend([lanes[-1]] * (len(manifest.views) - len(lanes)))
-        default_decode_backends = {
-            view.view_id: lanes[index] for index, view in enumerate(manifest.views)
-        }
-        kwargs["decode_backends"] = {
-            view.view_id: (decode_backends or default_decode_backends).get(
-                view.view_id, default_decode_backends[view.view_id]
-            )
-            for view in manifest.views
-        }
-        if (
-            phase == "coarse"
-            and windows is None
-            and perf.get("synchronized_segment_waves")
-            and concurrent_roles
-            and all(view.segments for view in manifest.views)
-        ):
-            segment_counts = {view.view_id: len(view.segments) for view in manifest.views}
-            if len(set(segment_counts.values())) != 1:
-                raise ValueError(
-                    f"synchronized segment waves require equal segment counts: {segment_counts}"
-                )
-            kwargs["wave_barrier"] = threading.Barrier(len(manifest.views))
-        for view in manifest.views:
-            runtime = self._view_runtime.setdefault(view.view_id, {})
-            runtime.update(
-                {
-                    "role": view.role.value,
-                    "decode_backend": kwargs["decode_backends"][view.view_id],
-                    "state": f"{phase}_running",
-                }
-            )
-        work_dir.mkdir(parents=True, exist_ok=True)
-        (work_dir / f"scheduler_{phase}.json").write_text(
-            json.dumps(
-                {
-                    "schema_version": "visioncortex-role-scheduler/1",
-                    "phase": phase,
-                    "mode": (
-                        "concurrent_role_workers"
-                        if concurrent_roles and len(scanner_groups) > len(role_groups)
-                        else "concurrent_roles"
-                        if concurrent_roles
-                        else "sequential_role_residency"
-                    ),
-                    "role_order": [group[0].role.value for group in role_groups],
-                    "yolo_inference_workers_per_role": workers_per_role,
-                    "active_scanner_count": len(scanner_groups),
-                    "scanner_groups": [
-                        {
-                            "scanner_id": scanner_id,
-                            "role": group[0].role.value,
-                            "view_ids": [view.view_id for view in group],
-                        }
-                        for group, scanner_id in scanner_groups
-                    ],
-                    "configured_decode_lanes": lanes,
-                    "active_view_ids": [view.view_id for view in manifest.views],
-                    "decode_backends": kwargs["decode_backends"],
-                    "reason": (
-                        "configured concurrent role scanners"
-                        if concurrent_roles
-                        else "one TensorRT role model resident at a time to preserve batch capacity"
-                    ),
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-        if not concurrent_roles:
-            result = {}
-            for group in role_groups:
-                group_kwargs = dict(kwargs)
-                group_kwargs["decode_backends"] = {
-                    view.view_id: kwargs["decode_backends"][view.view_id]
-                    for view in group
-                }
-                if (
-                    phase == "coarse"
-                    and windows is None
-                    and perf.get("synchronized_segment_waves")
-                    and all(view.segments for view in group)
-                    and len(group) > 1
-                ):
-                    group_kwargs["wave_barrier"] = threading.Barrier(len(group))
-                for view in group:
-                    self._view_runtime[view.view_id]["decode_backend"] = group_kwargs[
-                        "decode_backends"
-                    ][view.view_id]
-                result.update(
-                    scan_videos(
-                        group,
-                        infos,
-                        transforms,
-                        work_dir,
-                        self.config,
-                        **group_kwargs,
-                    )
-                )
-            for view in manifest.views:
-                self._view_runtime[view.view_id]["state"] = f"{phase}_completed"
-            return result
-        result = {}
-        with ThreadPoolExecutor(
-            max_workers=len(scanner_groups),
-            thread_name_prefix="role-scanner",
-        ) as executor:
-            futures = [
-                executor.submit(
-                    scan_videos,
-                    group,
-                    infos,
-                    transforms,
-                    work_dir,
-                    self.config,
-                    scanner_id=scanner_id,
-                    **kwargs,
-                )
-                for group, scanner_id in scanner_groups
-            ]
-            for future in futures:
-                result.update(future.result())
-        for view in manifest.views:
-            self._view_runtime[view.view_id]["state"] = f"{phase}_completed"
-        return result
 
     def _motion_probe_views(self, manifest: RunManifest) -> list[ViewInput]:
         """Choose sentinel views; bounded YOLO scans still use all eligible views."""
@@ -2896,6 +2900,18 @@ class EvidencePipeline:
         third_views = [
             view for view in fine_views if view.role == ViewRole.THIRD_PERSON
         ]
+        tp_global_coverage = {
+            view.view_id: self._merge_time_windows(
+                [
+                    (
+                        transforms[view.view_id].to_global(start),
+                        transforms[view.view_id].to_global(end),
+                    )
+                    for start, end in actual_windows.get(view.view_id, [])
+                ]
+            )
+            for view in third_views
+        }
         positions = {view.view_id: index for index, view in enumerate(fine_views)}
         reports: list[dict[str, Any]] = []
         selected_plans: list[dict[str, Any]] = []
@@ -2950,6 +2966,26 @@ class EvidencePipeline:
                 and candidate.global_start_ms <= target_end_ms
             ]
 
+            def candidate_scan_covered(
+                candidate: ActionCandidate, supporting_events: list[EvidenceEvent]
+            ) -> bool:
+                # A same-clock camera or an early event is not proof that the
+                # event's TP view was scanned throughout this FP fragment.
+                supporting_tp_views = {
+                    view_id
+                    for event in supporting_events
+                    for view_id in event.supporting_views
+                    if view_id in tp_global_coverage
+                }
+                return any(
+                    self._window_fully_covered(
+                        max(target_start_ms, candidate.global_start_ms),
+                        min(target_end_ms, candidate.global_end_ms),
+                        tp_global_coverage[view_id],
+                    )
+                    for view_id in supporting_tp_views
+                )
+
             def candidate_supported(candidate: ActionCandidate) -> bool:
                 for event in cross_view_events:
                     if event.action_type != candidate.action_type:
@@ -2961,9 +2997,10 @@ class EvidencePipeline:
                     overlap = min(
                         event.global_end_ms, candidate.global_end_ms
                     ) - max(event.global_start_ms, candidate.global_start_ms)
-                    if overlap >= 0.0 or abs(
-                        event.key_global_ms - candidate.key_global_ms
-                    ) <= 1500.0:
+                    if (
+                        overlap >= 0.0
+                        or abs(event.key_global_ms - candidate.key_global_ms) <= 1500.0
+                    ) and candidate_scan_covered(candidate, [event]):
                         return True
                 return False
 
@@ -2996,24 +3033,38 @@ class EvidencePipeline:
                     if event.global_end_ms >= cluster_start
                     and event.global_start_ms <= cluster_end
                 ]
-                supported = bool(supporting_cross_view_events)
-                if supported:
-                    cross_view_supported_candidate_ids.update(
-                        item.candidate_id for item in cluster
-                    )
+                covered_ids = {
+                    item.candidate_id
+                    for item in cluster
+                    # Clustering schedules recall; it must not transfer an
+                    # early workstation's proof to later, unrelated activity.
+                    if candidate_scan_covered(item, [
+                        event for event in supporting_cross_view_events
+                        if event.global_end_ms >= item.global_start_ms
+                        and event.global_start_ms <= item.global_end_ms
+                    ])
+                }
+                cross_view_supported_candidate_ids.update(covered_ids)
+                supported = len(covered_ids) == len(cluster)
+                remaining = [item for item in cluster if item.candidate_id not in covered_ids]
+                reported_candidates = cluster if supported else remaining
                 raw_cluster_reports.append({
                     "cluster_id": f"{group.group_id}-UNRESOLVED-{index:03d}",
                     "global_start_ms": cluster_start,
                     "global_end_ms": cluster_end,
-                    "candidate_ids": [item.candidate_id for item in cluster],
-                    "candidate_count": len(cluster),
+                    "candidate_ids": [item.candidate_id for item in reported_candidates],
+                    "candidate_count": len(reported_candidates),
+                    "source_cluster_candidate_count": len(cluster),
+                    "scan_covered_candidate_ids": sorted(covered_ids),
                     "cross_view_event_ids": [
                         event.event_id for event in supporting_cross_view_events
                     ],
                     "cross_view_supported": supported,
                     "status": (
-                        "satisfied_by_temporally_overlapping_cross_view_event"
+                        "satisfied_by_cross_view_event_and_tp_scan_coverage"
                         if supported
+                        else "unresolved_missing_supporting_tp_scan_coverage"
+                        if supporting_cross_view_events
                         else "unresolved"
                     ),
                 })
@@ -3046,6 +3097,7 @@ class EvidencePipeline:
                 "raw_candidate_level_unresolved_anchor_count": len(raw_unresolved),
                 "unresolved_anchor_count": len(unresolved),
                 "minimum_unresolved_anchors": minimum_unresolved,
+                "coverage_policy": "each_candidate_requires_local_event_and_supporting_tp_scan_coverage",
                 "unresolved_candidate_ids": [
                     candidate.candidate_id for candidate in unresolved
                 ],
@@ -3369,7 +3421,7 @@ class EvidencePipeline:
         fine_index_ingest_reports: list[dict[str, Any]] = []
         if bool(perf.get("fine_frame_index_enabled", False)):
             fine_frame_index = create_fine_frame_index(
-                work_dir / "fine_frame_index.sqlite3"
+                self._frame_index_path(work_dir, "fine_frame_index.sqlite3")
             )
         ordered_initial, ordered_supplemental = self._progressive_fine_view_order(
             fine_views,
@@ -4360,7 +4412,14 @@ class EvidencePipeline:
         else:
             bottleneck = "mixed_or_balanced"
             next_action = "use per-role telemetry before changing concurrency"
+        component_reports = [r["component_timings"] for r in role_reports if r.get("component_timings")]
+        component_keys = {k for r in component_reports for k, v in r.items()
+                          if isinstance(v, (int, float)) and not isinstance(v, bool)}
+        components = {k: round(sum(r.get(k, 0) for r in component_reports), 6) for k in component_keys}
         bottleneck_diagnosis = {
+            "component_timings": components,
+            "component_profiled_workers": len(component_reports),
+            "component_expected_workers": len(role_reports),
             "classification": bottleneck,
             "next_action": next_action,
             "observed_role_seconds": round(observed_seconds, 6),
@@ -4402,7 +4461,11 @@ class EvidencePipeline:
             },
         )
 
+    @analysis_execution
     def run(self, manifest: RunManifest) -> Path:
+        from .stage_execution import StageExecutor
+        stage_executor = StageExecutor(self.config)
+        speech_future = None
         self._run_started_perf = time.perf_counter()
         self._run_started_iso = datetime.now(timezone.utc).isoformat()
         self._active_stage = None
@@ -4493,7 +4556,7 @@ class EvidencePipeline:
             source_paths = [
                 path
                 for view in manifest.views
-                for path in view_source_files(view) + view_timestamp_files(view)
+                for path in view_source_files(view) + view_timestamp_files(view) + speech.audio_files(view)
             ]
             source_snapshots, source_validation = snapshot_source_paths(
                 source_paths,
@@ -4521,6 +4584,9 @@ class EvidencePipeline:
                 6,
             )
             preflight_breakdown["source_validation"] = source_validation
+            from .capture_quality import inspect as inspect_capture
+            capture = inspect_capture(manifest, self.config)
+            write_json(layout.json_config / "capture_quality.json", capture)
             preflight_step_started = time.perf_counter()
             model_report = validate_models(self.config)
             self._model_certification_audit = (
@@ -4626,7 +4692,7 @@ class EvidencePipeline:
             self._status(layout, "alignment", 0.08, "最近邻时间戳拟合与视觉锚点校准")
             alignment_runtime: dict[str, Any] = {}
             alignment_step_started = time.perf_counter()
-            transforms, _ = build_alignments(manifest.views, infos, self.config)
+            transforms, _ = stage_executor.run("alignment", build_alignments, manifest.views, infos, self.config)
             alignment_runtime["fit_seconds"] = round(
                 time.perf_counter() - alignment_step_started,
                 6,
@@ -4685,6 +4751,11 @@ class EvidencePipeline:
                 ],
             )
 
+            # Speech and visual preprocessing share execution controls but do not
+            # depend on one another. Join only before semantic consumers.
+            speech_future = stage_executor.submit(
+                'stt', self._run_speech_stage, layout, manifest, infos, transforms)
+
             motion_probe_views = self._motion_probe_views(manifest)
             preselected_coarse_views = self._coarse_scan_views(manifest)
             coarse_full_timeline = bool(
@@ -4731,7 +4802,7 @@ class EvidencePipeline:
                 if coarse_frame_index is not None:
                     return coarse_frame_index
                 coarse_frame_index, coarse_index_report = build_coarse_frame_index(
-                    layout.work / "coarse-frame-index.sqlite3",
+                    self._frame_index_path(layout.work, "coarse-frame-index.sqlite3"),
                     views,
                     infos,
                     paths,
@@ -4750,7 +4821,8 @@ class EvidencePipeline:
                     ),
                 )
                 manifest_report = dict(coarse_index_report)
-                manifest_report["index_path"] = "Work/coarse-frame-index.sqlite3"
+                manifest_report["index_path"] = str(coarse_frame_index.path)
+                manifest_report["index_storage"] = "local_runtime_rebuildable"
                 write_json(
                     layout.json_config / "coarse_frame_index_manifest.json",
                     manifest_report,
@@ -5638,7 +5710,7 @@ class EvidencePipeline:
                     "fine_frame_index_enabled", False
                 ):
                     fine_frame_index = create_fine_frame_index(
-                        fine_work_dir / "fine_frame_index.sqlite3"
+                        self._frame_index_path(fine_work_dir, "fine_frame_index.sqlite3")
                     )
                     fine_runtime_index = fine_frame_index
                     ingest_report = ingest_fine_frame_ledgers(
@@ -5771,12 +5843,20 @@ class EvidencePipeline:
                     scout_work_dir,
                     "fine_scout",
                 )
+            from .movement_verification import verify_movement_candidates
+
+            movement_report = verify_movement_candidates(
+                candidates, scanned_fine_views, infos, detection_paths, self.config,
+                progress=lambda done, total: self._status(
+                    layout, "candidate_fine", 0.68, f"移动画面核验 {done}/{total}"
+                ),
+            )
+            write_json(layout.json_config / "movement_visual_verification.json", movement_report)
             if self.config["archive"].get("keep_debug_candidates"):
-                write_json(
-                    layout.json_config / "candidate_layer.json",
-                    [candidate.model_dump(mode="json") for candidate in candidates],
-                )
+                write_json(layout.json_config / "candidate_layer.json",
+                           [candidate.model_dump(mode="json") for candidate in candidates])
             fine_artifacts = [
+                layout.json_config / "movement_visual_verification.json",
                 layout.json_config / "scan_runtime_fine.json",
                 layout.json_config / "fine_scan_windows.json",
             ]
@@ -5852,6 +5932,8 @@ class EvidencePipeline:
             )
             write_json(semantic_review_plan_path, semantic_review_plan)
             raw_boundary_receipts: list[dict[str, Any]] = []
+            activity_intervals = build_view_activity_intervals(
+                events, boundary_candidates, scanned_fine_views, transforms, fine_windows, self.config)
             segmentation_boundary_candidates = (
                 [] if exhaustive_full_timeline else boundary_candidates
             )
@@ -5946,6 +6028,7 @@ class EvidencePipeline:
                     "raw_segments": [
                         segment.model_dump(mode="json") for segment in raw_segments
                     ],
+                    "activity_intervals_by_view": activity_intervals,
                     "normalized_segments": [
                         segment.model_dump(mode="json")
                         for segment in normalized_segments
@@ -5968,6 +6051,13 @@ class EvidencePipeline:
                     "semantic_review_plan": semantic_review_plan,
                 },
             )
+            speech_duration = speech_future.result()
+            self._stage_metrics.append({"stage": "speech", "duration_seconds": speech_duration, "execution": "parallel_with_video"})
+            self._complete_stage(layout, "speech", [
+                layout.json_config / "speech.json",
+                *([layout.json_config / "speech_timeline.json"] if (layout.json_config / "speech_timeline.json").is_file() else []),
+                *([layout.key_materials / "Experiment-Audio"] if (layout.key_materials / "Experiment-Audio").is_dir() else []),
+            ])
             boundary_precheck = self._run_boundary_precheck(
                 layout, groups, progressive_report=progressive_report
             )
@@ -6077,6 +6167,36 @@ class EvidencePipeline:
                 return layout.root
 
             self._status(layout, "experiment_understanding", 0.72, "用完整有界双视角故事板命名实验并核验连续性")
+            if groups:
+                (layout.json_config / "speech_understanding.json").unlink(missing_ok=True)
+            if not groups and speech.enabled(self.config):
+                from .speech_semantics import analyze_unsegmented_recording
+
+                self._status(layout, "experiment_understanding", 0.72, "未发现可确认实验片段，正在用实际画面核对实验录音")
+                try:
+                    self._speech_understanding = analyze_unsegmented_recording(
+                        layout, manifest.views, infos, transforms, self.config
+                    )
+                finally:
+                    recording_receipt = layout.json_config / "speech_understanding.json"
+                    if recording_receipt.is_file():
+                        self._speech_understanding = json.loads(recording_receipt.read_text(encoding="utf-8"))
+            from .boundary_review import review_experiment_boundaries
+
+            groups = review_experiment_boundaries(
+                layout, groups, segments, events, manifest.views, infos, transforms, self.config
+            )
+            if any(group.boundary_reviews for group in groups):
+                # Retain the original CV partition and publish the reconciled
+                # group identities before names, clips and key materials exist.
+                audit_path = layout.json_config / "audit_layer.json"
+                audit = json.loads(audit_path.read_text(encoding="utf-8-sig"))
+                audit["experiment_groups_before_boundary_review"] = audit.get("experiment_groups", [])
+                audit["experiment_groups"] = [g.model_dump(mode="json") for g in groups]
+                audit["segments"] = [s.model_dump(mode="json") for s in segments]
+                write_json(audit_path, audit)
+                write_json(layout.json_config / "boundary_precheck_before_semantic_review.json", boundary_precheck)
+                boundary_precheck = self._run_boundary_precheck(layout, groups, progressive_report=progressive_report)
             analyze_experiment_groups(
                 layout, groups, segments, events, manifest.views, infos, transforms, self.config
             )
@@ -6183,6 +6303,7 @@ class EvidencePipeline:
                 "experiment_understanding",
                 [
                     group_understanding_path,
+                    *([layout.json_config / "speech_understanding.json", layout.root / "Key-Materials/Experiment-Audio"] if (layout.json_config / "speech_understanding.json").is_file() else []),
                     group_semantic_recall_path,
                     key_selection_path,
                     layout.json_config / "run_metrics_live.json",
@@ -6232,8 +6353,14 @@ class EvidencePipeline:
                 ],
             )
 
-            self._status(layout, "mllm", 0.92, "调用豆包理解去重后的关键动作当前/下一步骤")
-            analyze_key_materials(layout, key_events, self.config)
+            self._status(layout, "mllm", 0.92, "调用已配置的图像模型理解去重后的关键动作当前/下一步骤")
+            analyze_key_materials(
+                layout, key_events, self.config,
+                progress_callback=lambda done, total: self._status(
+                    layout, "mllm", 0.92 + 0.009 * done / max(1, total),
+                    f"关键动作模型理解已处理 {done}/{total}，正在核验画面证据",
+                ),
+            )
             reviewed_key_events = list(key_events)
             self._complete_stage(
                 layout,
@@ -6411,6 +6538,9 @@ class EvidencePipeline:
             # adjudication, so rebuild them deterministically instead of paying
             # for a duplicate group MLLM pass over the same evidence.
             refine_groups_from_final_events(groups, key_events)
+            if self.config.get("mllm", {}).get("enabled") and self.config["mllm"].get("operation_review", {}).get("enabled", False):
+                from .operation_review import review
+                review(layout.root, groups, key_events, self.config)
             normalize_final_group_action_language(groups, key_events)
             for group in groups:
                 for segment in segments:
@@ -6474,11 +6604,14 @@ class EvidencePipeline:
             quality_acceptance = self._run_quality_acceptance(
                 layout, groups, key_events
             )
+            from .result_review import inspect as inspect_result_completeness
+            inspect_result_completeness(layout.root, save=True)
             if quality_acceptance.get("passed") is not True:
-                raise RuntimeError(
-                    "Automatic experiment/material quality acceptance failed; "
-                    f"see {layout.json_config / 'quality_acceptance.json'}"
-                )
+                return self._finish_quality_attention(layout, events, groups)
+            # A successful retry must not publish the previous attempt's
+            # current partial report. The retry endpoint preserves its history.
+            (layout.json_config / "partial_delivery.json").unlink(missing_ok=True)
+            (layout.root / "Partial-Results/Partial-Evidence-Report.html").unlink(missing_ok=True)
             self._complete_stage(layout, "package", [layout.json_config])
             self._status(layout, "daily_report", 0.98, "从已验收证据生成实验室日报并执行一致性校验")
             generate_daily_report_archive(
@@ -6534,14 +6667,29 @@ class EvidencePipeline:
             return layout.root
         except Exception as exc:
             self._status(layout, "failed", 1.0, f"{type(exc).__name__}: {exc}")
+            partial_metrics = self._metrics(
+                locals().get("events", []), locals().get("groups", [])
+            )
             write_json(
                 layout.json_config / "run_metrics.json",
-                self._metrics(locals().get("events", []), locals().get("groups", [])),
+                partial_metrics,
             )
+            try:
+                write_partial_delivery(layout.root, partial_metrics)
+                if self._publisher is not None:
+                    self._publisher.publish_directory("Partial-Results")
+            except (OSError, ValueError, KeyError, TypeError) as report_exc:
+                # Retain the original failure and existing media even if a
+                # damaged control file prevents the supplemental report.
+                write_json(layout.json_config / "partial_delivery_error.json", {
+                    "status": "failed",
+                    "exception_class": type(report_exc).__name__,
+                })
             if self._publisher is not None:
                 self._publisher.publish_directory("JSON-Config-Files")
             raise
         finally:
+            stage_executor.close()
             if self._resource_monitor is not None:
                 self._resource_monitor.stop()
                 if self._publisher is not None:
@@ -6561,134 +6709,9 @@ class EvidencePipeline:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             handle.write(json.dumps({"pid": os.getpid(), "started_at": datetime.now(timezone.utc).isoformat()}))
 
-    def _fine_windows(
-        self,
-        candidates,
-        infos,
-        transforms,
-        padding_seconds: float | None = None,
-    ) -> dict[str, list[tuple[float, float]]]:
-        if bool(
-            self.config["performance"].get(
-                "exhaustive_negative_audit_full_timeline", False
-            )
-            or self.config["performance"].get(
-                "exhaustive_full_timeline_scan", False
-            )
-        ):
-            return {
-                view_id: [(0.0, float(info.duration_ms))]
-                for view_id, info in infos.items()
-                if float(info.duration_ms) > 0.0
-            }
-        padding = float(
-            self.config["performance"]["fine_window_padding_seconds"]
-            if padding_seconds is None
-            else padding_seconds
-        ) * 1000.0
-        merge_gap = max(
-            0.0,
-            float(
-                self.config["performance"].get(
-                    "fine_window_merge_gap_seconds", 0.0
-                )
-            )
-            * 1000.0,
-        )
-        candidate_list = list(candidates)
-        risk_extra_by_id: dict[str, float] = {}
-        perf = self.config["performance"]
-        if perf.get("fine_risk_window_expansion_enabled", False):
-            configured_actions = {
-                str(item).strip()
-                for item in perf.get("fine_risk_action_types", [])
-                if str(item).strip()
-            }
-            low_confidence_threshold = float(
-                perf.get("fine_risk_low_confidence_threshold", 0.70)
-            )
-            extra_padding_ms = max(
-                0.0,
-                float(perf.get("fine_risk_extra_padding_seconds", 30.0))
-                * 1000.0,
-            )
-            conflict_gap_ms = max(
-                0.0,
-                float(perf.get("fine_risk_conflict_gap_seconds", 15.0))
-                * 1000.0,
-            )
-            for candidate in candidate_list:
-                if (
-                    candidate.action_type.value in configured_actions
-                    or float(candidate.confidence) < low_confidence_threshold
-                ):
-                    risk_extra_by_id[candidate.candidate_id] = extra_padding_ms
-            active_candidates: list[ActionCandidate] = []
-            for current in sorted(
-                candidate_list,
-                key=lambda item: (item.global_start_ms, item.global_end_ms),
-            ):
-                active_candidates = [
-                    previous
-                    for previous in active_candidates
-                    if previous.global_end_ms + conflict_gap_ms
-                    >= current.global_start_ms
-                ]
-                for previous in active_candidates:
-                    if previous.action_type == current.action_type:
-                        continue
-                    risk_extra_by_id[previous.candidate_id] = extra_padding_ms
-                    risk_extra_by_id[current.candidate_id] = extra_padding_ms
-                active_candidates.append(current)
-        grouped: dict[str, list[tuple[float, float]]] = {view_id: [] for view_id in infos}
-        for candidate in candidate_list:
-            candidate_padding = padding + risk_extra_by_id.get(
-                candidate.candidate_id, 0.0
-            )
-            for view_id, info in infos.items():
-                alignment_extra = 0.0
-                transform = transforms[view_id]
-                if (
-                    perf.get("fine_low_alignment_extra_padding_enabled", False)
-                    and (
-                        transform.state != "aligned"
-                        or float(transform.confidence)
-                        < float(
-                            perf.get(
-                                "fine_low_alignment_confidence_threshold", 0.80
-                            )
-                        )
-                    )
-                ):
-                    alignment_extra = max(
-                        0.0,
-                        float(
-                            perf.get(
-                                "fine_low_alignment_extra_padding_seconds", 30.0
-                            )
-                        )
-                        * 1000.0,
-                    )
-                global_start = (
-                    candidate.global_start_ms - candidate_padding - alignment_extra
-                )
-                global_end = (
-                    candidate.global_end_ms + candidate_padding + alignment_extra
-                )
-                local_start = max(0.0, transforms[view_id].to_local(global_start))
-                local_end = min(info.duration_ms, transforms[view_id].to_local(global_end))
-                if local_end > local_start:
-                    grouped[view_id].append((local_start, local_end))
-        merged: dict[str, list[tuple[float, float]]] = {}
-        for view_id, windows in grouped.items():
-            result: list[list[float]] = []
-            for start, end in sorted(windows):
-                if result and start <= result[-1][1] + merge_gap:
-                    result[-1][1] = max(result[-1][1], end)
-                else:
-                    result.append([start, end])
-            merged[view_id] = [(item[0], item[1]) for item in result]
-        return merged
+    def _fine_windows(self, candidates, infos, transforms, padding_seconds=None):
+        from .actions import fine_scan_windows
+        return fine_scan_windows(candidates, infos, transforms, self.config, padding_seconds)
 
     def _intersect_fine_windows_with_usable_alignment(
         self,

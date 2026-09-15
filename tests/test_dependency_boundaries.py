@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import ast
 import re
+import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -66,3 +68,27 @@ def test_production_installers_exclude_development_extras():
     ):
         locked = (ROOT / relative).read_text(encoding="utf-8").casefold()
         assert "pytest" not in locked
+
+
+def test_training_entry_point_defers_optional_imports_and_preserves_symbols():
+    # A clean process verifies imports even when other tests use model stubs.
+    subprocess.run([sys.executable, "-c", '''
+import sys
+from types import ModuleType
+from visioncortex import project_ignore_training as adapter
+assert not any(name in sys.modules for name in ("torch", "ultralytics", "visioncortex.training.ignore"))
+try:
+    adapter.unknown_training_symbol
+except AttributeError:
+    pass
+else:
+    raise AssertionError("Unknown symbols must not initialize training")
+stub = ModuleType("visioncortex.training.ignore")
+for name in adapter.__all__:
+    setattr(stub, name, object())
+sys.modules[stub.__name__] = stub
+for name in adapter.__all__:
+    assert name in dir(adapter)
+    assert getattr(adapter, name) is getattr(stub, name)
+    assert getattr(adapter, name) is getattr(stub, name)
+'''], check=True, cwd=ROOT)

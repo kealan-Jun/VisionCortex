@@ -64,6 +64,14 @@ def test_reviewed_baseline_matches_five_groups_and_required_material_types():
     assert report["key_materials"]["missing_action_types"] == []
 
 
+def test_incomplete_material_attempt_cannot_pass_with_stale_complete_aliases():
+    item = event(1, ActionType.OBJECT_MOVEMENT)
+    item.observability["key_material_materialization"] = {"status": "partial"}
+    report = validate_experiment_and_material_quality([], [item], None)
+    assert report["key_materials"]["passed"] is False
+    assert report["key_materials"]["media_complete_count"] == 0
+
+
 def test_quality_acceptance_reports_boundary_and_continuity_regression():
     baseline = {
         "authority": "test",

@@ -5,7 +5,6 @@ from copy import deepcopy
 import hashlib
 import json
 import math
-import os
 from pathlib import Path
 import time
 from typing import Any, Callable
@@ -15,6 +14,8 @@ import cv2
 import numpy as np
 
 from .mllm import ArkAnalyzer
+from .mllm_provider import vision_request_identity
+from .provider_credentials import key_configured
 
 
 VERSION = "participant-visual-review/1"
@@ -179,9 +180,17 @@ class ParticipantVisualReviewer:
         self.cache = Path(config["storage"]["local_cache_root"]) / "participant-visual-review-v1"
         self.work_root = work_root / "participant-visual-review"
         self.index_path = output_root / "participant_visual_review.json"
+        self.recovery_attempt = config.get("project", {}).get("semantic_recovery_attempt")
         self.records: dict[str, dict] = {}
         if self.enabled and self.index_path.is_file():
-            self.records = json.loads(self.index_path.read_text())["requests"]
+            previous = json.loads(self.index_path.read_text())
+            if previous.get("recovery_attempt") == self.recovery_attempt:
+                self.records = previous["requests"]
+            else:
+                # An explicit retry gets a new bounded spending ledger. Keep
+                # unknown usage from the earlier attempt in its own receipt.
+                history = output_root / "participant-visual-review-attempts"
+                _write(history / f"{_fingerprint(previous)}.json", previous)
         self.max_calls = int(self.settings.get("max_calls_per_run", 32))
         self.max_candidates = int(self.settings.get("max_candidates_per_view", 20))
         if not 0 <= self.max_calls <= 128 or not 1 <= self.max_candidates <= 20:
@@ -196,7 +205,8 @@ class ParticipantVisualReviewer:
         if prior.get("request_attempted") and not prior.get("cache_reused"):
             record["cache_reused"] = False
         self.records[key] = record
-        _write(self.index_path, {"schema_version": VERSION, "requests": self.records})
+        _write(self.index_path, {"schema_version": VERSION, "requests": self.records,
+                                "recovery_attempt": self.recovery_attempt})
         ledger = event.observability.setdefault("participant_visual_review", {})
         ledger[key] = record
         return record
@@ -347,15 +357,28 @@ class ParticipantVisualReviewer:
         }
         images = [(label, view[key]) for view in prepared for label, key in ((f"{view['view_id']} original", "raw_path"), (f"{view['view_id']} numbered candidates", "grid_path"))]
         request = {"version": VERSION, "prompt": prompt, "metadata": metadata, "model": self.config["mllm"]["model"], "base_url": self.config["mllm"]["base_url"], "max_output_tokens": int(self.settings.get("max_output_tokens", 1800)), "namespace": self.config.get("project", {}).get("cache_namespace"), "proposals": [{"fingerprint": view["proposal_fingerprint"], "candidates": view["candidates"]} for view in prepared], "images": [hashlib.sha256(path.read_bytes()).hexdigest() for _, path in images]}
+        request["request_policy_sha256"] = vision_request_identity(
+            {**self.config["mllm"], "max_output_tokens": request["max_output_tokens"]}
+        )
         fingerprint = _fingerprint(request)
         cache_path = self.cache / "requests" / f"{fingerprint}.json"
+        original_cache_path = cache_path
+        if self.recovery_attempt and cache_path.is_file():
+            previous = json.loads(cache_path.read_text())
+            if previous.get("status") != "completed":
+                recovery_key = _fingerprint(self.recovery_attempt)
+                history = self.cache / "request-recovery" / fingerprint
+                old_receipt = history / f"{recovery_key}.previous.json"
+                if not old_receipt.exists():
+                    _write(old_receipt, previous)
+                cache_path = history / f"{recovery_key}.json"
         record = {"schema_version": VERSION, "input_fingerprint": fingerprint, "model": request["model"], "participant_class": participant_class, "status": "pending", "request_attempted": False, "cache_reused": False, "usage": {}, "candidates_by_view": {view["view_id"]: view["candidates"] for view in prepared}}
         if cache_path.exists():
             cached = json.loads(cache_path.read_text())
             record = {**cached, "cache_reused": True}
         elif not any(view["candidates"] for view in prepared):
             record["status"] = "no_candidates"
-        elif not self.config["mllm"].get("enabled") or not os.getenv(str(self.config["mllm"]["api_key_env"])):
+        elif not self.config["mllm"].get("enabled") or not key_configured(self.config["mllm"]):
             record["status"] = "unavailable"
         elif sum(bool(row.get("request_attempted")) and not row.get("cache_reused") for row in self.records.values()) >= self.max_calls:
             record["status"] = "budget_exhausted"
@@ -378,7 +401,7 @@ class ParticipantVisualReviewer:
                 try:
                     result = analyzer._call(prompt, metadata, images, max_images=len(images))
                     result, _ = _normalize_explicitly_invisible_selections(result)
-                    record.update({key: result[key] for key in ("status", "model", "usage", "latency_seconds", "attempts", "views") if key in result})
+                    record.update({key: result[key] for key in ("status", "model", "provider", "api_protocol", "request_id", "response_model", "usage", "latency_seconds", "attempts", "views") if key in result})
                     for key in ("raw_views", "response_normalizations"):
                         if key in result:
                             record[key] = result[key]
@@ -418,6 +441,8 @@ class ParticipantVisualReviewer:
             record.update({"status": "invalid_response", "validation_error": str(exc)})
             self._remember(record, event)
             raise RuntimeError(f"Invalid cached participant review; retained receipt {fingerprint}") from exc
+        if cache_path != original_cache_path and record.get("status") == "completed":
+            _write(original_cache_path, record)
         plan = {}
         for view in prepared:
             selected = selections[view["view_id"]]

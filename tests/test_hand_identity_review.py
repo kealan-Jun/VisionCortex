@@ -3,6 +3,18 @@ from copy import deepcopy
 from visioncortex.mllm import normalize_uncalibrated_hand_identity
 
 
+def test_readable_hand_descriptions_preserve_distinct_actions_and_original_words():
+    raw = {"status": "completed", "operation_title": "左手扶住试管架",
+           "current_step": "左、右手握住架子；左手仍扶在架侧、右手已抽离。",
+           "physical_change": {"before": "左手手指接触架子", "after": "左右手已离开"}}
+    result = normalize_uncalibrated_hand_identity(raw)
+    assert result["current_step"] == "双手握住架子；一只手仍扶在架侧、另一只手已抽离。"
+    assert result["physical_change"] == {"before": "手指接触架子", "after": "双手已离开"}
+    assert result["operation_title"] == "手扶住试管架"
+    assert result["hand_identity_review"]["original_text_fields"]["current_step"] == raw["current_step"]
+    assert raw["current_step"].startswith("左、右手")
+
+
 def test_cross_view_hand_assignments_remain_unknown_without_calibration():
     raw = {
         "status": "completed",

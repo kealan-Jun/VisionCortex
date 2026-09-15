@@ -9,6 +9,7 @@ import numpy as np
 from .candidate_index import CoarseFrameIndex, FineFrameIndex
 from .detection import iter_frame_evidence
 from .ordering import candidate_sort_key
+from .open_vocabulary_runtime import load_yolo_world_with_local_clip, serialized_open_vocabulary
 from .schemas import ActionCandidate, ActionType, FrameEvidence, VideoInfo, ViewInput
 from .video_io import read_view_frame_at
 
@@ -187,6 +188,7 @@ def select_suspicious_coarse_frames(
     )
 
 
+@serialized_open_vocabulary
 def _yolo_world_detections(
     frame: np.ndarray,
     settings: dict[str, Any],
@@ -208,13 +210,12 @@ def _yolo_world_detections(
     # Share the final-key-frame cache so the same configured model is loaded
     # only once during a run.  Importing lazily avoids adding a startup cost.
     from . import archive as archive_module
-    from ultralytics import YOLOWorld
 
     cached = archive_module._OPEN_VOCABULARY_MODEL_CACHE.get(str(model_path))
     model_load_seconds = 0.0
     if cached is None:
         started = time.perf_counter()
-        cached = {"model": YOLOWorld(str(model_path)), "prompts": None}
+        cached = {"model": load_yolo_world_with_local_clip(settings), "prompts": None}
         archive_module._OPEN_VOCABULARY_MODEL_CACHE[str(model_path)] = cached
         model_load_seconds = time.perf_counter() - started
     model = cached["model"]

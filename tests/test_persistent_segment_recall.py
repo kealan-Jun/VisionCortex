@@ -890,6 +890,88 @@ def test_group_local_recall_closes_each_temporal_cluster_with_cross_view_proof(
     ] == ["E-CROSS"]
 
 
+@pytest.mark.parametrize(
+    ("long_matching_fragments", "unrelated_view_fully_scanned", "distant_support_only"),
+    [(False, False, False), (True, False, False),
+     (False, True, False), (True, True, False), (False, False, True)],
+)
+def test_group_recall_does_not_bridge_unscanned_middle(
+    default_config, long_matching_fragments, unrelated_view_fully_scanned,
+    distant_support_only,
+):
+    """An early event cannot prove coverage of the later weighing interval."""
+    default_config["performance"]["fine_group_recall_min_unresolved_anchors"] = 3
+    default_config["performance"]["fine_group_recall_padding_seconds"] = 0
+    pipeline = EvidencePipeline(default_config)
+    views = [
+        ViewInput(view_id="fp", role=ViewRole.FIRST_PERSON, video=Path("fp.mp4")),
+        ViewInput(view_id="tp", role=ViewRole.THIRD_PERSON, video=Path("tp.mp4")),
+        ViewInput(view_id="other", role=ViewRole.THIRD_PERSON, video=Path("other.mp4")),
+    ]
+    infos = {
+        v.view_id: VideoInfo(path=v.video, duration_ms=1_000_000.0,
+                             fps=30.0, width=16, height=16, frame_count=30_000)
+        for v in views
+    }
+    transforms = {
+        v.view_id: AlignmentTransform(view_id=v.view_id, reference_view_id="fp",
+                                      state="aligned", confidence=1.0)
+        for v in views
+    }
+    event = EvidenceEvent(
+        event_id="EARLY", action_type=ActionType.DEVICE_PANEL_OPERATION,
+        global_start_ms=456_000.0, global_end_ms=457_000.0,
+        key_global_ms=456_500.0, objects=["balance"], confidence=0.9,
+        accepted=True, audit_reason="test", supporting_views=["fp", "tp"],
+        supporting_roles=[ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON], candidates=[],
+    )
+    segment = ExperimentSegment(
+        segment_id="EXP", global_start_ms=445_000.0, global_end_ms=900_000.0,
+        event_ids=[event.event_id], participating_views=["fp", "tp"],
+    )
+    group = ExperimentGroup(
+        group_id="G", continuity_type="independent", atomic_experiment_ids=["EXP"],
+        global_start_ms=445_000.0, global_end_ms=900_000.0,
+        participating_views=["fp", "tp"], first_person_view="fp",
+        third_person_view="tp", continuity_reason="test",
+    )
+    if long_matching_fragments:
+        # Even direct same-label overlap is insufficient for a long candidate.
+        fragments = [
+            _candidate(f"C-{i}", 445_000.0 + i * 5_000, 900_000.0,
+                       ActionType.DEVICE_PANEL_OPERATION, ["balance"])
+            for i in range(3)
+        ]
+    else:
+        # Many short fragments form a transitive cluster across the same gap.
+        fragments = [
+            _candidate(f"C-{i}", float(start), float(start + 10_000),
+                       ActionType.OBJECT_MOVEMENT, ["tube"])
+            for i, start in enumerate(range(445_000, 891_000, 5_000))
+        ]
+    coverage = {"fp": [(445_000.0, 900_000.0)],
+                "tp": [(445_000.0, 500_000.0), (619_050.0, 900_000.0)]}
+    if distant_support_only:
+        # The early event's bench was scanned, but it has no event near the
+        # later weighing action. A different, unscanned bench must be recalled.
+        coverage["tp"] = [(445_000.0, 900_000.0)]
+    if unrelated_view_fully_scanned:
+        coverage["other"] = [(445_000.0, 900_000.0)]
+    plan = pipeline._group_local_recall_plan(
+        [group], [segment], [event], fragments, views,
+        {v.view_id: {} for v in views}, coverage, infos, transforms,
+    )
+    assert plan["complete"] is False
+    assert plan["quality_complete"] is False
+    selected = plan["selected_plans"][0]
+    assert selected["view_id"] == ("other" if distant_support_only else "tp")
+    if distant_support_only:
+        assert any(start <= 600_000.0 <= end for start, end in selected["windows"])
+    else:
+        assert selected["windows"] == [(500_000.0, 619_050.0)]
+    assert plan["groups"][0]["unresolved_anchor_count"] >= 3
+
+
 def test_detection_ledger_merge_deduplicates_frames_and_namespaces_tracks(
     tmp_path,
 ):

@@ -30,12 +30,9 @@ class DurableRunQueue:
     def _json(payload: dict[str, Any]) -> str:
         return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database, timeout=30.0)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA busy_timeout = 30000")
-        return connection
+    def _connect(self):
+        from .sqlite_store import connection
+        return connection(self.database)
 
     def _initialize(self) -> None:
         with self._connect() as connection:
@@ -93,6 +90,21 @@ class DurableRunQueue:
                 "SELECT run_id, state_json FROM run_records ORDER BY created_at"
             ).fetchall()
         return {str(row["run_id"]): json.loads(row["state_json"]) for row in rows}
+
+    def patch_run(self, run_id, values):
+        with self._connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT state_json FROM run_records WHERE run_id=?', (run_id,)).fetchone()
+            state = (json.loads(row[0]) if row else {}) | values
+            timestamp = time.time()
+            db.execute("INSERT INTO run_records VALUES(?,?,?,?) ON CONFLICT(run_id) DO UPDATE SET state_json=excluded.state_json,updated_at=excluded.updated_at",
+                       (run_id, self._json(state), timestamp, timestamp))
+        return state
+
+    def load_run(self, run_id):
+        with self._connect() as db:
+            row = db.execute('SELECT state_json FROM run_records WHERE run_id=?', (run_id,)).fetchone()
+        return json.loads(row[0]) if row else None
 
     def enqueue(
         self,
@@ -222,7 +234,7 @@ class DurableRunQueue:
         error: str | None = None,
         now: float | None = None,
     ) -> bool:
-        if status not in {"completed", "failed"}:
+        if status not in {"completed", "partial", "failed"}:
             raise ValueError(f"Unsupported terminal queue status: {status}")
         finished_at = time.time() if now is None else float(now)
         with self._connect() as connection:
@@ -233,7 +245,10 @@ class DurableRunQueue:
                     lease_owner = NULL, lease_expires_at = NULL
                 WHERE run_id = ? AND status = 'running' AND lease_owner = ?
                 """,
-                (status, finished_at, finished_at, error, run_id, worker_id),
+                # Queue completion records execution, while run_records retains
+                # the partial evidence outcome. Existing databases need no migration.
+                ("completed" if status == "partial" else status,
+                 finished_at, finished_at, error, run_id, worker_id),
             ).rowcount
         return updated == 1
 
@@ -254,6 +269,75 @@ class DurableRunQueue:
         payload = dict(row)
         payload["payload"] = json.loads(payload.pop("payload_json"))
         return payload
+
+    def release_for_shutdown(self, run_id, worker_id):
+        """Return only our cancelled lease; keep its sealed payload/checkpoints."""
+        with self._connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            now = time.time()
+            changed = db.execute("""UPDATE run_jobs SET status='queued',updated_at=?,
+                lease_owner=NULL,lease_expires_at=NULL,attempts=MAX(0,attempts-1)
+                WHERE run_id=? AND status='running' AND lease_owner=?""", (now, run_id, worker_id)).rowcount
+            if changed:
+                row = db.execute('SELECT state_json FROM run_records WHERE run_id=?', (run_id,)).fetchone()
+                state = json.loads(row[0]) | {'state': 'queued', 'error': None,
+                    'message': '后台停止，已保留处理断点，重启后继续', 'recovered_from_durable_queue': True}
+                db.execute('UPDATE run_records SET state_json=?,updated_at=? WHERE run_id=?',
+                           (self._json(state), now, run_id))
+            return bool(changed)
+
+    def retry_failed(self, run_id: str, *, verified_mllm: dict | None = None) -> dict[str, Any]:
+        """Requeue the saved job atomically, preserving inputs and attempt history."""
+        now = time.time()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT j.*, r.state_json FROM run_jobs j JOIN run_records r "
+                "USING (run_id) WHERE j.run_id = ?", (run_id,),
+            ).fetchone()
+            if row is None or row["status"] not in {"failed", "completed"}:
+                raise ValueError("Only a finished failed job can be retried")
+            previous = json.loads(row["state_json"])
+            if row["status"] == "completed" and previous.get("state") != "partial":
+                raise ValueError("A completed formal result cannot be retried")
+            if previous.get("state") not in {"failed", "interrupted", "partial"}:
+                raise ValueError("Run state does not permit retry")
+            payload = json.loads(row["payload_json"])
+            settings = payload["settings"]
+            previous_credential = (settings.get("mllm") or {}).get("credential_ref")
+            if verified_mllm is not None:
+                settings["mllm"] = verified_mllm
+            project = settings.setdefault("project", {})
+            project["cache_mode"] = "reuse"
+            project["semantic_cache_mode"] = "reuse"
+            project["semantic_recovery_attempt"] = f"{run_id}:{int(row['attempts']) + 1}"
+            history = list(previous.get("attempt_history") or [])
+            history.append({
+                "attempt": row["attempts"],
+                "finished_at": row["finished_at"],
+                "state": previous.get("state"),
+                "error": previous.get("error"),
+                "retry_requested_at": now,
+                "previous_credential_ref": previous_credential,
+            })
+            state = {**previous, "state": "queued", "progress": 0.0,
+                     "error": None, "attempt_history": history,
+                     "message": "已保留原输入与阶段产出，等待复跑并校验可复用缓存"}
+            # Move to the tail so a retry cannot jump ahead of waiting users.
+            sequence = connection.execute(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM run_jobs"
+            ).fetchone()[0]
+            connection.execute(
+                "UPDATE run_jobs SET sequence = ?, payload_json = ?, status = 'queued', "
+                "queued_at = ?, updated_at = ?, finished_at = NULL, last_error = NULL, "
+                "lease_owner = NULL, lease_expires_at = NULL WHERE run_id = ?",
+                (sequence, self._json(payload), now, now, run_id),
+            )
+            connection.execute(
+                "UPDATE run_records SET state_json = ?, updated_at = ? WHERE run_id = ?",
+                (self._json(state), now, run_id),
+            )
+        return state
 
     def stats(self) -> dict[str, int]:
         with self._connect() as connection:

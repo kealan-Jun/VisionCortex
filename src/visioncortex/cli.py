@@ -60,6 +60,7 @@ from .model_registry import install_registered_models, validate_model_registry
 from .model_promotion import evaluate_yolo_candidate_promotion
 from .local_acceptance import run_local_six_view_acceptance
 from .local_model_acceptance import run_local_real_model_acceptance
+from .partial_delivery import partial_result_available, register_partial_result
 from .pipeline import (
     EvidencePipeline,
     _synchronize_final_event_state_receipts,
@@ -116,6 +117,35 @@ from .yolo_world_calibration import calibrate_yolo_world_prompts
 
 
 app = typer.Typer(no_args_is_help=True, help="多视角化学实验视频证据流水线")
+
+
+@app.command("process-device-days")
+def process_device_days(
+    config: Annotated[Path, typer.Option("--config", exists=True)],
+    stage: Annotated[str, typer.Option(help="all / retention / vision / stt / understanding / report")] = "all",
+    retry_failed: Annotated[bool, typer.Option(help="显式重试失败阶段；可能再次调用模型")] = False,
+    date: Annotated[str | None, typer.Option(help="只处理指定采集日，例如2026-09-07")] = None,
+) -> None:
+    """按设备/日期处理已关闭采集分片（按实际时长），采集端删除始终关闭。"""
+    from .device_day import DeviceDayRunner
+    from .ai_settings import apply_active
+    settings = apply_active(load_config(config))
+    if not (settings.get("device_day") or {}).get("enabled"):
+        raise typer.BadParameter("所选配置尚未启用device_day")
+    if stage not in {"all", "retention", "vision", "stt", "understanding", "report"}:
+        raise typer.BadParameter("未知阶段")
+    if date:
+        datetime.strptime(date, "%Y-%m-%d")
+    runner = DeviceDayRunner(settings)
+    result = runner.run_once(stage=stage, retry=retry_failed, date=date)
+    from .device_day_capture_files import reconcile_capture_files
+    result["capture_files"] = reconcile_capture_files(runner, date=date)
+    from .device_day_publication import reconcile_outputs, write_archive_guide
+    result["publication"] = reconcile_outputs(runner)
+    write_archive_guide(runner)
+    typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+    if any(r.get("status") == "failed" for r in result["results"]):
+        raise typer.Exit(1)
 
 
 @app.command("hash-web-password")
@@ -824,6 +854,16 @@ def generate_daily_report_command(
     typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
 
 
+@app.command("register-partial-result")
+def register_partial_result_command(
+    root: Annotated[Path, typer.Option("--root", exists=True, file_okay=False)],
+    config: Annotated[Path, typer.Option("--config", "-c", exists=True, dir_okay=False)],
+) -> None:
+    """Register retained local outputs for Web lookup without running analysis."""
+    result = register_partial_result(root, load_config(config))
+    typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+
+
 @app.command("run")
 def run_command(
     manifest: Annotated[
@@ -845,6 +885,8 @@ def run_command(
     if output:
         settings["project"]["output_root"] = str(output)
     result = EvidencePipeline(settings, _progress).run(load_manifest(manifest))
+    if partial_result_available(Path(result)):
+        typer.echo("PARTIAL_EVIDENCE：分析结束，阶段成果已保存；详见 Partial-Results/Partial-Evidence-Report.html")
     typer.echo(str(result))
 
 
@@ -2058,6 +2100,9 @@ def run_fixed_benchmark_command(
         f"nas_staging={nas_root} fixed_output={fixed_root}"
     )
     result = EvidencePipeline(settings, _progress).run(manifest)
+    if partial_result_available(Path(result)):
+        typer.echo(f"{result} state=partial evidence=PARTIAL_EVIDENCE fixed_archive_promotion=skipped")
+        return
     if preprocessing_only:
         typer.echo(
             f"{result} total_seconds={time.perf_counter() - started:.6f} "
@@ -2178,7 +2223,14 @@ def run_index_collection_command(
             f"input_mode={ingest['input_mode']} source_copy_bytes="
             f"{ingest['copied_source_bytes']} staging={staging_root}"
         )
-        EvidencePipeline(settings, _progress).run(manifest)
+        result = EvidencePipeline(settings, _progress).run(manifest)
+        if partial_result_available(Path(result)):
+            record_collection_state(
+                settings, experiment_id, archive_name=safe_name, run_id=run_id,
+                state="partial", details={"staging": str(staging_root)},
+            )
+            typer.echo(f"{result} state=partial evidence=PARTIAL_EVIDENCE fixed_archive_promotion=skipped")
+            return
         # Final participant key-frame selection can move two independently
         # proposed events onto the same physical transition.  Re-run the
         # deterministic presentation/semantic deduplication before promotion;
@@ -2354,7 +2406,7 @@ def run_index_staging_command(
         result = EvidencePipeline(settings, _progress).run(manifest)
         receipt.update(
             {
-                "state": "completed",
+                "state": "partial" if partial_result_available(Path(result)) else "completed",
                 "completed_at": datetime.now().astimezone().isoformat(),
                 "total_seconds": round(time.perf_counter() - started, 6),
                 "pipeline_result": str(result),
@@ -2995,6 +3047,40 @@ def repair_key_material_presentation_command(
     ):
         raise typer.Exit(code=1)
     typer.echo(json.dumps(receipt, ensure_ascii=False, indent=2))
+
+
+@app.command("worker")
+def worker_command(config: Annotated[Path, typer.Option("--config", "-c", exists=True, dir_okay=False)]):
+    """Run the common durable worker without starting an HTTP server."""
+    import asyncio
+    import os
+    import signal
+    os.environ['VISIONCORTEX_CONFIG'] = str(config.resolve())
+    os.environ['VISIONCORTEX_RUNTIME_ROLE'] = 'worker'
+    from .api import _lifespan, _storage_maintenance
+    if _storage_maintenance():
+        raise typer.BadParameter('Storage maintenance is active; worker remains disabled')
+    async def main():
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(signum, stop.set)
+            except NotImplementedError:
+                signal.signal(signum, lambda *_: loop.call_soon_threadsafe(stop.set))
+        async with _lifespan(None):
+            await stop.wait()
+    asyncio.run(main())
+
+
+@app.command("cache-impact")
+def cache_impact_command(before: Annotated[Path, typer.Option("--before", exists=True)],
+                         after: Annotated[Path | None, typer.Option("--after", exists=True)] = None):
+    """Plan affected stages without opening models or source media."""
+    from .stage_dependencies import compare, source_manifest
+    previous = json.loads(before.read_text())
+    current = json.loads(after.read_text()) if after else source_manifest()
+    typer.echo(json.dumps(compare(previous, current), ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

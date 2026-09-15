@@ -138,9 +138,9 @@ def test_frontend_keeps_polling_when_one_progress_read_fails():
         "function renderTasks", 1
     )[0]
     assert "consecutiveReadFailures += 1" in poller
-    assert "任务仍在后台运行" in poller
+    assert "暂时无法读取最新任务状态" in poller
     assert "continue;" in poller
-    assert "run.state === \"failed\"" in poller
+    assert '["failed", "interrupted"].includes(run.state)' in poller
 
 
 def test_frontend_refreshes_grouped_nas_batches_and_monitor_state():
@@ -150,8 +150,8 @@ def test_frontend_refreshes_grouped_nas_batches_and_monitor_state():
 
     assert "state.nasBatches = payload.batches || []" in app_js
     assert "state.nasMonitor = payload.monitor || null" in app_js
-    assert 'document.querySelector("#nas-batches")' in app_js
-    assert "batchPicker.outerHTML = nasBatchPicker()" in app_js
+    assert '["#nas-batches", nasBatchPicker, bindNasBatchPicker]' in app_js
+    assert "picker.outerHTML = markup()" in app_js
     assert "持续监控中" in app_js
 
 
@@ -192,13 +192,14 @@ def test_frontend_has_2k_4k_density_without_forcing_1080p_zoom():
     large_screen = styles.split("@media (min-width: 2200px) {", 1)[1].split(
         "@media (min-width: 2200px) and", 1
     )[0]
-    assert "--font-md: 16px" in large_screen
-    assert "width: min(100%,2800px)" in large_screen
+    assert "--font-md: 1rem" in large_screen
+    assert "width: min(100%,112rem)" in large_screen
     assert ".home-launchpad {" in large_screen
     assert ".library-card-grid { grid-template-columns: repeat(4" in large_screen
     assert "width: min(2100px,calc(100vw - 96px))" in large_screen
-    assert "styles.css?v=20260904-product-shell-32" in index
-    assert "app.js?v=20260904-product-shell-32" in index
+    style_version = index.split("styles.css?v=", 1)[1].split('"', 1)[0]
+    assert f"app.js?v={style_version}" in index
+    assert f"run-insights.js?v={style_version}" in index
 
     app_js = (web_root / "app.js").read_text(encoding="utf-8")
     assert "function bindHomeLaunchpad()" in app_js
@@ -233,7 +234,7 @@ def test_normal_product_pages_hide_raw_paths_and_explain_partial_results():
     assert "run.error" not in run_card
     assert "查看技术信息" not in attention_panel
     assert "result.path" not in archive_actions
-    assert "本页仅展示处理停止前已完成的内容" in result_header
+    assert "本页展示已保存的阶段成果及证据限制。" in result_header
     assert "function experimentAttentionPanel(" in app_js
     assert "本次处理未生成实验日报" in app_js
     assert "本次处理未生成专业报告" in app_js

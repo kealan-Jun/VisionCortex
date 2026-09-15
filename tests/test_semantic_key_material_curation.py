@@ -7,6 +7,7 @@ import numpy as np
 from visioncortex.archive import (
     ArchiveLayout,
     _key_material_event_folder_name,
+    _prune_replaced_key_material_views,
     curate_semantically_reviewed_key_materials,
 )
 from visioncortex.schemas import (
@@ -15,6 +16,23 @@ from visioncortex.schemas import (
     ExperimentGroup,
     ViewRole,
 )
+
+
+def test_rematerialized_pair_removes_stale_view_aliases_and_keeps_provenance():
+    event = _event("EVT-SWITCH", ActionType.HAND_OBJECT_CONTACT, "confirmed", "hand_object_contact")
+    event.key_frames = {"fp": "First.jpg", "old-tp": "Third.jpg", "aligned_first_third": "Pair.jpg"}
+    event.key_clips = {"fp": "First.mp4", "old-tp": "Third.mp4", "aligned_first_third": "Pair.mp4"}
+    original_sources = list(event.supporting_views)
+    _prune_replaced_key_material_views(event, "fp", "new-tp")
+    event.key_frames["new-tp"] = "Third.jpg"
+    event.key_clips["new-tp"] = "Third.mp4"
+    assert set(event.key_frames) == set(event.key_clips) == {"fp", "new-tp", "aligned_first_third"}
+    assert event.supporting_views == original_sources
+    history = event.observability["key_material_view_reference_history"]
+    assert history[0]["removed_aliases"]["key_frames"] == {"old-tp": "Third.jpg"}
+    assert history[0]["source_media_modified"] is False
+    _prune_replaced_key_material_views(event, "fp", "new-tp")
+    assert len(history) == 1
 
 
 def _event(

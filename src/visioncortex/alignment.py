@@ -238,7 +238,17 @@ def read_timestamp_csv_bounded(
     sample_count = max(2, int(sample_count))
     size = path.stat().st_size
     if size <= full_read_limit_bytes:
-        return read_timestamp_csv(path, fps, max_points=sample_count)
+        try:
+            return read_timestamp_csv(path, fps, max_points=sample_count)
+        except ValueError as error:
+            if not str(error).startswith("时间戳 CSV 至少需要两行:"):
+                raise
+            # Sparse RGB rows can all fall between the original row strides.
+            # Retry only that failed bounded sample; keep successful reads exact.
+            # The file-size gate bounds this full read, including mixed depth rows.
+            points = read_timestamp_csv(path, fps, max_points=size + 1)
+            indices = np.linspace(0, len(points) - 1, min(sample_count, len(points)), dtype=int)
+            return [points[int(index)] for index in indices]
 
     endpoints = read_timestamp_csv_endpoints(path, fps)
     with path.open("rb") as handle:
@@ -299,6 +309,34 @@ def read_timestamp_csv_bounded(
     result = sorted(unique.values(), key=lambda point: point.local_ms)
     if len(result) < 2:
         raise ValueError(f"时间戳 CSV 缺少足够的有界采样点: {path}")
+    return result
+
+
+def read_video_timestamp_csv(path: Path, info: VideoInfo, *, sample_count: int = 5,
+                             full_read_limit_bytes: int = 2 * 1024 * 1024) -> list[TimestampPoint]:
+    """Bind recorder frame ordinals to native PTS before clock fitting.
+
+    Recorder CSV local_time_us is a wall clock. Average-FPS conversion loses
+    internal recording gaps, even when the first and last timestamps match.
+    Generic timestamp formats retain their existing explicit media timeline.
+    """
+    points = read_timestamp_csv_bounded(path, info.fps, sample_count, full_read_limit_bytes)
+    with path.open(encoding="utf-8-sig", newline="") as handle:
+        header = next(csv.reader(handle), [])
+    if not {"rgb_video_frame_index", "rgb_recorded"}.issubset(header):
+        return points
+    from .source_frames import SourceFrameTrace
+    trace = SourceFrameTrace(info.path, 0, info.duration_ms, 2)
+    if trace.failure or not trace.positions or not trace.time_base:
+        raise ValueError("Recorder clock requires native video frame timestamps")
+    from fractions import Fraction
+    native = {ordinal: float(pts * Fraction(trace.time_base) * 1000) - trace.origin_ms
+              for rows in trace.positions.values() for pts, ordinal in rows if ordinal is not None}
+    result = []
+    for point in points:
+        if point.frame_index not in native:
+            raise ValueError("Recorder frame index has no native video timestamp")
+        result.append(point.model_copy(update={"local_ms": native[point.frame_index]}))
     return result
 
 
@@ -596,23 +634,26 @@ def build_alignments(
     sampling_mode = str(align_cfg.get("csv_sampling_mode", "bounded_sparse"))
     samples_per_segment = max(2, int(align_cfg.get("csv_samples_per_segment", 5)))
     clock_jobs: dict[Path, float] = {}
+    clock_infos = {}
     for view in views:
         info = infos[view.view_id]
         if info.segments:
             for segment in info.segments:
                 if segment.timestamps_csv:
                     clock_jobs[segment.timestamps_csv] = segment.fps
+                    clock_infos[segment.timestamps_csv] = segment
         elif view.timestamps_csv:
             clock_jobs[view.timestamps_csv] = info.fps
+            clock_infos[view.timestamps_csv] = info
     clock_cache: dict[Path, list[TimestampPoint]] = {}
     clock_sampling_started = time.perf_counter()
     if clock_jobs:
         reader = (
             read_timestamp_csv_endpoints
             if sampling_mode == "legacy_endpoints"
-            else lambda path, fps: read_timestamp_csv_bounded(
+            else lambda path, fps: read_video_timestamp_csv(
                 path,
-                fps,
+                clock_infos[path],
                 sample_count=samples_per_segment,
                 full_read_limit_bytes=int(
                     align_cfg.get("csv_bounded_full_read_limit_bytes", 2 * 1024 * 1024)

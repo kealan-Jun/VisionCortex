@@ -24,3 +24,5 @@ tmp/
 .coverage
 .env
 configs/trust/.visioncortex-root-id
+# Windows-style runtime roots accidentally created by cross-platform tests.
+/[A-Za-z]:/

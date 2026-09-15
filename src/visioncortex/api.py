@@ -27,7 +27,9 @@ from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Query, 
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 
+from .run_insights import hardware_summary, timing_summary, token_summary, with_operation_refreshes
 from .archive_catalog import (
     archive_catalog_path,
     catalog_archive_release,
@@ -45,15 +47,22 @@ from .annotation_workspace import (
     resolve_annotation_image,
 )
 from .config import load_config
+from .provider_connection import connection_health
+from .provider_credentials import key_configured
+from . import ai_settings
+from . import speech, speech_worker
 from .identity import CONFIG_ENV, PRODUCT_NAME
 from .device_registry import load_device_registry, resolve_view_role
+from .device_day_service import DeviceDayService, install_routes as install_device_day_routes
 from .input_preflight import preflight_manifest_inputs
 from .input_seal import build_input_seal, verify_input_seal, write_input_seal
 from .model_certification import audit_production_model_certification
+from .media_preview import cached_video_poster
 from .nas_recordings import (
     create_selection,
     enabled as directory_ingest_enabled,
     scan_recordings,
+    selection_path,
     validate_selection,
 )
 from .indexing import (
@@ -67,6 +76,10 @@ from .indexing import (
 from .pagination import decode_cursor, encode_cursor
 from .pathing import archive_contains, archive_relative_posix
 from .pipeline import EvidencePipeline
+from .partial_delivery import (
+    component_results, partial_result_available, prioritize_retained_candidates,
+    registered_partial_root, write_partial_delivery,
+)
 from .run_queue import DurableRunQueue, QueuedRunJob
 from .schemas import RunManifest, VideoSegmentInput, ViewInput
 from .storage import (
@@ -80,6 +93,7 @@ from .storage import (
     read_current_release_pointer,
     safe_archive_name,
 )
+from .build_identity import identity as build_identity
 from .upload_sessions import StorageReservationError, UploadSessionStore
 from .web_access import (
     append_access_audit,
@@ -96,23 +110,37 @@ async def _lifespan(_: FastAPI):
     if _ARCHIVE_STREAM_LIMIT_ERROR:
         raise RuntimeError(_ARCHIVE_STREAM_LIMIT_ERROR)
     validate_web_access_configuration()
+    if _storage_maintenance():
+        # Explicit deployment hold: do not recover receipts, discover media or
+        # start any producer while the NAS is being repaired.
+        yield
+        return
     settings = _settings()
     _initialize_persistent_queue(settings)
-    _expire_stale_upload_sessions(settings)
-    try:
-        _recover_jobs_from_archive_receipts(settings)
-        _recover_orphaned_tasks()
-        _start_queue_worker()
-        _start_nas_monitor(settings)
+    from .runtime_process import role, worker_owner
+    if role(settings) == 'web':
         yield
-    finally:
-        _stop_nas_monitor()
-        _stop_queue_worker()
+        return
+    with worker_owner(settings):
+        _expire_stale_upload_sessions(settings)
+        try:
+            _recover_jobs_from_archive_receipts(settings)
+            _recover_orphaned_tasks()
+            _start_queue_worker()
+            _start_nas_monitor(settings)
+            _device_day_service.start()
+            yield
+        finally:
+            _device_day_service.stop()
+            _stop_nas_monitor()
+            _stop_queue_worker()
+            from .shared_inference import close_pools
+            close_pools()
 
 
 app = FastAPI(
     title=PRODUCT_NAME,
-    version="0.2.0",
+    version=build_identity()["version"],
     lifespan=_lifespan,
 )
 _web_root = Path(__file__).with_name("web")
@@ -198,10 +226,29 @@ def _nas_monitor_loop(settings: dict[str, Any]) -> None:
         5.0,
         float((settings.get("collection_ingest") or {}).get("poll_seconds", 30)),
     )
+    camera_monitor = None
+    if (settings.get("device_day") or {}).get("camera_lanes"):
+        from .device_day_monitor import CameraMonitor
+        camera_monitor = CameraMonitor(settings, _nas_monitor_stop, _device_day_service.observe)
     while not _nas_monitor_stop.is_set():
         observed_at = datetime.now().astimezone().isoformat()
         try:
-            inventory = scan_recordings(settings)
+            if camera_monitor is not None:
+                inventory = camera_monitor.poll()
+            else:
+                discovery = copy.deepcopy(settings)
+                if (settings.get("device_day") or {}).get("enabled"):
+                    discovery["collection_ingest"]["max_recordings_per_camera"] = 0
+                    discovery["collection_ingest"]["capture_since_date"] = settings["device_day"].get("start_date")
+                if (settings.get("device_day") or {}).get("enabled"):
+                    # Release each uploaded slice to preprocessing as soon as it is
+                    # inspected, without waiting for every camera in the NAS scan.
+                    inventory = scan_recordings(discovery, on_record=lambda record:
+                        _device_day_service.observe(settings, {"recordings": [record]}))
+                else:
+                    inventory = scan_recordings(discovery)
+            if camera_monitor is None:
+                _device_day_service.observe(settings, inventory)
             failures = 0
             last_success = inventory | {
                 "monitor": {
@@ -326,8 +373,12 @@ def _recover_orphaned_tasks() -> None:
             )
     for status_path in status_paths:
         payload = _read_json(status_path, {}) or {}
+        # An unreadable NAS receipt is not an interrupted task. In particular,
+        # never overwrite a read failure with a fabricated recovery receipt.
+        if not isinstance(payload, dict) or not payload.get("stage"):
+            continue
         stage = str(payload.get("stage") or "")
-        if stage in {"completed", "failed"}:
+        if stage in {"completed", "partial", "failed"}:
             continue
         heartbeat = _runtime_activity_receipt(status_path)
         recovery = payload.get("recovery") if isinstance(payload.get("recovery"), dict) else {}
@@ -337,7 +388,7 @@ def _recover_orphaned_tasks() -> None:
                 stage == "interrupted"
                 and recovery.get("status") == "orphaned_after_service_restart"
                 and previous_stage
-                and previous_stage not in {"completed", "failed", "interrupted"}
+                and previous_stage not in {"completed", "partial", "failed", "interrupted"}
             ):
                 payload.update(
                     {
@@ -372,10 +423,23 @@ def _recover_orphaned_tasks() -> None:
         _write_json_atomic(status_path, payload)
 
 
+def _storage_maintenance() -> bool:
+    return os.environ.get("VISIONCORTEX_STORAGE_MAINTENANCE", "0") == "1"
+
+
 @app.middleware("http")
 async def enforce_web_access(request: Request, call_next):
     """Keep the default local service open and fail closed for LAN service mode."""
 
+    if _storage_maintenance() and request.url.path not in {"/api/device-day-progress", "/health/live"}:
+        message = "修复版代码已加载。NAS 正在维护，数据读取、提交与后台处理暂不开放；历史队列保留，未触发全量重跑。"
+        headers = {"Retry-After": "60", "Cache-Control": "no-store"}
+        if request.url.path.startswith("/api/"):
+            return JSONResponse({"status": "storage_maintenance", "detail": message}, status_code=503, headers=headers)
+        return HTMLResponse("<!doctype html><meta charset='utf-8'><title>VisionCortex 维护状态</title>"
+                            "<main style='max-width:760px;margin:80px auto;font:20px sans-serif'>"
+                            "<h1>VisionCortex · NAS 维护中</h1><p>" + message + "</p></main>",
+                            status_code=503, headers=headers)
     started = time.perf_counter()
     identity: dict[str, str] | None = None
     mode = "unknown"
@@ -493,9 +557,12 @@ async def require_analysis_certification(request: Request, call_next):
         or bool(re.fullmatch(r"/api/(collections|benchmarks)/[^/]+/runs", path))
         or bool(re.fullmatch(r"/api/nas-batches/[^/]+/runs", path))
         or bool(re.fullmatch(r"/api/upload-sessions/[^/]+/finalize", path))
+        or bool(re.fullmatch(r"/api/runs/[^/]+/retry", path))
     )
     if request.method == "POST" and starts_analysis:
         settings = _settings()
+        if settings.get("mllm", {}).get("credential_ref") and not key_configured(settings["mllm"]):
+            return JSONResponse(status_code=409, content={"detail": "AI 服务配置需要重新验证，请打开 AI 服务设置。"})
         if settings["storage"].get("sync_to_nas"):
             try:
                 audit_production_model_certification(settings)
@@ -539,7 +606,8 @@ def _nas_storage_available(settings: dict[str, Any]) -> bool:
 async def limit_archive_streams(request: Request, call_next):
     """Bound concurrent NAS-backed streams for predictable multi-user playback."""
 
-    if request.url.path != "/api/archive-file":
+    is_stream = request.url.path in {"/api/archive-file", "/api/staging-file"} or bool(re.fullmatch(r"/api/(staging-runs|archives)/[^/]+/speech-video", request.url.path))
+    if not is_stream or request.query_params.get("poster") == "true":
         return await call_next(request)
     if not _archive_stream_slots.acquire(blocking=False):
         return Response(
@@ -586,7 +654,12 @@ def _safe_file_name(value: str, fallback_stem: str = "file") -> str:
 
 def _settings() -> dict[str, Any]:
     configured = os.getenv(CONFIG_ENV)
-    return load_config(Path(configured)) if configured else load_config()
+    settings = load_config(Path(configured)) if configured else load_config()
+    return ai_settings.apply_active(settings)
+
+
+_device_day_service = DeviceDayService(_settings, _gpu_job_lock)
+install_device_day_routes(app, lambda: _settings(), _device_day_service)
 
 
 def _archive_root(settings: dict[str, Any] | None = None) -> Path:
@@ -647,8 +720,25 @@ def _renew_queue_lease(
 
 
 def _dispatch_persisted_job(job: QueuedRunJob) -> None:
+    from .runtime_control import execution_context
+    with execution_context(job_id=job.run_id, source='offline', stop=_queue_stop):
+        _dispatch_job_in_context(job)
+
+
+def _dispatch_job_in_context(job: QueuedRunJob) -> None:
     payload = job.payload
-    settings = payload["settings"]
+    # Keep queued model/input settings immutable. Admission is a live worker
+    # policy so jobs submitted before the split cannot bypass shared limits.
+    settings = payload["settings"] | {"runtime": _settings().get("runtime", {})}
+    if job.kind == "stage_refresh":
+        from .stage_refresh import refresh
+        root = _find_staging_run(settings, payload["parent_run_id"])
+        if root is None:
+            raise ValueError("原实验暂存目录不可用")
+        _update(job.run_id, state="running", progress=0.1, message="正在刷新所选阶段")
+        receipt = refresh(root, payload["scope"], settings, target=payload.get("target"), revision=payload.get("revision"))
+        _update(job.run_id, state="completed", progress=1.0, message="所选阶段已刷新，原质量门保持不变", refresh_receipt=receipt)
+        return
     if settings["storage"].get("sync_to_nas"):
         audit_production_model_certification(settings)
     if job.kind == "run":
@@ -684,6 +774,7 @@ def _dispatch_persisted_job(job: QueuedRunJob) -> None:
 
 
 def _queue_worker_loop(store: DurableRunQueue) -> None:
+    from .runtime_control import ExecutionCancelled
     while not _queue_stop.is_set():
         job = store.claim_next(
             _queue_worker_id,
@@ -694,9 +785,8 @@ def _queue_worker_loop(store: DurableRunQueue) -> None:
             _queue_wakeup.clear()
             continue
 
-        with _lock:
-            existing_state = str((_runs.get(job.run_id) or {}).get("state") or "")
-        if existing_state in {"completed", "failed"}:
+        existing_state = str((store.load_run(job.run_id) or {}).get("state") or "")
+        if existing_state in {"completed", "partial", "failed"}:
             store.finish(job.run_id, _queue_worker_id, existing_state)
             _queue_wakeup.set()
             continue
@@ -715,14 +805,17 @@ def _queue_worker_loop(store: DurableRunQueue) -> None:
                     job.run_id,
                     state="queued",
                     progress=0.0,
-                    message="服务重启后已恢复任务，等待 3090 Ti 继续执行",
+                    message="服务重启后已恢复任务，等待可用计算资源",
                     recovered_from_durable_queue=True,
                 )
             _dispatch_persisted_job(job)
-            with _lock:
-                final_state = str((_runs.get(job.run_id) or {}).get("state") or "")
-                final_error = (_runs.get(job.run_id) or {}).get("error")
-            if final_state not in {"completed", "failed"}:
+            latest = store.load_run(job.run_id) or {}
+            final_state = str(latest.get("state") or "")
+            final_error = latest.get("error")
+            if _queue_stop.is_set() and final_state == 'failed' and str(final_error).startswith('ExecutionCancelled:'):
+                store.release_for_shutdown(job.run_id, _queue_worker_id)
+                continue
+            if final_state not in {"completed", "partial", "failed"}:
                 final_state = "failed"
                 final_error = "Durable queue executor returned without a terminal run state"
                 _update(job.run_id, state=final_state, progress=1.0, error=final_error)
@@ -732,6 +825,8 @@ def _queue_worker_loop(store: DurableRunQueue) -> None:
                 final_state,
                 error=str(final_error) if final_error else None,
             )
+        except ExecutionCancelled:
+            store.release_for_shutdown(job.run_id, _queue_worker_id)
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
             _update(job.run_id, state="failed", progress=1.0, error=error)
@@ -854,9 +949,13 @@ def _manifest_source_receipts(
             source_pairs.append(("video", None, Path(view.video)))
             if view.timestamps_csv is not None:
                 source_pairs.append(("timestamp_csv", None, Path(view.timestamps_csv)))
+            if view.audio is not None:
+                source_pairs.append(("audio", None, Path(view.audio)))
         else:
             for ordinal, segment in enumerate(view.segments):
                 source_pairs.append(("video", ordinal, Path(segment.video)))
+                if segment.audio is not None:
+                    source_pairs.append(("audio", ordinal, Path(segment.audio)))
                 if segment.timestamps_csv is not None:
                     source_pairs.append(
                         ("timestamp_csv", ordinal, Path(segment.timestamps_csv))
@@ -998,7 +1097,7 @@ def _parse_upload_session_files(
         if not isinstance(item, dict):
             raise HTTPException(400, f"files[{position}] 必须是对象")
         kind = str(item.get("kind") or "")
-        if kind not in {"video", "timestamp_csv"}:
+        if kind not in {"video", "timestamp_csv", "audio"}:
             raise HTTPException(400, f"files[{position}].kind 无效")
         try:
             file_index = int(item.get("file_index"))
@@ -1039,6 +1138,7 @@ def _parse_upload_session_files(
     normalized_specs: list[dict[str, Any]] = []
     used_video_indexes: set[int] = set()
     used_csv_indexes: set[int] = set()
+    used_audio_indexes: set[int] = set()
     used_paths: set[Path] = set()
     try:
         registry = load_device_registry(
@@ -1064,6 +1164,8 @@ def _parse_upload_session_files(
                 {
                     "video_index": raw_spec.get("video_index", position),
                     "csv_index": raw_spec.get("csv_index"),
+                    "audio_index": raw_spec.get("audio_index"),
+                    "audio_offset_ms": raw_spec.get("audio_offset_ms"),
                 }
             ]
         mappings: list[tuple[int, int | None, dict[str, Any], dict[str, Any] | None]] = []
@@ -1154,6 +1256,26 @@ def _parse_upload_session_files(
             }
             for video_index, csv_index, _video_file, _csv_file in mappings
         ]
+        audio_mappings = []
+        for raw_mapping, normalized_mapping in zip(mapping_items, normalized_mappings, strict=True):
+            audio_file = None
+            if raw_mapping.get("audio_index") is not None:
+                try:
+                    audio_index = int(raw_mapping["audio_index"])
+                    raw_offset = raw_mapping.get("audio_offset_ms")
+                    audio_offset = float(raw_offset) if raw_offset is not None else None
+                    if audio_offset is not None and not math.isfinite(audio_offset):
+                        raise ValueError("nonfinite audio offset")
+                except (TypeError, ValueError) as exc:
+                    raise HTTPException(400, "录音映射或时间偏移无效") from exc
+                audio_file = by_kind_index.get(("audio", audio_index))
+                if audio_file is None or audio_index in used_audio_indexes:
+                    raise HTTPException(400, "录音文件不存在或重复映射")
+                used_audio_indexes.add(audio_index)
+                normalized_mapping.update(audio_index=audio_index, audio_offset_ms=audio_offset)
+            elif raw_mapping.get("audio_offset_ms") is not None:
+                raise HTTPException(400, "录音时间偏移必须关联录音文件")
+            audio_mappings.append(audio_file)
         if segmented_layout:
             normalized_spec["segments"] = normalized_mappings
         else:
@@ -1163,7 +1285,7 @@ def _parse_upload_session_files(
         for segment_position, (_video_index, _csv_index, video_file, csv_file) in enumerate(
             mappings, 1
         ):
-            for file_item in (video_file, csv_file):
+            for file_item in (video_file, csv_file, audio_mappings[segment_position - 1]):
                 if file_item is None:
                     continue
                 source_name = _safe_file_name(
@@ -1173,6 +1295,7 @@ def _parse_upload_session_files(
                 prefix = (
                     f"segment-{segment_position:04d}-video-"
                     if file_item["kind"] == "video"
+                    else f"segment-{segment_position:04d}-audio-" if file_item["kind"] == "audio"
                     else f"segment-{segment_position:04d}-timestamps-"
                 )
                 stored_name = f"{prefix}{source_name}"
@@ -1232,6 +1355,9 @@ def _parse_upload_session_files(
         except ValueError as exc:
             raise HTTPException(400, f"view_specs[{position}] 无效: {exc}") from exc
 
+    unused_audio = {int(item["file_index"]) for item in normalized_files if item["kind"] == "audio"} - used_audio_indexes
+    if unused_audio:
+        raise HTTPException(400, "存在未映射的录音文件")
     unused_csvs = {
         int(item["file_index"])
         for item in normalized_files
@@ -1340,7 +1466,7 @@ def _reserve_collection_archive(
         archive_name = base_name
         if (archive_root / archive_name).exists() or any(
             run.get("experiment_id") == archive_name
-            and run.get("state") not in {"completed", "failed", "interrupted"}
+            and run.get("state") not in {"completed", "partial", "failed", "interrupted"}
             for run in _runs.values()
         ):
             suffix = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -1351,6 +1477,9 @@ def _reserve_collection_archive(
         local_runtime_root = Path(settings["storage"]["local_runtime_root"]).resolve()
         settings["project"]["output_root"] = str(local_runtime_root / "runs" / run_id)
         settings["storage"]["active_archive_path"] = str(staging_root)
+        # The configured archive may be local or network storage. Write derived
+        # files directly into its staging tree in either case.
+        settings["storage"]["run_output_mode"] = "nas_direct"
         initialize_nas_archive(settings, archive_name)
     return archive_name, fixed_root, staging_root, history_root
 
@@ -1362,7 +1491,7 @@ def _reserve_fixed_benchmark(settings: dict[str, Any], run_id: str) -> Path:
     with _lock:
         if any(
             run.get("benchmark_archive") == _BENCHMARK_ARCHIVE_NAME
-            and run.get("state") not in {"completed", "failed"}
+            and run.get("state") not in {"completed", "partial", "failed"}
             for existing_id, run in _runs.items()
             if existing_id != run_id
         ):
@@ -1385,10 +1514,10 @@ def _reserve_fixed_benchmark(settings: dict[str, Any], run_id: str) -> Path:
 
 def _update(run_id: str, **values: Any) -> None:
     with _lock:
-        state = _runs.setdefault(run_id, {})
-        state.update(values)
         if _persistent_queue is not None:
-            _persistent_queue.save_run(run_id, state)
+            _runs[run_id] = _persistent_queue.patch_run(run_id, values)
+        else:
+            _runs.setdefault(run_id, {}).update(values)
 
 
 def _write_fixed_benchmark_submission_receipt(
@@ -1545,7 +1674,7 @@ def _recover_jobs_from_archive_receipts(settings: dict[str, Any]) -> None:
         status_path = nas_root / "JSON-Config-Files" / "pipeline_status.json"
         if status_path.exists():
             pipeline_status = _read_json(status_path, {}) or {}
-            if pipeline_status.get("stage") in {"completed", "failed"}:
+            if pipeline_status.get("stage") in {"completed", "partial", "failed"}:
                 _update_queue_recovery_state(
                     nas_root,
                     str(pipeline_status["stage"]),
@@ -1812,13 +1941,24 @@ def _pipeline_status_from_root(root: Path) -> dict[str, Any]:
     ) or {}
 
 
+def _latest_result_review(root: Path, *, save=False) -> dict:
+    from .result_review import inspect
+    try:
+        return inspect(root, save=save)
+    except (OSError, ValueError, KeyError, TypeError):
+        return {"available":False, "reason":"当前记录不足以执行版本与完整性检查"}
+
+
 def _merged_run_metrics(root: Path) -> dict[str, Any]:
     json_root = root / "JSON-Config-Files"
-    metrics = _read_json(json_root / "run_metrics.json", {}) or _read_json(
-        json_root / "run_metrics_live.json", {}
-    ) or {}
+    final = _read_json(json_root / "run_metrics.json", {}) or {}
+    live = _read_json(json_root / "run_metrics_live.json", {}) or {}
+    metrics = live if str(live.get("run_started_at", "")) > str(final.get("run_started_at", "")) else final or live
     delivery = _read_json(json_root / "delivery_metrics.json", {}) or {}
-    metrics.update(delivery)
+    # A retry keeps the previous receipts on disk. Its delivery timing must not
+    # overwrite the newer live attempt's metrics.
+    if not final or metrics.get("run_started_at") == final.get("run_started_at"):
+        metrics.update(delivery)
     publication = (read_current_release_pointer(root) or {}).get("publication")
     if isinstance(publication, dict):
         metric_key = str(publication.get("metric_key") or "").strip()
@@ -1828,7 +1968,16 @@ def _merged_run_metrics(root: Path) -> dict[str, Any]:
                 for key, value in publication.items()
                 if key != "metric_key"
             }
-    return metrics
+    # Add operation-only refresh receipts once; never replace the original run's
+    # wall clock with follow-up request time or count local reuse as new usage.
+    return with_operation_refreshes(root, metrics)
+
+
+def _current_attempt_started_at(status: dict[str, Any]) -> float | None:
+    try:
+        return datetime.fromisoformat(status["updated_at"]).timestamp() - float(status["elapsed_seconds"])
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _stage_receipts_from_root(root: Path) -> list[dict[str, Any]]:
@@ -1837,11 +1986,20 @@ def _stage_receipts_from_root(root: Path) -> list[dict[str, Any]]:
     receipt_root = root / "JSON-Config-Files" / "Stage-Receipts"
     if not receipt_root.is_dir():
         return []
+    started_at = _current_attempt_started_at(_pipeline_status_from_root(root))
     receipts: list[dict[str, Any]] = []
     for path in sorted(receipt_root.glob("*.json")):
         payload = _read_json(path, {}) or {}
         if not payload.get("stage"):
             continue
+        if started_at is not None:
+            try:
+                if datetime.fromisoformat(payload["completed_at"]).timestamp() < started_at - 1:
+                    continue
+            except (KeyError, TypeError, ValueError):
+                # Undated legacy receipts cannot establish completion of a
+                # timestamped attempt; the files remain available on disk.
+                continue
         artifacts = []
         for raw in payload.get("artifacts") or []:
             artifact_path = Path(str(raw))
@@ -1909,6 +2067,7 @@ def _run_snapshot_from_root(root: Path) -> dict[str, Any]:
     telemetry = _read_json(json_root / "resource_telemetry.json", {}) or {}
     metrics = _merged_run_metrics(root)
     source_progress = _read_json(json_root / "source_progress.json", {}) or {}
+    groups = _read_json(json_root / "experiment_group_understanding.json", {}) or {}
     if source_progress.get("views"):
         status["views"] = source_progress["views"]
     scans = {
@@ -1919,12 +2078,21 @@ def _run_snapshot_from_root(root: Path) -> dict[str, Any]:
         "root": str(root),
         "status": status,
         "live_telemetry": live_telemetry,
+        "insights": {
+            "hardware": hardware_summary(telemetry, live_telemetry, metrics.get("run_started_at")),
+            "tokens": token_summary(metrics),
+            "timing": timing_summary(metrics, scans),
+        },
         "telemetry_summary": {
             "sample_count": telemetry.get("sample_count"),
             "sampling_interval_seconds": telemetry.get("sampling_interval_seconds"),
             "stage_summaries": telemetry.get("stage_summaries") or {},
         },
         "metrics": metrics,
+        "capture_quality": _read_json(json_root / "capture_quality.json", {}) or {},
+        "partial_delivery": _read_json(json_root / "partial_delivery.json", {}) or {},
+        "components": component_results(root),
+        "retained_experiment_count": len(groups.get("groups") or []),
         "scan_runtime": scans,
         "source_progress": source_progress,
         "stage_receipts": _stage_receipts_from_root(root),
@@ -1952,6 +2120,10 @@ def _run_snapshot_from_root(root: Path) -> dict[str, Any]:
 
 
 def _hydrate_run_snapshot(run: dict[str, Any]) -> dict[str, Any]:
+    if run.get("origin") == "registered_local_partial":
+        root = registered_partial_root(_settings(), run)
+        return {**run, "observability": _run_snapshot_from_root(root) if root else {},
+                "result_available": root is not None}
     keys = (
         ("observability_root", "nas_output", "output", "nas_staging")
         if run.get("state") == "completed"
@@ -1963,12 +2135,38 @@ def _hydrate_run_snapshot(run: dict[str, Any]) -> dict[str, Any]:
             continue
         root = Path(value)
         if root.is_dir():
-            return {**run, "observability": _run_snapshot_from_root(root)}
+            snapshot = _run_snapshot_from_root(root)
+            if run.get("state") == "queued" and run.get("attempt_history"):
+                # Retrying moves old derived output out of the active view.
+                # Read its retained receipt; the durable queue owns current status.
+                previous_status = snapshot["status"]
+                attempt = run["attempt_history"][-1].get("attempt")
+                if isinstance(attempt, int) and attempt >= 0:
+                    previous_status = _read_json(
+                        root / "JSON-Config-Files" / "Retry-Attempts"
+                        / str(attempt) / "pipeline_status.json", {},
+                    ) or previous_status
+                snapshot["previous_attempt_status"] = previous_status
+                snapshot["status"] = {
+                    "stage": "queued", "progress": 0.0,
+                    "message": run.get("message"), "elapsed_seconds": 0.0,
+                }
+            return {**run, "observability": snapshot}
     return run
 
 
 def _find_staging_run(settings: dict[str, Any], run_id: str) -> Path | None:
+    record = _runs.get(run_id) or {}
+    if record.get("origin") == "registered_local_partial":
+        return registered_partial_root(settings, record)
     for staging_root in run_staging_roots(settings):
+        # Input validation can fail before the pipeline writes its first status.
+        # Use the durable job's exact directory, still constrained to this store.
+        if record.get("nas_staging"):
+            candidate = Path(record["nas_staging"]).resolve()
+            if (candidate.name == run_id and candidate.parent.parent == staging_root.resolve()
+                    and candidate.is_dir()):
+                return candidate
         for path in staging_root.glob("*/*/JSON-Config-Files/pipeline_status.json"):
             archive_run_root = path.parent.parent
             if archive_run_root.name == run_id:
@@ -2023,6 +2221,7 @@ async def _save_upload_to_local_and_nas(
     nas_destination: Path,
     *,
     retain_local_copy: bool = True,
+    archive_is_network: bool = True,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     if retain_local_copy:
@@ -2065,18 +2264,35 @@ async def _save_upload_to_local_and_nas(
     return {
         "filename": upload.filename,
         "bytes": total,
-        "local_path": str(local_destination) if retain_local_copy else None,
-        "nas_path": str(nas_destination),
+        "local_path": str(local_destination) if retain_local_copy else (
+            str(nas_destination) if not archive_is_network else None
+        ),
+        "nas_path": str(nas_destination) if archive_is_network else None,
         "analysis_path": str(local_destination if retain_local_copy else nas_destination),
-        "retention_mode": "local_and_nas" if retain_local_copy else "nas_only",
-        "local_write_bytes": total if retain_local_copy else 0,
-        "nas_write_bytes": total,
+        "retention_mode": ("local_and_nas" if retain_local_copy else "nas_only")
+        if archive_is_network else "local_only",
+        "local_write_bytes": total * (int(retain_local_copy) + int(not archive_is_network)),
+        "nas_write_bytes": total if archive_is_network else 0,
         "sha256": digest.hexdigest(),
         "duration_seconds": round(duration_seconds, 6),
         "effective_source_throughput_mib_s": round(
             total / duration_seconds / (1024 * 1024), 3
         ),
     }
+
+
+def _record_partial_completion(run_id: str, root: Path) -> bool:
+    """Recognize only a fully written quality-attention result, never publish it."""
+    if not partial_result_available(root):
+        return False
+    status = _pipeline_status_from_root(root)
+    _update_queue_recovery_state(root, "partial")
+    _update(run_id, state="partial", progress=1.0, error=None,
+            message=status.get("message"), nas_staging=str(root),
+            observability_root=str(root), output=None, promotion=None, archive_url=None,
+            result_url=f"/#/stage/{quote(run_id)}/experiments",
+            evidence_classification="PARTIAL_EVIDENCE")
+    return True
 
 
 def _execute_now(
@@ -2118,6 +2334,11 @@ def _execute_now(
         )
         _update_queue_recovery_state(nas_root, "running")
         output = EvidencePipeline(settings, progress).run(manifest)
+        if _record_partial_completion(run_id, Path(output)):
+            if ingest is not None:
+                _append_web_end_to_end_metrics([Path(output)], ingest, completed=False)
+                write_partial_delivery(Path(output), _merged_run_metrics(Path(output)))
+            return
         formal_fixed_value = str(
             settings.get("storage", {}).get("formal_fixed_root") or ""
         ).strip()
@@ -2184,7 +2405,7 @@ def _execute(
     nas_root: Path,
     ingest: dict[str, Any] | None = None,
 ) -> None:
-    _update(run_id, state="queued", progress=0.0, message="等待 3090 Ti 计算资源")
+    _update(run_id, state="queued", progress=0.0, message="等待可用计算资源")
     with _gpu_job_lock:
         _execute_now(run_id, manifest, settings, nas_root, ingest)
 
@@ -2238,6 +2459,10 @@ def _execute_fixed_benchmark_now(
         )
         _update(run_id, state="running", progress=0.02, nas_output=str(fixed_root))
         output = EvidencePipeline(settings, progress).run(manifest)
+        if _record_partial_completion(run_id, Path(output)):
+            _append_fixed_benchmark_metrics([Path(output)], timing, completed=False)
+            write_partial_delivery(Path(output), _merged_run_metrics(Path(output)))
+            return
         _append_fixed_benchmark_metrics([Path(output), nas_root], timing, completed=True)
         receipt = promote_fixed_archive(
             nas_root,
@@ -2281,7 +2506,7 @@ def _execute_fixed_benchmark(
     nas_root: Path,
     timing: dict[str, Any],
 ) -> None:
-    _update(run_id, state="queued", progress=0.0, message="等待 3090 Ti 计算资源")
+    _update(run_id, state="queued", progress=0.0, message="等待可用计算资源")
     with _gpu_job_lock:
         _execute_fixed_benchmark_now(run_id, settings, nas_root, timing)
 
@@ -2319,7 +2544,18 @@ def _preflight_and_seal_collection_input(
     existing_seal_path = (
         staging_root / "JSON-Config-Files" / "Input-Manifests" / "input_seal.json"
     )
-    existing_seal = _read_json(existing_seal_path, {}) or {}
+    # Local zero-copy ingestion keeps its first manifest/seal in Runtime. Bind
+    # the recovery receipt to an archive-owned metadata copy, never to ../ paths.
+    source_seal_path = Path(str((ingest.get("original_retention") or {}).get("input_seal") or existing_seal_path))
+    existing_seal = _read_json(source_seal_path, {}) or {}
+    if not verify_input_seal(existing_seal) or RunManifest.model_validate(existing_seal.get("manifest")).model_dump(mode="json") != manifest.model_dump(mode="json"):
+        raise ValueError("采集批次输入封条无效或与本次清单不一致，未启动分析。")
+    archived_manifest_path = staging_root / "JSON-Config-Files" / "input_manifest.yaml"
+    archived_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    archived_manifest_path.write_text(
+        yaml.safe_dump(manifest.model_dump(mode="json"), allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
     refreshed_seal = build_input_seal(
         manifest,
         source_mode="nas_segmented_virtual_timeline",
@@ -2329,6 +2565,12 @@ def _preflight_and_seal_collection_input(
         preflight=input_preflight,
     )
     write_input_seal(existing_seal_path, refreshed_seal)
+    _write_json_atomic(staging_root / "JSON-Config-Files" / "view_role_resolution.json",
+                       refreshed_seal["role_resolution"])
+    ingest["archived_input_manifest"] = str(archived_manifest_path)
+    ingest.setdefault("original_retention", {}).update(
+        source_input_seal=str(source_seal_path), input_seal=str(existing_seal_path))
+    timing["manifest"] = str(archived_manifest_path)
     ingest["prequeue_input_preflight"] = {
         "status": input_preflight["status"],
         "receipt": str(preflight_path),
@@ -2340,7 +2582,7 @@ def _preflight_and_seal_collection_input(
         staging_root,
         run_id=run_id,
         state="running",
-        manifest_path=manifest_path,
+        manifest_path=archived_manifest_path,
         input_seal_path=existing_seal_path,
         ingest=ingest,
         job_kind="index_collection",
@@ -2382,6 +2624,9 @@ def _execute_index_collection_now(
     try:
         if directory_ingest_enabled(settings):
             validate_selection(settings, source_experiment_id)
+            settings["storage"]["index_csv"] = str(
+                selection_path(settings, source_experiment_id, ".csv")
+            )
         record_collection_state(
             settings,
             source_experiment_id,
@@ -2442,6 +2687,15 @@ def _execute_index_collection_now(
         )
         with _gpu_job_lock:
             output = EvidencePipeline(settings, progress).run(manifest)
+        if _record_partial_completion(run_id, Path(output)):
+            _append_collection_index_metrics([Path(output)], timing, completed=False)
+            write_partial_delivery(Path(output), _merged_run_metrics(Path(output)))
+            record_collection_state(
+                settings, source_experiment_id, archive_name=archive_name,
+                run_id=run_id, state="partial",
+                details={"staging": str(staging_root), "evidence_classification": "PARTIAL_EVIDENCE"},
+            )
+            return
         _append_collection_index_metrics(
             [Path(output), staging_root], timing, completed=True
         )
@@ -2542,7 +2796,7 @@ def _execute_index_collection(
         run_id,
         state="queued",
         progress=0.0,
-        message="等待 3090 Ti 计算资源",
+        message="等待可用计算资源",
         nas_output=str(fixed_root),
         nas_staging=str(staging_root),
     )
@@ -2566,6 +2820,63 @@ def index() -> str:
 @app.get("/favicon.ico", include_in_schema=False)
 def favicon() -> Response:
     return Response(status_code=204)
+
+
+def _require_local_ai_settings(request: Request) -> None:
+    if not ai_settings.enabled():
+        raise HTTPException(404, "当前服务未启用本机 AI 设置。")
+    identity = getattr(request.state, "web_identity", {})
+    if (not request.client or request.client.host not in {"127.0.0.1", "::1"}
+            or request.url.hostname not in {"127.0.0.1", "localhost", "::1"}
+            or identity.get("role") != "admin"):
+        raise HTTPException(403, "请从本机工作台以管理员身份设置 AI 服务。")
+    origin = request.headers.get("origin")
+    expected = f"{request.url.scheme}://{request.url.netloc}"
+    if (origin and origin != expected) or request.headers.get("sec-fetch-site") == "cross-site":
+        raise HTTPException(403, "AI 设置请求来源无效。")
+    if request.method == "POST" and (origin != expected or request.headers.get("content-type", "").split(";", 1)[0] != "application/json"):
+        raise HTTPException(403, "请通过本机 AI 服务设置页面提交。")
+
+
+@app.get("/api/ai-settings")
+def get_ai_settings(request: Request) -> JSONResponse:
+    _require_local_ai_settings(request)
+    try:
+        result = ai_settings.public_settings(_settings())
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError) as exc:
+        raise HTTPException(503, "本机 AI 配置无法读取，请检查本地配置目录权限。") from exc
+    return JSONResponse(result, headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/ai-settings/models")
+@app.post("/api/ai-settings/verify")
+async def verify_ai_settings(request: Request) -> JSONResponse:
+    _require_local_ai_settings(request)
+    raw = bytearray()
+    async for chunk in request.stream():
+        raw.extend(chunk)
+        if len(raw) > 16384:
+            raise HTTPException(413, "AI 配置请求过大。")
+    try:
+        value = json.loads(raw)
+        connection = value.get("connection")
+        key = value.get("api_key", "")
+        if not isinstance(connection, dict) or not isinstance(key, str) or len(key) > 4096 or any(ord(c) < 32 for c in key):
+            raise ValueError("invalid settings")
+    except (ValueError, AttributeError, TypeError) as exc:
+        raise HTTPException(400, "请填写有效的厂商、视觉模型和 API 密钥。") from exc
+    try:
+        action = ai_settings.discover_available_models if request.url.path.endswith("/models") else ai_settings.verify_and_activate
+        result = await run_in_threadpool(action, connection, key, _settings())
+    except ai_settings.DiscoveryError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except BlockingIOError as exc:
+        raise HTTPException(409, "已有连接正在验证，请稍候。") from exc
+    except ValueError as exc:
+        raise HTTPException(400, "请核对厂商、HTTPS 接口地址、视觉模型及 API 密钥。") from exc
+    except (OSError, RuntimeError, KeyError, TypeError) as exc:
+        raise HTTPException(503, "连接验证或配置保存未完成，请重试并检查本机配置目录权限。") from exc
+    return JSONResponse(result, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/health")
@@ -2598,6 +2909,7 @@ def health() -> dict[str, Any]:
         "status": "ok",
         "product_name": PRODUCT_NAME,
         "analysis_ready": analysis_ready,
+        "speech_recognition": {"enabled": speech.enabled(settings)},
         "run_purpose": settings.get("project", {}).get(
             "run_purpose", "production"
         ),
@@ -2628,7 +2940,10 @@ def health() -> dict[str, Any]:
             "inactive_session_ttl_seconds": float(upload_policy["session_ttl_seconds"]),
             "sessions": upload_stats,
         },
-        "ark_key_configured": bool(os.getenv(settings["mllm"]["api_key_env"])),
+        "ark_key_configured": key_configured(settings["mllm"]),
+        "mllm_key_configured": key_configured(settings["mllm"]),
+        "mllm_connection": connection_health(settings["mllm"], key_configured(settings["mllm"])),
+        "ai_settings_enabled": ai_settings.enabled(),
         "mllm_enabled": bool(settings["mllm"].get("enabled")),
         "model": settings["mllm"]["model"],
         "archive_root": str(archive_root),
@@ -2638,6 +2953,7 @@ def health() -> dict[str, Any]:
         "nas_archive_root": str(archive_root),
         "nas_available": storage_mode == "nas" and archive_root.is_dir(),
         "fixed_benchmark": {
+            "enabled": not bool(settings.get("project", {}).get("portable_desktop")),
             "experiment_id": _BENCHMARK_EXPERIMENT_ID,
             "archive_name": _BENCHMARK_ARCHIVE_NAME,
             "submission_protocol_version": _BENCHMARK_SUBMISSION_PROTOCOL_VERSION,
@@ -3691,6 +4007,9 @@ def _archive_links(
             "Key-Materials/Key-Material-Category-Index.json"
         ),
         "metrics": existing("JSON-Config-Files/run_metrics.json"),
+        "resource_telemetry": existing("JSON-Config-Files/resource_telemetry.json"),
+        "resource_telemetry_journal": existing("JSON-Config-Files/resource_telemetry.jsonl"),
+        "operation_review": existing("JSON-Config-Files/operation_review.json"),
         "delivery_metrics": existing("JSON-Config-Files/delivery_metrics.json"),
         "acceptance": existing("JSON-Config-Files/acceptance_report.json"),
         "quality_acceptance": existing("JSON-Config-Files/quality_acceptance.json"),
@@ -3707,10 +4026,29 @@ def _archive_links(
             f"JSON-Config-Files/{INDEX_MANIFEST_NAME}"
         ),
         "run_provenance": existing("JSON-Config-Files/run_provenance.json"),
+        "project_annotation_comparison": existing("Project-Review/Project-Annotation-Comparison.html"),
         "final_key_material_annotation": existing(
             "JSON-Config-Files/final_key_material_annotation.json"
         ),
     }
+
+
+def _movement_screening_payload(root: Path, report_url: str) -> dict[str, Any] | None:
+    movement_report = _read_json(root / "JSON-Config-Files/movement_visual_verification.json", {}) or {}
+    movement_screening = None
+    if movement_report.get("enabled"):
+        movement_screening = {
+            "counts": movement_report.get("counts", {}),
+            "duration_seconds": movement_report.get("duration_seconds"),
+            "total_candidates": len(movement_report.get("candidates", [])),
+            "candidates": [
+                {key: item.get(key) for key in ("candidate_id", "view_id", "start_ms", "end_ms", "objects", "status")}
+                for item in movement_report.get("candidates", [])[:200]
+            ],
+            "report_url": report_url,
+            "physical_action_confirmed": False,
+        }
+    return movement_screening
 
 
 def _archive_summary_payload(archive_name: str, root: Path) -> dict[str, Any]:
@@ -3761,6 +4099,9 @@ def _archive_summary_payload(archive_name: str, root: Path) -> dict[str, Any]:
         }
         if index_manifest
         else None,
+        "movement_screening": _movement_screening_payload(
+            root, _file_url(archive_name, "JSON-Config-Files/movement_visual_verification.json", release_id)
+        ),
         "links": _archive_links(archive_name, root, release_id, daily_manifest),
     }
 
@@ -3823,8 +4164,17 @@ def _archive_section_payload(
                     "folder": folder_name,
                     "name": group.get("experiment_name") or folder_name,
                     "continuity_type": group.get("continuity_type"),
+                    "workflow_kind": group.get("workflow_kind", "unresolved"),
+                    "source_archive_folders": group.get("source_archive_folders") or [],
+                    "workflow_units": group.get("workflow_units") or [],
+                    "completion_status": group.get("completion_status", "unreviewed"),
+                    "completion_reason": group.get("completion_reason") or "",
+                    "boundary_extension_requires_step_review": group.get("boundary_extension_requires_step_review", False),
+                    "view_timeline": group.get("view_timeline") or [],
                     "start_ms": group.get("global_start_ms"),
                     "end_ms": group.get("global_end_ms"),
+                    "speech_interpretation": understanding.get("speech_interpretation"),
+                    "speech_context": understanding.get("speech_context"),
                     "summary": understanding.get("overall_summary"),
                     "steps": understanding.get("steps") or [],
                     "uncertainties": understanding.get("uncertainties") or [],
@@ -3857,6 +4207,13 @@ def _archive_section_payload(
                         or group.get("archive_folder"),
                         "folder": group.get("archive_folder"),
                         "continuity_type": group.get("continuity_type"),
+                        "workflow_kind": group.get("workflow_kind", "unresolved"),
+                        "source_archive_folders": group.get("source_archive_folders") or [],
+                        "workflow_units": group.get("workflow_units") or [],
+                        "completion_status": group.get("completion_status", "unreviewed"),
+                        "completion_reason": group.get("completion_reason") or "",
+                        "boundary_extension_requires_step_review": group.get("boundary_extension_requires_step_review", False),
+                        "view_timeline": group.get("view_timeline") or [],
                         "start_ms": group.get("global_start_ms"),
                         "end_ms": group.get("global_end_ms"),
                         "key_event_count": len(group.get("key_event_ids") or []),
@@ -3928,13 +4285,21 @@ def archive_detail(
 
 
 @app.get("/api/staging-runs/{run_id}/archive")
-def staging_archive_detail(run_id: str) -> dict[str, Any]:
+def staging_archive_detail(run_id: str, section: str = "all") -> dict[str, Any]:
+    if section not in {"all", "library-materials", "library-reports"}:
+        raise HTTPException(status_code=400, detail="Unsupported staging section")
     root = _resolve_staging_run(run_id)
-    return _archive_detail_from_root(root, root.parent.name, staging_run_id=run_id)
+    record = _runs.get(run_id) or {}
+    name = record.get("experiment_id") or root.parent.name
+    result = _archive_detail_from_root(root, name, staging_run_id=run_id, library_section=section if section != "all" else None)
+    if record.get("read_only"):
+        result.update(read_only=True, retry_available=False)
+    return result
 
 
 def _archive_detail_from_root(
-    root: Path, archive_name: str, *, staging_run_id: str | None = None
+    root: Path, archive_name: str, *, staging_run_id: str | None = None,
+    library_section: str | None = None
 ) -> dict[str, Any]:
     release_pointer = read_current_release_pointer(root) or {}
     release_id = str(release_pointer.get("release_id") or "") or None
@@ -3947,8 +4312,20 @@ def _archive_detail_from_root(
 
     index_manifest_path = root / "JSON-Config-Files" / INDEX_MANIFEST_NAME
     index_manifest = _read_json(index_manifest_path, {}) or {}
-    package = _read_json(root / "JSON-Config-Files" / "evidence_package.json", {}) or {}
-    metrics = _merged_run_metrics(root)
+    snapshot = ({"status": _pipeline_status_from_root(root),
+                 "stage_receipts": _stage_receipts_from_root(root),
+                 "partial_delivery": _read_json(root / "JSON-Config-Files/partial_delivery.json", {}) or {}}
+                if library_section else _run_snapshot_from_root(root))
+    status = snapshot.get("status") or {}
+    active_preview = bool(staging_run_id) and status.get("stage") not in {"completed", "partial", "failed", "interrupted", "cancelled"}
+    completed_stages = {
+        item["stage"] for item in snapshot.get("stage_receipts", [])
+        if item.get("status") == "completed"
+    }
+    package = {} if library_section else _read_json(root / "JSON-Config-Files" / "evidence_package.json", {}) or {}
+    if active_preview:
+        package = {}
+    metrics = {} if library_section else _merged_run_metrics(root)
     acceptance = _read_json(root / "JSON-Config-Files" / "acceptance_report.json", {}) or {}
     quality_path = root / "JSON-Config-Files" / "quality_acceptance.json"
     quality_acceptance = _read_json(quality_path, {}) or {}
@@ -3961,7 +4338,13 @@ def _archive_detail_from_root(
     final_annotation_path = (
         root / "JSON-Config-Files" / "final_key_material_annotation.json"
     )
-    final_annotation = _read_json(final_annotation_path, {}) or {}
+    final_annotation = {} if library_section else _read_json(final_annotation_path, {}) or {}
+    if active_preview:
+        quality_acceptance = {}
+        evidence_eval = {}
+        key_material_recall_eval = {}
+        if "material_refinement" not in completed_stages:
+            final_annotation = {}
     key_material_verification, verification_by_event = (
         _summarize_key_material_verification(final_annotation)
     )
@@ -3969,9 +4352,13 @@ def _archive_detail_from_root(
     key_events = _read_json(
         root / "Key-Materials" / "Key-Materials-Model-Understanding.json", []
     ) or []
+    if active_preview and "mllm" not in completed_stages:
+        key_events = []
     daily_manifest = _read_json(
         root / "JSON-Config-Files" / "daily_report_manifest.json", {}
     ) or {}
+    if active_preview:
+        daily_manifest = {}
     daily_report = (
         _read_json(root / daily_manifest["json"], {})
         if daily_manifest.get("json")
@@ -3983,6 +4370,12 @@ def _archive_detail_from_root(
             root / "JSON-Config-Files" / "experiment_group_understanding.json", {}
         ) or {}
         package_groups = stage_groups.get("groups", [])
+        if active_preview and _current_attempt_started_at(status) is not None and "experiment_understanding" not in completed_stages:
+            package_groups = []
+    from .speech_refresh import apply as apply_speech_revision
+    package_groups = apply_speech_revision(root, package_groups)
+    from .operation_review import apply as apply_operation_revision, coverage
+    package_groups = apply_operation_revision(root, package_groups)
     group_by_folder = {
         str(group.get("archive_folder")): group for group in package_groups
     }
@@ -3995,6 +4388,8 @@ def _archive_detail_from_root(
     experiment_root = root / "Experiment-Clips"
     if experiment_root.is_dir():
         for folder in sorted(item for item in experiment_root.iterdir() if item.is_dir()):
+            if (package_groups or active_preview) and folder.name not in group_by_folder:
+                continue
             group = group_by_folder.get(folder.name, {})
             understanding = group.get("model_understanding") or {}
             first_person = folder / "First-Person.mp4"
@@ -4003,12 +4398,24 @@ def _archive_detail_from_root(
             experiments.append(
                 {
                     "folder": folder.name,
+                    "group_id": group.get("group_id"),
                     "name": group.get("experiment_name") or folder.name,
                     "continuity_type": group.get("continuity_type"),
+                    "workflow_kind": group.get("workflow_kind", "unresolved"),
+                    "source_archive_folders": group.get("source_archive_folders") or [],
+                    "workflow_units": group.get("workflow_units") or [],
+                    "completion_status": group.get("completion_status", "unreviewed"),
+                    "completion_reason": group.get("completion_reason") or "",
+                    "boundary_extension_requires_step_review": group.get("boundary_extension_requires_step_review", False),
+                    "view_timeline": group.get("view_timeline") or [],
                     "start_ms": group.get("global_start_ms"),
                     "end_ms": group.get("global_end_ms"),
+                    "speech_interpretation": understanding.get("speech_interpretation"),
+                    "speech_context": understanding.get("speech_context"),
                     "summary": understanding.get("overall_summary"),
                     "steps": understanding.get("steps") or [],
+                    "operation_coverage": coverage(group, understanding.get("steps") or []),
+                    "operation_review_accepted": (understanding.get("operation_review") or {}).get("accepted"),
                     "uncertainties": understanding.get("uncertainties") or [],
                     "first_person_video_url": file_url(
                         archive_name,
@@ -4071,6 +4478,13 @@ def _archive_detail_from_root(
                     "name": group.get("experiment_name") or event.get("parent_event_id"),
                     "folder": group.get("archive_folder"),
                     "continuity_type": group.get("continuity_type"),
+                    "workflow_kind": group.get("workflow_kind", "unresolved"),
+                    "source_archive_folders": group.get("source_archive_folders") or [],
+                    "workflow_units": group.get("workflow_units") or [],
+                    "completion_status": group.get("completion_status", "unreviewed"),
+                    "completion_reason": group.get("completion_reason") or "",
+                    "boundary_extension_requires_step_review": group.get("boundary_extension_requires_step_review", False),
+                    "view_timeline": group.get("view_timeline") or [],
                     "start_ms": group.get("global_start_ms"),
                     "end_ms": group.get("global_end_ms"),
                 },
@@ -4100,7 +4514,6 @@ def _archive_detail_from_root(
         archive_name, root, release_id, daily_manifest,
         staging_run_id=staging_run_id,
     )
-    snapshot = _run_snapshot_from_root(root)
     preliminary_materials = []
     if not normalized_events and snapshot.get("status", {}).get("stage") != "completed":
         completed = {item.get("stage") for item in snapshot.get("stage_receipts", []) if item.get("status") == "completed"}
@@ -4124,7 +4537,98 @@ def _archive_detail_from_root(
                                 "review_status": "pending_semantic_review",
                                 **media,
                             })
-    return {
+    quarantine_materials = []
+    manifest = _read_json(root / "JSON-Config-Files/run_manifest.json", {}) or {}
+    role_by_view = {view.get("view_id"): view.get("role") for view in manifest.get("views", [])}
+    retained_candidates = {}
+    for relative_index in (
+        "Key-Materials/Machine-Quarantine/Machine-Quarantine-Index.json",
+        "Key-Materials/Review-Candidates/Candidate-Index.json",
+    ):
+        index = _read_json(root / relative_index, {}) or {}
+        for candidate in index.get("candidates", []):
+            if candidate.get("event_id"):
+                retained_candidates[str(candidate["event_id"])] = candidate
+    quarantine_index = {"candidates": list(retained_candidates.values())}
+    if active_preview and "material_refinement" not in completed_stages:
+        quarantine_index = {}
+    for event in quarantine_index.get("candidates", []):
+        media = {}
+        role_media: dict[str, dict[str, Any]] = {}
+        pairing = event.get("view_pairing") or {}
+        for relative in event.get("media", []):
+            candidate = (root / relative).resolve()
+            if not archive_contains(candidate, root.resolve()) or not candidate.is_file():
+                continue
+            if candidate.suffix.lower() in {".jpg", ".png", ".jpeg"}:
+                field = "frame_url"
+            elif candidate.suffix.lower() == ".mp4":
+                field = "clip_url"
+            else:
+                continue
+            if field not in media or "aligned" in candidate.name.lower():
+                media[field] = file_url(archive_name, relative)
+            if candidate.stem in {"First-Person", "Third-Person"}:
+                role_media.setdefault(candidate.stem, {})[field] = file_url(archive_name, relative)
+        context_media = {}
+        if pairing.get("pair_evidence_status") == "context_only_missing_key_time_support":
+            # A same-time context camera is not a corresponding action view.
+            # Keep it accessible separately instead of presenting a false pair.
+            supported = {item["view_id"] for candidates in pairing.get("candidates", {}).values()
+                         for item in candidates if item.get("candidate_supported_at_key")}
+            primary_role = ("Third-Person" if pairing.get("third_person_view") in supported
+                            and pairing.get("first_person_view") not in supported else "First-Person")
+            other_role = "Third-Person" if primary_role == "First-Person" else "First-Person"
+            if role_media.get(primary_role):
+                media = dict(role_media[primary_role])
+                context_media = role_media.get(other_role, {})
+        if media:
+            group = next((item for item in package_groups
+                          if item.get("global_start_ms") is not None
+                          and item.get("global_end_ms") is not None
+                          and item["global_start_ms"] <= event.get("key_global_ms", 0)
+                          <= item["global_end_ms"]), {})
+            quarantine_materials.append({
+                "event_id": event.get("event_id"),
+                "timestamp_ms": event.get("key_global_ms", 0),
+                "start_ms": event.get("global_start_ms"),
+                "end_ms": event.get("global_end_ms"),
+                "cv_action_type": event.get("cv_action_type"),
+                "cv_objects": event.get("cv_objects", []),
+                "source_views": event.get("source_views", []),
+                "view_pairing": event.get("view_pairing", {}),
+                "context_media": context_media,
+                "source_roles": sorted({role_by_view[view] for view in event.get("source_views", [])
+                                        if role_by_view.get(view)}),
+                "group_id": group.get("group_id"),
+                "group_folder": group.get("archive_folder"),
+                "group_name": group.get("experiment_name"),
+                "review_status": "machine_quarantined",
+                "evidence_classification": "PARTIAL_EVIDENCE",
+                "disposition": event.get("disposition"),
+                **media,
+            })
+    quarantine_materials, retained_review = prioritize_retained_candidates(quarantine_materials)
+    movement_screening = None if library_section else _movement_screening_payload(
+        root, file_url(archive_name, "JSON-Config-Files/movement_visual_verification.json")
+    )
+    partial_delivery = snapshot.get("partial_delivery") or {}
+    if partial_delivery and (root / "Partial-Results/Partial-Evidence-Report.html").is_file():
+        links["partial_report"] = file_url(
+            archive_name, "Partial-Results/Partial-Evidence-Report.html"
+        )
+        if (root / "Partial-Results/Analysis-Result.json").is_file():
+            links["partial_json"] = file_url(archive_name, "Partial-Results/Analysis-Result.json")
+        for key, kind, relative in (
+            ("partial_pdf", "pdf", "Partial-Results/Stage-Evidence-Report.pdf"),
+            ("partial_daily_report", "daily_html", "Partial-Results/Stage-Lab-Daily-Report.html"),
+        ):
+            presentation = (partial_delivery.get("readable_reports") or {}).get(kind) or {}
+            path = root / relative
+            if (presentation.get("path") == relative and path.is_file()
+                    and hashlib.sha256(path.read_bytes()).hexdigest() == presentation.get("sha256")):
+                links[key] = file_url(archive_name, relative)
+    result = {
         "name": archive_name,
         "path": str(root),
         "staging_run_id": staging_run_id,
@@ -4146,6 +4650,13 @@ def _archive_detail_from_root(
                 "name": group.get("experiment_name") or group.get("archive_folder"),
                 "folder": group.get("archive_folder"),
                 "continuity_type": group.get("continuity_type"),
+                "workflow_kind": group.get("workflow_kind", "unresolved"),
+                "source_archive_folders": group.get("source_archive_folders") or [],
+                "workflow_units": group.get("workflow_units") or [],
+                "completion_status": group.get("completion_status", "unreviewed"),
+                "completion_reason": group.get("completion_reason") or "",
+                "boundary_extension_requires_step_review": group.get("boundary_extension_requires_step_review", False),
+                "view_timeline": group.get("view_timeline") or [],
                 "start_ms": group.get("global_start_ms"),
                 "end_ms": group.get("global_end_ms"),
                 "key_event_count": len(group.get("key_event_ids", [])),
@@ -4154,8 +4665,13 @@ def _archive_detail_from_root(
         ],
         "key_events": normalized_events,
         "preliminary_materials": preliminary_materials,
+        "quarantined_materials": quarantine_materials,
+        "retained_material_review": retained_review,
+        "movement_screening": movement_screening,
+        "partial_delivery": partial_delivery,
         "metrics": metrics,
         "quality_acceptance": quality_acceptance,
+        "result_review": _latest_result_review(root) if not active_preview and not library_section else {"available":False},
         "key_material_recall_eval": key_material_recall_eval,
         "key_material_verification": key_material_verification,
         "observability": snapshot,
@@ -4170,17 +4686,26 @@ def _archive_detail_from_root(
         "links": links,
     }
 
+    if library_section:
+        from .library_projection import project_staging_library
+        return project_staging_library(result, library_section)
+    return result
+
 
 @app.get("/api/archive-file")
 def archive_file(
     archive: str,
     path: str,
     release: str | None = None,
+    poster: bool = False,
 ) -> FileResponse:
     root = _resolve_archive(archive).resolve()
-    candidate = (root / path).resolve()
-    if not archive_contains(candidate, root) or not candidate.is_file():
-        raise HTTPException(404, "档案文件不存在")
+    from .artifact_reader import resolve, storage_status
+    try:
+        candidate = resolve(root, path, historical=True)
+    except (OSError, ValueError) as exc:
+        code, message = storage_status(exc)
+        raise HTTPException(code, message) from exc
     headers = {
         "Accept-Ranges": "bytes",
         "X-Content-Type-Options": "nosniff",
@@ -4218,16 +4743,46 @@ def archive_file(
                 "X-VisionCortex-Integrity": "release-manifest-size-matched",
             }
         )
+    if poster:
+        return _video_poster_response(candidate, root)
     return FileResponse(candidate, headers=headers)
 
 
 @app.get("/api/staging-file")
-def staging_file(run_id: str, path: str) -> FileResponse:
+def staging_file(run_id: str, path: str, poster: bool = False) -> FileResponse:
     root = _resolve_staging_run(run_id)
-    candidate = (root / path).resolve()
-    if not archive_contains(candidate, root) or not candidate.is_file():
-        raise HTTPException(404, "staging 文件不存在")
-    return FileResponse(candidate)
+    from .artifact_reader import resolve, storage_status
+    try:
+        candidate = resolve(root, path, historical=True)
+    except (OSError, ValueError) as exc:
+        code, message = storage_status(exc)
+        raise HTTPException(code, message) from exc
+    if poster:
+        return _video_poster_response(candidate, root)
+    # Staging media can be rebuilt at the same URL. Revalidate cached ranges so
+    # the browser does not combine an earlier MP4 index with newer media bytes.
+    return FileResponse(candidate, headers={
+        "Cache-Control": "private, no-cache",
+        "X-Content-Type-Options": "nosniff",
+    })
+
+
+
+def _video_poster_response(candidate: Path, root: Path) -> FileResponse:
+    relative = candidate.relative_to(root.resolve())
+    if candidate.suffix.lower() != ".mp4" or relative.parts[0] not in {"Experiment-Clips", "Key-Materials"}:
+        raise HTTPException(400, "仅为已有实验片段和素材生成封面")
+    runtime = _settings().get("storage", {}).get("local_runtime_root")
+    if not runtime:
+        raise HTTPException(503, "本地封面缓存尚未配置")
+    try:
+        path = cached_video_poster(candidate, Path(runtime))
+    except (OSError, ValueError, TimeoutError, subprocess.SubprocessError) as exc:
+        raise HTTPException(503, "封面暂不可用，仍可点击播放视频") from exc
+    return FileResponse(path, media_type="image/jpeg", headers={
+        "Cache-Control": "private, no-cache", "X-Content-Type-Options": "nosniff",
+        "X-VisionCortex-Preview": "first-decoded-frame",
+    })
 
 
 def _folder_open_command(
@@ -4251,6 +4806,18 @@ def _folder_open_command(
 @app.post("/api/archives/{archive_name}/open")
 def open_archive_folder(archive_name: str) -> dict[str, str]:
     root = _resolve_archive(archive_name)
+    try:
+        command = _folder_open_command(root)
+    except RuntimeError as exc:
+        raise HTTPException(501, str(exc)) from exc
+    subprocess.Popen(command, start_new_session=True)
+    return {"status": "opened", "path": str(root)}
+
+
+@app.post("/api/staging-runs/{run_id}/open")
+def open_staging_folder(run_id: str) -> dict[str, str]:
+    """Open an already resolved run directory without promoting its evidence."""
+    root = _resolve_staging_run(run_id)
     try:
         command = _folder_open_command(root)
     except RuntimeError as exc:
@@ -4655,6 +5222,12 @@ def finalize_upload_session(
                         ),
                     )
                 )
+        for view, spec in zip(views, session["view_specs"], strict=True):
+            mappings = spec.get("segments") or [spec]
+            for part, mapping in zip(view.segments or [view], mappings, strict=True):
+                if mapping.get("audio_index") is not None:
+                    part.audio = Path(files_by_key[("audio", int(mapping["audio_index"]))]["final_path"])
+                    part.audio_offset_ms = mapping.get("audio_offset_ms")
         manifest = RunManifest(experiment_id=archive_name, views=views)
         manifest_path = nas_root / "JSON-Config-Files" / "input_manifest.yaml"
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -4958,7 +5531,6 @@ async def create_run(
     except (json.JSONDecodeError, ValueError) as exc:
         raise HTTPException(400, f"view_specs_json 无效: {exc}") from exc
     settings = _settings()
-    settings["storage"]["sync_to_nas"] = True
     archive_name, nas_root = _reserve_archive(settings, experiment_name)
     settings["storage"]["active_archive_path"] = str(nas_root)
     run_id = uuid.uuid4().hex[:12]
@@ -4966,7 +5538,7 @@ async def create_run(
     retention_mode = str(
         settings["storage"].get("web_upload_retention_mode", "local_and_nas")
     ).lower()
-    if retention_mode not in {"local_and_nas", "nas_only"}:
+    if retention_mode not in {"local_and_nas", "nas_only", "local_only"}:
         raise HTTPException(500, f"Unsupported web_upload_retention_mode: {retention_mode}")
     retain_local_copy = retention_mode == "local_and_nas"
     saved_videos: list[Path] = []
@@ -4991,6 +5563,7 @@ async def create_run(
                     local_destination,
                     nas_destination,
                     retain_local_copy=retain_local_copy,
+                    archive_is_network=bool(settings["storage"].get("sync_to_nas")),
                 )
             )
             saved_videos.append(Path(upload_ledger[-1]["analysis_path"]))
@@ -5012,6 +5585,7 @@ async def create_run(
                     local_destination,
                     nas_destination,
                     retain_local_copy=retain_local_copy,
+                    archive_is_network=bool(settings["storage"].get("sync_to_nas")),
                 )
             )
             saved_csvs.append(Path(upload_ledger[-1]["analysis_path"]))
@@ -5095,6 +5669,8 @@ async def create_run(
         "nas_write_bytes": sum(int(item["nas_write_bytes"]) for item in upload_ledger),
         "retention_mode": retention_mode,
         "destinations": (
+            ["local_archive_original_experiment_videos"]
+            if not settings["storage"].get("sync_to_nas") else
             ["local_input", "nas_original_experiment_videos"]
             if retain_local_copy
             else ["nas_original_experiment_videos"]
@@ -5198,6 +5774,8 @@ def create_fixed_benchmark_run(background_tasks: BackgroundTasks) -> dict[str, A
     request_started_epoch = time.time()
     request_received_at = datetime.now().astimezone().isoformat()
     settings = _settings()
+    if settings.get("project", {}).get("portable_desktop"):
+        raise HTTPException(404, "此应用使用用户上传的视频，不包含固定六路基准数据。")
     settings["storage"]["sync_to_nas"] = True
     run_id = f"benchmark-{uuid.uuid4().hex[:10]}"
     nas_root = _reserve_fixed_benchmark(settings, run_id)
@@ -5284,7 +5862,7 @@ def create_collection_run(
                 run_id
                 for run_id, run in _runs.items()
                 if run.get("source_collection_id") == experiment_id
-                and run.get("state") not in {"completed", "failed", "interrupted"}
+                and run.get("state") not in {"completed", "partial", "failed", "interrupted"}
             ),
             None,
         )
@@ -5298,7 +5876,10 @@ def create_collection_run(
     )
     requested_name = str(payload.get("experiment_name") or default_name).strip()
     run_id = f"collection-{uuid.uuid4().hex[:10]}"
-    settings["storage"]["sync_to_nas"] = True
+    if directory_ingest_enabled(settings):
+        settings["storage"]["index_csv"] = str(
+            selection_path(settings, experiment_id, ".csv")
+        )
     archive_name, fixed_root, staging_root, history_root = _reserve_collection_archive(
         settings, requested_name, run_id
     )
@@ -5375,7 +5956,6 @@ def create_run_from_paths(payload: dict[str, Any], background_tasks: BackgroundT
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     settings = _settings()
-    settings["storage"]["sync_to_nas"] = True
     archive_name, nas_root = _reserve_archive(settings, manifest.experiment_id)
     if archive_name != manifest.experiment_id:
         manifest = manifest.model_copy(update={"experiment_id": archive_name})
@@ -5459,6 +6039,9 @@ def create_run_from_paths(payload: dict[str, Any], background_tasks: BackgroundT
 
 @app.get("/api/runs")
 def list_runs() -> dict[str, Any]:
+    if _persistent_queue is not None:
+        with _lock:
+            _runs.update(_persistent_queue.load_runs())
     with _lock:
         runs = [
             _hydrate_run_snapshot({"run_id": run_id, **values})
@@ -5470,6 +6053,11 @@ def list_runs() -> dict[str, Any]:
 
 @app.get("/api/runs/{run_id}")
 def get_run(run_id: str) -> dict[str, Any]:
+    if _persistent_queue is not None:
+        fresh = _persistent_queue.load_run(run_id)
+        if fresh:
+            with _lock:
+                _runs[run_id] = fresh
     with _lock:
         state = dict(_runs.get(run_id, {}))
     if not state:
@@ -5489,6 +6077,365 @@ def get_run(run_id: str) -> dict[str, Any]:
     return _hydrate_run_snapshot({"run_id": run_id, **state})
 
 
+def _retain_retry_outputs(root: Path, attempt: int) -> None:
+    """Rename previous derived output into history on the same share.
+
+    Original media and input seals remain at their frozen paths. A fresh
+    attempt must not mix old clip names, quarantine files or indexes with its
+    own results. No media bytes are copied or removed.
+    """
+    json_root = root / "JSON-Config-Files"
+    history = json_root / "Retry-Attempts" / str(attempt) / "Derived"
+    inputs = {"Input-Manifests", "Retry-Attempts", "input_manifest.yaml",
+              "run_manifest.json", "original_upload_manifest.json"}
+    sources = [root / name for name in ARCHIVE_DIRECTORIES
+               if name not in {"Original-Experiment-Videos", "JSON-Config-Files"}]
+    sources.extend([root / "Partial-Results", root / "run_status.json"])
+    if json_root.is_dir():
+        sources.extend(item for item in json_root.iterdir() if item.name not in inputs)
+    moves = [(source, history / source.relative_to(root)) for source in sources if source.exists()]
+    if any(destination.exists() for _, destination in moves):
+        raise RuntimeError("上次复跑历史目录已存在同名产出，已停止以保留两份结果。")
+    applied = []
+    try:
+        for source, destination in moves:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            source.replace(destination)
+            applied.append((source, destination))
+        _write_json_atomic(history.parent / "output_relocation.json", {
+            "schema_version": "visioncortex-retry-output-relocation/1",
+            "previous_attempt": attempt, "source_media_moved": False,
+            "copied_media_bytes": 0,
+            "paths": [{"from": str(source.relative_to(root)), "to": str(destination.relative_to(root))}
+                      for source, destination in applied],
+        })
+    except OSError:
+        for source, destination in reversed(applied):
+            destination.replace(source)
+        raise
+
+
+def _refresh_in_progress(run_id: str) -> bool:
+    return any(state.get("parent_run_id") == run_id and state.get("state") in {"queued", "running"}
+               for state in _runs.values())
+
+
+@app.post("/api/runs/{run_id}/refresh/{scope}", status_code=202)
+def refresh_stage(run_id: str, scope: str, target: str | None = None, revision: str | None = None) -> dict[str, Any]:
+    if scope not in {"understanding", "reports", "timeline", "capture_quality", "search", "operations", "result_check", "gap_review"}:
+        raise HTTPException(422, "请选择需要更新的阶段")
+    store = _persistent_queue
+    job = store.get_job(run_id) if store else None
+    if not job or job["status"] not in {"failed", "completed"}:
+        raise HTTPException(409, "原任务须已停止且保留持久任务记录")
+    root = _find_staging_run(_settings(), run_id)
+    if root is None or read_current_release_pointer(root):
+        raise HTTPException(409, "仅可刷新尚未正式发布的实验")
+    settings = copy.deepcopy(job["payload"]["settings"])
+    if scope in {"result_check", "gap_review"}:
+        from .result_review import inspect
+        try:
+            plan = inspect(root)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise HTTPException(422, "当前保存记录不足以检查，请先核对实验产出") from exc
+        if not revision or revision != plan["revision"]:
+            raise HTTPException(409, "结果版本已改变，请刷新后重新检查")
+        if scope == "gap_review":
+            if target not in {w["window_id"] for w in plan["windows"]}:
+                raise HTTPException(422, "请选择当前检查中的缺口区间")
+            try:
+                settings["mllm"] = ai_settings.reverified_job_mllm(settings)
+            except (OSError, ValueError, RuntimeError) as exc:
+                raise HTTPException(422, str(exc)) from exc
+    if scope == "operations":
+        from .operation_review import bindings, GROUPS, EVENTS
+        bound = bindings(root)
+        if not bound.get(EVENTS) or not revision or revision != bound[GROUPS]:
+            raise HTTPException(422, "缺少已审核事件，或步骤版本已经变化，请刷新后重试")
+        try:
+            settings["mllm"] = ai_settings.reverified_job_mllm(settings)
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+    if scope == "understanding":
+        groups = _read_json(root / "JSON-Config-Files/experiment_group_understanding.json", {}) or {}
+        if target is not None:
+            from .speech_refresh import input_path
+            if not revision or len(revision) != 64:
+                raise HTTPException(422, "片段重算需要当前理解版本")
+            if target.startswith("group:"):
+                group = next((item for item in groups.get("groups", []) if "group:"+item["group_id"] == target), None)
+                if group is None or not input_path(root, group["group_id"]).is_file():
+                    raise HTTPException(422, "该片段没有保留可核验的理解画面，请运行完整流程生成")
+            elif not target.startswith("recording:") or not target.split(":")[1].isdigit():
+                raise HTTPException(422, "理解片段标识无效")
+        elif groups.get("groups") or not (root / "JSON-Config-Files/speech_understanding.json").is_file():
+            raise HTTPException(422, "请选择一个保留了理解画面的实验片段")
+        try:
+            settings["mllm"] = ai_settings.reverified_job_mllm(settings)
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+    settings.setdefault("project", {})["semantic_cache_mode"] = "reuse"
+    refresh_id = "refresh-" + uuid.uuid4().hex[:12]
+    with _lock:
+        # Parent retry and child refresh cannot alter the same artifacts together.
+        if _refresh_in_progress(run_id) or store.get_job(run_id)["status"] not in {"failed", "completed"}:
+            raise HTTPException(409, "此实验已有阶段任务，请等待完成")
+        state = {"state": "queued", "progress": 0.0, "parent_run_id": run_id,
+                 "refresh_scope": scope, "refresh_target": target, "message": "等待刷新所选阶段"}
+        store.save_run(refresh_id, state)
+        store.enqueue(refresh_id, "stage_refresh", {"settings": settings, "parent_run_id": run_id, "scope": scope, "target": target, "revision": revision})
+        _runs[refresh_id] = state
+    _queue_wakeup.set()
+    return {"run_id": refresh_id, "parent_run_id": run_id, "state": "queued",
+            "status_url": f"/api/runs/{refresh_id}", "scope": scope}
+
+
+@app.get("/api/runs/{run_id}/recovery-plan")
+def recovery_plan(run_id: str) -> dict[str, Any]:
+    store = _persistent_queue
+    job = store.get_job(run_id) if store else None
+    if job is None:
+        raise HTTPException(404, "原持久任务不存在，请重新选择原输入")
+    root = _find_staging_run(_settings(), run_id)
+    if root is None or read_current_release_pointer(root):
+        raise HTTPException(409, "仅可恢复尚未正式发布的暂存任务")
+    from .operation_review import bindings, GROUPS, EVENTS
+    bound = bindings(root)
+    status = _pipeline_status_from_root(root)
+    stopped = job["status"] in {"failed", "completed"} and not _refresh_in_progress(run_id)
+    retryable = stopped and (job["status"] == "failed" or (store.load_runs().get(run_id) or {}).get("state") == "partial")
+    model = job["payload"]["settings"].get("mllm") or {}
+    model_ready = False
+    model_message = "原任务未启用模型理解"
+    if model.get("enabled"):
+        try:
+            ai_settings.reverified_job_mllm(job["payload"]["settings"])
+            model_ready = True
+            model_message = "已保存的连接验证可用于原任务；提交时再次检查"
+        except (OSError, ValueError, RuntimeError) as exc:
+            model_message = str(exc)
+    identity = {"run_id":run_id, "attempt":job["attempts"], "status":job["status"], "bindings":bound,
+                "updated_at":status.get("updated_at"), "refresh_in_progress":_refresh_in_progress(run_id)}
+    revision = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+    return {"run_id":run_id, "revision":revision, "group_revision":bound[GROUPS],
+            "failed_stage":status.get("failed_stage") or status.get("stage"),
+            "provider":model.get("provider"), "model":model.get("model"),
+            "output_path":str(root), "retained_stage_count":len(_stage_receipts_from_root(root)),
+            "model_ready":model_ready, "model_check_message":model_message,
+            "actions": {"retry":retryable and (model_ready or not model.get("enabled")), "reports":stopped,
+                        "operations":stopped and model_ready and bool(bound[GROUPS] and bound[EVENTS])},
+            "cache_policy":"校验源文件、代码、配置和模型身份后复用；未通过校验的部分重新计算。",
+            "retry_effect":"原输入不复制；已有派生产出移入 Retry-Attempts 历史目录，本轮重新生成可见成果。",
+            "model_cost":"完整复跑与操作整理可能产生新的模型费用；缓存命中数与新增用量以执行回执为准，当前不作费用承诺。",
+            "quality_policy":"操作整理复用已保存画面与已审核事件；不能补出未观察的动作或证明实验已结束。报告刷新不调用模型，未通过质量门时仅生成阶段报告。"}
+
+
+@app.post("/api/runs/{run_id}/retry", status_code=202)
+def retry_run(run_id: str, revision: str | None = None) -> dict[str, Any]:
+    store = _persistent_queue
+    if store is None:
+        raise HTTPException(503, "持久任务队列未就绪")
+    job = store.get_job(run_id)
+    if job is None:
+        raise HTTPException(404, "原任务记录不存在，请重新选择原输入")
+    if job["status"] != "failed" and not (
+        job["status"] == "completed" and (store.load_runs().get(run_id) or {}).get("state") == "partial"
+    ):
+        raise HTTPException(409, "仅可复跑已停止的未完成任务")
+    root = _find_staging_run(_settings(), run_id)
+    if root is None or read_current_release_pointer(root):
+        raise HTTPException(409, "原任务暂存产出不可用，或已经正式发布")
+    try:
+        verified_mllm = ai_settings.reverified_job_mllm(job["payload"]["settings"])
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+    # Preserve compact receipts before this attempt rewrites its current view.
+    # No source media or derived video is copied for a retry.
+    attempt_root = root / "JSON-Config-Files" / "Retry-Attempts" / str(job["attempts"])
+    with _lock:
+        current = store.get_job(run_id)
+        if current is None or current["status"] != job["status"] or current["attempts"] != job["attempts"]:
+            raise HTTPException(409, "任务状态已改变，请刷新恢复方案")
+        if revision is not None and recovery_plan(run_id)["revision"] != revision:
+            raise HTTPException(409, "恢复方案已过期，请刷新后重试")
+        if _refresh_in_progress(run_id):
+            raise HTTPException(409, "此实验正在刷新阶段，请等待完成")
+        try:
+            retained = [
+                "JSON-Config-Files/partial_delivery.json",
+                "JSON-Config-Files/run_metrics.json",
+                "JSON-Config-Files/pipeline_status.json",
+                "JSON-Config-Files/key_material_semantic_failures.json",
+                "JSON-Config-Files/experiment_group_semantic_failures.json",
+                "Partial-Results/Partial-Evidence-Report.html",
+            ]
+            for relative in retained:
+                source = root / relative
+                if source.is_file():
+                    destination = attempt_root / source.name
+                    if not destination.exists():
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copyfile(source, destination)
+            _retain_retry_outputs(root, int(job["attempts"]))
+            state = store.retry_failed(run_id, verified_mllm=verified_mllm)
+        except ValueError as exc:
+            raise HTTPException(409, "任务已重新排队或尚未停止") from exc
+        _runs[run_id] = state
+    _queue_wakeup.set()
+    return {"run_id": run_id, "state": "queued", "status_url": f"/api/runs/{run_id}",
+            "source_copy_bytes": 0, "queue_persistence": "sqlite",
+            "reuses_original_inputs": True, "cache_policy": "verified_reuse"}
+
+
+def _experiment_speech_response(root: Path, name: str, staging: bool, query: str,
+                                offset: int, limit: int, chunk: str | None,
+                                release: str | None = None, *, fold: bool = False,
+                                phrase: str | None = None, aliases: bool = True, hint: str | None = None) -> dict[str, Any]:
+    pointer = read_current_release_pointer(root) or {} if not staging else {}
+    current = str(pointer.get("release_id") or "") or None
+    if release is not None and release != current:
+        raise HTTPException(409, "实验归档已更新，请刷新页面")
+    try:
+        if current:
+            if lightweight_release_integrity(root, pointer) != "release_manifest_verified":
+                raise ValueError("invalid release manifest")
+            manifest_path = (root / str(pointer.get("release_manifest") or "")).resolve()
+            if not archive_contains(manifest_path, root):
+                raise ValueError("invalid release path")
+            for filename in ("speech.json", "speech_understanding.json", "speech_timeline.json", "speech_search.json", "speech_search_receipt.json", "capture_quality.json", "speech_group_understanding.json"):
+                index = root / "JSON-Config-Files" / filename
+                if index.is_file():
+                    release_manifest = _read_json(manifest_path, {}) or {}
+                    expected = next((item for item in release_manifest.get("manifests", {}).get("JSON-Config-Files", [])
+                                     if item.get("path") == filename), None)
+                    observed = speech_worker.file_record(index)
+                    if not expected or observed != {"size": expected.get("size_bytes"), "sha256": expected.get("sha256")}:
+                        raise ValueError("speech index does not match release")
+        result = speech.archive_result(root, query, offset, limit, chunk, fold=fold, phrase=phrase, aliases=aliases, hint=hint)
+        result["refresh_targets"] = []
+        recording_path = root / "JSON-Config-Files/speech_understanding.json"
+        if staging and recording_path.is_file():
+            result["refresh_targets"] = [{"id": f"recording:{i}", "label": f"录音理解第 {i+1} 段",
+                "revision": speech_worker.sha256(recording_path),
+                "start_global_ms": part["speech_context"]["start_global_ms"], "end_global_ms": part["speech_context"]["end_global_ms"]}
+                for i, part in enumerate((result.get("model_understanding") or {}).get("parts", [])) if part.get("speech_context")]
+        groups_path = root / "JSON-Config-Files/experiment_group_understanding.json"
+        if groups_path.is_file():
+            from .speech_refresh import apply, input_path
+            groups = apply(root, (_read_json(groups_path, {}) or {}).get("groups", []))
+            result["group_understanding"] = groups
+            if staging:
+                result["refresh_targets"].extend({"id": "group:"+group["group_id"], "label": group.get("experiment_name") or group["group_id"],
+                    "revision": speech_worker.sha256(groups_path), "start_global_ms": group["global_start_ms"], "end_global_ms": group["global_end_ms"]}
+                    for group in groups if input_path(root, group["group_id"]).is_file())
+        from .speech_timeline import load as load_speech_timeline
+        timeline = load_speech_timeline(root)
+        if timeline:
+            prefix = f"/api/{'staging-runs' if staging else 'archives'}/{quote(name)}/speech-video"
+            timeline["videos"] = [{key:value for key,value in video.items() if not key.startswith("_")} | {
+                "url": prefix + f"?view={quote(video['view_id'])}&part={video['segment_ordinal']}&timeline={timeline['sha256']}" + (f"&release={quote(current)}" if current else "")}
+                for video in timeline["videos"]]
+        result["timeline"] = timeline
+        for source in result["sources"]:
+            for part in source["chunks"]:
+                for spec in part["files"].values():
+                    spec["url"] = (_staging_file_url(name, spec["path"]) if staging else
+                                   _file_url(name, spec["path"], current))
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise HTTPException(409, "实验录音产物不可用或完整性检查未通过") from exc
+    if not staging and (read_current_release_pointer(root) or {}) != pointer:
+        raise HTTPException(409, "实验归档正在更新，请刷新页面")
+    result["release_id"] = current
+    return result
+
+
+@app.get("/api/archives/{name}/speech")
+def archive_speech(name: str, q: str = Query(default="", max_length=200),
+                   offset: int = Query(default=0, ge=0), limit: int = Query(default=100, ge=1, le=500),
+                   chunk: str | None = None, release: str | None = None, fold: bool = False,
+                   phrase: str | None = None, aliases: bool = True, hint: str | None = None) -> dict[str, Any]:
+    return _experiment_speech_response(_resolve_archive(name), name, False, q, offset, limit, chunk, release,
+                                       fold=fold, phrase=phrase, aliases=aliases, hint=hint)
+
+
+@app.get("/api/staging-runs/{run_id}/speech")
+def staging_speech(run_id: str, q: str = Query(default="", max_length=200),
+                   offset: int = Query(default=0, ge=0), limit: int = Query(default=100, ge=1, le=500),
+                   chunk: str | None = None, fold: bool = False, phrase: str | None = None,
+                   aliases: bool = True, hint: str | None = None) -> dict[str, Any]:
+    return _experiment_speech_response(_resolve_staging_run(run_id), run_id, True, q, offset, limit, chunk,
+                                       fold=fold, phrase=phrase, aliases=aliases, hint=hint)
+
+
+@app.get("/api/speech-search")
+def search_speech_library(q: str = Query(min_length=1, max_length=200),
+                          archive_offset: int = Query(default=0, ge=0), aliases: bool = True) -> dict:
+    roots = [(name, root, False) for name, root in _search_archive_roots(None)]
+    for run_id, state in sorted(list(_runs.items())):
+        if state.get("parent_run_id") or state.get("state") not in {"failed", "completed", "partial", "interrupted"}:
+            continue
+        try:
+            roots.append((run_id, _resolve_staging_run(run_id), True))
+        except HTTPException:
+            continue
+    rows, unavailable = [], []
+    for name, root, staging in roots[archive_offset:archive_offset+10]:
+        if not (root / "JSON-Config-Files/speech.json").is_file():
+            continue
+        try:
+            if not staging:
+                root = _resolve_archive(name)
+            result = _experiment_speech_response(root, name, staging, q, 0, 100, None, aliases=aliases)
+            for row in result["segments"]:
+                params = f"chunk={quote(row['chunk_id'])}&t={row['playback_start_seconds']}"
+                rows.append({**row, "experiment": root.parent.name if staging else name,
+                    "run_id": name if staging else None, "experiment_matches": result["total"],
+                    "href": f"#/{'stage' if staging else 'archive'}/{quote(name)}/speech?{params}"})
+        except HTTPException:
+            unavailable.append({"name": name, "reason": "来源或索引完整性未通过"})
+    return {"segments": rows, "unavailable": unavailable, "searched_experiments": min(10, max(0, len(roots)-archive_offset)),
+            "total_experiments": len(roots), "per_experiment_limit": 100,
+            "next_archive_offset": archive_offset+10 if archive_offset+10 < len(roots) else None,
+            "evidence_kind": "spoken_mention", "physical_action_confirmation": False}
+
+
+@app.post("/api/{collection}/{name}/speech-evaluation")
+def evaluate_speech(collection: str, name: str, reference: dict) -> dict:
+    from .speech_search import evaluate
+    if collection not in {"archives", "staging-runs"}:
+        raise HTTPException(404, "实验不存在")
+    staging = collection == "staging-runs"
+    root = _resolve_staging_run(name) if staging else _resolve_archive(name)
+    _experiment_speech_response(root, name, staging, "", 0, 1, None)
+    try:
+        return evaluate(root, reference)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.get("/api/staging-runs/{run_id}/speech-video")
+def staging_speech_video(run_id: str, view: str, timeline: str, part: int = Query(ge=0)) -> FileResponse:
+    from .speech_timeline import video_path
+    try:
+        path = video_path(_resolve_staging_run(run_id), timeline, view, part)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise HTTPException(409, "同步视频不可用或输入身份已变化") from exc
+    return FileResponse(path, media_type="video/mp4", headers={"Cache-Control":"private, no-cache", "X-Content-Type-Options":"nosniff"})
+
+
+@app.get("/api/archives/{name}/speech-video")
+def archive_speech_video(name: str, view: str, timeline: str, part: int = Query(ge=0), release: str | None = None) -> FileResponse:
+    from .speech_timeline import video_path
+    root = _resolve_archive(name)
+    # Reuse the release manifest check before granting original-source access.
+    _experiment_speech_response(root, name, False, "", 0, 1, None, release)
+    try:
+        path = video_path(root, timeline, view, part)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise HTTPException(409, "同步视频不可用或输入身份已变化") from exc
+    return FileResponse(path, media_type="video/mp4", headers={"Cache-Control":"private, no-cache", "X-Content-Type-Options":"nosniff"})
+
+
 @app.get("/api/nas-recordings")
 def nas_recordings() -> dict[str, Any]:
     settings = _settings()
@@ -5501,7 +6448,7 @@ def nas_recordings() -> dict[str, Any]:
             else None
         )
     if monitored is not None:
-        return monitored
+        return _device_day_service.monitor_status(monitored) if (settings.get("device_day") or {}).get("enabled") else monitored
     if _nas_monitor_thread is not None and _nas_monitor_thread.is_alive():
         # The first scan can cover many recorder directories on a remote SMB
         # mount. Do not start a duplicate synchronous scan from each browser
@@ -5579,7 +6526,8 @@ def create_nas_batch_run(
         )
         if batch is None:
             raise HTTPException(404, "NAS 采集批次不存在或内容已经变化，请刷新后重试")
-        if not batch.get("available"):
+        device_day_enabled = bool((settings.get("device_day") or {}).get("enabled"))
+        if not (batch.get("device_day_processable") if device_day_enabled else batch.get("available")):
             raise HTTPException(
                 409,
                 {
@@ -5587,6 +6535,12 @@ def create_nas_batch_run(
                     "issues": batch.get("issues") or [],
                 },
             )
+        if device_day_enabled:
+            selected_ids = {r["recording_id"] for r in batch["recordings"]}
+            selected = [r for r in inventory["recordings"] if r["recording_id"] in selected_ids]
+            if len(selected) != len(selected_ids):
+                raise HTTPException(409, "采集分片清单已变化，请刷新后重试")
+            return _device_day_service.submit(settings, selected) | {"batch_id": batch_id}
         request = payload or {}
         batch_timestamp = datetime.fromtimestamp(
             int(batch["recording_start_us"]) / 1_000_000
@@ -5651,3 +6605,21 @@ def model_candidates() -> dict[str, Any]:
         "candidate_count": len(records),
         "candidates": records,
     }
+
+
+@app.get('/health/live')
+def liveness():
+    from .build_identity import identity
+    return {'status': 'alive', 'storage_maintenance': _storage_maintenance(), 'build': identity()}
+
+
+@app.get('/api/runtime')
+def runtime_status():
+    from .runtime_process import role, worker_status
+    from .runtime_control import ResourceCoordinator
+    from .build_identity import identity
+    settings = _settings()
+    database = Path(settings['storage']['local_runtime_root']) / 'state' / 'resources.sqlite3'
+    resources = ResourceCoordinator(database).snapshot() if database.is_file() else []
+    return {'build': identity(), 'role': role(settings), 'worker': worker_status(settings),
+            'resources': resources, 'queue': _persistent_queue.stats() if _persistent_queue else {}}

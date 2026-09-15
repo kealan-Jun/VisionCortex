@@ -153,7 +153,54 @@ def test_semantic_queue_waits_for_failure_bounded_wave_before_scheduling_more():
     assert sum(status == "skipped" for _item, status in results) == 5
 
 
-def test_mllm_retries_schema_invalid_response_before_accepting(monkeypatch, default_config):
+def test_healthy_semantic_queue_reaches_worker_capacity_without_batch_barrier():
+    release_slow = threading.Event()
+    reached_capacity = threading.Barrier(5)
+    lock = threading.Lock()
+    active = peak = 0
+    observed = []
+
+    def analyze(item):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        try:
+            if 2 <= item <= 5:
+                reached_capacity.wait(timeout=3)
+            if item == 2:
+                assert release_slow.wait(timeout=3)
+            elif item == 6:
+                # Work after the first healthy concurrent batch must start
+                # before its slowest member finishes.
+                release_slow.set()
+            return item, {"status": "completed", "cache_reused": False}
+        finally:
+            with lock:
+                active -= 1
+
+    result = []
+    errors = []
+    def run():
+        try:
+            result.extend(_run_bounded_semantic_waves(
+                list(range(10)), analyze, workers=4, failure_threshold=2,
+                on_result=lambda value: observed.append(value[0]),
+            ))
+        except Exception as exc:
+            errors.append(exc)
+    thread = threading.Thread(target=run)
+    thread.start()
+    reached_capacity.wait(timeout=3)
+    thread.join(timeout=5)
+    assert not thread.is_alive() and not errors
+    assert peak == 4
+    assert sorted(item for item, _ in result) == list(range(10))
+    assert sorted(observed) == list(range(10))
+
+
+@pytest.mark.parametrize("invalid_kind", ["missing", "extra", "invalid_json"])
+def test_mllm_retries_schema_invalid_response_before_accepting(monkeypatch, default_config, invalid_kind):
     valid = {
         "current_step": "抓取离心管",
         "next_step": "移动离心管",
@@ -203,14 +250,20 @@ def test_mllm_retries_schema_invalid_response_before_accepting(monkeypatch, defa
         "cross_view_consistency": "single_view",
         "evidence_verdict": "confirmed",
         "temporal_support": {
-            "before": "未接触",
-            "peak": "抓取",
-            "after": "保持抓取",
+            "early": "未接触",
+            "middle": "抓取",
+            "late": "保持抓取",
         },
+        "selected_keyframe_observations": [],
         "confidence": 0.9,
         "uncertainties": [],
     }
-    responses = [{"confidence": 0.9}, valid]
+    invalid = {"confidence": 0.9}
+    if invalid_kind == "extra":
+        invalid = {**valid, "physical_change": {**valid["physical_change"], "note": ""}}
+    elif invalid_kind == "invalid_json":
+        invalid = '{"current_step": "missing comma" "next_step": "unknown"}'
+    responses = [invalid, valid]
 
     class FakeResponse:
         is_error = False
@@ -221,7 +274,7 @@ def test_mllm_retries_schema_invalid_response_before_accepting(monkeypatch, defa
         def json(self):
             return {
                 "choices": [
-                    {"message": {"content": json.dumps(self.result)}}
+                    {"message": {"content": self.result if isinstance(self.result, str) else json.dumps(self.result)}}
                 ],
                 "usage": {
                     "prompt_tokens": 10,
@@ -233,8 +286,10 @@ def test_mllm_retries_schema_invalid_response_before_accepting(monkeypatch, defa
     class FakeClient:
         def __init__(self, **_kwargs):
             self.posts = 0
+            self.requests = []
 
         def post(self, *_args, **_kwargs):
+            self.requests.append(_kwargs["json"])
             response = FakeResponse(responses[self.posts])
             self.posts += 1
             return response
@@ -258,6 +313,16 @@ def test_mllm_retries_schema_invalid_response_before_accepting(monkeypatch, defa
         "visioncortex-event-mllm-response/1"
     )
     assert analyzer.client.posts == 2
+    assert result["usage"]["total_tokens"] == 24
+    assert result["usage"]["unknown_attempt_count"] == 0
+    assert [item["status"] for item in result["attempt_receipts"]] == ["failed", "completed"]
+    first, retried = analyzer.client.requests
+    assert first["instructions"] == retried["instructions"]
+    assert retried["input"][0]["content"][:-1] == first["input"][0]["content"]
+    feedback = json.loads(retried["input"][0]["content"][-1]["text"])
+    assert feedback["json_schema"]["additionalProperties"] is False
+    assert feedback["format_errors"]
+    assert result["attempt_receipts"][0]["format_correction_requested"] is True
 
 
 def test_mllm_refuses_to_silently_truncate_evidence(monkeypatch, default_config):
@@ -446,16 +511,24 @@ def test_frame_reader_reuses_decoder_for_same_segment(monkeypatch):
     opened = []
 
     class FakeCapture:
-        def __init__(self, path):
+        def __init__(self, path, *args):
             self.path = path
             self.released = False
             opened.append(self)
+            assert args == (video_io.cv2.CAP_FFMPEG, [
+                video_io.cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000,
+                video_io.cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000,
+            ])
 
         def isOpened(self):
             return not self.released
 
         def set(self, *_args):
+            self.timestamp = _args[-1]
             return True
+
+        def get(self, prop):
+            return self.timestamp if prop == video_io.cv2.CAP_PROP_POS_MSEC else 30.0
 
         def read(self):
             return True, np.zeros((8, 8, 3), dtype=np.uint8)
@@ -482,13 +555,14 @@ def test_frame_reader_reuses_decoder_for_same_segment(monkeypatch):
     assert opened[0].released is True
 
 
-def test_frame_reader_falls_back_to_bounded_ffmpeg_seek(monkeypatch):
+@pytest.mark.parametrize("opened", [True, False])
+def test_frame_reader_falls_back_to_bounded_ffmpeg_seek(monkeypatch, opened):
     class FailedCapture:
-        def __init__(self, _path):
+        def __init__(self, _path, *args):
             self.released = False
 
         def isOpened(self):
-            return True
+            return opened
 
         def set(self, *_args):
             return True
@@ -535,6 +609,41 @@ def test_frame_reader_falls_back_to_bounded_ffmpeg_seek(monkeypatch):
         "error",
     ]
     assert commands[0][1] == 30.0
+
+
+def test_successful_seek_with_stale_timestamp_is_discarded(monkeypatch):
+    class StaleCapture:
+        def __init__(self, _path, *args):
+            pass
+
+        def isOpened(self):
+            return True
+
+        def set(self, *_args):
+            return True
+
+        def get(self, prop):
+            return 33.3 if prop == video_io.cv2.CAP_PROP_POS_MSEC else 30.022
+
+        def read(self):
+            return True, np.zeros((8, 8, 3), dtype=np.uint8)
+
+        def release(self):
+            pass
+
+    fallback = np.full((8, 8, 3), 127, dtype=np.uint8)
+    calls = []
+    monkeypatch.setattr(video_io.cv2, "VideoCapture", StaleCapture)
+    monkeypatch.setattr(video_io, "_read_frame_at_ffmpeg",
+                        lambda path, ms: calls.append((path, ms)) or fallback)
+    path = Path("fractional-rate.mp4")
+    view = ViewInput(view_id="fp", role=ViewRole.FIRST_PERSON, video=path)
+    info = VideoInfo(path=path, duration_ms=60000, fps=30.022,
+                     width=8, height=8, frame_count=1801)
+    assert video_io.read_frame_at(path, 3550) is fallback
+    with ViewFrameReader() as reader:
+        assert reader.read(view, info, 3550) is fallback
+    assert calls == [(path, 3550), (path, 3550)]
 
 
 def test_nvml_sampler_uses_persistent_driver_handle(monkeypatch):
@@ -638,3 +747,26 @@ def test_publisher_ledger_skips_rehashing_verified_file(monkeypatch, tmp_path):
     publisher.publish_file(source)
     assert first_count > 0
     assert len(hash_calls) == first_count
+
+
+def test_event_prompt_example_matches_strict_response_contract():
+    from visioncortex.mllm import EVENT_SYSTEM_PROMPT, _validate_response_payload
+    # Validate the actual prompt example, so independent prompt/schema edits
+    # cannot make every provider response fail again.
+    start = EVENT_SYSTEM_PROMPT.index("{\n")
+    example, _ = json.JSONDecoder().raw_decode(EVENT_SYSTEM_PROMPT[start:])
+    def first_enum(value):
+        if isinstance(value, dict):
+            return {key: first_enum(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [first_enum(item) for item in value]
+        if isinstance(value, str) and "/" in value:
+            return value.split("/")[0]
+        return value
+    example = first_enum(example)
+    result = _validate_response_payload(example, "event")
+    assert set(result["temporal_support"]) == {"early", "middle", "late"}
+    assert result["selected_keyframe_observations"] == example["selected_keyframe_observations"]
+    example["temporal_support"] = {"before": "a", "peak": "b", "after": "c"}
+    with pytest.raises(ValueError):
+        _validate_response_payload(example, "event")

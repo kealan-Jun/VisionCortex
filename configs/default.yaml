@@ -1,3 +1,44 @@
+runtime:
+  role: combined
+  # Resource limits are deployment-specific, never a fixed camera count.
+  resource_limits: {}
+  admission_timeout_seconds: 300
+  local_only: false
+  provider_circuit_enabled: false
+
+capture_quality:
+  enabled: true
+  sample_windows: 4
+  sample_seconds: 3
+
+speech_recognition:
+  enabled: false
+  python_executable: null
+  model_directory: null
+  model_registry: configs/models/speech-recognition.json
+  language: zh
+  cpu_threads: 4
+  # Budget per recorder segment; multi-segment work is queued separately.
+  max_audio_seconds: 1800
+  max_source_bytes: 134217728
+  context_max_segments: 80
+  context_max_characters: 8000
+
+device_day:
+  schema_version: visioncortex-device-day/1
+  enabled: false
+  chunk_seconds: 900
+  timezone: Asia/Shanghai
+  start_date: '2026-09-10'
+  vision_workers: 2
+  stt_workers: 1
+  understanding_workers: 2
+  inactive_frames: 8
+  active_frames_per_window: 12
+  active_window_seconds: 30
+  # User instruction: implement cleanup, but DO NOT enable or execute it.
+  delete_capture_sources: false
+
 project:
   output_root: ./outputs
   experiment_id_prefix: CHEM
@@ -367,6 +408,14 @@ segmentation:
     device_panel_operation: 0.45
   semantic_review_cross_role_context_support_min_confidence: 0.55
   movement_threshold_norm: 0.025
+  # Integrate motion across time instead of requiring a large per-frame jump.
+  movement_window_ms: 250
+  movement_window_threshold_norm: 0.01
+  movement_visual_verification:
+    enabled: true
+    max_pairs_per_candidate: 3
+    max_candidates: 2048
+    max_wall_seconds: 600
   # Wearable camera motion shifts every box together. Subtract the median
   # translation of at least two stable lab anchors before declaring movement.
   camera_motion_compensation_min_anchors: 2
@@ -377,6 +426,9 @@ segmentation:
   liquid_motion_threshold: 6.0
   liquid_transfer_max_sequence_gap_seconds: 20.0
   liquid_transfer_min_contact_observations: 2
+  # Duplicate boxes and simultaneous tool/vessel matches are not a transfer.
+  # Both exclusive contact runs must persist; intervening motion is unconfirmed.
+  liquid_transfer_min_contact_duration_seconds: 0.20
   require_both_roles: true
   # A physical action can be visually conclusive in only one role because of
   # occlusion. Delivery still requires aligned first/third-person media; this
@@ -524,8 +576,20 @@ mllm:
   storyboard_pairs_per_group: 4
   storyboard_pairs_per_group_max: 12
   storyboard_seconds_per_pair: 300
+  # A CV cut is provisional. Review per-wearable continuity across workstations
+  # and the outer tail. Budget limits never establish an experiment's end.
+  boundary_review:
+    enabled: true
+    maximum_gap_seconds: 120
+    context_seconds: 12
+    maximum_pairs: 20
+    minimum_confidence: 0.85
+    tail_window_seconds: 90
+    maximum_tail_windows: 8
   max_images_per_group: 12
   group_workers: 4
+  operation_review:
+    enabled: true
   workers: 8
   response_language: zh-CN
   # Provider/API failure is event-level uncertainty. Completed semantic

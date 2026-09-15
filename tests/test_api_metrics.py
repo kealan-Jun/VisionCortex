@@ -699,6 +699,20 @@ def test_completed_run_uses_explicit_current_observability_root(tmp_path):
     assert hydrated["observability"]["metrics"]["total_duration_seconds"] == 4318.780
 
 
+def test_service_restart_does_not_rewrite_unreadable_receipt(monkeypatch, tmp_path):
+    root = tmp_path / "archive"
+    status = root / "run" / "JSON-Config-Files" / "pipeline_status.json"
+    status.parent.mkdir(parents=True)
+    status.write_text('{"stage":"fine_scan"}', encoding="utf-8")
+    monkeypatch.setattr(api, "_archive_root", lambda settings=None: root)
+    monkeypatch.setattr(api, "_read_json", lambda *args: {})
+    writes = []
+    monkeypatch.setattr(api, "_write_json_atomic", lambda *args: writes.append(args))
+    api._recover_orphaned_tasks()
+    assert not writes
+    assert json.loads(status.read_text())["stage"] == "fine_scan"
+
+
 def test_service_restart_marks_orphaned_task_resumable(monkeypatch, tmp_path):
     archive_root = tmp_path / "archive"
     status_path = (

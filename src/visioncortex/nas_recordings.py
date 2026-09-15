@@ -99,6 +99,7 @@ def _plain_clock_bounds(clock: Path) -> tuple[int, int]:
 
 
 def _inspect(root: Path, video: Path, now: float, settle: float, allow_plain: bool = False) -> dict[str, Any]:
+    from .device_day_audio import recorder_audio
     relative = video.relative_to(root).as_posix()
     prefix = video.name[:-len("rgb.mp4")] if video.name.endswith("rgb.mp4") else None
     meta_path = video.with_name(f"{prefix}meta.json") if prefix is not None else video.with_suffix(".json")
@@ -115,6 +116,8 @@ def _inspect(root: Path, video: Path, now: float, settle: float, allow_plain: bo
     clock_name = merged.get("frames_file") or (f"{prefix}frames.csv" if prefix is not None else f"{video.stem}.csv")
     if plain and not video.with_name(clock_name).is_file() and video.stem.lower().endswith("_rgb"):
         clock_name = video.stem[:-4] + "_帧时间戳.csv"
+    if plain and not video.with_name(clock_name).is_file() and video.with_name(f"{video.stem}_frames.csv").is_file():
+        clock_name = f"{video.stem}_frames.csv"
     clock = _child(video.parent, clock_name)
     snapshots = []
     for path in (video, clock, meta_path, ready_path):
@@ -145,7 +148,7 @@ def _inspect(root: Path, video: Path, now: float, settle: float, allow_plain: bo
         or merged.get("segment_end_us")
         or 0
     )
-    if plain and clock.is_file():
+    if clock.is_file() and (plain or not start or end <= start):
         start, end = _plain_clock_bounds(clock)
     if not start or end <= start:
         issues.append("缺少完整的采集时间范围")
@@ -179,11 +182,16 @@ def _inspect(root: Path, video: Path, now: float, settle: float, allow_plain: bo
         "recording_end_time": _iso(end),
         "duration_seconds": (end - start) / 1e6 if start and end > start else None,
         "available": not issues,
+        # Capture completeness is a quality attribute, not proof the file is
+        # still being written. Device/day processing includes closed partials.
+        "processable": not [issue for issue in issues if issue != "采集程序报告数据不完整"],
+        "capture_complete": ready.get("recording_complete") is True and ready.get("recording_quality_status") == "complete",
         "requires_completion_confirmation": plain,
         "completion_source": "user_confirmation_required" if plain else "recorder_sidecars",
         "status": "available" if not issues else "attention",
         "issues": issues,
         "source_signature": hashlib.sha256(json.dumps(snapshots).encode()).hexdigest(),
+        "audio": recorder_audio(video, metadata, ready, now, settle),
         "updated_at": datetime.fromtimestamp(latest, timezone.utc).isoformat(),
     }
 
@@ -352,6 +360,7 @@ def _recording_batches(
                 "recording_count": len(items),
                 "size_bytes": sum(int(item.get("size_bytes") or 0) for item in items),
                 "available": available,
+                "device_day_processable": bool(items) and all(item.get("processable", item.get("available")) for item in items) and not unconfigured_cameras,
                 "issues": issues,
                 "unconfigured_cameras": unconfigured_cameras,
                 "recordings": [
@@ -371,7 +380,7 @@ def _recording_batches(
     return batches
 
 
-def scan_recordings(config: dict[str, Any]) -> dict[str, Any]:
+def scan_recordings(config: dict[str, Any], *, on_record=None) -> dict[str, Any]:
     root = _root(config)
     settings = config["collection_ingest"]
     now = time.time()
@@ -404,6 +413,9 @@ def scan_recordings(config: dict[str, Any]) -> dict[str, Any]:
                     name
                     for name in directories
                     if not name.startswith((".", "#"))
+                    and not (depth == 0 and re.fullmatch(r"\d{4}-\d{2}-\d{2}", name)
+                             and ((settings.get("capture_date") and name != settings["capture_date"])
+                                  or (settings.get("capture_since_date") and name < settings["capture_since_date"])))
                     and not (current / name).is_symlink()
                     and (current / name).resolve() not in excluded
                 ),
@@ -435,6 +447,8 @@ def scan_recordings(config: dict[str, Any]) -> dict[str, Any]:
                         item["camera_key"]
                     )
                     recordings.append(item)
+                    if on_record is not None:
+                        on_record(item)
                     camera_recording_count += 1
                 except (OSError, ValueError, TypeError, OverflowError) as exc:
                     errors.append({"path": path.relative_to(root).as_posix(), "message": str(exc)})
@@ -455,10 +469,13 @@ def scan_recordings(config: dict[str, Any]) -> dict[str, Any]:
         if truncated:
             break
     recordings.sort(key=lambda item: (item["recording_start_us"], item["relative_path"]), reverse=True)
+    batches = _recording_batches(recordings, settings)
+    for batch in batches:
+        batch["analysis_ready"] = batch["device_day_processable"] if (config.get("device_day") or {}).get("enabled") else batch["available"]
     return {
         "mode": "directory_metadata", "recordings": recordings,
         "recording_count": len(recordings), "errors": errors, "truncated": truncated,
-        "batches": _recording_batches(recordings, settings),
+        "batches": batches,
         "camera_directories": monitored_camera_directories,
         "camera_directory_count": len(monitored_camera_directories),
         "history_window_limited": history_window_limited,

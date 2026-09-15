@@ -7,6 +7,15 @@ import pytest
 from visioncortex.config import load_config
 
 
+def test_completed_receipt_override_requires_checksum(monkeypatch, tmp_path):
+    monkeypatch.setenv('VISIONCORTEX_COMPLETED_VISION_RECEIPTS', str(tmp_path/'ReviewedReceipts.json'))
+    monkeypatch.delenv('VISIONCORTEX_COMPLETED_VISION_RECEIPTS_SHA256', raising=False)
+    with pytest.raises(ValueError, match='both path and SHA-256'):
+        load_config()
+    monkeypatch.setenv('VISIONCORTEX_COMPLETED_VISION_RECEIPTS_SHA256', 'a'*64)
+    assert load_config()['device_day']['completed_vision_receipts']['sha256'] == 'a'*64
+
+
 def test_rtx4090_profile_inherits_quality_rules_and_keeps_view_count_dynamic():
     profile = Path(__file__).resolve().parents[1] / "configs" / "rtx4090-production.yaml"
 
@@ -32,8 +41,8 @@ def test_rtx3090ti_ubuntu_profile_matches_host_and_keeps_view_count_dynamic():
 
     assert config["collection_ingest"] == {
         "enabled": True,
-        "poll_seconds": 30,
-        "settle_seconds": 120,
+        "poll_seconds": 5,
+        "settle_seconds": 5,
         "max_results": 200,
         "persist_snapshot": True,
         "snapshot_path": None,
@@ -43,11 +52,13 @@ def test_rtx3090ti_ubuntu_profile_matches_host_and_keeps_view_count_dynamic():
         "camera_directory_glob": "*_cam*",
         "camera_role_map": {
             "lubancat-4df661d7_cam01": "first_person",
+            "lubancat-52d2ef0c_cam01": "first_person",
             "lubancat-e8cc0cb3_cam01": "first_person",
             "orangepi5pro-ab748372_cam01": "third_person",
             "orangepi5pro-b439137c_cam02": "third_person",
             "orangepi5pro-d12a4719_cam01": "first_person",
             "orangepi5pro-f022c4_cam01": "third_person",
+            "orangepi5pro-fe0f7222_cam01": "third_person",
             "rk3588-ubuntu_cam01": "third_person",
         },
         "discover_plain_video_csv": False,
@@ -61,6 +72,10 @@ def test_rtx3090ti_ubuntu_profile_matches_host_and_keeps_view_count_dynamic():
     assert performance["tensor_rt"] == "required"
     assert performance["batch_size"] == 16
     assert performance["engine_batch_size"] == 4
+    assert performance["coarse_cuda_max_concurrent_sources"] == 2
+    assert performance["coarse_inference_batch_wait_ms"] == 500
+    assert config["models"]["first_person_coarse_engine"].endswith("first_person_coarse32_20260914.engine")
+    assert config["models"]["third_person_coarse_engine"].endswith("third_person_coarse32_20260914.engine")
     assert performance["motion_probe_fps"] == 0.1
     assert performance["motion_probe_run_yolo"] is True
     assert performance["coarse_reuse_motion_probe"] is True

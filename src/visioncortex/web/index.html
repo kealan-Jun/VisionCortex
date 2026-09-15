@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#1e4a52" />
     <link id="product-favicon" rel="icon" href="data:," />
     <title>VisionCortex · 多视角湿实验分析</title>
-    <link rel="stylesheet" href="/ui/styles.css?v=20260904-product-shell-32" />
+    <link rel="stylesheet" href="/ui/styles.css?v=20260915-unified-runtime-1" />
   </head>
   <body>
     <a class="skip-link" href="#main-content">跳到主要内容</a>
@@ -19,17 +19,21 @@
           </a>
           <nav class="nav-list">
             <p class="nav-section-label">实验工作台</p>
-            <a class="nav-link" data-route="home" href="#/home"><span class="nav-icon" data-icon="dashboard"></span><span class="nav-label">概览</span></a>
-            <a class="nav-link" data-route="experiments" href="#/experiments"><span class="nav-icon" data-icon="flask"></span><span class="nav-label">实验记录</span></a>
-            <a class="nav-link" data-route="tasks" href="#/tasks"><span class="nav-icon" data-icon="activity"></span><span class="nav-label">任务进度</span><em id="running-badge" hidden>0</em></a>
-            <a class="nav-link nav-create" data-route="new" href="#/new"><span class="nav-icon" data-icon="plus"></span><span class="nav-label">新建实验</span></a>
+            <a class="nav-link" data-route="home" href="#/home" aria-label="概览" title="概览"><span class="nav-icon" data-icon="dashboard"></span><span class="nav-label">概览</span></a>
+            <a class="nav-link" data-route="experiments" href="#/experiments" aria-label="实验记录" title="实验记录"><span class="nav-icon" data-icon="flask"></span><span class="nav-label">实验记录</span></a>
+            <a class="nav-link" data-route="tasks" href="#/tasks" aria-label="任务进度" title="任务进度"><span class="nav-icon" data-icon="activity"></span><span class="nav-label">任务进度</span><em id="running-badge" hidden>0</em></a>
+            <a class="nav-link" data-route="capture" href="#/capture" aria-label="NAS 采集监控" title="NAS 采集监控"><span class="nav-icon" data-icon="video"></span><span class="nav-label">NAS 采集监控</span></a>
+            <a class="nav-link nav-create" data-route="new" href="#/new" aria-label="新建实验" title="新建实验"><span class="nav-icon" data-icon="plus"></span><span class="nav-label">新建实验</span></a>
             <div class="nav-separator"></div>
             <p class="nav-section-label">实验成果</p>
-            <a class="nav-link" data-route="materials" href="#/materials"><span class="nav-icon" data-icon="boxes"></span><span class="nav-label">关键素材库</span></a>
-            <a class="nav-link" data-route="reports" href="#/reports"><span class="nav-icon" data-icon="file"></span><span class="nav-label">实验室日报</span></a>
+            <a class="nav-link" href="#/day-timeline" data-route="day-timeline"><span class="nav-icon" data-icon="clock"></span><span class="nav-label">当天时间线</span></a>
+            <a class="nav-link" href="#/device-days" data-route="device-days" aria-label="设备日归档" title="设备日归档"><span class="nav-icon" data-icon="boxes"></span><span class="nav-label">设备日归档</span></a>
+            <a class="nav-link" data-route="materials" href="#/materials" aria-label="关键素材库" title="关键素材库"><span class="nav-icon" data-icon="boxes"></span><span class="nav-label">关键素材库</span></a>
+            <a class="nav-link" data-route="reports" href="#/reports" aria-label="实验室日报" title="实验室日报"><span class="nav-icon" data-icon="file"></span><span class="nav-label">实验室日报</span></a>
             <div class="nav-separator"></div>
             <p class="nav-section-label">系统</p>
-            <a class="nav-link" data-route="operations" href="#/operations"><span class="nav-icon" data-icon="server"></span><span class="nav-label">运行状态</span></a>
+            <a class="nav-link" data-route="ai-settings" data-ai-settings-link href="#/ai-settings" hidden aria-label="AI 服务设置" title="AI 服务设置"><span class="nav-icon" data-icon="brain"></span><span class="nav-label">AI 服务设置</span></a>
+            <a class="nav-link" data-route="operations" href="#/operations" aria-label="运行状态" title="运行状态"><span class="nav-icon" data-icon="server"></span><span class="nav-label">运行状态</span></a>
             <button class="nav-link mobile-more-button" id="mobile-more-button" type="button"><span class="nav-icon" data-icon="boxes"></span><span class="nav-label">更多</span></button>
           </nav>
           <div class="nav-footer">
@@ -63,10 +67,18 @@
         <a href="#/materials"><span data-icon="boxes"></span><div><strong>关键素材库</strong><small>跨实验查看关键画面</small></div><span data-icon="arrow"></span></a>
         <a href="#/reports"><span data-icon="file"></span><div><strong>实验室日报</strong><small>汇总实验过程与结论</small></div><span data-icon="arrow"></span></a>
         <a href="#/operations"><span data-icon="server"></span><div><strong>运行状态</strong><small>查看服务与存储状态</small></div><span data-icon="arrow"></span></a>
+        <a href="#/ai-settings" data-ai-settings-link hidden><span data-icon="brain"></span><div><strong>AI 服务设置</strong><small>选择厂商、模型与密钥</small></div><span data-icon="arrow"></span></a>
       </nav>
     </dialog>
     <div class="toast-region" id="toast-region" aria-live="polite"></div>
     <script src="/ui/brand-logo.js" defer></script>
-    <script src="/ui/app.js?v=20260904-product-shell-32" defer></script>
+    <script src="/ui/ai-settings.js?v=20260908-provider-discovery-3" defer></script>
+    <script src="/ui/speech-sync.js?v=20260908-sync-1" defer></script>
+    <script src="/ui/speech-tools.js?v=20260908-speech-2" defer></script>
+    <script src="/ui/speech.js?v=20260908-speech-2" defer></script>
+    <script src="/ui/run-insights.js?v=20260915-unified-runtime-1" defer></script>
+    <script src="/ui/day-timeline.js?v=20260914-latency-2" defer></script>
+    <script src="/ui/device-days.js?v=20260911-timeline-2" defer></script>
+    <script src="/ui/app.js?v=20260915-unified-runtime-1" defer></script>
   </body>
 </html>

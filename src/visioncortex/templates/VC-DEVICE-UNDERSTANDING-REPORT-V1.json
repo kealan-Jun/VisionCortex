@@ -1,0 +1,14 @@
+{
+  "template_id": "VC-DEVICE-UNDERSTANDING-REPORT-V1",
+  "schema_version": "1.0.0",
+  "scope": "persisted_step_level_and_sparse_scene_interpretations",
+  "sections": [
+    {"id": "coverage", "title": "理解范围与完成情况"},
+    {"id": "timeline", "title": "按时间的步骤与场景理解"},
+    {"id": "context", "title": "comment、protocol 与录音来源"},
+    {"id": "uncertainty", "title": "不确定项与观察范围"},
+    {"id": "execution", "title": "模型执行与素材溯源"}
+  ],
+  "content_fields": ["device", "date", "activity", "start_us", "end_us", "summary", "steps", "frame_observations", "comments", "protocol", "uncertainties", "source_frames", "model_receipt"],
+  "generation_policy": {"layout_editable_by_model": false, "additional_mllm_calls": false, "additional_model_tokens": 0}
+}

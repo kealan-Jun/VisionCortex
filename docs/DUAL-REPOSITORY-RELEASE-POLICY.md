@@ -1,60 +1,72 @@
-# VisionCortex dual-repository release policy
+# VisionCortex 双仓同步与发布规则
 
-## Repository roles
+2026-09-15 按用户明确要求生效，取代此前“开发仓 → 稳定发布仓”的单向晋升规则。
+保留本文件路径，兼容已有文档和打包脚本的引用。
 
-### Development authority
+## 同一代码，两个平级仓库
 
-`https://github.com/kealan-Jun/VisionCortex.git`
+- `https://github.com/kealan-Jun/VisionCortex.git`
+- `https://github.com/RealityLoopAI/VisionCortex.git`
 
-- all feature branches and pull requests;
-- deterministic unit/integration tests;
-- 4060 task freezes and evidence feedback;
-- issue tracking and development diagnostics;
-- release candidate tags.
+两个仓库都可以承载代码、分支、评审和 CI，不设置开发专用或稳定专用权限。
+现有本地别名 `development`、`origin` 只是历史配置，不代表仓库等级。
+离线视频分析和 NAS 自动处理继续使用同一套代码。
 
-### Stable release authority
-
-`https://github.com/RealityLoopAI/VisionCortex.git`
-
-- only exact commits already accepted in the development repository;
-- a minimal `main` branch plus immutable stable tags/releases;
-- no direct feature development;
-- no reverse merges into the development repository;
-- no runtime data, NAS artifacts, keys or failed staging output.
-
-## Promotion gates
-
-A commit is eligible for stable promotion only when all applicable gates are recorded:
-
-1. development worktree and remote SHA match;
-2. complete deterministic test suite passes;
-3. repository credential/runtime-output policy passes;
-4. CV-affecting changes have a real-video quality receipt;
-5. performance claims identify whether they cover preprocessing or the complete chain;
-6. MLLM stages include input/output/total Token usage;
-7. archive promotion is complete and SHA-256 receipts pass;
-8. open limitations are written into the release notes.
-
-Pure derived-index, report-template or Web-read changes do not require an expensive full-video rerun when characterization tests prove they cannot alter CV decisions. They still require the full deterministic test suite.
-
-## Promotion invariant
-
-The stable release commit must be byte-for-byte identical to the tested development commit:
+同步完成的标准：
 
 ```text
-development commit SHA == stable main SHA == stable tag peeled SHA
+本地目标提交 SHA
+  == kealan-Jun/VisionCortex main SHA
+  == RealityLoopAI/VisionCortex main SHA
 ```
 
-No cherry-picking or editing is allowed during promotion.
+需要共享的工作分支也推送同一个提交。已有其他分支、标签和提交不删除。
+正式发布标签如需同步，两端的 peeled commit 必须相同，不移动已发布标签。
 
-## Credential and history policy
+## 同步步骤
 
-- credentials are supplied by environment or an untracked local secret store;
-- CI may report the path and credential class, never the value;
-- a repository with reachable secret-bearing history cannot be called clean;
-- legacy recovery bundles stay local and access-controlled;
-- credential rotation is required even after history is rewritten.
+1. 核对两个远端 URL、默认分支、工作分支、HEAD、upstream 和工作树。
+2. 获取两个远端的新提交，检查祖先关系。发生分叉时先保留并合入双方变更；
+   不用强推、`reset --hard`、`git clean` 或 `git push --mirror` 消除分歧。
+3. 检查本次代码、配置、文档和测试；只按明确路径暂存。不得提交密钥、模型、
+   引擎、原视频、录音、NAS 数据、运行数据库、缓存或失败暂存目录。
+4. 运行适用检查，形成一个本地提交。对两个仓库推送同一个 SHA，中间不改写提交。
+5. 再次查询远端，确认目标分支的完整 SHA 相同。Git 对不同服务器的推送不是
+   跨仓事务；若只有一端成功，明确报告不同步状态，修复原因后补推另一端，
+   不能假称两端已同步，也不能强制回退已成功的一端。
 
-## 4060 operating rule
+当前远端别名对应上述 URL 时，可使用以下命令；执行前仍需完成检查和冲突处理：
 
-Every 4060 task receives an immutable commit SHA from the development repository. The 4060 machine may run production video and return evidence, but it must not edit, commit, test or tune the code unless a later task explicitly changes that authority.
+```bash
+git fetch development
+git fetch origin
+git push development HEAD:refs/heads/main
+git push origin HEAD:refs/heads/main
+git ls-remote development refs/heads/main
+git ls-remote origin refs/heads/main
+```
+
+两端执行同一份 GitHub Actions。代码同步结果、CI 结果和服务上线结果分别报告。
+CI 失败需要保留真实状态并修复；“已同步”不等于“测试通过”或“生产可用”。
+
+## 正式构建与服务部署
+
+代码入仓不触发 NAS 扫描、模型运行、数据迁移、服务重启或原片删除。
+安装包和服务使用固定提交，升级前校验依赖锁、配置、输入/存储根及模型身份。
+
+正式交付仍需要：完整确定性检查、凭据/运行数据检查、适用的真实视频质量回执、
+归档完整性回执和已知限制。性能数据区分预处理和全链路；模型调用与 Token
+使用情况按真实回执记录。这些要求适用于两个仓库，不再要求先在某一仓库晋升。
+
+`deployment/runtime/Release.py` 的 `Acceptance.json` 使用中性的
+`commit_sha` 与 `release_ready`。为兼容已有安装包，仍可读取旧字段
+`development_sha`，但它不再表示一个独占开发仓；同时出现两个 SHA 字段时
+必须一致。封存、安装、切换和回退继续校验同一个不可变提交与内容摘要。
+
+## 数据与执行节点边界
+
+凭据只通过环境变量或未跟踪的私密存储提供，检查输出只报告文件路径和凭据
+类别，不输出值。发现历史泄露不能通过仅修改当前文件宣称已清理。
+
+RTX 4060 仍为冻结执行节点，可从任一仓库获取任务指定的同一个提交；除用户
+另有授权，只运行生产视频并回传证据，不修改、提交、测试或调参。

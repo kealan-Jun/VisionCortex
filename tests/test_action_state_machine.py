@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from visioncortex.action_state_machine import (
     attach_continuous_action_states,
     build_event_state_receipt,
@@ -150,4 +152,42 @@ def test_higher_level_transfer_suppresses_duplicate_contact_publication(default_
     assert transfer.accepted is True and contact.accepted is True
     assert contact.state_machine["publication"]["status"] == "component_only"
     assert contact.state_machine["publication"]["suppressed_by_event_id"] == "TRANSFER"
+    assert ledger["cv_acceptance_mutated"] is False
+
+
+@pytest.mark.parametrize("pending_semantic_guard", [False, True])
+def test_provisional_higher_level_candidate_does_not_suppress_formal_contact(
+    default_config, pending_semantic_guard,
+):
+    transfer = _event(
+        "PROVISIONAL-TRANSFER",
+        _candidate(
+            "C5",
+            ActionType.LIQUID_MOVEMENT,
+            ["pipette", "tube"],
+            [{"transfer_sequence": "source_transport_target", "tool_track_id": 1}],
+        ),
+    )
+    if pending_semantic_guard:
+        transfer.observability = {"semantic_recall_admission": {
+            "mandatory_semantic_review": True,
+            "candidate_action_directly_confirmed": False,
+        }}
+    else:
+        transfer.formal_admission_status = "provisional"
+    contact = _event(
+        "FORMAL-CONTACT",
+        _candidate(
+            "C6",
+            ActionType.HAND_OBJECT_CONTACT,
+            ["gloved_hand", "pipette"],
+            [{"distance_norm": 0.0, "object_track_id": 1}],
+        ),
+    )
+
+    ledger = attach_continuous_action_states([transfer, contact], default_config)
+
+    assert transfer.accepted is True
+    assert contact.state_machine["publication"]["status"] == "primary"
+    assert contact.state_machine["publication"]["suppressed_by_event_id"] is None
     assert ledger["cv_acceptance_mutated"] is False

@@ -1,6 +1,9 @@
 from pathlib import Path
 
+import pytest
+
 from visioncortex.archive import (
+    _generate_detached_media,
     _link_or_copy_immutable,
     _materialize_derived_media,
 )
@@ -138,3 +141,54 @@ def test_derived_media_cache_changed_bounds_force_new_generation(monkeypatch, tm
     )
     assert calls == ["changed"]
     assert result["cache_reused"] is False
+
+
+def test_regeneration_at_same_path_preserves_prior_cache_and_history(monkeypatch, tmp_path):
+    monkeypatch.setattr("visioncortex.archive.select_video_encoder", lambda value: value)
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"original-video")
+    output = tmp_path / "result.mp4"
+    config = _config(tmp_path, "reuse")
+    old = _materialize_derived_media(
+        output, "key-view-clip", {"view": "old"}, [source], config,
+        lambda: output.write_bytes(b"old-view"),
+    )
+    history = tmp_path / "history.mp4"
+    history.hardlink_to(output)
+    _materialize_derived_media(
+        output, "key-view-clip", {"view": "new"}, [source], config,
+        lambda: output.write_bytes(b"new-view"),
+    )
+    assert history.read_bytes() == b"old-view"
+    assert output.read_bytes() == b"new-view"
+
+    def must_not_generate():
+        raise AssertionError("earlier cache must remain valid")
+
+    reused = _materialize_derived_media(
+        output, "key-view-clip", {"view": "old"}, [source], config, must_not_generate,
+    )
+    assert reused["cache_output_sha256"] == old["cache_output_sha256"]
+    assert output.read_bytes() == b"old-view"
+    assert not list(tmp_path.glob(".*.previous-*"))
+
+
+@pytest.mark.parametrize("failure", ["exception", "empty", "missing"])
+def test_failed_regeneration_restores_previous_media(tmp_path, failure):
+    output = tmp_path / "result.mp4"
+    output.write_bytes(b"prior-valid-media")
+    cached = tmp_path / "cache.mp4"
+    cached.hardlink_to(output)
+
+    def generate():
+        if failure == "exception":
+            output.write_bytes(b"partial-media")
+            raise ValueError("encoder failed")
+        if failure == "empty":
+            output.touch()
+
+    with pytest.raises((ValueError, RuntimeError)):
+        _generate_detached_media(output, generate)
+    assert output.read_bytes() == cached.read_bytes() == b"prior-valid-media"
+    assert output.stat().st_ino == cached.stat().st_ino
+    assert not list(tmp_path.glob(".*.previous-*"))

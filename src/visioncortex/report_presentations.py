@@ -9,6 +9,22 @@ from urllib.parse import quote
 from .report_brand import BRAND_COLORS, brand_logo_data_url, brand_logo_png
 
 
+def _speech_note(group: dict[str, Any]) -> str:
+    speech = group.get("speech_interpretation") or {}
+    if not speech.get("summary"):
+        return ""
+    relations = {
+        "consistent": "与画面一致", "contradiction": "与画面有冲突",
+        "unrelated": "与画面无关", "uncertain": "与画面关系不确定",
+    }
+    refs = "、".join(speech.get("referenced_segment_ids") or [])
+    return (
+        f"录音相关说明（机器转写、未核实口述）：{speech['summary']} "
+        f"关系：{relations.get(speech.get('relation_to_visual'), '待核对')}。"
+        f"录音引用：{refs or '无'}。可在实验页面按引用回听。"
+    )
+
+
 def _duration(seconds: float | int | None) -> str:
     value = max(0.0, float(seconds or 0))
     hours, remainder = divmod(value, 3600)
@@ -38,6 +54,14 @@ def _headline_status(report: dict[str, Any]) -> tuple[str, str]:
     return "证据验收通过", "success"
 
 
+def _workflow_label(group: dict[str, Any]) -> str:
+    kind = {"continuous_workflow": "连续实验链", "independent_experiment": "独立实验"}.get(
+        group.get("workflow_kind"), "实验操作片段")
+    status = {"ongoing_at_recording_end": "录像结束，实验待续", "unresolved": "结束位置待核实",
+              "observed_complete": "已观察到结束"}.get(group.get("completion_status"), "边界尚未复核")
+    return f"{kind} · {status}"
+
+
 def render_daily_markdown(report: dict[str, Any]) -> str:
     overview = report["overview"]
     performance = report["performance"]
@@ -61,7 +85,7 @@ def render_daily_markdown(report: dict[str, Any]) -> str:
         "",
     ]
     for index, group in enumerate(report["experiment_timeline"], 1):
-        continuity = "连续实验" if group["continuity_type"] == "continuous" else "独立实验"
+        continuity = _workflow_label(group)
         lines.extend(
             [
                 f"### {index}. {group['experiment_name']}",
@@ -70,6 +94,8 @@ def render_daily_markdown(report: dict[str, Any]) -> str:
                 f"- 结果摘要：{group.get('overall_summary') or '暂无摘要'}",
             ]
         )
+        if note := _speech_note(group):
+            lines.append(f"- {html.escape(note)}")
         visual = group.get("representative_visual")
         if visual:
             lines.extend(
@@ -160,13 +186,15 @@ def render_daily_html(report: dict[str, Any]) -> str:
             if next_status == "inferred"
             else "后续未知"
         )
-        continuity = "连续实验" if group["continuity_type"] == "continuous" else "独立实验"
+        continuity = _workflow_label(group)
+        speech_html = f"<p>{e(_speech_note(group))}</p>" if _speech_note(group) else ""
         experiment_cards.append(
             f"<section class='experiment'><div class='section-kicker'>实验 {index:02d}</div>"
             f"<h2>{e(group['experiment_name'])}</h2>"
             f"<p class='meta'>{e(group['start_timecode'])}—{e(group['end_timecode'])} · {continuity} · {group['duration_seconds']:.1f} 秒</p>"
             f"<div class='experiment-grid'>{visual_html}<div class='brief'>"
             f"<h3>结果摘要</h3><p>{e(group.get('overall_summary') or '暂无摘要')}</p>"
+            f"{speech_html}"
             f"<dl><dt>开始阶段</dt><dd>{e(first_step.get('current_step') or '未说明')}</dd>"
             f"<dt>{next_label}</dt><dd>{e(last_step.get('next_step') or '证据不足')}</dd></dl>"
             f"<div class='pills'>{actions or empty_actions}</div>"
@@ -223,6 +251,38 @@ def _register_fonts() -> tuple[str, str]:
     return "Helvetica", "Helvetica-Bold"
 
 
+def professional_cover_flowables(rows, note: str, *, stage: bool = False):
+    """The approved brand cover shared by formal and retained-result reports."""
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.platypus import Image, PageBreak, Paragraph, Spacer, Table, TableStyle
+
+    regular, bold = _register_fonts()
+    palette = {key: colors.HexColor(value) for key, value in BRAND_COLORS.items()}
+    title = ParagraphStyle("BrandCoverTitle", fontName=bold, fontSize=24, leading=32,
+                           alignment=TA_CENTER, textColor=palette["brand"])
+    subtitle = ParagraphStyle("BrandCoverSubtitle", fontName=regular, fontSize=11, leading=17,
+                              alignment=TA_CENTER, textColor=palette["text_muted"])
+    cell = ParagraphStyle("BrandCoverCell", fontName=regular, fontSize=9, leading=14,
+                          wordWrap="CJK", textColor=palette["text"])
+    logo = Image(io.BytesIO(brand_logo_png()), width=34 * mm, height=34 * mm)
+    logo.hAlign = "CENTER"
+    matrix = Table([[Paragraph(html.escape(str(v if v is not None else "未记录")), cell) for v in row]
+                    for row in rows], colWidths=[37*mm,118*mm])
+    matrix.setStyle(TableStyle([
+        ("BACKGROUND",(0,0),(0,-1),palette["brand_soft"]),
+        ("GRID",(0,0),(-1,-1),.35,palette["border"]),
+        ("VALIGN",(0,0),(-1,-1),"TOP"),
+        ("LEFTPADDING",(0,0),(-1,-1),9),("RIGHTPADDING",(0,0),(-1,-1),9),
+        ("TOPPADDING",(0,0),(-1,-1),8),("BOTTOMPADDING",(0,0),(-1,-1),8)]))
+    return [Spacer(1,18*mm),logo,Spacer(1,9*mm),
+            Paragraph("多视角实验分析<br/>专业证据报告" + (" · 阶段版" if stage else ""),title),
+            Spacer(1,5*mm),Paragraph("Professional Multi-View Laboratory Evidence Report",subtitle),
+            Spacer(1,16*mm),matrix,Spacer(1,14*mm),Paragraph(html.escape(note),subtitle),PageBreak()]
+
+
 def render_professional_pdf(path: Path, report: dict[str, Any], archive_root: Path) -> None:
     from reportlab.lib import colors
     from reportlab.lib.enums import TA_CENTER
@@ -245,8 +305,6 @@ def render_professional_pdf(path: Path, report: dict[str, Any], archive_root: Pa
     regular, bold = _register_fonts()
     palette = {key: colors.HexColor(value) for key, value in BRAND_COLORS.items()}
     styles = getSampleStyleSheet()
-    cover_title = ParagraphStyle("CoverTitle", parent=styles["Title"], fontName=bold, fontSize=24, leading=32, alignment=TA_CENTER, textColor=palette["brand"])
-    cover_subtitle = ParagraphStyle("CoverSub", parent=styles["BodyText"], fontName=regular, fontSize=11, leading=17, alignment=TA_CENTER, textColor=palette["text_muted"])
     h1 = ParagraphStyle("ReportH1", parent=styles["Heading1"], fontName=bold, fontSize=16, leading=22, spaceBefore=9, spaceAfter=7, textColor=palette["brand"])
     h2 = ParagraphStyle("ReportH2", parent=h1, fontSize=12, leading=17, spaceBefore=7, spaceAfter=5, textColor=palette["brand_secondary"])
     body = ParagraphStyle("ReportBody", parent=styles["BodyText"], fontName=regular, fontSize=9, leading=14, textColor=palette["text"])
@@ -309,28 +367,12 @@ def render_professional_pdf(path: Path, report: dict[str, Any], archive_root: Pa
     )
     status, _ = _headline_status(report)
     overview = report["overview"]
-    logo_buffer = io.BytesIO(brand_logo_png())
-    logo = Image(logo_buffer, width=34 * mm, height=34 * mm)
-    logo.hAlign = "CENTER"
-    story: list[Any] = [
-        Spacer(1, 25 * mm), logo, Spacer(1, 9 * mm),
-        Paragraph("多视角实验分析<br/>专业证据报告", cover_title),
-        Spacer(1, 5 * mm),
-        Paragraph("Professional Multi-View Laboratory Evidence Report", cover_subtitle),
-        Spacer(1, 18 * mm),
-        styled_table(
-            [
-                ["报告日期", report["report_date"]],
-                ["实验档案", p(report["experiment_id"], small)],
-                ["质量状态", status],
-                ["证据范围", f"{overview['experiment_group_count']} 个有界实验 / {overview['key_event_count']} 个关键事件 / {overview['input_view_count']} 路视角"],
-                ["报告模板", report["presentation_contract"]["professional_template_id"]],
-            ],
-            [37 * mm, 118 * mm],
-        ),
-        Spacer(1, 20 * mm),
-        Paragraph("本报告由归档的实验片段、双视角素材、步骤理解和运行记录自动生成。质量状态见上表；完整证据与媒体文件保留在同一实验档案中。", cover_subtitle),
-        PageBreak(),
+    story: list[Any] = professional_cover_flowables([
+        ["报告日期", report["report_date"]], ["实验档案", report["experiment_id"]],
+        ["质量状态", status],
+        ["证据范围", f"{overview['experiment_group_count']} 个有界实验 / {overview['key_event_count']} 个关键事件 / {overview['input_view_count']} 路视角"],
+        ["报告模板", report["presentation_contract"]["professional_template_id"]],
+    ], "本报告由归档的实验片段、双视角素材、步骤理解和运行记录自动生成。质量状态见上表；完整证据与媒体文件保留在同一实验档案中。") + [
         Paragraph("1. 结论摘要", h1),
         Paragraph(
             f"本次分析识别并归档 {overview['experiment_group_count']} 个有界实验，记录 {overview['key_event_count']} 个关键事件和 {overview['physical_change_count']} 项物理状态变化。证据包状态为“{status}”。正文按实验展示代表性第一/第三人称对齐图片、过程摘要和细粒度步骤；完整事件明细保留在可索引 JSON 与 SQLite 中。",
@@ -343,7 +385,7 @@ def render_professional_pdf(path: Path, report: dict[str, Any], archive_root: Pa
             [
                 p(group["experiment_name"], small),
                 p(f"{group['start_timecode']}—{group['end_timecode']}", small),
-                "连续" if group["continuity_type"] == "continuous" else "独立",
+                _workflow_label(group),
                 len(group["steps"]),
                 len(group["key_events"]),
                 "有" if group.get("representative_visual") else "缺失",
@@ -362,7 +404,7 @@ def render_professional_pdf(path: Path, report: dict[str, Any], archive_root: Pa
     for index, group in enumerate(report["experiment_timeline"], 1):
         story.append(PageBreak())
         story.append(Paragraph(f"3.{index} {html.escape(group['experiment_name'])}", h1))
-        continuity = "连续实验" if group["continuity_type"] == "continuous" else "独立实验"
+        continuity = _workflow_label(group)
         facts = [
             ["时间范围", "实验类型", "持续时间", "步骤", "关键事件", "物理变化"],
             [
@@ -391,6 +433,8 @@ def render_professional_pdf(path: Path, report: dict[str, Any], archive_root: Pa
         else:
             story.append(image_flowable("", 165 * mm, 30 * mm))
         story.extend([Paragraph("实验结果摘要", h2), Paragraph(html.escape(group.get("overall_summary") or "暂无摘要"), body)])
+        if note := _speech_note(group):
+            story.append(Paragraph(html.escape(note), body))
         action_text = "；".join(f"{item['action_label']} {item['event_count']}" for item in group.get("key_action_summary") or [] if item["event_count"]) or "无保留动作"
         story.append(Paragraph(f"动作类别分布：{html.escape(action_text)}。", body))
         step_rows = [["步骤", "时间", "当前在做什么", "后续状态"]]

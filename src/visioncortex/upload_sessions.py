@@ -36,12 +36,9 @@ class UploadSessionStore:
         self.database.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database, timeout=30.0)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA busy_timeout = 30000")
-        return connection
+    def _connect(self):
+        from .sqlite_store import connection
+        return connection(self.database)
 
     def _initialize(self) -> None:
         with self._connect() as connection:
@@ -78,7 +75,7 @@ class UploadSessionStore:
                 CREATE TABLE IF NOT EXISTS upload_files (
                     session_id TEXT NOT NULL,
                     file_id TEXT NOT NULL,
-                    kind TEXT NOT NULL CHECK (kind IN ('video', 'timestamp_csv')),
+                    kind TEXT NOT NULL CHECK (kind IN ('video', 'timestamp_csv', 'audio')),
                     file_index INTEGER NOT NULL,
                     view_id TEXT NOT NULL,
                     segment_ordinal INTEGER,
@@ -135,6 +132,41 @@ class UploadSessionStore:
                 WHERE sha256 IS NOT NULL AND content_hash IS NULL
                 """
             )
+
+        self._allow_audio_files()
+
+    def _allow_audio_files(self) -> None:
+        """Upgrade the kind constraint without losing active uploads or chunks."""
+        # This migration deliberately disables FK enforcement before BEGIN;
+        # keep explicit ownership rather than entering the normal transaction.
+        connection = sqlite3.connect(self.database, timeout=30)
+        connection.execute('PRAGMA busy_timeout=30000')
+        try:
+            connection.execute("PRAGMA foreign_keys = OFF")
+            connection.execute("BEGIN IMMEDIATE")
+            schema = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='upload_files'"
+            ).fetchone()[0]
+            if "'audio'" not in schema:
+                new_schema = schema.replace("upload_files", "upload_files_audio", 1).replace(
+                    "'video', 'timestamp_csv'", "'video', 'timestamp_csv', 'audio'"
+                )
+                if new_schema == schema or "'audio'" not in new_schema:
+                    raise RuntimeError("unsupported upload_files schema")
+                connection.execute(new_schema)
+                columns = ", ".join('"' + row[1].replace('"', '""') + '"' for row in
+                                    connection.execute("PRAGMA table_info(upload_files)"))
+                connection.execute(f"INSERT INTO upload_files_audio ({columns}) SELECT {columns} FROM upload_files")
+                connection.execute("DROP TABLE upload_files")
+                connection.execute("ALTER TABLE upload_files_audio RENAME TO upload_files")
+                if connection.execute("PRAGMA foreign_key_check").fetchone():
+                    raise RuntimeError("audio upload migration failed foreign key check")
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
 
     @staticmethod
     def _json(payload: Any) -> str:

@@ -59,6 +59,25 @@ def selection(config):
     ]}
 
 
+def test_locked_audio_metadata_does_not_hide_finalized_rgb(nas_config, monkeypatch):
+    from visioncortex import nas_recordings
+    folder = recording(nas_config, "a_cam01")
+    (folder / "audio_meta.json").write_text('{}')
+    original = nas_recordings._json
+    def read(path):
+        if path.name == "audio_meta.json":
+            raise OSError(16, "Device or resource busy", str(path))
+        return original(path)
+    monkeypatch.setattr(nas_recordings, "_json", read)
+    inventory = scan_recordings(nas_config)
+    assert len(inventory["recordings"]) == 1
+    item = inventory["recordings"][0]
+    assert item["processable"] is True
+    assert item["audio"]["status"] == "pending_publication"
+    assert item["audio"]["files"] == []
+    assert item["audio"]["read_errors"][0]["errno"] == 16
+
+
 def test_indexless_selection_preserves_sources_and_requires_user_roles(nas_config):
     a = recording(nas_config, "a_cam01")
     b = recording(nas_config, "b_cam01", offset=1000000)
@@ -123,14 +142,15 @@ def test_missing_nas_does_not_create_a_local_fallback(nas_config):
     assert not root.exists()
 
 
-def test_plain_video_csv_requires_user_completion_and_keeps_sources_unchanged(nas_config):
+@pytest.mark.parametrize("naming", ["capture", "frames_suffix"])
+def test_plain_video_csv_requires_user_completion_and_keeps_sources_unchanged(nas_config, naming):
     nas_config["collection_ingest"]["discover_plain_video_csv"] = True
     root = Path(nas_config["collection_ingest"]["source_root"])
     folder = root / "采集批次"
     folder.mkdir()
     for name in ("正面_RGB", "侧面_RGB"):
         (folder / f"{name}.mp4").write_bytes(b"catalog-fixture-no-decode")
-        (folder / f"{name[:-4]}_帧时间戳.csv").write_text(
+        (folder / (f"{name[:-4]}_帧时间戳.csv" if naming == "capture" else f"{name}_frames.csv")).write_text(
             "frame_system_timestamp_us,rgb_video_frame_index,rgb_recorded\n"
             "1788408000000000,0,1\n1788408001000000,1,1\n1788408002000000,2,1\n"
         )

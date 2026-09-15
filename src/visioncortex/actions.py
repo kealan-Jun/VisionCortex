@@ -3,7 +3,7 @@ from __future__ import annotations
 import itertools
 import math
 from bisect import bisect_left
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import median
@@ -156,6 +156,7 @@ def _frame_observations(
     cfg: dict[str, Any],
     interaction_state: dict[tuple[Any, ...], dict[str, Any]] | None = None,
     container_states: dict[str, str] | None = None,
+    movement_history: dict[int, deque[tuple[float, float, float]]] | None = None,
 ) -> list[_Observation]:
     assert frame.global_ms is not None
     observations: list[_Observation] = []
@@ -302,7 +303,9 @@ def _frame_observations(
     while len(container_states) > maximum_state_entries:
         container_states.pop(next(iter(container_states)))
 
-    movement_threshold = float(cfg["movement_threshold_norm"])
+    window_ms = float(cfg.get("movement_window_ms", 250.0))
+    movement_threshold = float(cfg.get("movement_window_threshold_norm", 0.01)
+                               if movement_history is not None else cfg["movement_threshold_norm"])
     movement_samples: list[
         tuple[BoxEvidence, float, float, float, float, float, float, float]
     ] = []
@@ -312,6 +315,13 @@ def _frame_observations(
         center_x, center_y = _box_center(obj)
         previous = previous_tracks.pop(obj.track_id, None)
         previous_tracks[obj.track_id] = (center_x, center_y, frame.local_ms)
+        if movement_history is not None:
+            history = movement_history.setdefault(obj.track_id, deque(maxlen=64))
+            while history and frame.local_ms - history[0][2] > 2000.0:
+                history.popleft()
+            eligible = [item for item in history if frame.local_ms - item[2] >= window_ms * 0.6]
+            previous = min(eligible, key=lambda item: abs(frame.local_ms - item[2] - window_ms)) if eligible else None
+            history.append((center_x, center_y, frame.local_ms))
         if previous is None:
             continue
         delta_ms = frame.local_ms - previous[2]
@@ -337,6 +347,10 @@ def _frame_observations(
             del previous_tracks[track_id]
     while len(previous_tracks) > maximum_state_entries:
         previous_tracks.pop(next(iter(previous_tracks)))
+    if movement_history is not None:
+        for track_id in list(movement_history):
+            if track_id not in previous_tracks:
+                del movement_history[track_id]
 
     minimum_anchors = max(2, int(cfg.get("camera_motion_compensation_min_anchors", 2)))
     anchor_vectors = [
@@ -562,113 +576,15 @@ def _infer_liquid_transfer_sequences(
     view: ViewInput,
     cfg: dict[str, Any],
 ) -> list[ActionCandidate]:
-    """Infer source->transport->target sequences from existing tracks.
-
-    The result remains an indirect liquid hypothesis: it improves recall and
-    gives the MLLM a real temporal sequence, but never claims visible liquid.
-    """
-
-    maximum_gap_ms = float(
-        cfg.get("liquid_transfer_max_sequence_gap_seconds", 20.0)
-    ) * 1000.0
-    contact_gap_ms = float(cfg.get("event_merge_gap_seconds", 1.25)) * 1000.0
-    minimum_observations = max(
-        2, int(cfg.get("liquid_transfer_min_contact_observations", 2))
-    )
-    by_tool: dict[tuple[str, int], list[_Observation]] = defaultdict(list)
-    for observation in observations:
-        if observation.action_type != ActionType.LIQUID_MOVEMENT:
-            continue
-        tool_class = observation.evidence.get("tool_class")
-        tool_track_id = observation.evidence.get("tool_track_id")
-        vessel_track_id = observation.evidence.get("vessel_track_id")
-        if (
-            not isinstance(tool_class, str)
-            or not isinstance(tool_track_id, int)
-            or not isinstance(vessel_track_id, int)
-        ):
-            continue
-        by_tool[(tool_class, tool_track_id)].append(observation)
-
-    output: list[ActionCandidate] = []
-    for (tool_class, tool_track_id), items in by_tool.items():
-        runs: list[list[_Observation]] = []
-        current: list[_Observation] = []
-        current_vessel: tuple[str, int] | None = None
-        for item in sorted(items, key=lambda value: value.global_ms):
-            vessel = (
-                str(item.evidence.get("vessel_class") or "unknown"),
-                int(item.evidence["vessel_track_id"]),
-            )
-            if current and (
-                vessel != current_vessel
-                or item.global_ms - current[-1].global_ms > contact_gap_ms
-            ):
-                runs.append(current)
-                current = []
-            current.append(item)
-            current_vessel = vessel
-        if current:
-            runs.append(current)
-        runs = [run for run in runs if len(run) >= minimum_observations]
-        for source, target in zip(runs, runs[1:], strict=False):
-            source_identity = (
-                str(source[0].evidence.get("vessel_class") or "unknown"),
-                int(source[0].evidence["vessel_track_id"]),
-            )
-            target_identity = (
-                str(target[0].evidence.get("vessel_class") or "unknown"),
-                int(target[0].evidence["vessel_track_id"]),
-            )
-            gap_ms = target[0].global_ms - source[-1].global_ms
-            if source_identity == target_identity or not 0.0 <= gap_ms <= maximum_gap_ms:
-                continue
-            combined = [*source, *target]
-            confidence = min(
-                1.0,
-                sum(item.confidence for item in combined) / len(combined) + 0.08,
-            )
-            output.append(
-                ActionCandidate(
-                    candidate_id=f"TRANSFER-SEQ-{view.view_id}-{len(output) + 1:06d}",
-                    action_type=ActionType.LIQUID_MOVEMENT,
-                    view_id=view.view_id,
-                    role=view.role,
-                    local_start_ms=source[0].local_ms,
-                    local_end_ms=target[-1].local_ms,
-                    global_start_ms=source[0].global_ms,
-                    global_end_ms=target[-1].global_ms,
-                    key_global_ms=(source[-1].global_ms + target[0].global_ms) / 2.0,
-                    objects=sorted(
-                        {
-                            tool_class,
-                            source_identity[0],
-                            target_identity[0],
-                        }
-                    ),
-                    confidence=confidence,
-                    evidence=[
-                        {
-                            "transfer_sequence": "source_transport_target",
-                            "tool_class": tool_class,
-                            "tool_track_id": tool_track_id,
-                            "source_class": source_identity[0],
-                            "source_track_id": source_identity[1],
-                            "target_class": target_identity[0],
-                            "target_track_id": target_identity[1],
-                            "source_contact_end_global_ms": source[-1].global_ms,
-                            "target_contact_start_global_ms": target[0].global_ms,
-                            "transport_gap_ms": gap_ms,
-                            "source_observation_count": len(source),
-                            "target_observation_count": len(target),
-                        }
-                    ],
-                    uncertainty=[
-                        "工具从一个容器移动至另一容器；液体本体/液面仍需时序视觉或多模态确认"
-                    ],
-                )
-            )
-    return output
+    """Use the same exclusive-contact reducer for batch and streaming paths."""
+    reducer = _StreamingLiquidSequences(view, cfg)
+    for timestamp, items in itertools.groupby(
+        sorted(observations, key=lambda item: item.global_ms),
+        key=lambda item: item.global_ms,
+    ):
+        reducer.expire(timestamp)
+        reducer.add_frame(list(items))
+    return reducer.finish()
 
 
 def generate_candidates(
@@ -703,6 +619,7 @@ def generate_candidates(
             continue
         observations: list[_Observation] = []
         previous_tracks: dict[int, tuple[float, float, float]] = {}
+        movement_history: dict[int, deque[tuple[float, float, float]]] = {}
         interaction_state: dict[tuple[Any, ...], dict[str, Any]] = {}
         container_states: dict[str, str] = {}
         for frame in frames:
@@ -713,6 +630,7 @@ def generate_candidates(
                     cfg,
                     interaction_state,
                     container_states,
+                    movement_history,
                 )
             )
         candidates.extend(_merge_observations(observations, view, cfg))
@@ -1296,9 +1214,30 @@ class _StreamingLiquidSequences:
         self.minimum_observations = max(
             2, int(cfg.get("liquid_transfer_min_contact_observations", 2))
         )
+        self.minimum_contact_ms = max(
+            0.0, float(cfg.get("liquid_transfer_min_contact_duration_seconds", .2)) * 1000.0
+        )
         self.active: dict[tuple[str, int], _LiquidContactRun] = {}
         self.previous: dict[tuple[str, int], _LiquidContactRun] = {}
         self.output: list[ActionCandidate] = []
+
+    def add_frame(self, observations: Sequence[_Observation]) -> None:
+        by_tool: dict[tuple[str, int], list[_Observation]] = defaultdict(list)
+        for observation in observations:
+            if observation.action_type == ActionType.LIQUID_MOVEMENT:
+                key = self._tool_key(observation)
+                if key is not None:
+                    by_tool[key].append(observation)
+        for key, items in by_tool.items():
+            vessels = {(str(item.evidence.get("vessel_class") or "unknown"), item.evidence["vessel_track_id"])
+                       for item in items}
+            if len(vessels) != 1:
+                # Simultaneous proximity is ambiguous, never a source/target transition.
+                # Raw tool/vessel observations still enter the ordinary recall path.
+                self.active.pop(key, None)
+                self.previous.pop(key, None)
+                continue
+            self.add(max(items, key=lambda item: item.confidence))
 
     @staticmethod
     def _tool_key(observation: _Observation) -> tuple[str, int] | None:
@@ -1324,6 +1263,11 @@ class _StreamingLiquidSequences:
             str(observation.evidence.get("vessel_class") or "unknown"),
             int(observation.evidence["vessel_track_id"]),
         )
+        if current is not None and observation.global_ms <= current.last.global_ms:
+            if vessel != current.vessel_identity:
+                self.active.pop(key, None)
+                self.previous.pop(key, None)
+            return
         if current is not None and (
             vessel != current.vessel_identity
             or observation.global_ms - current.last.global_ms
@@ -1356,14 +1300,16 @@ class _StreamingLiquidSequences:
 
     def _finalize(self, key: tuple[str, int]) -> None:
         current = self.active.pop(key)
-        if current.count < self.minimum_observations:
+        if (current.count < self.minimum_observations
+                or current.last.global_ms - current.first.global_ms < self.minimum_contact_ms):
+            self.previous.pop(key, None)
             return
         previous = self.previous.get(key)
         if previous is not None:
             gap_ms = current.first.global_ms - previous.last.global_ms
             if (
                 previous.vessel_identity != current.vessel_identity
-                and 0.0 <= gap_ms <= self.maximum_gap_ms
+                and 0.0 < gap_ms <= self.maximum_gap_ms
             ):
                 combined_count = previous.count + current.count
                 confidence = min(
@@ -1417,11 +1363,17 @@ class _StreamingLiquidSequences:
                                 "transport_gap_ms": gap_ms,
                                 "source_observation_count": previous.count,
                                 "target_observation_count": current.count,
+                                "source_contact_duration_ms": previous.last.global_ms - previous.first.global_ms,
+                                "target_contact_duration_ms": current.last.global_ms - current.first.global_ms,
+                                "minimum_contact_duration_ms": self.minimum_contact_ms,
+                                "exclusive_contact_observations": True,
+                                "contact_sequence_only": True,
+                                "transport_observed": False,
                                 "streaming_state_machine": True,
                             }
                         ],
                         uncertainty=[
-                            "工具完成源到目标的连续轨迹；液体本体仍需时序视觉或多模态确认"
+                            "工具先后接近不同容器；中间转运、释放及液体本体尚未确认"
                         ],
                         instance_signature={
                             "schema_version": (
@@ -1467,6 +1419,7 @@ def _generate_candidates_streaming(
     precise: list[ActionCandidate] = []
     legacy: list[ActionCandidate] = []
     previous_tracks: dict[int, tuple[float, float, float]] = {}
+    movement_history: dict[int, deque[tuple[float, float, float]]] = {}
     interaction_state: dict[tuple[Any, ...], dict[str, Any]] = {}
     container_states: dict[str, str] = {}
     liquid_sequences = _StreamingLiquidSequences(view, cfg)
@@ -1534,10 +1487,11 @@ def _generate_candidates_streaming(
             cfg,
             interaction_state,
             container_states,
+            movement_history,
         )
         mark_observed_releases(float(frame.global_ms))
+        liquid_sequences.add_frame(observations)
         for observation in observations:
-            liquid_sequences.add(observation)
             if instance_aware and observation.instance_key:
                 add_to(
                     active_precise,
@@ -2694,6 +2648,15 @@ def audit_candidates(
     config: dict[str, Any],
     frame_index: FineFrameIndex | None = None,
 ) -> tuple[list[EvidenceEvent], list[dict[str, Any]]]:
+    motion_rejected = [
+        {"candidate_id": c.candidate_id, "reason": "movement_not_supported_by_image",
+         "event_id": f"REJECTED-CANDIDATE-{c.candidate_id}", "confidence": c.confidence,
+         "movement_visual_verification": c.provenance["movement_visual_verification"]}
+        for c in candidates if c.action_type == ActionType.OBJECT_MOVEMENT
+        and c.provenance.get("movement_visual_verification", {}).get("status") in {"contradicted", "unverified"}
+    ]
+    rejected_motion_ids = {c["candidate_id"] for c in motion_rejected}
+    candidates = [c for c in candidates if c.candidate_id not in rejected_motion_ids]
     tolerance = float(config["alignment"]["cross_view_event_tolerance_ms"])
     maximum_tolerance = max(
         tolerance,
@@ -2726,7 +2689,10 @@ def audit_candidates(
         left_error = float(profiles[id(left)]["uncertainty_ms"])
         right_error = float(profiles[id(right)]["uncertainty_ms"])
         propagated = math.sqrt(left_error**2 + right_error**2)
-        return min(maximum_tolerance, tolerance + propagated)
+        # Cross-camera co-occurrence must overlap within measured clock error.
+        # The same-view joining tolerance is not evidence that another bench
+        # observed this action hundreds of milliseconds earlier or later.
+        return min(maximum_tolerance, propagated)
 
     seg_cfg = config["segmentation"]
     ordered_candidates = sorted(candidates, key=candidate_sort_key)
@@ -2831,7 +2797,7 @@ def audit_candidates(
             selected.append(candidate)
 
     events: list[EvidenceEvent] = []
-    rejected: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = list(motion_rejected)
     for index, unsorted_cluster in enumerate(clusters, 1):
         cluster = sorted(unsorted_cluster, key=candidate_sort_key)
         views = sorted({item.view_id for item in cluster})
@@ -3012,9 +2978,9 @@ def audit_candidates(
             uncertainty.append("液体移动由传统CV候选提出，最终语义需多模态模型确认")
         if formal_status == "formal":
             if both_roles:
-                reason = "第一/第三人称动作、对象和全局时间窗一致"
+                reason = "第一/第三人称同类动作候选在时钟误差内重叠；跨机位实体对应仍待核验"
             elif len(views) >= 2:
-                reason = "至少两路同角色视角动作、对象和全局时间窗一致"
+                reason = "至少两路同角色视角的同类动作候选在时钟误差内重叠；跨机位实体对应仍待核验"
             elif semantic_context_candidate is not None:
                 reason = (
                     "单路状态线索与对侧同时动作上下文通过语义召回门控；"
@@ -3031,6 +2997,11 @@ def audit_candidates(
                 "schema_version": "visioncortex-alignment-association/1",
                 "base_tolerance_ms": tolerance,
                 "maximum_tolerance_ms": maximum_tolerance,
+                "cross_view_temporal_policy": "measured_clock_uncertainty_only",
+                "effective_cross_view_tolerance_ms": max(
+                    (pair_tolerance(left, right) for left in cluster for right in cluster
+                     if left.view_id != right.view_id), default=0.0
+                ),
                 "view_uncertainty_ms": {
                     view_id: transforms[view_id].uncertainty_ms
                     for view_id in views
@@ -3252,6 +3223,25 @@ def refine_liquid_events_with_context(
             "spatial_support_frame_counts": spatial_counts,
         }
         if supported:
+            removed_views = sorted(set(event.supporting_views) - set(supported))
+            if removed_views:
+                retained_candidates = [item for item in event.candidates if item.view_id in supported]
+                previous_confidence = event.confidence
+                event.confidence = min(event.confidence, max(
+                    (item.confidence for item in retained_candidates), default=0.0
+                ))
+                # A removed source invalidates the earlier consensus/admission.
+                # Keep the hypothesis available, but require a fresh semantic decision.
+                set_event_admission(event, "provisional")
+                event.observability["liquid_context"].update({
+                    "removed_supporting_views": removed_views,
+                    "previous_confidence": previous_confidence,
+                    "retained_confidence": event.confidence,
+                    "confidence_policy": "cap_to_retained_source_confidence",
+                    "admission_after_support_filter": "provisional",
+                })
+                event.audit_reason = "液体候选部分视角未通过手部空间核验，原跨视角裁决失效，保留待核验"
+                event.uncertainty.append("支持来源减少后须重新裁决，不能沿用此前跨视角一致结论")
             event.supporting_views = supported
             event.supporting_roles = sorted(
                 {candidate.role for candidate in event.candidates if candidate.view_id in supported},
@@ -4323,3 +4313,320 @@ def build_physical_change_log(events: Iterable[EvidenceEvent]) -> list[PhysicalC
             )
         )
     return changes
+
+
+def fine_scan_windows(candidates, infos, transforms, config, padding_seconds=None):
+    if bool(
+        config["performance"].get(
+            "exhaustive_negative_audit_full_timeline", False
+        )
+        or config["performance"].get(
+            "exhaustive_full_timeline_scan", False
+        )
+    ):
+        return {
+            view_id: [(0.0, float(info.duration_ms))]
+            for view_id, info in infos.items()
+            if float(info.duration_ms) > 0.0
+        }
+    padding = float(
+        config["performance"]["fine_window_padding_seconds"]
+        if padding_seconds is None
+        else padding_seconds
+    ) * 1000.0
+    merge_gap = max(
+        0.0,
+        float(
+            config["performance"].get(
+                "fine_window_merge_gap_seconds", 0.0
+            )
+        )
+        * 1000.0,
+    )
+    candidate_list = list(candidates)
+    risk_extra_by_id: dict[str, float] = {}
+    perf = config["performance"]
+    if perf.get("fine_risk_window_expansion_enabled", False):
+        configured_actions = {
+            str(item).strip()
+            for item in perf.get("fine_risk_action_types", [])
+            if str(item).strip()
+        }
+        low_confidence_threshold = float(
+            perf.get("fine_risk_low_confidence_threshold", 0.70)
+        )
+        extra_padding_ms = max(
+            0.0,
+            float(perf.get("fine_risk_extra_padding_seconds", 30.0))
+            * 1000.0,
+        )
+        conflict_gap_ms = max(
+            0.0,
+            float(perf.get("fine_risk_conflict_gap_seconds", 15.0))
+            * 1000.0,
+        )
+        for candidate in candidate_list:
+            if (
+                candidate.action_type.value in configured_actions
+                or float(candidate.confidence) < low_confidence_threshold
+            ):
+                risk_extra_by_id[candidate.candidate_id] = extra_padding_ms
+        active_candidates: list[ActionCandidate] = []
+        for current in sorted(
+            candidate_list,
+            key=lambda item: (item.global_start_ms, item.global_end_ms),
+        ):
+            active_candidates = [
+                previous
+                for previous in active_candidates
+                if previous.global_end_ms + conflict_gap_ms
+                >= current.global_start_ms
+            ]
+            for previous in active_candidates:
+                if previous.action_type == current.action_type:
+                    continue
+                risk_extra_by_id[previous.candidate_id] = extra_padding_ms
+                risk_extra_by_id[current.candidate_id] = extra_padding_ms
+            active_candidates.append(current)
+    grouped: dict[str, list[tuple[float, float]]] = {view_id: [] for view_id in infos}
+    for candidate in candidate_list:
+        candidate_padding = padding + risk_extra_by_id.get(
+            candidate.candidate_id, 0.0
+        )
+        for view_id, info in infos.items():
+            alignment_extra = 0.0
+            transform = transforms[view_id]
+            if (
+                perf.get("fine_low_alignment_extra_padding_enabled", False)
+                and (
+                    transform.state != "aligned"
+                    or float(transform.confidence)
+                    < float(
+                        perf.get(
+                            "fine_low_alignment_confidence_threshold", 0.80
+                        )
+                    )
+                )
+            ):
+                alignment_extra = max(
+                    0.0,
+                    float(
+                        perf.get(
+                            "fine_low_alignment_extra_padding_seconds", 30.0
+                        )
+                    )
+                    * 1000.0,
+                )
+            global_start = (
+                candidate.global_start_ms - candidate_padding - alignment_extra
+            )
+            global_end = (
+                candidate.global_end_ms + candidate_padding + alignment_extra
+            )
+            local_start = max(0.0, transforms[view_id].to_local(global_start))
+            local_end = min(info.duration_ms, transforms[view_id].to_local(global_end))
+            if local_end > local_start:
+                grouped[view_id].append((local_start, local_end))
+    merged: dict[str, list[tuple[float, float]]] = {}
+    for view_id, windows in grouped.items():
+        result: list[list[float]] = []
+        for start, end in sorted(windows):
+            if result and start <= result[-1][1] + merge_gap:
+                result[-1][1] = max(result[-1][1], end)
+            else:
+                result.append([start, end])
+        merged[view_id] = [(item[0], item[1]) for item in result]
+    return merged
+
+
+_ACTIVITY_PHYSICAL_TYPES = frozenset({
+    "hand_object_contact", "object_movement", "liquid_movement", "container_state_change", "device_panel_operation",
+})
+
+
+def merge_activity_intervals(values, lower, upper, padding=0.0):
+    result = []
+    for start, end in sorted((max(lower, a - padding), min(upper, b + padding)) for a, b in values):
+        if end <= start:
+            continue
+        if result and start <= result[-1][1]:
+            result[-1] = (result[-1][0], max(end, result[-1][1]))
+        else:
+            result.append((start, end))
+    return result
+
+
+def _activity_objects(candidates):
+    """Use the same laboratory-context exclusions for seeds and continuity."""
+    ignored = HAND_CLASSES | NON_ACTION_CLASSES | {"paper", "unknown"}
+    return {obj for candidate in candidates for obj in candidate.objects} - ignored
+
+
+def activity_seed_intervals(events, coarse_candidates, scan_windows, config):
+    """Retain visible device activity without promoting formal physical actions.
+
+    Formal event/group acceptance may require another camera or semantic proof.
+    Preprocessing instead needs bounded, fine-supported interaction intervals.
+    Coarse-only detections, weak contact and stationary proximity remain out.
+    """
+    cfg = config["segmentation"]
+    strong = float(cfg.get("rejected_boundary_context_strong_confidence", .65))
+    minimum_ms = float(cfg["min_event_duration_seconds"]) * 1000
+    minimum_observations = int(cfg["min_event_observations"])
+    pre = float(cfg["key_clip_pre_seconds"]) * 1000
+    post = float(cfg["key_clip_post_seconds"]) * 1000
+    intervals, decisions = [], []
+    for event in events:
+        if event.action_type.value not in _ACTIVITY_PHYSICAL_TYPES:
+            continue
+        evidence = [row for candidate in event.candidates for row in candidate.evidence]
+        transition = any(row.get("interaction_state", {}).get("approach_confirmed") or
+                         row.get("interaction_state", {}).get("previous_release_global_ms") is not None
+                         for row in evidence)
+        fine_contact = (event.action_type.value == "hand_object_contact" and event.confidence >= strong
+                        and event.global_end_ms - event.global_start_ms >= minimum_ms
+                        and len({row.get("frame_index") for row in evidence if row.get("frame_index") is not None}) >= minimum_observations
+                        and transition)
+        if not (event.accepted or fine_contact):
+            continue
+        if not _activity_objects(event.candidates):
+            decisions.append({"event_id": event.event_id,
+                              "start_ms": event.global_start_ms, "end_ms": event.global_end_ms,
+                              "basis": "non_laboratory_context_cannot_seed_activity",
+                              "objects": sorted({obj for candidate in event.candidates for obj in candidate.objects}),
+                              "activity_seed_eligible": False,
+                              "scope": "single_device_activity_screening",
+                              "event_acceptance_mutated": False, "physical_action_confirmed": False})
+            continue
+        for start, end in scan_windows:
+            if start <= event.global_start_ms and end >= event.global_end_ms:
+                support = [candidate.candidate_id for candidate in coarse_candidates
+                           if getattr(candidate, "global_start_ms", candidate.local_start_ms) <= end and getattr(candidate, "global_end_ms", candidate.local_end_ms) >= start]
+                if not support:
+                    continue
+                interval = (max(start, event.global_start_ms - pre), min(end, event.global_end_ms + post))
+                intervals.append(interval)
+                decisions.append({"event_id": event.event_id, "coarse_candidate_ids": support,
+                                  "start_ms": interval[0], "end_ms": interval[1],
+                                  "basis": "accepted_fine_event" if event.accepted else "persistent_fine_contact_with_transition",
+                                  "confidence": event.confidence, "observation_count": len(evidence),
+                                  "scope": "single_device_activity_screening", "event_acceptance_mutated": False,
+                                  "physical_action_confirmed": False})
+                break
+    return intervals, decisions
+
+
+def build_activity_intervals(events, coarse_candidates, scan_windows, config):
+    """Keep an anchored operation episode, including supported short pauses.
+
+    Fine interactions bound the output. Object-backed coarse motion can bridge
+    two fine interactions, but cannot start/end an episode or open one alone.
+    Neither context membership nor continuity promotes formal action evidence.
+    """
+    seeds, seed_decisions = activity_seed_intervals(events, coarse_candidates, scan_windows, config)
+    if not seeds:
+        return seeds, seed_decisions
+    cfg = config["segmentation"]
+    nodes = []
+    for event in events:
+        if event.action_type.value not in _ACTIVITY_PHYSICAL_TYPES or event.confidence < float(cfg["rejected_boundary_context_min_confidence"]):
+            continue
+        objects = _activity_objects(event.candidates)
+        evidence = [row for candidate in event.candidates for row in candidate.evidence]
+        if not objects or len({row.get("frame_index") for row in evidence if row.get("frame_index") is not None}) < 2:
+            continue
+        identities = {f"{kind}:{row[kind + '_track_id']}" for row in evidence for kind in ("hand", "object")
+                      if row.get(kind + "_track_id") is not None}
+        nodes.append({"id": event.event_id, "kind": "fine", "start": event.global_start_ms,
+                      "end": event.global_end_ms, "objects": objects, "identities": identities})
+    for candidate in coarse_candidates:
+        # Spatial co-occurrence is not continuity through an unobserved pause.
+        motion = any("coarse_motion" in row or "motion_score" in row for row in candidate.evidence)
+        objects = _activity_objects([candidate])
+        if motion and objects:
+            nodes.append({"id": candidate.candidate_id, "kind": "coarse_motion", "start": getattr(candidate, "global_start_ms", candidate.local_start_ms),
+                          "end": getattr(candidate, "global_end_ms", candidate.local_end_ms), "objects": objects, "identities": set()})
+    gap = float(cfg["experiment_gap_seconds"]) * 1000
+    extension = float(cfg["rejected_boundary_context_max_extension_seconds"]) * 1000
+    pre = float(cfg["experiment_pre_roll_seconds"]) * 1000
+    post = float(cfg["experiment_post_roll_seconds"]) * 1000
+    intervals, decisions = list(seeds), list(seed_decisions)
+    for seed in seed_decisions:
+        if seed.get("activity_seed_eligible") is False:
+            continue
+        anchor = next((node for node in nodes if node["id"] == seed["event_id"]), None)
+        if anchor is None:
+            continue
+        bounds = next(((start, end) for start, end in scan_windows
+                       if start <= anchor["start"] <= anchor["end"] <= end), None)
+        if bounds is None:
+            continue
+        eligible = [node for node in nodes if bounds[0] <= node["start"] <= node["end"] <= bounds[1]
+                    and node["start"] >= anchor["start"] - extension and node["end"] <= anchor["end"] + extension]
+        reached, frontier, edges = {anchor["id"]}, [anchor], []
+        while frontier:
+            left = frontier.pop()
+            for right in eligible:
+                distance = max(0, right["start"] - left["end"], left["start"] - right["end"])
+                shared = left["objects"] & right["objects"]
+                tracked = left["identities"] & right["identities"]
+                if right["id"] in reached or distance > gap or not (shared or tracked):
+                    continue
+                reached.add(right["id"])
+                frontier.append(right)
+                edges.append({"left": left["id"], "right": right["id"], "gap_ms": distance,
+                              "shared_objects": sorted(shared), "shared_fine_tracks": sorted(tracked),
+                              "physical_identity_verified": False})
+        fine = [node for node in eligible if node["id"] in reached and node["kind"] == "fine"]
+        if len(fine) < 2:
+            continue
+        start = max(bounds[0], min(node["start"] for node in fine) - pre)
+        end = min(bounds[1], max(node["end"] for node in fine) + post)
+        intervals.append((start, end))
+        decisions.append({"basis": "fine_anchored_operation_continuity", "event_id": anchor["id"],
+                          "start_ms": start, "end_ms": end, "fine_event_ids": sorted(node["id"] for node in fine),
+                          "coarse_bridge_ids": sorted(node["id"] for node in eligible
+                                                      if node["id"] in reached and node["kind"] == "coarse_motion"
+                                                      and start <= node["start"] <= node["end"] <= end),
+                          "edges": edges, "maximum_gap_ms": gap, "maximum_extension_ms": extension,
+                          "scope": "single_device_activity_screening", "evidence_status": "PARTIAL_EVIDENCE",
+                          "event_acceptance_mutated": False, "physical_action_confirmed": False})
+    joined = []
+    for start, end in merge_activity_intervals(intervals, min(a for a, _ in scan_windows), max(b for _, b in scan_windows)):
+        if joined and start - joined[-1][1] <= float(cfg["event_merge_gap_seconds"]) * 1000:
+            decisions.append({"basis": "fine_sampling_gap_inside_activity", "start_ms": joined[-1][1],
+                              "end_ms": start, "physical_action_confirmed": False})
+            joined[-1] = (joined[-1][0], end)
+        else:
+            joined.append((start, end))
+    return joined, decisions
+
+
+def build_view_activity_intervals(events, coarse_candidates, views, transforms, scan_windows, config):
+    """Project shared activity analysis into each camera's actual scanned time.
+
+    Each camera is evaluated from its own fine observations. A scene in another
+    camera cannot independently label this view as active. Global timestamps
+    are converted using the same alignment transforms as candidate auditing.
+    """
+    results = {}
+    for view in views:
+        transform = transforms[view.view_id]
+        local_windows = scan_windows.get(view.view_id, [])
+        global_windows = [(transform.to_global(start), transform.to_global(end)) for start, end in local_windows]
+        own_events = []
+        for event in events:
+            candidates = [c for c in event.candidates if c.view_id == view.view_id]
+            if not candidates:
+                continue
+            own_events.append(event.model_copy(update={
+                "candidates": candidates, "global_start_ms": min(c.global_start_ms for c in candidates),
+                "global_end_ms": max(c.global_end_ms for c in candidates)}))
+        intervals, decisions = build_activity_intervals(
+            own_events, [c for c in coarse_candidates if c.view_id == view.view_id], global_windows, config)
+        results[view.view_id] = {
+            "intervals": [(transform.to_local(start), transform.to_local(end)) for start, end in intervals],
+            "decisions": decisions, "algorithm": "visioncortex.actions.build_activity_intervals",
+            "decision_time_basis": "aligned_global_ms", "interval_time_basis": "view_local_ms",
+            "physical_action_confirmed": False, "evidence_status": "PARTIAL_EVIDENCE"}
+    return results

@@ -1,5 +1,7 @@
 # RealityLoopAI/VisionCortex legacy repository audit
 
+> 2026-09-15 规则更新：本文中的旧仓库分工仅为历史记录。两个 GitHub 仓库现为平级同步目标，不再执行开发仓向稳定仓的单向晋升；当前规则以 [双仓同步与发布规则](DUAL-REPOSITORY-RELEASE-POLICY.md) 为准。
+
 Audit date: 2026-08-17
 
 Target: `RealityLoopAI/VisionCortex` (private)

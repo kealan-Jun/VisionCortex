@@ -1,0 +1,1791 @@
+## 2026-09-10 goal92：补扫新增4909帧，真实机位质量仍未过门
+
+PARTIAL_EVIDENCE，目标active。4回归修复前失败，33测试及静态检查通过；同一最终账本重放找回150/334个未充分覆盖候选。真实四路原片980.56秒结束partial，新增2轮补扫，总10517批/42053帧，2实验/86候选（29优先）/264MP4/258JPG。没有新训练，仍FP v24/TP v49，累计72次。
+
+实看10个PTS/像素身份验证源帧及3拼图：600秒新扫c973为空移液台，称量rk仍差19.05秒，内部却判完整；需限制支持事件必须在候选自身时间内。第二段延长、实际同步422.667秒，但840秒右侧仍是空称量台，固定整段机位待修复。浏览器预览与第二段播放通过；两轮统一8011入口，列表疑似重复投影待查。待语义高级事件压制接触证据也待修复。
+
+426图8576框1552审计未变，13受保护资产与8源文件复核通过；未替换生产，无付费。完整质量、动态机位、账号恢复复跑与正式归档仍NOT_PROVEN。上一条“goal92进行中”已由本次完成记录替代，原文保存在in-progress文档与before-docs。
+
+[报告和实图](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/system-goal92/report.md) · [核验](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/system-goal92/verification-summary.json) · [回执](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/goal92-work-receipt.json)。两仓原分支/SHA与未提交修改保留。
+
+## 2026-09-10 goal91：四路原片完成本地CV运行，发现第三人称漏扫
+
+PARTIAL_EVIDENCE，目标active。FP v24/TP v49、960 FP32 batch4、精扫20fps，原4路约15分钟输入完整引用；832.25秒结束为partial，保留2实验/86候选，264MP4/258JPG。无新训练，累计72次（FP23/TP49）；13模型/引擎与8原输入哈希通过。未调用付费语义，不作完整质量或性能达标结论。
+
+有效partial只读登记已修复，报告篡改拒绝访问；27测试、ruff、compileall通过。浏览器实际检查长片129.67秒和首候选6.733秒解码、初始预览可见；CLI导入的页面重跑仍未证明。10源帧PTS/像素哈希复现。发现455秒长簇被零散双机位事件整体关闭，TP精扫仅39%，600秒称量处三TP均漏扫；下一步修复逐候选覆盖后重放和实跑。完整质量、尾部实验覆盖、机位动作核验、语义与正式归档仍NOT_PROVEN。
+
+[报告](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/system-goal91/report.md) · [回执](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/goal91-work-receipt.json)。两仓分支/SHA及未提交修改保留。
+
+## 2026-09-10 goal90：TP v49完成，用品盒误检减少，密集枪头未达标
+
+PROGRESS / PARTIAL_EVIDENCE，目标active。新增2张用品盒裁图，实际初标、保存后重开复核、工作台核对；426图8576框1552审计，原424条记录不变。来源明确的123训练父图+492增强=615文件，老1214图像/标签文件一致。两新裁图8个增强版本实看；模糊蓝枪头保留未知，91张未明来源不纳入训练。
+
+v48既有23类权重继续微调10轮，960 FP32 batch2 freeze10 AdamW lr0=0.00001 one2many；实际3080更新/6150访问/163.96秒。708个模型/EMA状态张量在首次更新前核对。v49对146图、两基线各新增2图，共150真实模型调用/150 NMS；旧288预测核验复用，无ROI调用。
+
+新用品盒训练裁图TP/FP/FN从0/3/2变2/0/0；两固定开发裁图24/2/3变24/0/3，仍3漏检。公开近景113/3/3变111/3/5，有退步；前轮17件裁图保持17/17，困难69枪头仍0/69、原验证视野0/8。13组实图复核发现空孔误报、边角用品盒漏检和新增实验服重复框。未替换生产。
+
+累计72次完成训练（FP23/TP49），FP仍v24。两仓原分支/SHA与未提交修改保留，12模型/引擎哈希通过。下一步继续密集蓝枪头可靠标注/尺度诊断，并衔接完整原片机位、失败保留与复跑、浏览器和溯源证据；当前不具备完整系统质量验收结论。
+
+[报告与实图](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal90/report.md) · [核验](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal90/verification-summary.json) · [回执](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/goal90-work-receipt.json)。
+
+## 2026-09-10 goal89：TP v48低学习率接续训练完成，灰枪头误检恢复，未晋升
+
+PROGRESS / PARTIAL_EVIDENCE，目标active。v46已有23类权重→lr0=0.00001微调10轮，实际3030更新/6050访问/164.91秒。相同121父图+484增强=605训练文件；输入960 FP32 batch2、freeze10、one2many。首次更新前708模型/EMA张量（含12分类输出）逐项相等；99冻结参数张量最终仍不变。未再次做21→23迁移。首次运行时观察器访问未创建的epoch属性，0更新即退出；原记录保留，新目录改start_epoch后预检完成，产品源码未改。
+
+144整图+156盒内=300实际推理，277NMS/23空ROI；v46/v47四份历史预测在同一数据/代码/环境核验后复用。新带盖训练裁图仍17/17；公开近景TP/FP/FN由v47的103/45/13恢复113/3/3（v46为114/4/2）；T000–002恢复81/88，旧训练枪头57/61。两固定开发裁图24/2/3略逊v46的25/1/2，困难69枪头仍0/69、原验证视野0/8。已实际查看11组图，盒内防护用品误报手、空孔误报、边角防护盒漏检仍在。通用整盒ROI仍退步，不启用，不替换生产。
+
+累计71次完成训练（FP23/TP48），FPv24不变；424图8574框1546审计和分区不变。下一步补充来源可靠的不同蓝枪头构图与防护用品/白角/空孔背景，实际逐件初标与二次复核；不凭增加轮数宣称解决。独立质量和完整原片语义归档仍NOT_PROVEN。
+
+[报告与实图](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal89/report.md) · [核验](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal89/verification-summary.json) · [回执](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/goal89-work-receipt.json)。两仓原分支/SHA及未提交修改保留。
+
+## 2026-09-10 goal88：TP v47完成，带盖构图已学到，困难域与误检仍未达标
+
+PROGRESS / PARTIAL_EVIDENCE，目标active，v47不晋升。T031新增312×354带盖裁图经过初标/保存后第二遍复核：13枪头+1盒+2枪+1手套=17件，剔除父框矩形相交产生的不可见实验服；不是新独立来源。工作台424图8574框，1546审计，96完整/258区域外/19待复核/51排除；原423记录未改，123条部分监督批次0阻断，普通全库导出639阻断。
+
+121训练父图2980框485枪头+484增强=605训练文件，2固定完整开发裁图不变。纳入0309更正3支及其重新生成的增强；1195旧图像标签/476旧派生记录逐项保留。960 FP32 batch2、AdamW0.0001、freeze10、20轮，真实6060更新/12100访问/321.99秒。固定last.pt；累计70次（FP23/TP47），FPv24不变。
+
+144图×3权重整图432次+盒内465次=897真实调用，851NMS/46空ROI，旧286整图基线完全复现。新裁图1/17→17/17，同源T031ROI可检13支；困难69枪头0→0、原验证视野0/8不变。公开近景114TP/4FP/2FN→103/45/13，新增瓶盖/枪头误检；固定开发裁图25/1/2→23/2/4，虽mAP50–95 80.21%→81.69%，固定阈值P/R退步。实际查看11对比+2ROI细节，未替换生产或启用整盒ROI。
+
+下一步从较稳v46的23类完整权重低学习率继续微调，核对分类头实际载入，不再做21→23迁移，保留同一评测与旧域门槛。91来源未明图仍unassigned。无产品源码/付费/NAS/完整原片改动，独立质量和原片语义归档仍NOT_PROVEN。
+
+[报告及实图](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal88/report.md) · [核验](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal88/verification-summary.json) · [回执](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/goal88-work-receipt.json)。两仓原分支/SHA和未提交修改保留。
+
+## 2026-09-10 goal87：整盒放大诊断未过门，转向训练构图覆盖
+
+PROGRESS / PARTIAL_EVIDENCE，目标active。143固定图×v44/v46，真实286整图+307盒内调用，593次后处理/565次NMS，28空结果跳过NMS；整图预测全部复现。模型预测盒选区域、不用标签框，保留源像素/矩阵/机位；非枪头类别完全不变。
+
+v46困难69枪头0→0，原验证视野0/8→0/8，旧训练枪头57/61→0/61，两整机训练枪头254/259→121/259；两固定开发裁图25/1/2不变。实际查看6组同源对比，整盒带盖构图明显退步，原T031小裁图仍13/13。暂不启用此规则，继续补充合规来源的蓝枪头和带盒盖背景训练构图，再检验两条路径。不能宣称放大已解决问题。
+
+423图8557框/1543审计未变，累计69次训练（FP23/TP46）未变。没有生产/标签/付费/NAS/完整原片修改。包装器错误要求空结果也有NMS已按逐次账本解决，未重跑或改写预测。
+
+[报告与实图](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal87/report.md) · [核验](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal87/verification-summary.json) · [回执](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/goal87-work-receipt.json)。原分支及未提交工作保留。
+
+## 2026-09-10 goal86：三处漏标已补标并复核，旧训练记录保留
+
+PROGRESS / PARTIAL_EVIDENCE，目标active。0309左架3处漏标已通过CLI更正并保存后实际复核至revision4：120支枪头、129框、1未知区。全库423图8557框，1543审计；其他422条、原126框几何、来源与分区均不变。122条部分监督格式0阻断，全库普通导出639阻断。
+
+仅对旧预测按新标签重新计数，v46该图122/126→125/129；权重/预测未变，其他142图结果相同，不是模型改进。原goal85数据、训练、原分数保留；累计69次训练不变，FPv24/TPv46均未因此晋升。旧域枪头、空孔/重复框、来源独立质量与完整原片系统验收仍未过门。无新训练、模型调用、付费、NAS或生产替换。
+
+[更正报告](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal86/report.md) · [核验](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal86/verification-summary.json) · [回执](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/goal86-work-receipt.json)。下一步按修正版本冻结训练数据并继续旧域质量迭代。
+
+## 2026-09-10 goal85：TP v46完成，整机训练拟合提高，旧域枪头退步并发现3处漏标
+
+PROGRESS / PARTIAL_EVIDENCE，目标active，v46不晋升。120训练父图2960已标框+480增强=600训练文件，原2完整验证裁图不变；960 FP32 batch2、AdamW0.0001、freeze10、20轮，实际6000更新12000访问、319.82秒。保留原120导出记录、1184图像标签及472增强记录；固定epoch20 last.pt。累计69次（FP23/TP46），FP仍v24。
+
+143图×3模型=429次真实调用/NMS，生产和v44全部143原始预测复现。新整机训练图已标枪头0/256→251/256，原困难69枪头4→0，完整验证原图枪头0/8不变、移液枪24/26→23/26；两固定完整开发裁图23/0/4→25/1/2，mAP50–95 77.97%→80.21%。提升主要为训练拟合，不能证明整体泛化达标。
+
+实际9对比图+4密集叠框+2原像素复查，发现0309左架r2/r3/r4第9列3支漏标；原revision2训练/评测和数值保留，下一步先CLI更正、保存后再复核。不能把这三处报为模型空孔误检，也不能静默改标签重算原成绩。右架空孔、重复框及防护盒角部纸张误检仍在。
+
+工作台423图8554框、1541审计记录本阶段不变；122条格式/来源契约0阻断、全库普通导出639阻断，格式通过不代表无视觉漏标。91未映射原图仍unassigned；未改生产资产/源码，无付费/完整原片/NAS操作。独立质量、完整原片多机位/语义/归档仍NOT_PROVEN。
+
+[完整报告与真实对比](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal85/report.md) · [核验](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal85/verification-summary.json) · [回执](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/goal85-work-receipt.json)。两仓原分支/SHA及未提交修改保留。
+
+## 2026-09-10 goal84：部分装载整机图117支枪头双遍复核，v45将六孔板孔误报为枪头
+
+PROGRESS / PARTIAL_EVIDENCE，目标active。新增1张OT2完整机台图，逐件117支枪头+3盒+6整体容器=126框，保留1未知；已保存后重开原图复核。全库423图8554框，95完整、258区域外、19待复核、0草稿、51排除，审计1541；浏览器实际显示新图版本2及更新统计。旧422记录和121批次版本不变，新增后122条（120训练父图+2固定验证裁图）区域外资格检查0阻断，全项目完整导出仍639阻断。
+
+生产/v44/v45对新0309与既有0176整机图各2次真实调用，共6源调用/6NMS。两图三模型均0/270已标实物匹配；v45在新图的六孔板孔口上报6个枪头，真正117支全漏。0176原始预测精确复现goal83。部分图不报告全图误检率。8项受保护资产未变，无产品代码、新训练/导出、付费或完整视频运行。
+
+下一步以v44的freeze10配置为对照，把已复核两张完整图与空孔背景加入增强/训练v46，并核对旧域退步。当前累计68次训练（FP23/TP45），FP v24/TP v45，未晋升；独立质量、完整原片多机位、真实语义和归档仍NOT_PROVEN。91未映射原图保持unassigned。
+
+[报告与图像](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal84/report.md) · [核验](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal84/verification-summary.json) · [回执](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/goal84-work-receipt.json)。两仓原分支/SHA及未提交修改保留。
+
+## 2026-09-10 goal83：完整机台139支枪头双遍复核，6次真实对照确认覆盖缺口
+
+PROGRESS / PARTIAL_EVIDENCE，目标active。本轮新增1张公开OT2完整机台图，逐件139枪头+2盒+3容器=144框，保存初标后实际重开复核，修正140框边界，保留废弃盒及左边器材2未知。全库422图8428框：95完整、257区域外、19待复核、0草稿、51排除；审计1538。浏览器实际显示新图版本2、139枪头及新统计。旧421记录/120批次版本不变，加入新图后121条资格检查0阻断，全项目普通导出仍637阻断；无新导出/训练。
+
+生产/v44/v45各2图，共6真实源调用及6NMS。完整机台144已知目标均0匹配，两候选无≥0.25输出；同名已训练近景v44为52/63枪头、v45为61/63，原始预测均复现goal82。完整图约11×9像素枪头，近景约39×39，存在明显尺寸/上下文/训练覆盖差异，但未核实原始裁剪矩阵，不作纯尺寸因果消融。生产把六孔板6孔报为样品瓶；旧类11语义不同不作单支同任务准确率基线。
+
+累计训练仍68次（FP23/TP45），FP v24/TP v45；v45不晋升，下轮继续以v44为开发对照补完整视野及空孔。8项受保护资产不变，无产品代码/付费/完整视频/NAS操作。91未映射图保留unassigned，完整原片多机位/语义/归档和独立质量仍NOT_PROVEN。
+
+[报告与实际图像](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal83/report.md) · [核验](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal83/verification-summary.json) · [回执](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/goal83-work-receipt.json)。两仓原分支/SHA及未提交修改保留。
+
+## 2026-09-10 goal82：TP v45完成冻结范围受控训练及141图对照
+
+PROGRESS / PARTIAL_EVIDENCE，目标active，v45不晋升生产。解冻使公开训练图枪头匹配102/113增至111/113，但空孔误检增加、旧域保留退步，原困难枪头仅6/69；本轮假设未达到可用收益。 冻结前10层改前4层，可训练参数551万→977万；118父图+472增强、2固定完整开发裁图不变。960 FP32 batch2 AdamW LR0.0001、20轮、5900更新11800访问，实际351.46秒。两轮5900条批次顺序和优化器学习率记录逐条一致，固定last.pt。累计68次训练（FP23/TP45），FP仍v24。
+
+141图×3权重=423真实源调用及423NMS；生产与v44全部141原始预测精确复现。困难图枪头4/69→6/69，完整验证视野已标枪头0/8→0/8；两张完整开发裁图正确/误检/漏检由23/0/4变为24/1/3。开发裁图和训练图不作独立质量验收。实际查看9份图像对照。
+
+全库421图8284框/1535审计及120行训练批次不变，批次0阻断；普通全库导出仍635阻断。未改来源/分区/生产资产/源码。91未映射图继续unassigned，无新完整视频/付费/NAS操作；独立逐类门槛、完整原片多机位/语义/归档仍NOT_PROVEN。保留冻结10层的v44作为下一轮开发对照，优先补充来源合规的部分装载架/空孔及完整视野训练实例，核查小目标尺寸覆盖；不继续无依据地扫冻结参数，也不将未映射图挪入训练。
+
+[报告和实际对比图](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal82/report.md) · [核验](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal82/verification-summary.json) · [回执](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/goal82-work-receipt.json)。两仓原分支/SHA及未提交工作保留。
+
+## 2026-09-10 goal81：新增113支枪头双遍复核，TP v44已训练并完成真实对照
+
+PROGRESS / PARTIAL_EVIDENCE，目标active，v44不晋升生产。官方OT2数据25,166,399字节ZIP实际下载并校验MD5/SHA；219张发布图片仅从train选3张入项目，逐件初标及重开原图第二遍完成113枪头+3盒体。全库421图8284框，95完整、256区域外、19待复核、0草稿、51排除；旧418记录不变，审计1535条。已实际在浏览器显示新图版本2、63支枪头及盒体。
+
+120条训练批次检查0阻断，118训练父图+472增强=590文件，原2张完整验证裁图不变；旧116记录、456派生及1144文件逐项相同。v44沿用v43生产TP初始化、冻结10层、960 FP32 batch2 AdamW LR0.0001、20轮，实际5900更新11800访问、315.66秒。固定last.pt。累计67次（FP23/TP44），FP仍v24。普通全项目完整导出仍635阻断。
+
+141张冻结图×3权重=423次真实源调用/NMS，生产及v43旧137图原始预测精确复现。新增训练枪头15/113→102/113，新增试管0/15→13/15；原困难枪头仅1/69→4/69，完整验证已标枪头仍0/8。原2完整验证裁图v43为24正确/1误检/3漏检，v44为23/0/4：多漏顶部瓶盖。mAP50–95 0.76992→0.77965不能掩盖召回退步或当独立质量证明。大口公开训练图仍4空孔误作枪头、1角落误作实验服。生产旧类11与新单支枪头含义不同，另列20共同类别比较。
+
+无生产替换、完整视频、付费调用、NAS或产品源码修改。未知原始来源91图仍unassigned；完整原片/多机位/语义/归档及独立逐类质量NOT_PROVEN。下一步针对真实困难外观和原类保留核查曝光/特征冻结，继续受控迭代。
+
+[详细报告及实际对比图](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal81/report.md) · [核验](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal81/verification-summary.json) · [回执](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/goal81-work-receipt.json)。两仓原分支/SHA与未提交工作保留。
+
+## 2026-09-10 goal80：新增不同场景15根试管，真实对照暴露覆盖缺口
+
+PROGRESS / PARTIAL_EVIDENCE，总目标active。公开Train新图1455完成实际初看与保存后重开第二遍，26框含15根试管、保留6未知，修正手/架/玻璃瓶3框。项目418图8168框：92完整、256区域外复核、19待复核、0草稿、51排除；审计1526条。实际浏览器显示版本2、26框/6未知、15试管、第三人称/train。
+
+原生产/v43各1次真实RoleScanner调用及NMS，固定960 FP32 batch1 .25/.7/.5；两者均0/26已知匹配、0/15试管。生产0报告框，v43唯一报告框将右侧试剂瓶附近误作枪头盒。部分标注不提供整图P/R/mAP，也不是独立测试。旧417记录和116训练版本保持，资格批次117条检查0阻断，未导出或训练；普通全库导出635阻断。仍累计66次，FP v24/TP v43，生产资产不变。
+
+另核对OT2Eye公开枪头数据CC BY 4.0登记，但Zenodo文件/API响应超时，未导入；本轮新增的是试管场景，枪头覆盖尚未补齐。91张原始来源仍未映射/unassigned。独立质量、完整原片多机位/语义/归档仍NOT_PROVEN。
+
+[报告和实际对比图](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal80/report.md) · [核验](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal80/verification-summary.json) · [回执](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/goal80-work-receipt.json)。原分支/SHA与未提交修改保留。
+
+## 2026-09-10 goal79：137图真实局部放大对照，当前方案不接入
+
+PROGRESS / PARTIAL_EVIDENCE，总目标active。实际1478次RoleScanner模型调用和1478次NMS，原生产/v43各137整图+602局部，130旧图原始整图预测分别逐项复现。v43增加191个预测，只多匹配4个已标实例，且全部为训练来源；新增7张困难图中的69支已标枪头前后仍1/69。两张完整开发裁剪27实例，v43整图24TP/1FP/3FN，合并后24TP/2FP/3FN，精确率96%→92.31%，召回不变88.89%。这些重复开发裁剪不是独立验证。当前预设切片不接入产品。
+
+实际查看8来源16张整图/细节，确认跨实例枪头框和重复枪身局部框。全137图已知匹配v43 3087→3091、生产2058→2074；部分标注不能计算全图误检率。候选137整图约1.074秒，额外602局部6.022秒，只是图像批次推理。417图8142框/1523审计及116旧训练记录未变，6项模型资产哈希不变；未新增训练，累计66次，FP v24/TP v43，生产不替换。91张未映射来源仍待原视频/批次对应。独立质量、完整原片多机位/语义/归档仍NOT_PROVEN。
+
+[报告和对比图](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal79/report.md) · [核验](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal79/verification-summary.json) · [回执](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/goal79-work-receipt.json)。两仓原分支/SHA与既有未提交修改保留。
+
+## 2026-09-10 goal78：两张称量侧机位补标复核，项目8142框
+
+PROGRESS / PARTIAL_EVIDENCE，总目标active。两张原holdout图实际初看、保存、重开整图/叠框完成第二遍，新增7框，保留6处未知；一张圆盘图仍0已知框但不是负样本，另一张明确4枪+枪架/管架/枪头盒。孔位、截断器材与过曝密集区不猜数。项目417图8142框：92完整、255区域外复核、19待复核、0草稿、51排除，审计1523条；实际浏览器显示最新统计和side-b版本4、7框/5未知、暂不进入训练。
+
+417来源/分区、415条其他标注、旧116训练版本/哈希不变；同批次当前审计检查0阻断，全项目普通导出仍633阻断。6个模型资产实际哈希不变，无新训练/导出/模型调用，累计66次、FP v24/TP v43，生产不替换。独立质量和完整原片多机位/语义/归档仍NOT_PROVEN。继续来源核定与有效困难样本，剩余val/test未知不能改状态或分区绕过。
+
+[报告](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal78/report.md) · [核验](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal78/verification-summary.json) · [回执](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/goal78-work-receipt.json)。两仓原分支/SHA及未提交修改保留。
+
+## 2026-09-10 goal77：16张原图新增439框，待初标清零
+
+PROGRESS / PARTIAL_EVIDENCE，总目标active。实际初看16原图/33裁剪；保存后实际重开16原图/16叠框及9份细节，修正5框边界并补1处过曝未知区，再实看6份最终叠框。逐支移液枪、裸手/已戴手套手、开口/有盖试剂瓶、折纸和移位物体均按本帧可见范围核对。新标439框/34未知区。项目417图8135框：92完整、253区域外复核、21待复核、0草稿、51排除；审计1519条。浏览器T115实际显示版本2、28框/2未知及最新统计。
+
+417来源/分区、401条其他标注、116条旧训练版本不变；同记录当前审计检查0阻断，普通全项目完整导出仍633阻断。新图继续未映射/unassigned，无新训练/导出/模型调用，累计66次，FP v24/TP v43，6个受保护模型资产哈希不变。整体优于生产与完整原片多机位/语义/归档验收仍NOT_PROVEN。继续21张待复核和来源核定，再冻结新训练批次。
+
+[报告](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal77/report.md) · [核验](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal77/verification-summary.json) · [回执](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/goal77-work-receipt.json)。两仓原分支/SHA及未提交修改保留。
+
+## 2026-09-10 goal76：10张原图新增321框，完成手持枪与密集枪头双遍复核
+
+PROGRESS / PARTIAL_EVIDENCE，总目标active。实际初看10原图/35裁剪；保存后实际重开10原图/10叠框及8份密集细节，修正13框边界、2处本帧已无玻璃的错误未知区，并实看6份最终叠框/1管体细节。T079架上9枪+手持1枪、23支蓝色枪头按8/8/7逐件，空孔不补件；模糊黄色枪头和透明管盖状态保留未知。新标321框/33未知区。项目417图7696框：92完整、237区域外复核、21待复核、16草稿、51排除；审计1487条。浏览器T079实际显示版本2、64框/5未知及最新统计。
+
+417来源/分区、407条其他标注、116条旧训练版本不变；同记录当前审计检查0阻断，普通全项目完整导出仍634阻断。新图继续未映射/unassigned，无新训练/导出/模型调用，累计66次，FP v24/TP v43，生产资产不变。整体优于生产与完整原片多机位/语义/归档验收仍NOT_PROVEN。继续16张草稿、21张待复核和来源核定，再冻结新训练批次。
+
+[报告](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal76/report.md) · [核验](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal76/verification-summary.json) · [回执](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/goal76-work-receipt.json)。两仓原分支/SHA及未提交修改保留。
+
+## 2026-09-09 goal75：12张原图新增302框，修正6处移液枪指托边界
+
+PROGRESS / PARTIAL_EVIDENCE，总目标active。12原图/39裁剪实际初看，初标保存后12原图/12叠框实际重开，4份枪架细节确认两图各前三支指托初框裁切，修正6框并实际查看最终叠框。保留54未知区，不凭空孔、邻帧或遮挡猜器材。项目417图7375框：92完整、227区域外复核、21待复核、26草稿、51排除；审计1467条。浏览器T070实际显示37框/6未知、版本2及最新统计。
+
+417来源/分区、405条其他标注、116条既有训练记录核验不变；同记录当前审计检查0阻断，普通全项目导出仍634阻断。新图继续未映射/unassigned，无新导出、训练或模型调用，累计66次，FP v24/TP v43，生产资产不变。真实整体优于生产与完整原片多机位/语义/归档验收仍NOT_PROVEN。继续26张草稿、21张待复核及来源核定。
+
+[报告](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal75/report.md) · [核验](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal75/verification-summary.json) · [回执](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/goal75-work-receipt.json)。两仓原分支/SHA及未提交修改保留。
+
+## 2026-09-09 goal74：12张原图新增282框，密集蓝枪头逐件复核
+
+PROGRESS / PARTIAL_EVIDENCE，目标继续active。12张原图、35份裁剪完成初看；初标保存后实际重开12原图/12叠框，再看6份细节，新增282框、保留36未知区。T056/T057每图23支蓝枪头与空孔分开，10枪、10管、3橙盖分别核对；空手套不标为已戴手，重遮挡器材不套邻帧。项目417图7073框：92完整、215区域外复核、21待复核、38草稿、51排除，审计1443条。实际工作台T057版本2、61框/5未知及新统计可见。
+
+全部417来源/分区、其他405条标注及冻结116记录不变；同记录当前审计检查0阻断，全项目普通完整导出仍634阻断。新图未映射来源且unassigned保留，无新导出/训练/模型调用，累计66次，FP v24/TP v43及生产资产不变。独立模型质量和完整原片多机位/语义/归档验收仍NOT_PROVEN，继续剩余标注、来源核对和系统对照。
+
+[本轮报告](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal74/report.md) · [核验](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal74/verification-summary.json) · [回执](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/goal74-work-receipt.json)。两仓原分支/SHA和未提交工作保留。
+
+## 2026-09-09 goal73：7张原图新增187框，修订T002漏包侧门
+
+PROGRESS / PARTIAL_EVIDENCE，目标继续active。8张实际原图初看、局部放大、初标保存后重开复核，共217框/26未知；T040/T041每图10支枪、10支试管及3管盖逐件确认，空孔不补数，T004收紧手/纸包遮挡边界。项目417图6791框：92完整、203区域外复核、21待复核、50草稿、51排除，审计1419条。浏览器实际显示T041版本2、37框/4未知及最新统计。
+
+全部417来源/分区、其余409标注及冻结116记录不变；同记录当前审计检查0阻断，普通全项目导出仍634阻断。新图来源未映射、unassigned保留。本轮无新导出/训练/模型调用，累计66次，FP v24/TP v43不变，生产不替换。T002标签已修订，历史原始域分数仅适用旧标签，本轮未重评分。独立质量及完整原片多机位语义/归档验收仍NOT_PROVEN；继续剩余标注与来源核对。
+
+[本轮报告](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal73/report.md) · [核验](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal73/verification-summary.json) · [回执](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/goal73-work-receipt.json)。两仓原分支/SHA和未提交工作保留。
+
+## 2026-09-09 goal72：11张原图双遍复核，修正4张旧标注
+
+PROGRESS / PARTIAL_EVIDENCE，总目标继续active。本轮实际查看15张完整原图、36份放大裁剪；初标保存后逐张重开原图与覆盖图复核。新增11张299框，另修正T085/T091/T094/T095；合计核对410框，保留48处未知区域。项目417图6604框，92完整复核、196区域外复核、21待复核、57待初标、51排除；审计1403条。
+
+逐支核对每图10支移液枪及独立架；统一旧图橙盖容器类别，补T094/T095打开玻璃门的天平边界，收紧手掌/实验服/玻璃器材边界与遮挡标记。T096无法辨认的被遮挡药匙保留未知，不从邻帧补件。15图仍在未映射原始来源组且unassigned，不混入训练/验证。
+
+全部417来源/分区与402张其他标注不变；旧116条训练/验证版本和哈希不变。旧批次因项目审计版本更新拒绝，逐条核对后仅生成当前审计检查清单，0阻断；全项目普通导出仍634阻断。本轮无新导出/训练/模型调用，累计66次训练，最新FP v24/TP v43，生产权重不替换。既有1459项回执文件实际哈希核验通过。
+
+工作台新页面实际显示6604框、196张区域外复核，T094版本4、28框/3未知、第三人称/未分组。真实模型整体优于生产、独立质量、完整原视频多机位/语义归档验收仍NOT_PROVEN。继续57张原始草稿及来源映射、真实失效场景覆盖；本轮只改项目标注与进度文档，保留两仓分支/SHA和未提交修改。
+
+[本轮报告](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal72/report.md) · [核验摘要](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal72/verification-summary.json) · [回执](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/goal72-work-receipt.json)。
+
+## 2026-09-09 goal71：v43状态补充训练完成，局部有进有退
+
+PROGRESS / PARTIAL_EVIDENCE，整体goal继续active，生产不替换。本轮未改标注，仍417图6305框（92完整/185区域外/21待复核/68草稿/51排除）。116条固定批次=114训练父图+2原验证裁剪，456增强+114原图=570训练文件；旧107条及1054份旧图像标签不变，9份36增强对照实际查看。
+
+TP v43从生产初始化，960 FP32 batch2/freeze10/AdamW LR.0001/image_uniform/one2many-only/20轮，实际5700更新、11400访问、302.91秒，退出0。旧父图访问不变，各100；新增9图各100，故总更新及优化顺序不同。累计66次完整训练（FP23/TP43），最新FP v24/TP v43。固定last.pt SHA`4d468705dc1501be4ef723703eadd1c701255adce53ad6cda8ae3e607ce6dc35`。
+
+三权重实际390源图/390NMS，旧121图生产/v42像素与原始预测完全复现。2固定开发裁剪27实例：生产15/7/12，v42为25/2/2，v43为24/1/3；v43P96%、R88.89%、mAP50–95 76.99%（v42 78.67%），新增漏gun07。全图已知87→88/106、原始域72→73/88、新增训练89→90/90；旧训练511→506/529，枪头53→48/61。全图枪头仍0/8、原始域天平仍0/3。7份实看对照确认65秒训练纸包补回，密集/旧域问题保留。共有类别26实例对照也非全面进步；这些均不是独立质量验收。
+
+v43不晋升，本轮无新完整视频/多机位/付费语义/正式归档运行，无产品源码修改。继续未完成精细标注、来源映射、清晰手持与多背景密集小目标，然后冻结完整原片系统对照；避免围绕重复小验证集扫参数。
+
+[参数、图像和结果报告](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal71/report.md) · [训练计划](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/goal71-training-plan.json) · [本轮回执](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/goal71-work-receipt.json)。两仓原分支/SHA和未提交工作保留。
+
+## 2026-09-09 goal70：完成17张原视频草稿复核，筛出训练状态代表
+
+PROGRESS / PARTIAL_EVIDENCE；总目标继续active。17张Customflow原片既有草稿完成原图初看、密集裁剪逐件核对、保存后重开原图及覆盖图第二遍复核；新增278个实物框、保留40处未确认区域。5/10秒瓶盖修正侧壁遗漏，架上10支枪分别标注，7个可辨认管盖不按透明孔位补管。项目417张/6305框；92完整复核、185区域外复核、21待复核、68原始第三人称草稿、51排除，审计1373条。所有原视频Customflow既有草稿已完成区域外复核，原始第三人称数据仍未全部完成。
+
+保留既有114行训练批次版本，只加入60秒（枪架移走、杯仍在）及85秒（枪头盒和样品瓶移走）的状态代表；其余15个相近静止帧留工作台，避免重复加权。冻结116行=114训练父图+2原固定完整验证裁剪；批次检查0阻断、部分监督导出及VisionCortex消费方实际验证116行通过。全项目普通导出仍634阻断，没有删除未知区域或挪动June17验证组的7张待复核移液图。当前新批次无增强、尚未训练。
+
+导出`/home/x1/.local/share/annotation-workbench/exports/tp-state-representatives-goal70`，回执SHA`91858397c8e18f37e0dbcd7e832c61e2698b816ebbf4ac23b42366d4aeeaa7aa`。新开工作台页面实际显示6305框、60秒11框/2未知/版本3/第三人称/train。原T045旧页面仍持旧JS统计，不据此宣称旧页面已自动刷新。
+
+本轮无新模型调用或训练，累计仍65次完整训练（第一人称23、第三人称42），最新FP v24/TP v42，生产权重不替换。新增静置状态未解决真实手持枪缺失，不能称准确率提高。下一轮按冻结批次设计与v42同设置的状态补充训练，并检查空孔误报、旧类退步和真实视频；尚余68张原图草稿及来源映射、独立逐类质量、完整多机位系统/正式归档门禁。
+
+详情：[本轮标注与批次报告](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal70/report.md)；[本轮回执](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/goal70-work-receipt.json)。两仓当前分支/SHA和未提交改动保留，本轮仅更新标注与进度记录，无产品源码修改。
+
+## 2026-09-09 goal69：七帧双遍复核与上下文模型对照
+
+PROGRESS / PARTIAL_EVIDENCE；总目标active，生产权重未更换。本轮7张既有Customflow训练帧完成实际初标、保存后重开原图复核，新增72框（含10支独立移液枪），保留11个未知区域。项目417图/6027框，92完整复核、168区域外复核、21待复核、85草稿、51排除，审计1339条。剩余17个Customflow草稿和68个未映射第三人称原图草稿；普通导出仍634阻断。
+
+既有107个训练版本哈希不变，加入7张后冻结114行（112训练父图+2固定完整验证裁剪），部分监督导出与VisionCortex消费方验证通过，无增强、未知区域完整保留。导出`/home/x1/.local/share/annotation-workbench/exports/tp-context-states-goal69`，回执SHA`b5dae77e23bf061046bad92df7f6ae09bfce38e7e2078ad89646f2b1fc46d6fe`。该批次尚未训练。
+
+固定960/FP32/batch1/.25报告阈值/.7NMS/.5匹配IoU，三权重实际21次源图调用与21次NMS：72个已知实例生产45、v41 70、v42 71；其中枪10件分别10/9/10。均为已有训练来源局部诊断，不是全图准确率或独立质量；旧21类与新23类须区分。三模型均漏65秒遮挡纸包，v42在模糊枪头ignore内有重叠预测。工作台新页面实际显示6027框、当前20秒21框/3未知区域、移液枪10件。
+
+未改实现源码、未新增训练、未替换生产模型/引擎；真实训练累计65（FP23/TP42），最新FP v24、TP v42。完整原视频多机位、独立逐类质量、关键素材和正式归档门禁仍未完成；继续剩余精细标注/来源映射后进行有针对性的训练。详情与已查看对照图见：
+
+- `/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal69/report.md`
+- `/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/diagnostics-goal69-context/summary.json`
+- `/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/goal69-work-receipt.json`
+
+## 2026-09-09 goal68 最新续接
+
+PROGRESS / PARTIAL_EVIDENCE，goal保持active。4张原始第三人称图T045/T085/T094/T095完成初标与保存后实际重看原图的区域外复核，新增117框；项目417图/5955框/1325审计，完整92、区域外161、待复核21、草稿92、排除51。来源未映射四图继续unassigned；普通导出634阻断保留。
+
+固定121图×3权重×3输入尺寸实际1089次源图推理/NMS，960完整复现goal67；v42输入960/1280/1920的2裁块TP/FP/FN分别25/2/2、21/4/6、7/8/20。3张全图已知命中87/106、87/106、48/106；旧域72/88、82/88、82/88。8个验证枪头全配置仍0命中。不能直接上调全局分辨率或宣称超过生产/泛化达标。本轮0新训练，累计65次，FP v24、TP v42；生产权重与引擎未替换。
+
+工作台loadImage同步刷新列表与统计，实际浏览器验证外部保存T095后点击重新读取，5927→5955且当前T094版本未变。75项pytest、node语法、两仓diff检查通过。70个本地原视频采样时刻及72张原图缩略图检查完成，没有新增可确认手持枪训练样本；未作整段连续视频或端到端质量宣称。
+
+详细报告：`/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal68/report.md`；最终回执：`/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/goal68-work-receipt.json`。下一轮沿已保存版本继续细标与来源映射，扩大真实失效场景后再设计训练。完整多视角/独立质量/云端语义重跑/正式归档等仍待验收。
+
+---
+
+# 3090 Ti 接续开发与局部运行回执 — 2026-09-07
+
+## goal67：显式水平翻转与v42真实对照（2026-09-09）
+
+**PARTIAL_EVIDENCE；v42不晋升，goal继续active。** 新增显式增强策略v2，图像/实物/未知区同步反射，v1保持复现。仍417图5838框、审计1317；新增标注0。105训练父图+420增强（210翻转）=525文件，原107条批次与214份原始图像标签不变，210未翻转派生像素/标签不变。4组16预览实看，工作台75/训练相关104测试、ruff/compileall通过。
+
+v42从生产21→23初始化，960 FP32 batch2、freeze10、AdamW LR.0001、image_uniform、one2many-only、20轮，实际5260更新/10500访问/276.07秒，退出0。累计65次完整训练（FP23/TP42），FP仍v24。系统分支固定2裁剪27实例：生产15/7/12、v41为23/1/4、v42为25/2/2；v42 P/R均92.59%、mAP50–95 78.67%。仅小开发集；原始域88已知77→72、天平1/3→0/3，公开新图4已知1→0，不能称整体优于生产。
+
+363次固定图片调用+24次公开图调用均核验；生产/v41原像素和原始预测完全复现。95.03秒开发派生视频760帧/190批/10.71秒；760像素/PTS身份一致，2280阶段重算一致，复跑0调用，换权重启动前拒绝。实际15份对照显示手持白枪仍漏、空孔仍误报，v42枪头预测7081次不等于正确实例增加。完整原片多视角、真实语义与归档、独立质量/稳定发布仍NOT_PROVEN。
+
+[本轮参数、图像、代码与训练报告](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal67/report.md) · [训练计划](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/goal67-training-plan.json)。保留两仓分支/SHA和生产资产；改动仅增强生成/严格消费/相应测试文档。source_frames未改，另任务最终集成修复指针仍ece199a3，未覆盖或宣称本机已合入。下一步补真实手持/空孔/密集目标及完整来源隔离验证，继续迭代。下列旧“当前”均为历史记录。
+
+## goal66：新来源与泛化核对（2026-09-09）
+
+**PARTIAL_EVIDENCE；goal继续active，候选不晋升。** 本轮未重训：实际核对30张本地抽帧预览，筛查8张有许可的公开实验图，1张完成双遍区域外项目标注（4框/1未知）。当前417图5838框、完整92/区域外157/待复核21/草稿96/排除51，审计1317。原416条不变；108条部分监督资格检查0阻断，全项目普通导出仍634阻断。
+
+生产/v39/v41各8图实跑，共24次源调用/NMS。新图4已知命中分别2/0/1；v41仍把玻璃器材旋塞以0.968误识为试管。公开pipette标签抽查是玻璃管/吸球，不能直接并成移液枪训练。手持枪仍仅2张原图/4裁剪，新样本覆盖不足，不能据小验证分数替换生产。最新FP v24/TP v41及64次完整训练不变。工作台实见版本3/1920×1080/4框/1未知；完整系统语义、真实归档与独立质量仍NOT_PROVEN。
+
+[本轮详细来源、标注、实际对照及后续步骤](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal66/report.md)。保留两仓库分支/未提交工作及生产资产，本轮无产品源码改动、提交、推送、NAS或付费调用。最终集成任务回报SHA为 **ece199a3b639d8939beee4ec647322e49caff01a**，替代历史6ca2b8e；其FFmpeg6/9源帧v2修复未合入本共享7db源码，不得覆盖。下列旧“当前”均为历史状态。
+
+## goal65：原片补标与v41（2026-09-09）
+
+**PARTIAL_EVIDENCE，v41不晋升，goal继续active。** 新抽14帧/复用16帧，实际复核0秒和55.0196秒原图，新增39框/7未知（10支枪、7个管盖分别标注，模糊手持器材不猜标）。两图版本1→2→3，当前416图5834框、完整92/区域外156/待复核21/草稿96/排除51，审计1313。两个工作台页面及28项测试通过；全项目普通导出仍632阻断。
+
+v41从生产21→23类初始化，105训练父图+420增强=525文件；960/FP32/batch2、AdamW LR.0001、freeze10、image_uniform、one2many损失1、20轮，实际5260更新/10500访问/256.18秒，退出0。旧105条和1034份图像标签不变；累计64次完整训练（FP23/TP41），FP仍v24。
+
+固定2裁图27实例：生产15/7/12，v39为23/2/4，v41为23/1/4；v41 P95.83%、R85.19%、mAP50–95 78.69%（v39 80.90%）。小裁图不足独立验收。完整画面106已知85→84；原始88已知76→77但天平3→1、枪35→37/42；旧训练枪头未匹配4→27。新增两训练图36→39/39只是拟合。
+
+95.03秒真实开发派生片段760帧/190批/8.99秒；760原像素/PTS/packet与生产/v39一致，2280阶段结果重算吻合。复跑0模型/0NMS，换权重续跑启动前拒绝。实看13份对照，白色手持枪漏检、空手套误报、密集枪头错框仍在。生产权重/引擎和两仓库当前分支/未提交工作保留，未提交/推送。下一步清晰手持与密集小目标、旧类退步分析及完整原片验收；真实语义/归档/系统浏览器仍NOT_PROVEN。
+
+[本轮详细报告](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal65/report.md) · [参数、数据和训练回执](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/goal65-training-plan.json)。本轮FFmpeg4.4使用现有源帧契约v1；另任务回传6ca2b8e的v2兼容修复尚未合入共享树，后续不得覆盖该修复。
+
+## goal64：两张原始状态图双遍补标（2026-09-09）
+
+**PARTIAL_EVIDENCE，goal继续active。** T050/T058分别新增12/24个实例，原图与密集局部实看后初标、再重开原图复核，版本0→1→2，各保留2处未知。区分已戴手套/裸手/空手套，逐件9管3盖、架与枪头盒分开；模糊黄色枪头未猜标。当前402图5795框、完整92/区域外154/待复核21/草稿84/排除51，审计1281；其他400条记录和全部来源不变。
+
+两图未映射来源、unassigned及used_by_baseline保持，不计新训练或验证图片。2页浏览器版本/原图/框/未知区域与API吻合，0页面错误；28项标注测试通过；普通导出仍604阻断。冻结标签后生产/v39/v40各2图实跑，共6源调用/NMS，36已知分别匹配29/34/34，只有内部已知匹配证据。T058器材后裸手候选模型仍漏，v40一根管有框但IoU0.498514未达0.5；不能当全图精确率或独立效果。
+
+本阶段无重训，最新TP仍v40、FP仍v24，累计63次完整训练。v40原始场景退步和真实手持枪漏检仍阻止替换。下一步原始序列标注、来源核对、多状态训练样本与完整验证；全原片多视角语义/归档及系统浏览器仍NOT_PROVEN。生产资产/当前分支/未提交修改保留。
+
+[详细标注、浏览器和对照报告](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal64/report.md) · [v40参数与视频对照](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal63/report.md)
+
+## goal63：来源平衡训练v40与真实对照（2026-09-09）
+
+**PARTIAL_EVIDENCE；v40不晋升，goal继续active。** 同105条批次/515训练文件/20轮/5,160更新/10,300访问，仅改为来源平衡采样，实际约25%/组；训练261.10秒。两原始手持图及4裁剪的训练访问600→846次，不增加独立样本。累计63次完整训练（FP23/TP40），FP最新仍v24。
+
+351次固定图片预测+760帧真实95秒开发视频已完成。2完整裁剪27实例：生产15/7/12，v39 23/2/4，v40 23/1/4（TP/FP/FN）；v40 P95.83%/R85.19%、mAP50–95 71.86%，每类样本仍不足。部分整图106已知85→86，原始88已知76→70，关键类退步。实际看完13份对照，手持枪仍漏、空孔仍误判枪头、未穿戴手套仍误判手。760帧同像素/PTS，2280份阶段重算一致，复跑0调用，换权重续跑启动前拒绝；检测单次9.08秒不等于全链路验收。
+
+包装进程143后保留训练输出并核验完整20轮，不重训、不虚构子进程退出码。全项目402图5759框/audit1277无修改；生产权重/引擎、分支和未提交工作保留。本轮无产品代码改动、付费调用或新增浏览器验证。下一步优先多状态原始样本、背景与完整验证图标注，完整多视角语义/归档仍NOT_PROVEN。
+
+[详细参数、证据和实际对照图](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal63/report.md)；阶段回执 `/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/goal63-work-receipt.json`。
+
+## goal62最新进展：原片补标与v39（2026-09-09）
+
+**PARTIAL_EVIDENCE，v39不晋升，goal继续active。** 新导入16张原片抽帧，4张完成两遍项目标注51实例，保留5个ignore；其余12张仍draft。全项目402图5759框：完整复核92、区域外复核152、待复核21、draft86、排除51（含16张既有裁剪图）。同日同实验curated-2026-06-18整体train，旧386条图片记录不变。105条批次检查0阻断；全项目普通导出仍604项阻断。
+
+第三人称最新v39-last，累计62次完整训练（FP23/TP39），第一人称仍v24。v39从原生产21→23迁移，103训练父图+412离线增强=515训练文件，960/FP32/batch2、AdamW LR.0001、freeze10、20轮、one2many损失1/one2one0、image_uniform；实际5160次更新/10300样本访问/254.99秒。验证仍原2张裁剪27实例，新增训练前已冻结last终点，旧101条及994份图像标签不变。
+
+系统同条件3权重各117图，共351次真实源调用/NMS。完整2裁剪：原生产15/7/12（TP/FP/FN），v38为24/3/3，v39为23/2/4；v39 P92.00%/R85.19%、mAP50–95 80.90%。部分整图106已知：60→87→85；T000–T002的88已知70→72→76；goal60六原图157已知125→148→148；新训练51已知38→44→51。训练拟合与小裁剪指标不能代替泛化，手/瓶盖等有退步。
+
+95.0279秒真实开发片段8fps共760帧/190批/9.26秒，源像素及PTS/packet与生产/v38一致，2280份阶段结果重算吻合；复跑0模型/0NMS，换权重续跑启动前拒绝。看完7时刻+2细节+7静态对照：手持白色移液枪仍漏、密集枪头仍错框，T002未穿戴手套仍误检。当前共享代码增加了计时，已保留差异，不拿不同版本耗时声称速度提升。
+
+工作台4张新标注浏览器0错误且版本/原图/中文实例/ignore与API吻合；完整系统真实多视角播放、语义和归档仍NOT_PROVEN。保留生产权重/引擎/当前分支与未提交修改，本轮无产品源码改动或付费请求。下一步针对手持遮挡与小目标状态/几何变化、采样增强的泛化；继续来源映射、原始标注与完整原片的分阶段验收。
+
+完整参数、对照与图像：[goal62报告](/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal62/report.md)；回执根`/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907`中的`goal62-work-receipt.json`，训练计划`goal62-training-plan.json`，数据检查`annotation-goal62/`，运行`third-person-customflow-context-v39/`、`diagnostics-goal62/`、`candidate-video-goal62/`、`video-review-goal62/`。主权重SHA`114a13b16209e6141ef0874abd285e4e13c9a412b657aeb91eec2295c180c70f`。后续历史记录中的“当前”只适用于当时版本。
+
+
+本记录承接 `docs/WORK-HANDOFF-20260907.md`。用户确认方舟账户尚未恢复，并要求继续独立开发：缺少一个环节时保留其他阶段产出，恢复后能够复跑。本轮完成该方向的实现与局部验证；真实网页/NAS 提交至正式可信归档的总目标仍为 **NOT_PROVEN**。
+
+## 1. 代码与工作区身份
+
+- 分支保持 `codex/rtx3050-device-delivery-20260904`。
+- HEAD 保持 `7db0dcd052891e0e189c5e931a27558256fea032`；本轮代码修改尚未提交，不能仅凭此 SHA 复现工作树。
+- 实际运行前为全部顶层 Python 源文件及 `web/app.js` 保存 SHA-256，运行结束复核无变化，见下述 `Local-Partial-Run/execution-identity.json`。
+- 本轮实时核对默认分支均为 `main`：开发 `development/main=f8801cbfc2486fb73f78d66948b1adb50129c975`，上游功能分支 `4a33a253b338dda5e71ec9f840c9d799680029bf`，稳定 `origin/main=a2698185f00b05f5a7d81e8d840c5e7df1a99289`。开发远端为 kealan-Jun，稳定远端为 RealityLoopAI。
+- 保留原 README 新增 14 行、四份用户文档、`docs/assets/`、交接文档与已应用的保护 stash。没有切分支、重复应用 stash、暂存、提交、推送或稳定晋升。
+- 未修改生产性能配置、未重建引擎、未安装依赖、未启动或终止训练。
+
+本机运行证据统一位于：
+
+`/srv/sentinel-data/VisionCortex3090Ti/Runtime/RealVideoValidation-20260907/`
+
+下文运行证据路径均相对此目录；这些运行文件、原视频、模型和引擎不得提交。
+
+## 2. 缺失语义服务时的保留与恢复
+
+实现位置：`partial_delivery.py`、`pipeline.py`、`archive.py`、`run_queue.py`、`api.py`、`participant_visual_review.py`、`web/app.js`。
+
+- 流水线未通过门禁时，保留既有片段和隔离素材，补充 `partial_delivery.json` 与 `Partial-Results/Partial-Evidence-Report.html`。报告明确为 `PARTIAL_EVIDENCE`，不产生正式发布许可，不把未知 Token 记为零。
+- 网页可查看隔离候选图片、视频和阶段报告。隔离候选单独计数，不进入正式关键素材计数。
+- 持久失败任务支持 `POST /api/runs/{run_id}/retry` 和“复跑并补全”。复用原任务清单及路径，不复制原视频；只有通过身份和完整性校验的缓存可复用。恢复操作不放宽输入、模型、质量或原子归档门禁。
+- SQLite 事务保证重复点击不会重复入队，复跑移至队尾；任务历史和小型旧回执保留，服务重启后队列仍可恢复。
+- 参与物视觉复核的失败、无效或未确定请求，只有显式新复跑才获得新的有界尝试；同一次尝试不会反复提交未知用量请求，旧用量回执保留。成功恢复时清除当前视图中的旧语义失败状态及阶段报告。
+- 服务首页将“已配置凭据”和“已验证实际调用”区分。没有增加周期性付费探测。
+
+适用边界：网页复跑要求原持久任务及暂存产出仍在；历史 CLI 目录本身不会自动变成持久网页任务。CLI 必须使用原清单和适用配置重新执行。本次关闭 MLLM 的局部配置也不能在账户恢复后原样当作完整语义验收配置。
+
+## 3. 账户与浏览器验证
+
+`ark-preflight-093931.json`：生产解释器、纯文本、一次有界实际请求，HTTP 403 / `AccountOverdueError`，0.354136 秒，usage 为 null。没有上传实验画面，没有充值。用户随后明确账户尚未恢复，因此未重复调用。
+
+`browser-recovery-validation.json` 使用明确标识的合成档案，独立服务禁用执行 worker。实际点击了“复跑并补全”，核对重新排队与重启恢复，播放了合成视频并查看阶段报告。这是 **PROVEN 的界面/队列行为验证**，不是模型调用或真实质量证据。
+
+真实局部运行后，独立只读预览服务展示了 4 个实验片段、98 个隔离候选、0 个正式关键素材及阶段报告。抽查双视角图片为 2702×800，视频实际播放到 5.133333 秒末尾，readyState=4、error=null，见 `browser-real-playback-state.json`、`browser-real-playback.png`、`browser-real-experiments.png`、`browser-real-partial-report.png`。没有将这一步描述为网页提交全链路。
+
+## 4. 四路真实本地运行
+
+输入清单沿用 `RealVideoValidation-20260904/input-manifests/usb-customflow-acebdf-0002.yaml`，引用既有 USB 导入原片；未为本次验证另行复制原视频。1 路第一人称、3 路第三人称，输入预检 4 路视频及 4 份时间 CSV 均通过。
+
+| 口径 | 本轮实测 |
+| --- | --- |
+| 各路时长 | 899.234、899.965、899.773、899.953 秒 |
+| 合计视频时长 / 大小 | 3598.925 秒 / 4,727,894,965 字节 |
+| 共同实验时间轴 | 898.022153 秒，约 14 分 58 秒 |
+| 预处理 | 191.286513 秒 |
+| 精扫 | 165.758010 秒 |
+| 实验裁片 | 68.535590 秒 |
+| 关键素材导出 | 201.266086 秒 |
+| 流水线开始至质量门禁停止 | 498.398879 秒，约 8 分 18 秒 |
+| 用户提交至正式归档可查阅 | 未测得；本次没有正式发布 |
+
+运行目录：`Local-Partial-Run/Archives/usb_customflow_acebdf_0002/`。
+
+解释器为 `/srv/sentinel-data/VisionCortex3090Ti/.venv/bin/python`，Python 3.12.13、Torch 2.6.0、Ultralytics 8.4.28、TensorRT cu12 10.16.1.11、httpx 0.28.1。配置、清单、模型/引擎身份、输入元数据、容量及存储根均在运行前复查。独立配置关闭 MLLM、NAS 同步及采集监控，活动输入/缓存/输出根均位于本地 Runtime 内。
+
+应用缓存为新的 cold 目录，精扫 19 个工作单元全部计算、复用 0 个。操作系统页缓存未清空，之前的有界解码探测可能已预热部分原片，不能称为磁盘冷缓存。
+
+实际 TensorRT 精扫记录：32,536 帧、8,136 次推理，实际 batch 最大 4，OOM 收缩次数 0。模型日志及 `scan_runtime_fine.json` 证明本次调用了第一/第三人称引擎。其他模型资产存在或预检通过不等于本次调用了所有模型。
+
+MLLM 实际调用 0 次；输入/输出/总 Token 均为 null。阶段名 `mllm=completed` 只表示关闭服务时的阶段控制流程走完，不表示完成豆包推理。
+
+### 遥测与性能结论
+
+488 个约 1 秒采样，采样错误 0。以下为阶段平均值；GPU/CPU 包含桌面等背景负载，磁盘列为流水线进程树采样，不把主机网络流量当作 NAS 或模型流量。
+
+| 阶段 | GPU % | CPU % | NVDEC % | NVENC % | 读 / 写 MiB/s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 精扫 | 72.679 | 12.795 | 49.043 | 0 | 10.363 / 3.145 |
+| 实验裁片 | 80.059 | 18.854 | 0.132 | 80.985 | 1.706 / 7.226 |
+| 关键素材 | 63.399 | 26.070 | 0.662 | 56.687 | 0.002 / 5.155 |
+
+精扫显存峰值 9618.562 MiB，GPU 功率均值 157.245 W；裁片功率均值 138.650 W，关键素材 139.430 W。关键素材与实验裁片合计约 270 秒，是本次主要耗时；不能由 GPU 利用率单一数字推导“已经打满”或直接增加 batch。
+
+另做了固定四路原片各 30 秒窗口、20 fps 的解码 ABBA：A 为默认 filter threads，B 为 1。A1/B1/B2/A2 分别 8.129/7.337/7.325/7.337 秒，每轮 2400 帧，所有对应像素流哈希一致。热缓存后 A 与 B 均约 7.33 秒，**没有可靠性能收益，因此未改生产参数**。见 `decode-ab-result.json` 和四轮遥测。此探测没有模型调用，不能外推六路长视频或完整链路成绩。
+
+### 产出与质量边界
+
+- 4 组有界实验视频，每组第一视角、第三视角、并排各一份，共 12 份。
+- 98 个候选因语义不可用自动隔离；4 个组级语义和 98 个素材语义共 102 项待补全。正式关键素材 0 个。
+- `quality_acceptance.json`：passed=false、structural_only，且当前实验没有适用独立基线；命令退出 1。正式发布指针、日报和完整 `run_provenance` 均未生成。
+- 阶段报告 21 个引用及 HTML 哈希全部复核一致；600 个衍生图片/视频共 1,503,188,641 字节已建立 SHA-256 清单，另有 674 个不超过 10 MiB 的 JSON 控制文件/旁注哈希。
+- 总回执：`local-partial-validation.json`；媒体清单：`local-partial-derived-media-sha256.json`；控制/旁注清单：`local-partial-control-sidecar-sha256.json`。
+- CLI 没有网页上传封条和 `Original-Video-Index.json`，原视频路径仍由 `run_manifest.json` / `cache_identity.json` 追溯。隔离旁注可能保留移动前路径，应以隔离索引定位保留素材。本轮补充清单没有重新读取原视频正文计算全文件哈希，不替代正式溯源验收。
+
+### 为什么关键素材只有几秒
+
+关键素材按候选动作起止范围加前 2 秒、后 3 秒导出。本次候选时长中位数 1.2 秒，39/98 个不足 1 秒；抽查首个候选本身只有 0.15 秒，因此并排片段约 5.13 秒。它不是完整操作证明。
+
+“实验片段和步骤理解”页的四个并排视频分别为 58.734、99.934、88.300、110.534 秒；四路约 15 分钟原片仍在。组级命名、边界及完整步骤尚待语义核验，不能仅延长播放时长就声称操作链已完整。
+
+## 5. 检查与下一步
+
+- 新增/相关回归覆盖阶段报告、隔离素材访问边界、失败复跑、重复点击、FIFO、服务重启恢复、参与物复核未知/失败请求恢复。
+- 当前工作树完整测试 **778 passed、4 skipped（10.26 秒）**，见 `pytest-final.log`；`ruff check src tests`、`.venv/bin/python -m compileall -q src tests`、`node --check src/visioncortex/web/app.js`、`git diff --check` 均通过。复跑排队时旧失败状态覆盖页面的问题已修复并纳入本次完整测试。
+- 当前文件凭据/运行产物策略检查通过；没有审计全部可达历史，不能据此宣称历史无凭据。未运行开发仓跨平台 CI 或稳定发布门禁。
+- 原 8000/8001 用户服务仍为 active，真实局部 GPU 任务已结束；没有向其他任务发送“整体目标完成、可以训练”的通知。
+- 本次真实片段只读预览：`http://127.0.0.1:8003/#/archive/usb_customflow_acebdf_0002/experiments`。临时用户服务为 `visioncortex-partial-preview-20260907.service`，禁用队列/采集监控且拒绝写请求（405），可用 `systemctl --user stop visioncortex-partial-preview-20260907.service` 结束预览。最终检查总回执为 `final-checks.json`。
+
+状态：**PROVEN** 为已实现且通过局部确定性/浏览器验证的保留与复跑行为，以及本次真实 CV 调用和衍生产物存在性；**PARTIAL_EVIDENCE** 为当前真实局部结果及性能；**NOT_PROVEN** 为完整语义、真实动作准确率、网页/NAS 提交至正式原子归档、六路长视频目标及稳定发布就绪。
+
+账户恢复后先做一次有界连通性预检，再使用保留的持久任务恢复真实语义调用与服务端 Token 计量；本轮 CLI 局部配置需恢复 MLLM 并重新核对身份。继续完成真实网页上传与 NAS 批次入口、输入封条、合法配对、自动质量门禁、原子发布、哈希复核和浏览器查阅。正式发布仍按双仓策略单独执行。
+
+## 6. 桌面主入口可见性修复
+
+用户随后在桌面应用看到“全部记录 0”。核对桌面启动器后确认：桌面入口为 8001 生产服务，读取 NAS 正式档案；本次真实局部结果仅在独立的本地目录及 8003 预览入口中。另一个缺口是实验列表只显示正式档案，未包含持久任务中的已保留阶段结果。
+
+修复后，实验列表和首页同时呈现正式档案及有阶段回执的未完成任务，后者使用阶段详情路由、单独状态，正式素材计数不增加。新增 `register-partial-result` 管理命令，可把本地 Runtime 内的已停止局部结果登记为持久、只读的查阅记录；不复制原片/产物，不写 NAS 正式档案，不生成执行任务。登记绑定原清单哈希，目录越界、符号链接逃逸、清单被替换均拒绝访问。没有原网页执行任务的登记结果不显示虚假的一键恢复按钮。
+
+本次登记的记录为 `local-partial-77884ce12e20dfc1b967`。8001 服务空闲时重启后记录恢复，GPU 队列仍为空。主入口浏览器已实际显示 **全部记录 1 / usb_customflow_acebdf_0002 / 实验片段 4 个 / 阶段产出 · 待补全**，并从列表进入真实片段和保留素材。入口为：
+
+`http://127.0.0.1:8001/#/stage/local-partial-77884ce12e20dfc1b967/experiments`
+
+网页脚本版本更新为 `20260907-retained-results-33`，避免桌面浏览器继续使用旧列表脚本；已有窗口需刷新整页。复用登记命令如下；`--config` 指向要查阅结果的 Web 服务配置，服务在下次启动时装入登记记录：
+
+```bash
+/srv/sentinel-data/VisionCortex3090Ti/.venv/bin/python -m visioncortex register-partial-result \
+  --root /srv/sentinel-data/VisionCortex3090Ti/Runtime/RealVideoValidation-20260907/Local-Partial-Run/Archives/usb_customflow_acebdf_0002 \
+  --config configs/rtx3090ti-ubuntu-production.yaml
+```
+
+可见性修复代码完整测试 **781 passed、4 skipped（10.19 秒）**，见 `pytest-main-visibility.log`；随后资源版本更新通过 22 项相关测试。Ruff、Python 编译、JavaScript 语法、差异检查通过。浏览器回执为 `browser-main-experiment-list.png`、`browser-main-playback-state.json`、`browser-main-playback.png`。这是 `PROVEN` 的主入口可见性与播放验证，不增加真实语义或正式归档通过声明。
+
+分支和 HEAD 仍为上文记录值，所有修改未提交；本节新增的是查阅与登记行为，没有重跑视频、调用方舟或更改 CV 决策。历史真实运行仍绑定运行当时的源文件哈希，不以本节后续代码修改替换其身份。
+
+## 7. CV 初筛缺陷与未播放黑屏修复
+
+用户指出关键素材效果差，并确认视频是在刚打开、尚未点击播放时黑屏。此问题不能归因于方舟不可用：CV 初筛仍应交付有价值的定位与素材。
+
+### 已定位的根因与修改
+
+- 原播放器使用 `preload=none` 且无封面。现在使用已有衍生视频的首个解码帧作为封面，保留按需播放，增加明确的播放按钮和加载失败提示。封面只进入配置的本地 Runtime 缓存，不改写原片、衍生视频或正式档案。最多两个 CPU 解码任务并行，每个只取一帧；归档路径和版本检查仍先执行。
+- 液体转移序列的归约器把同一时刻工具对多个容器的匹配按顺序处理，容器身份切换可能被当作源→目标转移；仅两个观测就能形成一个接触阶段。实际旧回执包含零转运间隔及不足半秒的“完整转移”。现在按采样时刻处理，同帧多容器匹配中断序列，同一时刻重复检测不重复计数，两个独立接触阶段分别至少持续 0.20 秒，转运间隔必须为正。普通工具/容器 ROI 候选仍保留；这只是时序假设，不能确认液体移动。
+- 新序列明确标记 `contact_sequence_only`，状态机不再凭两个接触阶段补齐未观察到的接近、转运、释放，也不声明容器内容已变化。已剔除支持视角的液体候选撤销原跨视角裁决、限制评分并降为 provisional，保留等待重新核验。
+- 关键帧选点原先只比较实验组默认的两个视角。现在同时考虑提出该候选的其他来源视角；语义尚未完成时优先使用 CV 候选来源，有语义直接支持时仍优先语义支持。CV 来源优先和语义直接支持分别留痕。
+
+### 真实检测记录回放
+
+证据目录：`CV-Screening-Fix-20260907/`。复用原四路视频的 32,536 帧检测 SQLite，仅运行 CPU 候选规则，不重新读取原视频正文，不调用 YOLO/TensorRT/方舟，不复制输入，不改原运行档案。
+
+| 回放口径 | 旧规则 | 修复后 |
+| --- | ---: | ---: |
+| 转移序列候选 | 465 | 16 |
+| 转运间隔 ≤ 0 ms | 101 | 0 |
+| 序列总时长 < 500 ms | 209 | 0 |
+| 普通 CV 候选（不含序列） | 1531 | 1531 |
+| 全部候选 | 1996 | 1547 |
+
+最终源代码回放耗时 2.260 秒；1,531 个普通候选的完整内容及顺序与原记录逐项一致。这个耗时只是已有检测记录上的 CPU 规则回放，不是视频预处理、模型推理或端到端耗时。16 个新序列不是 16 个已确认动作，449 个未再生成的序列也不能全部当作已人工证实的误检。精确率、召回率和漏检影响仍缺独立真值，**NOT_PROVEN**。
+
+回执：`execution-identity.json`、`transfer-sequence-replay.json`、`final-source-replay.json`、`new-transfer-sequences.json`、`replayed-candidates.json`。前一回放后补充了支持视角减少时的准入修正；最终源代码哈希单独记录于 `final-source-replay.json`，没有替换旧运行身份。
+
+### 浏览器交付与边界
+
+主入口现在展示 12 个真实视频封面，点击同步双视角播放后实测 currentTime=31.938、duration=58.733、readyState=4、error=null。候选页保留旧运行的全部 98 项，按时长、来源角色和重叠关系提供 36 项优先查阅；其余候选仍可切换查看。39 项不足一秒、37 项缺少第一/第三人称候选来源、8 项与其他同类对象候选时间重叠，原因可以重叠计数。它们是浏览初筛条件，不是动作真伪判定。
+
+实际点击验证：全部候选 98 项、实验片段 002 筛出 12 项、跳回相应较长片段；定位后卡片顶部在视口 150.4 px，无横向溢出。封面、播放及筛选截图在 `browser-poster-before-play.png`、`browser-playing.png`、`browser-candidate-filters.png`，播放状态在 `browser-playback.json`。页面资源版本为 `20260907-preview-screening-35`，桌面旧窗口须 Ctrl+R 刷新整页。
+
+完整测试 **788 passed、4 skipped（10.56 秒）**；Ruff、编译、JavaScript 语法和差异检查通过。当前文本文件凭据形状检查无发现，不包括历史审计。8001 和 8003 服务在队列为空时重启加载修改，没有执行新的 GPU 任务。
+
+**PROVEN**：确定性缺陷拦截、上述真实检测记录回放一致性、浏览器封面/播放/筛选行为。**PARTIAL_EVIDENCE**：新 CV 规则对本批候选结构的影响。**NOT_PROVEN**：改动后的真实素材重新导出效果、动作准确率/召回率、方舟完整语义、真实端到端正式归档和稳定发布。旧 98 项素材没有被改写为“新规则已重新分析”的结果。仍需在保留原证据的独立输出中验证新关键帧、完成真实视频质量对照及完整链路门禁。
+
+分支仍为 `codex/rtx3050-device-delivery-20260904`，HEAD 仍为 `7db0dcd052891e0e189c5e931a27558256fea032`；本节修改仍未提交。保留用户原修改，未做稳定仓晋升。
+
+## 8. 机位配对、错误取帧与真实候选重导出（9 月 7 日）
+
+用户指出两张候选图的机位不对应，要求修复；随后询问检测误检是否需要重训/微调。本轮没有启动训练、TensorRT 检测或方舟请求。保留当前分支与未提交修改，使用已有真实四路输入和冻结检测记录，读取有界原片片段并重新编码派生素材。
+
+### 根因与实现
+
+- **PROVEN：解码器“成功”不等于取到了目标时刻。** 在真实 First-Person 派生视频上，复用 OpenCV 请求 3550 ms，read 返回成功，但 CAP_PROP_POS_MSEC=33.309 ms；另一次独立请求 17950 ms 返回 34607.954 ms。原片/FFmpeg 对照显示旧候选 01 的地板画面来自错误时刻。视频取帧、复用读取器、稀疏抽帧和对齐运动签名增加解码时间检查，超出容差自动使用有界 FFmpeg 重取。
+- 派生实验片段保持原机位的播放速度；关键素材复用片段时改为 `transform.to_local(global_time) - actual_local_clip_start`，修复时钟 scale 不为 1 或片头被裁切时的映射误差。
+- 跨机位候选关联只使用记录的时钟误差，不再叠加同机位的 750 ms 拼接容差。同类对象与局部 track ID 不能证明跨机位为同一实体；旁注不再据此标记 `both_views_support_action=true`。
+- 关键帧优先选择两种角色都有候选观测的真实采样时刻，再比较参与对象覆盖。机位选择检查其候选时间区间是否包含关键时刻；缺少对应观测时，保留单侧候选画面，其他机位作为可展开参考，不再将参考图并列呈现为动作对应。
+
+### 两个实例与实际重导出
+
+运行证据位于本机 `Runtime/RealVideoValidation-20260907/Local-Partial-Run/View-Pairing-Fix-20260907/`，最终结果是其中 `Final-Preview/usb_customflow_acebdf_0002`。前一版 `Repaired-Preview` 是未接入网页的中间验证产物，不是最终交付。
+
+- `EVT-9B5F95834FF2F7C7`：从 13.200 s 改选为两路均有候选观测的 **13.050 s**。重新解码的第一人称显示手持橙色管盖的试管架，第三人称 rk3588 同时显示试管架；仍为未核验的候选，不能据此确认“容器状态变化”。原图中的地板错帧已修复。
+- `EVT-9A1ADD584A95B300`：rk3588 候选区间 24.782–26.731 s，第一人称区间 27.000–28.300 s，中间相隔 269.136 ms，而记录的跨机位时钟误差仅 25 ms。真实候选记录回放后拆为两个未接纳的单机位事件，不再得到虚假的双机位加分。保留旧候选编号用于对照，网页主画面展示第一人称，c973b736 是同时间实验片段参考，未标为同一动作证据。
+- 全部 **98 条**旧候选重新导出，耗时 **215.319 s**（仅素材重导出与隔离整理，不是全链路耗时）。40 条具备候选时间共现，58 条缺少关键时刻的双角色支持，**0 条被声明为已验证同一动作，0 条正式事件**。复制的是已有 12 个派生实验视频；未复制原始视频，未访问 NAS。
+- 原目录 **600 个派生媒体、674 个控制/旁注文件**重新逐一校验哈希，全部与此前回执一致。新输出有独立执行身份、输入引用、源码/配置摘要和派生文件哈希，不改写原证据。
+
+### 页面与验证
+
+主入口新登记记录为 `local-partial-cda79892123caee7018a`：
+`http://127.0.0.1:8001/#/stage/local-partial-cda79892123caee7018a/materials`。
+原登记 `local-partial-77884ce12e20dfc1b967` 继续保留。新记录仍只读、不入执行队列、未正式归档。页面资源版本为 `20260907-view-pairing-36`。服务在没有排队或运行任务时重启加载修改。
+
+浏览器实际验证：全部候选 98 条仍可访问、封面加载、第一条视频播放到结尾 6.133333 s（readyState=4，error=null）、第二条单侧主画面及其参考机位分别展示并可展开，无横向溢出。证据文件：`browser-playback.json`、`browser-context.json`、`browser-first-pair.png`、`browser-second-single-view.png`、`browser-reference-expanded.png`。
+
+最终完整确定性检查 **807 passed、4 skipped，11.43 s**；Ruff、compileall、JavaScript 语法及 diff 检查通过。新增覆盖：成功返回错误时刻的解码、超出时钟误差的跨机位关联、过期候选机位选择、派生片段的 affine/片头裁切映射、单侧主画面与参考媒体分离。
+
+并发工作新增了 RTX 4050/Windows 离线部署与本地 YOLOWorld 加载相关文件，本轮未改动或撤销。素材运行之后 `archive.py` 的两个 YOLOWorld 加载语句被并发工作替换；在内存中还原这两个语句后哈希与素材运行记录完全相同，相关模型在本轮配置中关闭。`validation.json` 明确记录该边界，不能把不同的文件哈希说成完全相同源码运行。
+
+### 误检与后续门禁
+
+错帧修复后仍可见“手”框覆盖背景，以及静止移液器的候选移动误判。前者需要真实检测质量评估，后者还涉及跟踪与动作判定；不能仅用重训检测模型概括全部原因。适合先建立人工核对的真实样本与负样本集，按实验/视频隔离训练和验证，再判断是否微调手、透明容器、管盖等薄弱类别。当前候选框与伪标签不能直接当真值。本轮没有启动任何训练或声称微调收益。
+
+**PROVEN**：上述确定性回归、两个真实实例的错帧/错误关联复现与拦截、98 条派生素材重导出、浏览器播放与来源分离、原证据哈希保留。**PARTIAL_EVIDENCE**：真实素材呈现与候选筛选改善。**NOT_PROVEN**：检测/动作准确率与召回率、当前完整检测及时间对齐流程复跑、方舟语义、正式溯源归档、跨平台 CI 与稳定发布。此处的时间共现不证明同一实体或物理动作。
+
+分支仍为 `codex/rtx3050-device-delivery-20260904`，HEAD 仍为 `7db0dcd052891e0e189c5e931a27558256fea032`；未提交、推送、切换分支或进行稳定晋升。
+
+## 9. 两例检测误检核对、轨迹索引修复与真实回放
+
+用户要求继续核对是否应重训/微调。本轮实际检查检测输入、预处理、类别映射、采样时刻、批次和后端，再修复已复现的轨迹索引错误；没有启动训练或调用方舟。
+
+独立证据根：`/srv/sentinel-data/VisionCortex3090Ti/Runtime/RealVideoValidation-20260907/Detector-Audit-20260907/`。中文结果与实际对照图见 `核对结果.md`；机器回执见 `audit-summary.json`、`execution-identity.json`。
+
+### 真实模型与原片核对
+
+- 3 个本地机位、8 个时刻，现有两个角色的 PT/TRT、batch 1/4 对照；额外对第一人称 3 帧用原分辨率图像比较 640/960。合计 **22 次真实 predict、38 帧次模型推理**，没有调用其他模型或重建引擎。GPU 使用后已释放模型进程。
+- 8 帧 CPU/CUDA 解码像素相同；不重写帧率的 FFmpeg 源 PTS 逐像素匹配，采样标签与源 PTS 最大差 **23.6 ms**。这是所选样本检查，不是整片或跨机位同步认证。时间戳诊断初次把 `-t` 放在稀疏 select 后，不能证明输入解码有界；已更正为输入侧时限并复跑，保留 `timestamp-probe-bound-correction.json`。
+- 21 类编号一致。第一人称引擎 `tube-cap` 经现有规则统一成 `tube_cap`，未发生编号错位。BGR→RGB、矩形填边、NCHW、归一化按当前 CUDA 路径重建后与实际预处理哈希相同。TRT 输入绑定 float32、PT 本次 float16，原始浮点哈希不同属精度路径差异。
+- TRT batch 1/4 结果完全一致。PT/TRT 第一人称匹配 36 框、最小 IoU 0.988、另有 1 个未匹配框；第三人称匹配 63 框、最小 IoU 0.991。后端一致性不代表检测准确率。
+- 第一例第一人称 13.050 s：PT/TRT 都将蓝色桌布误框为手套，置信度约 0.954；原图 960 仍误检，约 0.980。第二例 27.600 s：960 的手和试管架检出更完整，但没有独立标注集，未改生产分辨率或声称总体召回提升。
+- 第二例 rk3588 原始 track 31 本地 23.450→23.500→23.550 s：框中心分别跳动 27.27/27.47 像素；前后向一致性筛选后的 100 个图像特征点中位位移仅 0.014/0.019 像素。`pipette-motion-diagnostic.json` 和 `pipette-box-jitter.jpg` 证实框跳动与画面运动不一致。光流仅用于本次诊断，尚未集成正式候选流水线。
+
+### 已修复与尚未解决
+
+`candidate_index.py` 原来只排除本帧已经访问的统一轨迹号，新物体先被遍历或旧物体遮挡时可能盗用已有映射；之后多个物体共用一个编号。现在同一机位、同一扫描中源轨迹到统一轨迹保持一对一，跨扫描关联保留。新增覆盖新物体先遍历、遮挡后重现的回归，既有跨扫描测试继续通过。
+
+独立重建原始 32,536 帧、209,903 个框的索引：同帧重复轨迹号由 **3,986 帧降到 0**；除轨迹编号之外所有字段一致，原始账本和旧索引哈希不变。相同当前候选逻辑下，旧索引 1,547 个候选，新索引 1,801 个；错误合并拆开会增加候选，不能把数量变化当作精度提升。**第二例移动候选依然存在**，仍需补充画面运动一致性与补偿验证。旧网页 98 个候选未被此次回放改写。
+
+完整本地检查 **810 passed、4 skipped**；Ruff、compileall、JavaScript 语法、diff 检查通过。并发 RTX 4050/离线模型加载工作保持原状。测试生成的两个模拟 `D:` SQLite 文件移至证据根 `Test-Generated-Files`，未留在仓库。确认 8001 队列仅有两个 failed/只读记录后，重启 `visioncortex-analysis.service` 加载索引修复，后续运行生效。
+
+`review-cases.json` 保留三个实际原图片段时刻，全部 `pending_human_labeling`、`train_eligible=false`。蓝色桌布等背景、裸手/手套、透明器材适合作为针对性微调的数据准备方向；当前模型框、代理观察、伪标签均不是真值。尚未训练或评估微调收益。
+
+**PROVEN**：真实调用与上述实例复现、输入/采样/后端核对、轨迹映射修复及真实账本回放、确定性检查。**PARTIAL_EVIDENCE**：误检原因定位与局部工程改善。**NOT_PROVEN**：检测/动作精度与召回、整体关键素材质量、完整流程复跑、方舟语义、正式溯源归档、跨平台 CI、稳定发布。
+
+分支仍为 `codex/rtx3050-device-delivery-20260904`，HEAD 为 `7db0dcd052891e0e189c5e931a27558256fea032`；保留未提交修改，未提交、推送或切换分支。源码哈希及独立输出哈希见本轮回执。
+
+## 10. 图像运动核验、四路真实复跑与独立标注工作台（9 月 7 日，进行中）
+
+用户授权继续本地开发与真实局部验证，方舟账户尚未恢复。用户要求初标、复核均由 ChatGPT 执行，界面称“项目标注”；不再将逐张复核工作交回用户。项目标注仍明确非独立真值，不冒充人工独立评测。
+
+### 当前真实运行与工程验证
+
+证据根：`/srv/sentinel-data/VisionCortex3090Ti/Runtime/RealVideoValidation-20260907/Motion-Delivery-20260907`。
+新增 `movement_verification.py`，在原候选保留的前提下核验图像运动：前后向光流一致性、背景相机运动补偿、多个实际采样时刻的局部目标位移。静止器材的检测框抖动不再独立支持移动候选。支持/矛盾/不足证据分别记录，图像变化不等于已确认物理动作。
+
+第三次独立输出 `Run-03/Archives/usb_customflow_acebdf_0002` 实际完成本地处理后进入预期的正式归档质量门禁：流水线内部总耗时 **519.712051 s**；外层执行计时 **519.730849 s**。预处理口径 probe + alignment + coarse + fine + audit 为 **277.876014 s**，达到配置的 1200 s 目标；不能据此宣称语义端到端已通过。
+
+本次 fine 扫描冷启动，19 个工作单元均重新计算，0 复用：第一人称 **3419 次推理、13674 帧次**；第三人称 **4702 次推理、18804 帧次**。合计 **8121 次、32478 帧次**真实 TensorRT 推理。引擎 640 输入、有效 batch 4，第一/第三人称批次填充率分别 0.9999/0.9998，无 OOM 缩批。已存在引擎没有重建或替换。此计数来自 `scan_runtime_fine.json`，不是此前 32536 帧旧账本计数。
+
+979 个移动候选中 24 个图像支持、142 个图像矛盾、813 个证据不足；核验耗时 **87.317103 s**。保留 **5 个实验组、15 个较长派生视频、61 个隔离候选、0 个正式事件**。方舟执行调用数为 0，`partial_delivery.json` 明确 `awaiting_semantic_recovery`、`formal_archive_promotion_allowed=false`。前两次失败及其修复依据保留在 Attempts，未改写为成功记录。
+
+主入口只读登记 `local-partial-d9e98f450073656f95cb`：
+`http://127.0.0.1:8001/#/stage/local-partial-d9e98f450073656f95cb/experiments`。
+浏览器实际验证较长视频播放到 19.862911 s、readyState=4、error=null；素材页展示三种运动核验计数和61个保留候选。浏览器证据 `browser-playback.json`、`browser-materials.png`。网页资源版本 `20260907-motion-review-37`。
+
+本轮当前完整确定性检查 **826 passed、4 skipped（830 collected）**；Ruff、compileall、JavaScript 语法和差异检查通过。测试生成的4个模拟 D: SQLite 移至证据目录 `Test-Generated-Files/20260907-latest`，未删除或覆盖其他数据。并发 RTX4050/Windows 与离线模型工作保持原状。
+
+### 数据与独立工作台
+
+用户原始数据 `/home/x1/桌面/first_images.rar`：SHA256 `c2428318df09553793e2f993c3408371bcb6e1fa8bc6b264537d885a8626ea97`，128 张图，无原标签，11 个文件名推断来源组。位于 `Original-Datasets/First-Images/Extracted-Source`，不复制到 Git。
+现有第一人称 PT 在128张原图上实际生成候选：32次调用、128帧次、1685框，只是伪标签建议。后续逐图视觉初标保存于 `dense-review-decisions.json`；初始迁移时为63张初标、56张未初标、9张排除、912个实物框。**912是框数，不是图片数。** 原始标注脚本已保存到该数据目录的 `Authoring`。
+
+新增23类项目类别表 `configs/models/project-annotation-ontology.json` 与中文规范 `docs/PROJECT-INSTANCE-ANNOTATION-AND-ROLE-PROTOCOL.zh-CN.md`。原21类ID保持不变，候选训练新增移液枪架、枪头盒。生产类别表和生产模型尚未变更。第一/第三人称分别分类、训练和导出；机位身份与画面角色分别记录。
+
+按用户要求建立独立项目 **`/home/x1/Projects/AnnotationWorkbench`**，分支 `codex/annotation-workbench`，已本地提交至 `34489338a3e115b5b52baf6abc0f29e4cee88a03`，无远端或发布。独立数据目录 `~/.local/share/annotation-workbench`，网址 `http://127.0.0.1:8010`。复用技能在 `skills/annotation-workbench/SKILL.md`，本机 `~/.codex/skills/annotation-workbench` 链接到它。
+支持中文逐件编辑、放大、候选逐项处理、遮挡/截断、未解决区域、来源/角色/分组、严格 JSON CLI/API、版本冲突保护与审计历史、分角色 YOLO 导出。普通 YOLO 无法表达未解决区域，故禁止将这种整图作为背景导出。未复核/未分组/未知视角/跨分组来源或像素重复也阻止导出。
+
+已在浏览器保存并重新读取 F103 第十支移液枪的遮挡说明，版本从1到2；越界坐标尝试被拦截，未保存错误修改。界面将图片数与实物框数分列，用户可查看每个实例的中文名称。
+初标与复核均由 ChatGPT 继续执行，但迁移不会自动完成第二遍检查。独立工作台最终24项确定性测试通过，包括新增视频抽帧入口的 FFmpeg 实际解码结构测试；这些测试不证明实验标注准确率。
+
+已接入整理实验的60张旧抽帧（45第三人称、15第一人称），只有手部局部标注的图明确留作草稿，不能当作全23类训练标签。又通过独立工作台实际从称量实验两路视频的35/55/85秒抽取6张新图，原片引用、请求时间、实际 PTS、图像哈希和过程回执均保留；本次取帧时间误差0–30.6 ms。抽帧成功不等于完成实物标注。
+
+### 未完成的门禁与下一步
+
+**PROVEN**：上述代码与确定性检查、真实TensorRT调用/耗时、运动核验记录、局部派生媒体与浏览器行为、独立工作台保存和数据迁移、6张新真实视频抽帧。
+**PARTIAL_EVIDENCE**：传统CV筛选与真实关键素材改善、项目逐件初标、画面角色分类（原始RAR安装元数据未提供）。
+**NOT_PROVEN**：全数据逐件初标/二次复核完成、两个角色的新模型训练与收益、独立检测/动作准确率与召回、方舟语义完整链路、正式溯源归档、跨平台CI与稳定发布。
+
+继续在独立工作台完成剩余器材初标与重新看图复核、密集试管/枪头不确定区域、近重复与来源组隔离，再训练并对照两个角色的候选模型。后续实验员视频按来源提供的场次/人员编码隔离评测，不能猜测人员身份或将邻帧随机拆分。当前仍没有训练新的模型或替换生产权重。
+
+本节结束时 VisionCortex 分支与 HEAD 仍为 `codex/rtx3050-device-delivery-20260904` / `7db0dcd052891e0e189c5e931a27558256fea032`；保留未提交修改。后续标注的当前状态以独立工作台版本记录为准，旧静态 HTML 预览和旧回执不自动覆盖新标注，也不声称旧归档清单已包含之后新增的标注工作台证据。
+
+独立工作台当前进度快照：194张图、1044个实物框，116张草稿、65张待复核、2张完成项目复核、11张排除。F100/F101已重新看图及修正叠框并完成复核；F102发现瓶盖误标药匙已修正，密集枪头仍待处理。详情见独立项目 `docs/WORK-STATUS-20260907.md`，后续以工作台版本记录为准。
+
+## 11. 原始128张首轮处理与可复现训练增强（9月7日，继续进行中）
+
+用户授权初标与复核都由ChatGPT完成，并授权用整理实验视频抽帧和数据增强扩充训练样本。所有可见结果仍称“项目标注”，不改为独立人工真值。
+
+原始RAR的128张已逐图完成首轮处理：**103张初标待复核、5张复核完成、20张排除**；108张保留图共1660个实物框。近重复的F051–F056及明显运动模糊样本保留原图与明确排除理由，不当负样本。F048/F049/F050本次重新看原图与叠框后完成第二遍，各12件；与此前F100/F101合计5张已复核。
+
+F002/F003放大确认14个独立管盖和3个开口位置，F125确认12个独立管盖；透明管体层叠仍有未解决区域，不能宣称所有管身已完整标注。F006密集枪头仍需逐支复核。已处理同手重复框、裸露手腕被误计另一只手、蓝色桌布被误检手套手、枪头盒误作单支吸头等问题。
+
+独立工作台当前总数 **194张真实来源图片/抽帧、1747个实物框**：63张草稿、104张待复核、5张已复核、22张排除；146张第一人称、48张第三人称。新增增强版本不计入这194张。工作台浏览器实际显示这些数量，截图 `~/.local/share/annotation-workbench/browser-current-1747.png` 已查看。
+
+新增严格增强配置与CLI `augment-preview` / `export-yolo --augmentation-policy`。仅增强已完成全类别复核、无未解决区域、已分到train的图；保留原图，val/test不变，两个角色分别输出。当前采用温和亮度、对比度、Gamma、缩放填边、平移、轻微模糊和压缩，所有框随同一矩阵变换，不裁掉实例或丢掉小框，保留瓶盖等决定类别的色相。预览不能绕过正式训练导出检查。
+
+实际从F048/F050/F100/F101四个已复核来源生成16个增强版本，已逐组查看全部4张原图/4版本叠框对照。第二次生成的16张PNG和4张对照图SHA与首次逐项相同。父图完整记录、图像SHA、原标注版本、增强参数、矩阵、实现SHA及Pillow版本均在回执中。
+当前预览目录：`/home/x1/.local/share/annotation-workbench/augmentation-previews/lab-conservative-20260907-v2`。
+- `receipt.json` SHA：`46ad9166bb78ed57a1fb64114ad278aefd628b4aa480b0002bf38bfeb30f8844`。
+- 另存视觉查看记录 `visual-review.json` SHA：`ac8eff88d36961d527cc62f857c4b7506a81700c3fb1481de99ee785841f82d1`，没有改写预览回执。
+- 数据增强规范：`/home/x1/Projects/AnnotationWorkbench/docs/DATA-AUGMENTATION.zh-CN.md`。
+
+独立项目 **34项测试通过**，涵盖实际像素与框同步、角色分开、原始验证图保持不变、小目标不被丢弃、未复核/未解决区域受阻、重复生成，以及导出过程中源文件变化不发布半成品；Ruff、compileall、JavaScript语法、技能格式与diff检查通过。独立服务已重启，浏览器正常读取保存版本，新增强Schema实际可用。
+
+当前全项目导出检查仍受259项阻断；42项警告指出基线训练接触，不能宣称独立评测。来源文件/审计/格式/显式来源组跨分区检查没有发现异常；完整近重复审计与原始录制/实验员身份映射仍待继续核实。**没有调用新模型训练，也没有替换生产权重。** 后续应先完成103张原始图复核和整理视频器材补标，再分别做两个角色的无增强/增强训练对照及真实视频质量验收。
+
+独立工作台分支 `codex/annotation-workbench`，本地提交 `f16d11ebb0134a6aeeff97151a33876728c7270c`，工作区干净；没有远端、upstream或推送。VisionCortex仍为 `codex/rtx3050-device-delivery-20260904` / `7db0dcd052891e0e189c5e931a27558256fea032`，未切换、提交或推送，保留未提交修改及并发工作。
+
+**PROVEN**：上述首轮视觉处理记录、指定5张第二遍复核操作、实际增强生成/本机复现、确定性与浏览器检查。**PARTIAL_EVIDENCE**：整体标注质量、增强视觉适用范围、来源角色分类。**NOT_PROVEN**：全量复核完成、训练增益、跨实验员泛化、方舟语义全链路、正式溯源归档与稳定发布。方舟账户尚未恢复，原有局部产出及恢复后复跑入口保留。
+
+## 12. 第二遍逐件复核继续与暗部增强预览（9月7日）
+
+在前节基础上继续逐图查看F011–F027、F029–F034、F036–F040原图与当前叠框，其中28张完成第二遍，已复核合计33张。F035也重新检查，但顶部杆件碎片经3倍放大提亮仍不能分清，保留未解决区域。个别手部/遮挡场景另作带原图坐标的2倍局部查看。
+
+删除完全被手挡住的防护用品盒框；F030/F031只露橙盖时不补不可见瓶身。修正同件实验服两段袖子的重复计数、天平玻璃罩与底座的可见范围、瓶盖在画面外时错误沿用蓝盖类别，F040区分手持单张纸和后方纸包。规范补充在 `docs/PROJECT-INSTANCE-ANNOTATION-AND-ROLE-PROTOCOL.zh-CN.md`，生产模型仍未变更。
+
+当前工作台 **194张图、1729个实物框、33张已复核、76张待复核、63张草稿、22张排除**。原始128张为33张已复核、75张待复核、20张排除，保留图1642个框。框数减少包含删除不可见框和同物重复，未将数量增长当质量。当前版本快照 `~/.local/share/annotation-workbench/snapshot-current.json`，计数与检查分别为 `workbench-current-counts.json`、`check-current.json`；旧1747框快照和增强回执不改写。
+
+从已复核train图片F036/F038实际生成8个增强版本，并查看两张原图/四版本对照图。现累计 **6张真实来源、24个增强版本**，仍为6个来源而非新增24次实验；暗部三支枪场景已纳入，十支密集枪架和密集枪头盒仍未全部覆盖。新增目录 `~/.local/share/annotation-workbench/augmentation-previews/lab-dense-dark-20260907`，receipt SHA `b8cabd91f4ee09037ffeae92cfbe3b885d35f9b76610212bffdce5472d854df7`，独立视觉查看记录SHA `c6978f3ac159a9c8f63c92c7b7b743cd15c18281c997abdd1eb4cfbb41142913`。
+
+工作台浏览器实际显示1729框/33张已复核，读取F036版本2、18件、0未解决区域；截图 `browser-current-1729.png` 已查看。全项目check仍有202项阻断、42项基线接触警告，不导出未完成数据为训练集。34项代码测试证据继承上一节相同实现，本节仅数据及规范/进度文档变更，重新执行来源/审计/导出门禁与diff检查，没有重新调用训练或更换权重。
+
+独立工作台分支 `codex/annotation-workbench`，当前文档提交 `d5fc902fdda36597fbf49ac6923b9c9d4c231fd2`；增强实现提交仍为 `f16d11ebb0134a6aeeff97151a33876728c7270c`。无远端/推送，工作区干净。VisionCortex保留原分支 `codex/rtx3050-device-delivery-20260904` / SHA `7db0dcd052891e0e189c5e931a27558256fea032` 及未提交修改。
+
+**PROVEN**：明确的逐图复核保存、24个增强版本生成与浏览器读取。**PARTIAL_EVIDENCE**：标注全量质量、增强适用范围。**NOT_PROVEN**：剩余75张原始图复核及整理视频完整补标、新模型训练收益、真实语义全链路、正式归档与稳定发布。
+
+## 13. 持续goal、密集枪复核、裁剪溯源及跨分区近重复（9月7日）
+
+用户要求建立持续目标，已调用goal工具创建active目标：完成数据、分视角训练迭代和系统真实视频/归档验收。预先记录检测、密集实例、误检、素材筛选、机位、性能与恢复验收目标于 `docs/MODEL-ITERATION-ACCEPTANCE-20260907.md`；未达到不标完成，不以训练跑通或增强数量代替效果。
+
+原始图片F075–F079和F085经过整图、当前框和枪架2倍放大复核后完成第二遍，分别每帧9支或10支枪。当前原始RAR **39张复核完成、69张待复核、20张排除，1643个框**。F079补出搅拌器底座，改正把烧杯区域并入底座的过大框。
+
+独立工作台新增可追溯裁剪草稿流程：保留父图SHA、历史标注、原分区/机位、矩阵和逐框裁剪关系；禁止进入未解决区域，不能自动完成复核。F035原图保留holdout及顶部未解决区域，裁剪图13件两遍实际查看完成。又完成三个第三人称确定区域裁剪图的6/9/6件标注复核；两个初次裁剪仍包含未处理管架边缘，保留排除记录并重新制作。裁剪图不增加独立来源，原图右侧全器材仍未完成。
+
+逐格实际查看两路固定机位30帧发现跨日期近重复场景，25张重复静态帧被排除，两个代表帧暂留未解决区域；没有当成全类别负样本，也未把验证帧移到训练集。Tube-Place-And-Dilute侧机位三张真实布置变化帧保留。像素相似候选初始有65对跨train与val/test；处置后在当时195张登记图中，RGB双线性128×96、归一化MAE<0.012筛查非排除/非holdout样本，剩4对同组候选、0对跨分区候选。这是候选筛查，不能证明完整录制身份或所有近重复情况；新增裁剪受来源链约束，正式导出前仍需重查快照。
+
+最新工作台 **200张登记图（194原图/抽帧 + 6裁剪）、1802框，43张已复核、72张待复核、36张草稿、49张排除**。43张 = 39张原始图 + 4张有效裁剪；6裁剪中另2张排除。已复核第一人称train39/val1，第三人称train2/val1；第三人称现有复核均为局部裁剪，不宣称全图验证或完整类别覆盖。框数含未完成与排除记录，不是可训练实例总量。
+
+独立实现提交 `461589ecce307551a30cbd54fb05312fa0999548`，分支 `codex/annotation-workbench`；41项测试、Ruff、compileall、JS语法、技能格式、diff检查通过，浏览器实际读取上述数量及第三人称val裁剪版本3/6件。截图 `~/.local/share/annotation-workbench/browser-current-200-1802.png` 已查看。数据回执 `near-duplicate-dispositions.json`、`near-duplicate-candidate-audit-after-disposition.json`、`crop-visual-review-receipt.json` 与当前snapshot/check均在独立数据目录；当前导出165项阻断、34项基线接触警告，裁剪来源链检查无阻断。
+
+VisionCortex仍保持 `codex/rtx3050-device-delivery-20260904` / `7db0dcd052891e0e189c5e931a27558256fea032`，未stage/commit/push或切换；并发修改及新出现的D:/测试产物保持原状。本节主仓库仅记录文档，不把此前826项通过说成当前并发工作区重新跑过的结果。
+
+**PROVEN**：明确图片的实际复核、裁剪溯源/回读、近重复处置、本地41项测试及浏览器行为。**PARTIAL_EVIDENCE**：全量标注质量、完整来源映射和新数据覆盖。**NOT_PROVEN**：新训练调用与收益、完整真实视频检测/素材效果、方舟语义、正式归档和稳定发布。goal继续active；继续完成密集实例及第三人称全图、冻结数据、记录旧模型基线，实际训练与系统验证迭代。
+
+## 14. 持续goal第二轮逐件复核与第三人称枪架样本（9月7日）
+
+本轮又实际完成21张原图和3张裁剪的第二遍复核。原图为F041–F044、F057、F059–F064、F069–F074、F109/F110/F112/F114；裁剪为F006左侧、Tube-Clean-And-Dry下方和Pipetting下方。修正试管可见锥底、手后橙盖漏标、同人两袖重复框、瓶体只框瓶盖、门后折纸及药匙柄漏标。F006裁剪删除画面内已无枪身的继承空框，补正架脚下端。
+
+第三人称两张下方裁剪分别22件/21件，逐支数出10支/9支枪；后者左端有空位，没有照搬前者数量。父图上方密集枪头/管架区域仍保持未完成，裁剪不算新的独立来源。
+
+工作台当前203张登记图（194原图/视频帧+9裁剪）、1913框，67张复核、53张待复核、34张草稿、49张排除；复核框909个。原始RAR60张复核、48张待复核、20张排除。67张复核中60张RAR原图、7张裁剪；第一人称train57/val5，第三人称train3/val2（第三人称均为局部裁剪）。虽然23类均有已复核实例，单支枪头1个、试管8个、管盖13个、管架3个仍不足以证明密集效果。
+
+当前全项目check的130项阻断均为未复核、未解决区域、未分组，未发现来源/审计/格式/裁剪历史和像素的新增阻断；整体export_ready=false。对203图当前快照的已分区非排除样本重查RGB双线性128×96归一化MAE<0.012，4对同组近重复候选、0对跨分区候选。该筛查不能证明所有近重复或实验员隔离，未来新数据仍需重查。
+
+证据在 `/home/x1/.local/share/annotation-workbench`：`annotation-snapshot-goal2.json`、`training-readiness-check-goal2.json`、`near-duplicate-candidate-audit-goal2.json`、`reviewed-coverage-goal2.json`、`visual-review-receipt-goal2.json`。浏览器实际读取上述数量和第三人称val裁剪版本3/21件，截图 `browser-current-203-1913.png` 已查看。此轮只改变数据和进度文档；独立项目实现仍为461589e，41项测试记录继承同一实现，未声称重新跑过测试。
+
+VisionCortex仍为 `codex/rtx3050-device-delivery-20260904` / `7db0dcd052891e0e189c5e931a27558256fea032`，不切换、stage、commit或push，保留并发修改及D:/测试产物。**PROVEN**：上述实际看图复核、裁剪与浏览器读取。**PARTIAL_EVIDENCE**：全部标注与数据覆盖。**NOT_PROVEN**：新模型训练收益、完整系统视频质量、方舟语义、正式归档及稳定发布。goal继续active，尚未训练新权重或更换生产模型。
+
+
+## 15. 规范批次导出与九轮真实检测器迭代
+
+持续goal仍active，未达到完成条件。主仓库仍为 `codex/rtx3050-device-delivery-20260904` / `7db0dcd052891e0e189c5e931a27558256fea032`，保留全部已有及并发修改。本阶段未提交主仓库、未更换生产权重。
+
+工作台现203张/1935框，83张/1173框完成复核（76张RAR原图＋7裁剪），另37待复核、34草稿、49排除。新增F080/F084/F123/F124、F088–F099共16张原图复核，逐件纠正密集管体、管盖及边缘实例；TP-Pipetting父图版本5/39件仍保留未解决管身与小部件。原RAR剩32待复核。最新证据为工作台数据目录goal3快照/回执，视觉复核receipt SHA `3225261d64f87a2f2c9e5f0cb1c7f25893183cb8aa7e70656ecc3e4e8e373dfe`。
+
+工作台新增严格训练批次功能，固定图片ID/版本、源/标注哈希与审计头，全项目来源、审计、裁剪和跨分区约束仍检查。83张首批通过导出：FP63train/15val，TP3train/2val；全量103项标签完成度阻断保留，未将全部数据宣称合格。原图receipt SHA `3215dc19657b0c517dfa8d24699239f108eb9332c1c3a4519d8b1793f36fcc30`。增强另含FP252/TP12派生图，已看密集场景16个预览，17张val图及标签34个文件哈希不变；增强receipt SHA `bf88401bf6d3acf962de614253046f1008f1fdc304a0febe635af1983e820ef9`。
+
+已在3090 Ti完成9轮真实训练/预测。第一人称低学习率轮在固定15张/212件上P/R=88.4%/72.2%，旧模型为85.2%/67.9%；第三人称增强轮在同一原图的2张裁剪/27个按图计数标注实例上P/R=91.7%/81.5%，旧模型为69.6%/59.3%。部分共有类别仍回退，多数类别验证不足20件，单支枪头没有验证实例。所有候选保持不可晋升，尚未做新候选全画面真实视频和系统验收。数值、失败轮和逐类边界详见 `docs/MODEL-ITERATION-RESULTS-20260907.md`，实验均在 `/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907`。
+
+修正21→23类扩展丢失分类输出参数的初始化；进一步核对旧类11整盒误标并做类别初始化迁移。首轮末尾ASCII回执读取失败已改UTF-8并从已完成权重/预测恢复，保留旧失败记录。已发现end-to-end模型跳过NMS，旧回执IoU参数不能当作去重执行证据；后续须验证保守去重。第四轮源代码快照匹配启动哈希，第五轮开始自动归档导入时源代码；早期源码版本重建仍有边界。
+
+本机新增项目标注训练入口相关16项测试通过，src/tests Ruff和compileall通过；工作台实现932aa7f的55项测试通过，服务重启及浏览器实际回读203图/1935框/83复核。它们不是全部CI、稳定发布或完整系统质量证明。
+
+PROVEN：具体标注、严格批次、实际训练/预测、中文回执恢复、浏览器回读。PARTIAL_EVIDENCE：固定项目验证中的局部提升。NOT_PROVEN：全部标注/逐类目标、新模型真实系统效果、方舟语义与正式溯源归档。下一阶段补第三人称全画面和少数类，验证去重、继续错例驱动训练，之后执行实际视频与系统门禁。
+
+## 16. 去重核验、分类输出探针与第十二轮真实训练
+
+goal继续active。主仓库分支/SHA保持上一节一致，未stage、commit、push或替换生产权重。
+本轮工作台代码没有变化，数据变为205张/1969框，85张/1191框完成复核；39待复核、
+32草稿、49排除。新增溶解操作两张左侧700×720裁剪各9件完成两遍实看复核（版本2），
+两张父图右侧密集区仍待处理。全部205张中194张为来源图、11张为裁剪；第三人称全图复核仍为0。
+
+新85张批次通过严格导出，原83条记录和17张验证图/标签34个文件均保持一致。
+第三人称训练由3张增为5张，验证仍同一源帧的2张裁剪；增强TP12→20，FP仍252。
+新8个增强版本已实看。全量检查105项完成度阻断保留；新回执SHA
+`6e34f5c4b628fd6efb4ae14479357f9cd35dcab37e683266761bd473a24e697e`。
+
+累计12轮真实训练。FP增强+类别迁移46epoch，P/R=87.2%/70.8%；FP仅分类输出探针21epoch，
+P/R=89.0%/68.9%；TP新增两张操作裁剪78epoch，P/R=90.5%/70.4%。它们均未超越全部验收门槛，
+旧候选和失败假设均保留。分类输出探针只训练17,802个参数，其余模型状态训练前后SHA一致，
+每批固定BN状态、每轮验证/保存前同步EMA固定部分。当前框架原已冻结主干BN，未把该假设当真实故障。
+
+12轮原始预测离线对照同类IoU≥0.90去重：FP基线FP25→12且TP144不变；
+TP早期三个候选会少匹配一支枪，尚不统一接入主流程。回执
+`postprocess-audit-v2/receipt.json` SHA `78cd93ec35e38bfd8bb6cce76e7c01a5549b870e44b1e53681affbc9abcd2ee7`，
+保存逐个删除框、原预测/模型/实验哈希及逐类变化；没有重新调用模型冒充此对照。
+
+17项相关测试、src/tests Ruff、compileall通过；浏览器实读205图/1969框/85复核/11裁剪，
+截图已查看。视觉复核回执SHA `ae4eb6570995ef057b2d23b748065aae95b9bafc3832fdaa468176697f5a7aca`。
+PROVEN限具体复核、严格导出、真实训练及固定状态、浏览器回读；系统效果、全类别和第三人称
+全图质量、方舟语义与正式归档仍NOT_PROVEN。下一轮继续补充漏检类别/完整场景，
+不要只增加训练轮数或用裁剪结果代替全图质量。第三人称新原始数据本机路径已异步询问，独立工作继续。
+
+## 17. 区域外复核及整图上下文成对训练
+
+主仓库分支/SHA保持 `codex/rtx3050-device-delivery-20260904` /
+`7db0dcd052891e0e189c5e931a27558256fea032`，保留全部未提交及并发修改。
+新增独立 `project_ignore_training.py` 适配器：只在明确部分监督模式消费区域元数据，
+与已知框共用Instances/LetterBox几何，负分类项按anchor中心屏蔽，保留正项及原生定位损失。
+两分支均支持；版本限定8.4.28，禁止增强/多尺度/类别筛选/编译；缺元数据及恢复证据不足均阻断。
+默认完整导出、验证测试和生产门禁不放宽。
+
+AnnotationWorkbench新增 `reviewed_partial/all_visible_outside_ignore`、中文单独计数和
+`export-partial-training --cohort`。原图/ignore/版本/审计完整保留，普通YOLO导出仍拒绝。
+实际重看Clean-side-c-0整图、密集局部、初/复核叠图：版本4→5→6，26件实物不变，
+保留蓝色枪头簇及右上不完整红色器材两处未解决区；区域外二次复核完成，整图未完成。
+当前205图/1969框、85完整复核/1191框、1区域外复核/26框、38待复核/32草稿/49排除。
+全量普通导出仍105项阻断。
+
+真实第三人称成对训练已完成：5张裁剪对照80epoch，5张裁剪+1整图63epoch；
+配置和训练源码相同，验证仍为同一源帧的2张完整复核裁剪/27个按图计数实例。
+TP/FP/FN：19/2/8→18/0/9；移液枪8/9→9/9，瓶盖和样品瓶各少检出1件。
+处理组两支各126次损失调用/12222次忽略anchor访问，保留253/4次已知正项；
+控制组各160次调用、忽略访问0。不能把累计访问说成实例数，也不晋升候选。
+
+累计14轮全部原预测指标已重算、权重及导出重新校验，同角色基线预测SHA一致。
+`context-pair-v6-v7-comparison.json` SHA
+`d86bbceec717e937ae46ace04250605625a402c34f955782452e58c8d5ecaa4b`；
+新快照/复核/检查位于工作台数据目录的goal5文件，模型与训练记录在既有独立实验根。
+工作台64项测试及Ruff/compileall/JS/技能格式通过；主仓相关35项及Ruff/compileall通过。
+浏览器实读区域外复核筛选1/205、版本6/26件/2区域，截图已看；主仓未提交或替换生产模型。
+
+PROVEN限上述具体复核、部分监督实施/实际消费、真实成对训练与浏览器回读；
+PARTIAL_EVIDENCE为小批内部验证改善；全标注、逐类/完整场景质量、新候选真实系统收益、
+方舟语义/正式归档仍NOT_PROVEN，goal继续active。继续补第三人称整图、密集少数类和完整验证来源。
+
+## 18. 密集初标纠错、增量抽帧与第十六轮训练
+
+本轮未改代码、未提交主仓库或替换生产模型；分支/SHA仍为
+`codex/rtx3050-device-delivery-20260904` / `7db0dcd052891e0e189c5e931a27558256fea032`，保留原有及并发修改。
+工作台212张/2043框：85完整复核/1191框，5区域外复核/99框，36待复核、37草稿、49排除。
+其中201张来源图、11裁剪；原RAR为76完整、4区域外、28待复核、20排除，未把局部资格合并计作完整复核。
+
+Pipetting第三人称原片按52–76秒每4秒抽取7帧，真实PTS偏差0–22.3ms，原视频/片段包/图片SHA保留。
+新增帧同源组维持val，未引入train。56.0112秒帧版本5/42件与原80.774秒帧版本3/33件均保留未解决区域，
+其余6帧仍草稿；没有新增完整TP验证图。Clean版本9/29件仅区域外复核。
+两张密集枪头画面的14/19个初标经逐框第二遍，撤回11/15个相邻边界不足框，只保留3/4个独立开口清楚的实例；
+其余仍ignore，不按孔数推测，未将初标数量宣称确认总数。红色部件由清楚侧面核对为塑料瓶附属提手。
+
+F065–F068逐图全幅、暗部、手持区域及修改后叠图复核完成，合并同件实验服，纠正可见天平范围，
+仅依据本帧可见盖色处理蓝盖瓶。四图版本4/18、18、17、17件，仅区域外train；药匙及顶边不清楚处保留。
+按本轮审计头冻结85/90张成对批次`context-control-v4`/`context-partial-v4`，原85条完整复核及验证34个文件不变。
+两个批次检查通过，全量普通导出仍114项完成度阻断。来源分组先核对；启动后补充的RGB缩图MAE<0.012筛查
+在160个已分区非排除样本中得到4对同组、0对跨分区候选，不宣称彻底排除近重复或基线接触。
+
+实际3090 Ti新跑FP两组80epoch，63张控制与67张处理图，耗时134.02/141.81秒（含本入口基线与评测）。
+控制原始预测与FP第三轮完全相同：153/20/59；加入4张区域外图后149/12/63，P/R=92.5%/70.3%。
+误检下降，但天平、容器、手套手、纸张和管盖回退，仍不可晋升。处理组两分支各1360调用/200320次忽略anchor访问，
+区域内已知正项保留2457/397次；控制组各1280调用、忽略访问0。
+相同80epoch的批数为16/17，不将这组比较夸成单项标注修正的因果证明。
+
+新两轮原预测micro/macro/逐类指标重算一致，模型/源/基线及验证哈希再核对。
+已看F092/F093/F123的天平退步图：仍有IoU≥0.5候选，但最高分仅0.030/0.012/0.019，低于0.25阈值；
+暂不降低阈值或改验证标签。不同来源训练覆盖及采样分布作为下一轮调查方向。
+比较回执`fp-partial-pair-v8-v9-comparison.json` SHA
+`0c37e3f68f2b59e2b97ee2886b29f3b4ab3ef0b97e043dcf33a82f40ff58f1ec`。
+工作台视觉回执SHA `cc9b155ed24b72b237bb7add0cb2b9d2f23466faf98c8a7fb9e06a0a5d9fcd26`。
+
+浏览器实读212图/2043框/85完整复核/5区域外复核，筛选5/212，F065版本4/18件/1未解决区，截图已看。
+本轮只进行数据、实际训练及文档更新；上一代码阶段35项主仓检查与64项工作台检查不冒充本次重跑。
+PROVEN限上述具体行为/回执，PARTIAL_EVIDENCE为内部固定验证比较；完整标注、逐类和新候选真实系统质量、
+方舟语义与正式溯源归档仍NOT_PROVEN。持续goal保持active，未把16轮训练当作完成目标。
+
+## 19. 新场景标注、类别迁移与第十八轮训练（2026-09-08续作）
+
+本轮继续实际看图标注和3090 Ti训练，未修改训练/运行代码。主仓保持
+`codex/rtx3050-device-delivery-20260904` / `7db0dcd052891e0e189c5e931a27558256fea032`，
+生产权重与并发未提交修改保留。工作台当前212张/2144框：85完整复核/1191框、
+9区域外复核/208框、36待复核、33草稿、49排除；201来源图与11裁剪分别计数。
+全量普通导出仍118项阻断，部分监督资格不是全量标完；第三人称完整整图验证仍缺。
+
+称量前视角0/1与溶解前视角0/1实际查看全幅、器材放大、坐标网格及修改后叠框，
+从8个手部初标补为109个可辨实例。最终分别为版本3/36件、版本4/22件、版本5/40件、版本3/11件，
+均仅区域外第二遍复核，保留3/2/4/2个排除区域。逐件标枪与枪架、管与管盖，
+不按孔位推测隐藏管身；不将蓝颈环当蓝盖、背景帘布当实验服或未穿戴手套当实体手。
+纠正手持红盖/棕瓶边界及D0过宽实验服框（只露左下袖缘），补D0天平旁一件可辨金属药匙。
+
+来源核对发现此前FP训练67张中49张来自同一长操作组。
+训练前冻结`context-partial-v5`共93张：保持前90条记录不变，新增称量0/1及溶解1三图69件，
+得到FP70张train/15张val；验证17图及标签共34文件不变。新增3图仍同属curated-2026-06-18，
+不称3个独立实验；D0的40件在冻结后复核，未加入本轮训练。冻结快照和最终快照分开保留。
+训练前像素近重复筛查覆盖160活动分区图，仍4对同组、0跨分区候选；不等于排除全部未知关联。
+导出回执SHA `d939245e7c7f7720729017c4ead330ac84d213ddd6aec1c6eb9c1f3ab68d9c14`。
+
+第17轮第一人称新增场景对照实际80epoch、145.15秒，TP/FP/FN=151/23/61，P/R=86.8%/71.2%。
+天平从上一轮8/12升到10/12、纸2/12到5/12，但误检12到23，容器仍4/11、枪头盒0/8。
+第18轮仅启用已核查的旧类11整盒枪头到新类22的初始化迁移，按相同早停设置完成68epoch、123.73秒；
+TP/FP/FN=154/24/58，P/R=86.5%/72.6%，枪头盒4/8、容器6/11、试管29/36，
+但天平9/12、纸3/12、实验服0/3、管盖0/8，仍不晋升。
+两轮分别每分支1440/1224次损失调用、377360/320756次忽略anchor访问，
+已知正项保留5882/804、4935/629次；它们是训练累计访问而不是新标注数量。
+
+两轮原预测micro/macro/逐类指标重算一致，18轮同角色基线预测SHA一致，来源、模型与源码哈希重验。
+比较回执`fp-diverse-pair-v10-v11-comparison.json` SHA
+`294da7357a919b65366846808e42f394fe7f265910d24ecca073cfdca853fd26`。
+实看F085的4张移液枪误检对照，均为与更高分框重复，预测间IoU0.932–0.976。
+复用既有同类IoU≥0.90规则离线扩展核验后6轮；没有新模型调用或改生产配置。
+第17/18轮去重后151/10/61与154/10/58；这6轮没有少匹配TP，
+但原12轮中早期TP候选误删一支枪的限制仍保留，不能据此统一开启该阈值。
+扩展回执`postprocess-audit-v3/receipt.json` SHA
+`d13a99310efc4e4db2a420fd48ecd4f6f0223ab9c2636a4a71455e0c6a2187e6`。
+
+浏览器实际回读212图/2144框/85完整/9区域外、D0版本5/40件/4区域，截图已看。
+视觉回执`visual-review-receipt-goal7.json` SHA
+`746bd6a1b5b89570d1925c725920b4d470cc62b59f37662161b7d6db4edd2d27`，
+保存4张版本、来源SHA、看过的原图/局部/叠框及训练前/最终快照区别。
+本次仅数据、运行证据和文档变更，上一代码阶段35项主仓和64项工作台检查不冒充本次重跑。
+
+PROVEN限上述实际项目复核、批次核验、两次训练和浏览器回读；小批内部比较为PARTIAL_EVIDENCE。
+全标注、逐类/真实视频与新候选系统质量、方舟语义及正式溯源归档仍NOT_PROVEN，goal保持active。
+下一步补不同来源完整复核图、密集少数类及TP完整验证画面，并受控验证实际视频中的重复框处理。
+
+## 20. 按视角运行时去重、两路真实扫描与第三人称失败对照（2026-09-08）
+
+主仓继续保持`codex/rtx3050-device-delivery-20260904` / `7db0dcd052891e0e189c5e931a27558256fea032`，
+没有提交主仓、切换分支、替换生产权重或覆盖并发Windows4050工作。
+新增`detection_duplicates.py`及FrameEvidence审计结构：同一来源帧、跟踪前、同类高IoU去重，
+按角色显式开启且默认关闭；完整原始框、保留/移除索引及IoU可回溯。
+配置启用/关闭/改阈值时，已有断点在截断或删除记录前拒绝复用。
+本轮相关52项测试、`ruff check src tests`和`compileall`通过；新函数与此前6轮预测12组的离线保留框完全一致。
+
+在已整理称量实验的两个约129秒完整派生片段上做真实TensorRT对照，原21类引擎不变，
+仅FP开启0.90去重，TP维持原处理；各自本地时间，不做跨机位对齐或动作确认。
+两组各2,066帧、每路1,033帧，来源帧推理调用520/519次（不含初始化/预热）；像素、原始模型预测、角色和时间逐帧完全一致。
+FP原始17,720框中移除660框（481帧，505个移液枪框），跟踪输出16,187→15,743；
+TP原始34,311框、跟踪32,064框，两组记录完全一致。单轮耗时16.60/15.44秒含取证开销，
+不推导速度提升或六路全流程性能。处理组NVML15次采样无错误，GPU均值74.3%、NVDEC均值52.1%，
+显存采样最大4176.5MiB。热复跑0.65秒、零推理调用，检测文件字节不变；引擎仍初始化。
+改策略复跑在模型初始化前拒绝。首次直接扫描未解析`auto`的失败目录v1保留，成功为v2。
+
+按既定最低IoU/每类/首尾规则实际查看14对删除案例：12对指向同一可见实例；
+1对蓝颈环开口瓶仍错分蓝盖瓶，1对大框仍覆盖多支枪。未在抽样中看到不同实例被合并，
+不能据此代表所有660对，去重也不解决错类和多实物合框。
+运行目录`duplicate-runtime-goal8/real-weighing-v2`保存脚本、源码、原始帧取证、冷/热记录和遥测。
+执行/比较/视觉回执SHA分别为
+`9f1d16c711f691229913655f8e2a37cd05e9e7c247d98e1bf8471cb27d156e2f`、
+`ba611f907767339a9eb66d5681d4f2fdf7e09e133ce4bae7ca373feeb218d4fb`、
+`57078451d0b9263f3b8b758c3c9c82b792392aa78c5e1fe78cb0e5d8b6568396`。
+
+第三人称溶解图`C-Dissolve-And-Stir-view-04-side-c-1`实际看原图、密集区放大、分组叠框及逐枪裁剪，
+9框补为45框，版本4，完成第二遍区域外复核。10支枪及枪架、6根开口管/7管盖及管架、
+盒子和4个可辨枪头端部等逐件保留；透明管身、枪头重叠区、枪/架深色连接部3个ignore不删。
+项目现212图/2180框：85完整/1191框，10区域外/253框，35待复核、33草稿、49排除。
+全量普通导出仍118项阻断，TP完整整图验证仍缺。浏览器实际回读该帧版本4/45件/3区与全项目计数，截图已看。
+视觉回执`visual-review-receipt-goal8.json` SHA `c9042a279a699aa96eedb305093b5cbd5eef2ac7d3e9f8d7665731e87556ddc0`。
+
+冻结`context-partial-v6`95条，旧93条及全部验证34文件不变；增加本帧和先前复核FP溶解帧40件，
+后者尚未用于新FP训练。全部212张来源哈希/分区/源组与goal7近重复筛查一致，训练前核对。
+回执SHA `7f081f2e30eca5371b11568796f153383f9c4c0c959ed4bb6a8e3c1f909dd6d4`。
+第三人称新增3轮（累计21轮）：6张修订训练图对照56epoch、25.44秒，15/4/12；
+7张含新溶解图21epoch、11.32秒，15/20/12；同7张仅分类输出21epoch、8.13秒，16/7/11。
+新增图使枪8/9→9/9、样品瓶1/3→2/3，但增加12个枪头盒误检；两张实际诊断图显示框落到桌布、枪体等。
+固定特征17,802分类参数的方案回到旧基线整体水平，冻结状态前后SHA相同，尚无净提升。
+三轮原预测指标重算一致（整数精确、浮点绝对容差1e-12），21轮同角色基线预测SHA一致。
+比较回执`tp-goal8-three-run-comparison.json` SHA `662752eae37aa8c0fa961df37ee7300962487250cdca1957cc75807b9c56f634`。
+
+PROVEN限代码测试、上述实际模型调用/复跑、已看图项目复核和浏览器标注显示。
+内部小批质量及14对视觉样本是PARTIAL_EVIDENCE；全标注、新候选逐类/实际系统质量、方舟全链路、
+正式溯源归档及稳定发布仍NOT_PROVEN。goal保持active，继续补TP完整验证画面和不同场景标注，
+围绕已确认错类、漏分实例和桌布误检作受控改进，不按训练次数宣称完成。
+
+## 21. 保留测试帧复核、原始密集图修正及第一人称失败对照（2026-09-08）
+
+主仓仍为`codex/rtx3050-device-delivery-20260904` / `7db0dcd052891e0e189c5e931a27558256fea032`，
+工作台为`codex/annotation-workbench` / `f78875b210379469fb8934712b6fb9f77b8b6690`。
+本次仅标注、局部运行和文档更新，保留原分支、未提交及并发Windows4050修改，无生产权重替换。
+
+第三人称Pipetting原图2重查原像素、局部放大/提亮及分管裁剪后，撤回本次3个疑似管身初标：
+透明架壁和反光仍不能可靠归属。版本5仍33件/1未解决区，实验服左边界收紧；未进入验证导出。
+本地USB数据未找到该6月17日实验的更高清原片，索引指向旧NAS；没有访问或改写NAS路径。
+实际逐张查看Tube-Place侧C三时刻图，0帧完成两遍复核，版本3/5件/0未解决区，
+修正天平底座和瓶盖边界，底边截断器皿只标通用容器。1/2帧排除为同机位近重复，非负样本。
+三者保留原test分区，未用于本轮训练/调参；静态桌面不能证明密集器材或动作效果。
+
+原始RAR的F103实际看1920×1080原图、左右10支枪、盒内/瓶内枪头、远处管架、边角及叠框，
+16框补为20框，版本5完成第二遍区域外复核。拆分前后两个容器，补远处试管/橙盖与下边截断管架，
+修订枪体边界及第一支顶部完整的截断属性；3处密集枪头/远处架体连接关系继续保留。
+同源F104/F113仅辅助空间核对，没有把这些图批量改成已复核。F103尚未进入冻结训练批次。
+当前212图/2189框：86完整/1196框、11区域外/273框、34待复核、30草稿、51排除；
+201来源图/11裁剪分开统计，全量普通导出115项阻断。
+浏览器实读F103版本5/20件/3区及测试帧版本3/5件/0区，实际看过两张截图。
+项目视觉回执SHA `421449a3efb06d3bc8b1596038892aebc69274c1e7677ad8a5a3d6025b9fa9fa`，
+审计头`b3062502608127d9f5f01d9ffaf6debfdc1d78a0da7a2a6b8f9fede8e436f6bd`。
+
+真实训练前核对3090 Ti、解释器/依赖、剩余存储、两角色原模型/引擎SHA、源码、冻结v6回执和来源。
+训练源码与goal7一致，原85条FP记录/15图验证不变，仅新增已在goal7复核的溶解前视角0，71图train。
+第22轮FP v12实际51epoch，实验耗时95.03秒，TP/FP/FN=147/30/65，P/R=83.1%/69.3%；
+第23轮v13仅增加已核查的FP旧枪头盒分类初始化，56epoch，实验耗时102.88秒，149/25/63，85.6%/70.3%。
+两个损失分支各918/1008次调用、284172/312032次忽略anchor访问；已知正项保留10759/1102及11525/1265。
+新两轮相对goal7对应配置整体退步，未采用候选；实际早停不同，不称固定epoch比较。
+原始预测micro/macro/逐类/错误及各来源组指标重算一致，23轮同角色基线SHA一致。
+比较回执`fp-goal9-two-run-comparison.json` SHA
+`406516c515bacd10473b1154c72b1e4d3b173a4ddacc7f801c70aaf67a55cd39`。
+
+实际查看v13相对v11全部3个新增天平FN及2个新增烧杯FN，位置匹配框最高分下降至
+0.113/0.127/0.130/0.234/0.248，均低于0.25。F092三个试管FP落在已有试管，
+与更高分同类框IoU0.939/0.911/0.820，现有0.90规则不能解决全部三个；没有新阈值调参。
+诊断视觉回执SHA `6c522d23b88d2222b832ea18ee2b9f8b289d99fcfb49cb3256ed197668797e9f`。
+
+本次没有产品代码变更，不重报上一阶段52项测试为本次执行。标注格式/源哈希/审计检查实际执行，
+全量导出保持拒绝；本轮冻结数据及模型回执校验、预测重算和文档diff检查与完整系统质量分开。
+PROVEN限上述项目复核、两次训练和浏览器回读；小批内部质量为PARTIAL_EVIDENCE。
+全数据完成、新候选逐类/真实视频/系统效果、方舟语义与正式归档仍NOT_PROVEN，goal保持active。
+下一轮继续处理原始数据与密集实例、扩大可信完整验证，分析来源分布和分数回退，保留本轮失败对照。
+
+## 22. 来源采样对照、密集标注修正及第26轮净改善（2026-09-08）
+
+主仓仍为`codex/rtx3050-device-delivery-20260904` / `7db0dcd052891e0e189c5e931a27558256fea032`，
+保留原分支、工作树和并发Windows4050修改；工作台仍为`codex/annotation-workbench` /
+`f78875b210379469fb8934712b6fb9f77b8b6690`。本轮为局部开发、标注与本地3090 Ti实验，无生产权重替换。
+
+新增默认关闭的来源组平衡采样，图片权重为同组图片数倒数，有放回，每epoch仍原训练图数量。
+默认逐图打乱保持原框架；只允许冻结的无增强部分监督、单GPU、新训练。训练图片成员精确核对，
+验证/测试不进入抽样；在实际预处理入口记录图片，未消费预取不计数。采样计划、逐批trace、
+各图/组/epoch计数与SHA入回执，缺失或不一致的恢复不能宣称完成。它不增加独立样本。
+47项相关检查通过，Ruff/compileall通过；这些是合同检查，模型质量单独按原始预测和实看画面判断。
+
+F104/F105/F106逐张重新看原图、分区放大、叠框，再第二遍原图全类别检查，分别版本4、31/10/12件。
+F104修正3根管延伸到管架反光的过长框，补天平、远处2根横放管、右边缘纸；10支枪逐件核对。
+F105补左侧另一容器，裸手剔除前臂，手后白色底座归同一枪头盒；F106保留2根露出管并收回误包架边，
+旧左下区确认为架孔/反光。分别保留3/2/1处密集枪头/远处未解决区域，仅区域外复核，非完整图。
+三图在浏览器分别回读版本/数量/范围，三张截图实际查看；通过Store CAS保存，未直接修改数据库。
+当前212图/2194框：86完整/1196框、14区域外/326框、31待复核、30草稿、51排除；
+201来源图与11裁剪区分，全量普通导出仍115项阻断。视觉回执SHA
+`49734aef7a931817a7e7ee8b51efa95c9c59fff0857c86241ee4e03f0451585c`，审计头
+`7c16cd28f1d08d737309e60b0207d070b32558b90458ce88d2ca53917106ec02`。
+
+第24/25轮固定v6的71train/15val，FP采样对照实际56/51epoch、实验104.35/96.01秒。
+默认对照149/25/63，预测SHA与上一轮v13完全一致；平衡组156/29/56，天平/烧杯改善，管/盖/搅拌子回退。
+原长操作组49/71张，占69.0%；实际访问从2744/3976降到605/3621，6组访问561–641次，
+单图来源的裁剪重复635次，不能将访问数当作新样本。实际查看全部9个新增FN和2个指定恢复案例；
+F124蓝盖瓶新错分普通样品瓶0.744，不只分数降低。两轮对照回执SHA
+`8981c3255900f7eead4b2af3e5763fb63818a925bac468890dc9f043f3dd54dd`，诊断视觉回执SHA
+`e8c0a23e97ff6cc2d9924e4f0a1652ff61d4b862b7f863624b0d7cd2a9df1277`。
+
+随后冻结v7的99条：保留原95条、验证34文件不变，加入F103–F106共73件/9处ignore，均属既有20260525组。
+全部212张来源哈希/分区/源组与上一轮不变；不重新划分test、不增加独立实验。
+数据回执SHA `b007291293fbc2d9cabbb1bc262df9b453e05353ce018ab5f1f732716786c0c9`。
+第26轮继续相同来源平衡，FP75train/15val，64epoch、123.51秒，159/18/53，P/R=89.8%/75.0%。
+相较v15净增3个TP并减少11个FP，但枪10/10→9/10、天平12/12→11/12、枪头盒6/8→5/8、管盖1/8→0/8。
+4800次实际预处理访问/75张，1216批；两损失分支各1216调用、749081忽略anchor访问、保留41018/4340正项。
+这些计数不是新增图、目标或全链路吞吐。权重SHA `47c3d30a515b3be9b85378dc59dcafc8ed5324482e4ae956af3af11c0d39f555`。
+添加对照回执SHA `a1cc43a0ea4aa0c61bda41497cb8852b011f474460e95f9c5f6633a215682194`。
+实际查看全部8个新增FN与蓝盖瓶恢复案例，并核对F085全部10支枪一对一匹配：
+最高分重叠框属于邻枪，不能重复使用；最右枪位置最贴合候选IoU0.839但分数0.050。
+诊断视觉回执SHA `e35e9d487e338397db48abbe2cc6d92d5560a5870e1a298487ec877c4199543a`。
+
+26轮同角色基线预测SHA一致，原始micro/macro/逐类/错误/源组重算一致（浮点绝对容差1e-12）。
+新候选没有生成TRT引擎，没有本轮新真实视频/网页全链路、付费模型或NAS调用。
+PROVEN限上述实现合同、真实训练、项目图像复核及工作台回读；固定小批内部质量为PARTIAL_EVIDENCE。
+全数据、TP完整密集验证、逐类质量、新候选实际系统/事件效果、方舟恢复后的语义及正式归档仍NOT_PROVEN。
+goal保持active；继续逐件标注和第三人称完整验证覆盖，针对类别混淆、过度重复单图与密集相邻枪漏检迭代。
+
+## 23. 第三人称连续帧逐件补标与跨视角器材复核（2026-09-08）
+
+主仓仍为`codex/rtx3050-device-delivery-20260904` / `7db0dcd052891e0e189c5e931a27558256fea032`，
+工作台仍为`codex/annotation-workbench` / `f78875b210379469fb8934712b6fb9f77b8b6690`。
+本轮为本地图像标注、参考帧解码与工作台回读，没有改产品源码、重训、构建引擎或替换生产资产。
+
+对原已抽取的Pipetting侧C预定52/56/60/64/68/72/76秒7帧逐张实际查看原图、管架网格放大、
+枪头盒与手部局部及叠框。六张空白帧先初标再第二遍重看，56秒重新核对旧标注。
+按时间分别为41/41/37/40/45/34/44框、2/3/3/2/3/2/3处未解决区，共282个按帧计数的框。
+56秒版本5→6，其余1→2→3；通过Store版本检查保存，未直接写数据库。
+六张新增241框，56秒撤回1框，项目净增240框；没有新增独立来源或完整复核图。
+
+本地源视频与清单SHA重新核对后，有界抽取FP 56/60/72/76秒4帧及TP请求71.8/72.2秒2帧，
+后两帧实际PTS为71.8324/72.2011秒。6帧仅用于复核参考，未导入数据集或训练。
+第一人称可见完整枪体及细长前端，支持原手持移液枪类别；俯视遮挡使第三人称可见部分很短，
+不能仅凭外观疑似就改成别类，也不使用另一机位补画本帧不可见部分。
+56/76秒两处细小灰弧仍不能可靠区分管口与器材边缘，撤回原管框并明确保留未知区域。
+72秒只标清楚可见手指，右下暗部与投影边界仍ignore；被袖子挡住的枪头、蓝盖不沿用邻帧框。
+60秒逐支处理手部遮住的枪架前排，68秒保留运动模糊交界，不把拖影计作额外器材。
+此参考核对不证明跨机位精确时间同步、物理动作或整条系统质量。
+
+当前212图/2434框：86完整/1196框、14区域外/326框、37待复核/859框、24草稿/36框、51排除/17框。
+仍201张来源图和11张裁剪，全量普通导出121项阻断，6项增加来自新明确保存的未知区域。
+全部212张源图SHA、来源记录、人称、分区和组别均重新核对不变；本轮7帧仍为val和needs_review/partial。
+冻结v6/v7逐文件与成员重新校验通过，既有训练/验证不变，已完成训练仍26轮。
+4份生产模型/引擎SHA重新验证不变。本轮没有付费模型或NAS访问。
+
+72/76秒工作台分别实读版本3、34/44件与2/3处未解决区，两张浏览器截图实际查看。
+视觉回执`~/.local/share/annotation-workbench/visual-review-receipt-goal11.json` SHA
+`52e8b47428b438fc7ababc05a8daad985e2b5aa5ad78ca84b2c06025e4a36e19`；52份实际看过的源图/局部/叠图/截图列出各自SHA与变换。
+审计头`34bef6c52b6e9368dba6489cc96f14583c29adfa3cb3944be6b75e67cbae90ef`，
+快照`annotation-snapshot-goal11-final.json`。仅文档更新，执行两仓`git diff --check`；没有把上一轮47项测试重报为本轮执行。
+
+PROVEN限实际图像检查、版本保存、来源/冻结数据验证和工作台显示；标注质量仍PARTIAL_EVIDENCE。
+第三人称完整密集验证、本批候选真实系统效果、全部数据完成、方舟恢复后的语义及正式归档仍NOT_PROVEN。
+goal继续active；下一轮继续高分辨率原始数据的逐件补标和未解决场景核对，再以新增合格数据安排训练对照。
+
+## 24. 五张原图密集部件复核、第27轮训练与离线去重（2026-09-08）
+
+主仓保持`codex/rtx3050-device-delivery-20260904` / `7db0dcd052891e0e189c5e931a27558256fea032`，
+工作台保持`codex/annotation-workbench` / `f78875b210379469fb8934712b6fb9f77b8b6690`；未提交修改保留。
+本轮没有产品源码修改；使用相同已归档训练实现、3090 Ti和已校验原FP初始化，不替换生产权重/引擎。
+
+F002/F003/F006/F107/F108实际看原图、密集区放大、初核叠框，再重看原图作第二遍；Store版本2→3→4。
+分别41/39/27/19/21框、2/2/1/1/2处未知，147件全部仅train区域外复核；净增5支附着枪头和1支遮挡枪身。
+F002/F003各14枚橙盖和6根可辨前管，后两排管身继续未知；F006袖框不含前臂，底边5盖均截断且不补管身。
+F107/F108原左侧烧杯大框误包PET瓶/背景，改为可见通用容器；F107旧i1实看确认为手套覆盖，解决但不补隐藏管。
+F003顶端白片、F108底边浅片不能辨认，新增未知。单个灰片/孔位/反光不凭邻帧补实物。
+
+当前212图/2440框：86完整/1196框、19区域外/473框、32待复核/718框、24草稿/36框、51排除/17框；
+201来源图与11裁剪分开，全量普通导出仍121项阻断。全部212图来源SHA/角色/分区/组别重验不变，其他标注版本不变。
+F003浏览器显示版本4、39件及2处未知，截图实际查看。42份实际视觉文件回执SHA
+`1ca1e68d9170d6051c33379f626171cf0c2251a4271391a3f6e6dc61d498d88c`，审计头
+`c113a1f00f7562281e1d9aba4185c4e740d32d3386145ffe74ea6b25abcf9b88`。
+
+训练前冻结v8共104记录，完整保留v7旧99记录及34个验证图片/标签；追加5图147框/8区。
+FP80train/15val，训练管盖34→75、单枪头1→8；验证仍212件、8枚盖、无单枪头。
+源组6→7只是登记片段变化，不宣称独立实验；同日相邻拍摄均train。数据回执SHA
+`8a5a56ea91ca9fa1b27d14727aa18e6a3ca749fd0cf3072eae1d777816906015`。
+
+第27轮即FP v17实际60epoch、122.37秒，165/28/47，P/R85.5%/77.8%，AP50/50–95为85.6%/72.6%。
+相较v16净增6TP/10FP；盖0/8→3/8、枪9/10→10/10，但枪架、烧杯、瓶盖、搅拌子和纸有召回回退。
+4800次实际访问/80张、1200批，7组访问647–724次；两损失分支各1200调用、1553663忽略anchor访问，
+保留166682/16845区域内正项，不是新增样本。权重SHA `70fc3e7b044f8358170b417cc5ce04577e5b0ac8f4ab286116876cb7902c20ee`。
+比较回执SHA `d818fa48ccdebeaf189eb8ec6670cca11641559056825c5106a4040e70de9f25`；
+原预测的micro/macro/逐类/错误/各源组重算一致，27轮同角色基线SHA一致。
+
+实看8个新增FN、3枚盖恢复、最右枪恢复一对一分配和7张误检/重复裁剪，共19张诊断图。
+最右枪专属分数0.050→0.859、IoU0.839→0.698，新框下段仍偏短，邻枪不复用；全部8个新增FN存在低分相符候选。
+黄色器材端部和屏幕橙色区域误认管盖；架/管重复框并非新增实物。匹配器best_iou只针对未匹配GT，0不能解释为完全不重叠。
+诊断回执SHA `a86ec3515c10793e05290941c796d7989e88a3991d7c425a19894a699dd15c0f`。
+
+按既有同类IoU≥0.90离线重放v16/v17，分别去除7/14个≥0.25框；本小验证逐类TP均未下降。
+处理后159/11/53及165/14/47，后者P/R92.2%/77.8%，仍不合格。原预测、验证标签与生产设置保持不变。
+去重回执SHA `112780098b125ca34f16ac45f8879c32c4a3741621123e8cb3bc7f1e8b7e9dca`，不是实际系统去重质量证明。
+
+训练环境/源码/模型/输出前检通过；训练结束和离线结果均已回读核验。4个生产资产SHA再次验证不变。
+两仓git diff --check及本轮文档空白检查通过；无产品源码改变，不把旧测试结果报为新执行。
+PROVEN限图像复核、实际训练、预测重算/离线规则与工作台回读；内部质量PARTIAL_EVIDENCE。
+全部标注、TP密集完整验证、新候选真实系统/事件/浏览器/方舟语义及正式归档仍NOT_PROVEN，goal保持active。
+下一轮继续规范补标，针对屏幕/黄色端部错类、遮挡器材低分和密集验证缺口补数据，再做受控对照；不通过改验证或阈值制造达标。
+
+## 25. 第三人称三帧补标、双遍复核与第28–30轮训练（2026-09-08）
+
+主仓仍`codex/rtx3050-device-delivery-20260904` / `7db0dcd052891e0e189c5e931a27558256fea032`；
+工作台仍`codex/annotation-workbench` / `f78875b210379469fb8934712b6fb9f77b8b6690`，当前分支与未提交工作保留。
+本轮使用既有标注、训练和去重实现，无产品代码修改、付费调用、NAS访问或生产资产替换。
+
+清洗侧C的1帧0→29件、称量侧C的1帧2→51件，两遍检查后均版本3/区域外复核，保留3/5区未知。
+清洗和称量都逐件分出10支架上枪；称量还保留6个开口管端、7枚管盖、8个清楚枪头端。
+称量初标52件，第二遍9倍叠框发现一个疑似枪头端不可分，撤回后51件，未知区不删。
+移液47.514s帧2→27件，版本3，8支枪可辨，右端运动手套遮挡后的小灰弧不能靠邻帧补第9支；
+4区未知，原val/needs_review保持，不进入训练或完整验证。80.774s帧再次看原图及6倍管架仍不能辨透明管身，版本/标注不变。
+
+212图/2543框：86完整/1196框、21区域外/553框、33待复核/745框、21草稿/32框、51排除/17框。
+201来源与11裁剪分别计数；全量普通导出124阻断，未知明确保存导致计数增加，不等于标签可被删掉。
+全部212源文件SHA、角色、分区、组别重验不变，仅上述3图版本改变；净增103框。
+三帧工作台版本3、29/51/27件和3/5/4未知实读，截图实际看过。31份视觉文件回执SHA
+`fa17b666442513fe6ef688f70404fcaa5dc0e6d579b753e03edf68ddb51816d3`，审计头
+`98f2bba079e0cf104898d96a7405c9119e1fb2e86bd87b7ee64df92c3269ebf2`。
+
+冻结v9共106条，保留原v8全部104条与验证34文件，只追加2张TP训练图80件/8区；FP80train/15val不变。
+TP9train/2val，全训练仍属于curated-2026-06-18，验证仍同一原图2裁剪/27件；不增加独立实验。
+回执SHA `c33c9fae0ec014f8b58744c23877614942191c3d4ba1812277bc3d61d6e851d8`。
+
+第28–30轮分别TP v11当前7图对照、v12新9图、v13新9图仅分类输出；21/44/25epoch、11.04/24.96/9.94秒。
+v11原始预测逐字节复现旧v9；结果15/20/12、18/3/9、16/6/11，P/R42.9%/55.6%、85.7%/66.7%、72.7%/59.3%。
+v12的AP50/50–95为76.0%/62.5%；相较对照逐类TP不降，搅拌器、瓶盖、样品瓶各多匹配1件，枪仍9/9。
+仍不及历史增强TP的22/2/5，不能仅选较差对照宣布最优。7→9张导致每epoch 2→3批、早停不同，不单独归因于某个框。
+所有候选及基线重新推理；micro/macro/逐类/错误/来源组重算一致，30轮同角色基线SHA一致。
+比较回执SHA `7042586bc8108fec96a338220794e76369c3cddcfc35789403ca44bf9184f67c`；v12候选SHA
+`3470fbdb587d09c9c7e1b36e9c4cbce240a66e5b274b63750b2fb5ee7fb8cc5d`。
+实际图访问147/396/225次，42/132/75批，两分支各忽略anchor访问11340/49632/28200次；不是新独立数据。
+
+实看v12全部3FP、9FN及两张冻结源裁剪和瓶重复对照，共15图：松放手套误认手、PPE印刷面误认纸；瓶是重复框。
+瓶框IoU0.949529，两框实指同一瓶。既有同类0.90规则离线重放，v11/v12/v13分别删1/1/0个≥0.25框；
+本小验证逐类TP不降，v12为18/2/9、P/R90.0%/66.7%。纸、红盖和枪架仍有低分漏检，没有据验证调阈值。
+错误复核SHA `c9cd48afd7cf73d73d5c603097cc270707db5b12dc877733b87e075247141dc6`，去重SHA
+`a331b6085a681b3ac8424a5f820a1818aba58ed3d65c3945a7ae6c552b981653`。
+
+PROVEN限本轮逐图检查/版本保存、真实训练和离线核验、工作台回读；内部质量PARTIAL_EVIDENCE。
+全数据完成、第三人称完整密集验证、新候选真实视频/系统/事件/浏览器验收、方舟语义与正式归档仍NOT_PROVEN。
+goal继续active。后续补查其余未完成原图、盒内松放手套/包装印刷面等真实难负例，核对第三人称旧类别初始化语义；
+保持验证来源与阈值，新增合格数据后再比较，不以持续增加训练次数代替质量证据。
+
+## 26. 四张原图双遍复核、角色类别核对与第31–32轮训练（2026-09-08）
+
+主仓仍`codex/rtx3050-device-delivery-20260904` / `7db0dcd052891e0e189c5e931a27558256fea032`；
+工作台仍`codex/annotation-workbench` / `f78875b210379469fb8934712b6fb9f77b8b6690`，原未提交工作保留。
+本轮未改产品代码，无付费调用、NAS访问、生产权重或引擎替换。
+
+F111/F113/F115/F116原图及分区放大实看，版本2→3初标→4第二遍区域外复核，22/13/13/14件、2/1/1/1未知。
+同一人的两袖合一件实验服；手套框去掉裸前臂或旋钮；瓶框剔除后方PET或天平，前景烧杯补可见倒液嘴。
+F111补7个可辨蓝枪头端部/连续外壁和1个红盖，F113补左缘蓝PET；架孔不补管，密集废枪头仍未知。
+四图62件/5区、净增8框，不新增图片或独立来源，原角色/train/20260525不变。
+212图/2551框：86完整/1196框、25区域外/615框、29待复核/691框、21草稿/32框、51排除/17框。
+201来源、11裁剪分开计数；普通导出124阻断。27份标注视觉文件实看；四图网页版本4/计数回读，F111截图实看。
+全部212源SHA、分区、组和角色不变；审计头`ca697fbd1213f58f7914f7aab5753ceff636ea5517cd20e303f635b782cb1074`。
+
+冻结v10共110条，v9原106条与34验证文件完全不变，仅增上述4张FP训练图。
+FP84train/15val/212件验证；TP9train/2val/27件验证不变。
+第31轮TP v14先于FP新批次、仍用v9，不能将后加4图归为TP训练输入。
+
+第31轮先核对TP旧模型在4张已复核训练整图上的实际输出，确认旧11类框覆盖整盒枪头，再固定TP v12的9train/2val，仅启用旧11→22初始化、11重新学习。第32轮给FP加入F111/F113/F115/F116四张双遍区域外复核图62件/5区未知；冻结v10共110条，原106条与验证34文件不变，FP84train/15val、TP9train/2val。两轮实际65/46epoch，分别默认逐图/来源平衡采样，均无增强。
+
+TP v14相较v12多匹配1盖和1试剂瓶、少1支枪；原始19/6/8，去重后19/2/8，P/R90.5%/70.4%。实看全部6FP/8FN：用品盒印刷角误认纸，另5个多余同类框对应已有实物，现有0.90规则删4个；最右枪重复框IoU0.89765仍保留，没有为此调阈值。只有小验证上逐类TP不降，不能当所有密集目标安全证明。
+
+FP v18相较v17少5FP、多3FN；原始162/23/50，去重后162/13/50，P/R92.6%/76.4%，仍较v17的165个TP退步。逐件比较是10个新增漏检、找回7个旧漏检。实看10个新增FN，多为侧缘/遮挡天平、容器、枪、袖子、窄枪头盒边、远处管、底缘盖及右缘管架；相符同类最高分0.0181–0.2269，没有降低固定0.25阈值。额外重看F092全图确认天平后蓝PET，未据模型结果改验证标签。
+
+TP旧11类在4张训练图的框与项目22类框IoU0.904–0.962，形成该角色自己的迁移依据。迁移后同4图均以22类检出盒体和相连盖（0.863–0.954），v12原仅2图有≥0.25框；但4图18个已标单支枪头端仍无任何≥0.25的11类预测。这里是训练场景诊断，不能填补验证中缺少11/22正例的门槛，也不证明独立精度。
+
+TP v14实际65epoch、35.997秒，FP v18实际46epoch、98.031秒，耗时含训练及评测，不是系统SLA。
+两轮micro/macro/逐类/错误/来源组重算一致；累计32轮（FP18、TP14），同角色基线SHA全一致。
+TP585次图访问/195批、FP3864次/966批；两分支各忽略anchor访问73320/1266382次，
+已知正项分别12426/2104、136604/14218次；访问次数不等于独立样本。
+旧模型与v12训练场景诊断共8次图像调用，v14后诊断另4次（1.067秒），都不是额外训练。
+TP错误复核回执SHA `ca1ac8dd947dc917e5d444c9e7cfd65651d9286a82fca2c608db54d6291a3ac9`；
+FP新FN复核回执SHA `7bb05a6bfdbc4be70ddb010f6805575cefb19b65ff98392cba197071fda52d1a`；
+TP旧类别视觉回执SHA `528f65cf70725f539fd9c7335db2817ebb8e58eeaecd6b1068a8ce4459cf7449`；
+TP迁移后训练场景视觉回执SHA `1dfa7be2f789ca162e36e647e73a96564edd2ffcb18bb6c063232f65d3731ba7`。
+
+视觉回执`visual-review-receipt-goal14.json` SHA `2fbf9849b00589f75b5c064ebbfe17e925dece3375924afa04031ebdd775d1f9`；
+冻结v10回执SHA `3d691796f9326f31535e7ece5d0d4e7709f72760cf2c744faeca24fcc58493fd`；
+比较回执`training-goal14-comparison.json` SHA `84f7d8ca536a5dfcd2873ffffcb0b1e362aadfe17dd4a37cbd703d50d0a540df`。
+TP v14候选SHA `8c40f53a6cadf28d63e089cff148150a81a148d55362584cbf5b8518551768ea`；
+FP v18候选SHA `6c7443b008277b9a11d581f5989239812ff2342fa22238369b5bdc3d12e74ef5`。
+TP/FP去重回执`postprocess-audit-goal14-tp/receipt.json`、`postprocess-audit-goal14-fp/receipt.json`
+SHA分别`8a6a59c470251ee60027bf1284805eac450a39c49cd12ce7d464011ee0d07b2b`、
+`96b24dac6b3e8e45097911c345dc0dc51cf66a10bb33be2644fa28ea0e34021d`。
+
+PROVEN限实际标注/保存、真实训练/预测、离线核验及工作台回读；内部质量PARTIAL_EVIDENCE。
+完整数据、TP全幅密集验证、单支枪头效果、新候选真实视频/系统验收、方舟语义与正式归档仍NOT_PROVEN。
+goal继续active。下一步优先补查尚未完成的原图和已抽验证帧，补可辨枪头与边缘遮挡样例，保持来源隔离。
+本轮核对移液侧C来源元数据：抽帧来自95秒1280×720派生片段，包上游索引指Y盘；仅列本地包文件，
+其中未发现独立原始高分辨率视频，不访问或重写NAS，不把插值放大视为新增细节。
+
+## 27. goal15：实际优化更新、单支枪头学习诊断与称量全幅补标
+
+上一轮有实质进展，本轮继续PROGRESS，goal保持active。Vision分支`codex/rtx3050-device-delivery-20260904`，HEAD`7db0dcd052891e0e189c5e931a27558256fea032`，保留原36处已跟踪修改和其他未提交工作。
+
+- 产品改动限训练入口/CLI与相关测试文档：显式nbs、预热和patience；旧默认不变。原生optimizer post-hook记录每次更新、epoch、累积数和学习率；新失败回执恢复拒绝缺失或变更的更新证据。58项相关检查、ruff、compileall、CLI检查通过。
+- 只读数值诊断在冻结9张train、3个v14检查点上做27次前向，无优化，状态前后相同。18枪头均有one-to-one正分配，未被ignore删掉；初次包装缺默认损失权重的失败4图前向单独保留。
+- 第33轮TP v15默认控制65epoch/24更新，预测逐字节复现v14。第34轮v16每批更新、无预热、lr0.001、无早停，固定80epoch/240更新；同9train/2val不变。原始19/6/8→18/2/9，AP50/95从.77822/.65509变为.72781/.59974。来源访问585/720、损失分支各195/240批，不把epoch当更新次数。
+- v16同4训练图追加4次真实预测：18已知枪头从0→18一对一匹配，但51个高分框含重复/未知；不算全图P，不称泛化。4张对照图实际查看。固定验证11个错误全部通过3页对照实看；新增天平漏检，另两个FP是重复的搅拌器/试剂瓶。原0.90去重后18/0/9，召回仍66.7%。
+- 称量侧C第0帧版本3→4→5，50框/2未知，区域外两遍复核；净增40框。全项目212图/2591框，86完整/1196、26区域外/665、29待复核/691、20草稿/22、51排除/17。201源图、11裁剪；普通导出124阻断，当前审计头`ff57415467ecdabef85187b6fe83673b4a6606fba7b1f3545137c14aedb1869e`。所有源SHA/角色/分区/组保持。工作台实际回读版本5/50件/2未知及截图。
+- 新冻结v11保留110条、追加1训练帧，FP84/15、TP10/2；34验证文件不变，未用于本轮训练。未替换生产权重/引擎，不访问NAS、不付费调用。
+
+PROVEN限实现、针对性检查、实际标注/训练/预测及工作台显示；内部质量PARTIAL_EVIDENCE；完整数据、密集TP独立验证、新候选真实视频/系统效果、方舟语义和正式归档仍NOT_PROVEN。下一步检查新类优化与旧类遗忘、未知区域对重复框学习的影响，并继续剩余原图复核。未知区域不能为了提高分数而删除。
+
+## 28. goal16：五图区域外复核、第35–37轮与逐类退步核对
+
+上一轮有进展，本轮继续PROGRESS，goal保持active。Vision仍`codex/rtx3050-device-delivery-20260904` / `7db0dcd052891e0e189c5e931a27558256fea032`；工作台仍`codex/annotation-workbench` / `f78875b210379469fb8934712b6fb9f77b8b6690`。未改产品代码、生产权重、引擎、原未提交工作或来源分区。
+
+F045/F046/F047/F058/F102完成两遍区域外复核，共60框/5未知，净框-2；原图与放大/叠框26份实际查看，F102网页版本5/8件/1未知已回读。全项目212图/2589框：86完整/1196、31区域外/725、24待复核/629、20草稿/22、51排除/17，普通导出124阻断。新v12共116条，FP89/15、TP10/2；原111记录与34验证文件不变，未用于本轮三训练。
+
+TP v17分类输出对照80epoch/240更新，20/5/7，但四张训练图的18已知枪头匹配0；TP v18增加前轮复核称量图，10train仍80epoch/240更新，21/1/6，既有去重后21/0/6。实看全部7错误与四张枪头对照；v18已知枪头18匹配但高分框56，含重复/未知，不能算全图精确率或新类泛化。v18仍不及历史TP增强v4的22/2/5。
+
+FP v19固定84train/15val，低lr0.0001、来源平衡，仅更改整套日程，80epoch/1680更新；162/26/50，去重162/10/50，P/R94.2%/76.4%。AP提高但管/盖/纸各少2TP，不能替换生产。累计37轮FP19/TP18，原始指标与采样/更新证据核对，同角色基线SHA全一致。
+
+比较回执SHA `daad8549ac4e5c263da37e2d032b03112bf64c61b633d6ad3152fe19826c691c`；数据回执SHA `201dea7ba61df31104df49a9f2748aee4d260bcb4843ab21e570eafcc78f9825`；总回执`Project-Detector-Pilot-20260907/goal16-work-receipt.json`记录源/代码/生产哈希与所有子回执。两个辅助脚本错误（模型前建目录、导出后比较键名）均留证并修正，无失败训练或覆盖导出。
+
+PROVEN限真实执行和回执核验；质量PARTIAL_EVIDENCE，数据全量完成、候选真实系统、独立逐类效果、方舟语义及正式归档仍NOT_PROVEN。接着处理未完成原图、已冻结v12对照、管/盖召回与密集重复框，保持所有验收门槛。
+
+## 29. goal17：清洗三帧、两次训练及原生推理分支对照
+
+本轮PROGRESS，goal保持active。原Vision分支/HEAD与工作台分支/HEAD不变，未改产品代码、生产权重/引擎与其他未提交工作。
+三张第一人称清洗帧版本1→2→3，80框/5未知，净增75框；逐图两遍实看，32份视觉文件归档，第0帧工作台版本3/30件/2未知已回读。212图/2664框：86完整/1196、34区域外/805、24待复核/629、17草稿/17、51排除/17。普通导出127阻断，审计头`69f36ad16486ad04290caf2d9474ddc453a667840ab7425e26b004b87067bdd7`。
+v13冻结119条，原116条和34验证文件完全不变，FP92/15、TP10/2，两个消费检查通过。第38/39轮FP v20/v21用v12/v13，实际61/59epoch、100/97更新；159/23/53→164/24/48，但管盖少2TP、AP下降。累计39轮FP21/TP18，同角色基线SHA一致。
+同已存权重原生one2many+NMS0.7对照：FP v19 162/26/50→173/7/39，TP v18 21/1/6→23/1/4；TP原生产基线却16/7/11→15/7/12。38次源图推理/NMS与4次预热分开。四张TP train已知枪头18匹配保持，高分框56→25，称量图仍有重复；未对未知输出全判FP。实看全部TP5错误及FP新增3漏检，FP枪头盒净少2TP，不能全局切换。
+运行根`Project-Detector-Pilot-20260907`下`training-goal17-comparison.json`、`native-branches-goal17-attempt4/receipt.json`、`verification.json`、`visual-review-receipt.json`及`goal17-work-receipt.json`记录证据。标注回执`visual-review-receipt-goal17.json`，v13回执SHA`593bcd969ada17d602702c3a73451f814e836b50ddde7b2a1b2628c9d739c576`。辅助失败保留，15次成功预测恢复后复用，未重复推理它们。
+PROVEN限本轮实际执行与核验；内部质量PARTIAL_EVIDENCE，数据全量/TP全幅/独立逐类/候选真实视频系统/方舟语义正式归档仍NOT_PROVEN。继续17草稿/24待复核和来源隔离的完整验证，针对管盖/边缘枪头盒退步与分支变化继续优化。
+
+## 30. goal18：移液整图补标、原生分支和第40轮失败对照
+
+本轮PROGRESS，goal保持active，Vision/工作台原分支与HEAD和未提交工作保留；产品代码、生产4资产不变。三张FP val移液图版本1→2→3，逐件两遍检查102已知框/9未知，净增96框；保留待复核/val和源组curated-2026-06-17。212图/2760框：86完整、34区域外、27待复核、14草稿、51排除，201来源与11裁剪分开。全量普通导出130阻断，指定工作台第1帧版本3/33件/3未知已实际回读。
+
+原15张验证/212实例的原生分支对照：v20best178/12/34、last179/17/33；v21best178/16/34、last178/11/34。换检查点未解决管盖与枪头盒。第40轮FPv22固定v13的92/15及初始化，改nbs4/无预热/禁早停，实际80epoch、1840更新、186.332秒；原输出155/15/57，原生分支174/9/38。管盖4/8、盒7/8，但其他类别退步，禁止晋升。累计40轮FP22/TP18，所有同角色基线预测SHA一致。
+
+新三张完整图已知102实例：基线one2one/one2many匹配36/45，v20/v21/v22为57/53/55；2支已装透明吸头均未匹配。未知区域使全图P/R不成立，不将其混入训练，40轮的训练来源均已核对。抽查F077/F079/F112没有证实可直接补标的枪头，不将猜测当漏标根因。实看v22把药匙端黄色物体误识为盖，以及同一橙盖多出的含管颈框；拒绝以精确率上升替代系统质量。
+
+90次诊断源图调用/87次源图NMS/10次预热NMS与第40轮30次基线/候选预测分开记账。5原生验证+5已知实例报告从保存预测复算；来源/优化轨迹复核、45份标注视觉/5份训练审查视觉/1网页截图/9有效诊断图实际查看。辅助失败保留，产品代码测试未重跑，文档diff检查。运行根`Project-Detector-Pilot-20260907`的`goal18-work-receipt.json`、`training-goal18-comparison.json`、`goal18-diagnostic-comparison.json`及工作台`visual-review-receipt-goal18.json`保存证据。
+
+PROVEN为具体执行、复算、标注和指定浏览器页面；质量PARTIAL_EVIDENCE；数据全量、独立逐类、TP全幅和候选真实视频系统/机位PTS/性能/素材播放/方舟语义正式归档NOT_PROVEN。继续14草稿、27待复核和未知区域，增加来源隔离的完整验证，补密集器材/已装吸头及困难负例后检查训练范围，避免重复无效日程。
+
+## 31. goal19：8图密集复核、新训练批次与裁边后重复框根因
+
+212图/3025框：86完整/1196、42区域外/1074、27待复核/731、6草稿/7、51排除/17；201来源与11裁剪分开。8张既有训练组整图（FP4/TP4）逐图初标及第二遍区域外23类复核，全部版本3，共269件/15未知，净增265框。包括70支移液枪、30个管盖、22根可辨试管和19个枪头端；架/盒、内置件分开，不按孔或邻帧补数。第二遍修正枪架误包瓶子、枪杆与灰架混框、纸张漏边及药匙范围；F1两处包含未知合并扩大，不当背景。源SHA、人称、分区、组及其他204条记录不变。52份标注视觉和第三人称T3版本3/48件/2未知工作台截图实际查看。
+
+冻结`context-partial-v14`127条：FP96train/15val，TP14train/2val。原119条版本/源与标注SHA、全部34验证文件不变，两角色消费检查通过；保留ignore、禁止增强。全项目普通导出仍138阻断（72未完整复核、66未解决区域），不能称全部数据完成。标注回执`visual-review-receipt-goal19.json` SHA `ca06d14a8cb4ae522e885549d924d6352e5fbc9c854345de3e8903e10bfbf49a`；新导出回执SHA `dea8af9abae31d420dcc9362a2f3c4fcc92c83a8aed9d9b1843d24dbf769bc6d`。
+
+FP v23训练进程在主机重启后已不存在，状态停在training；日志/CSV/优化和采样轨迹含空字节，epoch70.pt为空。记录的1920更新无法用当前轨迹复核，禁止把它记为完整训练成功。原文件、完整性检查和中断回执全部保留；best/last通过ZIP CRC检查，best SHA `40d2b3e4a1fd68995d17d2655b04d6135d344cff1a9d5e3c99b178ddba706ff2`只用于独立诊断，训练总耗时与完整执行证据NOT_PROVEN，没有伪造补齐轨迹。随后单独执行此前尚未启动的TP v19，80epoch/320更新、51.125秒，原输出21/3/6，最佳SHA `a5406a48cf463139f319bf49fcd2a756755ab989ff277a8a55e96b92b3c399e3`。累计完整回执41轮（FP22/TP19），另1轮FP中断不混计；各完整轮同角色基线SHA一致。
+
+| 固定验证条件下的诊断 | TP / FP / FN | P / R | AP50 / AP50–95 |
+| --- | --- | --- | --- |
+| FP v23 one2one，15图/212件 | 154 / 20 / 58 | 88.5% / 72.6% | .84694 / .72238 |
+| FP v23 原生one2many + NMS .7 | 171 / 11 / 41 | 94.0% / 80.7% | .90007 / .75152 |
+| TP v19 原生one2many + NMS .7，2裁剪/27件 | 23 / 2 / 4 | 92.0% / 85.2% | .79784 / .62577 |
+
+相比同分支v22，FP少3TP、多2FP，瓶盖少3TP、管盖少2TP、枪头盒少1TP；不能因AP略高晋升。3张未进入train的FP移液完整图，102个已知实例匹配58（枪21/30、管盖10/14、管4/6、盒3/3、已装吸头0/2）。第1/2帧手持枪找回，但密集枪仍漏，第0帧手持枪仍漏。未知区使全图P/R不成立。实看FP9个关键错例格：8个管盖/盒漏检都有低于0.25的同类候选；药匙上的黄色物体仍误报管盖0.520。TP所有6错例和3张FP密集对照均已实看。
+
+两TP额外枪框与已保留高分框在最终坐标IoU约.834/.879，虽然真实调用记录NMS=.7仍共存。再次真实运行同一验证裁剪并截取NMS后、缩放裁边前后的坐标，结果逐项复现原预测：三个配对IoU从.652/.569/.695升到.834/.722/.879，证实本例裁边改变了去重几何。以原0.7阈值在已存最终坐标再次NMS，TP v19离线变23/0/4；FP v22/v23和TP v18指标不变。这是已定位的候选PT问题与离线对照，还没有接入系统/引擎或通过真实视频门禁，不改生产模型。
+
+本轮成功诊断36次源图调用（35次完整仪表记录，其中20次源图NMS；另1次裁边观察复现）。初次诊断在预热分支断言失败，实际源图调用0，旧脚本和目录保留。3份完整验证报告及逐来源、1份已知实例匹配报告复算；另4份离线再次NMS结果单列，不算模型调用。训练TP基线/候选各2次、FP中断前基线15次另记，不混入诊断数。运行根`Project-Detector-Pilot-20260907`的`goal19-training-interruption.json`、`training-goal19-comparison.json`、`goal19-diagnostic-comparison.json`、`clipping-trace-goal19/receipt.json`和`goal19-work-receipt.json`保存证据。诊断比较SHA `4c8bd74ad6c9bdc5281768d6dc33442c2f08cd826bf7a55e7d0a5068ee74ad90`。
+
+本轮产品代码未改，原分支/HEAD、未提交工作及4个生产资产保留；辅助失败明确留存，历史代码测试不冒充本轮重跑。Goal active，PROGRESS。具体标注、TP训练、诊断与裁边根因、指定工作台页面PROVEN；内部质量PARTIAL_EVIDENCE；FP v23完整训练、全量标注、独立逐类/TP全幅、候选真实视频系统/性能/素材播放与方舟语义正式归档NOT_PROVEN。下一步修复训练证据持久化、将裁边后的重复检查接入候选流程并跑针对性回归与真实视频，同时继续6张保留测试草稿、27待复核与完整来源隔离验证。不能重复无效训练或降低门槛来报完成。
+
+主机重启后原8010/8003服务缺失，本轮按既有本地配置恢复，并创建启用两个持久化用户服务（登录后自动启动）：`annotation-workbench.service`与`visioncortex-partial-preview-20260907.service`。仅监听127.0.0.1，8003沿用只读预览及lifespan关闭，不启动队列；原8000/8001服务未改。服务/HTTP回执与浏览器验证分开保存。实际重开工作台，212图/3025框及T3版本3、48件/2未知和图像叠框可见；8003原阶段性档案显示4片段/98候选，首片段未播放时已有预览图，点击后实看到0:06/0:58的播放画面，0:14暂停成功。只证明这份既有档案和首片段恢复，不能代替新候选真实视频或完整语义验收。见运行根`goal19-service-recovery.json`和`goal19-browser-recovery-observation.json`，后者4次截图实看记录保存在会话，未声称另有本地截图文件。
+
+## goal20：训练中断保护、完整复跑及系统去重回放
+
+本轮为开发与本地真实验证。当前分支仍为`codex/rtx3050-device-delivery-20260904`，HEAD `7db0dcd052891e0e189c5e931a27558256fea032`；保留其他未提交工作和全部生产资产。标注库保持212图/3025框，没有新增标注或改变分区。上一轮为PROGRESS，本轮Goal继续active。
+
+新增`project_training_evidence.py`并接入项目训练入口。JSON使用临时文件、文件fsync和原子替换，POSIX另同步目录；框架保存权重和最终剥离优化器先在独立目录完成，成功落盘后才替换正式候选文件。每epoch保留优化轨迹、来源采样、CSV、参数和ignore实际消费快照；最终权重、原始轨迹及80个快照必须通过完整性核对。多文件发布不是一个事务，中断留下不一致时仍拒绝称完成；失败暂存和旧回执保留，旧受损FP v23没有被倒填修复。当前部分监督仍不支持从中间epoch自动续训，修复后在新目录复跑。详见项目训练说明。
+
+按v23相同v14数据、80epoch/960/batch4/FP32、来源平衡、nbs4、无预热、无增强、冻结范围及学习率.0001执行FP v24（`first-person-durable-weighing-v24`）。实际80epoch、1920更新、189.831316秒；96训练图重复预处理7680次不等于7680个独立样本。80份epoch快照和1份finalized回执逐一验证，逐epoch优化数、来源采样、CSV行数及两损失分支ignore消费重新计算；所有保存PT的ZIP CRC通过。证据快照约54.55 MB，权重仍按原best/last/每10轮策略保留，不声称保存全部epoch权重。最佳候选SHA `bc536929b5540fe8912fe622414abff78717077327ab24c8204f2ad5670350c4`。累计完整回执42轮（FP23/TP19），另FP v23中断单列。
+
+| FP v24固定验证 | TP / FP / FN | P / R | 说明 |
+| --- | --- | --- | --- |
+| one2one直接输出，15图/212件 | 154 / 20 / 58 | 88.51% / 72.64% | 与v23旧候选指标相同 |
+| 原生one2many + NMS .7 | 171 / 11 / 41 | 93.96% / 80.66% | 逐项原始预测及完整报告与v23完全一致 |
+
+另对原3张FP完整图的102个已知实例做同条件真实诊断，匹配58，输出71个≥.25框；已装吸头仍0/2。这3图仍有未知区域，不能计算全图P/R或把所有未匹配框都叫误检。新诊断实际18次源图调用、18次源图NMS；训练前后独立验证各15次另计，训练内验证不混计。新训练解决完整证据和可重复性，没有提高检测质量，不重复同一日程来报改善。
+
+系统已有最终归一化坐标、按角色配置的`suppress_duplicate_boxes`，因此没有再造重复实现。新增真实裁边数值回归：原图外两重复枪框裁回边界后超过.7，在系统函数内移除，两个相邻实物框保留，原始框完整留证。把4份既有原生输出共34帧、3752框回放进同一系统函数，保留3695框、完整记录57次移除（大部分低于展示阈值）。各原始预测和指标与goal19单独离线计算一致；TP v19在.25下由23/2/4变23/0/4，其余三个对照指标不变。此回放模型调用0，不代替候选真实视频系统验收；生产去重配置、权重和引擎未改。
+
+最终85项相关测试通过（含进程直接os._exit、原生保存/结束中断、写盘失败、历史快照和已完成回执篡改、密集相邻框及扫描断点约束），`ruff check src tests`、`compileall`和diff检查通过。GPU解释器没有ruff模块，改用仓库既有`.venv/bin/ruff` 0.12.0通过，没有安装依赖。真实GPU训练后又补了输出目录父目录同步、失败回执持久化、已完成回执再次校验三处保护；实际训练严格归属于归档的导入时源码，最终版本通过针对性测试及这份真实完整回执重验，未冒称再次重跑80epoch，也未做物理断电测试。
+
+运行根`/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907`保存`goal20-verification.json`、`diagnostics-goal20/receipt.json`、`system-suppression-goal20/receipt.json`及`goal20-work-receipt.json`。具体训练、记录验证和系统函数回放PROVEN；内部质量PARTIAL_EVIDENCE；全量标注、独立逐类完整验证、候选PT/引擎真实视频、机位PTS/关键素材/性能与方舟语义正式归档仍NOT_PROVEN。下一步把已验证的候选推理分支与最终去重用于隔离的真实视频系统对照，同时补完整验证和已装吸头/密集实例覆盖；继续6测试草稿和27待复核，保留来源隔离，不用验证集调参后冒充测试通过。
+
+## goal21：候选分支接入、两段完整真实视频扫描及密集框复核
+
+本轮把按角色显式选择候选 PyTorch `one2one` / `one2many` 接入产品 `RoleScanner/scan_videos`；配置前核对双分支检测头，推理后检查后端实际分支。断点记录权重SHA、分支、阈值、图尺寸等身份；改变后在加载模型及截断旧输出前拒绝复用，包括尚无完整块的断点。默认生产行为和已有权重/引擎保持。91项相关测试通过，ruff、compileall、diff检查通过。实际运行源码已归档，检测相关最终源码摘要与运行时一致；并行任务改动的api.py不计入本轮运行证明。
+
+使用FP v24和TP v19原候选，在RTX 3090 Ti上通过产品扫描入口分别完整读取本地两段约95秒的既有Pipetting派生实验视频。来源为`view-03-front/raspberrypi-01_cam01`与`view-04-side-c/rk3588-ubuntu_cam01`，视频SHA分别`e99be8f47ad6625e17b46f0124cc20224db53fa1e080cec23ebc4ec1d5d56538`、`0a744eba3debccb34e49062305553180f70856df55ac224f825670a6f180000d`。均为960输入、8fps、batch4、FP32；两组各1520源帧/380预测批次。直接分支0次源图NMS，原生分支1520次源图NMS；后者还执行最终坐标的同类0.7去重。两组耗时14.924259秒和15.407359秒，包含证据记录开销、只有一次固定顺序对照，不是速度提升或六路全链路SLA证明。
+
+| 人称/760帧 | 直接分支原始框 | 原生分支原始框 | 原生最终去重后框 | 最终坐标移除次数 |
+| --- | ---: | ---: | ---: | ---: |
+| 第一人称 | 27600 | 28223 | 28196 | 27 |
+| 第三人称 | 39124 | 34767 | 33222 | 1545 |
+
+上述为跟踪前框数量；第三人称1538次移除涉及移液枪，不代表1538支实物或1538次正确去重。逐帧核对两组源时间、索引及像素SHA完全一致，再独立解码全部1520帧验证像素SHA；所有最终去重审计以产品函数重新计算一致。相同配置复跑0次源推理、原检测账本字节不变，耗时0.352903秒（仍有模型初始化）；改变分支的复跑在模型加载前被拒绝。
+
+实看22张诊断图：两机位各5个固定时刻对照、11个按类别/机位最小移除IoU的细节图及1张机位联系表。原生分支减少了第三人称管盖/架的明显重复，但两人称仍有多支枪共框；FP14.25秒原生分支漏掉直接分支能框到的手持枪；FP80.75秒同一打开枪头盒的盒盖/盒身被多次框选。两张枪移除细节的保留/移除框都覆盖多支，无法证明移除对应同一单实例；袖子、架体边界也仍有问题。不能将1572次移除全部称为质量改善，没有计算缺少完整真值的视频P/R，也没有晋升生产。
+
+机位来源已核到文件、包、相机键和源像素；静态器材布局在不同投影下大致可解释，不能仅凭桌布颜色或朝向判为不同实验。该历史包明确`curated_demo_evidence/analysis_pipeline_run=false`，不是原始自动端到端证明。本轮用独立片段本地时间轴、对齐状态uncertain/confidence0，未确认物理同步或跨机位同一操作。
+
+运行根`/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907`的`candidate-video-goal21/receipt.json`、`video-review-goal21/verification.json`、`video-review-goal21/visual-review-receipt.json`及`goal21-work-receipt.json`保存证据。本轮无新训练、无数据修改，累计仍42个完整训练回执（FP23/TP19），另FP v23中断保留。标注212图/3025框、6保留测试草稿与27待复核保持；分支`codex/rtx3050-device-delivery-20260904`/HEAD `7db0dcd052891e0e189c5e931a27558256fea032`未改。
+
+候选PT产品入口真实视频扫描、逐帧复算及指定恢复行为PROVEN；视频质量PARTIAL_EVIDENCE。完整独立逐类验证、密集单实例质量、候选引擎、自动机位同步/关键素材/新候选浏览器归档/系统性能、方舟语义和正式归档仍NOT_PROVEN。Goal继续active：优先补完整画面和逐件标注，按手持枪、密集枪与盒体错例设计下一次训练；不重复同一日程或降低门槛来报告完成。
+
+## goal22：第三人称整图补标与密集枪去重风险
+
+在已有3张第三人称Pipetting验证整图上两遍实际查看，版本由5/3/5经初标变为7/5/7。净补7件（两帧的搅拌子及中间帧5个独立可辨枪头端部），修正枪架上界、盒盖漏边和搅拌子边界；最终40/33/33件，共106个已知实例。架上枪逐帧为9/8/9，开口管5/0/2；中间帧枪头仅确认上缘3加右缘5，不按孔位补总数。透明闭盖管身、遮挡端部及新增细白杆/底边片段共4/4/2未知区域保留。三图仍为needs_review/partial/val，未进入训练或完整验证导出；其他209条及全部源字段、角色、分区保持。
+
+当前212图/3032框（201来源、11裁剪）：86完整/1196、42区域外/1074、27待复核/738、6草稿/7、51排除/17。普通导出仍138阻断，审计头`664b56a5ab88e13b927d935013bb249854eb2f81724c87cf13b48ad4d5c76474`。实际工作台页面读取中间帧版本5、33件/4未知，212图/3032框及原图上部叠框可见；不把API成功冒充完整画面或系统归档验收。
+
+冻结这3张精确PNG及标注后，TP v19经产品RoleScanner分别实际运行one2one和one2many，960/FP32/batch1、confidence .25、IoU .7固定，共6次源图预测，实际源图NMS3次、预热NMS2次。没有拿goal21相邻时刻/不同尺寸的帧直接套此标签。原生最终坐标0.7去重另作纯函数对照，完整原始框及移除关系保留。与其他GPU进程共享设备，预检空闲显存超过20GB；不将1.77秒诊断耗时用于性能结论。首尝试要求独占GPU而在模型加载前被拒绝，0次源调用；原目录保留，第二次明确记录共享运行，不中断其他进程。
+
+| 条件 | 已知实例匹配/106 | 枪匹配/26 | 输出框数 |
+| --- | ---: | ---: | ---: |
+| 直接one2one | 67 | 25 | 94 |
+| 原生one2many | 78 | 23 | 94 |
+| 原生 + 最终去重.7 | 77 | 22 | 88 |
+
+匹配按置信度降序、同类一对一IoU≥.5；不是全图P/R，未知区未匹配输出不被全部称误检。所有三条件的手套5件、枪头8件、枪头盒3件和搅拌子3件均无匹配，且.25下没有这些类的输出。总体已知匹配提高不能掩盖枪类退步或这些重要类别缺失。
+
+纠正goal21仅凭画面提出的共框疑虑：斜放长条器材的合格轴对齐矩形本来会重叠并包含部分邻物，不能据此独立判定“一个错误框包含多个实例”。T1去重框互相IoU .8475，被移除框最佳对应gun-1，保留框对gun-2/gun-1几乎同分；按主匹配规则少1个已知匹配，按最大匹配数检查3图可匹配数也由81降至78。两种检查都不证明物理身份，但已经否定去重无损的结论；不把6次移除都称正确，不全局启用此候选配置，也不为这三张验证图搜索新阈值。单支身份仍须结合可见枪身和端部复核。
+
+6份最终坐标去重审计与9份主匹配结果独立重算一致；4张新的模型/标注对照图实际查看。标注实看43次文件图像（含3张原图第二遍重看），另工作台截图1次。辅助脚本的模块路径、快照摘要字段和分析语法失败分别保留，没有覆盖标注、重复模型调用或补造证据。证据根`Project-Detector-Pilot-20260907`下的`goal22-verification.json`、`diagnostics-goal22-attempt2/known-matches.json`和`goal22-work-receipt.json`保存详情；工作台`review-goal22/visual-review-receipt.json`保留来源与双遍记录。
+
+无新训练/导出/产品代码改变，完整训练仍42轮，4个生产模型/引擎保持。Goal active：继续训练来源中的手套、枪头/盒和搅拌子覆盖及剩余待复核数据，对新训练同时保留固定原验证与整图已知实例诊断，密集去重不得只按框数优化。具体双遍补标和6次真实诊断PROVEN；实际质量PARTIAL_EVIDENCE；完整独立逐类、候选引擎/全流程/机位同步/素材与浏览器归档/性能、方舟语义及稳定发布仍NOT_PROVEN。
+
+
+## goal23：训练覆盖诊断、主干冻结对照与一张密集训练图补标
+
+TP v19的14张训练图全部来自curated-2026-06-18；2张验证裁剪没有手套手、单支枪头、搅拌子、枪头盒正例。先冻结这16条及goal22的3张Pipetting整图已知标注，对best/last分别实际运行原生one2many，得到38次源预测。训练图best匹配411/427，四类分别12/13、40/45、12/12、8/8；整图验证仍78/106，四类均0匹配。last仅把整图手套找回2/5，枪头、盒和搅拌子仍0。说明训练图拟合不能证明换实验场景有效，也不能只延长日程或换用最后权重。
+
+本地训练入口新增有界`--freeze-layers`，默认10保持，0允许主干训练；记录限制应用后的实际参数状态，分类输出探针拒绝冲突设置。69项相关测试通过，ruff、compileall及diff检查通过。按相同v14数据、80epoch/960/batch4/FP32、AdamW lr.001、nbs4、无预热/增强/早停、来源平衡，分别完成TP v20冻结对照和v21解冻实验，各320次更新。可训练参数分别5,514,658和9,965,666；前10层从0变为4,451,008个可训练参数。保存best权重的前10层198个状态张量中165个不同；这一对照同时改变归一化训练状态，不独断权重或BN的单独因果。
+
+| 固定原生分支，confidence .25 / IoU .5 | TP/FP/FN（原2验证裁剪） | AP50 / AP50–95 | 3整图已知匹配/106 |
+| --- | --- | --- | --- |
+| v20 best 冻结10层 | 23/2/4 | .797840 / .625774 | 78 |
+| v20 last | 23/4/4 | .844904 / .657620 | 80 |
+| v21 best 允许主干训练 | 22/0/5 | .788119 / .629142 | 68 |
+| v21 last | 22/2/5 | .788119 / .634336 | 70 |
+
+v20 best与v19的全部19张源预测逐项一致。v21 best训练图提高到413/427，但整图手套0/5、枪头1/8、搅拌子0/3、盒0/3；3个衣服、3个纸包、3个用品盒等失去匹配。实看3张整图对照，用品盒框偏大并包住搅拌器区域，衣袖定位/漏检仍明显。枪类一对一匹配的增减不能单独证明物理枪身份变化。解冻方案不采用，全部候选production_ready=false；不以裁剪精确率100%掩盖召回与整图退步。
+
+两轮训练回执分别50.799和61.562秒；共享GPU，不作为性能或系统SLA证明。外层训练核验进程在v21完成文件落盘后返回143，原因未明、无可靠子进程终态回报；训练进程已不存在。没有重训或伪造退出码：独立重验两轮各80份epoch及finalized证据、优化轨迹、全部PT ZIP CRC、基线和候选指标，完成产物均通过。原终止情况单独保存。训练累计44个完整回执（FP23/TP21），旧FP v23中断不混计。
+
+随后对两轮best/last共4个权重实际进行76次源预测、76次源图NMS；加上先前38次为本阶段114次，训练前后各2图的8次独立评测另计，训练内验证不混计。114份已知匹配以已有独立实现重算一致；两批各19张原像素重新解码核对。6份完整裁剪指标单独保存，含未知的训练/验证整图仅报告已知匹配，不输出全图P/R。辅助分析首尝试因沿用旧文件名在写报告前失败，新脚本更正后复算，原始预测未改，也未重跑模型。
+
+工作台中C-Dissolve-And-Stir-view-04-side-c-0完成初标和第二遍原图、分区放大与叠框检查，版本2→3→4、10→49件，净补39框。逐件为10枪、4个可辨开口管、7管盖、8个可辨枪头端，枪/架、枪头/盒分别标；修正管架上界。闭盖管身、蓝色重叠端部、后排暗杆归属和底边弧片共4处未知保留，只能区域外监督。初标说明误写48，数组始终49，第二遍明确纠正。其他211条及所有源字段、人称、分区不变；此图在上述两轮训练后才完成，未混入原v14导出或本次训练。
+
+当前212图/3071框：86完整/1196、43区域外/1123、26待复核/728、6保留测试草稿/7、51排除/17，201来源与11裁剪分开。普通导出仍138阻断，审计头`2da7f39d1a4b8915622a00cec807e574ab9969efdf421f1b9665b2babed0f72a`。实际浏览器读取新图版本4、49件/4未知及最新统计，原图上部叠框可见；这不是新候选的系统归档验收。
+
+证据根`/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907`保存`goal23-training-plan.json`、`goal23-wrapper-termination.json`、`goal23-independent-training-verification.json`、`goal23-diagnostic-verification.json`、两组diagnostics-goal23目录及`goal23-work-receipt.json`；工作台`review-goal23/visual-review-receipt.json`保存实际查看及版本记录。分支`codex/rtx3050-device-delivery-20260904`/HEAD `7db0dcd052891e0e189c5e931a27558256fea032`保持，保留并行开发修改与4个生产资产。具体训练、补标、诊断与指定页面PROVEN；真实质量PARTIAL_EVIDENCE；全量完整数据、独立逐类/新候选引擎、自动机位同步、关键素材、浏览器完整归档、系统性能、方舟语义与正式晋升仍NOT_PROVEN。Goal active、PROGRESS；后续继续余下训练帧和未知区域，补充可复核的训练变化与来源覆盖后再做受控训练，不重复本次无收益解冻日程。
+
+最终全仓ruff复查发现并行工作中的`src/visioncortex/speech.py:466`存在B905（zip未显式指定strict）；本轮起始同检查通过，当前全仓检查不能称通过。该文件不属于本轮修改，未代改；本轮3个变更代码/测试路径的ruff单独通过，compileall与两仓diff检查通过，69项训练相关测试记录保持。见`goal23-final-checks.json`。
+
+## goal24：区域同步增强、两轮真实训练与系统图像对照
+
+本轮保留分支/HEAD与所有无关修改，新增部分监督v2离线增强及严格消费校验。完成称量TP一帧两遍逐件复核，212图/3079框：86完整、44区域外、25待复核、6保留测试草稿、51排除。新TP批次16train/原2val，64增强版本经实际预览。v22对照80epoch、v23增强16epoch均320更新/1280访问，累计46完整训练（FP23/TP23）；两个实际子进程退出0。
+
+系统原生分支84次源图预测，固定三张整图已知匹配78/106→84/106，枪24/26→26/26、手2/5→4/5、盒0/3→1/3；单支枪头0/8、搅拌子0/3仍未解决。两张验证裁剪TP/FP/FN由24/1/3变23/3/4；实看发现深色衣料被新增报为手套。局部收益PARTIAL_EVIDENCE，不晋升生产。原图和模型/引擎哈希不变，80项Vision测试、66项工作台测试及ruff/compileall/diff检查通过。
+
+详见 `docs/MODEL-ITERATION-RESULTS-20260907.md` goal24节与运行根 `goal24-work-receipt.json`。标注复核、增强预览、训练完成、源图诊断、浏览器标注显示分别留证；该候选尚未完成连续视频、全部标注、独立来源逐类及方舟正式语义归档门禁，Goal保持active。
+
+
+## goal25：尺度诊断与1280训练，Goal继续
+
+完成F035版本3→4→5双遍区域外复核；212图3079框中86完整、45区域外、24待复核、6保留测试草稿、51排除。原分区/来源及其他211条不变，工作台实际读取版本5。
+
+同TP v23以1280/1600推理退化，实际预处理和原图坐标观察确认三次调用映射误差≤0.0001221像素，未据此盲改默认值。新TP v24保持数据、64离线增强、16epoch/320更新与采样顺序，只改训练imgsz1280；完整训练累计47（FP23/TP24）。最后权重在1280推理的三整图已知匹配84/106，枪头2/8、枪25/26、手套4/5，但盒0/3、搅拌子0/3；未达到晋升门槛。系统图像诊断126次、额外坐标观察3次，126组匹配独立重算，6份模型对照/细节实际查看。不能由两张裁剪P/R提高推断全图质量达标。
+
+本阶段产品代码未改；检查、逐epoch证据、输入/权重/预测/标注哈希详见运行根`goal25-work-receipt.json`及[迭代记录](MODEL-ITERATION-RESULTS-20260907.md)goal25节。保留当前分支/HEAD、并行修改与生产模型；真实质量PARTIAL_EVIDENCE，完整系统验收NOT_PROVEN。继续剩余规范标注与可用来源补充，不拿重复静态机位帧或训练次数充当泛化证据。
+
+
+## goal26：密集验证图复核继续，第三人称原始包待补充
+
+F082/F083双遍实际原图与分区复核后均版本6，保留19/23件，玻璃内关联不明细条不猜接到枪身；两图仅区域外完成，原val与来源保持。其他210条不变。212图3079框中86完整、47区域外、22待复核、6测试草稿、51排除；普通导出138阻断保持。工作台实际读取F083最新版本和统计，未增加训练或模型调用，累计47完整训练不变。用户表示第三人称原始数据集后续提供；现有视频抽帧和复核工作继续。
+
+公开数据仅核对一手元数据，未下载/导入/训练。Mendeley实验器材数据页给出CC BY 4.0，列作可进一步核查的来源；实际样本、23类完整性及来源分组仍待核对。详见[迭代记录](MODEL-ITERATION-RESULTS-20260907.md)goal26节及运行根`goal26-work-receipt.json`。当前分支/HEAD、并行修改、4个生产模型/引擎保持，质量PARTIAL_EVIDENCE；Goal active，不将本轮标注进展称为最终系统验收。
+
+
+## goal27：第三人称原始包已导入并开始逐件复核
+
+桌面third_images.rar实际169原图全部解码并导入T000–T168，未附标签，旧记录不覆盖。T024实际双遍复核至版本2，32件已知/3处未知，仅区域外完成；10枪与6根敞口管逐件标注，利用对应图纠正俯视圆口误作盖的初判。新包其余168图仍待标注与分类。旧F086/F087/F117/F118复核继续，F117未知设备解决为电脑，成为整图完整；F118模糊管和底边瓶体不猜标签。
+
+当前381图3106框：87完整、51区域外、18待复核、174草稿（含6保留测试图）、51排除；来源370与裁剪11分开。全项目普通导出643阻断，未隐藏新草稿或未知区域。实际浏览器T024显示版本2、32件、第三人称/train及381图统计。新来源按同实验跨机位保守归组，近重复/未映射场次继续核对；旧模型使用过的原始数据不变成独立测试。
+
+本阶段没有新增模型调用、导出或训练，完整47轮及4生产资产保持。当前建议分人称模型、关联后互补证据；统一模型好坏待同数据固定评估，不能靠经验定论。详见[迭代记录](MODEL-ITERATION-RESULTS-20260907.md)goal27节、运行根goal27-work-receipt.json及工作台review-goal27/snapshot-final.json。全部系统质量仍未达标，Goal active，继续新包规范标注和受控训练。
+
+
+## goal28：新包4图复核继续
+
+T006/T025/T026/T037双遍逐件至版本2，共79件，分别保留2/3/3/1处未知。三图保守沿用日期跨机位源组train；T037未映射来源仍unassigned，不进入训练。其余377条与所有源字段保持。当前381图3185框：87完整、55区域外、18待复核、170草稿、51排除；新包169图中5图区域外、164图仍草稿。全项目普通导出640阻断。
+
+45次实际文件查看，浏览器实际显示T026的2手套手、1实验服、6管等22件和3未知；新训练/导出/模型调用为0，47完整训练和生产资产保持。标注及指定页面文字PROVEN，真实质量PARTIAL_EVIDENCE，最终系统和分开/统一模型优劣NOT_PROVEN。分支codex/rtx3050-device-delivery-20260904、HEAD 7db0dcd052891e0e189c5e931a27558256fea032与并行未提交工作保留。详见迭代记录goal28及运行根goal28-work-receipt.json，Goal active/PROGRESS，继续新包标注、源组核对和冻结批次后受控训练。
+
+
+## goal29：新原图4张双遍复核，继续目标
+
+T008/T015/T027/T031均到版本2、17/23/25/43件，共新增108；保留3/4/3/2处未知。T031的13个蓝色枪头口沿逐个核对，普通黑孔不计；T027结合实际F107辨认手持管，仅框本图可见部分，149ms文件名差不作自动同步证明。T122/T150复杂组仅初看，暗区枪架仍需逐件标注，未改其草稿。
+
+当前381图3293框，87完整、59区域外、18待复核、166草稿、51排除；新TP包9图区域外/219件、160草稿。全项目普通导出636阻断，其他377条与所有来源保持。42次实看，浏览器T031实际显示43件/2未知、13枪头等；无新训练/调用/导出，47完整训练和生产资产保持。标注核验PROVEN、质量PARTIAL_EVIDENCE、完整验收NOT_PROVEN。分支codex/rtx3050-device-delivery-20260904、HEAD 7db0dcd052891e0e189c5e931a27558256fea032及并行未提交修改保留。接续goal29-work-receipt.json与迭代记录goal29，Goal active/PROGRESS。
+
+
+## goal30 接续更新
+
+T122/T150已双遍区域外复核至版本2、24/21件、各5处未知，共新增45。T122可辨8枪；T150撤回右缘3个不可靠初标对应，留下4已辨枪及明确未知区。41次实看；同组T123/T151/F011仅上下文未改，其他379条及全部来源保持。当前381图3338框：87完整、61区域外、18待复核、164草稿、51排除；新TP包11图区域外/264件、158草稿。普通导出634阻断，浏览器T122实际显示24件/5未知、8枪及3338框。
+
+TP train候选26记录含21原图/5裁剪，4源组，较上次训练新10原图；待冻结新批次后受控训练，统一/分开模型公平比较仍待完成。无新增训练/模型调用/导出，累计47轮和生产4资产保持。分支codex/rtx3050-device-delivery-20260904、HEAD 7db0dcd052891e0e189c5e931a27558256fea032及并行未提交修改保留。读取goal30-work-receipt.json、goal30-next-cohort-assessment.json与review-goal30/snapshot-final.json。Goal active/PROGRESS；质量PARTIAL_EVIDENCE，最终系统验收NOT_PROVEN。
+
+
+## goal31 接续更新
+
+已冻结并检查原16train+2val与新增10原图的26train+同2val，实际查看40新增强及4密集分区，导出/消费方哈希与未知区域契约通过。v25/v26各完成520参数更新、1040样本访问，49完整训练（FP23/TP26）。实际系统分支31图×4权重=124源预测，独立重算一致：新训练图99/243→230/243，但固定full-val已知82/106→76/106；T03113枪头全漏，1280/1920额外4图调用仍无改善。生产权重保持，NOT_PROMOTED。
+
+下一步T031密集枪头区域制作有溯源训练裁剪并实际双遍复核，保留父图未知；调整稀少目标支持及旧来源训练覆盖，固定验证继续对照。工作台381图3338框、87完整/61区域外/18待复核/164草稿/51排除不变，全项目普通导出634阻断。分支codex/rtx3050-device-delivery-20260904、HEAD 7db0dcd052891e0e189c5e931a27558256fea032与并行修改保留。读取goal31-work-receipt.json、goal31-comparison.json、goal31-training-verification.json、iteration-summary-goal31.json。Goal active/PROGRESS，质量PARTIAL_EVIDENCE，全部数据及完整系统验收NOT_PROVEN。
+
+
+## goal32 接续更新
+
+新增T031有溯源训练裁剪awcrop-9fe263d6c298e70c6f92c8ee已实际双遍复核至版本3、13枪头+1盒；纠正外框相交但无枪体的裁剪草稿。原381条及全部来源保持。当前382图3352框、370来源/12裁剪，88完整/61区域外/18待复核/164草稿/51排除；新TP原169图仍11区域外/264框、158草稿。普通全项目634阻断，限定29条v2批次检查/导出/实际增强预览通过；8010实际显示版本3及当前统计。
+
+TP v27均匀采样与v28加裁剪完成，累计51轮（FP23/TP28）。128源图系统预测/独立重算，加原v26当前运行时32次复跑（旧31图结果逐项一致），共160调用。v27固定完整画面已知匹配76/106→81/106，v28为77/106；v28大裁块13枪头匹配，但整图10个框只有2个IoU匹配、固定val8枪头仍漏，局部训练拟合不能宣称系统改善。保持NOT_PROMOTED与生产4资产。
+
+下一步中间尺度密集上下文训练支持及冻结连续片段局部CV诊断，同时继续剩余标注与所有原目标门禁。接续goal32-work-receipt.json、goal32-comparison.json、goal32-training-verification.json、iteration-summary-goal32.json、工作台review-goal32/snapshot-final.json。分支codex/rtx3050-device-delivery-20260904、HEAD 7db0dcd052891e0e189c5e931a27558256fea032和并行修改保留。Goal active/PROGRESS；质量PARTIAL_EVIDENCE，独立逐类、完整视频/机位/素材/播放、候选性能及语义正式归档NOT_PROVEN。
+
+
+## goal33 接续更新
+
+完成两个约95秒既有真实派生片段的FP v24固定、TP v23/v27对照，共3040源预测，逐帧去重/跟踪重算一致，恢复0调用，模型变更阻断复用。TP候选枪头预测跟踪前6323→后2293；实际7.875秒密集区15→4，另16.875秒手持移液枪检测漏框。框数不是GT计数；不能把全部跟踪丢弃当真实漏检。生成两个95秒有封面的诊断回放，文件面板queued，浏览器播放及主系统归档尚未验证。
+
+全部1520推理像素唯一对应原视频原帧PTS；现有抽样时间与原帧PTS最多差62.151ms，估算索引也不等于实际索引。独立映射已完成，运行时原帧身份传播与跨机位物理同步仍待验收，不能用此偏差直接归因所有机位错配。下一步优先修正源帧身份链路、核对密集目标跟踪保留和手持工具漏检，再继续规范标注和固定对照训练。
+
+当前382图3352框全部记录保持、51完整训练不变，无新增训练或生产替换。继续分角色检测、核对关联后互补证据；统一/双模型公平对照未完成。接续运行根goal33-work-receipt.json、candidate-video-goal33/receipt.json、video-review-goal33/pts-proof-attempt2/receipt.json及工作台review-goal33/snapshot-final.json。分支codex/rtx3050-device-delivery-20260904、HEAD 7db0dcd052891e0e189c5e931a27558256fea032及并行修改保持。Goal active/PROGRESS，质量PARTIAL_EVIDENCE、完整验收NOT_PROVEN。
+
+
+## goal34 接续更新
+
+原帧身份已贯通普通/持久分片FFmpeg抽帧、虚拟时间转换、模型输入包和FrameEvidence.source_frame；记录原始PTS/时间基、物理来源、像素SHA与缺失/歧义状态，抽样时间保持独立。末帧保持显式标识；旧身份检查点拒绝复用且保留旧文件；中途失败不再混入从头回退解码。上游新showinfo无包位置时立即记录未知，不能外推本机4.4.2的成功到所有平台。
+
+同两段约95秒真实派生片段，4次对照共6080实际模型源帧预测（唯一1520画面），全部6080去重/跟踪独立重算通过；取证三次4560身份观察匹配goal33独立原帧表，最终代码1520全部匹配。每次恢复0调用/原账本摘要不变，4生产资产保持。首次22.067秒、关闭取证诊断16.016秒、优化19.827秒、最终19.717秒，完整性能门禁未通过。像素及时间网格相同，不同冷启动的预测仍有细小数值和少量选框/轨迹差异；关闭取证也出现，原因待隔离，不能声称逐位一致或质量已改善。
+
+164相关检查、全src/tests的ruff和compileall通过。工作台382图3352框全部记录、51完整训练保持，本轮无新训练。接续goal34-work-receipt.json、source-frame-goal34/runtime-verification-final.json、candidate-video-goal34-final/receipt.json及工作台review-goal34/snapshot-final.json。下一步让派生素材/播放/正式归档消费原帧身份，继续查询性能与冷启动差异排查、剩余标注训练、独立逐类、角色/统一模型对照和完整真实链路。分支codex/rtx3050-device-delivery-20260904、HEAD 7db0dcd052891e0e189c5e931a27558256fea032及并行修改保留。Goal active/PROGRESS；本机指定原帧账本PROVEN，总体质量PARTIAL_EVIDENCE、完整验收NOT_PROVEN。
+
+
+## goal35：关键素材消费原帧身份与架构取舍（2026-09-08）
+
+继续采用“分人称检测，关联后互补证据”的开发基线；统一类别与标注规范，各角色训练及评测。统一模型、分角色模型、共享特征加角色分支的实际优劣仍NOT_PROVEN，须按同一来源隔离的验证集和明确训练/运行预算对照。新第三人称原始数据已收到，不能再记录为等待提供。架构取舍不能掩盖手持目标漏检、密集跟踪丢弃或错选架上器材；一致类别预测不能确认同一物体或动作。
+
+本轮在source_frames.py加入有界原帧重取：核对机位/角色、唯一物理文件和分段映射、大小/mtime、原始时间基、解码PTS及包位置，并要求BGR像素SHA与推理账本完全一致。CPU简单滤镜按原PTS选择，仅读取附近2.1秒输入且20秒子进程超时；输出采用账本输入分辨率，当前真实例为960宽。不同解码器/缩放方式若像素不一致则保留unverified，未验证所有CUDA缩放及其他FFmpeg版本。
+
+关键帧物化优先使用核验通过的原帧，原有派生实验片段继续作为关键短片来源。近似取帧退路仍可输出画面，但不借用附近检测框、不把seek目标写成实际解码时间。原图侧车升级/2，记录JPEG摘要、原帧证明和经对齐变换的实际时间；角色/拼图侧车保存frame_sources，短片侧车不冒充完整原帧证明。语义复核只有在/2图像摘要和原帧证明匹配时才附加已选关键帧，明确物理跨机位同步仍未验证。缺失原帧证明的原始画面、短片和时间序列可继续保留；所有媒体解码失败的跨事件隔离仍需后续处理。
+
+本机已有两路约95秒Pipetting派生视频与goal34-final真实模型账本，实际抽查16个分散时间点（每角色8个，含0、7.875、13.125、16.875、27.625、47.5、70、94.875秒）原帧PTS/包位置/像素全部一致。另用明确provisional的诊断事件执行真实素材物化，生成两角色关键帧及拼图、两角色短片及拼接短片，保留正式未准入状态。自动选取7.5秒网格对应FP7529.412ms、TP7541.899ms原帧，这两个时间不证明两机位物理同步。实际查看TP16.875秒账本框和诊断拼图：手持部分遮挡枪仍漏检，参与物仍选到架上的枪；因此只证明框与原帧绑定，不能称质量问题已解决。
+
+第一次诊断未启用派生缓存，却要求复跑禁止重编码，断言失败；原媒体由现有失败回滚逻辑保留，日志/脚本与首次产出留存。独立attempt2补齐本地缓存配置后，首次物化1.553秒、复跑0.446秒；禁止重新生成短片的复跑通过，六媒体摘要逐字不变，三短片复用已验证缓存。仅局部素材耗时，不是端到端性能。原视频与旧账本摘要重新核对，模型调用0、训练0、标注修改0，工作台382图3352框与51次完整训练保持。
+
+146项相关测试、ruff check src tests、compileall src tests通过；包含变帧率/B帧/非零起点/分段原帧重取、错误文件/角色/位置/像素拒绝、旧账本不借框、新侧车图像绑定及已有素材/复跑/部分交付契约。源码快照和阶段差异保存在本地运行根key-frame-material-goal35，真实证据入口attempt2/real-material-receipt.json、native-frame-checks.json、final-verification.json；旧goal34文件保留。分支codex/rtx3050-device-delivery-20260904与HEAD 7db0dcd052891e0e189c5e931a27558256fea032未变，保留并行未提交修改。
+
+上述指定原帧及局部物化/复跑PROVEN；总体质量PARTIAL_EVIDENCE；独立逐类检测、架构公平对照、全部标注、物理机位关联、参与物选择、主系统浏览器真实播放、全媒体失败隔离、候选引擎性能、语义完整归档及稳定发布NOT_PROVEN。Goal active/PROGRESS，未替换生产模型；继续处理参与物与密集跟踪、补充来源标注及系统可见验收。
+
+溯源复验补充：goal34回执的158个链接中152个原路径摘要不变；6个链接是本轮授权修改的实时源码/测试或追加文档，旧字节已在goal35/before按原摘要保留。首次将全部实时路径都要求不变的汇总断言失败，失败记录留存；分清历史快照与当前文件后158份旧证据均可核对，4生产资产摘要保持。
+
+
+## goal36：素材故障隔离、选择性恢复与真实浏览器播放（2026-09-08）
+
+上一轮goal35属PROGRESS；本轮复验其96个链接文件摘要保持。关键素材按机位、关键帧/短片、拼图/拼接视频分别尝试。预期读取、解码、编码失败返回明确失败记录，继续独立产出和后续事件；取消及未分类程序错误不伪装成成功。缺少拼接前提时记unavailable，不合成黑占位。失败输出移出当前事件引用，原文件保留；帧写入使用现有失败回滚保护。所有存活侧车在末尾统一更新完成状态和当前媒体引用，避免早期in_progress或旧映射继续充当最终状态。
+
+运行回执记录每项完成/失败、retry_event_ids和逐次失败历史；选择性复跑合并未涉及事件的记录，清空当前已恢复缺口但保留历史。部分报告增加待补全素材与事件重试范围，溯源索引绑定物化回执。质量门禁要求媒体数量齐全且新物化状态completed；即使遗留六个旧别名也不能绕过缺口。动作准入状态不因生成文件自动提升，诊断事件始终provisional。六种确定性故障（单帧、单短片、整路、源选择、拼图、拼接视频）及不掩盖程序错误有覆盖。
+
+在goal34-final真实模型账本及既有两路约95秒Pipetting视频上，实际注入首事件第一机位关键帧解码不可用。另一机位画面、三短片和第二事件六媒体继续生成，共10份；解除故障只复跑首事件，补齐12份，原10份摘要不变且三短片缓存复用、重新编码调用0。最终源码运行首次2.119秒、恢复0.434秒，范围仅诊断素材物化，非整体性能。首轮及最终轮回执均保存；最终轮还核对所有存活侧车的完成状态一致。真实来源/旧账本与4生产资产摘要保持，模型调用0、训练0、标注修改0。
+
+实际浏览器检查发现：已有实例42195的候选播放器有封面，阶段素材卡和聚焦播放器却未设置poster，且preload=none。当前前端两处复用统一播放器，提供真实关键帧封面、明确播放按钮、失败提示/重试与单独打开入口；聚焦不强制自动播放，数据绑定保留倍速等控件。画面对照文案不再直接宣称同步。原实例保持，通过本地只读GET/HEAD预览服务展示当前前端，后端仍引用既有Local-User-Acceptance-20260908阶段结果，不是新检测候选的部署验收。
+
+系统Chrome152.0.7977.82实际点击“播放关键片段”后，视频readyState=4、1280×360、时长5.866667秒，连续两次播放时间前进，页面错误0；源码SHA与浏览器实际加载app.js一致。已实看播放前封面及播放中截图，后者出现变化的手/试管架内容。最初的异步页面初始截图、键盘/原生坐标播放尝试未证明播放成功，均留存；显式play()诊断后，以最终可见按钮点击完成实际UI核验。界面仍有较大黑色留边，已有两路素材的动作对应仍待核准，不能将播放通过当机位或动作准确性。
+
+385项相关测试、ruff check src tests、compileall src tests、node --check app.js通过。另有一项原有Web测试硬编码样式版本70，与当前index/styles版本71不符；该断言不读取本轮修改的app.js，本轮未修改index/styles，也未顺手修正该无关失败。首次新增poster依赖使一个独立JS测试缺少location模拟，补齐实际依赖后通过。原包/模型/源码状态、阶段差异与失败日志保留。
+
+真实故障隔离/选择性恢复、指定浏览器封面/按钮播放PROVEN；总体模型质量PARTIAL_EVIDENCE。全部标注、独立逐类与架构对照、参与物/密集跟踪、物理机位对应、新候选完整视频/引擎性能、语义正式归档和稳定发布NOT_PROVEN。工作台仍382图3352框、51完整训练。下一轮继续剩余密集标注、手持/背景器材判别与跟踪质量，并将已验证的前后端变更纳入完整系统验收；不重复以局部产出替代最终指标。Goal active/PROGRESS，未替换生产资产。
+
+接续：运行根material-resilience-goal36/final-real/real-resilience-receipt.json、browser-playback-receipt.json、final-verification.json与goal36-work-receipt.json。修复预览http://127.0.0.1:54517，进程746552（exec会话9884），只读代理原后端42195，浏览器15已打开；后续须核对进程实际存活，不依此记录推断。分支codex/rtx3050-device-delivery-20260904、HEAD 7db0dcd052891e0e189c5e931a27558256fea032保持，全部未提交及并行修改保留。
+
+
+## goal37 接续：新增第三人称项目标注（2026-09-08）
+
+T028/T029/T030已完成第二遍区域外逐件复核，版本3/2/2，新增83明确实例、保留9处未知；同20260525源组train。工作台382图3435框：完整复核88图、区域外复核64图、待复核18图、草稿161图、排除51图。新第三人称169原图已处理14图区域外、155图草稿。原图和其他379图未变，历史审计保持；新审计头f34f7e3d48a3a12527eb4b1071690236e3b1c4b692f92547b99de4d4f1ae5197。
+
+下一批32图部分监督预检通过，沿用goal32的29图及原验证标签，仅加3训练图；全项目普通导出仍631阻断。本轮无新导出/增强/训练/模型调用，累计51次完整训练；4生产资产保持。工作台Chrome实际显示T030原图、29实物与3未知，页面错误0。首次列表按钮计数包含未知区域的检查脚本错误已修正，保留失败记录。goal36的214份历史文件摘要保持。
+
+详情见MODEL-ITERATION-RESULTS-20260907.md的goal37段；接续运行根goal37-work-receipt.json及annotation-goal37、工作台review-goal37/snapshot-final.json和cohort-next.json。分支codex/rtx3050-device-delivery-20260904、HEAD 7db0dcd052891e0e189c5e931a27558256fea032保持；Goal active/PROGRESS，总体质量PARTIAL_EVIDENCE。继续补充多来源及手持移液枪/密集标签、训练/真实视频对照，统一模型与分角色模型的实际优劣仍NOT_PROVEN。
+
+
+## goal38 接续：补标与两次候选迭代（2026-09-08）
+
+T032–T036五图已初标及第二遍区域外复核，新增104实例、保留15未知；工作台382图3539框（完整88、区域外69、待复核18、草稿156、排除51），新第三人称169原图仍150草稿。与goal37三图合并新增8训练原图187实例，冻结37原图/175train文件/2val裁剪；旧标签和验证图片字节不变，32增强预览与导出一致，部分监督消费者校验通过，全项目普通导出仍626阻断。
+
+实际完成TP v29/v30两次训练，共1056优化步/2100样本访问，累计53完整训练（FP23/TP30）。系统one2many下固定106已标整帧实例匹配：v27=81、v29=67、v30=85；2完整验证裁剪v30=24/27。v29新增图拟合高但旧能力退步，v30低学习率从v27微调恢复旧能力，却仍漏T032两支手持枪，整帧枪头0/8。训练脚本one2one分数另记，不能与系统分数混用。两个候选均未晋升，不因总分改善通过质量门禁。
+
+v30实际复跑95秒第三人称派生视频760帧，全部输入像素/原帧身份与v27一致，1520行两候选跟踪独立重算一致；7个真实原帧和9幅对照/放大已复核。16.875秒手持枪仍漏检；7.875秒枪头原始/跟踪数量变化不等于真实召回。局部检测10.070秒、恢复0.189秒且0模型调用/账本摘要不变，非全链路性能。Chrome实际显示T032原图及29实物/3未知，页面错误0。
+
+详情见MODEL-ITERATION-RESULTS-20260907.md的goal38段及本地运行根goal38-work-receipt.json、goal38-model-comparison.json、video-review-goal38/visual-review.json。接续工作台review-goal38/cohort.json和annotation-verification.json。下一轮停止小验证集扫参，补充不同姿态/遮挡/背景的训练来源实例，固定验证/测试并继续实际失败点复查。分人称检测+可靠关联后互补证据仍为基线；统一模型是否更好NOT_PROVEN。
+
+分支codex/rtx3050-device-delivery-20260904、HEAD 7db0dcd052891e0e189c5e931a27558256fea032及全部并行未提交修改保持，4生产资产未替换，无运行源码改动和外部付费调用。Goal active/PROGRESS，总体质量PARTIAL_EVIDENCE；全部标注、独立逐类/架构对照、参与物/物理机位关联、候选引擎/全长视频、语义正式归档与稳定发布仍NOT_PROVEN。
+
+
+## goal39 接续：手持器材逐件标注与来源隔离（2026-09-08）
+
+T042/T043/T044/T054/T055/T071/T080七张第三人称原图已逐件初标并第二遍区域外复核，均版本2；新增303实例、保留28未知，其中70支枪（7手持、63架上）、61管体、19管盖、49枪头（46盒内、3附着）。T055只有1根可辨管体与1个盖片段，不复制相邻图被手遮住的试管；同图每支枪分别取可见部分。实际查看31个原图/细节视图、24个初标叠框和11个修正叠框，第二遍重看全部7张未叠框原图，修正57个坐标边界。
+
+工作台382图3842框：完整88图1212框、区域外76图2046框、待复核18图560框、草稿149图7框、排除51图17框。新第三人称169原图为26图区域外754框、143草稿。其他375图与全部source字段保持；1013条审计保留，新头aba2844ee582ce90eea6bef1220102860414fcc6d919db8a52608c0101453b51。
+
+本轮7图统一保留third-original-unmapped-7509853b、unassigned和used_by_baseline，仅记录项目视觉第三人称。没有证据将其绑定原始视频/实验/人员/物理机位；6处CustomFlow源视频稀疏预览未建立映射，CSV的2026-06-18来源时间不能移植给未知原图。全项目普通导出626阻断，7图outside_ignore检查22阻断；来源未知时不进入训练。原goal38批次因审计头变化被契约拒绝；逐条确认原37成员版本/来源/标注摘要不变后，另存cohort-existing37-refrozen.json仅更新审计头，预检通过，7张新图不在其中。旧批次拒绝及检查脚本解析空stdout的失败记录留存，未修改检查契约。
+
+Chrome实际逐页显示7图1920×1080原图、版本2、第三人称、未分组和38/37/36/41/52/37/62实例，错误0；T042/T055页面截图已实看。打开用户窗口T055的请求仅queued，不当作窗口已切换证明。goal38的366份历史证据文件及4个生产资产摘要保持。本轮没有新模型调用/训练/增强/训练导出，累计53次完整候选训练，生产未替换。
+
+接续：工作台review-goal39/snapshot-final.json、visual-review-receipt.json、annotation-verification.json、cohort-existing37-refrozen.json；本地运行根annotation-goal39及goal39-work-receipt.json。下一轮继续来源映射与跨组近重复核查，补充有可靠来源的手持/密集真实图，再训练与实测；不继续对同一小验证集扫参。分人称检测+统一类别+可靠关联后互补证据为当前方案，架构质量优劣仍NOT_PROVEN。
+
+分支codex/rtx3050-device-delivery-20260904、HEAD 7db0dcd052891e0e189c5e931a27558256fea032保持，本轮仅项目标注与进度文档变更，未提交修改及并行工作保留。标注保存/指定浏览器展示与来源阻断PROVEN；总体标注与模型质量PARTIAL_EVIDENCE；全部标注、独立逐类/架构比较、物理机位/关键素材质量、候选完整引擎性能、语义正式归档和稳定发布仍NOT_PROVEN。Goal active/PROGRESS。
+
+
+## goal40 进展（2026-09-09）
+
+已完成T007/T009/T010/T011/T012/T013六张原图两遍项目标注，新增106实例/14未知，全库382图3948框，完整88、区域外82、待复核18、草稿143、排除51。43成员部分监督预检通过，旧验证标签不变，普通整库导出仍620阻断。六页真实浏览器核对通过；保留分支/HEAD、未提交修改、206份历史证据和4生产资产。累计完整训练53次，本轮无新训练或生产替换。
+
+未知rgb_sel/rgb_topup来源继续unassigned，不把RAR修改时间当采集时间；其来源目录澄清不阻止已知组独立工作。继续分角色检测、统一标注、可靠关联后互补证据，架构优劣需要固定来源隔离验证集对照。Goal active/PROGRESS，整体质量PARTIAL_EVIDENCE，完整真实语义归档与稳定验收NOT_PROVEN。续接运行根goal40-work-receipt.json、工作台review-goal40/cohort-next43.json。
+
+
+## goal41 进展（2026-09-09）
+
+继续分第一/第三人称检测器、统一本体和证据格式，在来源、时间及对象关系可靠时做后续证据互补。两路同类或模型一致不能独立确认同一实物、物理动作或同步；单路缺失时保留已成功产出及复跑能力。统一模型相对双模型的公平质量对照仍 NOT_PROVEN，不把架构建议当成已证明的最优方案。
+
+T014、T016–T023 九张原图已逐件初标，保存版本1后重新实际看完整原图、全图和管架叠框完成第二遍，最终版本2、reviewed_partial/all_visible_outside_ignore。新增222实例、保留26未知；包括82管体、21管盖、10移液枪、19烧杯、9药匙、9手套掌指、5裸手。T023逐支核对十枪，普通短袖不标实验服；T022杯内过曝不补猜搅拌子。第二遍修正13个实物边界、9个未知边界及1个截断属性。9整图+31细节初查、9原图+3额外细节复查、19初标叠框和11修正叠框均实际查看；未查看的生成图在清单明确为false。
+
+逐项验证旧43成员版本/来源/标注摘要保持，只追加九个同组train成员，形成review-goal41/cohort-next52.json；52成员outside_ignore检查0阻断，原2张完整验证裁剪不变。原20260519/20260525组及used_by_baseline保持，不增加独立实验或独立验证。普通整库导出仍611阻断；本轮无训练导出、增强或模型调用，累计仍53次完整候选训练。
+
+Chrome九页实际解码1920×1080原图，显示版本2、third_person、train及19/26/24/24/25/25/24/24/31实例，页面错误0，API与保存记录完全对应；T022/T023截图实际查看。向用户窗口打开T023请求仅queued，不作为已切换窗口证明。145份goal40历史文件及4生产资产重新哈希保持。
+
+接续工作台review-goal41/snapshot-final.json、annotation-verification.json、visual-review-receipt.json、cohort-next52.json及运行根annotation-goal41、goal41-work-receipt.json。下一步对冻结52成员做有溯源的增强预览/导出，再使用固定验证和真实手持失效帧检验有明确目的的候选；同时继续未完成原图与源视频映射。保持未解决来源不入训练，候选质量未通过不替换生产。
+
+
+## goal42 进展（2026-09-09）
+
+已对 goal40/41 新增的15张已复核训练原图逐张查看增强对照，60份新增强与正式导出字节一致。冻结52个父图记录：50 train父图（含既有裁剪）、2张完整val裁剪；250训练图片=50父图+200离线增强。15新增原图共328已标实例，仍属于已有20260519/20260525组，不增加独立拍摄来源；原37成员标注及旧媒体/标签、验证集哈希不变。消费者outside_ignore/v2校验通过，整库普通导出仍611阻断。工作台382图4170框、88完整/91区域外/18待复核/134草稿/51排除，审计未修改。
+
+实际完成第三人称v31（third-person-expanded-sources-v31），从v27初始化，沿用v30的学习率0.0001、freeze10、4轮：500优化步、1000样本访问、30.574秒，累计54次完整训练（FP23/TP31）。本轮同时增加数据量及更新步数，不能当成同预算因果对照。系统one2many实际调用v30best及v31best/last，共165张次；v30前40份预测与历史解析结果完全一致。
+
+新增15张训练图的已知实例匹配261/328→311/328，其中管体78/116→107/116；这是训练拟合。2张完整val裁剪24/27→25/27，3张整帧已知实例仍85/106，但移液枪26/26→25/26（下降3.85个百分点），超过2个百分点保留门禁。gun-7缺少可独立分配的检测框；与其重叠的0.735框更匹配相邻gun-6，不能重复计数。旧T032两支手持枪、整帧验证8个枪头仍未匹配。训练内one2one结果单独记录为24TP/3FP/3FN，不与系统分数混用。v31未晋升，生产资产保持。
+
+v31实际复跑95秒第三人称视频760帧，与v30全部输入像素/原帧身份一致；1520行双候选跟踪重算一致。检测10.465秒，恢复0.195秒、0模型调用及账本哈希不变；这是局部CV运行，非全链路性能。已实际查看7个原帧对照、2个细节：16.875秒手持枪仍在检测阶段漏检，v31同一手出现额外重叠框；7.875秒密集枪头预测增多伴随重叠/错类，不能据预测数量称召回改善。另实看T017训练管架改善和gun-7退步两幅细节对照；未改验证标注或阈值。
+
+接续证据：运行根goal42-model-comparison.json、goal42-work-receipt.json、diagnostics-goal42、candidate-video-goal42、video-review-goal42；工作台review-goal42/cohort.json、export-validation.json，导出exports/tp-expanded-sources-augmented-goal42。保留分支codex/rtx3050-device-delivery-20260904、HEAD 7db0dcd052891e0e189c5e931a27558256fea032及并行未提交工作。本轮无产品源码改动、生产权重替换或付费语义调用；训练/指定实际调用PROVEN，系统质量PARTIAL_EVIDENCE，完整独立质量/物理机位关联/候选引擎全长性能/真实语义归档和稳定验收NOT_PROVEN，Goal active/PROGRESS。
+
+下一步继续128张第三人称原图草稿及可靠来源映射，优先补充手持枪姿态/遮挡和密集实例训练来源；未知RGB组保持unassigned。需要冻结失败集分析单件分离、重复抑制和置信度，不能只对小验证集继续扫参数。按角色检测、统一类别和可追溯证据格式，只有来源/时间/实物关系可靠时互补；统一与分角色架构优劣仍无公平实验定论。
+
+
+## goal43：失败阶段定位与长操作来源标注（2026-09-09）
+
+实际截获v30/v31在2张既有图片和8个原生视频帧上的20张次系统预测，保留置信度过滤前张量、实际NMS输入及保留索引；按原4帧视频批次、960/float32/one2many、confidence=0.25/NMS=0.7执行，20份系统框均可从保存数据精确重建。T032左右手持枪两版均无IoU>=0.5且分数过0.25的同类候选；16.875秒手持工具诊断区域最高枪分数v30=0.00364、v31=0.00538（区域查询不是真值匹配），该漏检在NMS/跟踪前已经发生，单改去重无法解决。
+
+密集验证图anchor7426分数0.3865→0.4683，但与较高分anchor7185的实际NMS重叠从0.698664跨至0.710051，超过0.7而被删除。原图、项目gun6/gun7框及两版候选已同屏实看；两候选都更接近gun6，橙框未覆盖项目gun7的最右端。NMS导致候选消失PROVEN，但v30额外框是否正确区分另一物体仍NOT_PROVEN；此前26/26仅为既定IoU分配结果，不能提升为逐支物理正确。未改验证标注或生产阈值，没有通过放宽去重宣称质量修复。
+
+T123–T149、T151–T168共45张640×480长操作原图均实际查看并分类第三人称、train；保留既有复杂长操作来源组和used_by_baseline，不以组名first_person覆盖图片角色，不把跨视角算独立来源。T161/T168另完成逐件初标、保存后第二遍原图/叠框复核，最终版本3、reviewed_partial/all_visible_outside_ignore：新增23+22=45实例、4+4=8未知区域，包含每图4支独立可辨架上枪、2只手套手和1件药匙；第二遍修正7个框边界。其余43张只分类仍草稿。新增图并未补齐手持移液枪姿态多样性。
+
+全库382图4215框：完整88图1212框、区域外93图2419框、待复核18图560框、草稿132图7框、排除51图17框。第三人称原始169图中43区域外、126草稿；角色86第三人称、83未知。全部source与其他337记录不变；新增49条审计，1092条头ac9f7f48fd1977b73315990871bd815c65bca47e898d720f415707ce32a02acf。原52成员版本/来源/标注摘要与2张完整val裁剪保持，追加两train形成cohort-next54，outside_ignore检查0阻断；普通整库导出仍523阻断。新批次尚未增强、导出或训练，累计完整训练仍54次（FP23/TP31），生产资产保持。
+
+真实Chrome核验T123版本1草稿、T161/T168版本3区域外复核，均third_person/train、640×480原图，0/23/22实例及0/4/4未知，DOM/API与保存快照一致，页面错误0；两复核页截图已实看，未声称用户窗口已切换。实际查看清单区分生成但未查看的两幅最终upper叠框及T123页面截图。保存复核/指定浏览器展示与阶段定位PROVEN；全库标注及模型质量PARTIAL_EVIDENCE；全部数据标注、来源独立性、架构公平对照、实物/机位对应、关键素材及全链路质量、真实语义正式归档和稳定发布NOT_PROVEN。
+
+当前路线为分别训练第一/第三人称检测器、统一类别和证据格式，来源/时间/实物关系可靠时做证据互补。双模型优于统一模型的结论仍需固定来源隔离数据与相同训练预算对照；单路缺失保留已成功产出，不凭另一机位补造本机位证据。下一步继续已知训练组逐件标注，并扩充有可靠来源的手持枪/密集目标失效样本；不把未映射RGB图投入训练，不在同一小验证集继续扫阈值。
+
+接续：工作台review-goal43/snapshot-final.json、annotation-verification.json、instance-visual-review.json、role-visual-review.json、cohort-next54.json、browser-check.json；本地运行根failure-diagnostics-goal43、annotation-goal43及goal43-work-receipt.json。VisionCortex分支codex/rtx3050-device-delivery-20260904、HEAD 7db0dcd052891e0e189c5e931a27558256fea032保持；AnnotationWorkbench分支codex/annotation-workbench、HEAD f78875b210379469fb8934712b6fb9f77b8b6690保持。本轮未修改产品源码、未提交/推送或替换生产资产，保留并行未提交工作。Goal active/PROGRESS。
+
+
+## goal44：裸手与未穿戴手套场景补标（2026-09-09）
+
+T123/T129/T136/T143/T151/T158六张第三人称640×480原图已完成逐件初标及保存后的第二遍区域外复核，均版本3、reviewed_partial/all_visible_outside_ignore、train。分别24/25/26/17/21/20实例，共133新实例，包括36支移液枪、6只裸手、21个瓶盖与10个枪头盒；保留35未知区域。蓝色未穿戴手套和桌布不标为另一只手，空称量盘不标纸张；T143运动模糊及右侧截断区域继续保留未知，不按邻帧件数补画。六张均沿用既有复杂长操作组和used_by_baseline，不增加独立实验，也没有解决手持移液枪训练姿态不足。
+
+实际查看6个全图、14个细节；初标版本2保存后在6幅原图/叠框并排图中重新检查完整原始像素，各图再检查枪架叠框，四张有手图另查上区叠框，共16幅初标叠框；修正10处实物边界及1项天平遮挡，7幅修正叠框已实际查看。参考同组T122/T150既有项目框保持类别口径，每张仍独立看图、修正状态与边界，未复制已复核状态；生成但未查看图明确列出。全部source、其他376记录及审计前缀不变。新增12条审计，共1104条，头461a0e384485a1c8da8e4eb16ec4bd11dbcb49c26972d086f0116b98e445a73d。
+
+全库382图4348框：完整88图1212框、区域外99图2552框、待复核18图560框、草稿126图7框、排除51图17框；第三人称原始169图中49区域外、120草稿。逐项验证旧54批次成员版本/来源/标注摘要及2张完整val裁剪不变，只追加六train，cohort-next60的outside_ignore检查0阻断；普通整库导出529阻断。新批次未增强/导出/训练，累计完整训练仍54次（FP23/TP31），未启动模型或改变生产权重。
+
+真实Chrome六页显示版本3、第三人称、train、640×480及全部实例/未知数量；DOM/API与最终快照一致，页面错误0。T136/T151浏览器截图实际查看；未声称用户窗口已经切换。接续工作台review-goal44/snapshot-final.json、annotation-verification.json、visual-review-receipt.json、cohort-next60.json、browser-check.json，以及本地运行根annotation-goal44、goal44-work-receipt.json。继续37张已知复杂长操作组草稿和其他未完成原图，补充可靠来源的手持枪及密集场景；未知来源不投入训练。新增标注可能支持手部背景误检诊断，改善效果仍需后续实际模型/视频对照。
+
+本轮逐件项目标注、部分监督批次检查及指定浏览器展示PROVEN；总体数据覆盖与模型质量PARTIAL_EVIDENCE；完整数据标注、独立逐类/架构对照、物理机位和实物关联、关键素材质量、候选引擎全长性能、真实语义正式归档及稳定发布NOT_PROVEN。分支codex/rtx3050-device-delivery-20260904、HEAD 7db0dcd052891e0e189c5e931a27558256fea032保持；AnnotationWorkbench为codex/annotation-workbench、HEAD f78875b210379469fb8934712b6fb9f77b8b6690。无产品源码变更/提交/推送，保留并行未提交工作。Goal active/PROGRESS。
+
+
+## goal45：手套、药匙和密集枪架逐帧复核（2026-09-09）
+
+T124/T126/T132/T138/T146/T154/T162/T166八张640×480原图完成初标和保存后的第二遍区域外复核，均版本3、第三人称、train、reviewed_partial/all_visible_outside_ignore。新增185实例（48支移液枪、3只裸手、4只戴手套的手、3件药匙等），保留45处未知区域。未穿戴手套不标为手，天平后的用品盒不并入手部；T154仅见左腕/前臂而掌指重遮挡，保持未知。T162药匙柄左界由173修至166。初标实际查看8全图、16细节；保存版本2后再看8幅完整原图/叠框并排图及各图密集叠框、6幅上区叠框，并重看T162天平原图放大；修改后上区叠框已查看。查看清单和未查看生成图见visual-review-receipt.json。
+
+全部source字段、其他374记录及历史审计前缀不变；审计1120条，头009d6757ea62fff3e8bbbbcd813e64546ec621924eac649a18e9a2d7da1a9f75。全库382图4533框：完整88图1212框、区域外107图2737框、待复核18图560框、草稿118图7框、排除51图17框。第三人称原始169图中57区域外、112草稿；已知复杂长操作组还剩29草稿。这8张仍属已有来源组，不增加独立实验。只读检查另发现三张6月16日保留测试图片目前仅手部初标；实际查看前两张，第三张未查看，全部保持test和原版本，未送入训练。
+
+旧60成员及2张完整val裁剪保持，追加8张train得到cohort-next68（66 train父图含已有裁剪、2 val裁剪），outside_ignore检查0阻断。普通全库导出537项阻断，仍不能按普通YOLO丢弃ignore导出；此数是合同阻断数，不是检测错误数。本轮未导出/增强/训练，累计训练54次（FP23/TP31），未启动模型。真实Chrome八页版本/图片/实例/未知区域数量与快照和API一致，页面错误0；T154/T162截图实际查看，浏览器访问前后快照一致。未改变用户当前窗口。
+
+架构建议维持分视角检测、统一类别与可追溯证据，跨视角互补必须满足实际来源、时间及对象关联。两个独立权重、共享骨干分视角头、单一混合模型应在相同来源隔离、训练预算、输入尺寸与真实视频评价下比较；当前没有公平架构对照，不能宣布双模型一定更优。单视角有效产出应可保存，缺失另一视角或语义服务时保留待补证状态及复跑入口。
+
+接续证据：/home/x1/.local/share/annotation-workbench/review-goal45中的snapshot-final.json、annotation-verification.json、visual-review-receipt.json、cohort-next68.json、browser-check.json；运行根annotation-goal45/final-verification.json和goal45-work-receipt.json。指定标注与浏览器检查PROVEN；总体数据覆盖和现有模型质量PARTIAL_EVIDENCE；完整标注、独立逐类/架构对照、物理机位关联、真实关键素材质量、候选引擎全长性能、真实语义正式归档及稳定发布NOT_PROVEN。继续已知来源原图逐件复核及可靠来源的手持枪姿态补充；不以这些静态密集样本代替手持姿态证据。
+
+VisionCortex分支codex/rtx3050-device-delivery-20260904、HEAD 7db0dcd052891e0e189c5e931a27558256fea032；AnnotationWorkbench分支codex/annotation-workbench、HEAD f78875b210379469fb8934712b6fb9f77b8b6690保持。无产品源码变更、提交/推送或生产资产替换，保留并行未提交工作。Goal active/PROGRESS。
+
+
+## goal46：剩余后段操作原图逐件复核（2026-09-09）
+
+T155/T156/T157/T159/T160/T163/T164/T165/T167九张640×480第三人称原图完成初标及保存后的第二遍区域外复核，均版本3、train、reviewed_partial/all_visible_outside_ignore。新增196实例（36支移液枪、8只裸手、8只戴手套的手、4件药匙等），保留50处未知区域。初标实际看9全图、18细节；保存版本2后重看9幅完整原图/叠框并排图、9密集叠框、9上区叠框，并另看T163/T164/T165/T167天平原图3倍细节，将四张称量纸框收紧为[209,159,301,245]，四幅修正叠框已实际查看。T167药匙位于开口瓶上方，双手、瓶盖、搅拌子与纸包按本帧遮挡重新标注；松散未穿戴手套、门把手、用品盒印刷和粉末不增加手或工具实例。
+
+source-similarity.json记录9张RGB像素摘要均不同。T159/T160平均绝对RGB像素差约2.31/255，视觉高度相似；这只是像素描述，不能当语义独立性指标。所有图片保持已有复杂长操作来源组和used_by_baseline，不增加独立实验，不进入val/test。全部source、其他373记录和审计前缀不变；新增18条审计，共1138条，头1a8d4c93cb9c58bbae9f4aa33e8f26da1d098343c00b44aab054e799b565a5d4。
+
+全库382图4729框：完整88图1212框、区域外116图2933框、待复核18图560框、草稿109图7框、排除51图17框。第三人称原始169图中66区域外、103草稿，已知复杂长操作组剩20草稿。旧68批次成员来源/版本/标注摘要和2张完整val裁剪保持，追加9张train得到cohort-next77（75 train父图含已有裁剪、2 val裁剪），outside_ignore检查0阻断。普通全库YOLO导出546项合同阻断，仍不得删除ignore导出。本轮未增强、导出、训练或启动模型，累计训练仍54次（FP23/TP31）。
+
+真实Chrome九页版本、角色、split、640×480图像和全部实例/未知区域数量与最终快照及API一致，页面错误0；T155/T167截图实际查看，浏览器访问前后快照一致，未切换用户窗口。证据位于/home/x1/.local/share/annotation-workbench/review-goal46/的annotation-verification.json、visual-review-receipt.json、source-similarity.json、cohort-next77.json、browser-check.json，以及运行根annotation-goal46/final-verification.json和goal46-work-receipt.json。
+
+本批逐件标注、区域外批次检查及指定浏览器页面PROVEN；总体数据覆盖和既有模型质量PARTIAL_EVIDENCE；完整数据标注、新样本模型收益、独立逐类/架构对照、物理跨视角关联、关键素材质量、候选引擎全长性能、真实语义正式归档及稳定发布NOT_PROVEN。继续20张已知来源原图及其余未完成数据，仍需补充可靠来源的手持移液枪姿态；静态枪架和持药匙不代替持枪证据。VisionCortex分支codex/rtx3050-device-delivery-20260904、HEAD 7db0dcd052891e0e189c5e931a27558256fea032；AnnotationWorkbench分支codex/annotation-workbench、HEAD f78875b210379469fb8934712b6fb9f77b8b6690保持。无产品源码变更、提交/推送或生产资产替换，保留并行未提交工作。Goal active/PROGRESS。
+
+
+## goal47：玻璃后手部、松散手套与画面偏移逐帧复核（2026-09-09）
+
+T125/T127/T128/T130/T131/T133/T134/T135/T137/T139十张640×480第三人称原图完成初标与保存后的第二遍区域外复核，均版本3、train、reviewed_partial/all_visible_outside_ignore。新增246实例，包括76支架上移液枪、11只裸手、1件实验服、1件药匙；55处未知区域保留。九张逐支可对应八支枪，画面偏移的T139仅可靠对应前四支，不按邻帧补件数。T125/T131透过天平玻璃可见的掌指与用品盒印刷/反光分开；松散未穿戴手套不标戴手套的手。T137第二遍6倍原始掌指细节检查后，将左手框左界62收至87以排除前臂，保留上缘可见拇指片段，修正叠框已实看。
+
+初标实际看10完整原图、19细节；保存版本2后重看10幅完整原图/叠框并排图、10密集叠框、8上区叠框，另看1幅手部原始细节及1幅最终修正叠框。59幅不同查看图与生成但未查看图分别列于visual-review-receipt.json；两张浏览器截图另计。所有source、其余372记录和审计前缀不变，新增20条审计，总1158条，头5e7c94afa0fa79adcf5eff7af8a288feaf2e0d60307930822011f04895508917。十张都属于既有复杂长操作train来源和used_by_baseline，不增加独立实验。
+
+全库382图4975框：完整88图1212框、区域外126图3179框、待复核18图560框、草稿99图7框、排除51图17框。第三人称原始169图中76区域外、93草稿；其中已知复杂长操作组剩10草稿，另83张来源未映射RGB仍不能投入训练。旧77成员的来源/版本/标注摘要与2张完整val裁剪保持；追加10张train得到cohort-next87（85 train父图含已有裁剪、2 val裁剪），outside_ignore检查0阻断。普通全库YOLO导出556项合同阻断，不能删除ignore绕过。本轮未增强、导出、训练或启动模型，累计完整训练仍54次（FP23/TP31）。
+
+真实Chrome十页原图640×480、版本3、第三人称/train及逐件实例/未知数量与API和最终快照一致，页面错误0；T131/T139截图已实际查看，浏览器访问前后快照不变，未切换用户窗口。接续文件位于/home/x1/.local/share/annotation-workbench/review-goal47/的annotation-verification.json、visual-review-receipt.json、cohort-next87.json、check-next87.json、browser-check.json；本地运行根annotation-goal47/final-verification.json与goal47-work-receipt.json关联源文件、历史证据和生产资产摘要。
+
+本批标注、特定部分监督批次检查与指定浏览器展示PROVEN；总体数据覆盖和既有模型质量PARTIAL_EVIDENCE；新样本模型收益、完整数据标注、独立逐类/统一与分视角架构对照、物理跨视角对应、关键素材质量、候选引擎全长性能、真实语义正式归档和稳定发布NOT_PROVEN。继续剩余10张已知来源原图、保留测试视频全类别复核及可靠来源的手持移液枪样本；静态枪架样本不能代替手持姿态证据。架构建议保持分视角检测、统一标签与来源/时间/实物关系可靠后的证据互补，优势仍需公平对照，单路缺失应保留已有产出和复跑入口。
+
+VisionCortex分支codex/rtx3050-device-delivery-20260904、HEAD 7db0dcd052891e0e189c5e931a27558256fea032；AnnotationWorkbench分支codex/annotation-workbench、HEAD f78875b210379469fb8934712b6fb9f77b8b6690保持。无产品源码变更、提交/推送或生产资产替换，保留并行未提交工作。Goal active/PROGRESS。
+
+
+## goal48：已知来源第三人称原图完成区域外复核（2026-09-09）
+
+剩余T140/T141/T142/T144/T145/T147/T148/T149/T152/T153十张640×480原图完成初标及保存后的第二遍区域外复核，新增204实例（48支移液枪、4只裸手、3件实验服、1件药匙等），保留54处未知区域。T144按偏移后的枪架位置重新生成5倍细节；T140/T141各八支可辨枪，其余各前四支，出画和模糊片段不按邻帧补件数。T152/T153只框天平后可辨掌指，松散手套和裸腕不扩大为手。T149长柄和勺部可对应药匙，其他不清楚金属片段仍未知。
+
+实际查看10全图、22初标细节；版本2保存后逐张重看10幅完整原图/叠框并排图、10枪架叠框、10上区叠框，另看两幅4倍用品盒及三幅6倍盒层原始细节，修正8个框可见边界，5幅修正叠框已实际查看。72幅不同查看图与生成但未查看图分别记录，两张浏览器截图另计。初标版本2、几何复核版本3均保留；发现说明误带上一批55处未知总数后，经正常CLI版本检查另存版本4，删除逐图说明中的该批次总数措辞。实际本批54处；版本4仅改说明，几何、未知区域、人称、分区和复核状态与版本3完全一致，未伪造或覆盖历史版本。
+
+十张最终均版本4、third_person/train、reviewed_partial/all_visible_outside_ignore；全部source、其他372记录、旧87批次成员与历史审计前缀不变。新增30条审计，共1188条，头7d501b9a17c14d0cb293aa69614bb54a38d1084843aaa32062c8ef6efbea21e7。169张第三人称原始图中86张已完成区域外复核；剩余83张RGB原图来源未映射仍草稿，未进入训练。已知复杂长操作组不再有原图草稿，但局部未知仍在，不能称所有原图完整标注。
+
+全库382图5179框：完整88图1212框、区域外136图3383框、待复核18图560框、草稿89图7框、排除51图17框。追加10张同组train形成cohort-next97（95 train父图含既有裁剪、2张既有完整val裁剪），outside_ignore检查0阻断；普通全库YOLO导出566项合同阻断，不能删除ignore绕过。本轮没有增强、导出、训练或模型启动，本目标已记录完成训练仍54次（FP23/TP31）；这些新增同组图片不增加独立实验或证明模型收益。
+
+真实Chrome十页均核验版本4、角色/分区、640×480原图和逐件/未知数量，DOM/API与最终快照一致，页面错误0；T144/T153截图已实际查看，浏览器访问前后快照不变，未切换用户窗口。接续证据为/home/x1/.local/share/annotation-workbench/review-goal48/的annotation-verification.json、visual-review-receipt.json、review-notes-correction.json、cohort-next97.json、check-next97.json、browser-check.json、remaining-non-todo-originals.json，以及本地运行根annotation-goal48/final-verification.json和goal48-work-receipt.json。
+
+下一步优先继续6张6月16日保留测试视频图（第一/第三人称各3张）的全类别标注和复核，保持test及同源隔离，不用于候选训练；继续6月17日验证图和F119/F120/F125待复核项，不能以两张小val裁剪代替全场景质量。完成必要标签/冻结后，再按已验证部分监督契约预览增强、导出和训练对照；继续补足可靠来源的手持枪姿态，保留83张未映射RGB来源问题。本批逐件区域外复核、批次检查及指定浏览器页面PROVEN；总体数据/模型质量PARTIAL_EVIDENCE；完整原图标注、新批次模型收益、独立逐类及架构比较、物理跨视角关联、关键素材质量、候选引擎全长性能、真实语义正式归档和稳定发布NOT_PROVEN。
+
+VisionCortex仍为codex/rtx3050-device-delivery-20260904、HEAD 7db0dcd052891e0e189c5e931a27558256fea032；AnnotationWorkbench仍为codex/annotation-workbench、HEAD f78875b210379469fb8934712b6fb9f77b8b6690。无产品源码变更、提交/推送或生产资产替换，保留并行未提交工作。Goal active/PROGRESS。
+
+
+## goal49：六张保留测试帧逐件补标与真实解码核验（2026-09-09）
+
+本轮为实际进展，完整目标保持 active。对 2026-06-16 同一实验的 `C-Tube-Place-And-Dilute-view-02-side-b-{0,1,2}` 与 `view-03-front-{0,1,2}` 六张原有 test 帧进行了初标、保存后重新查看完整原图、密集区及第二遍复核。六张共 233 实例，相比原手部草稿净增 226；保留 41 处未解决区域，全部仍为 needs_review/partial/test，不增加完整 reviewed 或完整测试资格。第三人称三张为版本3；第一人称0/2为版本3、1为版本4（最后统一容器总框包含已连接瓶盖的边界）。第二遍修正17条框/未知区记录，另有第一人称1的一项容器边界修正。三张第一人称的瓶口专门放大仍不能确认独立蓝盖，撤回该假定，保留一般样品瓶和瓶口未知区域；不武断宣称已确认开口。右缘清楚可见的红盖容器及盖另行补标。
+
+当前项目 382 张 / 5405 实例：完整复核 88/1212，区域外复核 136/3383，待复核 24/793，草稿 83/0，排除 51/17（斜线前为图片数、后为实例数）。83张原始第三人称未映射来源仍未进入训练。原有97项批次的每项图片、版本、来源和标注摘要均未变，仅冻结到当前审计头；其中95项train父图（含原有裁剪）、2张固定完整val裁剪，没有本轮test帧。其 outside_ignore 检查0阻断；普通全项目检查572阻断（退出2为仍有不完整数据的预期门禁）。当前审计1201条，头 `d0f16525406aa3c6b427c901e8213cadd3dba380059160be911813cec0faa958`。其他376条图片记录和全部来源字段不变。
+
+PROVEN：68份实际查看的唯一原图/查看图/叠图；初标保存后六张完整原图均再次打开检查。真实Chrome六页逐项核对修订、角色、test分区、尺寸、实例及未知区数，页面错误0；第三人称1与第一人称1截图实际查看，浏览器后快照未变。两条已整理的本地视频及证据包SHA再次核验，CPU FFmpeg实际解码在三个采样时刻附近的帧，六张工作台原图均存在唯一逐像素完全一致的候选帧（仅指所检查的小时间窗口）。这排除了本次PNG抽帧额外引入色彩变化，第一人称过亮已存在于已整理的源片段；原始相机录制层仍待核对。
+
+精确匹配帧PTS：第三人称为 `1096000/119`、`3656000/119`、`6224000/119` 毫秒；第一人称为 `655200/71`、`2184000/71`、`3712800/71` 毫秒。相对于声明采样毫秒，第三人称有约16.9、33.3、-16.5毫秒差异。保留整数PTS/time_base及像素比较回执，不重写冻结的旧来源记录；跨机位证据关联须使用真实帧时间，不能把请求采样时间冒充解码PTS。此处只证明相对于现有片段的帧身份，不能证明物理安装或绝对跨机位同步。
+
+本机FFmpeg 4.4.2首次拒绝辅助核验命令的`-fps_mode`，进程明确退出1；已记录选项探测失败并改用兼容的`-vsync 0`完成解码，没有安装依赖或改动产品代码。没有新增训练/模型启动/付费调用，累计完成的训练仍54次，生产权重与引擎保持原摘要。
+
+PARTIAL_EVIDENCE：项目标注覆盖及既有模型质量。NOT_PROVEN：这六张的全类别完整测试指标、独立泛化、原始相机曝光成因、绝对机位同步、两角色方案公平比较、全长性能及真实语义全链路正式归档/稳定发布。方舟恢复门禁仍保留，但局部产出已保存并可继续复核。
+
+下一步：将本轮发现的瓶口/瓶盖歧义纳入既有冻结训练图的针对性核对；修正若发生则重新冻结版本。继续原有验证帧复核，同时用已合格批次推进候选训练和原固定评测，单独列出未完成test和局部val的证据范围，不以其中一项缺失丢弃其他产出、不按分数选图或移动保留分区。源片段实际PTS差异纳入后续真实机位/材料溯源核验。
+
+回执：`/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/goal49-work-receipt.json`；逐件版本/审计、六页浏览器及精确帧比较：`/home/x1/.local/share/annotation-workbench/review-goal49/`。本轮保留 VisionCortex 分支 `codex/rtx3050-device-delivery-20260904`，HEAD `7db0dcd052891e0e189c5e931a27558256fea032`；AnnotationWorkbench HEAD `f78875b210379469fb8934712b6fb9f77b8b6690`。未提交修改和既有证据保留。
+
+
+## goal50 接续：第三人称v32完成训练，真实漏检仍未通过（2026-09-09）
+
+已针对性核对47个现有蓝盖瓶/盖标签，无需修改；全库382图5405框、1201审计及全部来源/分区保持。97项合格批次冻结为95train父图+380增强、2固定val裁剪；新增45张同组原图1009实例，12张/48变体实际预览，部分监督v2检查通过，普通全库572阻断。旧52记录及504媒体/标签保持；未纳入83张未知来源原图和未完成test。
+
+实际完成TP v32四轮952更新/1900访问，累计55次训练（FP23/TP32）。固定系统诊断300源图调用：新增45训练图966/1009→1001/1009；2val裁剪25/27→24/27；3整帧85/106保持，实验服和防护用品盒退步。枪类25/26→26/26仍含相邻实例重叠框的贪心匹配，不能当不同实物找回。训练图T032右手枪找回，左手仍漏。
+
+真实95秒派生视频760帧完成，10.645秒，恢复0.221秒/0推理/账本不变；760原生帧身份与像素对照v31一致，1520跟踪行重算一致。实际查看7固定整图+2局部以及3静态诊断对照：16.875秒手持枪仍漏，密集枪头重叠错类仍在，不晋升候选。生产模型/引擎和产品源码保持；没有新浏览器、付费语义或正式归档验收。
+
+详情见MODEL-ITERATION-RESULTS-20260907.md的goal50及本地运行根goal50-work-receipt.json、goal50-model-comparison.json、diagnostics-goal50、candidate-video-goal50、video-review-goal50；工作台review-goal50保留全部快照、批次、增强检查及失败后准备重试记录。分支codex/rtx3050-device-delivery-20260904、HEAD 7db0dcd052891e0e189c5e931a27558256fea032保持；Goal active/PROGRESS，质量PARTIAL_EVIDENCE。继续同数据/等更新的来源平衡对照与真实失败点，补可靠手持目标来源；分角色检测+可靠关联后证据互补仍为当前路线，统一/共享/双模型的公平优劣NOT_PROVEN。
+
+
+## goal51 接续：固定来源平衡及裁剪均未解决手持漏检（2026-09-09）
+
+同goal50的97项/475train文件完成TP v33来源平衡对照：4epoch、952更新、1900访问，累计56次训练（FP23/TP33）。实际300静态源预测及95秒视频760帧；控制记录、760原帧身份/像素、1520跟踪行重算和0推理恢复通过。两张val裁剪24/27→25/27，但整帧已知匹配85/106→84/106、手套手3/5→2/5；手持枪与密集目标错误仍在，不晋升。
+
+固定手部上下文策略另做131裁剪预测，7个完整包含的已知枪框定位支持由整图6降至裁剪0；其余436个未完整包含的已知枪框不计漏检。实际看4幅裁剪和T031/T032/T033原图，确认类型依据后保持原标签；裁剪策略不接入系统。全库382图5405实例、1201审计与来源分区保持，批次0/普通全库572合同阻断。未增加浏览器验收、生产替换、付费调用或产品源码变更。
+
+详见MODEL-ITERATION-RESULTS-20260907.md的goal51及运行根goal51-work-receipt.json、goal51-model-comparison.json、hand-probe-goal51/localized-gun-diagnostic-v2.json。下一步补已知train来源的手持工具尺度/遮挡样本并双遍复核，保留全图与ignore；不再扫小验证集比例/ROI，不将保留组转训练。继续分角色检测和可靠关联后证据互补；统一/共享/双模型的公平优劣NOT_PROVEN。Goal active/PROGRESS，质量PARTIAL_EVIDENCE；物理机位、独立质量、全长性能、方舟真实语义正式归档仍待验收。主仓库原分支/HEAD 7db0dcd052891e0e189c5e931a27558256fea032与工作台原分支/HEAD f78875b210379469fb8934712b6fb9f77b8b6690保持。
+
+
+## goal52 接续：手持训练裁剪完成，v34未通过，工作台视窗已修复（2026-09-09）
+
+T031/T032已有train原图新增4张来源绑定裁剪、58逐件框，原图/密集细节实际查看及保存后第二遍复核，均版本2完整reviewed；不是4个新独立实验。全库386图5463框：完整92/1270、区域外136/3383、待复核24/793、草稿83/0、排除51/17。原382条记录/来源不变，审计1213条。批次101项=99train父图+2固定val；16新增强实际预览，495train文件含396增强，旧97项及954媒体/标签字节保持，批次0/普通全库572合同阻断。
+
+TP v34实际4epoch、992更新、1980访问，累计57次训练（FP23/TP34）。312静态源预测及95秒视频760帧完成；同输入像素、跟踪重算及0推理恢复通过。新增训练裁剪已知匹配7/58→43/58，但整帧验证85/106→82/106、手套手3/5→1/5；16.875秒手持枪仍漏，密集错框仍在，不晋升。新增数据也增加更新次数，不声称等算力因果提升。
+
+工作台fit仅按宽度缩放导致竖图底部不可见，已改annotation_workbench/web/app.js同时适配宽高。真实Chrome复现旧问题并检查4张图/两种窗口尺寸/3档缩放、原始框和指针映射，页面错误0、快照未变；26项相关测试及node语法检查通过。此项PROVEN只覆盖工作台显示，主系统视频/机位质量仍待验收。
+
+详细结果见VisionCortex的docs/MODEL-ITERATION-RESULTS-20260907.md之goal52；运行根goal52-work-receipt.json、goal52-model-comparison.json和工作台review-goal52保存完整证据。下一步先核对训练收敛和整图上下文，再冻结有依据的迭代；继续验证/test复核及未知原图来源。分视角检测、可靠关联后证据互补仍为当前路线，公平架构优势NOT_PROVEN。质量PARTIAL_EVIDENCE；物理机位、独立质量、全长引擎性能、真实语义正式归档仍未通过，Goal active/PROGRESS。原两仓库分支/HEAD保持，无提交/生产替换/付费调用；保留并行未提交工作。
+
+
+## goal53 接续：20轮训练补足拟合，真实手持漏检仍在（2026-09-09）
+
+同goal52的495train文件完成TP v35固定20轮，实际4960更新/9900访问，累计58次训练（FP23/TP35）。预先固定last20对v34last4，不以原生best或系统分数事后选权重。发现本机原生best及CSV损失均基于one2one，而系统使用one2many；原生E2ELoss还逐轮降低one2many权重。源码及推导系数已归档，尚非实测分支损失遥测。
+
+实际312静态源预测、两个最终权重各760视频原帧。训练裁剪44/58→56/58，6个重复枪标签3→6匹配；T032训练整图左右手枪均检出。整帧局部已知83/106→84/106，但实验服1/3→0/3、枪26/26→25/26、管盖10/10→9/10；两张完整val裁剪多漏一枪。真实16.875秒手持枪仍漏，密集错框仍在，不晋升。760输入身份/像素对照、1520跟踪重算及0推理恢复通过；5静态、7视频整图、2细节、1训练曲线均实际查看。
+
+全库386图5463框、1213审计、全部来源/角色/分区及101项批次保持；批次0/普通全库572阻断，无新增标注、增强、生产替换或产品源码修改。详情见VisionCortex的docs/MODEL-ITERATION-RESULTS-20260907.md之goal53及运行根goal53-work-receipt.json、goal53-model-comparison.json、annotation-goal53/branch-loss-schedule-audit.json。下一步先加入真实分支损失/权重遥测，再验证针对系统分支的训练方案；继续未完成验证/test及未知来源核对，不把保留视频转训练。Goal active/PROGRESS，质量PARTIAL_EVIDENCE，物理机位/独立质量/全长性能/真实语义正式归档仍NOT_PROVEN。两仓库原分支/HEAD与未提交修改保持。
+
+
+## 2026-09-09 goal54：实际分支损失记录与原生训练对照
+
+本阶段为 **PROGRESS**，总 goal 继续 active；质量仍为 **PARTIAL_EVIDENCE**，候选不晋升。分支 `codex/rtx3050-device-delivery-20260904` / SHA `7db0dcd052891e0e189c5e931a27558256fea032` 保持，既有未提交修改保留。
+
+显式 `--trace-branch-loss` 已实现并通过 84 项定向检查、`ruff check src tests` 和 `compileall`。默认关闭，沿用原生优化目标；实际训练逐批记录两分支损失、权重及加权结果，绑定预处理输入、每轮快照和恢复检查。原生 CSV 的损失仅反映 one2one，不能替代系统实际使用的 one2many 损失。
+
+实际新增 TP v36 `third-person-branch-observed-v36`：与 v35 相同 495 训练文件（99 父图＋396 离线增强）、v27 初始化、冻结10层、960/FP32/batch2、学习率 .0001、固定20轮。完成4,960次更新、9,900图片访问，耗时 267.840891 秒。累计59次训练（FP23/TP36），不把训练次数当质量。每轮分支记录已重算，已完成回执恢复检查未改写产物。
+
+本次 **PROVEN**：best/last 各708个模型张量分别与 v35 完全相同，采样顺序和除耗时外的 CSV 相同；固定104图的 best/last 系统预测分别精确复现。权重文件含不同运行元数据，文件哈希不同，不能称二进制相同。v36预定 last SHA `d75c63a6d2b5005fefeb4518f22d756d980efbaba8b446d7e1088470ab6d2d1c`；原生 best 仍在第7轮，独立保留，不按系统分数选替代终点。
+
+真实视频新增760帧，与 goal53 已冻结的 v35last760帧比较，全部源像素/帧身份一致，重新核对1,520行跟踪计算；复跑0次源图推理且账本不变。视频输出数组非精确相同：31,075原始框/27,272跟踪框按同类位置对应，最小IoU .991248，最大坐标差 .561962源像素，最大置信度差 .000288874；9帧有18个框换序，对应后跟踪编号变化0。各帧类别数量一致；数值差的精确来源 **NOT_PROVEN**，不宣称跨进程逐位一致。
+
+实看5张静态对照、7个视频时间点、2处放大和1张分支曲线。16.875秒手持白色移液枪仍漏检，7.875秒密集枪头仍有重复和试管/管盖混淆，实验服和过大容器/架体框问题仍在。整图已知匹配84/106，其中实验服0/3、移液枪25/26、试管盖9/10；两张完整验证裁剪23TP/1FP/4FN，均无质量提升。未将局部标注匹配解释为完整视频准确率。
+
+386图/5,463框、1,213审计条目及标签版本/来源/分区未变；训练批次检查0阻断，全项目仍572阻断。未新增独立来源，未完成全部标签；数据保持项目标注和 `independent_ground_truth=false`。未新做浏览器、真实语义正式归档、物理机位同步或候选引擎全原视频性能验收；这些门禁仍 **NOT_PROVEN**。未调用付费模型、未替换生产模型或引擎。
+
+回执：`/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/goal54-work-receipt.json`；比较：`/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/goal54-model-comparison.json`；代码/测试及真实损失证据：`/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal54`。下一步预先固定一个与系统 one2many 分支一致的目标对照，保留原生默认与固定终点；同时继续补齐来源映射、完整验证和困难样本。损失权重递减本身不证明是漏检原因，不盲目延长轮数、调阈值或把6月17日诊断视频放入训练。
+
+
+## 2026-09-09 goal55：固定一对多目标的真实训练与视频对照
+
+本轮 **PROGRESS**，完整 goal 保持 active；模型质量 **PARTIAL_EVIDENCE**，v37 不晋升。分支 `codex/rtx3050-device-delivery-20260904` / SHA `7db0dcd052891e0e189c5e931a27558256fea032` 保持；原有未提交修改、生产权重及引擎保留。
+
+新增显式 `--branch-loss-policy one2many`，默认 native 不变。仅允许区域外监督、分支记录、detector范围及patience=0；实际一对多损失直接返回，另一分支前向值保留记录但不进入反向传播，避免“乘零”仍触发闲置参数权重衰减。策略与逐批权重、预处理输入和每轮快照/恢复核对绑定；混用或缺失拒绝。95项定向检查、ruff src/tests和compileall通过；原v36真实完成回执在新代码下复验不变。
+
+真实训练 TP v37 `third-person-one2many-objective-v37`：与v36同v27初始化、495输入（99父图＋396增强）、960/FP32/batch2、freeze10、LR .0001、固定20轮。完成4,960次更新、9,900图片访问，247.876737秒；累计60次（FP23/TP37）。逐轮实测权重均one2many=1/one2one=0，采样顺序与v36一致。最终one2one头66个保存参数张量与初始化相同，其余300个参数张量中201个变化；不宣称未优化头的运行统计量或共用特征被冻结。
+
+第20轮一对多定位/分类损失分别.203850/.175562，比原生对照.216798/.184866稍低，不能等同泛化收益。主终点事先固定last，SHA `e72d22e0ddad967466ad51d5ba5e70260eed4aba0443b2642271590e5bd6168c`。原生best落在第1轮，因为它仍按未作为训练目标的one2one验证；保留辅助诊断，不因其小裁剪分数更好而换终点。
+
+实际系统104图×3权重共312次源预测/源NMS；控制组完整复现v36。两张完整验证裁剪从23TP/1FP/4FN到24TP/1FP/3FN，但三张局部已标整图从84/106到82/106：戴手套的手4/5→3/5，移液枪25/26→24/26；实验服0/3、单支枪头0/8、搅拌子0/3仍未匹配。前两类已知匹配下降分别.20/.03846，超过.02保留目标；手类同时不足20例。这里只是项目已知实例对照，不是完整逐类召回。
+
+候选实际运行同一95秒真实派生片的760源帧/760次NMS，与goal54冻结v36视频比较；全部源像素/帧身份一致，重新核对1,520行去重/跟踪计算。复跑0次源图预测且账本不变，更换模型身份在启动前被拒绝。v37原始/去重后/跟踪框31,033/31,021/27,798；v36为31,075/31,062/27,272。单支枪头跟踪框2,636→3,180是预测次数，不能当正确实例召回改善。
+
+实际复看5静态细节、7固定视频时间点、2放大和1训练曲线。T032训练图持枪分数上升，但16.875秒真实视频白色手持移液枪仍漏检；7.875秒密集枪头仍重叠并覆盖空孔，试管/管盖混淆、袖部误检为过大容器及架体误报仍在。此配方未解决关键错例。
+
+386图/5,463框、1,213审计条目及标签/来源/分区不变；批次0阻断，全项目572阻断。83张未映射原图及完整验证/测试标签仍未完成；本轮没有新增独立来源或标注。未做新浏览器、物理机位对应、候选引擎全原视频性能、付费语义与正式归档验收；这些以及稳定发布仍 **NOT_PROVEN**。真实训练/明确目标消费、指定源帧身份和复跑为 **PROVEN**，不能扩大到完整目标已完成。
+
+下一步优先可靠训练来源中持枪姿态、遮挡、尺度、清晰度与完整验证标签。先审查实物像素尺寸和现有标签，再决定经逐图复看的增强；不继续盲扫分支权重/轮数，不改阈值，不把6月17日诊断视频或邻帧放入训练。对不能辨清的区域保留未知，不因需达标而补猜标签。
+
+结果：`/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/goal55-model-comparison.json`；回执：`/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/goal55-work-receipt.json`；代码/检查/实测损失证据：`/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/annotation-goal55`。
+
+
+## 2026-09-09 goal56：三张第一人称验证原图逐件复核
+
+本轮 **PROGRESS**，总 goal 保持 active。先核验 goal55 回执关联的306份文件均与摘要一致、当前工作台快照未变，再继续原有 F119/F120/F125 的待复核标注。这3张1920×1080原图均来自原有 test_long_0512_camera01 组，保持 first_person/val；原始相机安装及同组映射的既有限制未被改写，不宣称独立验证。没有新增训练或模型启动。
+
+实际逐图查看原图、密集管架3/4倍放大及重点区域，第一遍保存后重新打开完整原图和逐类叠框做第二遍检查。修正天平可见总边界、遮挡和截断；F119重新确认左缘蓝盖并修正样品瓶类别、补盖框，撤回下缘失焦皮肤的裸手候选并保留未知；F125第二遍将延伸至右缘的打开玻璃门纳入同一天平。前排管、可辨后排管身、管盖、架体分别核对；其余透明管身仍无法可靠分离，保留未知，不能以孔数补猜。三张均为版本4，分别22/22/26实例、2/1/1未知区，状态仅为区域外已复核，仍不具备完整val资格，未转入训练。
+
+当前386图/5463实例：完整复核92图1270框，区域外139图3453框，待复核21图723框，草稿83图0框，排除51图17框；其中16张为既有派生裁剪。本轮总框数不变，1个裸手框撤回、补1个可见蓝盖框，不把改框数量当新图。新增6条审计，共1219条，头46b72c2ee4759a54a379f04ba859804b659fea53930d3e2701c43ab7943c1839。其他383条图片记录、全部来源/角色/分区、历史审计前缀保持。原101项批次逐项版本/来源/标注摘要核对不变后重新冻结审计头；批次检查0阻断，全项目普通导出仍572阻断。
+
+真实Chrome检查三页版本、角色、val分区、1920×1080媒体解码、实例/未知数量及API完整记录一致，页面错误0；F119/F125截图实际查看，浏览器前后快照一致。共实际查看24份唯一原图/查看图/叠图/页面截图，三张完整原图均在第一遍保存后重新打开。无产品源码改动、新训练、数据增强、付费语义或正式归档；累计训练仍60次（FP23/TP37），最新v37的真实视频问题仍未解决，不晋升。四份生产权重/引擎及v27对照权重摘要再次核验保持。
+
+本轮指定标注修订、审计保持和三页浏览器可见性 **PROVEN**；整体数据/模型质量 **PARTIAL_EVIDENCE**。完整标注、独立逐类评测、分人称优于统一模型、物理跨机位对应、关键素材质量、候选引擎全长性能、真实语义正式归档及稳定发布仍 **NOT_PROVEN**。继续补齐原验证/test标签、核对83张未映射原图来源，并从可靠训练来源补足手持器材/遮挡/尺度样本后再冻结训练；不以局部复核或重复训练代替全场景验收。
+
+证据：`/home/x1/.local/share/annotation-workbench/review-goal56/`中的annotation-verification.json、visual-review-receipt.json、cohort-check.json、full-check.json、browser-check.json及snapshot-final.json；阶段回执为`/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/goal56-work-receipt.json`。VisionCortex分支codex/rtx3050-device-delivery-20260904、HEAD 7db0dcd052891e0e189c5e931a27558256fea032，AnnotationWorkbench分支codex/annotation-workbench、HEAD f78875b210379469fb8934712b6fb9f77b8b6690均保留；未提交/推送，保留已有未提交工作。
+
+
+## 2026-09-09 goal57：参数核对与生产权重同条件真实评测
+
+本轮PROGRESS，总goal active。用户询问参数、与现有权重差距及何时更好后，读取四份权重保存的训练参数，并补做原生产.pt与FP v24 best / TP v37 last的同条件RoleScanner one2many比较；固定960/FP32/batch1、预测底线.001、报告.25、NMS .7、匹配IoU .5、max_det1000，无额外去重或跟踪。15张完整FP val和TP2完整val裁剪+3部分整图的版本、来源、标签均与旧冻结记录一致，没有按分数换图。两次实际运行各40源图调用；第二次纠正Ultralytics因不存在的settings父目录回退/tmp的局部运行设置，并断言本地目录，40份原始输出全部精确复现；首次证据保留。
+
+PROVEN仅限固定范围：FP生产147TP/12FP/65FN→v24 171/11/41，P/R92.45%/69.34%→93.96%/80.66%，mAP50/95 77.33%/68.77%→90.01%/75.15%；TP两完整裁剪生产15/7/12→v37last24/1/3，P/R68.18%/55.56%→96.00%/88.89%，mAP50/95 56.51%/40.30%→95.05%/77.09%。共有21类也提高：FP147/203→164/203，TP15/26→23/26。3张部分TP整图已知60/106→82/106，不算完整P/R。独立按原始预测重算整数计数与评估报告一致，候选micro复现旧系统分支结果。实际查看FP容器和搅拌子两处新增漏检以及TP原固定整图对照；密集错框仍可见。FP容器9/11→8/11、搅拌子5/6→4/6，管盖仍2/8；不晋升。
+
+当前同为YOLO26s，21→23类；原保存配置120epochs、MuSGD、lr.001、FP batch32/TP16、AMP开、无freeze；当前FP v24实跑80epochs/batch4，TP v37实跑20/batch2，AdamW/lr.0001/freeze10/FP32。原120仅配置值，不是已核验完成轮数；FP v24是累计第23次完整运行，旧v23缺完整回执。FP96训练父图/15val、来源平衡；TP99父图+396离线增强/2val、逐图均匀。v37从v27初始化，只优化one2many，必须把初始化对照与生产对照分开。旧权重记录框架8.4.51、当前8.4.28；不声称单个参数解释效果变化。
+
+本轮没有训练、标签变更、引擎重建、生产替换或付费调用，仍386图/5463框、1219审计、60完整训练。整体质量PARTIAL_EVIDENCE；全场景独立逐类、实际部署引擎、完整视频机位/素材及语义正式归档仍NOT_PROVEN，不能给出可信上线日期。下一步补齐完整验证、已知关键退步及手持困难训练来源，未来每轮同时列生产权重和初始化权重对照。参数与结果详见docs/MODEL-PARAMETERS-AND-BASELINE-COMPARISON-20260909.md；本地diagnostics-goal57-localsettings保存运行账本、完整参数、原预测、独立重算和实际查看回执，goal57-work-receipt.json为接续。主仓库原分支/HEAD保留，源码和生产资产未改，未提交/推送。
+
+
+## 2026-09-09 goal58：原始画面逐件标注与旧场景退步对照
+
+本轮为 PROGRESS，总 goal active；整体质量 PARTIAL_EVIDENCE，候选不晋升。实际查看原始第三人称包按 frame 文件名排序的首3张未标图 T000/T001/T002，在任何本轮模型预测前完成初标与保存后的整图第二遍复核。3张均版本0→1→2，新增28/30/30共88实例；每张分别10支中下架枪、4支右架可辨枪、2枪架、3瓶盖。修正逐枪和架体边界、衣摆/皮肤/鞋的区分、天平被手套轻微遮挡；T001一只可辨裸手、T002两只裸手，未穿戴蓝手套不标为戴手套的手。右缘残片、前横杆下不能对应的端部、橙盖周边不明瓶体及失焦皮肤/衣料保留未知，3/4/4处。仅 reviewed_partial/all_visible_outside_ignore；未通过删未知成为完整图。
+
+依据实际连续画面固定台面与操作者对面入镜，完成项目视觉 third_person 分类；保留原来源组 third-original-unmapped-7509853b、unassigned 及 used_by_baseline，不把自带Bottom view字样当物理机位证明。尚无可靠原实验/视频/人员映射，这3图没有进入训练或验证。没有新增独立来源。当前386图/5551框：完整92图1270框、区域外142图3541框、待复核21图723框、草稿80图0框、排除51图17框。新增6条审计，共1225；其他383条、全部源记录/原图字节和分区、历史审计前缀保持。原101项批次逐项版本/来源/标注摘要保持，重新冻结审计头后0阻断；全项目普通导出仍572阻断。
+
+真实Chrome检查3页版本2、960×540媒体解码、中文类别/28/30/30实例和3/4/4未知区、角色/未分组及API一致，页面错误0；T000/T002截图实际查看。共27份唯一实际查看文件、30次查看（含每张原图保存后再次打开、密集分组叠框、浏览器和模型对照）。浏览器及推理前后快照一致。没有改产品源码。
+
+在冻结标签上实际调用当前RoleScanner one2many：960/FP32/batch1、预测底线.001、报告.25、NMS .7、IoU .5、max_det1000，不额外去重。生产/v37及初始化v27/原生对照v36分别跑同3图，共12源调用/12源NMS。88个已标实例匹配：生产70、v27最佳38、v36末轮53、v37末轮54；移液枪分别39/42、15/42、30/42、30/42。生产天平3/3、裸手3/3、防护用品盒3/3，v37均0；v37瓶盖6/9、枪架4/6提高，不能掩盖其他类别退步。原预测匹配索引/同类/置信度/IoU/去重一一对应已重算；未知区域使完整FP/FN不可得，不报告整图精确率/召回率或独立泛化。两张生产/v37完整叠图实际查看：候选把手套盒内手套误当戴手套的手，漏掉天平/裸手和部分架上枪；生产也有把未穿戴手套误标为手的情况。
+
+退步在v27初始化已存在，不能归因于v37的一对多目标本身。追溯实际训练记录，v27从21类生产初始化时已迁移12个分类输出权重/偏置并处理旧枪头盒语义；v36/v37从其23类权重继续，不是漏开21→23迁移。现99个TP父图所有23类均有已标正例，例如天平88、用品盒76、裸手48；数量存在不证明场景分布足够，也不能由此确定遗忘的唯一原因。下一轮保持99父图/495文件、固定验证和同等20轮日程，改从生产权重重新微调并显式做类别迁移，检查原场景保留、旧固定验证和真实视频；新3图仍隔离，不用模型分数改标签/分区。
+
+本轮没有新训练，累计仍60次（FP23/TP37）；生产权重/引擎保持，无付费调用、引擎重建或全长视频/语义正式归档验收。完整数据、独立逐类、物理机位对应、素材质量、候选引擎全长性能和正式发布仍 NOT_PROVEN。VisionCortex分支 codex/rtx3050-device-delivery-20260904、HEAD 7db0dcd052891e0e189c5e931a27558256fea032；工作台分支 codex/annotation-workbench、HEAD f78875b210379469fb8934712b6fb9f77b8b6690 保持，未提交/推送，未提交工作保留。
+
+证据：工作台数据目录 review-goal58 的 annotation-verification.json、visual-review-receipt.json、browser-check.json、training-coverage-and-lineage.json、diagnostic-verification.json；模型运行根 diagnostics-goal58 / diagnostics-goal58-checkpoints 的预检、原预测、账本和已知实例对照。阶段回执 goal58-work-receipt.json。
+
+## goal59：从生产权重重启训练及同源真实视频复核（2026-09-09）
+
+结论 **PARTIAL_EVIDENCE，v38不晋升**。累计61次完整训练（第一人称23、第三人称38）。本轮没有改动标注；全项目仍386图5551框、1225条审计，保留原分支和未提交工作。goal58新复核的T000/T001/T002仍为部分标注、unassigned，未进入训练或完整验证。
+
+第三人称v38从原生产21类权重重新初始化，显式迁移21→23类分类输出（12个输出参数张量）。数据、增强、采样顺序及日程保持v37一致：99训练父图、495训练文件，960/FP32/batch2，AdamW学习率0.0001，余弦lrf .05，freeze10，20轮，实际4960次参数更新、9900次样本访问、244.74秒。one2many损失权重1、one2one权重0，末轮last是训练前固定终点。与v37采样记录逐字节一致。首次运行在GPU占用预检退出，未创建训练输出或启动模型；空闲后原计划重试完成，没有停止其他任务。模型last SHA为`61c054d99c37b08dc6a1b9c065a473111d3981c1098fec3905b212ee2c4cd42f`。
+
+相同系统分支/尺寸/精度/报告阈值下，3种权重各实际推理107图，共321次源图模型调用及321次源NMS。旧生产与v37在goal57的5张TP对照图及goal58的3张原始图上逐项复现。
+
+| 冻结范围 | 原生产 | v37-last | v38-last |
+| --- | ---: | ---: | ---: |
+| 2张完整验证裁剪/27实例，TP/FP/FN | 15/7/12 | 24/1/3 | 24/3/3 |
+| 同上精确率/召回率 | 68.18%/55.56% | 96.00%/88.89% | 88.89%/88.89% |
+| 同上mAP50–95 | 40.30% | 77.09% | 79.28% |
+| 3张部分验证整图/106已知，匹配数 | 60 | 82 | 87 |
+| T000/T001/T002的88已知，匹配数 | 70 | 54 | 72 |
+| 同原始图移液枪42已知，匹配数 | 39 | 30 | 35 |
+| 同原始图裸手3已知，匹配数 | 3 | 0 | 2 |
+| 同原始图实验服2已知，匹配数 | 2 | 0 | 0 |
+
+v38原始图的天平、防护用品盒各恢复3/3，但关键移液枪、裸手、实验服仍低于旧权重；小验证裁剪多2个误检。部分图只报告已知实例匹配，不计算整图精确率/召回率。2张裁剪mAP50虽为1.0，报告阈值下仍有3FP/3FN，不能称完美，更不能代表全场景。来源被旧基线接触且缺完整独立来源映射，所有这些都是项目证据，不是独立真值。
+
+真实视频复跑固定的第三人称95秒片段：8fps，760帧、190批次，960/FP32/batch4，实际760次源NMS，检测运行8.99秒。760帧像素、网格与原生PTS/packet身份全部与v37对照一致；重算1520份两版本逐帧去重/跟踪阶段并核对实际输出。缓存复跑0模型调用、0NMS且账本不变；更换模型后的续跑在模型启动前被拒绝。这里只证明该固定单机位片段，不能推导全长多机位SLA或物理同步已通过。
+
+实际查看7个固定时刻的原生帧对照、2个细节放大、1张裸原图及4张完整静态对照，共14个文件。**16.875秒的白色手持移液枪仍在原始检测中漏检，7.875秒密集枪头仍错框/重叠。**v38在部分时刻补上手与实验服，但末尾实验服仍不稳定。T032训练图两支手持枪已检出不能证明跨视频泛化；未将这段诊断视频加入训练，也未改标签去迎合预测。
+
+下一步补充不同来源的手持、遮挡与密集器材训练样例，完成整图验证；继续保留生产/v38和这段视频作固定回归。原生产权重、引擎均未替换；第一人称本轮未新训。逐类P≥.90/R≥.85、关键类不退步、密集实例、真实多机位素材与性能/溯源归档等门禁继续适用。付费语义阶段仍缺账户恢复证据，总goal保持active。
+
+证据位于运行根`/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/`：`goal59-training-plan.json`、`third-person-production-restart-v38/experiment.json`、`diagnostics-goal59/`、`candidate-video-goal59/`、`video-review-goal59/`、`annotation-goal59/visual-review-receipt.json`、`goal59-model-comparison.json`及`goal59-work-receipt.json`。本轮未修改产品代码；并行任务的API/流水线等改动保留并记录，不把共享工作区当作整体冻结源，实际运行各自存档源码快照。
+
+## goal60：原始图双遍复核与同条件保留检查（2026-09-09）
+
+新增T081/T091/T102/T103/T112/T121六张原始图两遍复核，共157框（60个移液枪实例）及13个保留未知区域，全部版本2、third_person/unassigned；来源组及基线接触状态未变，不进入训练或完整验证。全项目386图5708框：92完整、148区域外、21待复核、74草稿、51排除，1237条审计。其余380条记录及原101项训练批次不变；重冻批次检查0阻断，普通整项目仍572阻断。浏览器6页核对成功、0页面错误。
+
+实际21次源图推理/NMS，新6图157已知匹配：生产125、v37 124、v38 148；移液枪60/60恢复，但T112/T121手持纸相对生产漏检，纸张14/15→12/15。类别细分不确定的橙盖瓶体差异不当作实物误检。保留此前真实视频失败，不晋升候选；本轮未新训，累计仍61次。详见VisionCortex的MODEL-ITERATION-RESULTS-20260907.md中goal60，以及运行根goal60-work-receipt.json和标注数据目录review-goal60。总goal active，完整系统质量NOT_PROVEN；继续原图标注、来源核对和有可靠来源的困难样本/整图验证。
+
+## goal61进展（2026-09-09）
+
+PARTIAL_EVIDENCE；goal持续active。本轮新增3次同一95秒真实派生片段运行，共2280源帧；旧生产960与v38的960/1280/1536均漏掉固定16.875秒手持枪，分辨率提高不足以晋升。修复`source_frames.py`的原尺寸NV12/默认CPU颜色转换兼容：只允许一次额外CPU转换，每次仍严格核验PTS、packet与像素SHA；61项相关测试、ruff、compileall、diff检查及21次真实像素复现通过。未更新运行服务，不能声称用户页面黑屏全部修好。没有新训/新标注，仍386图5708框、累计61训练（FP23/TP38）；生产权重/配置保留。详细参数、对照图和限制见VisionCortex `docs/MODEL-ITERATION-RESULTS-20260907.md` 的goal61；机器回执`/srv/sentinel-data/VisionCortex3090Ti/Runtime/Project-Detector-Pilot-20260907/goal61-work-receipt.json`。全项目标注、手持/密集质量、真实原片多路全链路/正式归档仍NOT_PROVEN。

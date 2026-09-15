@@ -1,5 +1,9 @@
 extends: ./rtx3050-6gb-ubuntu20-production.yaml
 
+device_day:
+  enabled: false
+  delete_capture_sources: false
+
 # No-NAS smoke-test/Web profile. It never inherits a production NAS path.
 project:
   output_root: /opt/visioncortex-rtx3050/Runtime/NoNasWeb/Archives/.VisionCortex-Run-Staging

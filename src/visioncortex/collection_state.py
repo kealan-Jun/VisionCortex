@@ -171,7 +171,7 @@ def record_collection_state(
     state: str,
     details: dict[str, Any] | None = None,
 ) -> Path:
-    if state not in {"queued", "processing", "failed", "archived"}:
+    if state not in {"queued", "processing", "partial", "failed", "archived"}:
         raise ValueError(f"Unsupported collection processing state: {state}")
     path = collection_state_path(config)
     now = datetime.now().astimezone().isoformat()

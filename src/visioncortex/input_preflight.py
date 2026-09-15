@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from . import speech
 from .alignment import read_timestamp_csv_endpoints
 from .schemas import RunManifest, VideoInfo, ViewInput
 from .video_io import probe_views
@@ -48,6 +49,12 @@ def preflight_manifest_inputs(
     clock_preflight_started = time.perf_counter()
     views: list[dict[str, Any]] = []
     warnings: list[str] = []
+    for view in manifest.views:
+        for audio in speech.audio_files(view):
+            if speech.probe_audio(audio) is None:
+                raise ValueError(f"附带录音没有有效音轨: {view.view_id}")
+            if not speech.enabled(config):
+                warnings.append(f"{view.view_id}: speech_recognition_disabled")
     clock_overlap_tolerance_ms = max(
         0.0, float(upload.get("prequeue_clock_overlap_tolerance_ms", 2_500.0))
     )
@@ -165,9 +172,13 @@ def preflight_manifest_inputs(
     else:
         warnings.append("visual_alignment_required_no_absolute_clock_coverage")
     clock_preflight_seconds = time.perf_counter() - clock_preflight_started
+    from .capture_quality import inspect as inspect_capture
+    capture = inspect_capture(manifest, config, infos)
+    warnings.extend(f"{item['view_id']}: {warning}" for item in capture.get("records", []) for warning in item["warnings"])
     return {
         "schema_version": "visioncortex-prequeue-input-preflight/1",
         "status": "passed",
+        "capture_quality": capture,
         "completed_at": datetime.now().astimezone().isoformat(),
         "probe_workers": workers,
         "runtime": {

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from bisect import bisect_left, bisect_right
 from collections import Counter
+from dataclasses import dataclass, field
 import math
 from typing import Any, Sequence
 
@@ -2704,6 +2705,76 @@ def _select_view_pair(
     )
 
 
+def _build_view_timeline(
+    group: ExperimentGroup,
+    chain: Sequence[ExperimentSegment],
+    events: Sequence[EvidenceEvent],
+    views: Sequence[ViewInput],
+) -> list[dict[str, Any]]:
+    """Route third-person playback only where a formal paired event supports it.
+
+    A single best camera for an entire long workflow is unsafe: the operator
+    can move between workstations while the recorder clocks remain aligned.
+    Preserve the complete interval, but leave it explicitly unrouted unless a
+    formal event contains both the group's first-person view and a concrete
+    third-person view. This keeps an unrelated camera from being presented as
+    corroborating evidence.
+    """
+    roles = {view.view_id: view.role for view in views}
+    by_event = {event.event_id: event for event in events}
+    candidates: list[tuple[float, float, str, str]] = []
+    event_ids = {event_id for segment in chain for event_id in segment.event_ids}
+    for event_id in event_ids:
+        event = by_event.get(event_id)
+        if event is None or not event_is_formal(event):
+            continue
+        if group.first_person_view not in event.supporting_views:
+            continue
+        start = max(group.global_start_ms, float(event.global_start_ms))
+        end = min(group.global_end_ms, float(event.global_end_ms))
+        if end <= start:
+            continue
+        for view_id in sorted(set(event.supporting_views)):
+            if view_id == group.first_person_view or roles.get(view_id) != ViewRole.THIRD_PERSON:
+                continue
+            candidates.append((start, end, view_id, event.event_id))
+
+    boundaries = {float(group.global_start_ms), float(group.global_end_ms)}
+    boundaries.update(start for start, end, _, _ in candidates)
+    boundaries.update(end for start, end, _, _ in candidates)
+    ordered = sorted(boundaries)
+    rows: list[dict[str, Any]] = []
+    for start, end in zip(ordered, ordered[1:], strict=False):
+        if end <= start:
+            continue
+        active = [item for item in candidates if item[0] < end and item[1] > start]
+        if active:
+            scores: dict[str, float] = {}
+            evidence_ids: dict[str, list[str]] = {}
+            for item_start, item_end, view_id, event_id in active:
+                overlap = min(end, item_end) - max(start, item_start)
+                scores[view_id] = scores.get(view_id, 0.0) + overlap
+                evidence_ids.setdefault(view_id, []).append(event_id)
+            view_id = max(scores, key=lambda value: (scores[value], value))
+            route = view_id
+            reason = "formal_paired_event_support"
+            evidence = sorted(set(evidence_ids[view_id]))
+        else:
+            route = None
+            reason = "no_formal_paired_event_support"
+            evidence = []
+        row = {"start_ms": start, "end_ms": end, "third_person_view": route,
+               "reason": reason, "evidence_event_ids": evidence}
+        if rows and rows[-1]["third_person_view"] == route and rows[-1]["reason"] == reason:
+            rows[-1]["end_ms"] = end
+            rows[-1]["evidence_event_ids"] = sorted(set(
+                rows[-1].get("evidence_event_ids", []) + evidence
+            ))
+        else:
+            rows.append(row)
+    return rows
+
+
 def build_experiment_groups(
     segments: Sequence[ExperimentSegment],
     events: Sequence[EvidenceEvent],
@@ -2932,6 +3003,7 @@ def build_experiment_groups(
                 third_person_view=third,
                 continuity_reason="；".join(chain_reasons),
             )
+        group.view_timeline = _build_view_timeline(group, chain, events, views)
         groups.append(group)
         if decision_receipts is not None:
             decision_receipts.append(
@@ -2955,9 +3027,90 @@ def build_experiment_groups(
     return groups
 
 
+@dataclass
+class _KeySelectionWindow:
+    """Selection budget window, not an admitted experiment segment."""
+
+    segment_id: str
+    global_start_ms: float
+    global_end_ms: float
+    event_ids: list[str]
+
+
+@dataclass
+class _KeySelectionScope:
+    """Device-local material selection; never published as an experiment group."""
+
+    group_id: str
+    atomic_experiment_ids: list[str]
+    global_start_ms: float
+    global_end_ms: float
+    first_person_view: str | None = None
+    third_person_view: str | None = None
+    key_event_ids: list[str] = field(default_factory=list)
+
+
+def select_device_key_events(
+    events: Sequence[EvidenceEvent],
+    activity_intervals: Sequence[tuple[float, float]],
+    view_id: str,
+    action_types: set[str],
+    config: dict[str, Any],
+    decision_receipts: list[dict[str, Any]] | None = None,
+) -> list[EvidenceEvent]:
+    """Use shared key-material curation without requiring experiment admission.
+
+    Only formally audited physical events inside this device's active coverage
+    are eligible. Activity recall cannot promote provisional/rejected events.
+    Scope/window IDs describe selection only, not confirmed experiments.
+    """
+    windows: list[_KeySelectionWindow] = []
+    assigned: set[str] = set()
+    for index, (start, end) in enumerate(sorted(activity_intervals)):
+        ids = [
+            event.event_id for event in events
+            if event.event_id not in assigned
+            and event_is_formal(event)
+            and event.action_type.value in action_types
+            and view_id in event.supporting_views
+            and start <= event.key_global_ms < end
+            and ((event.state_machine or {}).get("publication") or {}).get("status")
+            != "component_only"
+        ]
+        if ids:
+            windows.append(_KeySelectionWindow(
+                f"DeviceSelectionWindow-{index}", start, end, ids))
+            assigned.update(ids)
+    if not windows:
+        return []
+    scope = _KeySelectionScope(
+        f"DeviceSelection-{view_id}", [window.segment_id for window in windows],
+        min(window.global_start_ms for window in windows),
+        max(window.global_end_ms for window in windows))
+    receipts: list[dict[str, Any]] = []
+    selected = _select_key_events([scope], windows, events, config, receipts)
+    for receipt in receipts:
+        receipt["selection_scope"] = "single_device_action_material"
+        receipt["physical_action_confirmed"] = False
+        receipt["experiment_admission_changed"] = False
+    if decision_receipts is not None:
+        decision_receipts.extend(receipts)
+    return selected
+
+
 def select_key_events(
     groups: Sequence[ExperimentGroup],
     segments: Sequence[ExperimentSegment],
+    events: Sequence[EvidenceEvent],
+    config: dict[str, Any],
+    decision_receipts: list[dict[str, Any]] | None = None,
+) -> list[EvidenceEvent]:
+    return _select_key_events(groups, segments, events, config, decision_receipts)
+
+
+def _select_key_events(
+    groups: Sequence[ExperimentGroup | _KeySelectionScope],
+    segments: Sequence[ExperimentSegment | _KeySelectionWindow],
     events: Sequence[EvidenceEvent],
     config: dict[str, Any],
     decision_receipts: list[dict[str, Any]] | None = None,
@@ -3256,6 +3409,18 @@ def select_key_events(
             per_type: dict[str, list[EvidenceEvent]] = {}
             for event in candidates:
                 event_decision = ensure_decision(event, group, segment_id)
+                # A cap detector is a recall cue, not a before/after transition.
+                # Respect explicit negative state evidence in both offline and
+                # device-day curation, while preserving the original event.
+                state = event.state_machine or {}
+                missing = set(state.get("missing_phases") or [])
+                if (event.action_type == ActionType.CONTAINER_STATE_CHANGE
+                        and missing.intersection({"state_after", "state_hold"})):
+                    event_decision.update(
+                        decision="container_state_transition_not_observed",
+                        missing_phases=sorted(missing),
+                    )
+                    continue
                 bucket = per_type.setdefault(event.action_type.value, [])
                 duplicate: tuple[EvidenceEvent, dict[str, Any]] | None = None
                 for existing in bucket:

@@ -19,7 +19,7 @@
 
 ## 1. 先同步 GitHub 冻结版本
 
-仓库：`https://github.com/kealan-Jun/VisionCortex.git`
+仓库：`https://github.com/kealan-Jun/VisionCortex.git` 或 `https://github.com/RealityLoopAI/VisionCortex.git`。两个仓库平级同步；执行时使用本任务冻结的同一提交 SHA。
 
 目标分支：`codex/post-dev008-adaptive-throughput`
 
@@ -37,8 +37,8 @@ if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($OriginUrl)) {
     throw '当前仓库没有可用的 origin 远端。'
 }
 $OriginUrl = $OriginUrl.Trim()
-if ($OriginUrl -notmatch 'github\.com[/:]kealan-Jun/VisionCortex(?:\.git)?$') {
-    throw "当前仓库不是 kealan-Jun/VisionCortex：$OriginUrl"
+if ($OriginUrl -notmatch 'github\.com[/:](?:kealan-Jun|RealityLoopAI)/VisionCortex(?:\.git)?$') {
+    throw "当前仓库不是 VisionCortex 两个同步仓库之一：$OriginUrl"
 }
 git status --short --branch
 git remote -v

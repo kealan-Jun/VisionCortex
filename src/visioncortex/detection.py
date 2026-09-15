@@ -16,8 +16,12 @@ from typing import Any, Callable
 import cv2
 import numpy as np
 
+from .detection_duplicates import duplicate_suppression_policies, suppress_duplicate_boxes
+from .detection_inference import prediction_branches, prediction_contract
+from .performance_stages import StageTimings, MeasuredWriter, prediction_timings
 from .key_material_verification import validate_selective_key_material_verification
-from .schemas import AlignmentTransform, BoxEvidence, FrameEvidence, VideoInfo, ViewInput, ViewRole
+from .schemas import AlignmentTransform, BoxEvidence, FrameEvidence, SourceFrameIdentity, VideoInfo, ViewInput, ViewRole
+from .source_frames import SOURCE_FRAME_CONTRACT
 from .liquid_semantic import validate_liquid_semantic_runtime
 from .temporal_segmentation import validate_temporal_segmentation_runtime
 from .video_io import (
@@ -204,6 +208,7 @@ class FramePacket:
     motion_quality_state: str = "usable"
     motion_probe_score: float | None = None
     motion_probe_raw_score: float | None = None
+    source_frame: SourceFrameIdentity | None = None
 
 
 @dataclass(frozen=True)
@@ -405,16 +410,29 @@ class _DecodedUnitError:
     message: str
 
 
-def _read_checkpoint(path: Path, output_path: Path | None = None) -> set[int]:
+def _read_checkpoint(
+    path: Path, output_path: Path | None = None, *, duplicate_policy: dict | None = None,
+    prediction_policy: dict | None = None,
+    source_frame_contract: str | None = None,
+) -> set[int]:
     if not path.is_file():
         return set()
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload.get("source_frame_contract") != source_frame_contract:
+            raise RuntimeError("Source frame identity contract changed; use a new scan directory")
+        if payload.get("prediction_policy") != prediction_policy:
+            raise RuntimeError("Detection prediction policy changed; use a new scan directory")
         completed = {int(item) for item in payload.get("completed_chunks", [])}
         if not completed:
             return set()
         if output_path is None or not output_path.is_file():
             return set()
+        if payload.get("duplicate_suppression_policy") != duplicate_policy:
+            # Reject before truncating the uncommitted tail or deleting a ledger.
+            raise RuntimeError(
+                "Detection duplicate suppression policy changed; use a new scan directory"
+            )
         expected_size = payload.get("output_size_bytes")
         if expected_size is not None:
             expected = int(expected_size)
@@ -434,7 +452,11 @@ def _read_checkpoint(path: Path, output_path: Path | None = None) -> set[int]:
         return set()
 
 
-def _write_checkpoint(path: Path, completed: set[int], output_path: Path) -> None:
+def _write_checkpoint(
+    path: Path, completed: set[int], output_path: Path, *, duplicate_policy: dict | None = None,
+    prediction_policy: dict | None = None,
+    source_frame_contract: str | None = None,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp")
     temporary.write_text(
@@ -444,6 +466,9 @@ def _write_checkpoint(path: Path, completed: set[int], output_path: Path) -> Non
                 "completed_chunks": sorted(completed),
                 "output_path": str(output_path),
                 "output_size_bytes": output_path.stat().st_size if output_path.is_file() else 0,
+                "duplicate_suppression_policy": duplicate_policy,
+                "prediction_policy": prediction_policy,
+                "source_frame_contract": source_frame_contract,
             },
             ensure_ascii=False,
             indent=2,
@@ -472,6 +497,7 @@ def _producer(
     decode_worker_override: int | None = None,
 ) -> None:
     perf = config["performance"]
+    component_timings = getattr(output_queue, "component_timings", StageTimings())
     chunk_ms = float(perf.get(f"{phase}_chunk_seconds", perf["chunk_seconds"])) * 1000.0
     spans = windows if windows is not None else [(0.0, info.duration_ms)]
     persistent_sessions: list[PhysicalSegmentDecodeSession] = []
@@ -615,7 +641,7 @@ def _producer(
             with activity_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
-    def iter_decoded_frames(
+    def raw_decoded_frames(
         start_ms: float, end_ms: float, chunk_index: int | None = None
     ) -> Iterable[tuple[int, float, np.ndarray]]:
         if persistent_sessions:
@@ -664,6 +690,9 @@ def _producer(
             bool(perf.get("ffmpeg_cuda_scale", False)) and decode_backend == "cuda",
         )
 
+    def iter_decoded_frames(start_ms, end_ms, chunk_index=None):
+        return component_timings.frames(raw_decoded_frames(start_ms, end_ms, chunk_index))
+
     def decoded_frames(
         start_ms: float, end_ms: float, chunk_index: int | None = None
     ) -> list[tuple[int, float, np.ndarray]]:
@@ -680,7 +709,9 @@ def _producer(
         probe_period_ms = 1000.0 / max(motion_probe_fps, 1e-9)
         if shared_motion_probe and next_shared_probe_ms is None:
             next_shared_probe_ms = start_ms
-        for frame_index, local_ms, frame in frames:
+        for decoded in frames:
+            frame_index, local_ms, frame = decoded
+            preparation_started = time.perf_counter()
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             signature = cv2.resize(gray, motion_signature_size, interpolation=cv2.INTER_AREA)
             compensation_enabled = bool(
@@ -795,7 +826,10 @@ def _producer(
             previous_signature = signature
             if not persistent_sessions and local_ms + 0.5 < next_yolo_ms:
                 previous_gray = gray
+                component_timings.add("frame_preparation_seconds", time.perf_counter()-preparation_started)
                 continue
+            component_timings.add("frame_preparation_seconds", time.perf_counter()-preparation_started)
+            emit_started = time.perf_counter()
             output_queue.put(
                 FramePacket(
                     view=view,
@@ -813,8 +847,10 @@ def _producer(
                     motion_quality_state=motion_quality_state,
                     motion_probe_score=probe_motion_score,
                     motion_probe_raw_score=probe_raw_motion_score,
+                    source_frame=getattr(decoded, "source_frame", None),
                 )
             )
+            component_timings.add("producer_emit_seconds", time.perf_counter()-emit_started)
             previous_gray = gray
             if not persistent_sessions:
                 while next_yolo_ms <= local_ms + 0.5:
@@ -1377,7 +1413,22 @@ class RoleScanner:
         self.role = role
         self.config = config
         self.model_path = _select_model_path(role, config)
+        branch = prediction_branches(config).get(role)
+        self.prediction_policy = (
+            prediction_contract(branch, self.model_path, config,
+                                int(image_size or config["performance"]["image_size"]))
+            if branch is not None else None
+        )
+        self.prediction_end2end = None if branch is None else branch == "one2one"
+        self.last_prediction_end2end = None
         self.model = YOLO(str(self.model_path))
+        if branch is not None:
+            head = self.model.model.model[-1]
+            if any(getattr(head, name, None) is None for name in (
+                "cv2", "cv3", "one2one_cv2", "one2one_cv3"
+            )):
+                raise ValueError("Selected model does not contain both candidate prediction branches")
+            self.model.model.end2end = self.prediction_end2end
         self.names = {
             int(key): str(value).replace("-", "_")
             for key, value in self.model.names.items()
@@ -1414,10 +1465,14 @@ class RoleScanner:
             pass
 
     def infer(self, packets: Sequence[FramePacket]) -> list[list[BoxEvidence]]:
+        from .runtime_control import check_cancelled
+        check_cancelled()
         perf, model_cfg = self.config["performance"], self.config["models"]
         # A short queue flush is not a memory-pressure signal. Keep the engine
         # capacity unchanged unless inference actually raises CUDA OOM.
         batch_size = min(self.batch_size, len(packets))
+        if not hasattr(self, "component_timings"):
+            self.component_timings = StageTimings()
         while True:
             try:
                 results: list[list[BoxEvidence]] = []
@@ -1439,6 +1494,8 @@ class RoleScanner:
                             + padding
                         )
                     engine_batch_sizes.append(len(execution_batch))
+                    expected_end2end = getattr(self, "prediction_end2end", None)
+                    branch_options = {} if expected_end2end is None else {"end2end": expected_end2end}
                     predictions = self.model.predict(
                         source=[packet.frame for packet in execution_batch],
                         imgsz=self.image_size,
@@ -1448,7 +1505,14 @@ class RoleScanner:
                         device=perf["device"],
                         half=bool(perf["half"]),
                         verbose=False,
+                        **branch_options,
                     )
+                    prediction_timings(predictions, self.component_timings)
+                    if expected_end2end is not None:
+                        observed = getattr(self.model.predictor.model, "end2end", None)
+                        if type(observed) is not bool or observed != expected_end2end:
+                            raise RuntimeError("Prediction backend did not honor the configured branch")
+                        self.last_prediction_end2end = observed
                     if len(predictions) < len(sub_batch):
                         raise RuntimeError(
                             "TensorRT inference returned fewer predictions than source frames"
@@ -1458,7 +1522,7 @@ class RoleScanner:
                     ):
                         boxes: list[BoxEvidence] = []
                         if prediction.boxes is not None:
-                            xyxy = prediction.boxes.xyxyn.detach().cpu().numpy()
+                            xyxy = np.clip(prediction.boxes.xyxyn.detach().cpu().numpy(), 0.0, 1.0)
                             confidences = prediction.boxes.conf.detach().cpu().numpy()
                             classes = (
                                 prediction.boxes.cls.detach().cpu().numpy().astype(int)
@@ -1467,7 +1531,7 @@ class RoleScanner:
                                 xyxy, confidences, classes, strict=True
                             ):
                                 coords_tuple = tuple(
-                                    float(np.clip(item, 0.0, 1.0)) for item in coords
+                                    float(item) for item in coords
                                 )
                                 boxes.append(
                                     BoxEvidence(
@@ -1529,12 +1593,25 @@ def scan_videos(
     progress_callback: Callable[[str, int, int], None] | None = None,
     scanner_id: str | None = None,
 ) -> dict[str, Path]:
+    policies = duplicate_suppression_policies(config)
+    branches = prediction_branches(config)
+    effective_image_size = int(image_size if image_size is not None else config["performance"]["image_size"])
+    if phase == "motion_probe" and not config["performance"].get("motion_probe_run_yolo", False):
+        policies = {}
+        branches = {}
+    prediction_policies = {
+        role: prediction_contract(branch, _select_model_path(role, config), config, effective_image_size)
+        for role, branch in branches.items() if any(view.role == role for view in views)
+    }
     work_dir.mkdir(parents=True, exist_ok=True)
     output_paths = {view.view_id: work_dir / f"{view.view_id}.detections.jsonl" for view in views}
     checkpoint_paths = {view.view_id: work_dir / f"{view.view_id}.checkpoint.json" for view in views}
     completed = {
         view.view_id: _read_checkpoint(
-            checkpoint_paths[view.view_id], output_paths[view.view_id]
+            checkpoint_paths[view.view_id], output_paths[view.view_id],
+            duplicate_policy=policies.get(view.role),
+            prediction_policy=prediction_policies.get(view.role),
+            source_frame_contract=SOURCE_FRAME_CONTRACT,
         )
         for view in views
     }
@@ -1555,7 +1632,6 @@ def scan_videos(
         pass
 
     effective_fps = float(sample_fps if sample_fps is not None else config["performance"]["detection_fps"])
-    effective_image_size = int(image_size if image_size is not None else config["performance"]["image_size"])
     phase_batch_size = int(
         config["performance"].get(
             f"{phase}_batch_size", config["performance"].get("batch_size", 16)
@@ -1570,6 +1646,7 @@ def scan_videos(
         role_views = [view for view in views if view.role == role]
         if not role_views:
             continue
+        duplicate_policy = policies.get(role)
         role_decode_slot_budget = max(
             len(role_views),
             int(config["performance"].get("fine_active_decode_slots", len(role_views))),
@@ -1599,8 +1676,9 @@ def scan_videos(
             config["performance"].get("motion_probe_run_yolo", False)
         )
         model_load_started = time.perf_counter()
-        scanner = None if motion_only else RoleScanner(
-            role,
+        from .shared_inference import acquire_scanner
+        scanner = None if motion_only else acquire_scanner(
+            RoleScanner, role,
             config,
             effective_image_size,
             phase_batch_size,
@@ -1611,12 +1689,15 @@ def scan_videos(
                 )
             ),
         )
+        if scanner is not None and getattr(scanner, "prediction_policy", None) != prediction_policies.get(role):
+            raise RuntimeError("Prediction identity changed between checkpoint verification and model startup")
         model_load_seconds = time.perf_counter() - model_load_started
         runtime_report = {
             "phase": phase,
             "role": role.value,
             "scanner_id": scanner_id,
             "model_path": str(scanner.model_path) if scanner is not None else None,
+            "prediction_policy": prediction_policies.get(role),
             "backend": (
                 "motion_only"
                 if scanner is None
@@ -1743,8 +1824,9 @@ def scan_videos(
             )
             for view in role_views
         } if scanner is not None else {}
+        component_timings = StageTimings()
         writers = {
-            view.view_id: output_paths[view.view_id].open("a", encoding="utf-8", buffering=1024 * 1024)
+            view.view_id: MeasuredWriter(output_paths[view.view_id].open("a", encoding="utf-8", buffering=1024 * 1024), component_timings)
             for view in role_views
         }
         emitted_timestamp_keys: dict[str, set[int]] = {
@@ -1770,6 +1852,7 @@ def scan_videos(
             work_dir
             / f"source_activity_{phase}_{role.value}{scanner_suffix}.jsonl"
         )
+        frame_queue.component_timings = component_timings
         frame_queue.activity_lock = threading.Lock()
         threads = [
             threading.Thread(
@@ -1825,6 +1908,9 @@ def scan_videos(
         maximum_camera_shift_norm = 0.0
         motion_compensation_methods: dict[str, int] = {}
         degraded_motion_frame_count = 0
+        raw_detection_count = 0
+        suppressed_detection_count = 0
+        suppression_frame_count = 0
         batch_wait_seconds = max(
             0.001,
             float(config["performance"].get("inference_batch_wait_ms", 25.0)) / 1000.0,
@@ -1837,6 +1923,7 @@ def scan_videos(
             nonlocal raw_motion_score_sum, effective_motion_score_sum
             nonlocal compensated_motion_frame_count, quality_fallback_frame_count
             nonlocal maximum_camera_shift_norm, degraded_motion_frame_count
+            nonlocal raw_detection_count, suppressed_detection_count, suppression_frame_count
             if not pending_items:
                 return
             frames = [item for item in pending_items if isinstance(item, FramePacket)]
@@ -1852,6 +1939,8 @@ def scan_videos(
                 inference_seconds += time.perf_counter() - inference_started
                 if frames:
                     batch_sizes.extend(scanner.last_inference_batch_sizes)
+                    from .device_day_activity import counted
+                    counted(phase, len(frames))
             if reason == "full_batch":
                 full_batch_flushes += 1
             elif reason == "timeout":
@@ -1904,6 +1993,14 @@ def scan_videos(
                                 )
                                 + 1
                             )
+                    suppression_audit = None
+                    if scanner is not None and duplicate_policy is not None:
+                        raw_detection_count += len(boxes)
+                        boxes, suppression_audit = suppress_duplicate_boxes(
+                            boxes, duplicate_policy["iou_threshold"]
+                        )
+                        suppressed_detection_count += len(suppression_audit.removals)
+                        suppression_frame_count += bool(suppression_audit.removals)
                     tracked = (
                         trackers[item.view.view_id].update(boxes, item.local_ms)
                         if scanner is not None
@@ -1933,6 +2030,8 @@ def scan_videos(
                         camera_motion_method=item.camera_motion_method,
                         motion_quality_state=item.motion_quality_state,
                         detections=tracked,
+                        duplicate_suppression=suppression_audit,
+                        source_frame=item.source_frame,
                     )
                     writers[item.view.view_id].write(evidence.model_dump_json() + "\n")
                 elif isinstance(item, ChunkEnd):
@@ -1942,6 +2041,9 @@ def scan_videos(
                         checkpoint_paths[item.view_id],
                         completed[item.view_id],
                         output_paths[item.view_id],
+                        duplicate_policy=duplicate_policy,
+                        prediction_policy=prediction_policies.get(role),
+                        source_frame_contract=SOURCE_FRAME_CONTRACT,
                     )
                     if progress_callback is not None:
                         progress_callback(
@@ -1992,8 +2094,12 @@ def scan_videos(
         finally:
             for thread in threads:
                 thread.join(timeout=5.0)
+            processing_write_seconds = component_timings.snapshot().get("ledger_write_seconds", 0)
             for writer in writers.values():
                 writer.close()
+            if hasattr(scanner, "shared_statistics"):
+                runtime_report["shared_inference"] = scanner.shared_statistics()
+                runtime_report["inference_statistics_scope"] = "caller_submissions_not_physical_gpu_batches"
             runtime_report.update(
                 {
                     "completed_source_workers": len(ended),
@@ -2046,7 +2152,23 @@ def scan_videos(
                     "control_only_flushes": control_only_flushes,
                     "queue_wait_seconds": round(queue_wait_seconds, 6),
                     "inference_seconds": round(inference_seconds, 6),
+                    "observed_prediction_end2end": getattr(scanner, "last_prediction_end2end", None),
                     "tracking_and_ledger_seconds": round(postprocess_seconds, 6),
+                    "component_timings": {
+                        "schema_version": "visioncortex-component-timing/1",
+                        "scope": "overlapping worker sums; model profile includes padding; buffered writes, not fsync",
+                        "read_decode_separate": False,
+                        **component_timings.snapshot(),
+                        **(scanner.component_timings.snapshot() if hasattr(scanner, "component_timings") else {}),
+                        "tracking_serialization_seconds": round(max(0.0, postprocess_seconds-processing_write_seconds), 6),
+                    },
+                    "duplicate_suppression": {
+                        "policy": duplicate_policy,
+                        "input_detections": raw_detection_count,
+                        "suppressed_detections": suppressed_detection_count,
+                        "frames_with_suppression": suppression_frame_count,
+                        "scope": "current_invocation_before_tracking",
+                    },
                     "role_total_seconds": round(time.perf_counter() - role_started, 6),
                 }
             )

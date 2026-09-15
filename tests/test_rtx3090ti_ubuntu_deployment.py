@@ -178,3 +178,16 @@ def test_linux_archive_folder_uses_xdg_open(monkeypatch, tmp_path):
     command = _folder_open_command(tmp_path, os_name="posix", platform="linux")
 
     assert command == ["/usr/bin/xdg-open", str(tmp_path)]
+
+
+def test_local_profile_cannot_inherit_production_nas_input_contract():
+    from visioncortex.config import load_config
+
+    settings = load_config(ROOT / "configs/rtx3090ti-ubuntu-local.yaml")
+    storage = settings["storage"]
+    assert storage["run_output_mode"] == "local"
+    assert storage["manifest_storage"] == "local"
+    assert storage["require_nas_source_paths"] is False
+    assert storage["sync_to_nas"] is False
+    for name in ("source_root", "snapshot_path"):
+        assert settings["collection_ingest"][name].startswith("/srv/sentinel-data/VisionCortex3090Ti/Runtime/NoNasWeb/")

@@ -262,7 +262,11 @@ def validate_experiment_and_material_quality(
             and (not semantic_review or semantic_confirmed)
         )
         confirmed_count += int(confirmed)
-        media_complete = len(event.key_frames) == 3 and len(event.key_clips) == 3
+        materialization = event.observability.get("key_material_materialization") or {}
+        media_complete = bool(
+            len(event.key_frames) == 3 and len(event.key_clips) == 3
+            and (not materialization or materialization.get("status") == "completed")
+        )
         media_complete_count += int(media_complete)
         auditable = both_roles or bool(event.uncertainty)
         auditable_count += int(auditable)
@@ -339,6 +343,7 @@ def validate_experiment_and_material_quality(
                 "confidence": event.confidence,
                 "cross_view_supported": both_roles,
                 "media_complete": media_complete,
+                "materialization_status": materialization.get("status"),
                 "model_understanding_completed": model_completed,
                 "semantic_review_verdict": semantic_verdict or None,
                 "semantic_claim_confirmed": confirmed,
@@ -420,8 +425,36 @@ def validate_experiment_and_material_quality(
     canonical_pair_coverage_passed = all(
         item["passed"] for item in pair_coverage
     )
+    incomplete_boundaries = []
+    for group in groups:
+        assessment = (group.model_understanding or {}).get("boundary_assessment") or {}
+        reasons = []
+        if group.completion_status in {"unresolved", "ongoing_at_recording_end"}:
+            reasons.append("workflow_end_not_observed")
+        if group.boundary_extension_requires_step_review:
+            reasons.append("extended_video_steps_not_revalidated")
+        if assessment.get("start_complete") is False:
+            reasons.append("experiment_start_incomplete")
+        if assessment.get("end_complete") is False:
+            reasons.append("experiment_end_incomplete")
+        if assessment.get("localized_rescan_needed") is True:
+            reasons.append("boundary_context_review_needed")
+        for review in group.boundary_reviews:
+            if review.get("kind") == "tail" or review.get("superseded_by"):
+                continue
+            if review.get("joined"):
+                continue
+            result = review.get("result") or {}
+            decision = result.get("decision") or {}
+            if result.get("status") != "completed" or decision.get("relation") == "uncertain":
+                reasons.append("neighboring_cut_unresolved")
+            elif decision.get("left_experiment_complete") is False:
+                reasons.append("ongoing_experiment_at_cut")
+        if reasons:
+            incomplete_boundaries.append({"group_id": group.group_id, "reasons": sorted(set(reasons))})
     segmentation_integrity_passed = bool(
         stable_group_uid_gate_passed and canonical_pair_coverage_passed
+        and not incomplete_boundaries
     )
     cross_view_rate = cross_view_count / event_count if event_count else 0.0
     participant_only_annotation_gate_passed = bool(
@@ -517,6 +550,8 @@ def validate_experiment_and_material_quality(
             ),
             "stable_group_uid_gate_passed": stable_group_uid_gate_passed,
             "canonical_pair_coverage_passed": canonical_pair_coverage_passed,
+            "boundary_completion_passed": not incomplete_boundaries,
+            "incomplete_boundaries": incomplete_boundaries,
             "groups": pair_coverage,
         },
         "key_materials": {

@@ -810,3 +810,35 @@ def test_staging_run_web_endpoints_are_indexable_and_fail_closed(
         "/api/staging-file",
         params={"run_id": run_id, "path": "outside-link.txt"},
     ).status_code == 404
+
+
+def test_material_link_lookup_finds_exact_event_beyond_first_page(monkeypatch, tmp_path):
+    archive_root = tmp_path / "archives"
+    root = archive_root / "Archive-Material-Link"
+    _, events, groups, _, _ = _indexed_archive(root, event_count=30)
+    monkeypatch.setattr(api, "_archive_root", lambda settings=None: archive_root)
+    monkeypatch.setattr(
+        api, "_archive_catalog_database", lambda **_kwargs: tmp_path / "catalog.sqlite3"
+    )
+    client = TestClient(api.app)
+    first = client.get(
+        "/api/key-events", params={"archive": root.name, "material_ready": True, "limit": 24}
+    ).json()
+    target = events[-1]
+    assert target.event_id not in {item["event_id"] for item in first["items"]}
+    response = client.get(
+        "/api/key-events",
+        params={
+            "archive": root.name, "q": target.event_id,
+            "parent_event_id": groups[-1].group_id, "material_ready": True, "limit": 24,
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total_count"] == 1
+    assert payload["items"][0]["event_id"] == target.event_id
+    assert payload["items"][0]["event_uid"]
+    assert payload["items"][0]["dual_view_material_ready"] is True
+    assert payload["items"][0]["archive_name"] == root.name
+    assert "release_id" in payload["items"][0]
+    assert payload["next_cursor"] is None

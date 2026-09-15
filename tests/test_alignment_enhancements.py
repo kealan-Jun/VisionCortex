@@ -553,6 +553,9 @@ def test_cross_view_association_uses_bounded_alignment_uncertainty():
 
     events, _ = audit_candidates(candidates, transforms, config)
 
+    assert len(events) == 2  # 1200 ms gap exceeds sqrt(600**2 + 600**2).
+    candidates[1].global_start_ms = 1800.0
+    events, _ = audit_candidates(candidates, transforms, config)
     assert len(events) == 1
     receipt = events[0].observability["alignment_association"]
     assert receipt["effective_cluster_tolerance_ms"] > config["alignment"][

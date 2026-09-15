@@ -80,6 +80,7 @@ def test_api_schedule_writes_sqlite_before_returning(monkeypatch, tmp_path: Path
 
 def test_persisted_job_dispatch_restores_paths_and_payload(monkeypatch, tmp_path: Path):
     observed = {}
+    monkeypatch.setattr(api, "_queue_stop", threading.Event())
 
     def fake_execute(run_id, settings, nas_root, timing):
         observed.update(

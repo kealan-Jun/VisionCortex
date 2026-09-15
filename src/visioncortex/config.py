@@ -72,7 +72,11 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
     if path and path.resolve() != default_config:
         config = _deep_merge(config, _load_profile(path))
     _apply_environment_overrides(config)
+    from .runtime_options import validate as validate_runtime
+    validate_runtime(config)
     _validate_mllm_evidence_config(config)
+    from .device_day_contract import validate_config as validate_device_day_config
+    validate_device_day_config(config)
     return config
 
 
@@ -192,6 +196,22 @@ def _apply_environment_overrides(config: dict[str, Any]) -> None:
     if output_root:
         config.setdefault("project", {})["output_root"] = output_root
 
+    completed_receipts = os.getenv("VISIONCORTEX_COMPLETED_VISION_RECEIPTS")
+    completed_receipts_sha = os.getenv("VISIONCORTEX_COMPLETED_VISION_RECEIPTS_SHA256")
+    if completed_receipts or completed_receipts_sha:
+        if not completed_receipts or not completed_receipts_sha:
+            raise ValueError("Completed vision receipt manifest requires both path and SHA-256")
+        config.setdefault("device_day", {})["completed_vision_receipts"] = {
+            "path": completed_receipts, "sha256": completed_receipts_sha}
+
+    checkpoints = os.getenv("VISIONCORTEX_COMPLETED_STAGE_RECEIPTS")
+    checkpoints_sha = os.getenv("VISIONCORTEX_COMPLETED_STAGE_RECEIPTS_SHA256")
+    if checkpoints or checkpoints_sha:
+        if not checkpoints or not checkpoints_sha:
+            raise ValueError("Completed stage receipt manifest requires both path and SHA-256")
+        config.setdefault("device_day", {})["completed_stage_receipts"] = {
+            "path": checkpoints, "sha256": checkpoints_sha}
+
     models = config.setdefault("models", {})
     model_overrides = {
         "VISIONCORTEX_FIRST_PERSON_MODEL": "first_person",
@@ -228,6 +248,9 @@ def load_manifest(path: Path) -> RunManifest:
             view.video = (base / view.video).resolve()
         if view.timestamps_csv and not view.timestamps_csv.is_absolute():
             view.timestamps_csv = (base / view.timestamps_csv).resolve()
+        for item in view.segments or [view]:
+            if item.audio is not None and not item.audio.is_absolute():
+                item.audio = (base / item.audio).resolve()
         for segment in view.segments:
             if not segment.video.is_absolute():
                 segment.video = (base / segment.video).resolve()

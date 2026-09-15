@@ -359,6 +359,7 @@ def build_daily_report(
                     "physical_change": raw.get("physical_change"),
                     "supporting_views": raw.get("supporting_views") or [],
                     "confidence": raw.get("confidence"),
+                    "speech_segment_ids": raw.get("speech_segment_ids") or [],
                     "claim_class": "supported_model_understanding",
                 }
             )
@@ -407,6 +408,8 @@ def build_daily_report(
                     "supporting_views": event.supporting_views,
                     "supporting_roles": [role.value for role in event.supporting_roles],
                     "observed_evidence": event.audit_reason,
+                    "speech_interpretation": event_understanding.get("speech_interpretation"),
+                    "speech_context": event_understanding.get("speech_context"),
                     "current_step": event_understanding.get("current_step"),
                     "next_step": event_understanding.get("next_step"),
                     "next_step_status": (
@@ -453,6 +456,11 @@ def build_daily_report(
                 "experiment_name": group.experiment_name,
                 "experiment_name_en": group.experiment_name_en,
                 "continuity_type": group.continuity_type,
+                "workflow_kind": group.workflow_kind,
+                "workflow_units": group.workflow_units,
+                "completion_status": group.completion_status,
+                "completion_reason": group.completion_reason,
+                "boundary_extension_requires_step_review": group.boundary_extension_requires_step_review,
                 "continuity_reason": group.continuity_reason,
                 "atomic_experiment_ids": group.atomic_experiment_ids,
                 "start_global_ms": group.global_start_ms,
@@ -461,6 +469,8 @@ def build_daily_report(
                 "end_timecode": _clock(group.global_end_ms),
                 "duration_seconds": round(duration_seconds, 6),
                 "participating_views": group.participating_views,
+                "speech_interpretation": understanding.get("speech_interpretation"),
+                "speech_context": understanding.get("speech_context"),
                 "overall_summary": understanding.get("overall_summary"),
                 "model_status": understanding.get("status"),
                 "model_name": understanding.get("model"),
@@ -987,5 +997,10 @@ def generate_daily_report_from_archive(root: Path, config: dict[str, Any]) -> di
     summary = RunSummary.model_validate_json(
         (layout.json_config / "evidence_package.json").read_text(encoding="utf-8-sig")
     )
+    from .speech_refresh import apply
+    from .operation_review import apply as apply_operations
+    from .schemas import ExperimentGroup
+    summary.experiment_groups = [ExperimentGroup.model_validate(item) for item in
+                                 apply_operations(root, apply(root, [group.model_dump(mode="json") for group in summary.experiment_groups]))]
     run_metrics = json.loads((layout.json_config / "run_metrics.json").read_text(encoding="utf-8-sig"))
     return generate_daily_report_archive(layout, summary, run_metrics, config)
