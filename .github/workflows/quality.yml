@@ -1,9 +1,7 @@
 name: VisionCortex quality gates
 
 on:
-  pull_request:
-  push:
-    branches: [main, "codex/**"]
+  # Manual only: repository synchronization does not trigger CI.
   workflow_dispatch:
 
 permissions:

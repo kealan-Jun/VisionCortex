@@ -23,7 +23,7 @@
 - Synchronize the same reviewed local commit to both `main` branches and any explicitly shared working branch. Existing remote aliases (`development` and `origin`) are historical names, not different authority levels.
 - Before consequential Git work, verify the remote URLs, default branch, current branch, local SHA, remote SHA, upstream, and working-tree status.
 - Synchronization is complete only after querying both remotes and confirming identical target SHAs. Preserve remote commits, other branches and tags; reconcile divergence before pushing. Never force-push or use `--mirror` to erase remote history as part of routine synchronization.
-- Apply `docs/DUAL-REPOSITORY-RELEASE-POLICY.md`. Code synchronization does not deploy services or assert release readiness. Formal releases still need deterministic checks, relevant real-video receipts for CV changes, and documented limitations.
+- Apply `docs/DUAL-REPOSITORY-RELEASE-POLICY.md`. Code synchronization does not deploy services or assert release readiness. Per the user's 2026-09-15 clarification, routine code management must not trigger or wait for CI self-checks; the workflow is manual-only. Formal deployment evidence is separate from Git synchronization.
 - The RTX 4060 machine is a frozen execution node. Give it an immutable synchronized SHA from either repository; it may execute production video and return evidence, but it must not edit, commit, test, or tune code unless a later task explicitly changes that authority.
 - Preserve unrelated work. In a dirty tree, stage only named paths; never use `git add -A` or `git add .`.
 
@@ -41,7 +41,7 @@
 1. Inspect the applicable instructions, Git state, canonical docs, relevant source, configuration, and tests.
 2. Classify the task as read-only audit, development change, repository synchronization, frozen-node execution, release deployment, or live verification; keep actions inside that boundary.
 3. Make the smallest coherent change that addresses the root problem. Avoid unrelated refactors, broad formatting, speculative features, and one-off helper artifacts.
-4. Run the smallest relevant local checks, then rely on the required cross-platform CI and runtime gates for stronger claims.
+4. Run the smallest relevant local checks for implementation changes. Routine Git synchronization does not require running CI. Use applicable runtime evidence for stronger deployment claims.
 5. Review the diff and status for unintended files, generated output, credential shapes, and scope drift before handoff or publication.
 6. Report the exact branch/SHA, checks run, evidence obtained, and remaining `PARTIAL_EVIDENCE` or `NOT_PROVEN` boundaries.
 
@@ -53,7 +53,7 @@
 - Web JavaScript changes: run `node --check src/visioncortex/web/app.js` plus the relevant Python/Web characterization tests.
 - Ubuntu deployment-script changes: run `bash -n` on the changed scripts.
 - Documentation-only changes: run `git diff --check` and validate referenced paths/commands. Do not install dependencies or run code tests locally unless the documentation changes an executable contract.
-- Both repositories run the same deterministic GitHub Actions suite, including Ubuntu Python 3.11/3.12, Windows Python 3.11, repository policy, and no-NAS contracts. Report actual CI status separately from successful Git synchronization.
+- Both repositories retain the same manual GitHub Actions workflow. Pushes and pull requests do not trigger it. Do not launch CI for routine synchronization; if explicitly requested later, report its actual result separately from successful Git synchronization.
 - Do not silently fix unrelated failures. Separate regressions caused by the change from pre-existing or environment-specific failures.
 
 ## Code review rules

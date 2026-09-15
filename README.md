@@ -527,7 +527,7 @@ visioncortex serve --host 127.0.0.1 --port 8000
 
 已完成档案不会依赖浏览器加载整份大 JSON 才能查找关键素材：`GET /api/key-events` 支持跨档案或指定档案的全文、动作类型、实验组、双视角和时间范围筛选，并通过与筛选条件绑定的 `cursor` 分页；`GET /api/key-events/{event_uid}` 返回事件及带 SHA-256 的素材引用；`GET /api/evidence/{evidence_uid}` 可一跳回到 `evidence_package.json` 的 JSON Pointer 和原视频物理分片；`GET /api/physical-changes` 查询明确观测到的对象前后状态变化，不会替 unknown 区间补状态。稳定事件 UID 格式为 `{archive_id}:{parent_event_uid}:{event_id}`；其中稳定实验组 UID 不会因前面插入其他实验而改变，原有 `GROUP-xxxx` 继续作为页面顺序编号。SQLite/JSONL 都是权威归档 JSON 的派生产物，可随时重建，不会取代原 JSON。
 
-`kealan-Jun/VisionCortex` 与 `RealityLoopAI/VisionCortex` 是同一套代码的两个平级仓库，直接同步同一个提交，不再区分开发仓和稳定发布仓。同步完成以两端 `main` 的完整 SHA 相同为准，保留各端其他分支和标签；代码同步不自动重启服务或发布安装包。操作规则见 [双仓同步与发布规则](docs/DUAL-REPOSITORY-RELEASE-POLICY.md)。[旧仓库审计报告](docs/REALITYLOOP-LEGACY-REPOSITORY-AUDIT-20260817.md) 保留为历史记录，其中旧的仓库分工已被当前规则替代。
+`kealan-Jun/VisionCortex` 与 `RealityLoopAI/VisionCortex` 是同一套代码的两个平级仓库，直接同步同一个提交，不再区分开发仓和稳定发布仓。同步完成以两端 `main` 的完整 SHA 相同为准，保留各端其他分支和标签；推送不触发 CI，自检仅保留手动入口，代码同步不自动重启服务或发布安装包。操作规则见 [双仓同步与发布规则](docs/DUAL-REPOSITORY-RELEASE-POLICY.md)。[旧仓库审计报告](docs/REALITYLOOP-LEGACY-REPOSITORY-AUDIT-20260817.md) 保留为历史记录，其中旧的仓库分工已被当前规则替代。
 
 已验证的容量基线是至少 **6 路 × 每路 3 小时**，它不是上传上限。上传路数、单路
 时长和总字节数不设固定小上限；能否接收由当时真实 NAS 剩余空间和活动任务预留量
