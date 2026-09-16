@@ -222,7 +222,9 @@ def install_routes(app, settings_factory):
         try:
             return await progress_poller.read()
         except (asyncio.TimeoutError, ProgressUnavailable):
-            raise HTTPException(503, '进度读取暂时繁忙；后台任务继续运行，请稍后刷新') from None
+            from fastapi.responses import JSONResponse
+            return JSONResponse({'status': 'progress_initializing', 'available': False,
+                'detail': '进度快照正在生成，后台处理继续运行', 'retry_after_seconds': 5}, status_code=202)
 
     @app.get('/api/day-timeline/{day}')
     def timeline(day: str):

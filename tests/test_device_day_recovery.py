@@ -86,7 +86,10 @@ def test_recovery_rejects_unverified_or_different_inputs(device_config, change):
 
 def test_recovery_compare_and_swap_preserves_new_queue_owner(device_config):
     runner, _, path, row = failed_retention(device_config)
-    runner.queues['retention'].claim('new-owner', retry=True)
+    # Reappearance must first clear the independent input gate.
+    with runner.queues['retention'].connect() as db:
+        db.execute("UPDATE recordings SET input_status='ready'")
+    assert runner.queues['retention'].claim('new-owner', retry=True) is not None
     assert recover_one(runner, row)['status'] == 'queue_changed'
     assert read_json(path)['status'] == 'failed'
 

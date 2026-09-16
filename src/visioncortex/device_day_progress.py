@@ -33,15 +33,58 @@ class ProgressPoller:
         self.lock = Lock()
         self.future = None
         self.started = 0.0
+        self.last_good = None
+        self.last_error = None
+
+    def _collect(self):
+        config = self.settings_factory()
+        path = (Path(config['storage']['local_runtime_root']) / 'device-day' / 'ProgressSnapshot.json'
+                if config.get('storage', {}).get('local_runtime_root') else None)
+        if path and path.is_file():
+            try:
+                cached = json.loads(path.read_text(encoding='utf-8'))
+                if isinstance(cached.get('days'), dict) and cached.get('observed_at'):
+                    self.last_good = cached
+                    if self.reader is snapshot and time.time()-cached['observed_at'] < 15:
+                        return cached
+            except (OSError, ValueError, TypeError):
+                pass
+        value = self.reader(config)
+        from .device_day_contract import atomic_json
+        if path:
+            atomic_json(path, value)
+        return value
+
+    def _result(self, value, *, stale=False):
+        return value | {'snapshot_stale': stale,
+                        'snapshot_age_seconds': max(0, time.time() - value.get('observed_at', time.time())),
+                        'refresh_error': self.last_error}
 
     async def read(self, timeout=5):
         with self.lock:
+            # Consume a finished result BEFORE starting the next refresh. A
+            # read taking >5s used to be discarded on every subsequent poll.
+            if self.future is not None and self.future.done():
+                try:
+                    self.last_good = self.future.result()
+                    self.last_error = None
+                except Exception as exc:
+                    self.last_error = type(exc).__name__
             if self.future is None or (self.future.done() and time.monotonic() - self.started >= 1):
                 # Settings may touch disk too; keep it off the ASGI event loop.
-                self.future = self.executor.submit(lambda: self.reader(self.settings_factory()))
+                self.future = self.executor.submit(self._collect)
                 self.started = time.monotonic()
             future = self.future
-        return await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(future)), timeout)
+            if self.last_good is not None:
+                return self._result(self.last_good, stale=bool(self.last_error) or time.time()-self.last_good.get('observed_at', 0)>15)
+        try:
+            value = await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(future)), timeout)
+            self.last_good = value
+            return self._result(value)
+        except (asyncio.TimeoutError, ProgressUnavailable):
+            if self.last_good is not None:
+                return self._result(self.last_good, stale=True)
+            raise
 
 STAGES = ('retention', 'vision', 'stt', 'understanding', 'report')
 
@@ -53,6 +96,9 @@ def snapshot(config):
     failures = {}
     component_samples = {}
     missing_inputs = {}
+    source_signatures = {}
+    from .input_availability import Availability
+    availability = Availability(root).states() if (root/'InputAvailability.sqlite3').is_file() else {}
     def bucket(day):
         return days.setdefault(day, {'recordings': set(), 'cameras': set(), 'stages': {
             s: {'completed': 0, 'queued': 0, 'running': 0, 'failed': 0, 'expired': 0} for s in STAGES}})
@@ -67,6 +113,7 @@ def snapshot(config):
                 if not row.get('recording_start_us'):
                     continue
                 b = bucket(date_of(row['recording_start_us']))
+                source_signatures[row['recording_id']] = row.get('source_signature')
                 b['recordings'].add(row['recording_id'])
                 b['cameras'].add(row['camera_key'])
         except (OSError, ValueError, KeyError):
@@ -79,8 +126,8 @@ def snapshot(config):
             with closing(sqlite3.connect(path.as_uri()+'?mode=ro', uri=True, timeout=2)) as db:
                 rows = db.execute("SELECT recording_id,status,lease_until,queued_at,updated_at, "
                                   "json_extract(payload,'$.camera_key'),json_extract(payload,'$.recording_start_us'),"
-                                  "json_extract(payload,'$.recording_end_us'),wall_seconds,completed_at,result FROM recordings")
-                for rid, status, lease, _queued, updated, camera, start, end, wall, completed_at, raw_result in rows:
+                                  "json_extract(payload,'$.recording_end_us'),wall_seconds,completed_at,result,json_extract(payload,'$.source_signature') FROM recordings")
+                for rid, status, lease, _queued, updated, camera, start, end, wall, completed_at, raw_result, signature in rows:
                     if not start:
                         continue
                     day = date_of(start)
@@ -88,6 +135,12 @@ def snapshot(config):
                     b['recordings'].add(rid)
                     b['cameras'].add(camera)
                     state = 'expired' if status == 'running' and (lease or 0) < now else status
+                    source_signatures.setdefault(rid, signature)
+                    if (status not in {'running', 'completed'} and availability.get(rid, {}).get('state', 'ready') != 'ready'
+                            and availability[rid].get('signature') == signature):
+                        state = 'input_' + availability[rid]['state']
+                    if availability.get(rid, {}).get('state') == 'missing' and availability[rid].get('signature') == signature:
+                        missing_inputs.setdefault(day, set()).add(rid)
                     counts = b['stages'][stage]
                     counts[state] = counts.get(state, 0)+1
                     states.setdefault(rid, {})[stage] = (state, day)
@@ -113,10 +166,20 @@ def snapshot(config):
         except (sqlite3.Error, OSError):
             raise ProgressUnavailable(f'{stage} 队列暂不可读；保留上次成功快照') from None
     from .device_day_activity import observations
-    active = observations()
+    active = observations(root)
     for item in jobs:
         item.update(active.get((item['stage'], item['recording_id']), {'phase': '等待工作线程进入处理或恢复租约'}))
     for day, b in days.items():
+        for rid in b['recordings']:
+            available = availability.get(rid, {})
+            if available.get('state', 'ready') != 'ready' and available.get('signature') == source_signatures.get(rid):
+                if available['state'] == 'missing':
+                    missing_inputs.setdefault(day, set()).add(rid)
+                for stage, counts in b['stages'].items():
+                    if stage not in states.get(rid, {}):
+                        state = 'input_' + available['state']
+                        counts[state] = counts.get(state, 0)+1
+                        states.setdefault(rid, {})[stage] = (state, day)
         missing = {rid for rid in missing_inputs.get(day, set())
                    if states.get(rid, {}).get('vision', ('missing',))[0] != 'completed'}
         b['missing_input_count'] = len(missing)

@@ -49,8 +49,9 @@ def test_waiting_counts_distinguish_failed_upstream_from_compute_backlog(tmp_pat
     retention.finish('r1','1',{'status':'completed'},1)
     result = snapshot({'storage':{'local_runtime_root':str(tmp_path)}})
     waiting = next(iter(result['waiting'].values()))['vision']
-    assert waiting == {'upstream_failed':1,'pending_validation':1,'upstream_pending':1}
+    assert waiting == {'pending_validation':1,'upstream_pending':1}
     assert next(iter(result['days'].values()))['stages']['vision']['queued'] == sum(waiting.values())
+    assert next(iter(result['days'].values()))['stages']['vision']['input_missing'] == 1
 
 
 def test_progress_polls_share_work_and_timeout_does_not_cancel_it():
@@ -78,8 +79,8 @@ def test_progress_polls_share_work_and_timeout_does_not_cancel_it():
         assert len(calls) == 1
         release.set()
         results = await asyncio.gather(*others)
-        assert all(r == {'observed_at': 123, 'days': {}} for r in results)
-        assert await poller.read() == results[0]
+        assert all(r['observed_at'] == 123 and r['days'] == {} for r in results)
+        assert (await poller.read())['observed_at'] == results[0]['observed_at']
         assert len(calls) == 1
     with ThreadPoolExecutor(max_workers=1) as executor:
         asyncio.run(run(executor))

@@ -380,7 +380,7 @@ class DeviceDayRunner:
         from .device_day_activity import job
         from .runtime_control import execution_context
         with execution_context(job_id=recording["recording_id"], source="nas",
-                               priority=recording.get("processing_priority", 1), stop=stop_event), job(stage, recording["recording_id"]) as measured:
+                               priority=recording.get("processing_priority", 1), stop=stop_event), job(stage, recording["recording_id"], root=self.runtime_root) as measured:
             result = self._observed_process(recording, stage=stage, retry=retry)
         return result | {'component_timings': dict(measured['phase_seconds']),
                          'measured_frame_counts': dict(measured['frame_counts'])}
@@ -611,6 +611,9 @@ class DeviceDayRunner:
         from .device_day_schedule import priority_date, refresh_queue_priorities
         focus_date = priority_date(self.runtime_root)
         refresh_queue_priorities(self.queues[stage], focus_date)
+        from .input_availability import Availability
+        states = Availability(self.runtime_root).states()
+        self.queues[stage].sync_availability(states)
         durable = {r["recording_id"]: r for r in self.queues[stage].pending()}
         durable.update({r["recording_id"]: r for r in inventory.get("recordings", [])})
         # Local durable parent status is a cheap readiness prefilter. Validate
@@ -638,6 +641,9 @@ class DeviceDayRunner:
         for record in records:
             if stop_event is not None and stop_event.is_set():
                 return eligible
+            if (states.get(record['recording_id'], {}).get('state', 'ready') != 'ready'
+                    and states[record['recording_id']].get('signature') == record.get('source_signature')):
+                continue
             if not record.get("processable", record.get("available")):
                 continue
             # Reuse only readiness, never acceptance of source media. process()

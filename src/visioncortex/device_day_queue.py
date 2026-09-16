@@ -21,7 +21,12 @@ class DeviceDayQueue:
             CREATE TABLE IF NOT EXISTS camera_dispatch (camera_key TEXT PRIMARY KEY, last_claim REAL NOT NULL);
             CREATE INDEX IF NOT EXISTS device_day_fifo ON recordings(status, queued_at);
             """)
+            db.execute("BEGIN IMMEDIATE")
             columns = {r[1] for r in db.execute("PRAGMA table_info(recordings)")}
+            from .task_events import initialize
+            initialize(db)
+            if "input_status" not in columns:
+                db.execute("ALTER TABLE recordings ADD COLUMN input_status TEXT NOT NULL DEFAULT 'ready'")
             if "started_at" not in columns:
                 db.execute("ALTER TABLE recordings ADD COLUMN started_at REAL")
 
@@ -34,14 +39,17 @@ class DeviceDayQueue:
         payload = json.dumps(recording, ensure_ascii=False)
         status = "queued" if recording.get("configured_role") in {"first_person", "third_person"} else "needs_camera_role"
         with self.connect() as db:
-            db.execute("""INSERT INTO recordings(recording_id,revision,payload,status,queued_at,updated_at)
+            changed = db.execute("""INSERT INTO recordings(recording_id,revision,payload,status,queued_at,updated_at)
               VALUES(?,?,?,?,?,?) ON CONFLICT(recording_id) DO UPDATE SET
               revision=excluded.revision,payload=excluded.payload,status=excluded.status,
               queued_at=excluded.queued_at,updated_at=excluded.updated_at,lease_owner=NULL,
-              lease_until=NULL,result=NULL,completed_at=NULL,wall_seconds=NULL,started_at=NULL,attempts=0
+              lease_until=NULL,result=NULL,completed_at=NULL,wall_seconds=NULL,started_at=NULL,attempts=0,input_status='ready'
               WHERE recordings.revision != excluded.revision AND
                 (recordings.status != 'running' OR COALESCE(recordings.lease_until,0) < ?)
-            """, (recording["recording_id"], revision, payload, status, observed, observed, observed))
+            """, (recording["recording_id"], revision, payload, status, observed, observed, observed)).rowcount
+            if changed:
+                from .task_events import append
+                append(db, recording["recording_id"], status, revision=revision, data={"camera": recording.get("camera_key"), "date": recording.get("archive_date")})
             # Visual revisions intentionally exclude scheduling/audio metadata.
             # Keep the claim payload aligned with the inventory used to verify
             # prerequisites, even when the visual work itself is unchanged.
@@ -80,6 +88,7 @@ class DeviceDayQueue:
             # json_each keeps large allowlists below SQLite's parameter limit.
             conditions = ["(r.status='queued' OR (r.status='running' AND COALESCE(r.lease_until,0)<?)"
                           + (" OR (r.status='failed' AND (? IS NULL OR r.attempts<?)))" if retry else ")")]
+            conditions.append("r.input_status='ready'")
             parameters = [current]
             if retry:
                 parameters.extend([max_attempts, max_attempts])
@@ -116,6 +125,8 @@ class DeviceDayQueue:
             db.execute("""UPDATE recordings SET status='running',lease_owner=?,lease_until=?,
               attempts=attempts+1,updated_at=?,started_at=? WHERE recording_id=?""",
                        (owner, current + 90, current, current, row["recording_id"]))
+            from .task_events import append
+            append(db, row['recording_id'], 'running', revision=row['revision'], attempt=row['attempts']+1)
             return json.loads(row["payload"])
 
     def renew(self, owner):
@@ -136,17 +147,36 @@ class DeviceDayQueue:
         completed = result.get("status") == "completed"
         status = "completed" if completed else "failed"
         with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT revision,attempts,payload FROM recordings WHERE recording_id=? AND lease_owner=?', (recording_id, owner)).fetchone()
             db.execute("""UPDATE recordings SET status=?,result=?,completed_at=?,wall_seconds=?,
               lease_owner=NULL,lease_until=NULL,updated_at=? WHERE recording_id=? AND lease_owner=?""",
                        (status, json.dumps(result, ensure_ascii=False), time.time() if completed else None,
                         seconds, time.time(), recording_id, owner))
+            if row:
+                from .task_events import append
+                append(db, recording_id, status, revision=row['revision'], attempt=row['attempts'], data={
+                    key: result[key] for key in ('archive', 'stage', 'error_type', 'component_timings', 'measured_frame_counts') if key in result})
+                if self.path.stem == 'queue-retention' and result.get('error_type') in {'FileNotFoundError', 'PermissionError', 'OSError'}:
+                    state = 'missing' if result['error_type'] == 'FileNotFoundError' else 'unavailable'
+                    db.execute('UPDATE recordings SET input_status=? WHERE recording_id=?', (state, recording_id))
+        if row and self.path.stem == 'queue-retention' and result.get('error_type') in {'FileNotFoundError', 'PermissionError', 'OSError'}:
+            from .input_availability import Availability
+            record = json.loads(row['payload'])
+            Availability(self.path.parent).mark(record, state, reason=result['error_type'])
+
+    def sync_availability(self, states):
+        with self.connect() as db:
+            db.executemany("UPDATE recordings SET input_status=? WHERE recording_id=? AND status NOT IN ('completed','running') AND input_status!=? AND json_extract(payload,'$.source_signature') IS ?",
+                           [(s['state'], key, s['state'], s.get('signature')) for key,s in states.items()])
 
     def snapshot(self):
         with self.connect() as db:
             current = time.time()
             # Expired leases are waiting for recovery, not live concurrency.
             counts = {row["effective_status"]: row["n"] for row in db.execute("""
-              SELECT CASE WHEN status='running' AND COALESCE(lease_until,0)<?
+              SELECT CASE WHEN status NOT IN ('completed','running') AND input_status!='ready' THEN 'input_'||input_status
+                WHEN status='running' AND COALESCE(lease_until,0)<?
                 THEN 'queued' ELSE status END effective_status, COUNT(*) n
               FROM recordings GROUP BY effective_status""", (current,))}
             expired = db.execute("SELECT COUNT(*) FROM recordings WHERE status='running' AND COALESCE(lease_until,0)<?",
@@ -155,7 +185,7 @@ class DeviceDayQueue:
               COALESCE(SUM(COALESCE(json_extract(payload,'$.duration_seconds'),0)),0) capture_seconds,
               COALESCE(SUM(json_extract(payload,'$.media_duration_seconds')),0) media_seconds,
               COALESCE(SUM(json_extract(payload,'$.media_duration_seconds') IS NULL),0) unknown
-              FROM recordings WHERE status='queued' OR (status='running' AND COALESCE(lease_until,0)<?)""",
+              FROM recordings WHERE (status='queued' AND input_status='ready') OR (status='running' AND COALESCE(lease_until,0)<?)""",
                                 (current,)).fetchone()
             oldest = queued["oldest"]
             completed = db.execute("SELECT result,wall_seconds FROM recordings WHERE status='completed' ORDER BY completed_at DESC LIMIT 100").fetchall()

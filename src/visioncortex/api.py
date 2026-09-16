@@ -54,6 +54,7 @@ from . import speech, speech_worker
 from .identity import CONFIG_ENV, PRODUCT_NAME
 from .device_registry import load_device_registry, resolve_view_role
 from .device_day_service import DeviceDayService, install_routes as install_device_day_routes
+from .knowledge_api import install_routes as install_knowledge_routes
 from .input_preflight import preflight_manifest_inputs
 from .input_seal import build_input_seal, verify_input_seal, write_input_seal
 from .model_certification import audit_production_model_certification
@@ -474,12 +475,18 @@ async def enforce_web_access(request: Request, call_next):
                 pass
         return response
 
+    async def dispatch():
+        from .submission import handle, eligible
+        if request.method != "POST" or not eligible(request.url.path):
+            return await call_next(request)
+        return await handle(request, call_next, _settings())
+
     try:
         mode = web_access_mode()
         if mode == "local":
             identity = {"username": "local", "role": "admin"}
             request.state.web_identity = identity
-            return audited(await call_next(request))
+            return audited(await dispatch())
         client_host = request.client.host if request.client else None
         if not is_allowed_lan_client(client_host):
             return audited(Response(
@@ -535,7 +542,7 @@ async def enforce_web_access(request: Request, call_next):
             status_code=503,
             headers={"Cache-Control": "no-store"},
         ))
-    return audited(await call_next(request))
+    return audited(await dispatch())
 
 
 @app.middleware("http")
@@ -660,6 +667,7 @@ def _settings() -> dict[str, Any]:
 
 _device_day_service = DeviceDayService(_settings, _gpu_job_lock)
 install_device_day_routes(app, lambda: _settings(), _device_day_service)
+install_knowledge_routes(app, lambda: _settings())
 
 
 def _archive_root(settings: dict[str, Any] | None = None) -> Path:

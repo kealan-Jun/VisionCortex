@@ -13,6 +13,7 @@ NAS 自动采集的设备日五目录、按实际时长的采集分片处理、�
 | --- | --- |
 | 第一次提交视频分析 | [普通用户 10 分钟操作指南](docs/VisionCortex-普通用户10分钟操作指南.md) |
 | 安装、运维、升级和故障处理 | [端到端视频分析交付手册](docs/VisionCortex-端到端视频分析交付手册.md) |
+| 统一任务防重、结果回传、证据检索与写入时延 | [统一任务与检索契约](docs/UNIFIED-TASK-RETRIEVAL-CONTRACT.md) |
 | 离线与 NAS 共用运行层、资源配置及版本切换 | [统一运行层实现与交接](docs/UNIFIED-RUNTIME-WORK.md) |
 | 正式交付签字 | [交付验收单模板](docs/VisionCortex-交付验收单模板.md) |
 | 理解真实运行证据及其边界 | [历史真实六路验收示例](docs/VisionCortex-历史真实六路验收示例.md) |

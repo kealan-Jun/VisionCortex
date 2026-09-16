@@ -18,6 +18,7 @@ DEVICE_SOURCES = {
 CONTROL_MODULES = frozenset({
     'runtime_control', 'runtime_options', 'runtime_process', 'sqlite_store', 'observed_inventory',
     'receipt_projection', 'publication_journal', 'provider_control', 'build_identity', 'owned_subprocess',
+    'runtime_services', 'task_events', 'input_availability', 'submission', 'knowledge', 'knowledge_api',
     'stage_execution', 'stage_dependencies', 'artifact_reader', 'timeline_invalidation',
 })
 

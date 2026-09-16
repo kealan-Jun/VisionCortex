@@ -123,7 +123,7 @@ def recover_one(runner, row):
             with queue.connect() as db:
                 db.execute('BEGIN IMMEDIATE')
                 current = db.execute('SELECT * FROM recordings WHERE recording_id=?', (rid,)).fetchone()
-                if (not current or current['status'] != 'failed' or current['revision'] != row['revision']
+                if (not current or current['status'] not in {'failed', 'queued'} or current['revision'] != row['revision']
                         or current['payload'] != row['payload'] or current['updated_at'] != row['updated_at']):
                     return {'status': 'queue_changed', 'recording_id': rid}
                 if path.is_file():
@@ -151,8 +151,8 @@ class RetentionRecovery:
             waiting = {row[0] for row in db.execute("SELECT recording_id FROM recordings WHERE status='queued' "
                 "OR (status='running' AND COALESCE(lease_until,0)<?)", (time.time(),))}
         with runner.queues['retention'].connect() as db:
-            rows = list(db.execute("SELECT * FROM recordings WHERE status='failed' "
-                                   "AND json_extract(result,'$.error_type')='FileNotFoundError' "
+            rows = list(db.execute("SELECT * FROM recordings WHERE (status='failed' AND json_extract(result,'$.error_type')='FileNotFoundError') "
+                                   "OR (status='queued' AND input_status='missing') "
                                    "ORDER BY COALESCE(json_extract(payload,'$.processing_priority'),0),"
                                    "json_extract(payload,'$.recording_start_us')"))
         rows.sort(key=lambda row: row['recording_id'] not in waiting)

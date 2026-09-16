@@ -32,7 +32,9 @@ def worker_owner(config):
         thread = threading.Thread(target=heartbeat, name='worker-heartbeat', daemon=True)
         thread.start()
         try:
-            yield
+            from .runtime_services import services
+            with services(config):
+                yield
         finally:
             stopped.set()
             thread.join(timeout=5)

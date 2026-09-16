@@ -385,6 +385,7 @@ function hydrateIcons(root = document) {
 }
 
 function pageContext(route) {
+  if (route === "knowledge") return ["实验成果", "证据检索与追踪"];
   if (route === "day-timeline") return ["实验成果", "当天时间线"];
   if (["device-days", "device-day"].includes(route)) return ["实验成果", "设备日归档"];
   if (route === "new") return ["实验工作台", "新建实验"];
@@ -4100,6 +4101,7 @@ async function router() {
   if (route === "stage" && parts[1]) return renderArchive(parts[1], parts[2] || "experiments", true);
   if (route === "new") return renderNew();
   if (route === "capture") return renderCaptureMonitor();
+  if (route === "knowledge") return window.VisionCortexKnowledge.render({main,api,esc,setChrome});
   if (route === "day-timeline") return window.VisionCortexDayTimeline.render({main,api,esc,setChrome,state},parts[1]);
   if (route === "device-days" || route === "device-day") {
     const ctx = {main,state,esc,number,api,setChrome,formatDate,deviceDaySummary,deviceDaySection,deviceDayQueueSection};

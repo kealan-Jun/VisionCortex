@@ -107,7 +107,14 @@ def snapshot(config, *, now=None):
                 for r in db.execute('SELECT recording_id,status,queued_at,completed_at,attempts,wall_seconds,'
                                     "json_extract(payload,'$.source_signature') AS source_signature,"+started+' FROM recordings'):
                     queues[stage][r['recording_id']] = dict(r)
+        uploads = {}
+        upload_path = root / 'UploadReceipts.sqlite3'
+        if upload_path.is_file():
+            from .sqlite_store import connection
+            with connection(upload_path, readonly=True) as db:
+                uploads = {(r['recording_id'], r['signature']): r['completed'] for r in db.execute('SELECT * FROM receipts')}
         for r in rows:
+            uploaded = uploads.get((r['recording_id'], r['source_signature']))
             stages = {s: q.get(r['recording_id'], {}) for s, q in queues.items()}
             # Link only to the exact source revision observed, never a prior run.
             stages = {s: v if v.get('source_signature') == r['source_signature'] else {} for s, v in stages.items()}
@@ -115,7 +122,10 @@ def snapshot(config, *, now=None):
             ready, start, done = r['ready_at'], v.get('started_at'), r['published_at']
             valid_start = start if _elapsed(ready, start) is not None else None
             valid_done = done if valid_start is not None and _elapsed(start, done) is not None else None
-            r.update({'upload_completed_at': None, 'discovery_delay_seconds': None,
+            r.update({'upload_completed_at': uploaded, 'discovery_delay_seconds': _elapsed(uploaded, r['revision_observed_at']),
+                'upload_to_preprocessing_start_seconds': _elapsed(uploaded, valid_start),
+                'upload_to_preprocessing_completed_seconds': _elapsed(uploaded, valid_done),
+                'upload_clock_source': 'receiver_reported' if uploaded is not None else None,
                 'mtime_to_first_observation_estimate_seconds': _elapsed(r['source_mtime_at'], r['revision_observed_at']),
                 'observed_to_ready_seconds': _elapsed(r['first_observed_at'], ready),
                 'ready_to_archive_queue_seconds': _elapsed(ready, a.get('queued_at')),
@@ -131,7 +141,8 @@ def snapshot(config, *, now=None):
                 'vision_status': v.get('status', 'not_enqueued'), 'attempts': v.get('attempts', 0)})
         rows.sort(key=lambda r: r['revision_observed_at'], reverse=True)
         result['recent'] = rows[:50]
-        metrics = ('ready_to_start_seconds', 'ready_to_completed_seconds', 'vision_queue_seconds', 'vision_run_seconds')
+        result['upload_completion_time_available'] = any(r['upload_completed_at'] is not None for r in rows)
+        metrics = ('discovery_delay_seconds', 'upload_to_preprocessing_start_seconds', 'upload_to_preprocessing_completed_seconds', 'ready_to_start_seconds', 'ready_to_completed_seconds', 'vision_queue_seconds', 'vision_run_seconds')
         for cohort in ('live_observation', 'startup_inventory', 'historical_backfill'):
             samples = [r for r in rows if r['cohort'] == cohort and r['revision_observed_at'] >= now-86400]
             result['cohorts'][cohort] = {'observations_24h': len(samples), 'metrics': {}}
@@ -171,7 +182,7 @@ def render(data):
             return '已有结果，缺少本次时延样本'
         return '仍未启动：'+seconds(r['waiting_to_start_seconds'])
     recent = ''.join(f'<tr><td>{r["date"]} {datetime.fromtimestamp(r["start_us"]/1e6, ZoneInfo("Asia/Shanghai")).strftime("%H:%M:%S")}<br>{escape(r["camera"])}</td>'
-                     f'<td>发现 {clock(r["first_observed_at"])}<br>可处理 {clock(r["ready_at"])}</td>'
+                     f'<td>上传 {clock(r.get("upload_completed_at"))}<br>发现 {clock(r["first_observed_at"])}<br>可处理 {clock(r["ready_at"])}<br>上传至发现 {seconds(r.get("discovery_delay_seconds"))}<br>上传至启动 {seconds(r.get("upload_to_preprocessing_start_seconds"))}</td>'
                      f'<td>等待 {seconds(r["archive_queue_seconds"])}<br>执行 {seconds(r["archive_run_seconds"])}</td>'
                      f'<td>{state(r)}</td>'
                      f'<td>{seconds(r["vision_queue_seconds"])}</td><td>{seconds(r["vision_run_seconds"])}</td>'
@@ -186,3 +197,29 @@ def render(data):
             '<details><summary>最近分片的归档与预处理时延</summary><div class="table-wrap"><table><thead>'
             '<tr><th>采集时段 / 相机</th><th>监控时刻</th><th>原片归档</th><th>可处理至启动</th><th>YOLO 队列等待</th><th>预处理耗时</th>'
             f'<th>可处理至落盘</th></tr></thead><tbody>{recent}</tbody></table></div></details>')
+
+
+def upload_completed(config, receipt):
+    """Authenticated receiver's explicit completion time, never reconstructed."""
+    from .observed_inventory import read_inventory
+    from .sqlite_store import connection
+    root = _root(config)
+    record = next((r for r in read_inventory(root).get('recordings', [])
+                   if r['recording_id'] == receipt['recording_id']), None)
+    if record is None or record.get('source_signature') != receipt['source_signature']:
+        raise ValueError('尚未发现此分片版本，请在发现后重试；不能关联到其他版本')
+    at = receipt['completed_at']
+    if not isinstance(at, (int,float)) or not math.isfinite(at) or not 0 < at <= time.time()+5:
+        raise ValueError('上传完成时间无效或接收端时钟超前')
+    root.mkdir(parents=True, exist_ok=True)
+    with connection(root / 'UploadReceipts.sqlite3') as db:
+        db.execute('''CREATE TABLE IF NOT EXISTS receipts(recording_id TEXT,signature TEXT,
+                      completed REAL,received REAL,PRIMARY KEY(recording_id,signature))''')
+        db.execute('BEGIN IMMEDIATE')
+        row = db.execute('SELECT completed FROM receipts WHERE recording_id=? AND signature=?',
+                         (receipt['recording_id'],receipt['source_signature'])).fetchone()
+        if row and row[0] != at:
+            raise ValueError('该分片已有不同的上传回执；不能覆盖原始时间')
+        db.execute('INSERT OR IGNORE INTO receipts VALUES(?,?,?,?)',
+                   (receipt['recording_id'],receipt['source_signature'],at,time.time()))
+    return {'status':'recorded', 'clock_source':'receiver_reported', **receipt}

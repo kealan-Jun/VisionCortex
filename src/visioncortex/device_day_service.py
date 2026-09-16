@@ -73,9 +73,13 @@ class DeviceDayService:
         root = Path(settings["storage"]["local_runtime_root"]) / "device-day" / "requests"
         atomic_json(root / f"{identifier}.json", {"schema_version": VERSION, "status": "queued",
                     "recordings": recordings, "request_id": identifier})
+        from .submission import bind_task
+        bind_task(identifier)
         self.start()
         self.wakeup.set()
         return {"request_id": identifier, "status": "queued", "workflow": "device_day",
+                "recording_ids": [r["recording_id"] for r in recordings],
+                "status_url": f"/api/tasks/{identifier}/history",
                 "archive_url": "/device-days", "capture_deletion": "disabled_by_user"}
 
     def observe(self, settings, inventory):
@@ -92,7 +96,15 @@ class DeviceDayService:
             logging.getLogger(__name__).warning('Discovery latency persistence unavailable')
         from .observed_inventory import observe as upsert_observations
         root = Path(settings["storage"]["local_runtime_root"]) / "device-day"
-        if not upsert_observations(root, inventory, start_date=settings["device_day"].get("start_date")):
+        changed = upsert_observations(root, inventory, start_date=settings["device_day"].get("start_date"))
+        from .input_availability import Availability
+        availability = Availability(root)
+        availability_updates = []
+        for record in inventory.get('recordings', []):
+            observed = (inventory.get('discovery') or {}).get(record['recording_id'], {}).get('observed_at')
+            availability_updates.append((record, 'ready' if record.get('processable', record.get('available')) else 'waiting', observed, 'monitor_observation'))
+        availability.mark_many(availability_updates)
+        if not changed:
             return
         self.wakeup.set()
 

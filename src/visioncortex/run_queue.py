@@ -36,6 +36,8 @@ class DurableRunQueue:
 
     def _initialize(self) -> None:
         with self._connect() as connection:
+            from .task_events import initialize
+            initialize(connection)
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("PRAGMA synchronous = FULL")
             connection.executescript(
@@ -99,6 +101,9 @@ class DurableRunQueue:
             timestamp = time.time()
             db.execute("INSERT INTO run_records VALUES(?,?,?,?) ON CONFLICT(run_id) DO UPDATE SET state_json=excluded.state_json,updated_at=excluded.updated_at",
                        (run_id, self._json(state), timestamp, timestamp))
+            if {k: values[k] for k in ('state', 'stage', 'message') if k in values}:
+                from .task_events import append
+                append(db, run_id, state.get('state', 'progress'), data={k: state[k] for k in ('state','stage','message','progress','archive_url') if k in state})
         return state
 
     def load_run(self, run_id):
@@ -133,8 +138,12 @@ class DurableRunQueue:
                     """,
                     (run_id, kind, self._json(payload), queued_at, queued_at),
                 )
+                from .task_events import append
+                append(connection, run_id, 'queued', data={'kind': kind})
         except sqlite3.IntegrityError as exc:
             raise ValueError(f"run_id already queued: {run_id}") from exc
+        from .submission import bind_task
+        bind_task(run_id)
         return int(cursor.lastrowid)
 
     def claim_next(
@@ -195,6 +204,9 @@ class DurableRunQueue:
             if updated != 1:
                 connection.rollback()
                 return None
+            from .task_events import append
+            append(connection, str(row['run_id']), 'running', attempt=int(row['attempts'])+1,
+                   data={'reclaimed': str(row['status']) == 'running'})
             connection.commit()
         return QueuedRunJob(
             run_id=str(row["run_id"]),
@@ -250,6 +262,13 @@ class DurableRunQueue:
                 ("completed" if status == "partial" else status,
                  finished_at, finished_at, error, run_id, worker_id),
             ).rowcount
+            if updated:
+                from .task_events import append
+                row = connection.execute('SELECT attempts FROM run_jobs WHERE run_id=?', (run_id,)).fetchone()
+                saved = connection.execute('SELECT state_json FROM run_records WHERE run_id=?', (run_id,)).fetchone()
+                archive = json.loads(saved[0]).get('nas_output') if saved else None
+                append(connection, run_id, status, attempt=row['attempts'], data={
+                    'result_url': f'/api/runs/{run_id}', 'archive': Path(archive).name if archive else None})
         return updated == 1
 
     def get_job(self, run_id: str) -> dict[str, Any] | None:
