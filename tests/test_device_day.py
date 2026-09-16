@@ -1531,3 +1531,14 @@ def test_process_preserves_measured_components_without_changing_outcome(device_c
     assert result['component_timings']['coarse_scan_seconds'] >= 0
     assert result['measured_frame_counts'] == {'coarse': 12}
     assert not observations()
+
+
+def test_durable_pending_camera_role_repaired_from_configuration(device_config):
+    capture(device_config)
+    item, _ = item_and_layout(device_config)
+    runner = DeviceDayRunner(device_config, backend=FakeModels())
+    lost_role = {k: v for k, v in item.items() if k != 'configured_role'}
+    inventory = {'recordings': [lost_role]}
+    eligible = runner._build_stage_inventory(inventory, 'retention', None)
+    assert item['recording_id'] in eligible
+    assert runner.queues['retention'].claim('test')['configured_role'] == 'first_person'

@@ -43,8 +43,10 @@ class DeviceDayQueue:
               VALUES(?,?,?,?,?,?) ON CONFLICT(recording_id) DO UPDATE SET
               revision=excluded.revision,payload=excluded.payload,status=excluded.status,
               queued_at=excluded.queued_at,updated_at=excluded.updated_at,lease_owner=NULL,
-              lease_until=NULL,result=NULL,completed_at=NULL,wall_seconds=NULL,started_at=NULL,attempts=0,input_status='ready'
-              WHERE recordings.revision != excluded.revision AND
+              lease_until=NULL,result=NULL,completed_at=NULL,wall_seconds=NULL,started_at=NULL,attempts=0,
+              input_status=CASE WHEN recordings.revision!=excluded.revision THEN 'ready' ELSE recordings.input_status END
+              WHERE (recordings.revision != excluded.revision OR
+                (recordings.status='needs_camera_role' AND excluded.status='queued')) AND
                 (recordings.status != 'running' OR COALESCE(recordings.lease_until,0) < ?)
             """, (recording["recording_id"], revision, payload, status, observed, observed, observed)).rowcount
             if changed:

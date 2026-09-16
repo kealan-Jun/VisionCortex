@@ -150,3 +150,102 @@ def test_stt_is_read_only_from_current_index_and_keeps_day(tmp_path):
     store.refresh()
     hit = store.search("称量", kind="stt")["items"][0]
     assert hit["day"] == "2026-09-09" and hit["evidence"]["recording_id"] == "r1"
+
+
+def test_root_outage_preserves_local_index_and_reports_recovery(tmp_path, monkeypatch):
+    from pathlib import Path
+    store, path = setup_index(tmp_path)
+    store.refresh()
+    hit = store.search('移液器')['items'][0]
+    before = store.status()['health']['last_success_at']
+    original = Path.iterdir
+    def offline(p):
+        if p == store.root:
+            raise OSError(5, 'simulated mount error')
+        return original(p)
+    with monkeypatch.context() as m:
+        m.setattr(Path, 'iterdir', offline)
+        assert store.refresh() == 0
+        assert store.status()['health']['state'] == 'unavailable'
+        assert store.status()['health']['last_success_at'] == before
+        assert store.search('移液器')['items'][0]['id'] == hit['id']
+    store.refresh()
+    assert store.status()['health']['state'] == 'ready'
+
+
+def test_one_unreadable_archive_does_not_abort_other_archives(tmp_path, monkeypatch):
+    from pathlib import Path
+    store, path = setup_index(tmp_path)
+    bad = store.root / '000-unreadable'
+    bad.mkdir()
+    original = Path.is_dir
+    def denied(p):
+        if p == bad:
+            raise PermissionError(13, 'synthetic')
+        return original(p)
+    monkeypatch.setattr(Path, 'is_dir', denied)
+    assert store.refresh() == 1
+    assert len(store.search('移液器')['items']) == 1
+    health = store.status()['health']
+    assert health['state'] == 'partial' and health['failure_count'] == 1
+    assert health['failures'][0]['errno'] == 13
+
+
+def test_unreadable_metadata_retries_and_preserves_historical_evidence(tmp_path):
+    store, path = setup_index(tmp_path)
+    original = path.read_text()
+    store.refresh()
+    path.write_text('{')
+    store.refresh()
+    assert store.status()['health']['state'] == 'partial'
+    assert store.status()['documents'] == 1
+    assert store.search('移液器')['items'] == []
+    path.write_text(original)
+    store.refresh()
+    assert store.status()['health']['state'] == 'ready'
+    assert len(store.search('移液器')['items']) == 1
+
+
+def test_large_index_streams_evidence_and_hashes_unindexed_audit(tmp_path, monkeypatch):
+    import hashlib
+    from pathlib import Path
+    from visioncortex.knowledge import read_device_day_index
+    store, path = setup_index(tmp_path)
+    data = json.loads(path.read_text())
+    data['segments'][0]['activity_audit'] = {'detections': [{'box': [1,2,3,4]}] * 10000}
+    data['recordings'] = [{'recording_id': 'r1', 'processing': {'scan': 'x' * 10000},
+                          'transcription': {'comments': [{'text': '真实转写', 'audio_ref': 'Comment/Audio.wav'}]}}]
+    raw = json.dumps(data, ensure_ascii=False).encode()
+    path.write_bytes(raw)
+    # Lower the bound to prove oversized canonical files take the streaming
+    # path. A full read_bytes is forbidden even for this small test fixture.
+    monkeypatch.setattr('visioncortex.knowledge.MAX_PROJECTION_BYTES', 4096)
+    monkeypatch.setattr(Path, 'read_bytes', lambda p: pytest.fail('unbounded index read'))
+    projection, revision = read_device_day_index(path)
+    assert revision == hashlib.sha256(raw).hexdigest()
+    assert 'activity_audit' not in projection['segments'][0]
+    assert 'processing' not in projection['recordings'][0]
+    assert projection['recordings'][0]['transcription']['comments'][0]['text'] == '真实转写'
+    assert store.refresh() == 1
+    assert store.status()['health']['state'] == 'ready'
+    hit = store.search('移液器')['items'][0]
+    assert hit['revision'] == revision
+    assert len(store.search('真实转写', kind='stt')['items']) == 1
+    data['segments'][0]['activity_audit']['changed'] = True
+    path.write_text(json.dumps(data))
+    assert read_device_day_index(path)[1] != revision
+
+
+def test_streaming_projection_limit_and_invalid_shape_fail_one_source_only(tmp_path, monkeypatch):
+    from visioncortex.knowledge import read_device_day_index
+    store, path = setup_index(tmp_path)
+    monkeypatch.setattr('visioncortex.knowledge.MAX_PROJECTION_BYTES', 32)
+    with pytest.raises(ValueError, match='projection limit'):
+        read_device_day_index(path)
+    monkeypatch.setattr('visioncortex.knowledge.MAX_PROJECTION_BYTES', 4096)
+    path.write_text('{"segments": [3]}')
+    assert store.refresh() == 0
+    assert store.status()['health']['state'] == 'partial'
+    path.write_text('{"segments": [')
+    with pytest.raises(ValueError, match='Invalid archive JSON'):
+        read_device_day_index(path)

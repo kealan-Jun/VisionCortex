@@ -6,6 +6,18 @@ from pathlib import Path
 from .sqlite_store import connection
 
 
+def configured_record(config, record):
+    """Restore the explicit camera binding after metadata-only reinspection.
+
+    No camera-prefix inference: unregistered cameras still need a binding.
+    Do not mutate an inventory or an actively leased worker's snapshot.
+    """
+    role = config.get("collection_ingest", {}).get("camera_role_map", {}).get(
+        record.get("camera_key")
+    )
+    return record | {"configured_role": role} if role else record
+
+
 class Availability:
     def __init__(self, root):
         self.path = Path(root) / "InputAvailability.sqlite3"
@@ -82,6 +94,7 @@ class Reconciler:
         self.root = Path(config["storage"]["local_runtime_root"]) / "device-day"
         self.cursor = ""
         self.migrated = False
+        self.last_priority_check = {}
 
     def tick(self):
         from .device_day_queue import DeviceDayQueue
@@ -94,6 +107,7 @@ class Reconciler:
         if not self.migrated:
             availability.migrate_legacy(queue)
             self.migrated = True
+        states = availability.states()
         with queue.connect() as db:
             rows = list(
                 db.execute(
@@ -104,12 +118,34 @@ class Reconciler:
             )
         if not rows:
             self.cursor = ""
+        # Recheck transient I/O failures promptly without starving the bounded
+        # historical sweep or repeatedly hitting the same unavailable input.
+        current = time.time()
+        priority = [key for key, state in states.items()
+                    if state['state'] == 'unavailable'
+                    and current - self.last_priority_check.get(key, 0) >= 30][:8]
+        with queue.connect() as db:
+            extra = list(db.execute(
+                "SELECT * FROM recordings WHERE status NOT IN ('completed','running') "
+                "AND recording_id IN (SELECT value FROM json_each(?))", (json.dumps(priority),)))
+        for key in priority:
+            self.last_priority_check[key] = current
+        if rows:
+            self.cursor = rows[-1]['recording_id']
+        rows = list({row['recording_id']: row for row in rows + extra}.values())
+        source = Path(self.config["collection_ingest"]["source_root"])
+        try:
+            # A mount outage is not proof that every source video was removed.
+            if not source.is_dir():
+                return
+        except OSError:
+            return
         for row in rows:
-            self.cursor = row["recording_id"]
             record = json.loads(row["payload"])
             video = record.get("video_path")
             if not video:
                 continue
+            inspecting_metadata = False
             try:
                 info = Path(video).stat()
                 if info.st_size <= 0:
@@ -118,13 +154,14 @@ class Reconciler:
                 # A present file is not necessarily a closed, compatible input.
                 from .nas_recordings import _inspect
 
-                source = Path(self.config["collection_ingest"]["source_root"])
+                inspecting_metadata = True
                 fresh = _inspect(
                     source,
                     Path(video),
                     time.time(),
                     float(self.config["collection_ingest"].get("settle_seconds", 5)),
                 )
+                fresh = configured_record(self.config, fresh)
                 if fresh.get("processable"):
                     availability.mark(fresh, "ready", reason="capture_reinspected")
                     from .observed_inventory import observe
@@ -137,12 +174,13 @@ class Reconciler:
                 # Missing capture never authorizes changing a successful receipt.
                 availability.mark(
                     record,
-                    "missing",
-                    reason="capture_missing_pending_archive_verification",
+                    "waiting" if inspecting_metadata else "missing",
+                    reason="capture_metadata_missing" if inspecting_metadata else
+                    "capture_missing_pending_archive_verification",
                 )
-            except (OSError, ValueError):
+            except (OSError, ValueError) as exc:
                 availability.mark(
-                    record, "unavailable", reason="input_inspection_unavailable"
+                    record, "unavailable", reason=f"input_inspection_unavailable:{type(exc).__name__}:errno={getattr(exc, 'errno', None)}"
                 )
         # A verified retained original remains usable after capture replacement.
         states = availability.states()

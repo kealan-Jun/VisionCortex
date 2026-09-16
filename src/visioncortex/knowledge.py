@@ -17,6 +17,59 @@ from urllib.parse import quote
 from .sqlite_store import connection
 from .device_day_contract import safe_child
 
+MAX_PROJECTION_BYTES = 64 * 1024 * 1024
+
+
+def read_device_day_index(path):
+    """Stream the frozen index, retaining searchable evidence, not scan arrays.
+
+    The revision still hashes EVERY original byte. Detailed scan/action audits
+    remain in the canonical source file and are never edited by this reader.
+    """
+    import ijson
+    from ijson.common import ObjectBuilder
+
+    class HashingReader:
+        def __init__(self, stream):
+            self.stream = stream
+            self.hash = hashlib.sha256()
+
+        def read(self, size=-1):
+            value = self.stream.read(size)
+            self.hash.update(value)
+            return value
+
+    def selected(prefix, event, value):
+        if not prefix:
+            return event != 'map_key' or value in {'segments', 'recordings', 'understandings'}
+        if prefix.split('.', 1)[0] not in {'segments', 'recordings', 'understandings'}:
+            return False
+        if prefix == 'segments.item' and event == 'map_key' and value == 'activity_audit':
+            return False
+        if prefix == 'segments.item.activity_audit' or prefix.startswith('segments.item.activity_audit.'):
+            return False
+        if prefix == 'recordings.item' and event == 'map_key':
+            return value in {'recording_id', 'transcription'}
+        if prefix.startswith('recordings.item.'):
+            return prefix.split('.')[2] in {'recording_id', 'transcription'}
+        return True
+
+    builder = ObjectBuilder()
+    projected_bytes = 0
+    with path.open('rb') as stream:
+        reader = HashingReader(stream)
+        try:
+            for prefix, event, value in ijson.parse(reader, use_float=True):
+                if not selected(prefix, event, value):
+                    continue
+                projected_bytes += len(value.encode('utf-8')) + 32 if isinstance(value, str) else 32
+                if projected_bytes > MAX_PROJECTION_BYTES:
+                    raise ValueError('Searchable metadata exceeds bounded projection limit')
+                builder.event(event, value)
+        except ijson.JSONError as exc:
+            raise ValueError('Invalid archive JSON') from exc
+    return builder.value, reader.hash.hexdigest()
+
 
 def digest(value):
     return hashlib.sha256(value).hexdigest()
@@ -70,7 +123,8 @@ class Knowledge:
                 archive TEXT, day TEXT, camera TEXT, kind TEXT, text TEXT, evidence TEXT);
               CREATE INDEX IF NOT EXISTS document_scope ON documents(day,camera,kind);
               CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(id UNINDEXED,text, tokenize='trigram');
-              CREATE TABLE IF NOT EXISTS answers(id TEXT PRIMARY KEY, at REAL, receipt TEXT);""")
+              CREATE TABLE IF NOT EXISTS answers(id TEXT PRIMARY KEY, at REAL, receipt TEXT);
+              CREATE TABLE IF NOT EXISTS index_health(id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT);""")
 
     def _replace(self, archive, relative, fingerprint, revision, records):
         sid = digest(f"{archive}/{relative}".encode())
@@ -137,7 +191,8 @@ class Knowledge:
         }
         if time.monotonic() - self.last_sweep > 300 or not self.last_sweep:
             result = self.refresh(stop=stop)
-            self.last_sweep = time.monotonic()
+            if self.status()["health"]["state"] == "ready":
+                self.last_sweep = time.monotonic()
         else:
             result = self.refresh(stop=stop, archives=names) if names else 0
         self.event_cursor = events["next_cursor"]
@@ -145,21 +200,35 @@ class Knowledge:
 
     def refresh(self, *, stop=None, archives=None):
         """Only canonical small metadata/indices. Never open raw media."""
-        if not self.root.is_dir():
-            raise OSError("Archive root unavailable")
         updated = 0
         seen = set()
+        failures = []
         with connection(self.path, readonly=True) as db:
             old = {r["id"]: dict(r) for r in db.execute("SELECT * FROM sources")}
-        folders = (
-            sorted(self.root.iterdir())
-            if archives is None
-            else [safe_child(self.root, name) for name in sorted(archives)]
-        )
-        for folder in folders:
+        try:
+            if not self.root.is_dir():
+                raise OSError("Archive root unavailable")
+            names = (sorted(p.name for p in self.root.iterdir())
+                     if archives is None else sorted(archives))
+        except OSError as exc:
+            # Keep the last good local index across mount/startup outages.
+            self._health("unavailable", [self._failure("archive_root", exc)])
+            return 0
+        for name in names:
             if stop and stop.is_set():
                 return updated
-            if not folder.is_dir() or folder.name.startswith("."):
+            if name.startswith("."):
+                continue
+            try:
+                folder = safe_child(self.root, name)
+                if not folder.is_dir():
+                    continue
+            except (OSError, ValueError) as exc:
+                failures.append(self._failure(name, exc))
+                for sid, previous in old.items():
+                    if previous['archive'] == name:
+                        seen.add(sid)
+                        self._source_status(sid, "unavailable")
                 continue
             files = [
                 ("ProcessedClips/Index.json", "device_day"),
@@ -169,16 +238,19 @@ class Knowledge:
                 ("JSON-Config-Files/evidence_index.sqlite", "offline"),
             ]
             daily = folder / "Lab-Daily-Reports"
-            if daily.is_dir():
-                files.extend(
-                    (p.relative_to(folder).as_posix(), "offline_report")
-                    for p in daily.glob("*/Lab-Daily-Report-*.json")
-                )
+            try:
+                if daily.is_dir():
+                    files.extend(
+                        (p.relative_to(folder).as_posix(), "offline_report")
+                        for p in daily.glob("*/Lab-Daily-Report-*.json")
+                    )
+            except OSError as exc:
+                failures.append(self._failure(f"{name}/Lab-Daily-Reports", exc))
             for relative, kind in files:
                 sid = digest(f"{folder.name}/{relative}".encode())
                 seen.add(sid)
-                path = safe_child(folder, relative)
                 try:
+                    path = safe_child(folder, relative)
                     stat = path.stat()
                     fp = f"{stat.st_size}:{stat.st_mtime_ns}"
                     if (
@@ -186,7 +258,7 @@ class Knowledge:
                         and old[sid]["status"] == "available"
                     ):
                         continue
-                    if stat.st_size > 64 * 1024 * 1024 and kind != "offline":
+                    if stat.st_size > MAX_PROJECTION_BYTES and kind not in {"offline", "device_day"}:
                         raise ValueError("Metadata index exceeds bounded reader limit")
                     if kind == "offline":
                         from .archive_catalog import (
@@ -226,6 +298,9 @@ class Knowledge:
                                     )
                                 )
                         revision = digest(encoded(records).encode())
+                    elif kind == "device_day":
+                        data, revision = read_device_day_index(path)
+                        records = self._records(folder.name, relative, kind, data)
                     else:
                         raw = path.read_bytes()
                         revision = digest(raw)
@@ -248,6 +323,9 @@ class Knowledge:
                     self._replace(folder.name, relative, fp, revision, records)
                     updated += 1
                 except (OSError, ValueError, KeyError, TypeError, sqlite3.Error) as exc:
+                    # Optional outputs which have never existed are not errors.
+                    if not isinstance(exc, FileNotFoundError):
+                        failures.append(self._failure(f"{name}/{relative}", exc))
                     if sid in old:
                         self._source_status(
                             sid,
@@ -259,7 +337,23 @@ class Knowledge:
         # exclude it from new retrieval. Never purge evidence on an I/O error.
         for sid in set(old) - seen if archives is None else []:
             self._source_status(sid, "unavailable")
+        self._health("partial" if failures else "ready", failures)
         return updated
+
+    @staticmethod
+    def _failure(scope, exc):
+        # Error text may contain transport details; retain class/errno only.
+        return {"scope": scope, "error_type": type(exc).__name__, "errno": getattr(exc, 'errno', None)}
+
+    def _health(self, state, failures):
+        with connection(self.path) as db:
+            row = db.execute("SELECT payload FROM index_health WHERE id=1").fetchone()
+            previous = json.loads(row[0]) if row else {}
+            now = time.time()
+            payload = {"state": state, "last_attempt_at": now,
+                       "last_success_at": now if state == "ready" else previous.get("last_success_at"),
+                       "failure_count": len(failures), "failures": failures[:20]}
+            db.execute("INSERT OR REPLACE INTO index_health VALUES(1,?)", (encoded(payload),))
 
     def _source_status(self, sid, status):
         with connection(self.path) as db:
@@ -269,10 +363,16 @@ class Knowledge:
             )
 
     def _records(self, archive, relative, kind, data):
+        if not isinstance(data, (dict, list)) or kind == "device_day" and not isinstance(data, dict):
+            raise ValueError("Invalid archive metadata object")
         url = f"/api/device-days/{quote(archive)}/files/{quote(relative)}"
         if kind == "offline_report":
             url = f"/api/archive-file?archive={quote(archive)}&path={quote(relative)}"
         if kind == "device_day":
+            if any(not isinstance(data.get(key, []), list) or
+                   any(not isinstance(row, dict) for row in data.get(key, []))
+                   for key in ("segments", "recordings", "understandings")):
+                raise ValueError("Invalid archive metadata entries")
             semantics = {x.get("segment_id"): x for x in data.get("understandings", [])}
             records = [
                 (
@@ -393,10 +493,12 @@ class Knowledge:
             }
             count = db.execute("SELECT count(*) FROM documents").fetchone()[0]
             checked = db.execute("SELECT max(checked) FROM sources").fetchone()[0]
+            health = db.execute("SELECT payload FROM index_health WHERE id=1").fetchone()
         return {
             "sources": groups,
             "documents": count,
             "last_changed_at": checked,
+            "health": json.loads(health[0]) if health else {"state": "pending"},
             "empty_index_is_not_no_experiment": True,
         }
 

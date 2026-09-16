@@ -89,3 +89,88 @@ def test_receiver_receipt_revision_scoped_and_not_reconstructed(tmp_path):
         upload_completed(config, payload | {"completed_at": now - 5})
     with pytest.raises(ValueError):
         upload_completed(config, payload | {"completed_at": now + 50})
+
+
+def test_camera_binding_releases_only_blocked_jobs_without_changing_success(tmp_path):
+    from visioncortex.input_availability import configured_record
+
+    config = {'collection_ingest': {'camera_role_map': {'a': 'first_person'}}}
+    q = DeviceDayQueue(tmp_path / 'queue-retention.sqlite3')
+    item = {'recording_id': 'one', 'camera_key': 'a', 'source_signature': 'same'}
+    q.enqueue(item, 'same')
+    a = Availability(tmp_path)
+    a.mark(item, 'missing')
+    q.sync_availability(a.states())
+    bound = configured_record(config, item)
+    assert 'configured_role' not in item
+    q.enqueue(bound, 'same')
+    assert q.claim('worker') is None  # Role repair cannot override missing input.
+    a.mark(item, 'ready')
+    q.sync_availability(a.states())
+    assert q.claim('worker')['configured_role'] == 'first_person'
+    q.enqueue(item, 'same')  # An active lease keeps its own bound snapshot.
+    with q.connect() as db:
+        assert json.loads(db.execute('SELECT payload FROM recordings').fetchone()[0]) == bound
+    q.finish('worker', 'one', {'status': 'completed', 'proof': 'original'}, 1)
+    q.enqueue(bound, 'same')
+    with q.connect() as db:
+        row = db.execute('SELECT * FROM recordings').fetchone()
+        assert row['status'] == 'completed' and 'original' in row['result']
+    q.enqueue(configured_record(config, item | {'recording_id': 'unknown', 'camera_key': 'b'}), 'same')
+    assert q.snapshot()['counts']['needs_camera_role'] == 1
+
+
+def reconciler_fixture(tmp_path):
+    from visioncortex.input_availability import Reconciler
+
+    source = tmp_path / 'capture'
+    source.mkdir()
+    video = source / 'rgb.mp4'
+    video.write_bytes(b'synthetic-not-video')
+    config = {'storage': {'local_runtime_root': str(tmp_path)}, 'collection_ingest': {
+        'source_root': str(source), 'camera_role_map': {'cam': 'first_person'}}}
+    record = {'recording_id': 'r', 'camera_key': 'cam', 'video_path': str(video),
+              'recording_start_us': 1789005600000000, 'source_signature': 'same', 'processable': True}
+    q = DeviceDayQueue(tmp_path / 'device-day/queue-retention.sqlite3')
+    q.enqueue(record, 'same')
+    return Reconciler(config), record, source, video
+
+
+def test_input_reinspection_preserves_explicit_view_role(tmp_path, monkeypatch):
+    from visioncortex.observed_inventory import read_inventory
+    reconciler, record, source, video = reconciler_fixture(tmp_path)
+    monkeypatch.setattr('visioncortex.nas_recordings._inspect', lambda *args: record.copy())
+    reconciler.tick()
+    fresh = read_inventory(reconciler.root)['recordings'][0]
+    assert fresh['configured_role'] == 'first_person'
+    assert Availability(reconciler.root).states()['r']['state'] == 'ready'
+
+
+def test_input_sidecar_race_is_not_video_deletion_and_outage_preserves_state(tmp_path, monkeypatch):
+    reconciler, record, source, video = reconciler_fixture(tmp_path)
+    def missing_sidecar(*args):
+        raise FileNotFoundError('metadata publication raced the inspection')
+    monkeypatch.setattr('visioncortex.nas_recordings._inspect', missing_sidecar)
+    reconciler.tick()
+    a = Availability(reconciler.root)
+    assert a.states()['r']['state'] == 'waiting'
+    assert a.states()['r']['reason'] == 'capture_metadata_missing'
+    video.unlink()
+    reconciler.cursor = ''
+    reconciler.tick()
+    assert a.states()['r']['state'] == 'missing'
+    a.mark(record, 'ready')
+    source.rmdir()  # Unmounted/unavailable capture root.
+    reconciler.cursor = ''
+    reconciler.tick()
+    assert a.states()['r']['state'] == 'ready'
+
+
+def test_transient_failures_rechecked_without_waiting_for_historical_sweep(tmp_path, monkeypatch):
+    reconciler, record, source, video = reconciler_fixture(tmp_path)
+    a = Availability(reconciler.root)
+    a.mark(record, 'unavailable')
+    reconciler.cursor = 'z'
+    monkeypatch.setattr('visioncortex.nas_recordings._inspect', lambda *args: record.copy())
+    reconciler.tick()
+    assert a.states()['r']['state'] == 'ready'

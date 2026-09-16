@@ -6,6 +6,15 @@ window.VisionCortexKnowledge = (() => {
     const status = main.querySelector('[data-search-status]');
     const results = main.querySelector('[data-evidence]');
     const answer = main.querySelector('[data-answer]');
+    const health = document.createElement('p');
+    health.setAttribute('aria-live', 'polite');
+    status.after(health);
+    const showHealth = index => {
+      const h = index?.health || {state:'pending'};
+      const names = {ready:'归档索引可用',partial:'部分归档暂不可读，其他目录继续更新',unavailable:'NAS 归档暂不可读，保留上次索引并自动重试',pending:'等待首次索引检查'};
+      health.textContent = (names[h.state] || '索引状态未知') + (h.last_success_at ? ` · 最近成功检查：${new Date(h.last_success_at*1000).toLocaleString('zh-CN')}` : '');
+    };
+    api('/api/knowledge/search?limit=1').then(r=>showHealth(r.index_status)).catch(()=>{health.textContent='索引状态暂不可读';});
     const showHits = hits => {
       results.innerHTML = hits.map(h=>`<article class="panel"><h3>${esc(h.archive)} · ${esc(h.kind)}</h3><p>${esc(h.text.slice(0,1000))}</p><p><a href="${esc(h.citation_url)}" target="_blank" rel="noopener">证据与版本回执</a> · <a href="${esc(h.evidence.url)}" target="_blank" rel="noopener">查看来源</a></p><small>${esc(h.evidence.evidence_status)} · 检索命中不等于确认实验结论</small></article>`).join('');
     };
@@ -24,7 +33,7 @@ window.VisionCortexKnowledge = (() => {
           answer.innerHTML=(r.claims||[]).map(c=>`<p>${esc(c.text)} ${(c.citations||[]).map(id=>`<a target="_blank" rel="noopener" href="${esc(refs.get(id)?.citation_url||'#')}">[证据]</a>`).join(' ')}</p>`).join('')+(r.id?`<p><a href="/api/knowledge/answers/${encodeURIComponent(r.id)}" target="_blank" rel="noopener">回答回执</a></p>`:'');
         } else {
           const r=await api('/api/knowledge/search?'+new URLSearchParams(Object.entries(data).filter(([,v])=>v)));
-          showHits(r.items); status.textContent=`显示 ${r.items.length} 条证据；索引由后台增量更新。`;
+          showHits(r.items); showHealth(r.index_status); status.textContent=`显示 ${r.items.length} 条证据；索引由后台增量更新。`;
         }
       } catch(e) {status.textContent=`读取失败：${e.message}`;}
       finally {form.querySelectorAll('button').forEach(b=>b.disabled=false);}

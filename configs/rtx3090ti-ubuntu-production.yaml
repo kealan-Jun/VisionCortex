@@ -55,9 +55,11 @@ collection_ingest:
   source_root: /home/x1/桌面/nas
   camera_directories: []
   camera_directory_glob: "*_cam*"
+  # Frozen explicit device bindings; never infer a role from the device prefix.
+  # Sample review and evidence limits: docs/CAMERA-VIEW-BINDINGS.md.
+  # Reinspection and durable queue replay must retain these same bindings.
   camera_role_map:
     lubancat-4df661d7_cam01: first_person
-    # Same explicit bindings as the running stage-recovery production profile.
     lubancat-52d2ef0c_cam01: first_person
     lubancat-e8cc0cb3_cam01: first_person
     orangepi5pro-ab748372_cam01: third_person

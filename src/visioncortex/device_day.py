@@ -611,11 +611,12 @@ class DeviceDayRunner:
         from .device_day_schedule import priority_date, refresh_queue_priorities
         focus_date = priority_date(self.runtime_root)
         refresh_queue_priorities(self.queues[stage], focus_date)
-        from .input_availability import Availability
+        from .input_availability import Availability, configured_record
         states = Availability(self.runtime_root).states()
         self.queues[stage].sync_availability(states)
         durable = {r["recording_id"]: r for r in self.queues[stage].pending()}
         durable.update({r["recording_id"]: r for r in inventory.get("recordings", [])})
+        durable = {key: configured_record(self.config, record) for key, record in durable.items()}
         # Local durable parent status is a cheap readiness prefilter. Validate
         # the exact NAS receipt/key below only after upstream has produced it.
         # This prevents thousands of not-yet-retained slices from blocking all

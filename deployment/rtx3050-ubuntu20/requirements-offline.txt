@@ -4,6 +4,7 @@ setuptools==83.0.0
 wheel==0.47.0
 fastapi==0.136.0
 httpx==0.28.1
+ijson==3.5.1
 ml-dtypes==0.5.4
 numpy==1.26.4
 scipy==1.17.1

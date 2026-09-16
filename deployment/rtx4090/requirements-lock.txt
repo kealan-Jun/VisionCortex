@@ -2,6 +2,7 @@
 # Windows CPython 3.12. The final SHA256SUMS.json freezes every resolved wheel.
 fastapi==0.136.0
 httpx==0.28.1
+ijson==3.5.1
 numpy==1.26.4
 nvidia-ml-py==13.590.44
 opencv-python==4.11.0.86
