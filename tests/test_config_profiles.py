@@ -54,6 +54,7 @@ def test_rtx3090ti_ubuntu_profile_matches_host_and_keeps_view_count_dynamic():
             "lubancat-4df661d7_cam01": "first_person",
             "lubancat-52d2ef0c_cam01": "first_person",
             "lubancat-e8cc0cb3_cam01": "first_person",
+            "lubancat-52d2ef0c_cam01": "first_person",
             "orangepi5pro-ab748372_cam01": "third_person",
             "orangepi5pro-b439137c_cam02": "third_person",
             "orangepi5pro-d12a4719_cam01": "first_person",

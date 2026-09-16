@@ -59,13 +59,29 @@ TAIL_PROMPT = """检查一个湿实验片段末尾之后的原视频，避免将
 尚在承接操作输出 ongoing；无法判断输出 uncertain。不得猜测录像之外发生的事情。
 在 ongoing 时需引用最后一张图并说明它与之前操作的承接。完成时引用明确结束的画面，
 不能引用采样终点作为完成理由。frame_ids 必须同时引用提议终点及之前的依据和后续依据。
+单步完成（operation）或单个实验单元完成（experiment_unit）不能作为整个连续链完成。
+completed 必须 completion_scope=workflow，且结束画面之后至少两张画面（含最后一张）
+未见相关操作继续，覆盖至少 completion_followup_ms 的时间；引用 post_completion_frame_ids。
+这只是对已观察范围的判断，不是保证以后不再操作。只看到最后一帧结束或缺少后续画面，输出 uncertain。
+结束后又配液、携带原容器或继续移液，post_completion_state=related_continuation，不能输出 completed。
+短暂停手、等候或遮挡后同一任务继续应为 ongoing；无法从画面建立承接时仍为 uncertain。
+same_operator 需要画面支持，不能仅凭第一人称摄像头编号确认操作者未变。
+ongoing 和 completed 均在 object_links 引用同一被操作对象跨 continuity_anchor_ms 的前后状态：
+before_frame_ids <= continuity_anchor_ms，after_frame_ids > continuity_anchor_ms。
+ongoing 至少一个对象引用最后一张图；completed 至少一个对象引用 completion_frame_id。
+跨台时对象还须引用实际携带过程的 handoff_frame_ids。所有对象引用都须包含在 frame_ids 中。
 另行判断所有后续画面是否仍在同一实验台、第三人称画面能否对应第一人称的操作对象与操作过程。
 只有实际可见对应才将 third_person_continuity_observed 设为 true；同一时间或文件机位名不足以确认。
 移动、遮挡、机位对应不清时将它设为 false，保留第一人称。只输出 JSON：
 {"state":"ongoing/completed/different_workflow/uncertain","continuation_observed":true,
-"same_workstation":true,"third_person_continuity_observed":false,
+"same_operator":true,"same_workstation":true,"third_person_continuity_observed":false,
 "frame_ids":["F001","F020"],"last_continuation_frame_id":"F020",
-"completion_frame_id":null,"observation":"具体画面依据","confidence":0.0,"uncertainties":[]}
+"completion_frame_id":null,"completion_scope":"none/operation/experiment_unit/workflow",
+"post_completion_state":"not_observed/related_continuation/no_related_continuation/uncertain",
+"post_completion_frame_ids":[],"object_links":[{"object_description":"实际操作对象",
+"before_state":"此前状态","after_state":"后续状态","before_frame_ids":["F001"],
+"after_frame_ids":["F020"],"handoff_frame_ids":[]}],
+"observation":"具体画面依据","confidence":0.0,"uncertainties":[]}
 """
 
 
@@ -103,11 +119,18 @@ class TailDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")
     state: Literal["ongoing", "completed", "different_workflow", "uncertain"]
     continuation_observed: bool
+    same_operator: bool = False
     same_workstation: bool | None = None
     third_person_continuity_observed: bool = False
     frame_ids: list[str]
     last_continuation_frame_id: str | None
     completion_frame_id: str | None
+    completion_scope: Literal["none", "operation", "experiment_unit", "workflow"] = "none"
+    post_completion_state: Literal[
+        "not_observed", "related_continuation", "no_related_continuation", "uncertain"
+    ] = "not_observed"
+    post_completion_frame_ids: list[str] = Field(default_factory=list)
+    object_links: list[ObjectContinuation] = Field(default_factory=list, max_length=8)
     observation: str = Field(min_length=1)
     confidence: float = Field(ge=0, le=1)
     uncertainties: list[str]
@@ -182,7 +205,7 @@ def operation_context(group, events, side):
 def seam_review_times(times, seams, metadata):
     anchors = {min(times), max(times)}
     anchors.update(s[k] for s in seams for k in ("before_ms", "after_ms"))
-    anchors.update(metadata[k] for k in ("proposed_left_end_ms", "proposed_right_start_ms", "proposed_end_ms")
+    anchors.update(metadata[k] for k in ("proposed_left_end_ms", "proposed_right_start_ms", "proposed_end_ms", "continuity_anchor_ms", "previous_review_end_ms")
                    if k in metadata and min(times) <= metadata[k] <= max(times))
     budget = min(32, max(6, len(times)))
     if len(anchors) > budget:
@@ -444,6 +467,9 @@ def _review(layout, analyzer, config, view_ids, views, infos, transforms, times,
         _read_semantic_cache, _semantic_cache_path, _semantic_cache_reads_enabled,
         _semantic_fingerprint, _write_semantic_cache,
     )
+    version = 4 if schema is TailDecision else 3
+    if version == 4:
+        identity = {**identity, "tail_evidence_version": version}
     edge_id = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:20]
     seams = recording_seams(view_ids, infos, transforms, min(times), max(times))
     metadata = {**metadata, "recording_seams": seams,
@@ -452,7 +478,7 @@ def _review(layout, analyzer, config, view_ids, views, infos, transforms, times,
         times = seam_review_times(times, seams, metadata)
     except ValueError:
         return {**identity, "review_id": edge_id, "frames": [], "request_metadata": metadata,
-                "result": {"status": "insufficient_boundary_coverage", "continuity_evidence_version": 3}}
+                "result": {"status": "insufficient_boundary_coverage", "continuity_evidence_version": version}}
     directory = layout.json_config / "Boundary-Review-Frames" / edge_id
     directory.mkdir(parents=True, exist_ok=True)
     frames, images = [], []
@@ -490,7 +516,7 @@ def _review(layout, analyzer, config, view_ids, views, infos, transforms, times,
     metadata = {**metadata, "frames": [
         {"frame_id": f["frame_id"], "global_ms": f["global_ms"],
          "views": [s["view_id"] for s in f["sources"]]} for f in frames]}
-    fingerprint = _semantic_fingerprint("experiment-boundary-v3", config, prompt, metadata, images)
+    fingerprint = _semantic_fingerprint(f"experiment-boundary-v{version}", config, prompt, metadata, images)
     cache_path = _semantic_cache_path(config, "experiment-boundaries", fingerprint)
     result = _read_semantic_cache(cache_path, fingerprint) if _semantic_cache_reads_enabled(config) else None
     if result is None:
@@ -510,7 +536,7 @@ def _review(layout, analyzer, config, view_ids, views, infos, transforms, times,
                     result["status"] = "invalid_boundary_response"
                 else:
                     result = _write_semantic_cache(cache_path, fingerprint, result)
-    result = {**result, "continuity_evidence_version": 3}
+    result = {**result, "continuity_evidence_version": version}
     return {**identity, "review_id": edge_id, "frames": frames, "request_metadata": metadata,
             "input_fingerprint": fingerprint, "result": result}
 
@@ -545,6 +571,47 @@ def refine_neighbor_review(layout, analyzer, config, left, right, record, views,
     return detailed
 
 
+def _tail_object_continuity(group, review, decision, by_id):
+    """Validate references linking the original task to the reviewed tail."""
+    if not decision.same_operator or not decision.object_links:
+        return False
+    anchor = review.get("request_metadata", {}).get("continuity_anchor_ms", group.global_end_ms)
+    endpoint = (decision.completion_frame_id if decision.state == "completed"
+                else decision.last_continuation_frame_id)
+    covered = set(decision.frame_ids)
+    for link in decision.object_links:
+        refs = set(link.before_frame_ids + link.after_frame_ids + link.handoff_frame_ids)
+        if (not refs <= covered or not refs <= by_id.keys()
+                or not all(by_id[i] <= anchor for i in link.before_frame_ids)
+                or not all(by_id[i] > anchor for i in link.after_frame_ids)):
+            return False
+        if decision.same_workstation is False and not link.handoff_frame_ids:
+            return False
+        if not all(anchor < by_id[i] <= max(by_id.values()) for i in link.handoff_frame_ids):
+            return False
+    if not any(endpoint in link.after_frame_ids for link in decision.object_links):
+        return False
+    return all(group.first_person_view in {s["view_id"] for s in frame.get("sources", [])}
+               for frame in review["frames"] if frame["frame_id"] in covered)
+
+
+def _workflow_completion_supported(review, decision, by_id):
+    """An operation/experiment unit ending does not end the continuous workflow."""
+    if (review["result"].get("continuity_evidence_version", 2) < 4
+            or decision.completion_scope != "workflow"
+            or decision.post_completion_state != "no_related_continuation"):
+        return False
+    after = decision.post_completion_frame_ids
+    end = by_id.get(decision.completion_frame_id)
+    if (end is None or len(set(after)) < 2 or len(set(after)) != len(after)
+            or not set(after) <= set(decision.frame_ids)
+            or not all(i in by_id and by_id[i] > end for i in after)):
+        return False
+    followup_ms = max(12000, review.get("request_metadata", {}).get("completion_followup_ms", 12000))
+    return (max(by_id[i] for i in after) == max(by_id.values())
+            and max(by_id[i] for i in after) - end >= followup_ms)
+
+
 def apply_tail_review(group, review, source_end_ms, minimum_confidence=0.85):
     """Keep an open end unless actual continuation/completion is evidenced."""
     result = review["result"]
@@ -558,16 +625,24 @@ def apply_tail_review(group, review, source_end_ms, minimum_confidence=0.85):
         return False
     by_id = {f["frame_id"]: f["global_ms"] for f in review["frames"]}
     if (decision.confidence < minimum_confidence or not decision.frame_ids
+            or len(by_id) != len(review["frames"])
+            or not all(isinstance(t, (float, int)) and math.isfinite(t) for t in by_id.values())
             or not set(decision.frame_ids) <= by_id.keys()
             or not any(by_id[i] <= group.global_end_ms for i in decision.frame_ids)):
         return False
+    if (result.get("continuity_evidence_version", 2) >= 4
+            and not _tail_object_continuity(group, review, decision, by_id)):
+        return False
+    limit = min(source_end_ms, review.get("review_limit_ms", source_end_ms))
     if decision.state == "completed":
         end = by_id.get(decision.completion_frame_id)
-        if end is None or decision.completion_frame_id not in decision.frame_ids or end < group.global_end_ms:
+        if (end is None or decision.completion_frame_id not in decision.frame_ids
+                or end < group.global_end_ms or end >= limit
+                or not _workflow_completion_supported(review, decision, by_id)):
             return False
         group.completion_status = "observed_complete"
         group.completion_reason = decision.observation
-        group.global_end_ms = min(source_end_ms, end + 1000)
+        group.global_end_ms = min(limit, end + 1000)
         if group.workflow_kind == "unresolved":
             group.workflow_kind = "independent_experiment"
         if group.workflow_units:
@@ -577,9 +652,10 @@ def apply_tail_review(group, review, source_end_ms, minimum_confidence=0.85):
         already_at_source_end = abs(source_end_ms - group.global_end_ms) <= 250
         if (end is None or decision.last_continuation_frame_id not in decision.frame_ids
                 or end != max(by_id.values())
+                or end > limit
                 or (end <= group.global_end_ms and not already_at_source_end)):
             return False
-        group.global_end_ms = source_end_ms if source_end_ms - end <= 250 else end
+        group.global_end_ms = source_end_ms if limit == source_end_ms and source_end_ms - end <= 250 else end
         group.completion_reason = decision.observation
         if group.global_end_ms >= source_end_ms:
             group.completion_status = "ongoing_at_recording_end"
@@ -667,14 +743,20 @@ def review_experiment_boundaries(layout, groups, segments, events, views, infos,
             # A separate candidate group is an unresolved boundary, not a
             # source-file end. Never label it "waiting for next recording".
             limit = min(source_end, next_start)
-            for window in range(max(1, int(cfg.get("maximum_tail_windows", 8)))):
-                end = min(limit - 100, group.global_end_ms + float(cfg.get("tail_window_seconds", 90)) * 1000)
+            window_budget = max(1, int(cfg.get("maximum_tail_windows", 8)))
+            uncertain_budget = max(0, min(window_budget, int(cfg.get("maximum_uncertain_tail_windows", 2))))
+            uncertain_windows = 0
+            scanned_end = group.global_end_ms
+            for window in range(window_budget):
+                end = min(limit - 100, scanned_end + float(cfg.get("tail_window_seconds", 90)) * 1000)
                 at_source_end = window == 0 and abs(source_end - group.global_end_ms) <= 250
                 if end <= group.global_end_ms and not at_source_end:
                     break
                 start = max(group.global_start_ms, group.global_end_ms - 12000)
+                anchor = max(start, min(group.global_end_ms, end - 1000)) if at_source_end else group.global_end_ms
                 times = sorted(set(np.linspace(start, end, maximum_pairs).tolist()
-                                   + ([group.global_end_ms] if group.global_end_ms <= end else [])))
+                                   + ([anchor] if start <= anchor <= end else [])
+                                   + ([scanned_end] if uncertain_windows and start <= scanned_end <= end else [])))
                 identity = {"left_group_uid": group.group_uid or group.group_id,
                             "right_group_uid": "", "kind": "tail", "window": window,
                             "start_ms": start, "end_ms": end}
@@ -682,16 +764,49 @@ def review_experiment_boundaries(layout, groups, segments, events, views, infos,
                                 if r.get("third_person_view")), group.third_person_view)
                 record = _review(layout, analyzer, config, [fp, last_tp], views, infos, transforms, times,
                                  {"proposed_end_ms": group.global_end_ms,
+                                  "continuity_anchor_ms": anchor,
                                   "recording_end_ms": source_end,
+                                  "completion_followup_ms": max(12, float(cfg.get("completion_followup_seconds", 12))) * 1000,
+                                  "uncertain_windows_before": uncertain_windows,
+                                  "previous_review_end_ms": scanned_end,
+                                  "review_does_not_extend_clip_without_continuity": True,
                                   "operation_context": operation_context(group, events, "end")},
                                  TAIL_PROMPT, TailDecision, identity)
-                record.update(left_end_ms=group.global_end_ms, minimum_confidence=minimum_confidence, joined=False)
+                record.update(left_end_ms=group.global_end_ms, review_limit_ms=limit,
+                              minimum_confidence=minimum_confidence, joined=False)
                 progressed = apply_tail_review(group, record, source_end, minimum_confidence)
                 record["tail_applied"] = progressed
                 group.boundary_reviews.append(record)
                 records.append(record)
-                if not progressed or group.completion_status in {"observed_complete", "ongoing_at_recording_end"}:
+                if group.completion_status in {"observed_complete", "ongoing_at_recording_end"}:
+                    record["stop_reason"] = group.completion_status
                     break
+                if not progressed:
+                    decision = record["result"].get("decision") or {}
+                    if record["result"].get("status") != "completed":
+                        record["stop_reason"] = "review_failed"
+                        break
+                    if decision.get("state") == "different_workflow":
+                        record["stop_reason"] = "different_workflow"
+                        break
+                    if uncertain_windows >= uncertain_budget:
+                        record["stop_reason"] = "uncertainty_budget_exhausted"
+                        break
+                    uncertain_windows += 1
+                else:
+                    uncertain_windows = 0
+                if end >= limit - 100:
+                    record["stop_reason"] = "reviewed_limit_unresolved"
+                    break
+                # Advance the inspection cursor, not the accepted experiment
+                # end. A later review must still bridge the original cut.
+                scanned_end = end
+            if records and "stop_reason" not in records[-1]:
+                records[-1]["stop_reason"] = "tail_window_budget_exhausted"
+            if records and group.completion_status == "unresolved":
+                group.completion_reason = (
+                    "已保留有依据的录像范围；后续承接或整个实验链的结束仍未确认，需要结合后续录像核对"
+                )
             if group.view_timeline and group.global_end_ms != group.view_timeline[-1]["end_ms"]:
                 raise ValueError("Workflow video coverage does not match reviewed extent")
             return records
@@ -721,7 +836,7 @@ def review_experiment_boundaries(layout, groups, segments, events, views, infos,
     finally:
         analyzer.close()
         write_json(layout.json_config / "experiment_boundary_review.json", {
-            "schema_version": "visioncortex-experiment-boundary-review/3",
+            "schema_version": "visioncortex-experiment-boundary-review/4",
             "policy": "semantic units and workflow chains; recording end is never completion evidence",
             "original_groups": before_groups, "reviews": reviews,
             "workflow_tracks": workflow_tracking(groups, infos, transforms),

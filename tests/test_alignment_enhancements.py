@@ -10,6 +10,7 @@ from visioncortex.alignment import (
     audit_timestamp_series,
     build_alignments,
     iter_aligned_rows,
+    read_timestamp_csv,
     read_timestamp_csv_bounded,
 )
 from visioncortex.config import load_config
@@ -108,6 +109,70 @@ def test_large_clock_reader_uses_distributed_bounded_samples(tmp_path):
     assert points[0].frame_index == 0
     assert points[-1].frame_index == 99
     assert any(0 < point.frame_index < 99 for point in points)
+
+
+@pytest.mark.parametrize("delimiter", [",", ";"])
+def test_bounded_samples_cover_recorded_rgb_despite_interleaved_depth(tmp_path, delimiter):
+    clock = tmp_path / "mixed.csv"
+    rows = ["frame_index,local_timestamp_ms,global_timestamp_ms,rgb_recorded"]
+    rows.append("0,0,1000000,0")
+    for index in range(100):
+        rows.append(f"{index},{index * 100},{1_000_000 + index * 100},")
+        rows.append(f"{index},{index * 100},{1_000_000 + index * 100},1")
+    rows.append("100,10000,1010000,")
+    clock.write_text("\n".join(rows).replace(",", delimiter) + "\n", encoding="utf-8")
+
+    points = read_timestamp_csv_bounded(clock, 10.0, sample_count=5)
+
+    assert [point.frame_index for point in points] == [0, 24, 49, 74, 99]
+    assert [point.row_number for point in points] == [2, 50, 100, 150, 200]
+    assert all(point.source_ms == 1_000_000 + point.local_ms for point in points)
+
+
+def test_timestamp_sample_budget_includes_last_recorded_frame(tmp_path):
+    clock = tmp_path / "rgb.csv"
+    clock.write_text(
+        "frame_index,local_timestamp_ms,global_timestamp_ms\n"
+        + "".join(f"{i},{i * 100},{1_000_000 + i * 100}\n" for i in range(100)),
+        encoding="utf-8",
+    )
+
+    points = read_timestamp_csv(clock, 10.0, max_points=5)
+
+    assert len(points) == 5
+    assert points[0].frame_index == 0
+    assert points[-1].frame_index == 99
+
+
+def test_mixed_recording_rows_preserve_formal_dual_view_alignment(tmp_path, monkeypatch):
+    views = []
+    for view_id, role, clock_offset in [
+        ("fp", ViewRole.FIRST_PERSON, 0),
+        ("tp", ViewRole.THIRD_PERSON, 200),
+    ]:
+        clock = tmp_path / f"{view_id}.csv"
+        rows = ["frame_index,local_timestamp_ms,global_timestamp_ms,rgb_recorded"]
+        rows.append("0,0,1000000,0")
+        for i in range(100):
+            values = f"{i},{i * 100},{1_000_000 + clock_offset + i * 100}"
+            rows.extend([values + ",", values + ",1"])
+        rows.append("100,10000,1010000,")
+        clock.write_text("\n".join(rows) + "\n", encoding="utf-8")
+        views.append(_view(view_id, role, clock))
+    monkeypatch.setattr(
+        alignment, "visual_anchor_calibration",
+        lambda *_args, **_kwargs: (0.0, 0.9, [{"reliable": True}] * 3),
+    )
+    config = load_config()
+    config["alignment"]["allow_uncertain_segment_formal_evidence"] = False
+    infos = {view.view_id: _info(f"{view.view_id}.mp4", 10_000.0) for view in views}
+
+    transforms, _ = build_alignments(views, infos, config)
+    receipt = alignment_quality_report(views, infos, transforms, config)
+
+    assert all(item.clock_sample_count == 5 for item in transforms.values())
+    assert receipt["formal_evidence_ready"] is True
+    assert receipt["common_first_third_person_overlap_ms"] >= 1000
 
 
 def test_invalid_clock_sync_samples_are_not_used_as_absolute_time(tmp_path):

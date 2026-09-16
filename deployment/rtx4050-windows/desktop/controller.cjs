@@ -21,7 +21,9 @@ function validateApiKey(value) {
 }
 
 class BackendController extends EventEmitter {
-  constructor({ root, spawnProcess = spawn, writeLog = () => {}, platform = process.platform, stopTimeoutMs = 8000 }) {
+  constructor({ root, spawnProcess = spawn, writeLog = () => {}, platform = process.platform, stopTimeoutMs = 8000,
+    hardwareTimeoutMs = 240000, hardwareTotalTimeoutMs = 1200000,
+    watchdogTimers = { setTimeout, clearTimeout } }) {
     super();
     this.root = root;
     this.spawnProcess = spawnProcess;
@@ -31,6 +33,11 @@ class BackendController extends EventEmitter {
     this.stopping = false;
     this.origin = null;
     this.stopTimeoutMs = stopTimeoutMs;
+    this.hardwareTimeoutMs = hardwareTimeoutMs;
+    this.hardwareTotalTimeoutMs = hardwareTotalTimeoutMs;
+    this.watchdogTimers = watchdogTimers;
+    this.clearHardwareWatchdog = () => {};
+    this.stopPromise = null;
   }
 
   start(key, port, settings, storage) {
@@ -52,12 +59,54 @@ class BackendController extends EventEmitter {
         PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8", PYTHONDONTWRITEBYTECODE: "1" },
     });
     this.child = child;
+    let hardwareTimer, hardwareTotalTimer, hardwareActive = false, failed = false;
+    const operations = new Set();
+    const clearHardwareWatchdog = () => {
+      this.watchdogTimers.clearTimeout(hardwareTimer);
+      this.watchdogTimers.clearTimeout(hardwareTotalTimer);
+      hardwareActive = false;
+    };
+    this.clearHardwareWatchdog = clearHardwareWatchdog;
+    const hardwareTimeout = () => {
+      if (this.child !== child || this.stopping || failed) return;
+      failed = true;
+      clearHardwareWatchdog();
+      const state = { status: "error", stage: "hardware", reason: "desktop_hardware_timeout",
+        operation: this.lastState?.operation || "hardware_supervisor",
+        message: "本机运行环境检查超过等待上限，正在停止本次启动。请打开诊断目录，回传 desktop.log 和 hardware-preflight 日志。" };
+      this.lastState = state;
+      // The Electron deadline still runs if the Python supervisor itself hangs.
+      // Report failure before attempting cleanup, which has its own bounded wait.
+      this.emit("state", state);
+      void this.stop().catch(() => {});
+      this.writeLog(STATE_PREFIX + JSON.stringify({ ...state, at: new Date().toISOString() }));
+    };
+    const watchHardware = (state) => {
+      if (state.status !== "preparing" || state.stage !== "hardware") {
+        clearHardwareWatchdog();
+        return;
+      }
+      if (!hardwareActive) {
+        hardwareActive = true;
+        operations.clear();
+        hardwareTotalTimer = this.watchdogTimers.setTimeout(hardwareTimeout, this.hardwareTotalTimeoutMs);
+        hardwareTotalTimer?.unref?.();
+      }
+      const operation = typeof state.operation === "string" ? state.operation : "hardware_supervisor";
+      // Repeated status messages and arbitrary stdout do not extend the deadline.
+      if (operations.has(operation)) return;
+      operations.add(operation);
+      this.watchdogTimers.clearTimeout(hardwareTimer);
+      hardwareTimer = this.watchdogTimers.setTimeout(hardwareTimeout, this.hardwareTimeoutMs);
+      hardwareTimer?.unref?.();
+    };
     child.stdin.on("error", () => {}); // The child may exit before a stop command reaches its pipe.
     const scrub = (text) => String(text).split(key).join("[已隐藏]");
     const consume = (stream) => {
       let pending = "";
       stream.setEncoding("utf8");
       stream.on("data", (chunk) => {
+        if (this.child !== child || this.stopping || failed) return;
         pending += chunk;
         let end;
         while ((end = pending.indexOf("\n")) >= 0) {
@@ -70,6 +119,7 @@ class BackendController extends EventEmitter {
             if (!state || typeof state.message !== "string" || !["preparing", "ready", "error"].includes(state.status)) continue;
             if (state.status === "ready" && !serviceUrlAllowed(state.url, this.origin)) continue;
             this.lastState = state;
+            watchHardware(state);
             this.emit("state", state);
           } catch { /* Unstructured model output stays in the diagnostic log. */ }
         }
@@ -78,8 +128,15 @@ class BackendController extends EventEmitter {
     };
     consume(child.stdout);
     consume(child.stderr);
-    child.on("error", () => this.emit("state", { status: "error", message: "应用运行环境无法启动，请查看诊断记录。" }));
+    child.on("error", () => {
+      clearHardwareWatchdog();
+      if (this.child !== child || this.stopping || failed) return;
+      this.lastState = { status: "error", message: "应用运行环境无法启动，请查看诊断记录。" };
+      this.emit("state", this.lastState);
+    });
     child.on("close", (code) => {
+      clearHardwareWatchdog();
+      if (this.child !== child) return;
       this.child = null;
       if (!this.stopping && this.lastState?.status !== "error") this.emit("state", { status: "error", message: `应用后台已退出（${code ?? "异常"}）。请重新启动或查看诊断记录。` });
       this.emit("stopped");
@@ -88,10 +145,12 @@ class BackendController extends EventEmitter {
   }
 
   async stop() {
+    if (this.stopPromise) return this.stopPromise;
     const child = this.child;
     if (!child) return;
     this.stopping = true;
-    await new Promise((resolve) => {
+    this.clearHardwareWatchdog();
+    this.stopPromise = new Promise((resolve) => {
       let timer;
       let fallback;
       const done = () => { clearTimeout(timer); clearTimeout(fallback); child.removeListener("close", done); resolve(); };
@@ -110,6 +169,8 @@ class BackendController extends EventEmitter {
         } else { child.kill("SIGTERM"); done(); }
       }, this.stopTimeoutMs);
     });
+    try { await this.stopPromise; }
+    finally { this.stopPromise = null; }
   }
 }
 

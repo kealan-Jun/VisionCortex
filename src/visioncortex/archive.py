@@ -669,7 +669,7 @@ def materialize_experiment_clips(
     config: dict[str, Any],
     publisher: Any | None = None,
 ) -> None:
-    from .workflow_video import materialize_third_person_timeline, routed_intervals
+    from .workflow_video import covered_intervals, materialize_third_person_timeline
 
     by_view = {view.view_id: view for view in views}
     by_segment = {segment.segment_id: segment for segment in segments}
@@ -773,17 +773,26 @@ def materialize_experiment_clips(
 
         def extract_role(role_label: str, view_id: str) -> dict[str, Any]:
             started = time.perf_counter()
-            if role_label == "Third-Person" and group.view_timeline:
+            source_transform = transforms[view_id]
+            needs_coverage_route = (
+                source_transform.to_local(group.global_start_ms) < 0
+                or source_transform.to_local(group.global_end_ms) > infos[view_id].duration_ms + 1
+            )
+            if (role_label == "Third-Person" and group.view_timeline) or needs_coverage_route:
                 destination = videos_dir / f"{role_label}.mp4"
-                rows = routed_intervals(group)
+                route_group = group if role_label == "Third-Person" and group.view_timeline else group.model_copy(update={
+                    "view_timeline": [{"start_ms": group.global_start_ms, "end_ms": group.global_end_ms,
+                                       "third_person_view": view_id}]})
+                rows = covered_intervals(route_group, infos, transforms)
                 source_ids = sorted({row["third_person_view"] for row in rows if row.get("third_person_view")})
                 cache = _materialize_derived_media(
                     destination, "workflow-third-person-timeline",
-                    {"timeline": rows, "alignments": {v: transforms[v].model_dump(mode="json") for v in source_ids}},
+                    {"coverage_policy": "explicit_source_gaps_v1", "timeline": rows, "alignments": {v: transforms[v].model_dump(mode="json") for v in source_ids}},
                     [p for v in source_ids for p in view_source_files(by_view[v])], config,
-                    lambda: materialize_third_person_timeline(group, by_view, infos, transforms, destination, encoder))
+                    lambda: materialize_third_person_timeline(route_group, by_view, infos, transforms, destination, encoder))
                 return {"group_id": group.group_id, "role_label": role_label, "view_id": "routed",
                         "duration_seconds": round(time.perf_counter() - started, 6),
+                        "source_coverage": rows,
                         "output_bytes": destination.stat().st_size, **cache}
             view = by_view[view_id]
             transform = transforms[view_id]
@@ -838,7 +847,25 @@ def materialize_experiment_clips(
                 ("Third-Person", group.third_person_view),
             ):
                 extraction_jobs.append(executor.submit(extract_role, role_label, view_id))
-            runtime_records.extend(job.result() for job in extraction_jobs)
+            failures = []
+            for role_label, job in zip(("First-Person", "Third-Person"), extraction_jobs, strict=True):
+                try:
+                    runtime_records.append(job.result())
+                except (OSError, ValueError, RuntimeError) as exc:
+                    failures.append((role_label, exc))
+            if failures:
+                runtime_path = layout.json_config / "experiment_clip_materialization_runtime.json"
+                write_json(runtime_path, {
+                    "schema_version": "visioncortex-materialization-runtime/1", "status": "partial",
+                    "records": runtime_records, "failures": [{
+                        "group_id": group.group_id, "role_label": role_label,
+                        "requested_start_ms": group.global_start_ms, "requested_end_ms": group.global_end_ms,
+                        "error_type": type(exc).__name__, "message": str(exc),
+                    } for role_label, exc in failures],
+                })
+                if publisher is not None:
+                    publisher.publish_file(runtime_path)
+                raise failures[0][1]
         role_paths: dict[str, tuple[str, Path]] = {}
         for role_label, view_id in (
             ("First-Person", group.first_person_view),
@@ -869,13 +896,15 @@ def materialize_experiment_clips(
                 "local_start_ms": local_start,
                 "local_end_ms": local_end,
                 "alignment": transform.model_dump(mode="json"),
+                "source_coverage": next((r.get("source_coverage") for r in runtime_records
+                    if r.get("group_id") == group.group_id and r.get("role_label") == role_label), None),
                 "atomic_experiments": [
                     by_segment[item].model_dump(mode="json") for item in group.atomic_experiment_ids
                 ],
             }
             if role_label == "Third-Person" and group.view_timeline:
                 metadata.update(view_id=None, alignment=None, local_start_ms=None, local_end_ms=None,
-                                view_timeline=group.view_timeline,
+                                view_timeline=covered_intervals(group, infos, transforms),
                                 alignments={v: transforms[v].model_dump(mode="json")
                                             for v in group.participating_views})
             json_path = json_dir / f"{base}.json"
@@ -1533,6 +1562,7 @@ def _artifact_json(
     archive_id: str | None = None,
 ) -> dict[str, Any]:
     first_material_view, third_material_view = _key_material_view_pair(group, event)
+    liquid_state = event.liquid_state
     understanding = event.model_understanding or {}
     physical_change = understanding.get("physical_change") or {}
     before_state = str(physical_change.get("before") or "unknown")
@@ -1687,6 +1717,24 @@ def _artifact_json(
             }
             for index, supported_view in enumerate(event.supporting_views, 1)
         ]
+    if liquid_state is not None:
+        for index, item in enumerate(
+            liquid_state.per_view_observations, len(observations) + 1
+        ):
+            facts = item.observed_facts or [
+                f"liquid_present={item.liquid_present}; "
+                f"fill_ratio={item.fill_ratio}; visible_flow={item.visible_flow}"
+            ]
+            observations.extend(
+                {
+                    "observation_id": f"{event.event_id}-obs-{index:02d}-{fact_index:02d}",
+                    "view_id": item.view_id,
+                    "view_role": item.view_role.value,
+                    "timestamp_us": item.timestamp_us,
+                    "observed_fact": fact,
+                }
+                for fact_index, fact in enumerate(facts, 1)
+            )
 
     alignment_uncertainty_us = max(
         80_000,
@@ -1721,7 +1769,7 @@ def _artifact_json(
             "consistency": understanding.get("cross_view_consistency", "unreviewed"),
             "both_views_support_action": bool(
                 (event.observability.get("key_material_view_selection") or {}).get(
-                    "same_action_pair_verified", True
+                    "same_action_pair_verified", False
                 )
             ) and all(
                 item in event.supporting_views
@@ -1752,6 +1800,10 @@ def _artifact_json(
             ]
         )
     )
+    if liquid_state is not None:
+        uncertainties = list(
+            dict.fromkeys([*uncertainties, *liquid_state.uncertain_claims])
+        )
     consistency = str(understanding.get("cross_view_consistency") or "unreviewed")
     model_confidence = float(understanding.get("confidence") or 0.0)
     confirmed_action = str(understanding.get("action_type_confirmed") or "unknown")
@@ -1844,6 +1896,15 @@ def _artifact_json(
             observed_facts.append(f"已观察后续动作：{next_step}")
         elif next_step_status == "inferred":
             supported_inferences.append(f"预测下一步：{next_step}")
+    if liquid_state is not None:
+        observed_facts = list(
+            dict.fromkeys([*observed_facts, *liquid_state.observed_facts])
+        )
+        supported_inferences = list(
+            dict.fromkeys(
+                [*supported_inferences, *liquid_state.supported_inferences]
+            )
+        )
     contradictions = []
     if consistency == "conflict":
         contradictions.append("第一人称与第三人称观察发生冲突，详见 observations")
@@ -1856,6 +1917,35 @@ def _artifact_json(
     }.get(consistency, 0.35)
     change_observed = before_state != "unknown" and after_state != "unknown"
     action_agrees = confirmed_action in {event.action_type.value, normalized_action}
+    def liquid_container_state(value: Any, fallback: str) -> str:
+        if value is None:
+            return fallback
+        fragments = []
+        if value.liquid_present is not None:
+            fragments.append(f"liquid_present={str(value.liquid_present).lower()}")
+        if value.fill_ratio is not None:
+            fragments.append(f"fill_ratio={value.fill_ratio:.4f}")
+        return "; ".join(fragments) or fallback
+
+    source_before_state = liquid_container_state(
+        liquid_state.source_before if liquid_state else None, "unknown"
+    )
+    source_after_state = liquid_container_state(
+        liquid_state.source_after if liquid_state else None, "unknown"
+    )
+    target_before_state = liquid_container_state(
+        liquid_state.target_before if liquid_state else None, "unknown"
+    )
+    target_after_state = liquid_container_state(
+        liquid_state.target_after if liquid_state else None, "unknown"
+    )
+    state_change_score = (
+        liquid_state.confidence
+        if liquid_state is not None and liquid_state.state_change_confirmed is True
+        else model_confidence
+        if change_observed
+        else 0.25
+    )
     if normalized_action == ActionType.CONTAINER_STATE_CHANGE.value:
         normalized_objects = {
             "actor": tracked_id(actor, "actor"),
@@ -1900,14 +1990,14 @@ def _artifact_json(
         }
         normalized_state_before = {
             "tool": before_state,
-            "source": "unknown",
-            "target": "unknown",
+            "source": source_before_state,
+            "target": target_before_state,
             **dict(state_receipt.get("state_before") or {}),
         }
         normalized_state_after = {
             "tool": after_state,
-            "source": "unknown",
-            "target": "unknown",
+            "source": source_after_state,
+            "target": target_after_state,
             **dict(state_receipt.get("state_after") or {}),
         }
 
@@ -1957,7 +2047,7 @@ def _artifact_json(
             "object_identity": round(min(1.0, 0.35 + min(len(event.objects), 4) * 0.08 + model_confidence * 0.3), 4),
             "phase_completeness": round((0.45 + model_confidence * 0.5) if change_observed else (0.25 + model_confidence * 0.35), 4),
             "cross_view_support": cross_view_score,
-            "state_change_support": round(model_confidence if change_observed else 0.25, 4),
+            "state_change_support": round(state_change_score, 4),
             "model_agreement": round((float(event.confidence) + model_confidence) / 2.0 if action_agrees else model_confidence * 0.5, 4),
             "contradiction_penalty": 0.8 if consistency == "conflict" else 0.0,
             **dict(state_receipt.get("scores") or {}),
@@ -1966,6 +2056,7 @@ def _artifact_json(
         "key_clips": key_clips,
         "evidence_ids": evidence_ids,
         "provenance": {
+            **({"liquid_state": liquid_state.model_dump(mode="json")} if liquid_state is not None else {}),
             "schema_version": "key-material-event-v1.0.0",
             "time_base": "aligned_global_timeline_microseconds",
             "experiment_group_id": group.group_id,
@@ -3581,7 +3672,7 @@ def _rerender_curated_participant_annotations(
         review_classes = visual_reviewer.eligible_classes(event) if visual_reviewer is not None else []
         if review_classes:
             if config.get("performance", {}).get("release_auxiliary_models_between_stages"):
-                _release_auxiliary_model_caches()
+                _park_auxiliary_model_caches(config)
             for participant_class in review_classes:
                 visual_views = []
                 for role_label, view_id in (("First-Person", first_material_view), ("Third-Person", third_material_view)):
@@ -3757,7 +3848,7 @@ def _rerender_curated_participant_annotations(
                 (config or {}).get("performance", {}).get("release_auxiliary_models_between_stages")
             )
             if phase_isolation:
-                _release_auxiliary_model_caches()
+                _park_auxiliary_model_caches(config)
             if view_id in visual_plan and set(view_event.objects) <= {"hand", "gloved_hand", *visual_plan[view_id]["reviewed_classes"]}:
                 supplement_receipt = {
                     "status": "replaced_by_visual_candidate_review",
@@ -3836,7 +3927,7 @@ def _rerender_curated_participant_annotations(
                 if deferred_note not in event.uncertainty:
                     event.uncertainty.append(deferred_note)
             if phase_isolation:
-                _release_auxiliary_model_caches()
+                _park_auxiliary_model_caches(config)
             segmentation_receipt: dict[str, Any] | None = None
             if config is not None:
                 segmentation_settings = (
@@ -3908,6 +3999,8 @@ def _rerender_curated_participant_annotations(
                 if liquid_settings.get("enabled") and (
                     not enabled_actions or event.action_type.value in enabled_actions
                 ):
+                    if phase_isolation:
+                        _park_auxiliary_model_caches(config)
                     liquid_output = (
                         layout.key_materials
                         / "Liquid-State-Observations"
@@ -3977,7 +4070,7 @@ def _rerender_curated_participant_annotations(
                 "release_auxiliary_models_after_event", False
             )
         ):
-            _release_auxiliary_model_caches()
+            _park_auxiliary_model_caches(config)
     decisions = [
         record["selective_verification"]
         for record in records
@@ -4097,8 +4190,8 @@ _GROUNDING_DINO_MODEL_CACHE: dict[tuple[str, str, str], Any] = {}
 _GROUNDING_DINO_ASSET_VALIDATION: set[tuple[str, str]] = set()
 
 
-def _release_auxiliary_model_caches() -> dict[str, int]:
-    """Bound peak RAM/VRAM by dropping event-scoped auxiliary model caches."""
+def _release_auxiliary_model_caches(*, retain_on_cpu: bool = False) -> dict[str, int]:
+    """Release VRAM between models; optionally retain weights in host RAM."""
 
     open_vocabulary = len(_OPEN_VOCABULARY_MODEL_CACHE)
     grounding_dino = len(_GROUNDING_DINO_MODEL_CACHE)
@@ -4112,10 +4205,11 @@ def _release_auxiliary_model_caches() -> dict[str, int]:
                 model.to("cpu")
             except (RuntimeError, TypeError, ValueError):
                 pass
-    _OPEN_VOCABULARY_MODEL_CACHE.clear()
-    _GROUNDING_DINO_MODEL_CACHE.clear()
-    temporal = release_temporal_segmentation_model_cache()
-    liquid = release_liquid_semantic_model_cache()
+    if not retain_on_cpu:
+        _OPEN_VOCABULARY_MODEL_CACHE.clear()
+        _GROUNDING_DINO_MODEL_CACHE.clear()
+    temporal = release_temporal_segmentation_model_cache(retain_on_cpu=retain_on_cpu)
+    liquid = release_liquid_semantic_model_cache(retain_on_cpu=retain_on_cpu)
     gc.collect()
     try:
         import torch
@@ -4130,6 +4224,21 @@ def _release_auxiliary_model_caches() -> dict[str, int]:
         "temporal_segmentation": temporal,
         "liquid_semantic": liquid,
     }
+
+
+def _park_auxiliary_model_caches(config: dict[str, Any] | None) -> dict[str, Any]:
+    """Keep warm weights only while the configured host-memory reserve exists."""
+    import psutil
+
+    minimum_gib = float(((config or {}).get("performance") or {}).get(
+        "auxiliary_cpu_cache_min_available_gib", 0
+    ))
+    available = int(psutil.virtual_memory().available)
+    retain = minimum_gib > 0 and available >= minimum_gib * 1024**3
+    started = time.perf_counter()
+    counts = _release_auxiliary_model_caches(retain_on_cpu=retain)
+    return {"retained_on_cpu": retain, "available_host_bytes": available,
+            "models": counts, "seconds": round(time.perf_counter() - started, 6)}
 
 
 def _box_edge_gap_norm(
@@ -4622,6 +4731,32 @@ def _grounding_dino_key_frame_detections(
     canonical_classes: set[str],
     settings: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    fallback = dict(settings.get("grounding_dino_fallback") or {})
+    if not (str(fallback.get("device", "cuda")).startswith("cuda")
+            and fallback.get("cuda_oom_fallback_cpu")):
+        return _grounding_dino_key_frame_detections_once(frame, canonical_classes, settings)
+    import torch
+
+    try:
+        return _grounding_dino_key_frame_detections_once(frame, canonical_classes, settings)
+    except torch.cuda.OutOfMemoryError:
+        # Retry the identical FP32 model and input on CPU after unwinding GPU
+        # intermediates. Other failures must still propagate to the stage.
+        pass
+    _release_auxiliary_model_caches(retain_on_cpu=True)
+    fallback["device"] = "cpu"
+    boxes, receipt = _grounding_dino_key_frame_detections_once(
+        frame, canonical_classes, {**settings, "grounding_dino_fallback": fallback}
+    )
+    receipt["device_fallback"] = "cuda_out_of_memory_to_cpu"
+    return boxes, receipt
+
+
+def _grounding_dino_key_frame_detections_once(
+    frame: np.ndarray,
+    canonical_classes: set[str],
+    settings: dict[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Ground only missing participant classes with the pinned local model."""
 
     fallback = dict(settings.get("grounding_dino_fallback") or {})
@@ -4671,7 +4806,9 @@ def _grounding_dino_key_frame_detections(
     device = str(fallback.get("device") or "cuda")
     cache_key = (str(model_path), model_sha256, device)
     cached = _GROUNDING_DINO_MODEL_CACHE.get(cache_key)
+    model_cache_reused = cached is not None
     model_load_seconds = 0.0
+    model_restore_seconds = 0.0
     if cached is None:
         load_started = time.perf_counter()
         processor = AutoProcessor.from_pretrained(
@@ -4690,6 +4827,12 @@ def _grounding_dino_key_frame_detections(
         model_load_seconds = time.perf_counter() - load_started
         cached = {"processor": processor, "model": model, "device": device}
         _GROUNDING_DINO_MODEL_CACHE[cache_key] = cached
+    else:
+        restore_started = time.perf_counter()
+        cached["model"].to(device)
+        if device.startswith("cuda"):
+            torch.cuda.synchronize()
+        model_restore_seconds = time.perf_counter() - restore_started
     processor = cached["processor"]
     model = cached["model"]
     device = str(cached["device"])
@@ -4782,6 +4925,8 @@ def _grounding_dino_key_frame_detections(
         "recovered_composite_label_count": recovered_composite_label_count,
         "maximum_box_area_norm": maximum_area,
         "model_load_seconds": round(model_load_seconds, 6),
+        "model_cache_reused": model_cache_reused,
+        "model_restore_seconds": round(model_restore_seconds, 6),
         "inference_seconds": round(inference_seconds, 6),
         "token_usage": 0,
         "ark_calls": 0,

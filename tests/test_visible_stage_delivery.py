@@ -19,6 +19,29 @@ from visioncortex.storage import (
 )
 
 
+def test_stage_versions_retain_overwritten_json_and_do_not_copy_media(tmp_path):
+    from visioncortex.stage_versions import save_version
+    root = tmp_path / 'archive'
+    directory = root / 'JSON-Config-Files'
+    directory.mkdir(parents=True)
+    source = directory / 'groups.json'
+    source.write_text('{"phase":1}')
+    video = root / 'clip.mp4'
+    video.write_bytes(b'fixture-video-not-real')
+    first = save_version(root, [directory, video], {'stage':'clips'})
+    source.write_text('{"phase":2}')
+    second = save_version(root, [directory], {'stage':'review'})
+    payload = json.loads(first.read_text())
+    row = next(item for item in payload['files'] if item['path'].endswith('groups.json'))
+    assert (root / row['snapshot']).read_text() == '{"phase":1}'
+    import hashlib
+    assert hashlib.sha256((root / row['snapshot']).read_bytes()).hexdigest() == row['sha256']
+    assert payload['media_bodies_revalidated'] is False
+    assert not any(first.parent.rglob('*.mp4'))
+    assert len(json.loads(second.read_text())['files']) == 1  # no recursive snapshot copying
+    assert first != second
+
+
 def test_completed_stage_visible_before_final_acceptance(tmp_path):
     config = {"storage": {"archive_root": str(tmp_path / "nas"), "staging_directory_name": "Processing"}}
     final, staging, history = fixed_archive_staging_paths(config, "experiment", "run-1")
@@ -74,6 +97,10 @@ def test_stage_preview_reads_completed_clips_without_final_package(tmp_path, mon
     json_dir = root / "JSON-Config-Files"
     json_dir.mkdir(parents=True)
     (json_dir / "pipeline_status.json").write_text(json.dumps({"stage": "mllm"}))
+    (json_dir / "Stage-Receipts").mkdir()
+    (json_dir / "Stage-Receipts/experiment_clips.json").write_text(json.dumps({
+        "stage": "experiment_clips", "status": "completed",
+    }))
     (json_dir / "experiment_group_understanding.json").write_text(json.dumps({
         "groups": [{"group_id": "GROUP-1", "archive_folder": "weighing",
                     "experiment_name": "称量", "global_start_ms": 0,
@@ -124,7 +151,7 @@ def test_stage_preview_reads_completed_clips_without_final_package(tmp_path, mon
     # A folder alone must not make an unfinished stage appear delivered.
     assert api.staging_archive_detail("run-preview")["preliminary_materials"] == []
     receipts = json_dir / "Stage-Receipts"
-    receipts.mkdir()
+    receipts.mkdir(exist_ok=True)
     (receipts / "key_materials.json").write_text(json.dumps({"stage": "key_materials", "status": "completed"}))
     preview = api.staging_archive_detail("run-preview")
     assert preview["key_events"] == []
@@ -218,6 +245,12 @@ def test_checkpoint_receipt_waits_for_successful_publication(tmp_path, monkeypat
     first = pipeline._checkpoint_key_material_understanding(layout, "mllm", [], [])
     pipeline._complete_stage(layout, "mllm", first)
     preserved = (nas / "JSON-Config-Files/Stage-Outputs/mllm.json").read_bytes()
+    inventory_path = nas / "StageInventory.json"
+    inventory_before = inventory_path.read_bytes()
+    inventory = json.loads(inventory_before)
+    assert inventory["formal_release"] is False
+    assert [item["stage"] for item in inventory["stages"]] == ["mllm"]
+    assert all((nas / name).exists() for item in inventory["stages"] for name in item["artifacts"])
     next_paths = pipeline._checkpoint_key_material_understanding(
         layout, "material_refinement", [], []
     )
@@ -232,6 +265,7 @@ def test_checkpoint_receipt_waits_for_successful_publication(tmp_path, monkeypat
     assert (nas / "JSON-Config-Files/Stage-Receipts/mllm.json").exists()
     assert not (layout.json_config / "Stage-Receipts/material_refinement.json").exists()
     assert not (nas / "JSON-Config-Files/Stage-Receipts/material_refinement.json").exists()
+    assert inventory_path.read_bytes() == inventory_before
 
 
 def test_task_page_exposes_each_completed_stage_output():
@@ -306,11 +340,12 @@ def test_retry_preview_uses_current_groups_and_receipts(tmp_path):
         (folder / "First-Person.mp4").write_bytes(b"test-media")
     save(receipts / "experiment_understanding.json", {"stage": "experiment_understanding", "status": "completed", "completed_at": "2026-09-07T10:04:00+00:00"})
     save(receipts / "semantic_refinement.json", {"stage": "semantic_refinement", "status": "completed", "completed_at": "2026-09-07T09:40:00+00:00"})
+    save(receipts / "experiment_clips.json", {"stage": "experiment_clips", "status": "completed", "completed_at": "2026-09-07T10:04:30+00:00"})
     detail = api._archive_detail_from_root(root, "experiment", staging_run_id="retry")
     assert [item["name"] for item in detail["experiments"]] == ["current"]
     assert detail["experiments"][0]["steps"] == [{"description": "observed"}]
     assert detail["metrics"]["total_duration_seconds"] == 300
-    assert [item["stage"] for item in detail["observability"]["stage_receipts"]] == ["experiment_understanding"]
+    assert [item["stage"] for item in detail["observability"]["stage_receipts"]] == ["experiment_clips", "experiment_understanding"]
     assert (root / "Experiment-Clips/old/First-Person.mp4").exists()
     # The completed package also excludes orphan folders from older attempts.
     save(config / "evidence_package.json", {"experiment_groups": [current]})

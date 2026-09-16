@@ -19,7 +19,13 @@ def safe(root, name):
     pure = PurePosixPath(name)
     if not name or pure.is_absolute() or ".." in pure.parts or "\\" in name or ":" in name:
         raise RuntimeError("Invalid update path")
-    target = (root / name).resolve()
+    unresolved = root.resolve() / pure
+    for entry in (unresolved, *unresolved.parents):
+        if entry == root.resolve():
+            break
+        if entry.is_symlink() or (hasattr(entry, "is_junction") and entry.is_junction()):
+            raise RuntimeError("Update paths cannot contain links")
+    target = unresolved.resolve()
     if root.resolve() not in target.parents:
         raise RuntimeError("Update path escapes application")
     return target
@@ -37,7 +43,9 @@ def apply(root, patch):
     current = digest(root / "SHA256SUMS.json")
     if current == spec["updated_manifest_sha256"]:
         for item in records:
-            if digest(safe(root, item["path"])) != item["after_sha256"]:
+            path = safe(root, item["path"])
+            actual = digest(path) if path.is_file() else None
+            if actual != item["after_sha256"]:
                 raise RuntimeError("Installed update files are damaged")
         return {"status": "already_applied"}
     if current != spec["base_manifest_sha256"]:
@@ -48,10 +56,18 @@ def apply(root, patch):
         name = item["path"]
         if name != "SHA256SUMS.json" and indexed.get(name, {}).get("sha256") != item["before_sha256"]:
             raise RuntimeError("Update is not bound to the original file manifest")
-        if digest(safe(root, name)) != item["before_sha256"]:
+        path = safe(root, name)
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise RuntimeError("Update target must be a regular file")
+        actual = digest(path) if path.is_file() else None
+        if actual != item["before_sha256"]:
             raise RuntimeError("Original application files were changed. No files changed.")
-        if digest(safe(patch / "payload", name)) != item["after_sha256"]:
+        payload = safe(patch / "payload", name)
+        after = digest(payload) if payload.is_file() else None
+        if after != item["after_sha256"]:
             raise RuntimeError("Update payload is damaged. No files changed.")
+        if item["before_sha256"] is None and item["after_sha256"] is None:
+            raise RuntimeError("Update entry cannot be empty")
     manifest_record = next(item for item in records if item["path"] == "SHA256SUMS.json")
     if manifest_record["after_sha256"] != spec["updated_manifest_sha256"]:
         raise RuntimeError("Updated manifest identity mismatch")
@@ -59,17 +75,24 @@ def apply(root, patch):
     expected = {name: dict(item) for name, item in indexed.items()}
     for item in records:
         if item["path"] != "SHA256SUMS.json":
-            expected[item["path"]].update(sha256=item["after_sha256"], size_bytes=safe(patch / "payload", item["path"]).stat().st_size)
-    if updated["files"] != [expected[item["path"]] for item in original["files"]] or updated["file_count"] != original["file_count"]:
+            if item["after_sha256"] is None:
+                expected.pop(item["path"], None)
+            else:
+                expected[item["path"]] = dict(path=item["path"], sha256=item["after_sha256"],
+                                             size_bytes=safe(patch / "payload", item["path"]).stat().st_size)
+    if (updated["files"] != list(expected.values()) or updated["file_count"] != len(expected)
+            or updated.get("total_bytes") != sum(item["size_bytes"] for item in expected.values())):
         raise RuntimeError("Update unexpectedly changes unrelated manifest entries")
     updates = safe(root, "Runtime/Updates")
     updates.mkdir(parents=True, exist_ok=True)
-    backup = Path(tempfile.mkdtemp(prefix="connection-", dir=updates))
+    backup = Path(tempfile.mkdtemp(prefix="source-" if spec.get("kind") == "git_source_update" else "connection-", dir=updates))
     ordered = sorted(records, key=lambda item: item["path"] == "SHA256SUMS.json")
     # Back up and stage everything before the first replacement. Seal manifest last.
     for item in ordered:
         name = item["path"]
         for folder, source in [("before", safe(root, name)), ("staged", safe(patch / "payload", name))]:
+            if not source.is_file():
+                continue
             target = safe(backup / folder, name)
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, target)
@@ -77,19 +100,32 @@ def apply(root, patch):
     try:
         for item in ordered:
             name = item["path"]
-            os.replace(safe(backup / "staged", name), safe(root, name))
+            target = safe(root, name)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if item["after_sha256"] is None:
+                target.unlink()
+            else:
+                os.replace(safe(backup / "staged", name), target)
             replaced.append(name)
         for item in ordered:
-            if digest(safe(root, item["path"])) != item["after_sha256"]:
+            target = safe(root, item["path"])
+            actual = digest(target) if target.is_file() else None
+            if actual != item["after_sha256"]:
                 raise RuntimeError("Installed update checksum mismatch")
     except Exception:
         for name in reversed(replaced):
-            shutil.copyfile(safe(backup / "before", name), safe(root, name))
+            before = safe(backup / "before", name)
+            if before.is_file():
+                shutil.copyfile(before, safe(root, name))
+            else:
+                safe(root, name).unlink(missing_ok=True)
         (backup / "FAILED.txt").write_text("Update failed; original files restored.\n", encoding="utf-8")
         raise
     receipt = {"status": "applied", "base_manifest_sha256": current,
                "updated_manifest_sha256": spec["updated_manifest_sha256"], "backup": str(backup),
                "windows_runtime": "NOT_PROVEN", "real_video_quality": "NOT_PROVEN"}
+    if spec.get("source_git_commit"):
+        receipt["source_git_commit"] = spec["source_git_commit"]
     (backup / "result.json").write_text(json.dumps(receipt, indent=2), encoding="utf-8")
     return receipt
 

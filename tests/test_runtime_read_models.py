@@ -194,3 +194,37 @@ def test_transient_failures_rechecked_without_waiting_for_historical_sweep(tmp_p
     monkeypatch.setattr('visioncortex.nas_recordings._inspect', lambda *args: record.copy())
     reconciler.tick()
     assert a.states()['r']['state'] == 'ready'
+
+
+def test_input_initialization_retries_only_busy_errors(monkeypatch, tmp_path):
+    from contextlib import contextmanager
+    import sqlite3
+    import visioncortex.input_availability as module
+
+    real_connection = module.connection
+    attempts = []
+
+    @contextmanager
+    def locked_once(*args, **kwargs):
+        attempts.append(1)
+        if len(attempts) == 1:
+            error = sqlite3.OperationalError("database is locked")
+            error.sqlite_errorcode = sqlite3.SQLITE_BUSY
+            raise error
+        with real_connection(*args, **kwargs) as db:
+            yield db
+
+    monkeypatch.setattr(module, "connection", locked_once)
+    state = Availability(tmp_path)
+    state.mark({"recording_id": "one"}, "ready")
+    assert state.states()["one"]["state"] == "ready"
+    assert len(attempts) == 4
+
+    @contextmanager
+    def invalid_database(*args, **kwargs):
+        raise sqlite3.OperationalError("invalid database")
+        yield
+
+    monkeypatch.setattr(module, "connection", invalid_database)
+    with pytest.raises(sqlite3.OperationalError, match="invalid database"):
+        Availability(tmp_path)

@@ -160,6 +160,25 @@ def test_daily_report_excludes_post_curation_physical_changes(default_config):
     ]
 
 
+def test_daily_export_keeps_current_and_following_evidence_separate(default_config):
+    summary = _summary_with_post_curation_rejection()
+    raw = summary.experiment_groups[0].model_understanding["steps"][0]
+    raw.update(operation_title="捏持纸片", observed_result="纸片仍在手中",
+               time_scope={"complete_operation_boundaries_proven": False},
+               next_step_evidence={"status": "unknown", "evidence_event_ids": []},
+               source_next_step={"text": "拿起瓶子", "evidence": {"status": "observed"}},
+               source_operation_records=[{"event_id": "EVT-ACCEPTED", "current_step": "捏纸后拿瓶"}])
+    report = build_daily_report(summary, {}, {"passed": True, "checks": []},
+                                default_config, _accepted_quality())
+    exported = report["experiment_timeline"][0]["steps"][0]
+    assert exported["supporting_event_ids"] == ["EVT-ACCEPTED"]
+    assert exported["next_step_status"] == "unknown"
+    assert exported["source_next_step"]["text"] == "拿起瓶子"
+    assert exported["source_operation_records"][0]["current_step"] == "捏纸后拿瓶"
+    assert exported["time_scope"]["complete_operation_boundaries_proven"] is False
+    assert exported["operation_title"] == "捏持纸片"
+
+
 def test_daily_report_eval_fails_closed_on_rejected_physical_change(default_config):
     summary = _summary_with_post_curation_rejection()
     report = build_daily_report(

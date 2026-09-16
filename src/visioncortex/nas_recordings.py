@@ -190,6 +190,14 @@ def _inspect(root: Path, video: Path, now: float, settle: float, allow_plain: bo
         "completion_source": "user_confirmation_required" if plain else "recorder_sidecars",
         "status": "available" if not issues else "attention",
         "issues": issues,
+        "capture_quality": {
+            "status": ready.get("recording_quality_status"),
+            "reason": ready.get("recording_quality_reason"),
+            "rgb_coverage_ratio": ready.get("rgb_coverage_ratio"),
+            "rgb_max_frame_gap_us": ready.get("rgb_max_frame_gap_us"),
+            "rgb_timestamp_out_of_order_count": ready.get("rgb_timestamp_out_of_order_count"),
+            "scope": "recorder_reported_not_analysis_accuracy",
+        },
         "source_signature": hashlib.sha256(json.dumps(snapshots).encode()).hexdigest(),
         "audio": recorder_audio(video, metadata, ready, now, settle),
         "updated_at": datetime.fromtimestamp(latest, timezone.utc).isoformat(),
@@ -362,6 +370,11 @@ def _recording_batches(
                 "available": available,
                 "device_day_processable": bool(items) and all(item.get("processable", item.get("available")) for item in items) and not unconfigured_cameras,
                 "issues": issues,
+                "issue_details": [
+                    {"camera_key": item.get("camera_key"), "relative_path": item.get("relative_path"),
+                     "issues": item.get("issues", []), "capture_quality": item.get("capture_quality", {})}
+                    for item in items if item.get("issues")
+                ],
                 "unconfigured_cameras": unconfigured_cameras,
                 "recordings": [
                     {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+
 import copy
 import hashlib
 import hmac
@@ -739,7 +740,9 @@ def _dispatch_job_in_context(job: QueuedRunJob) -> None:
     payload = job.payload
     # Keep queued model/input settings immutable. Admission is a live worker
     # policy so jobs submitted before the split cannot bypass shared limits.
-    settings = payload["settings"] | {"runtime": _settings().get("runtime", {})}
+    settings = copy.deepcopy(payload["settings"]) | {"runtime": _settings().get("runtime", {})}
+    if job.reclaimed and job.kind != "stage_refresh":
+        settings.setdefault("project", {})["resume_stages"] = True
     if job.kind == "stage_refresh":
         from .stage_refresh import refresh
         root = _find_staging_run(settings, payload["parent_run_id"])
@@ -2046,12 +2049,16 @@ def _stage_receipts_from_root(root: Path) -> list[dict[str, Any]]:
             {
                 "stage": payload["stage"],
                 "status": payload.get("status", "completed"),
+                "reason": payload.get("reason"),
+                "reused": bool(payload.get("reused")),
+                "archive_status": payload.get("archive_status"),
                 "completed_at": payload.get("completed_at"),
                 "run_elapsed_seconds": payload.get("run_elapsed_seconds"),
                 "stage_duration_seconds": payload.get("stage_duration_seconds"),
                 "archive_mode": payload.get("archive_mode"),
                 "artifacts": artifacts,
                 "receipt": f"JSON-Config-Files/Stage-Receipts/{path.name}",
+                "version_manifest": payload.get("version_manifest"),
             }
         )
     return receipts
@@ -3460,6 +3467,9 @@ def search_key_events(
     action_type: str | None = None,
     parent_event_id: str | None = None,
     cross_view: bool | None = None,
+    liquid_state_status: str | None = None,
+    liquid_present: bool | None = None,
+    visible_flow: bool | None = None,
     material_ready: bool | None = None,
     start_us: int | None = None,
     end_us: int | None = None,
@@ -3477,6 +3487,9 @@ def search_key_events(
         "action_type": action_type,
         "parent_event_id": parent_event_id,
         "cross_view": cross_view,
+        "liquid_state_status": liquid_state_status,
+        "liquid_present": liquid_present,
+        "visible_flow": visible_flow,
         "material_ready": material_ready,
         "start_us": start_us,
         "end_us": end_us,
@@ -3498,6 +3511,9 @@ def search_key_events(
             action_type=action_type,
             parent_event_id=parent_event_id,
             cross_view=cross_view,
+            liquid_state_status=liquid_state_status,
+            liquid_present=liquid_present,
+            visible_flow=visible_flow,
             material_ready=material_ready,
             start_us=start_us,
             end_us=end_us,
@@ -3543,6 +3559,9 @@ def search_staging_key_events(
     action_type: str | None = None,
     parent_event_id: str | None = None,
     cross_view: bool | None = None,
+    liquid_state_status: str | None = None,
+    liquid_present: bool | None = None,
+    visible_flow: bool | None = None,
     start_us: int | None = None,
     end_us: int | None = None,
     cursor: str | None = None,
@@ -3557,6 +3576,9 @@ def search_staging_key_events(
         "action_type": action_type,
         "parent_event_id": parent_event_id,
         "cross_view": cross_view,
+        "liquid_state_status": liquid_state_status,
+        "liquid_present": liquid_present,
+        "visible_flow": visible_flow,
         "start_us": start_us,
         "end_us": end_us,
     }
@@ -3577,6 +3599,9 @@ def search_staging_key_events(
         action_type=action_type,
         parent_event_id=parent_event_id,
         cross_view=cross_view,
+        liquid_state_status=liquid_state_status,
+        liquid_present=liquid_present,
+        visible_flow=visible_flow,
         start_us=start_us,
         end_us=end_us,
         after_peak_us=after_peak_us,
@@ -4156,6 +4181,7 @@ def _archive_section_payload(
         if not groups:
             legacy_package = _read_json(json_root / "evidence_package.json", {}) or {}
             groups = list(legacy_package.get("experiment_groups") or [])
+        from .activity_review import assessment
         source_page = groups[offset : offset + limit + 1]
         has_more = len(source_page) > limit
         source_page = source_page[:limit]
@@ -4173,6 +4199,7 @@ def _archive_section_payload(
                 {
                     "folder": folder_name,
                     "name": group.get("experiment_name") or folder_name,
+                    "activity_assessment": assessment(group),
                     "continuity_type": group.get("continuity_type"),
                     "workflow_kind": group.get("workflow_kind", "unresolved"),
                     "source_archive_folders": group.get("source_archive_folders") or [],
@@ -4307,6 +4334,23 @@ def staging_archive_detail(run_id: str, section: str = "all") -> dict[str, Any]:
     return result
 
 
+def _stage_clip_group(folder: Path, groups: dict[str, dict], status: dict) -> dict | None:
+    started = _current_attempt_started_at(status)
+    sidecar = folder / "First-Person.json"
+    if not sidecar.is_file() or (started is not None and sidecar.stat().st_mtime < started):
+        return None
+    saved = _read_json(sidecar, {}) or {}
+    source = saved.get("group") or {}
+    current = groups.get(str(source.get("group_id")))
+    if not current or current.get("archive_folder"):
+        return None
+    if any(source.get(key) != current.get(key) for key in ("global_start_ms", "global_end_ms")):
+        return None
+    if saved.get("artifact_type") != "experiment_view_video" or source.get("archive_folder") != folder.name:
+        return None
+    return {**current, "archive_folder": folder.name}
+
+
 def _archive_detail_from_root(
     root: Path, archive_name: str, *, staging_run_id: str | None = None,
     library_section: str | None = None
@@ -4327,6 +4371,14 @@ def _archive_detail_from_root(
                  "partial_delivery": _read_json(root / "JSON-Config-Files/partial_delivery.json", {}) or {}}
                 if library_section else _run_snapshot_from_root(root))
     status = snapshot.get("status") or {}
+    for receipt in snapshot.get("stage_receipts", []):
+        receipt["receipt_url"] = file_url(archive_name, receipt["receipt"])
+        version = receipt.get("version_manifest")
+        if version and (root / version).is_file():
+            receipt["version_url"] = file_url(archive_name, version)
+        for artifact in receipt.get("artifacts", []):
+            if artifact.get("available") and artifact.get("relative_path") and artifact.get("kind") == "file":
+                artifact["url"] = file_url(archive_name, artifact["relative_path"])
     active_preview = bool(staging_run_id) and status.get("stage") not in {"completed", "partial", "failed", "interrupted", "cancelled"}
     completed_stages = {
         item["stage"] for item in snapshot.get("stage_receipts", [])
@@ -4386,6 +4438,8 @@ def _archive_detail_from_root(
     package_groups = apply_speech_revision(root, package_groups)
     from .operation_review import apply as apply_operation_revision, coverage
     package_groups = apply_operation_revision(root, package_groups)
+    from .activity_review import apply as apply_activity, assessment, counts as activity_counts
+    package_groups = apply_activity(root, package_groups)
     group_by_folder = {
         str(group.get("archive_folder")): group for group in package_groups
     }
@@ -4398,8 +4452,16 @@ def _archive_detail_from_root(
     experiment_root = root / "Experiment-Clips"
     if experiment_root.is_dir():
         for folder in sorted(item for item in experiment_root.iterdir() if item.is_dir()):
+            if staging_run_id and folder.name not in group_by_folder:
+                # Older runs published their group index before clip paths
+                # were assigned. Recover only matching, finished clip metadata.
+                recovered = _stage_clip_group(folder, group_by_id, status)
+                if recovered:
+                    group_by_folder[folder.name] = recovered
             if (package_groups or active_preview) and folder.name not in group_by_folder:
                 continue
+            if active_preview and "experiment_clips" not in completed_stages:
+                continue  # A directory/MP4 may still be under construction.
             group = group_by_folder.get(folder.name, {})
             understanding = group.get("model_understanding") or {}
             first_person = folder / "First-Person.mp4"
@@ -4410,6 +4472,7 @@ def _archive_detail_from_root(
                     "folder": folder.name,
                     "group_id": group.get("group_id"),
                     "name": group.get("experiment_name") or folder.name,
+                    "activity_assessment": assessment(group),
                     "continuity_type": group.get("continuity_type"),
                     "workflow_kind": group.get("workflow_kind", "unresolved"),
                     "source_archive_folders": group.get("source_archive_folders") or [],
@@ -4650,7 +4713,7 @@ def _archive_detail_from_root(
             else "legacy_archive_not_release_verified"
         ),
         "counts": {
-            "experiments": len(experiments),
+            **activity_counts(experiments),
             "key_events": len(normalized_events),
         },
         "experiments": experiments,
@@ -6224,7 +6287,9 @@ def recovery_plan(run_id: str) -> dict[str, Any]:
             model_message = "已保存的连接验证可用于原任务；提交时再次检查"
         except (OSError, ValueError, RuntimeError) as exc:
             model_message = str(exc)
-    identity = {"run_id":run_id, "attempt":job["attempts"], "status":job["status"], "bindings":bound,
+    from .stage_recovery import index as recovery_index, DEPENDENCIES
+    checkpoints = recovery_index(root).get("stages", {})
+    identity = {"recovery": checkpoints, "run_id":run_id, "attempt":job["attempts"], "status":job["status"], "bindings":bound,
                 "updated_at":status.get("updated_at"), "refresh_in_progress":_refresh_in_progress(run_id)}
     revision = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     return {"run_id":run_id, "revision":revision, "group_revision":bound[GROUPS],
@@ -6232,7 +6297,9 @@ def recovery_plan(run_id: str) -> dict[str, Any]:
             "provider":model.get("provider"), "model":model.get("model"),
             "output_path":str(root), "retained_stage_count":len(_stage_receipts_from_root(root)),
             "model_ready":model_ready, "model_check_message":model_message,
-            "actions": {"retry":retryable and (model_ready or not model.get("enabled")), "reports":stopped,
+            "checkpoint_stages": list(checkpoints), "dependencies": DEPENDENCIES,
+            "resume_effect": "已完成产物保留在原位置；执行时逐环节校验恢复点，重算失败、缺失、改变及受影响的后续环节。旧任务没有恢复点时使用原有缓存重新执行。",
+            "actions": {"resume":retryable and (model_ready or not model.get("enabled")), "retry":retryable and (model_ready or not model.get("enabled")), "reports":stopped,
                         "operations":stopped and model_ready and bool(bound[GROUPS] and bound[EVENTS])},
             "cache_policy":"校验源文件、代码、配置和模型身份后复用；未通过校验的部分重新计算。",
             "retry_effect":"原输入不复制；已有派生产出移入 Retry-Attempts 历史目录，本轮重新生成可见成果。",
@@ -6241,7 +6308,11 @@ def recovery_plan(run_id: str) -> dict[str, Any]:
 
 
 @app.post("/api/runs/{run_id}/retry", status_code=202)
-def retry_run(run_id: str, revision: str | None = None) -> dict[str, Any]:
+def retry_run(run_id: str, revision: str | None = None, mode: str = "full") -> dict[str, Any]:
+    if mode not in {"full", "resume"}:
+        raise HTTPException(422, "请选择恢复未完成环节或完整复跑")
+    if mode == "resume" and not revision:
+        raise HTTPException(422, "恢复需要当前方案版本，请重新打开恢复方案")
     store = _persistent_queue
     if store is None:
         raise HTTPException(503, "持久任务队列未就绪")
@@ -6286,15 +6357,16 @@ def retry_run(run_id: str, revision: str | None = None) -> dict[str, Any]:
                     if not destination.exists():
                         destination.parent.mkdir(parents=True, exist_ok=True)
                         shutil.copyfile(source, destination)
-            _retain_retry_outputs(root, int(job["attempts"]))
-            state = store.retry_failed(run_id, verified_mllm=verified_mllm)
+            if mode == "full":
+                _retain_retry_outputs(root, int(job["attempts"]))
+            state = store.retry_failed(run_id, verified_mllm=verified_mllm, resume_stages=mode == "resume")
         except ValueError as exc:
             raise HTTPException(409, "任务已重新排队或尚未停止") from exc
         _runs[run_id] = state
     _queue_wakeup.set()
     return {"run_id": run_id, "state": "queued", "status_url": f"/api/runs/{run_id}",
             "source_copy_bytes": 0, "queue_persistence": "sqlite",
-            "reuses_original_inputs": True, "cache_policy": "verified_reuse"}
+            "reuses_original_inputs": True, "cache_policy": "verified_reuse", "recovery_mode": mode}
 
 
 def _experiment_speech_response(root: Path, name: str, staging: bool, query: str,
@@ -6347,6 +6419,12 @@ def _experiment_speech_response(root: Path, name: str, staging: bool, query: str
                 for video in timeline["videos"]]
         result["timeline"] = timeline
         for source in result["sources"]:
+            original = (source.get("original") or {}).get("file")
+            if original:
+                source_path = (root / original["path"]).resolve()
+                if not archive_contains(source_path, root) or not source_path.is_file() or source_path.stat().st_size != original["size"]:
+                    raise ValueError("原始录音归档不可用")
+                original["url"] = (_staging_file_url(name, original["path"]) if staging else _file_url(name, original["path"], current))
             for part in source["chunks"]:
                 for spec in part["files"].values():
                     spec["url"] = (_staging_file_url(name, spec["path"]) if staging else
@@ -6541,7 +6619,7 @@ def create_nas_batch_run(
             raise HTTPException(
                 409,
                 {
-                    "message": "该采集批次尚未完成",
+                    "message": "该采集批次尚不具备分析条件，请查看各项原因",
                     "issues": batch.get("issues") or [],
                 },
             )

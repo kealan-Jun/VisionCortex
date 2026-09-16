@@ -136,6 +136,40 @@ def test_local_audio_has_no_inferred_video_sync(tmp_path, monkeypatch):
     assert sources[0]["_sealed"]["start_global_us"] is None
 
 
+@pytest.mark.parametrize("relative", [
+    "VisionCortexExperimentArchive/experiment/Original-Experiment-Videos/first/video.mp4",
+    "archive/experiment/video.mp4",
+    "device_cam01/not-a-date/segment/video.mp4",
+])
+@pytest.mark.parametrize("embedded_audio", [False, True])
+def test_uploaded_video_under_nas_root_is_not_a_recorder_folder(
+    tmp_path, monkeypatch, relative, embedded_audio,
+):
+    video = tmp_path / relative
+    video.parent.mkdir(parents=True)
+    video.write_bytes(b"uploaded-video")
+    config = {
+        "speech_recognition": {"enabled": True},
+        "collection_ingest": {
+            "enabled": True, "mode": "directory_metadata",
+            "source_root": str(tmp_path),
+        },
+    }
+    monkeypatch.setattr(
+        speech, "inspect_source", lambda *_: pytest.fail("upload treated as recorder")
+    )
+    monkeypatch.setattr(
+        speech, "probe_audio",
+        lambda _: {"duration_seconds": 3} if embedded_audio else None,
+    )
+    view = ViewInput(view_id="fp", role="first_person", video=video)
+    sources = speech.discover(config, SimpleNamespace(views=[view]))
+    assert sources[0]["available"] is embedded_audio
+    assert sources[0]["status"] == ("complete" if embedded_audio else "no_audio")
+    if embedded_audio:
+        assert sources[0]["_sealed"]["audio_file"] == "video.mp4"
+
+
 def test_subtitles_use_listening_chunk_timeline_and_escape_cues(tmp_path):
     request = {"source": {}, "model": {}, "start_seconds": 60, "end_seconds": 90}
     rows = [
@@ -159,7 +193,9 @@ def test_subtitles_use_listening_chunk_timeline_and_escape_cues(tmp_path):
 def test_stage_archives_results_search_and_integrity(tmp_path, monkeypatch):
     layout = ArchiveLayout(tmp_path / "experiment")
     layout.create()
-    manifest = SimpleNamespace(experiment_id="experiment")
+    manifest = SimpleNamespace(experiment_id="experiment", views=[SimpleNamespace(view_id="fp", segments=[], video=tmp_path / "video.mp4")])
+    original = tmp_path / "original.wav"
+    original.write_bytes(b"fixture-original-audio")
     source = {
         "id": "fp-0001",
         "view_id": "fp",
@@ -168,7 +204,8 @@ def test_stage_archives_results_search_and_integrity(tmp_path, monkeypatch):
         "duration_seconds": 5,
         "audio_offset_ms": 250,
         "alignment": "PARTIAL_EVIDENCE",
-        "_sealed": {},
+        "_sealed": {"folder": str(tmp_path), "resolved_folder": str(tmp_path.resolve()),
+                    "audio_file": original.name, "files": {original.name: speech_worker.file_record(original)}},
     }
     monkeypatch.setattr(speech, "discover", lambda *_: [source])
     monkeypatch.setattr(speech, "runtime_request", lambda _: {"max_audio_seconds": 3})
@@ -249,7 +286,7 @@ def test_failed_speech_cannot_publish_completed_receipt(tmp_path, monkeypatch):
     with pytest.raises(ValueError):
         speech.run_stage(
             {"speech_recognition": {"enabled": True}},
-            SimpleNamespace(experiment_id="test"),
+            SimpleNamespace(experiment_id="test", views=[SimpleNamespace(view_id="fp", segments=[], video=tmp_path / "video.mp4")]),
             layout,
             {},
             {},
@@ -451,10 +488,11 @@ def test_failed_speech_does_not_prevent_visual_scan_submission(tmp_path, monkeyp
         received_infos,
         received_transforms,
         progress,
+        publisher=None,
     ):
         calls.append(received_manifest.experiment_id)
         assert received_config["speech_recognition"]["enabled"]
-        assert received_infos is infos and received_transforms is transforms
+        assert received_infos == infos and received_transforms == transforms
         assert (layout.json_config / "time_alignment.json").is_file()
         progress("录音哈希验证失败")
         raise ValueError("audio hash mismatch")
@@ -524,3 +562,22 @@ def test_complete_asr_cache_checks_runtime_request_and_every_artifact(tmp_path):
     assert speech_worker.completed_cache(tmp_path, 'request', 'changed') is None
     (tmp_path / 'audio.m4a').write_bytes(b'tampered')
     assert speech_worker.completed_cache(tmp_path, 'request', 'runtime') is None
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_missing_audio_skips_model_start_and_keeps_video_inputs(tmp_path, monkeypatch, enabled):
+    from visioncortex.archive import ArchiveLayout
+    from visioncortex.speech_semantics import SpeechContext
+    layout = ArchiveLayout(tmp_path / "archive")
+    layout.create()
+    video = tmp_path / "silent.mp4"
+    video.write_bytes(b"source-identity-only")
+    manifest = RunManifest(experiment_id="no-audio", views=[ViewInput(view_id=name, role=role, video=video) for name, role in [("fp", "first_person"), ("tp", "third_person")]])
+    config = {"speech_recognition": {"enabled": enabled}, "collection_ingest": {"enabled": False}}
+    monkeypatch.setattr(speech, "probe_audio", lambda _: None)
+    monkeypatch.setattr(speech, "runtime_request", lambda _: pytest.fail("No audio must not start an ASR runtime"))
+    result = speech.run_stage(config, manifest, layout, {}, {})
+    assert result["status"] == ("completed" if enabled else "disabled")
+    assert not any(item["available"] for item in result["sources"])
+    assert SpeechContext(layout.root, config).rows == []
+    assert video.read_bytes() == b"source-identity-only"

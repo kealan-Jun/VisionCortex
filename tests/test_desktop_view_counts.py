@@ -17,7 +17,9 @@ def desktop_config(tmp_path, monkeypatch):
     monkeypatch.syspath_prepend(str(repo / "tools"))
     import rtx4050_portable
     shutil.copytree(repo / "configs", tmp_path / "configs")
-    (tmp_path / "SHA256SUMS.json").write_text("{}")
+    # Engine identity is covered by deployment tests; these tests exercise view routing.
+    monkeypatch.setattr(rtx4050_portable, "engine_cache_directory",
+                        lambda root, *_: root / "Runtime/Engines/synthetic")
     monkeypatch.setattr(rtx4050_portable.os, "environ", dict(rtx4050_portable.os.environ))
     rtx4050_portable.configure_environment(tmp_path)
     _, config = rtx4050_portable.effective_config(tmp_path, {"gpu_uuid": "test-only"})

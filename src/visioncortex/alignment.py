@@ -184,9 +184,6 @@ def read_timestamp_csv_endpoints(path: Path, fps: float) -> list[TimestampPoint]
 def read_timestamp_csv(path: Path, fps: float, max_points: int = 50_000) -> list[TimestampPoint]:
     if not path.is_file():
         raise FileNotFoundError(f"时间戳 CSV 不存在: {path}")
-    with path.open("r", encoding="utf-8-sig", newline="") as counter:
-        row_count = max(0, sum(1 for _ in counter) - 1)
-    stride = max(1, math.ceil(row_count / max_points))
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         sample = handle.read(4096)
         handle.seek(0)
@@ -202,17 +199,33 @@ def read_timestamp_csv(path: Path, fps: float, max_points: int = 50_000) -> list
         rgb_recorded_index = (
             lowered_fields.index("rgb_recorded") if "rgb_recorded" in lowered_fields else None
         )
+
+        def recorded(values: list[str]) -> bool:
+            return rgb_recorded_index is None or (
+                rgb_recorded_index < len(values)
+                and values[rgb_recorded_index].strip().lower() in {"1", "true", "yes"}
+            )
+
+        # Capture CSVs interleave RGB, depth and unrecorded frames. Sample the
+        # recorded frame sequence, retaining both endpoints within the budget.
+        recorded_count = sum(1 for values in reader if recorded(values))
+        if recorded_count < 2:
+            raise ValueError(f"时间戳 CSV 至少需要两行: {path}")
+        sample_count = min(recorded_count, max(2, max_points))
+        sample_indices = {
+            index * (recorded_count - 1) // (sample_count - 1)
+            for index in range(sample_count)
+        }
+        handle.seek(0)
+        reader = csv.reader(handle, dialect=dialect)
+        next(reader)
         points: list[TimestampPoint] = []
+        recorded_index = -1
         for row_number, values in enumerate(reader):
-            if (
-                rgb_recorded_index is not None
-                and (
-                    rgb_recorded_index >= len(values)
-                    or values[rgb_recorded_index].strip().lower() not in {"1", "true", "yes"}
-                )
-            ):
+            if not recorded(values):
                 continue
-            if row_number % stride and row_number + 1 < row_count:
+            recorded_index += 1
+            if recorded_index not in sample_indices:
                 continue
             row = {
                 key: values[index] if index < len(values) else ""

@@ -1,5 +1,6 @@
 import hashlib
 import json
+import sqlite3
 import threading
 from pathlib import Path
 
@@ -29,6 +30,11 @@ from visioncortex.schemas import (
     AlignmentTransform,
     EvidenceEvent,
     ExperimentGroup,
+    LiquidViewObservation,
+    LiquidFlowDirection,
+    LiquidContainerState,
+    LiquidStateEvidence,
+    LiquidStateStatus,
     VideoInfo,
     ViewRole,
 )
@@ -39,6 +45,8 @@ def _indexed_archive(
     *,
     event_count: int = 1,
     stable_group_uids: bool = False,
+    pair_verified: bool = True,
+    with_liquid_state: bool = False,
 ):
     archive_id = root.name
     transforms = {
@@ -71,6 +79,42 @@ def _indexed_archive(
             evidence=[{"frame_index": 360 + ordinal, "motion_score": 0.8}],
         )
         event = EvidenceEvent(
+            liquid_state=(
+                LiquidStateEvidence(
+                    status=LiquidStateStatus.OBSERVED,
+                    backend="unit-test",
+                    source_before=LiquidContainerState(
+                        container_id="bottle-01", liquid_present=True, fill_ratio=0.8
+                    ),
+                    source_after=LiquidContainerState(
+                        container_id="bottle-01", liquid_present=True, fill_ratio=0.6
+                    ),
+                    target_before=LiquidContainerState(
+                        container_id="tube-01", liquid_present=False, fill_ratio=0.0
+                    ),
+                    target_after=LiquidContainerState(
+                        container_id="tube-01", liquid_present=True, fill_ratio=0.2
+                    ),
+                    per_view_observations=[
+                        LiquidViewObservation(
+                            view_id="fp",
+                            view_role=ViewRole.FIRST_PERSON,
+                            timestamp_us=12_600_000,
+                            liquid_present=True,
+                            visible_flow=True,
+                            flow_direction=LiquidFlowDirection.SOURCE_TO_TARGET,
+                            visibility=0.9,
+                            confidence=0.9,
+                        )
+                    ],
+                    visible_flow=True,
+                    flow_direction=LiquidFlowDirection.SOURCE_TO_TARGET,
+                    state_change_confirmed=True,
+                    confidence=0.9,
+                )
+                if with_liquid_state
+                else None
+            ),
             event_id=event_id,
             action_type=ActionType.LIQUID_MOVEMENT,
             global_start_ms=12_000 + ordinal * 100,
@@ -83,6 +127,8 @@ def _indexed_archive(
             supporting_views=["fp", "tp"],
             supporting_roles=[ViewRole.FIRST_PERSON, ViewRole.THIRD_PERSON],
             candidates=[candidate],
+            observability={"key_material_view_selection": {"same_action_pair_verified": True}}
+            if pair_verified else {},
             model_understanding={
                 "status": "completed",
                 "model": "doubao-seed-2.1-pro",
@@ -356,6 +402,13 @@ def test_search_archive_index_filters_full_text_and_returns_material_hashes(
     assert " IN (" in artifact_queries[0]
 
 
+def test_unreviewed_pair_does_not_match_dual_view_evidence_filter(tmp_path):
+    root = tmp_path / "Archive-Unreviewed"
+    _indexed_archive(root, pair_verified=False)
+    assert len(search_archive_index(root, query="吸取液体")) == 1
+    assert search_archive_index(root, query="吸取液体", cross_view=True) == []
+
+
 def test_quality_decision_receipts_are_indexed_by_rule_verdict_and_subject(tmp_path):
     root = tmp_path / "Archive-Decisions"
     archive_id, events, groups, normalized, _ = _indexed_archive(root)
@@ -427,13 +480,13 @@ def test_physical_change_index_only_projects_explicit_known_state_differences(tm
 def test_key_event_api_paginates_and_resolves_event_and_evidence(monkeypatch, tmp_path):
     archive_root = tmp_path / "archives"
     root = archive_root / "Archive-Web"
-    archive_id, events, groups, _, _ = _indexed_archive(root, event_count=2)
+    archive_id, events, groups, _, _ = _indexed_archive(root, event_count=2, with_liquid_state=True)
     monkeypatch.setattr(api, "_archive_root", lambda settings=None: archive_root)
     client = TestClient(api.app)
 
     first_page = client.get(
         "/api/key-events",
-        params={"archive": root.name, "q": "吸取液体", "limit": 1},
+        params={"archive": root.name, "q": "吸取液体", "limit": 1, "liquid_state_status": "observed", "liquid_present": True, "visible_flow": True},
     )
     assert first_page.status_code == 200
     first_payload = first_page.json()
@@ -446,6 +499,9 @@ def test_key_event_api_paginates_and_resolves_event_and_evidence(monkeypatch, tm
         params={
             "archive": root.name,
             "q": "吸取液体",
+            "liquid_state_status": "observed",
+            "liquid_present": True,
+            "visible_flow": True,
             "limit": 1,
             "cursor": first_payload["next_cursor"],
         },
@@ -842,3 +898,33 @@ def test_material_link_lookup_finds_exact_event_beyond_first_page(monkeypatch, t
     assert payload["items"][0]["archive_name"] == root.name
     assert "release_id" in payload["items"][0]
     assert payload["next_cursor"] is None
+
+
+def test_liquid_state_is_preserved_and_filterable_without_changing_top_level_contract(tmp_path):
+    root = tmp_path / "Archive-Liquid-State"
+    _, _, _, normalized, _ = _indexed_archive(root, with_liquid_state=True)
+
+    assert normalized[0]["provenance"]["liquid_state"]["status"] == "observed"
+    assert normalized[0]["state_before"]["source"] == "liquid_present=true; fill_ratio=0.8000"
+    results = search_archive_index(
+        root,
+        liquid_state_status="observed",
+        liquid_present=True,
+        visible_flow=True,
+    )
+    assert len(results) == 1
+    assert results[0]["provenance"]["liquid_state"]["backend"] == "unit-test"
+
+
+def test_liquid_filter_skips_legacy_rebuildable_index_instead_of_failing(tmp_path):
+    root = tmp_path / "Legacy-Archive"
+    json_root = root / "JSON-Config-Files"
+    json_root.mkdir(parents=True)
+    connection = sqlite3.connect(json_root / INDEX_DB_NAME)
+    try:
+        connection.execute("CREATE TABLE key_events (event_uid TEXT PRIMARY KEY)")
+        connection.commit()
+    finally:
+        connection.close()
+
+    assert search_archive_index(root, liquid_state_status="observed") == []

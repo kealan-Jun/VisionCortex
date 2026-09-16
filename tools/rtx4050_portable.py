@@ -6,7 +6,6 @@ import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
-import platform
 import shutil
 import socket
 import subprocess
@@ -49,7 +48,10 @@ def safe_path(root: Path, relative: str) -> Path:
     return result
 
 
-def verify_package(root: Path, *, progress=None) -> dict:
+def verify_package(root: Path, *, progress=None, use_cache=False, force_full=False) -> dict:
+    if use_cache:
+        from rtx4050_integrity import verify
+        return verify(root, hash_file=sha256, safe_path=safe_path, progress=progress, force_full=force_full)
     manifest = json.loads((root / "SHA256SUMS.json").read_text(encoding="utf-8"))
     seen = set()
     total_bytes = sum(entry["size_bytes"] for entry in manifest["files"])
@@ -148,49 +150,116 @@ def write_json(path: Path, payload: dict) -> None:
 
 
 def hardware_preflight() -> dict:
-    if sys.platform != "win32" or platform.machine().lower() not in {"amd64", "x86_64"}:
-        raise RuntimeError("此压缩包只适用于 Windows 10/11 64 位。")
-    if sys.version_info[:2] != (3, 12):
-        raise RuntimeError("必须使用包内 Python 3.12。")
-    import psutil
-    import torch
-    import tensorrt
+    from rtx4050_hardware import hardware_preflight as check
 
-    if torch.__version__ != "2.6.0+cu124" or tensorrt.__version__ != "10.4.0":
-        raise RuntimeError("运行环境版本与离线包不一致。")
-    if not torch.cuda.is_available():
-        raise RuntimeError("CUDA 不可用；请检查 NVIDIA 驱动，然后重新启动。")
-    name = torch.cuda.get_device_name(0)
-    if "4050" not in name:
-        raise RuntimeError(f"本包固定适配 RTX 4050，当前 GPU：{name}")
-    smi = shutil.which("nvidia-smi")
-    if not smi:
-        candidate = Path(os.environ.get("WINDIR", "C:/Windows")) / "System32/nvidia-smi.exe"
-        smi = str(candidate) if candidate.is_file() else None
-    if not smi:
-        raise RuntimeError("未找到 nvidia-smi，无法核验驱动和显卡身份。")
-    result = subprocess.run([smi, "--query-gpu=uuid,driver_version,memory.total", "--format=csv,noheader,nounits", "-i", "0"],
-                            check=True, capture_output=True, text=True)
-    uuid, driver, memory = [part.strip() for part in result.stdout.strip().split(",")]
-    if tuple(map(int, driver.split("."))) < (551, 78):
-        raise RuntimeError("NVIDIA 驱动低于 CUDA 12.4 要求，请更新驱动。")
-    if float(memory) < 5700:
-        raise RuntimeError("显卡总显存不足 6GB 配置要求。")
-    if psutil.virtual_memory().available < 8 * 1024**3:
-        raise RuntimeError("可用系统内存不足 8 GiB，请关闭其他大型程序。")
-    # A real CUDA operation proves invocation only; no real-video quality claim.
-    probe = torch.ones((128, 128), device="cuda", dtype=torch.float16)
-    if not torch.isfinite(probe @ probe).all().item():
-        raise RuntimeError("CUDA FP16 自检失败。")
-    torch.cuda.synchronize()
-    del probe
-    torch.cuda.empty_cache()
-    return {"gpu": name, "gpu_uuid": uuid, "driver": driver, "vram_mib": float(memory),
-            "ram_gib": round(psutil.virtual_memory().total / 1024**3, 2),
-            "cpu_logical_count": os.cpu_count(), "torch": torch.__version__,
-            "tensorrt": tensorrt.__version__, "python": platform.python_version(),
-            "windows": platform.version(), "cuda_fp16_invocation": "PROVEN",
-            "real_video_quality": "NOT_PROVEN"}
+    return check(ROOT, desktop_state)
+
+
+def engine_build_settings(config: dict) -> dict:
+    """Effective export/autotune arguments used by prepare-engine."""
+    perf = config["performance"]
+    candidates = perf.get("engine_batch_candidates")
+    if candidates is None:
+        candidates = [perf.get("engine_batch_size", perf["batch_size"])]
+    return {
+        "image_size": int(perf["image_size"]), "half": bool(perf["half"]),
+        "dynamic": bool(perf.get("engine_dynamic", True)),
+        "batch_candidates": list(dict.fromkeys(int(value) for value in candidates)),
+        "workspace_gib": float(perf.get("engine_workspace_gib", 3.0)),
+        "autotune_iterations": int(perf.get("engine_autotune_iterations", 4)),
+        "autotune_max_gpu_memory_fraction": float(perf.get(
+            "engine_autotune_max_gpu_memory_fraction", perf.get("max_gpu_memory_fraction", 0.9))),
+    }
+
+
+def engine_cache_identity(root: Path, config: dict, hardware: dict, manifest: dict) -> dict:
+    # verify_package has already checked these bytes. Source UI, alignment,
+    # archives, AI settings and unrelated analysis options do not build engines.
+    required = {"src/visioncortex/cli.py"}
+    for role in ("first_person", "third_person"):
+        required.add(Path(config["models"][role]).resolve().relative_to(root.resolve()).as_posix())
+    files = {item["path"]: item["sha256"] for item in manifest["files"]
+             if item["path"].startswith("python/") or item["path"] in required}
+    if not required.issubset(files) or not any(name.startswith("python/") for name in files):
+        raise RuntimeError("引擎缓存缺少运行环境或模型文件身份。")
+    return {
+        "schema_version": "visioncortex-portable-engine-cache/1",
+        "hardware": {key: hardware.get(key) for key in (
+            "gpu", "gpu_uuid", "driver", "vram_mib", "torch", "tensorrt", "python", "windows")},
+        "runtime_and_builder_sha256": hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest(),
+        "models": {role: files[Path(config["models"][role]).resolve().relative_to(root.resolve()).as_posix()]
+                   for role in ("first_person", "third_person")},
+        "build": engine_build_settings(config), "device": config["performance"]["device"],
+    }
+
+
+def legacy_engine_signature(config: dict, hardware: dict, manifest_hash: str) -> str:
+    return hashlib.sha256(json.dumps({
+        "hardware": hardware,
+        "config": {key: value for key, value in config.items()
+                   if key not in {"mllm", "storage", "project", "collection_ingest"}},
+        "source_manifest": manifest_hash,
+    }, sort_keys=True).encode()).hexdigest()[:20]
+
+
+def engine_cache_directory(root: Path, config: dict, hardware: dict) -> Path:
+    manifest_path = root / "SHA256SUMS.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    identity = engine_cache_identity(root, config, hardware, manifest)
+    signature = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:20]
+    engines = root / "Runtime/Engines"
+    index = engines / f"cache-{signature}.json"
+    if index.is_file():
+        record = json.loads(index.read_text(encoding="utf-8"))
+        name = record.get("directory", "")
+        if (record.get("identity") != identity or not isinstance(name, str) or len(name) != 20
+                or any(char not in "0123456789abcdef" for char in name)):
+            raise RuntimeError("引擎缓存映射身份无效，请保留日志。")
+        hashes = record.get("engine_sha256")
+        if not isinstance(hashes, dict):
+            raise RuntimeError("引擎缓存映射缺少文件身份，请保留日志。")
+        complete = True
+        for role in ("first_person", "third_person"):
+            engine = engines / name / f"{role}.engine"
+            if not engine.is_file():
+                complete = False
+            elif hashes.get(role) != sha256(engine):
+                raise RuntimeError("引擎缓存映射与文件身份不一致，请保留日志。")
+        return engines / name if complete else engines / signature
+
+    # Preserve old engine paths, build receipts and matching model-smoke receipts.
+    # An old folder name alone is insufficient: reproduce the exact old signature
+    # and require an unchanged runtime, builder, weights and build configuration.
+    candidates = [(manifest, sha256(manifest_path))]
+    for backup in sorted((root / "Runtime/Updates").glob("source-*/before/SHA256SUMS.json")):
+        try:
+            result = json.loads((backup.parent.parent / "result.json").read_text(encoding="utf-8"))
+            old_hash = sha256(backup)
+            if (isinstance(result, dict) and result.get("status") == "applied"
+                    and result.get("base_manifest_sha256") == old_hash):
+                candidates.append((json.loads(backup.read_text(encoding="utf-8")), old_hash))
+        except (OSError, ValueError):
+            continue  # Optional migration evidence cannot authorize reuse if unreadable.
+    for old_manifest, old_hash in candidates:
+        try:
+            compatible = engine_cache_identity(root, config, hardware, old_manifest) == identity
+        except (KeyError, TypeError, ValueError, AttributeError, RuntimeError):
+            compatible = False
+        if not compatible:
+            continue
+        directory = engines / legacy_engine_signature(config, hardware, old_hash)
+        if not directory.is_dir():
+            continue
+        selected = dict(config, models=dict(config["models"]))
+        for role in ("first_person", "third_person"):
+            selected["models"][f"{role}_engine"] = str(directory / f"{role}.engine")
+        if verify_engine_receipts(selected):
+            write_json(index, {"identity": identity, "directory": directory.name,
+                               "engine_sha256": {role: sha256(directory / f"{role}.engine")
+                                                 for role in ("first_person", "third_person")},
+                               "legacy_manifest_sha256": old_hash})
+            return directory
+    return engines / signature
 
 
 def effective_config(root: Path, hardware: dict) -> tuple[Path, dict]:
@@ -265,12 +334,9 @@ def effective_config(root: Path, hardware: dict) -> tuple[Path, dict]:
         config["mllm"]["api_key_env"] = "MLLM_API_KEY"
         config["mllm"]["connection_verification"] = saved["verification"]
     config["performance"]["cpu_decode_threads"] = max(1, min(4, (os.cpu_count() or 4) // 4))
-    signature = hashlib.sha256(json.dumps({
-        "hardware": hardware, "config": {key: value for key, value in config.items() if key not in {"mllm", "storage", "project", "collection_ingest"}},
-        "source_manifest": sha256(root / "SHA256SUMS.json"),
-    }, sort_keys=True).encode()).hexdigest()[:20]
+    engine_directory = engine_cache_directory(root, config, hardware)
     for role in ("first_person", "third_person"):
-        config["models"][f"{role}_engine"] = str(root / "Runtime/Engines" / signature / f"{role}.engine")
+        config["models"][f"{role}_engine"] = str(engine_directory / f"{role}.engine")
     for key in ("index_csv", "device_registry_path", "archive_root", "local_input_root",
                 "local_runtime_root", "local_cache_root", "local_staging_root"):
         path = Path(config["storage"][key]).resolve()
@@ -284,20 +350,57 @@ def effective_config(root: Path, hardware: dict) -> tuple[Path, dict]:
     return destination, config
 
 
-def verify_engine_receipts(config: dict) -> None:
+def verify_engine_receipts(config: dict) -> bool:
+    expected = engine_build_settings(config)
+    complete = True
     for role in ("first_person", "third_person"):
         engine = Path(config["models"][f"{role}_engine"])
         if not engine.is_file():
+            complete = False
             continue
         receipt_path = engine.with_suffix(".engine.build.json")
         if not receipt_path.is_file():
             raise RuntimeError(f"缺少引擎身份回执：{receipt_path}")
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-        if (receipt["engine_sha256"] != sha256(engine)
-                or receipt["source_sha256"] != sha256(Path(config["models"][role]))
-                or receipt["image_size"] != config["performance"]["image_size"]
-                or receipt["selected_batch"] not in config["performance"]["engine_batch_candidates"]):
+        if (receipt.get("engine_sha256") != sha256(engine)
+                or receipt.get("source_sha256") != sha256(Path(config["models"][role]))
+                or any(receipt.get(key) != value for key, value in expected.items())
+                or receipt.get("selected_batch") not in expected["batch_candidates"]):
             raise RuntimeError("引擎身份校验失败，请保留日志并重新解压到新目录。")
+    return complete
+
+
+def prepare_engines(config_path: Path, config: dict) -> None:
+    started = time.perf_counter()
+    destination = ROOT / "Runtime/Logs/engine-preparation.json"
+    record = {
+        "status": "running", "started_at_unix": time.time(),
+        "engines": {role: config["models"][f"{role}_engine"] for role in ("first_person", "third_person")},
+        "timing_scope": "engine_receipt_verification_and_optional_build_only",
+        "real_video_quality": "NOT_PROVEN",
+    }
+    write_json(destination, record)
+    try:
+        desktop_state("engines", "正在核对已保存的加速引擎…")
+        ready = verify_engine_receipts(config)
+        if ready:
+            print("已有加速引擎身份校验通过，直接复用，无需重新构建。", flush=True)
+            desktop_state("engines", "正在复用已验证的加速引擎，无需重新构建…")
+        else:
+            print("当前环境缺少匹配的加速引擎，将离线构建并实测，可能需要数分钟。", flush=True)
+            desktop_state("engines", "正在构建匹配本机环境的加速引擎，需要几分钟…")
+            command(config_path, "prepare-engine")
+            if not verify_engine_receipts(config):
+                raise RuntimeError("加速引擎构建后仍有文件缺失，已停止启动。")
+        record.update(status="completed", mode="reused" if ready else "built")
+    except Exception as error:
+        record.update(status="failed", error_type=type(error).__name__)
+        raise
+    finally:
+        elapsed = round(time.perf_counter() - started, 3)
+        record["elapsed_seconds"] = elapsed
+        write_json(destination, record)
+    print(f"加速引擎{'复用检查' if ready else '准备'}完成：{elapsed:.3f} 秒（不含应用完整性和其他启动阶段）。", flush=True)
 
 
 def command(config: Path, *arguments: str) -> None:
@@ -370,16 +473,20 @@ def model_smoke(stage: str, config_path: Path) -> None:
     write_json(root / f"{stage}.json", {"stage": stage, "model_invocation": "PROVEN",
                "input_kind": "synthetic_not_ground_truth", "real_video_quality": "NOT_PROVEN",
                "elapsed_seconds": round(time.perf_counter() - started, 3),
-               "config_sha256": sha256(config_path)})
+               "config_sha256": sha256(config_path),
+               "source_manifest_sha256": sha256(ROOT / "SHA256SUMS.json")})
 
 
 def ensure_model_smoke(config_path: Path, config: dict) -> None:
     root = Path(config["models"]["first_person_engine"]).parent / "startup-smoke"
+    manifest_hash = sha256(ROOT / "SHA256SUMS.json")
     for stage in ("world", "dino", "labpics", "sam2"):
         receipt = root / f"{stage}.json"
         if receipt.is_file():
             record = json.loads(receipt.read_text(encoding="utf-8"))
-            if record.get("model_invocation") == "PROVEN" and record.get("config_sha256") == sha256(config_path):
+            if (record.get("model_invocation") == "PROVEN"
+                    and record.get("config_sha256") == sha256(config_path)
+                    and record.get("source_manifest_sha256") == manifest_hash):
                 continue
         print(f"本地模型首次自检：{stage}（合成输入，仅验证可执行性）", flush=True)
         desktop_state("models", {"world": "正在准备目标识别模型…", "dino": "正在准备物体复核模型…",
@@ -439,6 +546,7 @@ def main() -> int:
     global DESKTOP_MODE
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check-only", action="store_true")
+    parser.add_argument("--verify-package-only", action="store_true", help="完整检查文件并刷新启动缓存，不启动 GPU 或 AI 服务")
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--smoke-stage", choices=("world", "dino", "labpics", "sam2"), help=argparse.SUPPRESS)
@@ -462,7 +570,24 @@ def main() -> int:
         return 0
     print("正在核验离线包完整性，请稍候……", flush=True)
     desktop_state("integrity", "正在检查应用文件完整性…")
-    verify_package(ROOT)
+    last_progress = float("-inf")
+
+    def progress(counts):
+        nonlocal last_progress
+        now = time.monotonic()
+        if now - last_progress >= .5 or counts["checked_files"] == counts["total_files"]:
+            last_progress = now
+            reused = counts.get("reused_files", 0)
+            message = f"正在核对应用文件：{counts['checked_files']} / {counts['total_files']}"
+            if reused:
+                message += f"，已复用 {reused} 个未变化文件的校验记录"
+            desktop_state("integrity", message + "…", **counts)
+
+    verify_package(ROOT, use_cache=DESKTOP_MODE or args.verify_package_only,
+                   force_full=args.check_only or args.verify_package_only, progress=progress)
+    if args.verify_package_only:
+        print("完整文件校验通过，启动缓存已刷新；未启动 GPU 或 AI 服务。")
+        return 0
     configure_environment(ROOT)
     desktop_state("hardware", "正在检查本机运行环境…")
     hardware = hardware_preflight()
@@ -470,14 +595,11 @@ def main() -> int:
     config_path, config = effective_config(ROOT, hardware)
     if shutil.disk_usage(ROOT).free < 15 * 1024**3:
         raise RuntimeError("解压盘可用空间不足 15 GiB；视频容量另由上传前预检核算。")
-    verify_engine_receipts(config)
     if args.check_only:
+        verify_engine_receipts(config)
         print("环境与文件自检通过；未构建引擎、未分析视频。")
         return 0
-    print("首次启动将离线构建并实测 TensorRT 引擎，可能需要数分钟。", flush=True)
-    desktop_state("engines", "正在为这台电脑准备加速引擎，首次使用需要几分钟…")
-    command(config_path, "prepare-engine")
-    verify_engine_receipts(config)
+    prepare_engines(config_path, config)
     command(config_path, "validate-models")
     ensure_model_smoke(config_path, config)
     print("模型文件与引擎检查完成；真实视频质量仍需本机运行验收。", flush=True)

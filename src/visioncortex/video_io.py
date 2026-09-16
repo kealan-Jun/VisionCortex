@@ -525,7 +525,8 @@ def _ffmpeg_frame_iterator(
         if use_cuda_scale
         else f"fps={sample_fps:.8f}{identity_filter},scale={width}:{height}"
     )
-    command = ["ffmpeg", "-hide_banner", "-loglevel", "info" if trace.enabled else "error"]
+    filter_graph = trace.filter_prefix() + filter_graph
+    command = ["ffmpeg", "-hide_banner", "-loglevel", "info" if trace.enabled else "error", *trace.input_options()]
     if hwaccel:
         command += ["-hwaccel", hwaccel]
         if use_cuda_scale:
@@ -549,6 +550,7 @@ def _ffmpeg_frame_iterator(
         "rawvideo",
         "-pix_fmt",
         "bgr24",
+        *trace.output_options(),
         "pipe:1",
     ]
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -867,7 +869,8 @@ def _ffmpeg_multi_window_iterator(
         if use_cuda_scale
         else f",scale={width}:{height}"
     )
-    command = ["ffmpeg", "-hide_banner", "-loglevel", "info" if trace.enabled else "error"]
+    filter_graph = trace.filter_prefix() + filter_graph
+    command = ["ffmpeg", "-hide_banner", "-loglevel", "info" if trace.enabled else "error", *trace.input_options()]
     if hwaccel:
         command += ["-hwaccel", hwaccel]
         if use_cuda_scale:
@@ -892,6 +895,7 @@ def _ffmpeg_multi_window_iterator(
         "rawvideo",
         "-pix_fmt",
         "bgr24",
+        *trace.output_options(),
         "pipe:1",
     ]
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)

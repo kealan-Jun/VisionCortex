@@ -1,6 +1,7 @@
 """Input readiness is independent of task execution and historical success."""
 
 import json
+import sqlite3
 import time
 from pathlib import Path
 from .sqlite_store import connection
@@ -22,12 +23,21 @@ class Availability:
     def __init__(self, root):
         self.path = Path(root) / "InputAvailability.sqlite3"
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with connection(self.path) as db:
-            # Discovery writes and scheduler snapshots use separate connections.
-            # Rollback journaling lets even a read snapshot block publication.
-            db.execute('PRAGMA journal_mode=WAL')
-            db.execute("""CREATE TABLE IF NOT EXISTS inputs(id TEXT PRIMARY KEY, signature TEXT,
-                state TEXT, observed REAL, reason TEXT)""")
+        # WAL mode changes can return SQLITE_BUSY immediately while another
+        # connection initializes the same new database. Retry only initialization,
+        # with a deadline; never hide a different database error.
+        deadline = time.monotonic() + 5.0
+        while True:
+            try:
+                with connection(self.path) as db:
+                    db.execute('PRAGMA journal_mode=WAL')
+                    db.execute("""CREATE TABLE IF NOT EXISTS inputs(id TEXT PRIMARY KEY, signature TEXT,
+                        state TEXT, observed REAL, reason TEXT)""")
+                break
+            except sqlite3.OperationalError as exc:
+                if getattr(exc, "sqlite_errorcode", None) != sqlite3.SQLITE_BUSY or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.01)
 
     def mark(self, record, state, *, observed=None, reason=""):
         self.mark_many([(record, state, observed, reason)])

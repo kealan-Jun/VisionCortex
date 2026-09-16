@@ -575,6 +575,7 @@ resource_limits:
   gpu_temperature_warning_c: 82
 
 storage:
+  staging_directory_name: Processing
   index_csv: /home/x1/桌面/nas/experiment_record_index.csv
   archive_root: /home/x1/桌面/nas/VisionCortexExperimentArchive
   # This contains only small generated manifests/bookkeeping. Original videos

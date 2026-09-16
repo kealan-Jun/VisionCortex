@@ -311,6 +311,7 @@ def test_desktop_uses_verified_selection_without_secret_in_config_or_engine_iden
         monkeypatch.setenv('MLLM_API_KEY', 'synthetic-desktop-secret')
         monkeypatch.setenv('VISIONCORTEX_DESKTOP_CONNECTION', json.dumps({'connection': selected, 'verification': receipt}))
         portable.configure_environment(tmp_path)
+        monkeypatch.setattr(portable, 'engine_cache_directory', lambda root, *_: root / 'Runtime/Engines/test')
         path, config = portable.effective_config(tmp_path, {'gpu_uuid': 'test'})
         assert config['mllm']['api_key_env'] == 'MLLM_API_KEY'
         assert config['mllm']['provider'] == provider

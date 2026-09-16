@@ -27,7 +27,8 @@ models:
     clip_model_path: ./models/Public/ViT-B-32.pt
     grounding_dino_fallback:
       model_path: ./models/Public/grounding-dino-base
-      device: cpu
+      device: cuda
+      cuda_oom_fallback_cpu: true
       temporal_rescue_device: cuda
   temporal_participant_segmentation:
     checkpoint_path: ./models/Public/sam2.1_hiera_base_plus.pt
@@ -38,7 +39,8 @@ models:
   liquid_semantic_sidecar:
     checkpoint_path: ./models/Public/labpics-semantic-materials.torch
     source_archive_path: ./models/Public/LabPicsSemantic.zip
-    device: cpu
+    device: cuda
+    cuda_oom_fallback_cpu: true
     half: false
 
 performance:
@@ -48,6 +50,10 @@ performance:
   max_gpu_memory_fraction: 0.86
   concurrent_role_scanners: false
   release_auxiliary_models_after_event: true
+  release_auxiliary_models_between_stages: true
+  # Release GPU residency between grounding, temporal and liquid phases.
+  # Keep validated weights in RAM only while at least 8 GiB remains available.
+  auxiliary_cpu_cache_min_available_gib: 8
   # CPU count is detected by the launcher; RAM is a cache, not a fill target.
   source_workers: 6  # Concurrency budget, not a camera-count limit.
   decode_queue_depth: 64
@@ -58,8 +64,9 @@ performance:
 
 mllm:
   enabled: true
-  workers: 2
-  group_workers: 2
+  # Independent cloud requests do not allocate local model VRAM.
+  workers: 4
+  group_workers: 4
 
 storage:
   index_csv: ./Runtime/local-experiment-index.csv

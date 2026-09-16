@@ -94,6 +94,7 @@ from .storage import (
     safe_archive_name,
     validate_formal_archive_release,
 )
+from .three_dataset_acceptance import analyze_three_datasets, load_acceptance_spec, write_acceptance_reports
 from .validation import (
     finalize_quality_acceptance_claims,
     validate_experiment_and_material_quality,
@@ -3083,6 +3084,75 @@ def cache_impact_command(before: Annotated[Path, typer.Option("--before", exists
     previous = json.loads(before.read_text())
     current = json.loads(after.read_text()) if after else source_manifest()
     typer.echo(json.dumps(compare(previous, current), ensure_ascii=False, indent=2))
+
+
+@app.command("accept-three-datasets")
+def accept_three_datasets_command(
+    archive_root: Annotated[
+        Path,
+        typer.Option("--archive-root", exists=True, file_okay=False),
+    ] = Path("Y:/VisionCortexExperimentArchive"),
+    spec: Annotated[
+        Path,
+        typer.Option("--spec", exists=True, dir_okay=False),
+    ] = Path("configs/acceptance/dev041-three-dataset.json"),
+    output: Annotated[
+        Path,
+        typer.Option("--output", "-o"),
+    ] = Path("outputs/DEV-041-three-dataset-acceptance.json"),
+    candidate: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--candidate",
+            help="Optional exact candidate override in DATASET_KEY=PATH form; repeat per dataset.",
+        ),
+    ] = None,
+) -> None:
+    """Audit three production datasets from durable JSON without opening media."""
+
+    task_id, datasets = load_acceptance_spec(spec)
+    valid_keys = {item.key for item in datasets}
+    overrides: dict[str, Path] = {}
+    for item in candidate or []:
+        key, separator, value = item.partition("=")
+        if not separator or not key or not value:
+            raise typer.BadParameter(
+                "Each --candidate must use DATASET_KEY=PATH syntax"
+            )
+        if key not in valid_keys:
+            raise typer.BadParameter(
+                f"Unknown candidate dataset key {key!r}; expected one of {sorted(valid_keys)}"
+            )
+        if key in overrides:
+            raise typer.BadParameter(f"Duplicate candidate override for {key!r}")
+        overrides[key] = Path(value)
+    result = analyze_three_datasets(
+        task_id,
+        archive_root,
+        datasets,
+        candidate_overrides=overrides,
+    )
+    json_path, markdown_path = write_acceptance_reports(
+        result, output, archive_root
+    )
+    typer.echo(
+        json.dumps(
+            {
+                "status": result["status"],
+                "production_release_ready": result["production_release_ready"],
+                "json": str(json_path),
+                "markdown": str(markdown_path),
+                "video_files_opened": 0,
+                "clock_csv_files_opened": 0,
+                "model_api_calls": 0,
+                "model_tokens_consumed": 0,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    if not result["passed"]:
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":

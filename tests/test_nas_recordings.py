@@ -260,6 +260,27 @@ def test_configured_camera_pair_becomes_one_click_batch(nas_config, monkeypatch)
     assert receipt["role_source"] == "configured_camera_role_map"
 
 
+def test_closed_incomplete_capture_exposes_producer_reason_without_admitting_batch(nas_config):
+    nas_config["collection_ingest"].update(camera_role_map={"a_cam01": "first_person", "b_cam01": "third_person"})
+    folder = recording(nas_config, "a_cam01", complete=False)
+    recording(nas_config, "b_cam01")
+    path = folder / "recording_ready.json"
+    data = json.loads(path.read_text())
+    data.update(recording_quality_reason="rgb coverage below 98 percent", rgb_coverage_ratio=0.22,
+                rgb_max_frame_gap_us=2800000)
+    path.write_text(json.dumps(data))
+    os.utime(path, (time.time() - 1000, time.time() - 1000))
+    before = {p: p.read_bytes() for p in folder.iterdir()}
+    batch = scan_recordings(nas_config)["batches"][0]
+    assert not batch["available"]
+    detail = next(item for item in batch["issue_details"] if item["camera_key"] == "a_cam01")
+    assert detail["capture_quality"]["rgb_coverage_ratio"] == 0.22
+    assert detail["capture_quality"]["scope"] == "recorder_reported_not_analysis_accuracy"
+    assert "等待采集完成标记" not in detail["issues"]
+    assert "采集程序报告数据不完整" in detail["issues"]
+    assert all(p.read_bytes() == value for p, value in before.items())
+
+
 def test_dynamic_camera_discovery_monitors_unknown_roles_but_blocks_batch(
     nas_config,
 ):

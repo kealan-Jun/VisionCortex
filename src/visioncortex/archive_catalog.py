@@ -14,6 +14,7 @@ from .indexing import (
     INDEX_MANIFEST_NAME,
     action_search_aliases,
 )
+from .indexing import _liquid_index_values
 from .pathing import archive_contains
 from .storage import (
     ARCHIVE_DIRECTORIES,
@@ -22,7 +23,7 @@ from .storage import (
 )
 
 
-CATALOG_SCHEMA_VERSION = "visioncortex-archive-read-catalog/4"
+CATALOG_SCHEMA_VERSION = "visioncortex-archive-read-catalog/5"
 CATALOG_DB_NAME = "archive_read_catalog.sqlite3"
 _CATALOG_LOCK = threading.RLock()
 
@@ -116,6 +117,9 @@ def _connect(path: Path) -> sqlite3.Connection:
             search_text TEXT NOT NULL,
             event_json TEXT NOT NULL,
             artifacts_json TEXT NOT NULL,
+            liquid_state_status TEXT,
+            liquid_present INTEGER,
+            visible_flow INTEGER,
             PRIMARY KEY(archive_name, event_uid)
         );
         CREATE INDEX IF NOT EXISTS catalog_events_timeline_idx
@@ -298,6 +302,7 @@ def _replace_archive(connection: sqlite3.Connection, item: dict[str, Any]) -> No
                 for artifact in event_artifacts
                 if artifact.get("view_role") == "aligned_first_third"
             }
+            liquid = _liquid_index_values(json.loads(row["event_json"]))
             records.append(
                 (
                     item["name"], item["release_id"],
@@ -308,10 +313,11 @@ def _replace_archive(connection: sqlite3.Connection, item: dict[str, Any]) -> No
                     int({"key_frame", "key_clip"}.issubset(aligned_types)),
                     search_text, row["event_json"],
                     json.dumps(event_artifacts, ensure_ascii=False),
+                    liquid["status"], liquid["liquid_present"], liquid["visible_flow"],
                 )
             )
         connection.executemany(
-            "INSERT INTO key_events VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO key_events VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             records,
         )
         if not item["key_event_count"]:
@@ -455,6 +461,9 @@ def search_catalog_events(
     action_type: str | None = None,
     parent_event_id: str | None = None,
     cross_view: bool | None = None,
+    liquid_state_status: str | None = None,
+    liquid_present: bool | None = None,
+    visible_flow: bool | None = None,
     material_ready: bool | None = None,
     start_us: int | None = None,
     end_us: int | None = None,
@@ -476,6 +485,10 @@ def search_catalog_events(
         if cross_view is not None:
             conditions.append("cross_view_supported = ?")
             parameters.append(int(cross_view))
+        for field, value in (("liquid_state_status", liquid_state_status), ("liquid_present", liquid_present), ("visible_flow", visible_flow)):
+            if value is not None:
+                conditions.append(f"{field} = ?")
+                parameters.append(value)
         if material_ready is not None:
             conditions.append("dual_view_material_ready = ?")
             parameters.append(int(material_ready))

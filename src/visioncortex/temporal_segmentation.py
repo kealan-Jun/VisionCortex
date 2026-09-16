@@ -12,6 +12,8 @@ from typing import Any, Sequence
 import cv2
 import numpy as np
 
+from .cache_paths import model_cache_directory
+
 
 SEGMENTATION_SCHEMA = "visioncortex-sam2-participant-continuity/1"
 
@@ -20,12 +22,16 @@ _MODEL_LOCK = threading.RLock()
 _VALIDATED_ASSETS: set[tuple[str, str]] = set()
 
 
-def release_temporal_segmentation_model_cache() -> int:
-    """Release cached SAM2 predictors between events on low-memory hosts."""
+def release_temporal_segmentation_model_cache(*, retain_on_cpu: bool = False) -> int:
+    """Release VRAM, optionally keeping validated weights in host memory."""
 
     with _MODEL_LOCK:
         released = len(_MODEL_CACHE)
-        _MODEL_CACHE.clear()
+        if retain_on_cpu:
+            for cached in _MODEL_CACHE.values():
+                cached["predictor"].to("cpu")
+        else:
+            _MODEL_CACHE.clear()
     gc.collect()
     try:
         import torch
@@ -114,10 +120,17 @@ def _load_predictor(config: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
     )
     cached = _MODEL_CACHE.get(key)
     if cached is not None:
+        restore_started = time.perf_counter()
+        cached["predictor"].to(validation["device"])
+        if validation["device"].startswith("cuda"):
+            import torch
+
+            torch.cuda.synchronize()
         return cached["predictor"], {
             **validation,
             "model_cache_reused": True,
             "model_load_seconds": 0.0,
+            "model_restore_seconds": time.perf_counter() - restore_started,
         }
 
     from sam2.build_sam import build_sam2_video_predictor
@@ -184,12 +197,18 @@ def _sample_clip(
             # rate H.264 clips with nonzero start PTS. Decode in ordinal order,
             # retaining only the requested sample instead of trusting seeks.
             while next_source_index <= source_index:
-                ok, frame = capture.read()
-                if not ok or frame is None:
+                if not capture.grab():
                     raise RuntimeError(
                         f"SAM2 frame decode failed: {clip_path} frame={next_source_index}"
                     )
                 next_source_index += 1
+            # Keep ordinal decoding, but avoid converting/copying every skipped
+            # frame to a BGR numpy array. Only requested samples are retrieved.
+            ok, frame = capture.retrieve()
+            if not ok or frame is None:
+                raise RuntimeError(
+                    f"SAM2 frame decode failed: {clip_path} frame={source_index}"
+                )
             if output_index == seed_position:
                 frame = seed_frame.copy()
             if output_shape is None:
@@ -354,6 +373,9 @@ def audit_participant_continuity(
     fingerprint_payload = {
         "schema_version": SEGMENTATION_SCHEMA,
         "frame_decode_policy": "sequential_ordinal_v2",
+        # Flatten directories without losing the caller's code/config namespace.
+        "work_namespace": str(work_root),
+        "settings": settings,
         "event_id": event_id,
         "view_id": view_id,
         "action_type": action_type,
@@ -373,7 +395,8 @@ def audit_participant_continuity(
             fingerprint_payload, ensure_ascii=False, sort_keys=True
         ).encode("utf-8")
     ).hexdigest()
-    run_root = work_root / event_id / view_id / fingerprint
+    cache_root = Path((config.get("storage") or {}).get("local_cache_root") or work_root)
+    run_root = model_cache_directory(cache_root, "s2", fingerprint)
     frames_root = run_root / "frames"
     receipt_path = run_root / "receipt.json"
     if receipt_path.is_file():
@@ -387,6 +410,7 @@ def audit_participant_continuity(
                 dict(item) for item in cached.get("refined_participant_boxes") or []
             ], {**cached, "cache_reused": True}
 
+    sampling_started = time.perf_counter()
     source_indices, seed_position, (height, width) = _sample_clip(
         clip_path,
         seed_frame,
@@ -395,16 +419,17 @@ def audit_participant_continuity(
         maximum_frames=int(settings.get("maximum_frames_per_clip", 9)),
         jpeg_quality=int(settings.get("jpeg_quality", 95)),
     )
-    predictor, model_receipt = _load_predictor(config)
+    sampling_seconds = time.perf_counter() - sampling_started
     device = str(settings.get("device") or "cuda")
     import torch
 
     frame_masks: dict[int, dict[int, dict[str, Any]]] = {}
-    inference_started = time.perf_counter()
-    memory_before = (
-        int(torch.cuda.memory_allocated()) if device.startswith("cuda") else 0
-    )
     with _MODEL_LOCK, torch.inference_mode():
+        predictor, model_receipt = _load_predictor(config)
+        inference_started = time.perf_counter()
+        memory_before = (
+            int(torch.cuda.memory_allocated()) if device.startswith("cuda") else 0
+        )
         autocast = (
             torch.autocast("cuda", dtype=torch.bfloat16)
             if device.startswith("cuda")
@@ -467,6 +492,7 @@ def audit_participant_continuity(
         finally:
             if state is not None:
                 predictor.reset_state(state)
+                state = None
     if device.startswith("cuda"):
         torch.cuda.synchronize()
     inference_seconds = time.perf_counter() - inference_started
@@ -519,6 +545,7 @@ def audit_participant_continuity(
         "view_id": view_id,
         "action_type": action_type,
         "input_fingerprint": fingerprint,
+        "cache_path_policy": "flat_full_digest_v1",
         "cache_reused": False,
         "source_scope": "already_derived_key_clip",
         "source_copy_bytes": 0,
@@ -527,6 +554,8 @@ def audit_participant_continuity(
         "token_usage": 0,
         "sampled_frame_count": len(source_indices),
         "source_frame_indices": source_indices,
+        "frame_sampling_seconds": round(sampling_seconds, 6),
+        "frame_retrieval_policy": "requested_samples_only",
         "frame_decode_policy": "sequential_ordinal_v2",
         "seed_sample_position": seed_position,
         "minimum_presence_ratio": minimum_presence,

@@ -17,6 +17,7 @@ import threading
 from collections import OrderedDict, deque
 from copy import deepcopy
 from fractions import Fraction
+from functools import lru_cache
 from pathlib import Path
 from typing import BinaryIO
 
@@ -25,7 +26,7 @@ import numpy as np
 from .schemas import FrameEvidence, SourceFrameIdentity, VideoInfo, ViewInput
 
 
-SOURCE_FRAME_CONTRACT = "decoder-position-pts/1"
+SOURCE_FRAME_CONTRACT = "decoder-position-pts/2"
 SOURCE_FRAME_FILTER = "showinfo@source_identity=checksum=0"
 # Reuse only the native metadata index, never detections or decoded pixels.
 # The same source/window is commonly inspected by both coarse and fine passes.
@@ -38,6 +39,37 @@ _FRAME_LINE = re.compile(r"\bn:\s*(\d+)\b")
 _POSITION = re.compile(r"\bpos:\s*(-?\d+)\b")
 _PTS = re.compile(r"\bpts:\s*(-?\d+)\b")
 _TIME_BASE = re.compile(r"config in time_base:\s*(\d+/\d+)")
+
+
+_ENCODER_LINE = re.compile(r"^VC_SOURCE (\d+) (-?\d+) (\d+/\d+)\s*$")
+
+
+@lru_cache(maxsize=8)
+def _encoder_stats_supported(executable):
+    if not executable:
+        return False
+    try:
+        version = subprocess.run([executable, "-version"], capture_output=True, check=True, timeout=10)
+        match = re.search(rb"ffmpeg version (?:n)?(\d+)\.", version.stdout)
+        return bool(match and int(match[1]) >= 6)
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+
+def _encoder_stats_options():
+    return ["-stats_enc_pre", "pipe:2", "-stats_enc_pre_fmt", "VC_SOURCE {n} {ptsi} {tbi}"]
+
+
+
+def _native_rows(path, start, end, *, timeout=120):
+    return json.loads(subprocess.run([
+        "ffprobe", "-v", "error", "-select_streams", "v:0",
+        "-skip_loop_filter", "all", "-skip_idct", "all", "-threads", "2",
+        "-read_intervals", f"{start:.9f}%{end:.9f}",
+        "-show_entries", "frame=best_effort_timestamp,pkt_pos", "-of", "json", str(path),
+    ], capture_output=True, check=True, timeout=timeout).stdout).get("frames", [])
+
 
 
 def read_evidence_frame(
@@ -103,6 +135,15 @@ def read_evidence_frame(
         # NVDEC returns NV12; at native size its BGR conversion can differ
         # from software YUV420P. Try that CPU conversion only after a pixel
         # mismatch, retaining the same exact PTS, packet and digest checks.
+        encoder_stats = _encoder_stats_supported(shutil.which("ffmpeg"))
+        from .video_io import _ffmpeg_passthrough_arguments
+        passthrough = _ffmpeg_passthrough_arguments()
+        if encoder_stats:
+            rows = _native_rows(path, float(source_seconds + origin) - min(1.0, float(source_seconds)),
+                                float(source_seconds + origin) + 1.1, timeout=20)
+            matches = [row for row in rows if str(row.get("best_effort_timestamp")) == str(identity.source_pts)]
+            if len(matches) != 1 or str(matches[0].get("pkt_pos")) != str(identity.packet_position):
+                return unavailable("decoded_native_identity_mismatch")
         for format_filter in ("", "format=nv12,"):
             filters = (
                 f"select=eq(pts\\,{identity.source_pts}),{SOURCE_FRAME_FILTER},{format_filter}"
@@ -114,7 +155,8 @@ def read_evidence_frame(
                 "ffmpeg", "-hide_banner", "-loglevel", "info", "-nostdin", "-copyts",
                 "-threads", "2", "-ss", f"{seek_seconds:.9f}", "-t", "2.1",
                 "-i", str(path), "-map", "0:v:0", "-vf", filters,
-                "-an", "-sn", "-vsync", "0", "-frames:v", "1",
+                "-an", "-sn", *passthrough, "-frames:v", "1",
+                *(_encoder_stats_options() if encoder_stats else []),
                 "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1",
             ], capture_output=True, check=True, timeout=20)
             records = []
@@ -128,7 +170,14 @@ def read_evidence_frame(
                 if _FRAME_LINE.search(line):
                     pts, position = _PTS.search(line), _POSITION.search(line)
                     records.append((int(pts[1]) if pts else None, int(position[1]) if position else None))
-            if filter_time_bases != [time_base] or records != [(identity.source_pts, identity.packet_position)]:
+            if encoder_stats:
+                mux_records = [_ENCODER_LINE.fullmatch(line.strip()) for line in decoded.stderr.decode("utf-8", errors="replace").splitlines()]
+                mux_records = [m for m in mux_records if m]
+                if (len(mux_records) != 1 or int(mux_records[0][1]) != 0
+                        or int(mux_records[0][2]) != identity.source_pts
+                        or Fraction(mux_records[0][3]) != time_base):
+                    return unavailable("decoded_native_identity_mismatch")
+            elif filter_time_bases != [time_base] or records != [(identity.source_pts, identity.packet_position)]:
                 return unavailable("decoded_native_identity_mismatch")
             if len(decoded.stdout) != evidence.width * evidence.height * 3:
                 return unavailable("decoded_frame_size_mismatch")
@@ -182,6 +231,10 @@ class SourceFrameTrace:
         self.positions: dict[int, list[tuple[int, int | None]]] = {}
         self.time_base: str | None = None
         self.origin_ms = 0.0
+        self.encoder_stats = self.enabled and _encoder_stats_supported(shutil.which("ffmpeg"))
+        self.start_ms = start_ms
+        self.timestamp_offset = 0
+        self.native_pts = {}
         self.failure: str | None = None
         self.stat = path.stat() if path.is_file() else None
         if not self.enabled:
@@ -212,6 +265,7 @@ class SourceFrameTrace:
                         # A seeked probe does not claim a global frame ordinal.
                         self.positions = {pos: [(pts, None) for pts, _ in rows]
                                           for pos, rows in self.positions.items()}
+                    self._encoder_identity_index()
                     return
             metadata = self._probe(["-show_entries", "stream=time_base:format=start_time"])
             self.time_base = metadata["streams"][0]["time_base"]
@@ -250,9 +304,28 @@ class SourceFrameTrace:
                            or sum(sum(map(len, entry[1].values()))
                                   for entry in _NATIVE_INDEX_CACHE.values()) > _NATIVE_INDEX_TOTAL_ROWS):
                         _NATIVE_INDEX_CACHE.popitem(last=False)
+            self._encoder_identity_index()
         except (OSError, subprocess.SubprocessError, KeyError, ValueError, TypeError, ZeroDivisionError):
             self.positions.clear()
             self.failure = "native_frame_probe_unavailable"
+
+    def _encoder_identity_index(self):
+        if not self.time_base:
+            return
+        offset = (Fraction(str(self.origin_ms / 1000)) + Fraction(f"{self.start_ms / 1000:.6f}")) / Fraction(self.time_base)
+        self.timestamp_offset = int(offset + Fraction(1, 2)) if offset >= 0 else -int(-offset + Fraction(1, 2))
+        for position, rows in self.positions.items():
+            for pts, _ in rows:
+                self.native_pts.setdefault(pts, []).append(position)
+
+    def input_options(self):
+        return ["-copyts"] if self.encoder_stats else []
+
+    def output_options(self):
+        return _encoder_stats_options() if self.encoder_stats else []
+
+    def filter_prefix(self):
+        return f"setpts=PTS-({self.timestamp_offset})," if self.encoder_stats else ""
 
     def _probe(self, arguments: list[str]) -> dict:
         result = subprocess.run(
@@ -268,8 +341,23 @@ class SourceFrameTrace:
 
         def consume():
             output_time_base = None
+            sample_times = {}
             try:
                 for line in iter(stderr.readline, b""):
+                    text = line.decode("utf-8", errors="replace")
+                    if self.encoder_stats:
+                        match = _ENCODER_LINE.fullmatch(text.rstrip("\r\n").rsplit("\r", 1)[-1].strip())
+                        if match:
+                            try:
+                                valid = (self.failure is None and self.time_base is not None
+                                         and Fraction(match[3]) == Fraction(self.time_base)
+                                         and int(match[2]) != 9223372036854775807)
+                            except (ValueError, ZeroDivisionError):
+                                valid = False
+                            candidates = self.native_pts.get(int(match[2]), []) if valid else []
+                            position = candidates[0] if len(candidates) == 1 else -1
+                            self.records.put((int(match[1]), position, sample_times.pop(int(match[1]), None)))
+                            continue
                     if b"showinfo@source_identity" in line:
                         text = line.decode("utf-8", errors="replace")
                         base = _TIME_BASE.search(text)
@@ -281,7 +369,10 @@ class SourceFrameTrace:
                             pts = _PTS.search(text)
                             sample_ms = (float(int(pts[1]) * output_time_base * 1000)
                                          if pts and output_time_base is not None else None)
-                            self.records.put((int(match[1]), int(position[1]) if position else -1, sample_ms))
+                            if self.encoder_stats:
+                                sample_times[int(match[1])] = sample_ms
+                            else:
+                                self.records.put((int(match[1]), int(position[1]) if position else -1, sample_ms))
                             continue
                     self.messages.append(line[-2048:])
             finally:

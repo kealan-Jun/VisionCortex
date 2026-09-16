@@ -115,6 +115,7 @@ def test_explicit_before_state_and_unfinished_operation_are_not_completed_action
 
 
 def test_final_group_steps_are_rebuilt_without_a_second_model_pass():
+    from visioncortex.step_evidence import timing_scope
     event = _event()
     event.model_understanding = {
         "status": "completed",
@@ -151,6 +152,7 @@ def test_final_group_steps_are_rebuilt_without_a_second_model_pass():
                 "evidence_event_ids": ["EVT-1"],
             },
             "supporting_event_ids": ["EVT-1"],
+            "time_scope": timing_scope([event]),
             "objects": ["gloved_hand", "balance"],
             "physical_change": "未抓取 → 已抓取",
             "supporting_views": ["fp", "tp"],

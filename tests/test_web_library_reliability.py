@@ -58,7 +58,10 @@ def run_javascript(names, script):
         "renderHome": ("deviceDaySummary", "deviceDaySection"),
         "renderExperiments": ("deviceDaySummary", "deviceDaySection"),
         "renderReportsLibrary": ("deviceDaySummary", "deviceDaySection"),
-        "renderTasks": ("deviceDayQueueSection",),
+        "renderTasks": ("deviceDayQueueSection", "rememberRunDisclosures"),
+        "renderArchive": ("stageSnapshotVersion",),
+        "resultWorkspaceContent": ("stageDeliveryView",),
+        "submitRecoveryAction": ("beginStageFollow",),
     }
     names = list(dict.fromkeys([*names, *(dependency for name in names for dependency in dependencies.get(name, ()))]))
     for name in names:
@@ -211,7 +214,7 @@ const run={run_id:"original-run",state:"failed",nas_staging:"/local/staging",
 const html=runObservabilityCard(run);
 assert.ok(!html.includes("阶段产出已保存"));
 assert.ok(!html.includes("预览已完成内容"));
-assert.ok(html.includes("复跑并补全"));
+assert.ok(html.includes("继续未完成环节"));
 assert.ok(friendlyFailureReason(run).includes("分析尚未开始"));
 const definition={stages:["original_ingest","input_preflight"],completedBy:["original_ingest"]};
 assert.equal(guidedStageState(run,definition,new Map([["original_ingest",{}]]),0).state,"failed");
@@ -1743,7 +1746,7 @@ def test_task_sync_failure_is_visible_and_recovery_keeps_the_last_snapshot():
     run_javascript(("refreshTaskSnapshots", "refreshLibraryOverview", "renderTasks"), r'''
 const saved={run_id:"R",experiment_id:"A",state:"key_materials"};
 const state={runs:[saved],libraryLoadErrors:new Set()};
-const document={hidden:false,querySelectorAll:()=>[]},main={innerHTML:""};
+const document={hidden:false,querySelectorAll:()=>[]},main={innerHTML:"",querySelectorAll:()=>[]};
 const experimentRecords=()=>[],routeParts=()=>["tasks"],updateServiceChrome=()=>{};
 const setChrome=()=>{},statusCard=()=>"",number=x=>x,icon=()=>"",bindArchiveActions=()=>{};
 const runObservabilityCard=run=>`<article>${run.run_id}:${run.state}</article>`;

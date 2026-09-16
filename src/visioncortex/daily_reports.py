@@ -340,6 +340,7 @@ def build_daily_report(
             }
         )
 
+    from .activity_review import assessment
     for group in sorted(summary.experiment_groups, key=lambda item: item.global_start_ms):
         understanding = group.model_understanding or {}
         steps = []
@@ -352,8 +353,14 @@ def build_daily_report(
                     "start_timecode": _clock(raw.get("start_global_ms")),
                     "end_timecode": _clock(raw.get("end_global_ms")),
                     "current_step": raw.get("current_step"),
+                    "operation_title": raw.get("operation_title"),
+                    "observed_result": raw.get("observed_result"),
+                    "time_scope": raw.get("time_scope"),
                     "next_step": raw.get("next_step"),
                     "next_step_status": raw.get("next_step_status") or "unknown",
+                    "next_step_evidence": raw.get("next_step_evidence") or {},
+                    "source_next_step": raw.get("source_next_step"),
+                    "source_operation_records": raw.get("source_operation_records") or [],
                     "supporting_event_ids": raw.get("supporting_event_ids") or [],
                     "objects": raw.get("objects") or [],
                     "physical_change": raw.get("physical_change"),
@@ -453,7 +460,9 @@ def build_daily_report(
         timeline.append(
             {
                 "group_id": group.group_id,
-                "experiment_name": group.experiment_name,
+                "experiment_name": ((assessment(group.model_dump(mode="json"))["label"] + "记录") if assessment(group.model_dump(mode="json"))["is_auxiliary"] else group.experiment_name),
+                "source_experiment_name": group.experiment_name,
+                "activity_assessment": assessment(group.model_dump(mode="json")),
                 "experiment_name_en": group.experiment_name_en,
                 "continuity_type": group.continuity_type,
                 "workflow_kind": group.workflow_kind,
@@ -573,7 +582,9 @@ def build_daily_report(
             "input_view_count": summary.stats.get("input_view_count", len(summary.views)),
             "first_person_views": sum(view.role.value == "first_person" for view in summary.views),
             "third_person_views": sum(view.role.value == "third_person" for view in summary.views),
-            "experiment_group_count": len(summary.experiment_groups),
+            "experiment_group_count": sum(not assessment(g.model_dump(mode="json"))["is_auxiliary"] for g in summary.experiment_groups),
+            "activity_record_count": len(summary.experiment_groups),
+            "auxiliary_activity_count": sum(assessment(g.model_dump(mode="json"))["is_auxiliary"] for g in summary.experiment_groups),
             "key_event_count": sum(len(item["key_events"]) for item in timeline),
             "physical_change_count": len(accepted_physical_changes),
             "accepted_event_count": summary.stats.get("accepted_event_count"),
@@ -874,6 +885,7 @@ def generate_daily_report_archive(
     summary: RunSummary,
     run_metrics: dict[str, Any],
     config: dict[str, Any],
+    *, defer_pdf: bool = False,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     evidence_eval_path = layout.json_config / "evidence_package_eval.json"
@@ -915,6 +927,10 @@ def generate_daily_report_archive(
     html_path = report_dir / f"{stem}.html"
     eval_path = report_dir / "Daily-Report-Eval.json"
     acceptance_path = report_dir / "Automatic-Acceptance.json"
+    from .report_references import export_reference_index
+    report["reference_index"] = export_reference_index(
+        layout.root, [group.model_dump(mode="json") for group in summary.experiment_groups]
+    )
     write_json(json_path, report)
     markdown_path.write_text(render_daily_markdown(report), encoding="utf-8")
     html_path.write_text(render_daily_html(report), encoding="utf-8")
@@ -927,7 +943,7 @@ def generate_daily_report_archive(
         layout.professional_pdfs
         / f"VisionCortex-Professional-Evidence-Report-{report_date}.pdf"
     )
-    if config.get("daily_report", {}).get("generate_pdf", True):
+    if not defer_pdf and config.get("daily_report", {}).get("generate_pdf", True):
         render_professional_pdf(pdf_path, report, layout.root)
     professional_manifest_path = layout.json_config / "professional_report_manifest.json"
     professional_manifest = {
@@ -936,9 +952,9 @@ def generate_daily_report_archive(
         "template_sha256": _sha256(PROFESSIONAL_TEMPLATE_PATH),
         "renderer_sha256": _sha256(PROFESSIONAL_RENDERER_PATH),
         "report_date": report_date,
-        "status": "generated" if pdf_path.is_file() else "not_generated",
+        "status": "generated" if (not defer_pdf and pdf_path.is_file()) else "not_generated",
         "pdf": archive_relative_posix(pdf_path, layout.root)
-        if pdf_path.is_file()
+        if (not defer_pdf and pdf_path.is_file())
         else None,
         "visual_policy": {
             "accepted_key_materials_only": True,
@@ -947,7 +963,7 @@ def generate_daily_report_archive(
         },
         "narrative_source": "accepted_existing_model_understanding",
         "additional_model_tokens": 0,
-        "checksum_sha256": _sha256(pdf_path) if pdf_path.is_file() else None,
+        "checksum_sha256": _sha256(pdf_path) if (not defer_pdf and pdf_path.is_file()) else None,
     }
     write_json(professional_manifest_path, professional_manifest)
     artifacts = {
@@ -955,7 +971,7 @@ def generate_daily_report_archive(
         "json": archive_relative_posix(json_path, layout.root),
         "markdown": archive_relative_posix(markdown_path, layout.root),
         "html": archive_relative_posix(html_path, layout.root),
-        "pdf": archive_relative_posix(pdf_path, layout.root) if pdf_path.is_file() else None,
+        "pdf": archive_relative_posix(pdf_path, layout.root) if (not defer_pdf and pdf_path.is_file()) else None,
         "professional_report_manifest": str(
             archive_relative_posix(professional_manifest_path, layout.root)
         ),
@@ -985,11 +1001,33 @@ def generate_daily_report_archive(
                 pdf_path,
                 professional_manifest_path,
             )
-            if path.is_file()
+            if path.is_file() and (path != pdf_path or not defer_pdf)
         },
     }
     write_json(layout.json_config / "daily_report_manifest.json", artifacts)
     return artifacts
+
+
+def generate_professional_report_archive(layout: ArchiveLayout) -> dict[str, Any]:
+    daily_path = layout.json_config / "daily_report_manifest.json"
+    daily = json.loads(daily_path.read_text(encoding="utf-8"))
+    report_path = layout.root / daily["json"]
+    if _sha256(report_path) != daily["checksums"][report_path.name] or daily.get("passed") is not True:
+        raise ValueError("Daily report changed before PDF generation")
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    quality = json.loads((layout.json_config / "quality_acceptance.json").read_text(encoding="utf-8"))
+    if quality.get("passed") is not True:
+        raise ValueError("Quality acceptance is required for a professional PDF")
+    pdf = layout.professional_pdfs / f"VisionCortex-Professional-Evidence-Report-{report['report_date']}.pdf"
+    render_professional_pdf(pdf, report, layout.root)
+    manifest_path = layout.json_config / "professional_report_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.update(status="generated", pdf=archive_relative_posix(pdf, layout.root), checksum_sha256=_sha256(pdf))
+    write_json(manifest_path, manifest)
+    daily.update(pdf=manifest["pdf"])
+    daily["checksums"].update({pdf.name: _sha256(pdf), manifest_path.name: _sha256(manifest_path)})
+    write_json(daily_path, daily)
+    return manifest
 
 
 def generate_daily_report_from_archive(root: Path, config: dict[str, Any]) -> dict[str, Any]:

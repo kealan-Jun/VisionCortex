@@ -155,12 +155,20 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           cache: pip
+      - name: Validate desktop lifecycle and hardware watchdog contracts
+        run: |
+          node --check deployment/rtx4050-windows/desktop/controller.cjs
+          node --test tests/desktop_controller.test.cjs tests/desktop_main.test.cjs tests/desktop_connection.test.cjs tests/desktop_storage.test.cjs
       - name: Install the project and test dependencies
         run: python -m pip install --disable-pip-version-check -e ".[dev]"
       - name: Compile and validate the installed dependency graph
         run: |
           python -m compileall -q src tests
           python -m pip check
+      - name: Validate portable cache and native Windows startup
+        run: >-
+          python -m pytest tests/test_rtx4050_integrity.py
+          tests/test_windows_desktop_lifecycle.py tests/test_rtx4050_source_update.py
       - name: Provision and verify the FFmpeg runtime dependency
         if: runner.os == 'Windows'
         shell: pwsh
@@ -197,9 +205,12 @@ jobs:
         run: |
           ffmpeg -version
           ffprobe -version
+      - name: Validate source frame provenance with the installed FFmpeg
+        run: python -m pytest tests/test_source_frames.py -o faulthandler_timeout=120
       - name: Run the complete deterministic test suite
         run: >-
           python -m pytest
+          -o faulthandler_timeout=120
           --cov=visioncortex
           --cov-report=term:skip-covered
           --cov-fail-under=66

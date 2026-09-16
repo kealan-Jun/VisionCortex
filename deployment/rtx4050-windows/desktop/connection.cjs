@@ -60,13 +60,14 @@ function verifyProvider(root, connection, key, {spawnProcess=spawn, timeoutMs=24
       // Progress within a phase must not renew its absolute deadline.
       if(value.stage!==stage){stage=value.stage;arm();}
       const counts={};
-      for(const name of ["checked_bytes","total_bytes","checked_files","total_files"]){
+      for(const name of ["checked_bytes","total_bytes","checked_files","total_files","reused_files","reused_bytes","hashed_bytes"]){
         if(Number.isSafeInteger(value[name])&&value[name]>=0)counts[name]=value[name];
       }
       const labels={package:"正在校验本地离线包，完成后再连接 AI 服务…",loading:"正在加载本地验证组件，尚未调用 AI 服务…",request:"本地校验已通过，正在实际调用所选模型验证多图理解…"};
       let message=labels[stage];
       if(stage==="package"&&counts.total_bytes>0&&counts.checked_bytes<=counts.total_bytes){
         message=`正在校验本地离线包：${(counts.checked_bytes/1024**3).toFixed(2)} / ${(counts.total_bytes/1024**3).toFixed(2)} GiB；${counts.checked_files??0} / ${counts.total_files??0} 个文件。完成后再连接 AI 服务。`;
+        if(counts.reused_files>0)message=`正在核对本地文件：${counts.checked_files??0} / ${counts.total_files??0}，已复用 ${counts.reused_files} 个未变化文件的校验记录。完成后再连接 AI 服务。`;
       }
       try{onProgress({stage,message,...counts});}catch{/* UI/log failure must not alter verification. */}
     }

@@ -46,11 +46,22 @@ def test_profile_preserves_full_chain_and_has_only_local_storage():
     assert config["speech_recognition"]["enabled"] is False
     assert config["speech_recognition"]["python_executable"] is None
     assert config["speech_recognition"]["model_directory"] is None
+    assert config["mllm"]["workers"] == config["mllm"]["group_workers"] == 4
+    assert config["performance"]["release_auxiliary_models_between_stages"]
+    assert config["performance"]["auxiliary_cpu_cache_min_available_gib"] == 8
+    dino = config["models"]["open_vocabulary_key_frame"]["grounding_dino_fallback"]
+    liquid = config["models"]["liquid_semantic_sidecar"]
+    assert dino["device"] == liquid["device"] == "cuda"
+    assert dino["cuda_oom_fallback_cpu"] and liquid["cuda_oom_fallback_cpu"]
+    assert not liquid["half"]
 
 
 def test_old_host_overrides_cannot_redirect_portable_config(portable, tmp_path, monkeypatch):
     shutil.copytree(ROOT / "configs", tmp_path / "configs")
-    (tmp_path / "SHA256SUMS.json").write_text('{}')
+    (tmp_path / "SHA256SUMS.json").write_text(json.dumps({"files": [
+        {"path": name, "sha256": "synthetic-hash"} for name in (
+            "python/python.exe", "src/visioncortex/cli.py",
+            "models/ClosedSetYOLO/first_person/best.pt", "models/ClosedSetYOLO/third_person/best.pt")]}))
     monkeypatch.setenv("VISIONCORTEX_DEFAULT_CONFIG", "/old-host/missing.yaml")
     monkeypatch.setenv("VISIONCORTEX_NAS_ARCHIVE_ROOT", "/old-nas/archive")
     monkeypatch.setenv("VISIONCORTEX_FIRST_PERSON_ENGINE", "/old-gpu/engine")
@@ -101,14 +112,16 @@ def test_engine_reuse_requires_model_and_engine_hashes(portable, tmp_path):
     source.write_bytes(b"test model")
     engine.write_bytes(b"test engine")
     config = {"models": {role: str(source) for role in ("first_person", "third_person")},
-              "performance": {"image_size": 640, "engine_batch_candidates": [16, 8, 4, 2, 1]}}
+              "performance": {"image_size": 640, "half": True, "engine_batch_candidates": [16, 8, 4, 2, 1]}}
     for role in ("first_person", "third_person"):
         config["models"][f"{role}_engine"] = str(engine)
     with pytest.raises(RuntimeError, match="身份回执"):
         portable.verify_engine_receipts(config)
     engine.with_suffix(".engine.build.json").write_text(json.dumps({
         "engine_sha256": portable.sha256(engine), "source_sha256": portable.sha256(source),
-        "image_size": 640, "selected_batch": 4}))
+        "image_size": 640, "selected_batch": 4, "half": True, "dynamic": True,
+        "workspace_gib": 3.0, "autotune_iterations": 4, "autotune_max_gpu_memory_fraction": 0.9,
+        "batch_candidates": [16, 8, 4, 2, 1]}))
     portable.verify_engine_receipts(config)
     source.write_bytes(b"changed model")
     with pytest.raises(RuntimeError, match="身份校验失败"):
@@ -137,9 +150,12 @@ def test_launcher_uses_offline_runtime_and_user_bound_secret():
 
 
 def test_check_only_does_not_build_engines_or_serve(portable, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
     monkeypatch.setattr(portable, "ROOT", tmp_path)
+    monkeypatch.setattr(portable.shutil, "disk_usage", lambda _: SimpleNamespace(free=20 * 1024**3))
     monkeypatch.setattr(sys, "argv", ["launcher", "--check-only"])
-    monkeypatch.setattr(portable, "verify_package", lambda _: {})
+    monkeypatch.setattr(portable, "verify_package", lambda _, **kwargs: {})
     monkeypatch.setattr(portable, "configure_environment", lambda _: None)
     monkeypatch.setattr(portable, "hardware_preflight", lambda: {"gpu": "test"})
     monkeypatch.setattr(portable, "effective_config", lambda *_: (tmp_path / "config.yaml", {}))
@@ -155,6 +171,8 @@ def test_sam_smoke_accepts_execution_receipt_without_claiming_quality(portable, 
     from visioncortex import local_model_acceptance, temporal_segmentation
     config_path = tmp_path / "active.yaml"
     config_path.write_text("test config")
+    monkeypatch.setattr(portable, "ROOT", tmp_path)
+    (tmp_path / "SHA256SUMS.json").write_text("{}")
     engine = tmp_path / "Engines/fp.engine"
     monkeypatch.setattr(config_module, "load_config", lambda _: {"models": {"first_person_engine": str(engine)}})
     monkeypatch.setattr(local_model_acceptance, "_write_bounded_clip", lambda *_: None)
@@ -197,6 +215,7 @@ def test_windows_job_owns_descendants_and_watches_original_parent_handle(monkeyp
         "CreateJobObjectW": 101, "SetInformationJobObject": 1,
         "AssignProcessToJobObject": 1, "GetCurrentProcess": -1,
         "OpenProcess": 202, "WaitForSingleObject": 0, "CloseHandle": 1,
+        "GetStdHandle": 303, "GetFileType": 3, "ReadFile": 1, "PeekNamedPipe": 1,
     }.items()})
     targets = []
     monkeypatch.setattr(lifecycle.sys, "platform", "win32")

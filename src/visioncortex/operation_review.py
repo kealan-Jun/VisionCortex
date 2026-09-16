@@ -15,18 +15,27 @@ from pathlib import Path
 
 from .mllm import ArkAnalyzer, OBJECT_IDENTITY_RULES, OPERATION_DESCRIPTION_RULES
 from .schemas import EvidenceEvent, ExperimentGroup, event_is_formal
+from .step_evidence import next_operation, organization_metadata, timing_scope
 
 GROUPS = "JSON-Config-Files/experiment_group_understanding.json"
 EVENTS = "JSON-Config-Files/key_material_model_understanding.json"
 CONTROL = "JSON-Config-Files/operation_review.json"
 PROMPT = OBJECT_IDENTITY_RULES + OPERATION_DESCRIPTION_RULES + """
-本轮只整理已审核事件的具体操作，实验名称、边界、物理变化和后续判断由原记录保留，不再重写。
+本轮只整理已审核事件的具体操作，实验名称、边界和后续判断由原记录保留，不再重写。
 不要逐条照抄 CV 类别；同一具体操作、同一被操作实例的重叠证据可以合并。不确定是否同一实例时分开。
 每个输入 event_id 必须恰好在一个步骤的 supporting_event_ids 出现。相隔超过 2.5 秒的事件不能合并。
-current_step 用 80–180 个汉字清楚描述实际操作和可见结果，保留完成状态未知及关键否定条件；不要重复背景摆设和技术审计。
+current_step 清楚描述当前这一操作和可见结果，按必要信息写，不为凑字数补充背景。
+当前过程和 observed_result 都不要重述此前或之后的独立动作。例如当前是折纸，就不再讲此前打开纸包、后来拿瓶；那些内容仍保存在原事件描述中。
+直接写实验员的操作，不写机位比较、模型审核、推理过程或遵守规则的说明（例如“未把该接触写为……”）。必要限制直接说“读数看不清”“未看到放下”，避免枚举未接触的背景物体。
+reviewed_operation 是整段审阅描述，可能包含当前动作前后的其他操作。先依据 action_type 与 action_review 找到本事件已确认的那一项操作，再写具体动词、被操作对象和直接可见结果。
+例如已确认事件是天平面板操作，而整段还描述了折纸、拿瓶：本步骤只写按触面板及已知结果，不把折纸、拿瓶串进本步骤标题和过程，也不把按触写成去皮或称量完成。
+following_context_not_current_evidence 仅为后续上下文，不能当当前步骤依据。未确认的完成状态、剂量或读数保持未知。
+事件时间仅定位已审核证据，不是整套操作的起止时间；不得声称过程全部发生在此区间或整个操作已结束。
+observed_result 只写当前操作直接可见的前后变化或结果；不能复制整段 physical_change 中属于其他操作的变化。按键身份、读数变化等不可见时直说未确认。原始整段描述仍单独保留。
 只引用 reviewed_operation 中已经确认的动作，不因单帧补写吸排液、开合盖、按键或读数等功能性操作。
 即使另一事件证明了某功能性动作，也不能用来升级本步骤引用事件的动作。图片仅为选定关键帧，不代表连续过程。
 只返回 JSON：{"steps":[{"operation_title":"具体动词与对象","current_step":"操作过程及可见结果",
+"observed_result":"仅本操作可见的变化或结果；不可见则写尚未确认",
 "supporting_event_ids":["引用的输入事件ID"]}]}。不得返回其他字段或 Markdown。
 """
 
@@ -85,7 +94,7 @@ def validate_steps(group, events, result):
         lo, hi = step.get("start_global_ms"), step.get("end_global_ms")
         if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in (lo, hi)) or abs(lo-start)>1 or abs(hi-end)>1:
             raise ValueError("步骤时间超出所引用事件范围")
-        views = set().union(*(set(e.supporting_views) for e in referenced))
+        views = set.intersection(*(set(e.supporting_views) for e in referenced))
         if not step.get("supporting_views") or not set(step["supporting_views"]) <= views:
             raise ValueError("步骤引用了未支持该操作的机位")
         if not str(step.get("operation_title") or "").strip():
@@ -102,6 +111,7 @@ def validate_steps(group, events, result):
                    evidence_intervals=[{"event_id": e.event_id, "start_global_ms": e.global_start_ms,
                                         "end_global_ms": e.global_end_ms} for e in referenced],
                    evidence_record_count=len(ids))
+        row["time_scope"] = timing_scope(referenced)
         row["uncertainties"] = sorted({str(u) for e in referenced for u in
                                        [*e.uncertainty, *(e.model_understanding or {}).get("uncertainties", [])]})
         output.append(row)
@@ -142,13 +152,8 @@ def review(root: Path, groups: list, events: list, config: dict) -> list[dict]:
                     raise ValueError("操作审核画面不可用或越出当前实验")
                 image_receipts.append({"path": path, "sha256": hashlib.sha256(p.read_bytes()).hexdigest()})
                 images.append((f"{event.event_id}; key_global_ms={event.key_global_ms}; selected keyframe only", p))
-        metadata = {"group_id": group.group_id, "completion_status":group.completion_status,
-                    "events": [{"event_id":e.event_id, "action_type":e.action_type.value,
-                                "start_ms":e.global_start_ms, "end_ms":e.global_end_ms,
-                                "reviewed_operation":{k:(e.model_understanding or {}).get(k) for k in (
-                                    "operation_title", "current_step", "physical_change", "uncertainties")}}
-                               for e in chunk]}
-        fingerprint = _semantic_fingerprint("final-operations-v2", config, PROMPT, metadata, images)
+        metadata = organization_metadata(group, chunk)
+        fingerprint = _semantic_fingerprint("final-operations-v3", config, PROMPT, metadata, images)
         cache = _semantic_cache_path(config, "final-operations", fingerprint)
         retained_path = root / "JSON-Config-Files/Operation-Reviews/Allocations" / f"{fingerprint}.json"
         result = _read_semantic_cache(cache, fingerprint) if _semantic_cache_reads_enabled(config) else None
@@ -160,7 +165,7 @@ def review(root: Path, groups: list, events: list, config: dict) -> list[dict]:
                 if (retained.get("status") == "completed"
                         and retained.get("input_fingerprint") == fingerprint
                         and retained.get("review_images") == image_receipts):
-                    validate_steps(group, chunk, expand_steps(chunk, retained))
+                    validate_steps(group, chunk, expand_steps(chunk, retained, selected_by_group[group.group_id]))
                     result = {**retained, "cache_reused": True,
                               "local_revalidation": "exact retained response accepted by current evidence checks"}
             except (OSError, ValueError):
@@ -174,7 +179,9 @@ def review(root: Path, groups: list, events: list, config: dict) -> list[dict]:
             for image in image_receipts:
                 if hashlib.sha256((root/image["path"]).read_bytes()).hexdigest() != image["sha256"]:
                     raise ValueError("审核期间画面变化，未应用结果")
-            expanded = expand_steps(chunk, result)
+            if any(not str(s.get("observed_result") or "").strip() for s in result.get("steps", [])):
+                raise ValueError("缺少当前操作单独核对的结果")
+            expanded = expand_steps(chunk, result, selected_by_group[group.group_id])
             accepted = validate_steps(group, chunk, expanded)
         except ValueError as exc:
             result["organization_accepted"] = False
@@ -215,7 +222,7 @@ def review(root: Path, groups: list, events: list, config: dict) -> list[dict]:
         analyzer.close()
 
 
-def expand_steps(events, result):
+def expand_steps(events, result, following_events=None):
     """The model supplies prose and IDs; all other facts come from the ledger."""
     by_id = {e.event_id:e for e in events}
     expanded = copy.deepcopy(result)
@@ -224,18 +231,18 @@ def expand_steps(events, result):
         if not ids or not set(ids) <= by_id.keys():
             raise ValueError("步骤引用不属于输入事件")
         refs = sorted([by_id[i] for i in ids], key=lambda e:e.global_start_ms)
-        previous = refs[-1].model_understanding or {}
-        next_evidence = previous.get("next_step_evidence") or {}
-        changes = [(e.model_understanding or {}).get("physical_change") or {} for e in refs]
+        last = max(refs, key=lambda e: (e.global_end_ms, e.global_start_ms))
         step.update(start_global_ms=min(e.global_start_ms for e in refs),
                     end_global_ms=max(e.global_end_ms for e in refs),
                     supporting_views=sorted(set.intersection(*(set(e.supporting_views) for e in refs))),
                     objects=list(dict.fromkeys(o for e in refs for o in e.objects)),
                     confidence=min(e.confidence for e in refs),
-                    physical_change="；".join(dict.fromkeys(f"{c.get('before','未知')} → {c.get('after','未知')}" for c in changes)),
-                    next_step=previous.get("next_step", "未知"),
-                    next_step_status=next_evidence.get("status", "unknown"), next_step_evidence=next_evidence,
-                    source_operation_records=[{"event_id":e.event_id, "current_step":(e.model_understanding or {}).get("current_step")} for e in refs])
+                    physical_change=step.get("observed_result") or "当前操作的结果尚未单独核对",
+                    **next_operation(last, following_events if following_events is not None else events, set(ids)),
+                    source_operation_records=[{"event_id":e.event_id,
+                        "current_step":(e.model_understanding or {}).get("current_step"),
+                        "physical_change":copy.deepcopy((e.model_understanding or {}).get("physical_change"))}
+                        for e in refs])
     return expanded
 
 
