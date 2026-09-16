@@ -23,6 +23,9 @@ class Availability:
         self.path = Path(root) / "InputAvailability.sqlite3"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with connection(self.path) as db:
+            # Discovery writes and scheduler snapshots use separate connections.
+            # Rollback journaling lets even a read snapshot block publication.
+            db.execute('PRAGMA journal_mode=WAL')
             db.execute("""CREATE TABLE IF NOT EXISTS inputs(id TEXT PRIMARY KEY, signature TEXT,
                 state TEXT, observed REAL, reason TEXT)""")
 
@@ -43,6 +46,8 @@ class Availability:
                     reason,
                 )
             )
+        if not values:
+            return
         with connection(self.path) as db:
             db.executemany(
                 """INSERT INTO inputs VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET

@@ -9,6 +9,26 @@ from visioncortex.device_day_activity import job, phase, observations, counted
 from visioncortex.device_day_latency import observe, upload_completed, snapshot
 
 
+def test_input_publication_continues_during_read_snapshot(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from visioncortex.sqlite_store import connection
+
+    state = Availability(tmp_path)
+    record = {'recording_id': 'one', 'source_signature': 'v1'}
+    state.mark(record, 'waiting', observed=1)
+    with ThreadPoolExecutor(max_workers=1) as workers:
+        with connection(state.path, readonly=True) as reader:
+            assert reader.execute('SELECT state FROM inputs').fetchone()[0] == 'waiting'
+
+            def publish():
+                Availability(tmp_path).mark(record, 'ready', observed=2)
+
+            workers.submit(publish).result(timeout=3)
+            # The held snapshot stays coherent while the new version commits.
+            assert reader.execute('SELECT state FROM inputs').fetchone()[0] == 'waiting'
+    assert state.states()['one']['state'] == 'ready'
+
+
 def test_unavailable_inputs_do_not_block_other_cameras(tmp_path):
     q = DeviceDayQueue(tmp_path / "queue-vision.sqlite3")
     a = Availability(tmp_path)
