@@ -9,8 +9,8 @@ Environment=VISIONCORTEX_RUNTIME_ROLE=worker
 ExecStart=/bin/sh -c 'exec /usr/bin/python3 "$VISIONCORTEX_DEPLOY_TOOLS/Launch.py" worker'
 Restart=on-failure
 RestartSec=5
-KillMode=control-group
-TimeoutStopSec=90
+KillMode=mixed
+TimeoutStopSec=180
 NoNewPrivileges=true
 UMask=0077
 

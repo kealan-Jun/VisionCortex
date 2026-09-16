@@ -28,8 +28,8 @@ Environment=VISIONCORTEX_OUTPUT_ROOT=/home/x1/桌面/nas/VisionCortexExperimentA
 ExecStart=/home/x1/Projects/VisionCortex/deployment/rtx3090ti-ubuntu/06-Run-LAN-Server.sh
 Restart=always
 RestartSec=5
-TimeoutStopSec=60
-KillMode=control-group
+TimeoutStopSec=180
+KillMode=mixed
 NoNewPrivileges=true
 PrivateTmp=true
 UMask=0077

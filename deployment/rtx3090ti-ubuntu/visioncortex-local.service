@@ -21,7 +21,8 @@ Environment=VISIONCORTEX_OUTPUT_ROOT=/srv/sentinel-data/VisionCortex3090Ti/Runti
 ExecStart=/srv/sentinel-data/VisionCortex3090Ti/.venv/bin/python -m visioncortex serve --host 127.0.0.1 --port 8000 --config /home/x1/Projects/VisionCortex/configs/rtx3090ti-ubuntu-local.yaml
 Restart=on-failure
 RestartSec=3
-TimeoutStopSec=30
+TimeoutStopSec=180
+KillMode=mixed
 NoNewPrivileges=true
 PrivateTmp=true
 
