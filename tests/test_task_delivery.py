@@ -179,7 +179,9 @@ def test_progress_last_good_survives_slow_refresh(tmp_path):
         poller.started -= 2
         second = await asyncio.wait_for(poller.read(), 0.2)
         assert second["observed_at"] == first["observed_at"]
-        assert (tmp_path / "device-day/ProgressSnapshot.json").exists()
+        # HTTP fallbacks are readers; only the supervised publisher owns the
+        # shared snapshot, so a late fallback cannot overwrite newer progress.
+        assert not (tmp_path / "device-day/ProgressSnapshot.json").exists()
         release.set()
 
     with ThreadPoolExecutor(1) as pool:

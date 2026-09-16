@@ -35,25 +35,35 @@ class ProgressPoller:
         self.started = 0.0
         self.last_good = None
         self.last_error = None
+        self.snapshot_path = None
+
+    def _published(self):
+        path = self.snapshot_path
+        if path is None:
+            return None
+        try:
+            cached = json.loads(path.read_text(encoding='utf-8'))
+            if isinstance(cached.get('days'), dict) and cached.get('observed_at'):
+                return cached
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+        return None
+
+    def _remember(self, value):
+        if self.last_good is None or value.get('observed_at', 0) >= self.last_good.get('observed_at', 0):
+            self.last_good = value
 
     def _collect(self):
         config = self.settings_factory()
         path = (Path(config['storage']['local_runtime_root']) / 'device-day' / 'ProgressSnapshot.json'
                 if config.get('storage', {}).get('local_runtime_root') else None)
-        if path and path.is_file():
-            try:
-                cached = json.loads(path.read_text(encoding='utf-8'))
-                if isinstance(cached.get('days'), dict) and cached.get('observed_at'):
-                    self.last_good = cached
-                    if self.reader is snapshot and time.time()-cached['observed_at'] < 15:
-                        return cached
-            except (OSError, ValueError, TypeError):
-                pass
-        value = self.reader(config)
-        from .device_day_contract import atomic_json
-        if path:
-            atomic_json(path, value)
-        return value
+        self.snapshot_path = path
+        cached = self._published()
+        if cached is not None and self.reader is snapshot:
+            return cached
+        # Only the publisher writes the shared file. A slow HTTP fallback must
+        # never overwrite a newer independently published observation.
+        return self.reader(config)
 
     def _result(self, value, *, stale=False):
         return value | {'snapshot_stale': stale,
@@ -61,15 +71,24 @@ class ProgressPoller:
                         'refresh_error': self.last_error}
 
     async def read(self, timeout=5):
+        published = None
+        if self.reader is snapshot and self.snapshot_path is not None:
+            try:
+                published = await asyncio.wait_for(asyncio.to_thread(self._published), min(timeout, .5))
+            except asyncio.TimeoutError:
+                pass
         with self.lock:
             # Consume a finished result BEFORE starting the next refresh. A
             # read taking >5s used to be discarded on every subsequent poll.
             if self.future is not None and self.future.done():
                 try:
-                    self.last_good = self.future.result()
+                    self._remember(self.future.result())
                     self.last_error = None
                 except Exception as exc:
                     self.last_error = type(exc).__name__
+            if published is not None:
+                self._remember(published)
+                self.last_error = None
             if self.future is None or (self.future.done() and time.monotonic() - self.started >= 1):
                 # Settings may touch disk too; keep it off the ASGI event loop.
                 self.future = self.executor.submit(self._collect)
@@ -79,8 +98,8 @@ class ProgressPoller:
                 return self._result(self.last_good, stale=bool(self.last_error) or time.time()-self.last_good.get('observed_at', 0)>15)
         try:
             value = await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(future)), timeout)
-            self.last_good = value
-            return self._result(value)
+            self._remember(value)
+            return self._result(self.last_good, stale=time.time()-self.last_good.get('observed_at', 0)>15)
         except (asyncio.TimeoutError, ProgressUnavailable):
             if self.last_good is not None:
                 return self._result(self.last_good, stale=True)

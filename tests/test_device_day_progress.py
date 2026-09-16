@@ -86,6 +86,51 @@ def test_progress_polls_share_work_and_timeout_does_not_cancel_it():
         asyncio.run(run(executor))
 
 
+def test_published_progress_refreshes_first_poll_even_when_settings_are_busy(tmp_path):
+    import asyncio
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from visioncortex.device_day_contract import atomic_json
+    from visioncortex.device_day_progress import ProgressPoller
+
+    path = tmp_path / 'device-day/ProgressSnapshot.json'
+    config = {'storage': {'local_runtime_root': str(tmp_path)}}
+    busy, release = Event(), Event()
+    calls = []
+
+    def settings():
+        calls.append(True)
+        if len(calls) > 1:
+            busy.set()
+            assert release.wait(5)
+        return config
+
+    async def run(executor):
+        poller = ProgressPoller(settings, executor=executor)
+        now = time.time()
+        atomic_json(path, {'observed_at': now - 100, 'days': {}})
+        assert (await poller.read())['snapshot_stale'] is True
+        atomic_json(path, {'observed_at': now, 'days': {'new': {} }})
+        poller.started = 0
+        try:
+            # No extra browser poll is needed to see what the publisher wrote.
+            assert (await poller.read())['observed_at'] == now
+            assert await asyncio.to_thread(busy.wait, 1)
+            atomic_json(path, {'observed_at': now + .001, 'days': {'newer': {}}})
+            newest = await poller.read()
+            assert newest['days'] == {'newer': {}}
+            assert newest['snapshot_stale'] is False
+            # A late result cannot replace a newer observed state.
+            poller._remember({'observed_at': now - 100, 'days': {'old': {}}})
+            assert poller.last_good['days'] == {'newer': {}}
+        finally:
+            release.set()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        asyncio.run(run(executor))
+
+
 def test_failure_categories_and_component_percentiles_are_visible(tmp_path):
     root = tmp_path / 'device-day'
     q = DeviceDayQueue(root / 'queue-vision.sqlite3')
