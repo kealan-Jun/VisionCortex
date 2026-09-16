@@ -4161,7 +4161,7 @@ document.querySelector("#refresh-button").addEventListener("click", async () => 
   state.materialCache.clear();
   state.libraryLoadErrors.clear();
   try {
-    if (routeParts()[0] !== "day-timeline") await loadAll();
+    if (!["day-timeline", "knowledge"].includes(routeParts()[0])) await loadAll();
     await router();
     const unavailable = [state.archiveRefreshPending && "实验目录", state.taskSyncError && "任务状态"].filter(Boolean);
     if (unavailable.length) toast(`${unavailable.join("与")}暂时无法同步，当前数据可能不完整；系统会自动重试。`, "error");
@@ -4191,9 +4191,9 @@ window.setInterval(refreshTaskSnapshots, 4000);
 hydrateIcons();
 const legacyArchive = new URLSearchParams(location.search).get("archive");
 if (legacyArchive && !location.hash) location.hash = `#/archive/${encodeURIComponent(legacyArchive)}/experiments`;
-if (routeParts()[0] === "day-timeline") routeFromNavigation();
-loadAll().then(() => { if (routeParts()[0] !== "day-timeline") return routeFromNavigation(); }).catch(() => {
-  if (routeParts()[0] === "day-timeline") return;
+if (["day-timeline", "knowledge"].includes(routeParts()[0])) routeFromNavigation();
+loadAll().then(() => { if (!["day-timeline", "knowledge"].includes(routeParts()[0])) return routeFromNavigation(); }).catch(() => {
+  if (["day-timeline", "knowledge"].includes(routeParts()[0])) return;
   main.innerHTML = productState("error", "server", "实验目录暂时无法载入", "目录读取失败，暂时无法确认素材与报告数量；系统会自动重试。", `<button class="primary-button" type="button" data-retry-service>重新连接</button>`);
   document.querySelector("[data-retry-service]")?.addEventListener("click", ()=>location.reload());
 });
