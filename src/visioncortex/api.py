@@ -132,11 +132,13 @@ async def _lifespan(_: FastAPI):
             _device_day_service.start()
             yield
         finally:
-            _device_day_service.stop()
-            _stop_nas_monitor()
-            _stop_queue_worker()
-            from .shared_inference import close_pools
-            close_pools()
+            from .owned_subprocess import decoder_shutdown_guard
+            with decoder_shutdown_guard():
+                _device_day_service.stop()
+                _stop_nas_monitor()
+                _stop_queue_worker()
+                from .shared_inference import close_pools
+                close_pools()
 
 
 app = FastAPI(
