@@ -2442,7 +2442,9 @@ def serve_command(
 
     if config:
         os.environ["VISIONCORTEX_CONFIG"] = str(config.resolve())
-    uvicorn.run("visioncortex.api:app", host=host, port=port, reload=False)
+    # HTTP readers must not prevent the lifespan from draining durable workers.
+    uvicorn.run("visioncortex.api:app", host=host, port=port, reload=False,
+                timeout_graceful_shutdown=30)
 
 
 @app.command("refresh-key-json")
