@@ -24,7 +24,9 @@ NAS 队列继续按实际相机、源版本和阶段管理。`input_status` 是�
 
 ## 进度与事件
 
-工作进程每 5 秒独立发布本地 `device-day/ProgressSnapshot.json`。
+受监督的轻量独立进程每 5 秒发布本地 `device-day/ProgressSnapshot.json`，
+不与推理线程共用 Python 锁；异常退出后自动重新启动。使用 spawn，不 fork 已加载的
+CUDA 进程。快照保存生产进程 PID 和汇总耗时，便于区分汇总慢与任务本身慢。
 HTTP 读取最近成功快照；刷新慢或失败时保留旧快照并返回年龄、过期标记和错误类别。
 首次尚无快照时 `/api/device-day-progress` 返回 202 `progress_initializing`，
 不把取进度超时当成分析服务故障。模型/存储真实故障仍保留其错误状态。
