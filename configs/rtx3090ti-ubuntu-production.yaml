@@ -42,9 +42,10 @@ project:
 # such recordings remain fail-closed instead of being guessed from its name.
 speech_recognition:
   enabled: true
-  provider: aliyun_qwen
-  model: qwen-audio-3.0-asr-flash
-  adapter_sha256: d02caa2087e483ab96b753ff3ec1ba6b09885e2bd96ebe2b8b2ebe69cd721869
+  # Explicit local ASR selection, restored by the user on 2026-09-17.
+  # Cloud connection verification does not gate this CPU-only worker.
+  provider: faster_whisper
+  model: faster-whisper-small
   max_audio_seconds: 180
   python_executable: /srv/sentinel-data/VisionCortex3090Ti/Runtime/ASR-Pilot/.venv/bin/python
   model_directory: /srv/sentinel-data/VisionCortex3090Ti/Models/Speech/faster-whisper-small/536b0662742c02347bc0e980a01041f333bce120
