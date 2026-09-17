@@ -152,6 +152,18 @@ class DeviceDayService:
         from .device_day_provider_gate import ProviderGate
         if self._runner.settings.get("preprocessing_only") or ProviderGate(self._runner.config).blocks("understanding"):
             return False
+        # Reject unfinished requests from local queues before touching the NAS.
+        # Checking every historical request's remote receipts on the dispatcher
+        # thread can otherwise stall discovery admission and all camera slots.
+        # Missing queue rows still use the receipt path for direct/historical
+        # runs; completed rows are not proof of matching current receipts.
+        identifiers = json.dumps([r["recording_id"] for r in request["recordings"]])
+        for stage in STAGES:
+            with self._runner.queues[stage].connect() as db:
+                if db.execute("SELECT 1 FROM recordings WHERE recording_id IN "
+                              "(SELECT value FROM json_each(?)) AND status != 'completed' LIMIT 1",
+                              (identifiers,)).fetchone():
+                    return False
         for original in request["recordings"]:
             layout = self._runner.layout(original)
             record = original | {"archive_date": layout.name[:10],

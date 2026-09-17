@@ -948,6 +948,36 @@ def test_request_completion_uses_the_same_priority_payload(device_config):
     assert service._request_complete(request)
 
 
+@pytest.mark.parametrize("stage", ["retention", "vision", "stt", "understanding", "report"])
+@pytest.mark.parametrize("status", ["queued", "running", "failed"])
+def test_pending_request_does_not_read_nas_on_dispatch_thread(device_config, monkeypatch, stage, status):
+    runner = DeviceDayRunner(device_config, FakeModels())
+    service = DeviceDayService(lambda: device_config, threading.Lock())
+    service._runner = runner
+    records = [{"recording_id": name, "configured_role": "first_person"} for name in ("older", "pending")]
+    queue = runner.queues[stage]
+    queue.enqueue(records[1], "revision")
+    if status != "queued":
+        queue.claim("worker")
+        if status == "failed":
+            queue.finish("worker", "pending", {"status": "failed"}, 1)
+    monkeypatch.setattr(runner, "layout", lambda _: pytest.fail("Pending request must not inspect NAS receipts"))
+    assert not service._request_complete({"recordings": records})
+
+
+def test_completed_request_queues_do_not_replace_receipt_verification(device_config):
+    capture(device_config)
+    item, _ = item_and_layout(device_config)
+    runner = DeviceDayRunner(device_config, FakeModels())
+    service = DeviceDayService(lambda: device_config, threading.Lock())
+    service._runner = runner
+    for queue in runner.queues.values():
+        queue.enqueue(item, "revision")
+        assert queue.claim("worker")
+        queue.finish("worker", item["recording_id"], {"status": "completed"}, 1)
+    assert not service._request_complete({"recordings": [item]})
+
+
 def test_case_only_migration_uses_unambiguous_directory_entries(tmp_path):
     from visioncortex.device_day_migration import _canonical_case
     root = tmp_path / "Archive"
