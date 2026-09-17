@@ -565,6 +565,8 @@ class DeviceDayRunner:
                     from .timeline_invalidation import TimelineInvalidations
                     bounds = [r.get('start_us') for r in recordings if r.get('start_us') is not None]
                     ends = [r.get('end_us') for r in recordings if r.get('end_us') is not None]
+                    from .device_day_file_index import publish_file_index
+                    publish_file_index(self.config, index)
                     atomic_json(layout.index, index)
                     # The publication journal covers a crash after this write.
                     # Notify only after readers can see the new generation.

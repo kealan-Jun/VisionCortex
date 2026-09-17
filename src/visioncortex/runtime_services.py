@@ -132,6 +132,9 @@ def services(config):
     ]
     if config.get('device_day', {}).get('enabled'):
         from .device_day_time_lookup import refresh_photo_index
+        from .device_day_file_index import FileIndexPublisher
+        file_indexes = FileIndexPublisher(config)
+        tasks.append(('file-time-index', 5, file_indexes.tick))
         for camera in config.get('collection_ingest', {}).get('camera_role_map', {}):
             tasks.append(('capture-photos-'+camera, 5,
                           lambda camera=camera: refresh_photo_index(config, camera)))

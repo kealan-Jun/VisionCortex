@@ -136,6 +136,34 @@ VISIONCORTEX_WEB_AI_SETTINGS=1 PYTHONPATH=src \
 
 NAS 根目录的 `README.html` 是阅读入口，五个设备日主目录不变。第二目录严格只有 `Index.json` 和 `Clips/`。详细运行回执、YOLO 审计、旧试跑产物保存在配置的 `storage.local_cache_root/device-day-receipts/<设备日>/<recording_id>/`，此持久化回执区不得按临时缓存淘汰。总索引 `recordings[].sources` 保留原片来源，`processing` 保留粗精扫批次、分类依据、速度与审计引用。审计引用带 `storage_root: local_cache_root` 并相对此配置根解析，不能混作归档相对路径。迁移回执保存旧新路径和校验值，原始采集文件不被清理。
 
+## 直接读文件的全局时间检索（2026-09-17）
+
+每个设备日的 `Comment/TimeIndex.json` 是轻量文件检索入口，不需要启动网页或调用 HTTP。
+原有 `ProcessedClips/Index.json` 增加 `time_index.path` 引用；原字段、五目录及素材位置不变。
+每阶段发布索引时同步原子更新；后台每五秒检查晚到的图片和索引变化。尚未有视频的设备日也可发布图片引用。
+这里的五秒是轮询间隔，不是 NAS 写入到全部模型完成的时延承诺。
+
+`entries[]` 按全局 Unix 微秒时间排序，包括 recording、audio、speech、video_segment、
+key_frame、scene_frame、voice_photo。每项的 `start_us` / `end_us` 使用左闭右开区间，
+`start_time` / `end_time` 同时给出带 +08:00 时区的可读时间。查询区间 `[a,b)` 时筛选
+`start_us < b and end_us > a`，再读取条目中的文件引用即可；时间未知的条目保留 null，不能强行对齐。
+
+`speech.text` 是实际机器转写，`video_segment.understanding` 和帧条目的 `text` 保留已完成的理解文字，
+可作为自然语言检索的文本输入。`file`、`audio`、`source_video`、`transcript_file` 等引用使用
+`path_base` + `path`：`device_day` 表示当前设备日目录，`capture_root` 表示原始采集根。
+客户端可将 `path_bases.device_day` 替换成自己的 NAS 挂载前缀；相对路径不变。
+例如读 `/media/x1/RealityLoop-NAS/VisionCortexExperimentArchive/<日期>_<设备>/Comment/TimeIndex.json`，
+再解析 `MetaVideo/Audio/...opus` 或 `Comment/Stt/.../Transcript.txt`。
+
+recording 条目区分 `transcription_status`、`transcription_outcome` 和 `model_invocation`。
+`no_transcript` 表示识别已执行但没返回文字，不能当成“没处理”或“没有人说话”。audio 条目保留
+`capture_complete`、`quality_status`、音频自身采集时间、相对视频边界的 `audio_start_offset_us`
+及原始音频元数据引用。音频晚于视频开始不自动证明丢包，具体缺失情况以采集元数据为准。
+
+生产仍只导出固定 `process_since_us` 及以后（含跨越切换点的分片）的文件检索条目，不补跑历史。
+照片按采集文件名提供秒级时间，并显式标记时钟未验证；机器转写准确率与跨设备精确时钟对齐仍需真实验收。
+生成文件与模型调用成功不等于物理动作确认，也不等于自然语言检索质量通过。
+
 ## 日期隔离
 
 一个设备日只消费该设备该日期的采集记录、录音、comment 与 protocol。历史补跑按日期分别生成输入清单、执行回执、质量说明和日报。9 月 1 日缺少录音时必须如实记录 no_audio；其他日期的录音不得补入该日期，也不得用其他日期的 STT 成功证明该日期流程完成。跨日期的总队列仅表示任务调度，不能替代单日验收统计。
