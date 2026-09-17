@@ -53,7 +53,7 @@ def refresh_queue_priorities(queue, focus_date=None, live_priority_seconds=14400
     cutoff = round(midnight.timestamp()*1e6)
     focus_start = (round(datetime.fromisoformat(focus_date).replace(tzinfo=zone).timestamp()*1e6)
                    if focus_date else -1)
-    live_cutoff = round((time.time() - max(0, int(live_priority_seconds)) * 1e6))
+    live_cutoff = round((time.time() - max(0, int(live_priority_seconds))) * 1e6)
     expression = ("CASE WHEN COALESCE(json_extract(payload,'$.recording_start_us'),0)>=? THEN -1 "
                   "WHEN COALESCE(json_extract(payload,'$.recording_start_us'),0)>=? THEN 0 "
                   "WHEN ?=-1 OR json_extract(payload,'$.recording_start_us') BETWEEN ? AND ? THEN 1 ELSE 2 END")
