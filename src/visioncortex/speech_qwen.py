@@ -14,6 +14,7 @@ from urllib.request import Request, urlopen
 from . import speech_worker as files
 
 MODEL = "qwen-audio-3.0-asr-flash"
+MODELS = {MODEL, "fun-asr-flash-2026-06-15"}
 NO_WORDS = "ASR_RESPONSE_HAVE_NO_WORDS"
 
 
@@ -29,7 +30,8 @@ def runtime_request(config):
         "dashscope.aliyuncs.com", "dashscope-intl.aliyuncs.com",
     }:
         raise ValueError("Qwen ASR requires the existing verified Aliyun connection")
-    if options.get("model") != MODEL:
+    model = options.get("model")
+    if model not in MODELS:
         raise ValueError("Unsupported Qwen ASR model; do not silently fall back")
     identity = files.sha256(Path(__file__))
     if options.get("adapter_sha256") != identity:
@@ -42,12 +44,12 @@ def runtime_request(config):
         raise ValueError("Qwen inline audio must be split into at most 180 seconds")
     return {
         "schema_version": "visioncortex-speech-request/1", "provider": "aliyun_qwen",
-        "model": {"provider": "aliyun", "model": MODEL, "revision": "provider_managed_alias",
+        "model": {"provider": "aliyun", "model": model, "revision": "provider_managed_alias" if model == MODEL else model,
                   "weights_identity": "NOT_PROVEN"},
         "endpoint": f"https://{host}/api/v1/services/aigc/multimodal-generation/generation",
         "credential_connection": connection, "worker_sha256": identity,
         "repository": {"implementation_identity": "worker_sha256", "release_certified": False},
-        "max_audio_seconds": maximum, "language_hints": ["zh", "en"],
+        "max_audio_seconds": maximum, "language_hints": ["zh", "en"] if model == MODEL else ["zh"],
     }
 
 

@@ -77,6 +77,8 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
     _validate_mllm_evidence_config(config)
     from .device_day_contract import validate_config as validate_device_day_config
     validate_device_day_config(config)
+    from .device_day_schedule import processing_cutoff
+    processing_cutoff(config.get('device_day', {}))
     return config
 
 

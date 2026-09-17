@@ -6,6 +6,7 @@ import time
 import logging
 from copy import deepcopy
 from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .device_day_contract import digest
@@ -22,6 +23,14 @@ class CameraMonitor:
         self.dirty = {}
         self.discovery = {}
         self.completed_lanes = set()
+        self.paused_folders = set()
+        from .device_day_schedule import in_processing_scope, processing_cutoff
+        if processing_cutoff(settings.get('device_day', {})):
+            from .observed_inventory import read_inventory
+            root = Path(settings['storage']['local_runtime_root']) / 'device-day'
+            for record in read_inventory(root)['recordings']:
+                if record.get('processable') and not in_processing_scope(settings['device_day'], record):
+                    self.paused_folders.add(str(Path(record['video_path']).parent))
 
     def _run_lane(self, camera, mode):
         try:
@@ -56,6 +65,11 @@ class CameraMonitor:
                     pending.clear()
                     last_emit[0] = time.monotonic()
             def forward(record):
+                from .device_day_schedule import in_processing_scope
+                if record.get('processable') and not in_processing_scope(self.settings.get('device_day', {}), record):
+                    with self.lock:
+                        self.paused_folders.add(str(Path(record['video_path']).parent))
+                    return
                 identity = digest(record)
                 with self.lock:
                     previous = self.records.get(record['recording_id'], {})
@@ -74,7 +88,9 @@ class CameraMonitor:
                 if len(pending) >= 25 or time.monotonic() - last_emit[0] >= 1:
                     flush()
             try:
-                inventory = scan_recordings(config, on_record=forward)
+                with self.lock:
+                    skipped = set(self.paused_folders)
+                inventory = scan_recordings(config, on_record=forward, **({'skip_folders': skipped} if skipped else {}))
                 flush()
                 self.observe(self.settings, {'recordings': [], 'errors': inventory.get('errors', [])})
                 state = {'camera_key': camera, 'mode': mode, 'status': 'watching', 'started_at': started,
@@ -116,8 +132,10 @@ class CameraMonitor:
     def poll(self):
         root = _root(self.settings)
         cameras = _camera_directories(root, self.settings['collection_ingest'], False)
+        from .device_day_schedule import processing_cutoff
+        modes = ('live',) if processing_cutoff(self.settings.get('device_day', {})) else ('live', 'history')
         for camera in cameras:
-            for mode in ('live', 'history'):
+            for mode in modes:
                 key = (camera.name, mode)
                 previous = self.threads.get(key)
                 if not self.stop.is_set() and (previous is None or not previous.is_alive()):

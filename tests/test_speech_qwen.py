@@ -100,18 +100,20 @@ def test_verified_receipt_reuse_does_not_claim_a_new_api_call(tmp_path, monkeypa
     assert len(calls) == 1
 
 
-def test_provider_binding_is_not_replaced_by_asr_model(monkeypatch):
+@pytest.mark.parametrize('model', sorted(qwen.MODELS))
+def test_provider_binding_is_not_replaced_by_asr_model(monkeypatch, model):
     from visioncortex import provider_credentials
     binding = {"provider": "aliyun", "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
                "model": "already-verified-vision-model", "api_protocol": "chat_completions",
                "credential_ref": "a" * 32}
     observed = []
     monkeypatch.setattr(provider_credentials, "model_api_key", lambda c: observed.append(c) or "test-only-key")
-    config = {"mllm": binding, "speech_recognition": {"model": qwen.MODEL,
+    config = {"mllm": binding, "speech_recognition": {"model": model,
               "adapter_sha256": speech_worker.sha256(Path(qwen.__file__)), "max_audio_seconds": 180}}
     runtime = qwen.runtime_request(config)
     assert observed[0]["model"] == binding["model"]
-    assert runtime["model"]["model"] == qwen.MODEL
+    assert runtime["model"]["model"] == model
+    assert runtime['language_hints'] == (['zh', 'en'] if model == qwen.MODEL else ['zh'])
     assert "test-only-key" not in str(runtime)
     config["speech_recognition"]["model"] = "older-model"
     with pytest.raises(ValueError):
@@ -150,3 +152,14 @@ def test_archive_revision_reuses_exact_asr_request_without_mutating_history(tmp_
     assert result["chunks"][0]["current_execution"]["model_invocations"] == 0
     assert history == {p.name: p.read_bytes() for p in previous.iterdir() if p.is_file()}
     assert (layout.receipts / "fixture/speech/new/0000/audio.wav").is_file()
+    assert result['transcript_file']['path'].endswith('/new/Transcript.txt')
+    text = (layout.root / result['transcript_file']['path']).read_text()
+    assert '你好。' in text and '+08:00' in text and '原录音：' in text
+
+
+@pytest.mark.parametrize('outcome,message', [('no_speech', '语音活动检测未检测到语音'),
+                                           ('no_transcript', '这不证明原录音没有语音')])
+def test_empty_transcript_explains_actual_outcome_without_inventing_text(outcome, message):
+    from visioncortex.device_day_stt import transcript_text
+    text = transcript_text({'recording_id': 'sample'}, {'path': 'MetaVideo/Audio/Original.opus'}, [], outcome)
+    assert message in text and 'Original.opus' in text

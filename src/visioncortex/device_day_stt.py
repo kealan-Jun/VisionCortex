@@ -2,8 +2,22 @@
 from __future__ import annotations
 
 import math
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
-from .device_day_contract import artifact, atomic_json, digest, media_interval_name, read_json, safe_child
+from .device_day_contract import artifact, atomic_bytes, atomic_json, digest, media_interval_name, read_json, safe_child
+
+
+def transcript_text(recording, source, comments, outcome):
+    def clock(value):
+        return datetime.fromtimestamp(value / 1e6, ZoneInfo('Asia/Shanghai')).isoformat(timespec='milliseconds')
+    status = {'transcribed': '已生成机器转写，未经人工复核。',
+              'no_speech': '语音活动检测未检测到语音，未生成转写；请回听原录音确认。',
+              'no_transcript': '识别模型未返回文字；这不证明原录音没有语音。'}[outcome]
+    lines = [f"录音：{recording['recording_id']}", f"原录音：{source['path']}",
+             f'识别状态：{outcome}；{status}', '时间：Asia/Shanghai，依据采集音频时钟；精确对齐未经验证。', '']
+    lines.extend(f"[{clock(row['start_us'])} – {clock(row['end_us'])}] {row['text'].strip()}" for row in comments)
+    return '\n'.join(lines) + '\n'
 
 
 def audio_windows(duration, maximum):
@@ -112,11 +126,16 @@ def transcribe(config, layout, retention, key):
                        "model": receipt.get("model"), "current_execution": receipt.get("execution", {}),
                        "wall_seconds": receipt["wall_seconds"], "segment_count": receipt["segment_count"]})
     comment_path = root / "Comments.json"
-    atomic_json(comment_path, {"source": "machine_transcribed_speech", "comments": comments,
-                               "audio_ref": source["retained"], "chunks": chunks})
-    artifacts.append(artifact(layout.root, comment_path))
     outcome = "transcribed" if comments else "no_transcript" if any(c["outcome"] == "no_transcript" for c in chunks) else "no_speech"
+    text_path = root / "Transcript.txt"
+    atomic_bytes(text_path, transcript_text(recording, source['retained'], comments, outcome).encode('utf-8'))
+    text_ref = artifact(layout.root, text_path)
+    atomic_json(comment_path, {"source": "machine_transcribed_speech", "comments": comments,
+                               "audio_ref": source["retained"], "chunks": chunks,
+                               "outcome": outcome, "transcript_file": text_ref})
+    artifacts.extend([artifact(layout.root, comment_path), text_ref])
     return {"outcome": outcome, "comments": comments, "artifacts": artifacts,
+            "transcript_file": text_ref,
             "audit_artifacts": audit_artifacts,
             "audio_ref": source["retained"], "chunks": chunks, "accuracy": "NOT_PROVEN",
             "model_invocation": "PROVEN" if any(c["model_invocation"] == "PROVEN" for c in chunks) else "NOT_PROVEN"}

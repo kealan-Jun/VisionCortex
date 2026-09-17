@@ -393,9 +393,10 @@ def _recording_batches(
     return batches
 
 
-def scan_recordings(config: dict[str, Any], *, on_record=None) -> dict[str, Any]:
+def scan_recordings(config: dict[str, Any], *, on_record=None, skip_folders=()) -> dict[str, Any]:
     root = _root(config)
     settings = config["collection_ingest"]
+    skip_folders = set(skip_folders)
     now = time.time()
     recordings, errors = [], []
     excluded = {Path(config["storage"][key]).resolve() for key in ("archive_root", "local_cache_root")}
@@ -426,6 +427,7 @@ def scan_recordings(config: dict[str, Any], *, on_record=None) -> dict[str, Any]
                     name
                     for name in directories
                     if not name.startswith((".", "#"))
+                    and str(current / name) not in skip_folders
                     and not (depth == 0 and re.fullmatch(r"\d{4}-\d{2}-\d{2}", name)
                              and ((settings.get("capture_date") and name != settings["capture_date"])
                                   or (settings.get("capture_since_date") and name < settings["capture_since_date"])))

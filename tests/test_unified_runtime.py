@@ -401,7 +401,7 @@ def test_publication_replay_cannot_acknowledge_active_or_unavailable_record(tmp_
             raise OSError('test-only unavailable storage')
         published.append(recording_id)
         return True
-    runner = SimpleNamespace(runtime_root=tmp_path, layout=lambda record: record,
+    runner = SimpleNamespace(runtime_root=tmp_path, settings={}, layout=lambda record: record,
                              refresh_index=refresh)
     with exclusive(tmp_path / 'locks/active.vision.lock'):
         assert reconcile(runner) == 1

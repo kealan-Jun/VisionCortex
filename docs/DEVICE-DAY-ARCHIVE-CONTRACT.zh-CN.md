@@ -58,6 +58,7 @@ VisionCortexExperimentArchive/
     ├── Protocol.json                      # 用户提供的protocol快照/版本，按需产生
     ├── Stt/<recording_id>/<处理版本>/      # 自动识别，不冒充人的手写comment
     │   ├── Comments.json                  # 带时间、原录音引用与STT来源的机器comment
+    │   ├── Transcript.txt                 # 本分片完整文字、绝对时间、原录音引用及空结果原因
     │   └── <片内开始时间>_<片内结束时间>/
     │       ├── Transcript.json            # 句段和词级时间、识别置信信息
     │       ├── Transcript.txt
@@ -104,7 +105,7 @@ VisionCortexExperimentArchive/
 
 1. **retention**：确认采集已关闭并发布、文件稳定，校验复制原片和附属元数据，发布留存回执。`capture_complete` 只描述采集质量，不是是否允许分析的开关；已关闭的 incomplete/partial 分片同样留存并进入后续阶段。
 2. **vision**：每个停止写入的采集分片独立入队，**以实际视频时长处理，不要求满15分钟**。短片、末尾不足15分钟及采集程序标记不完整但已关闭稳定的片段也处理，原始质量问题随产物保留；仍在写入的文件等待稳定，无法解码的文件保留具体失败原因。采集文件按实际起止时间形成处理批次，不再人为按900秒切出尾部小批次；精扫仍仅覆盖候选活动区间。设备按有界工位并发。先粗扫，覆盖合格且没有候选活动则跳过精扫；有候选时只对候选区间精扫。粗扫阳性仅扩大精扫范围，候选和拒绝原因保留在审计回执，不能直接命名“有实验活动”。接入现有精扫、移动画面核验、动作审计、连续状态、可观测性和边界规范化规则，只有通过设备级活动边界判定的区间命名为有活动。跨视角正式实验门禁单独保留，不因按设备归档而绕过。
-3. **stt**：与 YOLO 并行消费原片留存回执。独立录音或原视频内嵌音轨必须进入已配置的 STT。3090 Ti 生产节点按用户 2026-09-17 的要求恢复本地 faster-whisper-small，使用 CPU INT8，不依赖云端凭据验证；按实际录音时长分有界窗口，保存句段、词级时间、原音频引用、模型身份和执行回执，生成第五目录的机器comment。无音频保留 no_audio；模型识别结果为空保留 no_transcript，不能据此证明静音；只有明确的语音活动检测结果才可标 no_speech，不伪造模型调用或识别文本。STT失败不占用或阻止YOLO工位。
+3. **stt**：与 YOLO 并行消费原片留存回执。独立录音或原视频内嵌音轨必须进入已配置的 STT。3090 Ti 在 2026-09-17 恢复本地识别后，按用户随后恢复阿里云额度并要求提速的指令，选择 `fun-asr-flash-2026-06-15`；按实际录音时长分有界窗口，保存句段、词级时间、原音频引用、模型身份和执行回执，生成第五目录的机器comment。无音频保留 no_audio；模型识别结果为空保留 no_transcript，不能据此证明静音；只有明确的语音活动检测结果才可标 no_speech，不伪造模型调用或识别文本。STT失败不占用或阻止YOLO工位。
 4. **understanding**：消费落盘视频片段与STT产出。有活动按有界窗口理解步骤；无活动用稀疏抽帧描述场景及其他可见行为。两者都结合对应时间的人的comment、STT机器comment和protocol，保留输入、输出、帧来源及用量。定时抽取的模型理解图片统一标为 scene_sample；不得因为模型引用了一张图片就把它提升为五类动作关键帧。语音内容不能独立确认视觉动作；时间缺少依据时显式保留估计/未验证状态。
 5. **report**：消费总索引中的关键帧文字、STT和多模态理解，重组成一份按时间组织的实验室日报。HTML 和 JSON 是一份报告的两种表达；不是三份报告并列或文本机械相加。
 
@@ -161,11 +162,13 @@ NAS 根目录的 `README.html` 是阅读入口，五个设备日主目录不变�
 
 模型选择及接口依据：[Aliyun 语音识别模型](https://help.aliyun.com/zh/model-studio/asr-model/)、[Qwen-Audio-3.0-ASR-Flash HTTP API](https://help.aliyun.com/zh/model-studio/fun-asr-flash-recorded-speech-recognition-http-api)。此变更仅更新语音识别实现与相应回执，保留既定五目录、日期/设备隔离及关闭采集端删除的规则。
 
-### 恢复本地语音识别（2026-09-17 用户变更）
+### 当前语音识别选择与本地保留（2026-09-17 用户变更）
 
-3090 Ti 生产配置明确选择 `speech_recognition.provider=faster_whisper`、`model=faster-whisper-small`，复用已有独立 Python 环境及 `configs/models/speech-recognition.json` 固定的本地模型版本。执行前校验原录音、模型文件和运行代码，使用 CPU INT8、每任务 4 个线程，沿用最长 180 秒窗口；实际并发受 `runtime.resource_limits.stt=2` 控制。本地 STT 不调用 Aliyun、不上传音频，也不由云服务连接验证或熔断状态阻止调度；这次是显式切换，不是静默故障回退。
+本轮首先按指令恢复 `faster_whisper` / `faster-whisper-small`，复用已有 CPU INT8 环境与固定模型版本。随后用户确认阿里云额度恢复并要求“效果好且快”，最终生产选择改为 `aliyun_qwen` 适配器下的 `fun-asr-flash-2026-06-15`。本地模型和环境保留，需要显式配置才能使用，不做静默回退。当前云端方案会将每个最长 180 秒的派生音频窗口发送到已验证的阿里云接口，使用中文语言提示；同设备时间与原始音频引用保持不变，并发仍受 `runtime.resource_limits.stt=2` 限制。
 
-原录音仍保存在同设备同日的 `MetaVideo/Audio/`，转写、字幕、派生试听与机器 comment 仍发布到 `Comment/Stt/`，保留本地模型哈希、VAD、实际模型调用和耗时回执。既有 Qwen 结果保留其原始来源，不改标为 Whisper 结果。切换后按新 STT 配置版本恢复队列，视频预处理沿用自身有效回执；文本准确性仍需真实录音人工复核。
+原录音仍保存在同设备同日的 `MetaVideo/Audio/`，转写、字幕、派生试听与机器 comment 仍发布到 `Comment/Stt/`。版本根目录新增可直接阅读的 `Transcript.txt`，包含绝对时间和原录音引用；空结果明确区分检测无语音和模型未返回文字。`Comments.json` 与总索引的 `transcription.transcript_file` 引用同一汇总文件。历史模型结果保留原身份；此前分片暂停补跑。
+
+同一份已封存的 90 秒真实口令样本，本次实测 Fun-ASR-Flash 为 5.750 秒、Qwen-Audio-3.0-ASR-Flash 为 30.546 秒、本地 Whisper-small 为 19.226 秒，均输出 15 句；两种云模型的文本一致，Whisper 的唤醒词写法不同。这是单样本调用与延迟证据，不是实验术语准确率或持续吞吐验收。云模型能力和协议见 [阿里云语音识别说明](https://help.aliyun.com/zh/model-studio/asr-model) 与 [文件识别接口说明](https://help.aliyun.com/zh/model-studio/non-realtime-speech-recognition-user-guide)。
 
 ### 设备内活动筛选与物理动作确证
 

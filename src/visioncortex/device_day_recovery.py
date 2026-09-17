@@ -156,7 +156,10 @@ class RetentionRecovery:
                                    "ORDER BY COALESCE(json_extract(payload,'$.processing_priority'),0),"
                                    "json_extract(payload,'$.recording_start_us')"))
         rows.sort(key=lambda row: row['recording_id'] not in waiting)
+        from .device_day_schedule import in_processing_scope
         for row in rows:
+            if not in_processing_scope(runner.settings, json.loads(row['payload'])):
+                continue
             identity = (row['revision'], row['updated_at'])
             previous = self.checked.get(row['recording_id'])
             if previous and previous[0] == identity and time.monotonic() < previous[1]:

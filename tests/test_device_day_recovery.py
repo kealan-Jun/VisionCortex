@@ -51,6 +51,15 @@ def test_restore_only_identical_verified_retention_preserving_failed_attempts(de
     assert any(read_json(p).get('status') == 'failed' for p in path.parent.joinpath('history').glob('*.json'))
 
 
+def test_live_cutoff_pauses_historical_recovery(device_config, monkeypatch):
+    runner, record, path, row = failed_retention(device_config)
+    runner.settings['process_since_us'] = record['recording_end_us'] + 1
+    monkeypatch.setattr('visioncortex.device_day_recovery.recover_one',
+                        lambda *args: pytest.fail('Old recovery must remain paused'))
+    assert RetentionRecovery().tick(runner) == {'status': 'idle'}
+    assert read_json(path)['status'] == 'failed'
+
+
 @pytest.mark.parametrize('change', ['corrupt', 'missing', 'source_changed', 'audio_omitted', 'snapshot_omitted', 'live_capture'])
 def test_recovery_rejects_unverified_or_different_inputs(device_config, change):
     runner, record, path, row = failed_retention(device_config)

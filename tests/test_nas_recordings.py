@@ -78,6 +78,19 @@ def test_locked_audio_metadata_does_not_hide_finalized_rgb(nas_config, monkeypat
     assert item["audio"]["read_errors"][0]["errno"] == 16
 
 
+def test_paused_known_capture_folders_are_pruned_before_metadata_reads(nas_config, monkeypatch):
+    from visioncortex import nas_recordings
+    old = recording(nas_config, 'a_cam01')
+    new = recording(nas_config, 'b_cam01')
+    original = nas_recordings._inspect
+    def inspect(root, path, *args):
+        assert path.parent != old
+        return original(root, path, *args)
+    monkeypatch.setattr(nas_recordings, '_inspect', inspect)
+    result = scan_recordings(nas_config, skip_folders={str(old)})
+    assert [r['video_path'] for r in result['recordings']] == [str(new / 'rgb.mp4')]
+
+
 def test_indexless_selection_preserves_sources_and_requires_user_roles(nas_config):
     a = recording(nas_config, "a_cam01")
     b = recording(nas_config, "b_cam01", offset=1000000)

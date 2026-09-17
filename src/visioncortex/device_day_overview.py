@@ -133,8 +133,9 @@ class ArchiveOverview:
         # Rebuild one absent derived index from existing canonical receipts on
         # this independent worker. Never rerun a model or fabricate a completion.
         from .device_day_recovery import repair_missing_index
+        from .device_day_schedule import processing_cutoff
         repair = None
-        for error in errors:
+        for error in ([] if processing_cutoff(runner.config.get('device_day', {})) else errors):
             if error['reason'] == 'FileNotFoundError' and self.repair_after.get(error['archive'], 0) < progress['observed_at']:
                 self.repair_after[error['archive']] = progress['observed_at'] + 300
                 repair = repair_missing_index(runner, error['archive'])

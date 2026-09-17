@@ -4,6 +4,20 @@ from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 
+def processing_cutoff(settings):
+    value = settings.get('process_since_us')
+    if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value <= 0):
+        raise ValueError('device_day.process_since_us must be a positive Unix microsecond timestamp')
+    return value
+
+
+def in_processing_scope(settings, record):
+    """Include captures overlapping the fixed cutover, never late old uploads."""
+    cutoff = processing_cutoff(settings)
+    return cutoff is None or max(record.get('recording_start_us') or 0,
+                                 record.get('recording_end_us') or 0) >= cutoff
+
+
 def priority_date(runtime_root):
     """Read the operator's backfill preference without altering input identity."""
     try:

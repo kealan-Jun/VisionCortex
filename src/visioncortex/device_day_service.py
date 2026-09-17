@@ -188,6 +188,8 @@ class DeviceDayService:
         # Existing retained media consume no additional original-copy allowance.
         pending = {r["recording_id"]: r for r in runner.queues["retention"].pending()}
         pending.update({r["recording_id"]: r for r in inventory.get("recordings", [])})
+        from .device_day_schedule import in_processing_scope
+        pending = {key: record for key, record in pending.items() if in_processing_scope(runner.settings, record)}
         sizes = []
         for record in sorted(pending.values(), key=lambda r: (-r.get("size_bytes", 0), r["recording_start_us"])):
             if not record.get("processable", record.get("available")) or record.get("configured_role") not in {"first_person", "third_person"}:
@@ -242,10 +244,27 @@ class DeviceDayService:
             resume_pending(runner)
             from .publication_journal import PublicationJournal, reconcile
             reconcile(runner)
-            capture = reconcile_capture_files(runner)
-            reconcile_outputs(runner)
+            from .device_day_schedule import in_processing_scope, processing_cutoff
+            if processing_cutoff(runner.settings):
+                # Live-only mode must not walk or republish historical archives.
+                from .device_day_capture_files import retain_capture_files, publish_capture_catalog
+                from .observed_inventory import read_inventory
+                capture, layouts = [], {}
+                for record in read_inventory(runner.runtime_root)['recordings']:
+                    if in_processing_scope(runner.settings, record):
+                        reference = retain_capture_files(runner, record)
+                        if reference:
+                            capture.append({'recording_id': record['recording_id'], 'manifest': reference})
+                            layout = runner.layout(record)
+                            layouts[layout.name] = layout
+                for layout in layouts.values():
+                    publish_capture_catalog(runner, layout)
+            else:
+                capture = reconcile_capture_files(runner)
+                reconcile_outputs(runner)
             return {"capture_files": capture,
-                    "pending_publications": bool(PublicationJournal(runner.runtime_root).pending(1))}
+                    "pending_publications": bool(PublicationJournal(runner.runtime_root).pending(
+                        1, since_us=processing_cutoff(runner.settings)))}
         def run_stage(runner, inventory, stage):
             from .device_day_night_schedule import stage_admitted, night_schedule
             if not stage_admitted(runner.config, stage):
@@ -359,15 +378,22 @@ class DeviceDayService:
                         if gate.blocks("understanding") and time.time() >= gate.state().get("next_probe_at", 0):
                             probe_job = probe_worker.submit(gate.probe_if_due)
                     inventory = observed_inventory
-                    records = {r["recording_id"]: r for r in inventory["recordings"]}
+                    from .device_day_schedule import in_processing_scope, processing_cutoff
+                    records = {r["recording_id"]: r for r in inventory["recordings"]
+                               if in_processing_scope(self._runner.settings, r)}
                     for request_path in sorted((self._runner.runtime_root / "requests").glob("*.json")):
                         request = read_json(request_path)
                         if request.get("status") not in {"queued", "running"}:
                             continue
-                        if request["status"] == "running" and self._request_complete(request):
+                        selected = [r for r in request['recordings'] if in_processing_scope(self._runner.settings, r)]
+                        if not selected:
+                            continue
+                        # A partly paused request cannot be declared complete.
+                        scoped_request = len(selected) == len(request['recordings'])
+                        if scoped_request and request["status"] == "running" and self._request_complete(request):
                             atomic_json(request_path, request | {"status": "completed"})
                             continue
-                        for record in request["recordings"]:
+                        for record in selected:
                             records.setdefault(record["recording_id"], record | {
                                 "processing_priority": 1 if request.get("kind") == "historical_backfill" else 0})
                         if request["status"] == "queued":
@@ -410,13 +436,15 @@ class DeviceDayService:
                         except Exception as exc:
                             results['timeline'] = {'status': 'failed', 'error_type': type(exc).__name__}
                         timeline_job = None
-                    if timeline_job is None and time.monotonic() - last_timeline >= 30 and records:
+                    if timeline_job is None and time.monotonic() - last_timeline >= 5 and records:
                         from .device_day_timeline import refresh_timeline
                         pending_days = invalidations.pending()
                         # Historical local caches get a one-time bootstrap. No
                         # new capture means no recurring all-date recomputation.
                         days = sorted({archive_name(r['camera_key'], r['recording_start_us'])[:10]
                                        for r in records.values() if r.get('recording_start_us')})
+                        if processing_cutoff(self._runner.settings):
+                            pending_days = [item for item in pending_days if item['day'] in days]
                         missing = [d for d in days if not (self._runner.runtime_root / 'DayTimeline' / f'{d}.json').is_file()]
                         day = pending_days[0]['day'] if pending_days else (sorted(timeline_pending)[0] if timeline_pending else (missing[0] if missing else None))
                         if day:
@@ -427,6 +455,8 @@ class DeviceDayService:
                     publication_dirty = publication_dirty or bool(changed_stages)
                     storage_wait = results.get("retention", {}).get("status") == "waiting_for_storage"
                     self.last_result = {"schema_version": VERSION, "status": "waiting_for_storage" if storage_wait else "running" if jobs else "waiting_for_nas_monitor",
+                                        "process_since_us": processing_cutoff(self._runner.settings),
+                                        "historical_backfill": "paused" if processing_cutoff(self._runner.settings) else "enabled",
                                         "stages": results, "parallel_capacity": dict(capacities),
                                         "queue": self._runner.queue_snapshot(),
                                         "capture_deletion": "disabled_by_user"}
@@ -439,7 +469,7 @@ class DeviceDayService:
                             results["publication"] = {"status": "failed", "error_type": type(exc).__name__}
                             publication_dirty = True
                         publication_job = None
-                    if publication_job is None and publication_dirty and time.monotonic() - last_publication >= 30:
+                    if publication_job is None and publication_dirty and time.monotonic() - last_publication >= 5:
                         publication_job = workers.submit(publish, self._runner)
                         last_publication = time.monotonic()
                         publication_dirty = False
@@ -592,13 +622,16 @@ def install_routes(app, settings_factory, service):
         for record in data.get("recordings", []):
             transcript = record.get("transcription") or {}
             comments = transcript.get("comments") or []
-            if not comments:
+            if not comments and not transcript.get('transcript_file'):
                 continue
-            source = comments[0].get("audio_ref")
+            source = comments[0].get("audio_ref") if comments else next(
+                (s['retained'] for s in record.get('sources', []) if s.get('kind') == 'audio_audio'), None)
             player = f'<audio controls preload="none" src="{href(source["path"])}"></audio>' if source else ''
+            summary = transcript.get('transcript_file')
+            download = f'<p><a href="{href(summary["path"])}">完整录音识别文字与状态</a></p>' if summary else ''
             paragraphs = ''.join(f'<p><strong>{clock(c["start_us"])}</strong> {html.escape(c["text"])} '
                                  f'<a href="{href(c["transcript_path"])}">识别来源</a></p>' for c in comments)
-            sections.append(f'<section>{player}{paragraphs}</section>')
+            sections.append(f'<section>{player}{download}{paragraphs}</section>')
         return '<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' \
                '<title>录音识别</title><style>body{font:16px/1.8 system-ui;max-width:1000px;margin:40px auto;padding:20px}section{border-top:1px solid #ccc;padding-top:20px}audio{width:100%}</style>' \
                f'<a href="/device-days">返回设备日归档</a><h1>{html.escape(name)} 录音识别</h1><p>STT自动识别，未经人工复核；不能仅据录音确认实验动作。时间对齐依据保留在识别来源中。</p>' \

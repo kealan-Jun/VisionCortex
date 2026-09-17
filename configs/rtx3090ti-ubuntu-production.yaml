@@ -15,7 +15,7 @@ device_day:
   enabled: true
   camera_lanes: true
   night_processing:
-    enabled: true
+    enabled: false  # New slices proceed through every stage immediately.
     timezone: Asia/Shanghai
     start: "20:30"
     end: "08:00"
@@ -23,6 +23,9 @@ device_day:
   failure_retry_limit: 3
   preprocessing_only: false
   start_date: null
+  # Fixed user cutover: 2026-09-17 17:28:26 Asia/Shanghai. Include an active
+  # slice crossing this instant; preserve but do not replay earlier queues.
+  process_since_us: 1789637306000000
   delete_capture_sources: false  # Legacy unlink-only deletion remains prohibited.
   capture_video_link_cleanup:
     enabled: false  # Native SMB symlink probe currently fails; retain capture originals.
@@ -42,10 +45,11 @@ project:
 # such recordings remain fail-closed instead of being guessed from its name.
 speech_recognition:
   enabled: true
-  # Explicit local ASR selection, restored by the user on 2026-09-17.
-  # Cloud connection verification does not gate this CPU-only worker.
-  provider: faster_whisper
-  model: faster-whisper-small
+  # 2026-09-17: user restored Aliyun credit and requested fast, accurate ASR.
+  # Fun Flash: 90-second real sample / 15 phrases in 5.75 seconds locally measured.
+  provider: aliyun_qwen
+  model: fun-asr-flash-2026-06-15
+  adapter_sha256: 888cc607b9243b31571c51d8cd8989e342f544263a8e133b5afd50426dad54d7
   max_audio_seconds: 180
   python_executable: /srv/sentinel-data/VisionCortex3090Ti/Runtime/ASR-Pilot/.venv/bin/python
   model_directory: /srv/sentinel-data/VisionCortex3090Ti/Models/Speech/faster-whisper-small/536b0662742c02347bc0e980a01041f333bce120

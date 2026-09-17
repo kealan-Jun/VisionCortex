@@ -520,7 +520,7 @@ class DeviceDayRunner:
                                            "sources": retained.get("sources", []),
                                            "processing": {k: visual.get(k) for k in ("status", "source_duration_ms", "batches", "scan_reports", "audit_artifacts", "clock_mapping")},
                                            "transcription": {k: stages.get("stt", {}).get(k) for k in
-                                                             ("status", "outcome", "model_invocation", "comments", "chunks")},
+                                                             ("status", "outcome", "model_invocation", "comments", "chunks", "transcript_file")},
                                            "stages": {s: {k: value.get(k) for k in ("status", "key", "message", "completed_at")}
                                                       for s, value in stages.items()}})
                         visual = stages.get("vision") or {}
@@ -608,7 +608,7 @@ class DeviceDayRunner:
             lock.release()
 
     def _build_stage_inventory(self, inventory, stage, date, stop_event=None):
-        from .device_day_schedule import priority_date, refresh_queue_priorities
+        from .device_day_schedule import in_processing_scope, priority_date, refresh_queue_priorities
         focus_date = priority_date(self.runtime_root)
         refresh_queue_priorities(self.queues[stage], focus_date)
         from .input_availability import Availability, configured_record
@@ -616,6 +616,7 @@ class DeviceDayRunner:
         self.queues[stage].sync_availability(states)
         durable = {r["recording_id"]: r for r in self.queues[stage].pending()}
         durable.update({r["recording_id"]: r for r in inventory.get("recordings", [])})
+        durable = {key: record for key, record in durable.items() if in_processing_scope(self.settings, record)}
         durable = {key: configured_record(self.config, record) for key, record in durable.items()}
         # Local durable parent status is a cheap readiness prefilter. Validate
         # the exact NAS receipt/key below only after upstream has produced it.

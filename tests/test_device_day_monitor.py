@@ -18,6 +18,30 @@ def wait_until(predicate):
         time.sleep(.01)
 
 
+def test_live_only_monitor_keeps_old_closed_folders_out_of_scans(tmp_path, monkeypatch):
+    from visioncortex.observed_inventory import observe
+    old = {'recording_id': 'old', 'recording_start_us': 10, 'recording_end_us': 20,
+           'processable': True, 'video_path': str(tmp_path / 'camera/old/rgb.mp4')}
+    observe(tmp_path / 'device-day', {'recordings': [old]})
+    settings = {'storage': {'local_runtime_root': str(tmp_path)},
+                'device_day': {'process_since_us': 30}, 'collection_ingest': {}}
+    stop = threading.Event()
+    monkeypatch.setattr(module, '_root', lambda _: tmp_path)
+    monkeypatch.setattr(module, '_camera_directories', lambda *a: [tmp_path / 'camera'])
+    monkeypatch.setattr(module, '_recording_batches', lambda *a: [])
+    seen = []
+    def scan(config, on_record, skip_folders):
+        seen.append(skip_folders)
+        stop.set()
+        return {'errors': []}
+    monkeypatch.setattr(module, 'scan_recordings', scan)
+    monitor = module.CameraMonitor(settings, stop, lambda *a: None)
+    monitor.poll()
+    monitor.threads['camera', 'live'].join(2)
+    assert set(monitor.threads) == {('camera', 'live')}
+    assert seen == [{str(tmp_path / 'camera/old')}]
+
+
 def test_concurrent_inventory_writers_preserve_every_camera(tmp_path, monkeypatch):
     from visioncortex import device_day_service, device_day_latency
     config = {'device_day': {'enabled': True}, 'storage': {'local_runtime_root': str(tmp_path)}}
