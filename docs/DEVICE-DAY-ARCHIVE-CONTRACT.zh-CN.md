@@ -13,7 +13,9 @@
 `Comment/<开始时分秒.微秒>_<结束时分秒.微秒>/Transcript.json`、
 `Transcript.txt`；`MultimodalUnderstanding/<开始时分秒.微秒>_<结束时分秒.微秒>/Understanding.json`。
 各目录 `Index.json` 列出内容路径，`Comment/TimeIndex.json` 的分离媒体流引用这些文件。
-原有 Stt/ClipUnderstanding 执行回执保留以兼容历史引用；查阅不再需要进入录音 ID 和版本哈希目录。
+STT 执行文件统一收进对应时间目录的 `Recognition/<版本>/`，外层不再保留第二个 `Stt` 入口。
+`Comment/LegacyPaths.json` 明确映射旧引用，历史读取器通过 `safe_child` 继续校验和解析原回执；
+迁移备份及清单保存在后台缓存，原始录音不移动、不删除。ClipUnderstanding 执行回执仍保留。
 这些入口是可原子更新的投影，不冒充不可变执行证据，不复制或改动原始媒体。
 
 后台每 5 秒发布已通过校验的理解窗口，即使同一原片后续窗口未完成或失败，
@@ -78,7 +80,10 @@ VisionCortexExperimentArchive/
 └── Comment/
     ├── Comment.jsonl                      # 该设备该时间的人的备注，按需产生
     ├── Protocol.json                      # 用户提供的protocol快照/版本，按需产生
-    ├── Stt/<recording_id>/<处理版本>/      # 自动识别，不冒充人的手写comment
+    ├── <采集开始时间>_<采集结束时间>/
+    │   ├── Transcript.json                # 直接读取的完整转写、状态及原音频引用
+    │   ├── Transcript.txt                 # 直接读取的文字
+    │   └── Recognition/<处理版本>/        # 自动识别执行文件，历史版本保留在同一时间入口内
     │   ├── Comments.json                  # 带时间、原录音引用与STT来源的机器comment
     │   ├── Transcript.txt                 # 本分片完整文字、绝对时间、原录音引用及空结果原因
     │   └── <片内开始时间>_<片内结束时间>/

@@ -62,7 +62,8 @@ def transcribe(config, layout, retention, key):
     sealed = {"folder": str(path.parent), "resolved_folder": str(path.parent.resolve()),
               "files": {path.name: {"size": source["retained"]["size_bytes"], "sha256": source["retained"]["sha256"]}},
               "audio_file": path.name, "start_global_us": origin, "playback_events": []}
-    root = layout.comments / "Stt" / recording["recording_id"] / key
+    from .device_day_content import time_folder
+    root = layout.comments / time_folder(recording['recording_start_us'], recording['recording_end_us']) / 'Recognition' / key
     duration, maximum = info["duration_seconds"], runtime["max_audio_seconds"]
     comments, artifacts, chunks, audit_artifacts = [], [], [], []
     for ordinal, (start, end) in enumerate(audio_windows(duration, maximum)):

@@ -552,6 +552,10 @@ class DeviceDayRunner:
                                 context = recording_context(day_context, record, stt)
                                 if self._accepts_receipt(semantic, self._key("understanding", record, {"vision": visual, "stt": stt, "context": context})):
                                     understandings.extend(semantic.get("understandings", []))
+                    from .device_day_content_paths import aliases, public_references
+                    mapping = aliases(layout.root)
+                    for row in recordings:
+                        row['transcription'] = public_references(row.get('transcription'), mapping)
                     frame_text = {observation["frame_id"]: observation["text"]
                                   for item in understandings for window in item.get("windows", [])
                                   for observation in window.get("frame_observations", [])}

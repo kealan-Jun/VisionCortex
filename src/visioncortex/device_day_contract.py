@@ -94,6 +94,11 @@ def safe_child(root: Path, relative: str) -> Path:
     parts = relative.split("/")
     if any(part in {"", ".", ".."} for part in parts):
         raise ValueError("Invalid archive-relative reference")
+    if relative.startswith('Comment/Stt/'):
+        from .device_day_content_paths import aliases, relocated
+        target = relocated(relative, aliases(root))
+        if target != relative:
+            return safe_child(root, target)
     path = root.joinpath(*parts)
     if not path.resolve().is_relative_to(root.resolve()):
         raise ValueError("Artifact reference escapes archive")

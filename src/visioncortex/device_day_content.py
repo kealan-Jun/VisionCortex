@@ -72,6 +72,10 @@ def with_partial_understandings(config, index):
                          for s in index.get('segments', [])]
     value['understandings'] = deepcopy(index.get('understandings', []))
     root = Path(config['storage']['archive_root']) / index['archive']
+    from .device_day_content_paths import aliases, public_references
+    mapping = aliases(root)
+    for row in value['recordings']:
+        row['transcription'] = public_references(row.get('transcription'), mapping)
     records = {r['recording_id']: r for r in index.get('recordings', [])}
     backend = config['storage'].get('local_cache_root')
     if backend:
