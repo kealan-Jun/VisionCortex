@@ -95,6 +95,9 @@ def attach_photos(config, result):
     """Use recorder filename time explicitly; upload mtime is never capture time."""
     from .device_day_schedule import processing_cutoff
     cutoff = processing_cutoff(config.get('device_day', {}))
+    if cutoff and result['end_us'] <= cutoff:
+        return result | {'photo_errors': [], 'photo_history_paused_before_us': cutoff,
+                         'photo_time_basis': 'capture_filename_seconds_not_verified_global_clock'}
     root = Path(config['collection_ingest']['source_root'])
     devices = {d['camera']: d for d in result['devices']}
     errors = []
@@ -133,4 +136,50 @@ def attach_photos(config, result):
     result.update(devices=sorted(devices.values(), key=lambda d: d['camera']), photo_errors=errors,
                   photo_time_basis='capture_filename_seconds_not_verified_global_clock',
                   photo_history_paused_before_us=cutoff)
+    return result
+
+
+def refresh_photo_index(config, camera, day=None):
+    """A per-camera background reader publishes references on local disk only."""
+    from copy import deepcopy
+    from .device_day_contract import atomic_json
+    from .device_day_timeline import day_bounds
+    day = day or datetime.now(ZoneInfo('Asia/Shanghai')).date().isoformat()
+    lo, hi = day_bounds(day)
+    selected = deepcopy(config)
+    selected['collection_ingest']['camera_role_map'] = {camera: config['collection_ingest']['camera_role_map'][camera]}
+    value = attach_photos(selected, {'date': day, 'start_us': lo, 'end_us': hi, 'devices': []})
+    value['observed_at'] = time.time()
+    path = Path(config['storage']['local_runtime_root'])/'device-day'/'CapturePhotos'/f'{day}_{camera}.json'
+    atomic_json(path, value)
+
+
+def indexed_photos(config, result):
+    """Never block an interactive time query on SMB photo discovery."""
+    from .device_day_contract import read_json
+    from .device_day_schedule import processing_cutoff
+    cutoff = processing_cutoff(config.get('device_day', {}))
+    result.update(photo_errors=[], photo_history_paused_before_us=cutoff,
+                  photo_time_basis='capture_filename_seconds_not_verified_global_clock')
+    if cutoff and result['end_us'] <= cutoff:
+        return result
+    devices = {d['camera']: d for d in result['devices']}
+    root = Path(config['storage']['local_runtime_root'])/'device-day'/'CapturePhotos'
+    for camera in config['collection_ingest'].get('camera_role_map', {}):
+        try:
+            index = read_json(root/f'{result["date"]}_{camera}.json')
+            result['photo_errors'].extend(index.get('photo_errors', []))
+            if time.time()-index.get('observed_at', 0) > 30:
+                result['photo_errors'].append({'camera': camera, 'status': 'photo_index_stale'})
+            for device in index['devices']:
+                for photo in device['photos']:
+                    stamp = photo['capture_us']
+                    if not result['start_us'] <= stamp < result['end_us'] or (cutoff and stamp < cutoff):
+                        continue
+                    target = devices.setdefault(camera, {'camera': camera, 'recordings': [], 'photos': []})
+                    target['photos'].append(photo | {'recording_ids': [r['recording_id'] for r in target['recordings']
+                                                                      if r['start_us'] <= stamp < r['end_us']]})
+        except (OSError, ValueError, KeyError):
+            result['photo_errors'].append({'camera': camera, 'status': 'photo_index_initializing'})
+    result['devices'] = sorted(devices.values(), key=lambda d: d['camera'])
     return result

@@ -189,7 +189,18 @@ class Knowledge:
             for row in events["events"]
             if row["state"] == "completed" and row["data"].get("archive")
         }
-        if time.monotonic() - self.last_sweep > 300 or not self.last_sweep:
+        from .device_day_schedule import processing_cutoff, in_processing_scope
+        if processing_cutoff(self.config.get('device_day', {})):
+            from .observed_inventory import read_inventory
+            from .device_day_contract import archive_name
+            root = Path(self.config['storage']['local_runtime_root'])/'device-day'
+            names = {archive_name(r['camera_key'], r['recording_start_us'])
+                     for r in read_inventory(root)['recordings']
+                     if in_processing_scope(self.config['device_day'], r)}
+            # Preserve already searchable historical evidence; avoid an initial
+            # all-archive sweep competing with newly written recorder slices.
+            result = self.refresh(stop=stop, archives=names) if names else 0
+        elif time.monotonic() - self.last_sweep > 300 or not self.last_sweep:
             result = self.refresh(stop=stop)
             if self.status()["health"]["state"] == "ready":
                 self.last_sweep = time.monotonic()

@@ -98,3 +98,21 @@ def test_no_source_link_escapes_archive_and_no_fabricated_days(tmp_path):
     changed['segments'][0]['key_frames'].append({'path':'ProcessedClips/<script>alert(1)</script>.jpg'})
     page=render(assemble(snapshot(cfg),[summarize(data['archive'],changed,cfg)],[]))
     assert '<script>alert(1)</script>' not in page
+
+
+def test_live_overview_preserves_historical_summary_without_opening_old_indexes(tmp_path, monkeypatch):
+    name = '2026-09-10_a_cam01'
+    root = tmp_path/'archive'
+    path = root/name/'ProcessedClips/Index.json'
+    atomic_json(path, index(name))
+    cfg = {'storage': {'local_runtime_root': str(tmp_path/'runtime')}}
+    runner = SimpleNamespace(config=cfg, archive_root=root, runtime_root=tmp_path/'runtime/device-day')
+    worker = ArchiveOverview()
+    worker.publish(runner)
+    cfg['device_day'] = {'process_since_us': 1789637306000000}
+    path.write_text('old NAS index deliberately unavailable')
+    result = worker.publish(runner)
+    assert result['active_segments'] == 1 and not result['errors']
+    import json
+    data = json.loads((runner.runtime_root/'ArchiveOverview.json').read_text())
+    assert data['days'][0]['archives'][0]['historical_snapshot']

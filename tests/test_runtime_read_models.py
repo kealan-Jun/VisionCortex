@@ -166,6 +166,21 @@ def test_input_reinspection_preserves_explicit_view_role(tmp_path, monkeypatch):
     assert Availability(reconciler.root).states()['r']['state'] == 'ready'
 
 
+def test_input_reinspection_skips_history_before_bounded_selection(tmp_path, monkeypatch):
+    reconciler, record, source, video = reconciler_fixture(tmp_path)
+    cutoff = record['recording_start_us']
+    reconciler.config['device_day'] = {'process_since_us': cutoff}
+    q = DeviceDayQueue(reconciler.root/'queue-retention.sqlite3')
+    for number in range(30):
+        q.enqueue(record | {'recording_id': f'old-{number:02d}', 'recording_start_us': cutoff-100,
+                            'recording_end_us': cutoff-1, 'video_path': str(source/f'old-{number}.mp4')}, 'old')
+    calls = []
+    monkeypatch.setattr('visioncortex.nas_recordings._inspect', lambda *args: calls.append(args[1]) or record.copy())
+    reconciler.tick()
+    assert calls == [video]
+    assert set(Availability(reconciler.root).states()) == {'r'}
+
+
 def test_input_sidecar_race_is_not_video_deletion_and_outage_preserves_state(tmp_path, monkeypatch):
     reconciler, record, source, video = reconciler_fixture(tmp_path)
     def missing_sidecar(*args):

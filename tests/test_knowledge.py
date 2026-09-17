@@ -41,6 +41,23 @@ def setup_index(tmp_path):
     return store, path
 
 
+def test_live_tick_preserves_old_search_index_without_reading_old_archive(tmp_path, monkeypatch):
+    store, path = setup_index(tmp_path)
+    store.refresh()
+    from visioncortex.observed_inventory import observe
+    from pathlib import Path
+    start = 1789638647000000
+    store.config['device_day'] = {'process_since_us': start}
+    observe(Path(store.config['storage']['local_runtime_root'])/'device-day', {'recordings': [
+        {'recording_id': 'old', 'camera_key': 'cam', 'recording_start_us': start-100, 'recording_end_us': start-1},
+        {'recording_id': 'new', 'camera_key': 'new_cam01', 'recording_start_us': start, 'recording_end_us': start+100}]})
+    calls = []
+    monkeypatch.setattr(store, 'refresh', lambda **kwargs: calls.append(kwargs['archives']) or 0)
+    store.tick()
+    assert calls == [{'2026-09-17_new_cam01'}]
+    assert store.search('移液器')['items']
+
+
 def test_both_layouts_incremental_query_and_version_invalidation(tmp_path):
     store, path = setup_index(tmp_path)
     folder = store.root / "offline/JSON-Config-Files"

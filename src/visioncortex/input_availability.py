@@ -123,12 +123,17 @@ class Reconciler:
             availability.migrate_legacy(queue)
             self.migrated = True
         states = availability.states()
+        from .device_day_schedule import processing_cutoff, in_processing_scope
+        cutoff = processing_cutoff(self.config.get('device_day', {}))
+        scope_sql = (" AND (json_extract(payload,'$.recording_start_us')>=? "
+                     "OR json_extract(payload,'$.recording_end_us')>=?)") if cutoff else ""
+        scope_args = (cutoff, cutoff) if cutoff else ()
         with queue.connect() as db:
             rows = list(
                 db.execute(
                     "SELECT * FROM recordings WHERE status NOT IN ('completed','running') "
-                    "AND recording_id>? ORDER BY recording_id LIMIT 24",
-                    (self.cursor,),
+                    "AND recording_id>?" + scope_sql + " ORDER BY recording_id LIMIT 24",
+                    (self.cursor, *scope_args),
                 )
             )
         if not rows:
@@ -142,7 +147,8 @@ class Reconciler:
         with queue.connect() as db:
             extra = list(db.execute(
                 "SELECT * FROM recordings WHERE status NOT IN ('completed','running') "
-                "AND recording_id IN (SELECT value FROM json_each(?))", (json.dumps(priority),)))
+                "AND recording_id IN (SELECT value FROM json_each(?))" + scope_sql,
+                (json.dumps(priority), *scope_args)))
         for key in priority:
             self.last_priority_check[key] = current
         if rows:
@@ -205,6 +211,8 @@ class Reconciler:
             )
         for row in completed:
             record = json.loads(row["payload"])
+            if not in_processing_scope(self.config.get('device_day', {}), record):
+                continue
             if states.get(record["recording_id"], {}).get("state", "ready") != "ready":
                 availability.mark(
                     record, "ready", reason="verified_retention_completed"

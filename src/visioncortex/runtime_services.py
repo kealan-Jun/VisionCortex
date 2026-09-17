@@ -130,6 +130,11 @@ def services(config):
         ),
         ("input-availability", 5, availability.tick),
     ]
+    if config.get('device_day', {}).get('enabled'):
+        from .device_day_time_lookup import refresh_photo_index
+        for camera in config.get('collection_ingest', {}).get('camera_role_map', {}):
+            tasks.append(('capture-photos-'+camera, 5,
+                          lambda camera=camera: refresh_photo_index(config, camera)))
     subscriptions = config.get("runtime", {}).get("result_callbacks", [])
     if subscriptions:
         tasks.append(("result-callbacks", 5, lambda: events.dispatch(subscriptions)))

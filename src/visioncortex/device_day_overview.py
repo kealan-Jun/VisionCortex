@@ -99,8 +99,22 @@ class ArchiveOverview:
         except (OSError, sqlite3.Error, ValueError, KeyError):
             progress.setdefault('errors', []).append('持续运行观察记录暂不可用')
         archives, errors, seen = [], [], set()
+        from .device_day_schedule import processing_cutoff, in_processing_scope
+        if processing_cutoff(runner.config.get('device_day', {})):
+            from .observed_inventory import read_inventory
+            from .device_day_contract import archive_name
+            names = {archive_name(r['camera_key'], r['recording_start_us'])
+                     for r in read_inventory(runner.runtime_root)['recordings']
+                     if in_processing_scope(runner.config['device_day'], r)}
+            previous_path = runner.runtime_root/'ArchiveOverview.json'
+            previous = read_json(previous_path) if previous_path.is_file() else {}
+            archives = [a | {'historical_snapshot': True} for d in previous.get('days', [])
+                        for a in d['archives'] if a['archive'] not in names]
+            roots = [runner.archive_root/name for name in sorted(names, reverse=True)]
+        else:
+            roots = sorted(runner.archive_root.iterdir(), reverse=True)
         # Indexes and file metadata only; never frames/media or model calls.
-        for root in sorted(runner.archive_root.iterdir(), reverse=True):
+        for root in roots:
             try:
                 validate_archive_name(root.name)
             except ValueError:

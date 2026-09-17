@@ -8,8 +8,8 @@ from fastapi.testclient import TestClient
 import pytest
 
 from visioncortex.device_day_contract import atomic_json
-from visioncortex.device_day_timeline import build_timeline, day_bounds, install_routes, refresh_timeline
-from visioncortex.device_day_time_lookup import attach_photos, photo_path, query_materials
+from visioncortex.device_day_timeline import build_timeline, day_bounds, install_routes, refresh_timeline, query_timeline
+from visioncortex.device_day_time_lookup import attach_photos, photo_path, query_materials, refresh_photo_index, indexed_photos
 
 DAY = '2026-09-17'
 BASE = day_bounds(DAY)[0] + 12 * 3600 * 1000000
@@ -104,6 +104,7 @@ def test_lookup_api_returns_existing_paths_without_mutating_archive(default_conf
     atomic_json(path, index())
     before = path.read_bytes()
     create_photo(config)
+    refresh_photo_index(config, 'camera_cam01', DAY)
     app = FastAPI()
     install_routes(app, lambda: config)
     client = TestClient(app)
@@ -124,3 +125,19 @@ def test_live_timeline_refresh_writes_only_runtime_index(tmp_path, monkeypatch):
     config = {'storage': {'local_runtime_root': str(tmp_path)}, 'device_day': {'process_since_us': BASE}}
     assert refresh_timeline(config, DAY)['publication_pending'] == []
     assert (tmp_path/'device-day/DayTimeline'/f'{DAY}.json').is_file()
+
+
+def test_queries_use_published_local_indexes_without_nas_scans(tmp_path, monkeypatch):
+    config = photo_config(tmp_path)
+    config['storage'] = {'local_runtime_root': str(tmp_path/'runtime')}
+    create_photo(config)
+    refresh_photo_index(config, 'camera_cam01', DAY)
+    timeline = build_timeline(DAY, [(ARCHIVE, index())])
+    atomic_json(tmp_path/'runtime/device-day/DayTimeline'/f'{DAY}.json', timeline)
+    def blocked(*args, **kwargs):
+        pytest.fail('Interactive query must not wait for NAS discovery')
+    monkeypatch.setattr('visioncortex.device_day_timeline.load_timeline', blocked)
+    monkeypatch.setattr('visioncortex.device_day_time_lookup.attach_photos', blocked)
+    result = indexed_photos(config, query_materials(query_timeline(config, DAY), BASE+3000000, 2))
+    assert result['devices'][0]['photos'][0]['recording_ids'] == ['slice']
+    assert not result['photo_errors']

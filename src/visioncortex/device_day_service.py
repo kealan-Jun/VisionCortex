@@ -344,7 +344,7 @@ class DeviceDayService:
                             next_poll[slot] = time.monotonic() + (0 if changed else 30)
                             if changed:
                                 changed_stages.add(stage)
-                                if stage in {'vision', 'understanding', 'stt'}:
+                                if stage in {'retention', 'vision', 'understanding', 'stt'}:
                                     timeline_pending.update(item['archive'][:10] for item in results[stage].get('results', [])
                                                             if item.get('archive'))
                     from .device_day_contract import DEPENDENCIES

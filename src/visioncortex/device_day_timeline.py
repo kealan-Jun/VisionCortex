@@ -197,19 +197,36 @@ def refresh_timeline(config, day):
     return {'date': day, 'link_count': len(result['cross_view_links']), 'publication_pending': publication_pending}
 
 
+def query_timeline(config, day):
+    """Use the worker's atomic local index; do not reread NAS per UI poll."""
+    import time
+    day_bounds(day)
+    path = Path(config['storage']['local_runtime_root'])/'device-day'/'DayTimeline'/f'{day}.json'
+    try:
+        value = read_json(path)
+        if value.get('date') == day and 'media_recordings' in value:
+            return value | {'index_updated_at': path.stat().st_mtime,
+                            'index_age_seconds': max(0, time.time()-path.stat().st_mtime)}
+    except (OSError, ValueError):
+        pass
+    return load_timeline(config, day)
+
+
 def install_routes(app, settings_factory):
     from .device_day_progress import ProgressPoller, ProgressUnavailable
     progress_poller = ProgressPoller(settings_factory)
 
     @app.get('/api/day-timeline/{day}/at')
     def materials_at(day: str, at_us: int, duration_seconds: float = 60):
-        from .device_day_time_lookup import query_materials, attach_photos
+        from .device_day_time_lookup import query_materials, indexed_photos
         config = settings_factory()
         try:
             # Validate before any NAS reads, including malformed time windows.
             query_materials({'date': day}, at_us, duration_seconds)
-            result = query_materials(load_timeline(config, day), at_us, duration_seconds)
-            return attach_photos(config, result)
+            timeline = query_timeline(config, day)
+            result = query_materials(timeline, at_us, duration_seconds)
+            result['index_updated_at'] = timeline.get('index_updated_at')
+            return indexed_photos(config, result)
         except ValueError as exc:
             raise HTTPException(400, '请使用当天的全局时间戳和不超过一小时的查询范围') from exc
         except OSError as exc:
@@ -266,7 +283,7 @@ def install_routes(app, settings_factory):
             day_bounds(day)
         except ValueError as exc:
             raise HTTPException(400, '日期应为 YYYY-MM-DD') from exc
-        result = load_timeline(settings_factory(), day)
+        result = query_timeline(settings_factory(), day)
         path = Path(settings_factory()['storage']['local_runtime_root'])/'device-day'/'DayTimeline'/f'{day}.json'
         if path.is_file():
             previous = read_json(path)
