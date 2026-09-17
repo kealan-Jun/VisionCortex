@@ -26,6 +26,9 @@ def build_file_index(config, index, photos):
         return {'kind': kind, 'recording_id': identifier, 'start_us': start, 'end_us': end,
                 'start_time': time_text(start), 'end_time': time_text(end), **values}
     entries, records = [], {}
+    readable = index.get('readable_content') or {}
+    readable_audio = {r['recording_id']: r for r in readable.get('audio', [])}
+    readable_visual = {r['segment_id']: r for r in readable.get('multimodal', [])}
     for row in index.get('recordings', []):
         if not in_processing_scope(config.get('device_day', {}),
                 {'recording_start_us': row.get('start_us'), 'recording_end_us': row.get('end_us')}):
@@ -76,7 +79,9 @@ def build_file_index(config, index, photos):
             # Existing understanding consumes video AND comments. A reference
             # to that output must never be labeled pure video or verbatim audio.
             entries.append(entry('multimodal_result', rid, segment['start_us'], segment['end_us'],
-                segment_id=segment['segment_id'], content_source='multimodal_context',
+                segment_id=segment['segment_id'], content_source=meaning.get('content_source', 'multimodal_context'),
+                status=meaning.get('status', 'completed'),
+                content_file=reference(readable_visual.get(segment['segment_id'], {}).get('content')),
                 files=[reference(w['model_receipt']) for w in meaning.get('windows', []) if w.get('model_receipt')],
                 inputs=[reference(w['input']) for w in meaning.get('windows', []) if w.get('input')],
                 physical_action_confirmed=False))
@@ -109,12 +114,15 @@ def build_file_index(config, index, photos):
                 'status': stt.get('status'), 'outcome': stt.get('outcome'),
                 'model_invocation': stt.get('model_invocation', 'NOT_PROVEN'),
                 'text_file': reference(stt.get('transcript_file')),
+                'content_file': reference(readable_audio.get(item['recording_id'], {}).get('content')),
+                'readable_text_file': reference(readable_audio.get(item['recording_id'], {}).get('text')),
                 'sentences': [e for e in entries if e['kind'] == 'speech' and e['recording_id'] == item['recording_id']]}})
         elif kind in {'key_frame', 'scene_frame', 'voice_photo'}:
             streams['images'].append(item)
         elif kind == 'multimodal_result':
             streams['multimodal'].append(item)
     return {'schema_version': 'visioncortex-file-time-index/2', 'archive': archive,
+            'readable_content': index.get('readable_content', {}),
             'source_index_updated_at': index.get('updated_at'),
             'source_index': {'path': 'ProcessedClips/Index.json', 'path_base': 'device_day'},
             'cross_camera_alignment_verified': False, 'evidence_status': 'PARTIAL_EVIDENCE',
@@ -187,15 +195,35 @@ class FileIndexPublisher:
                             'evidence_status': 'PARTIAL_EVIDENCE'})
                     stat = path.stat()
                     version = (stat.st_mtime_ns, stat.st_size, photo_version)
+                    content_enabled = self.config.get('device_day', {}).get('readable_content_enabled', False)
+                    index = read_json(path) if content_enabled else None
+                    if content_enabled:
+                        from .device_day_content import content_revision
+                        version += (content_revision(self.config, index),)
                     if self.versions.get(name) == version:
                         continue
-                    index = read_json(path)
+                    index = index or read_json(path)
                     before = index.get('time_index')
+                    if content_enabled:
+                        from .device_day_content import publish_content, with_partial_understandings
+                        from .device_day_contract import DeviceDayLayout
+                        from .device_day_reports import render_day
+                        original = index
+                        index = with_partial_understandings(self.config, index)
+                        index['readable_content'] = publish_content(self.config, index)
+                        if index.get('recordings'):
+                            layout = DeviceDayLayout(Path(self.config['storage']['archive_root']), name[11:],
+                                index['recordings'][0]['start_us'])
+                            render_day(layout, index)
                     publish_file_index(self.config, index, photos)
                     if before != index['time_index']:
-                        atomic_json(path, index)
+                        if content_enabled:
+                            original['time_index'] = index['time_index']
+                        atomic_json(path, original if content_enabled else index)
                     stat = path.stat()
                     self.versions[name] = (stat.st_mtime_ns, stat.st_size, photo_version)
+                    if content_enabled:
+                        self.versions[name] += (version[-1],)
             except BlockingIOError:
                 continue  # Producer still publishing; retry without dropping references.
             except OSError as exc:

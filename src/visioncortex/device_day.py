@@ -283,6 +283,10 @@ class DeviceDayRunner:
         sources = [directory / "device_day_contract.py", directory / "device_day_verification.py", Path(__file__)]
         from .stage_dependencies import DEVICE_SOURCES as dependencies
         sources.extend(directory / f"{name}.py" for name in dependencies[stage])
+        from .device_day_understanding import enabled as full_coverage_enabled
+        full_coverage = full_coverage_enabled(self.settings, recording)
+        if stage == 'understanding' and full_coverage:
+            sources.append(directory / 'device_day_understanding.py')
         keys = ("performance", "segmentation", "models", "alignment", "continuity") if stage == "vision" else ()
         from .device_day_runtime_identity import compatible_performance
         settings = {key: compatible_performance(self.config.get(key)) if key == "performance" else self.config.get(key) for key in keys}
@@ -306,6 +310,10 @@ class DeviceDayRunner:
         semantic_keys = {"vision": ("chunk_seconds", "inactive_frames"),
                          "understanding": ("inactive_frames", "active_frames_per_window", "active_window_seconds")}
         stage_settings.update({k: self.settings.get(k) for k in semantic_keys.get(stage, ())})
+        if stage == 'understanding' and full_coverage:
+            stage_settings.update({k: self.settings.get(k) for k in (
+                'understanding_coverage_since_us', 'understanding_frames_per_request',
+                'understanding_window_seconds', 'inactive_sample_seconds')})
         if stage == "retention":
             def retention_identity(value):
                 if isinstance(value, list):
@@ -315,9 +323,15 @@ class DeviceDayRunner:
                 return value
             inputs = retention_identity(inputs)
         from .device_day_runtime_identity import compatible_runtime_hash
+        def code_hash(path):
+            checksum = compatible_runtime_hash(path, self._hash(path))
+            if path.name == 'device_day_models.py' and (stage == 'vision' or stage == 'understanding' and not full_coverage):
+                from .device_day_runtime_identity import independent_vision_backend_hash
+                return independent_vision_backend_hash(path, checksum, legacy_understanding=stage == 'understanding')
+            return checksum
         descriptor = {"stage": stage, "source": recording["recording_id"] if stage == "vision" else recording["source_signature"],
                       "inputs": inputs, "settings": settings, "device_day": stage_settings,
-                      "code": [self._execution_identity if p == Path(__file__) else compatible_runtime_hash(p, self._hash(p)) for p in sources]}
+                      "code": [self._execution_identity if p == Path(__file__) else code_hash(p) for p in sources]}
         descriptor["code"] = [value for value in descriptor["code"] if value is not None]
         key = digest(descriptor)
         # Exact compatibility with the pre-verifier retention implementation:

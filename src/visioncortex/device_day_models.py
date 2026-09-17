@@ -710,6 +710,9 @@ class DeviceDayModels:
                 "physical_action_confirmed": False}
 
     def understand(self, layout, recording, vision, context, key):
+        from .device_day_understanding import enabled, understand
+        if enabled(self.settings, recording):
+            return understand(self, layout, recording, vision, context, key)
         from .mllm import ArkAnalyzer
         analyzer = ArkAnalyzer(self.config)
         artifacts, understandings = [], []

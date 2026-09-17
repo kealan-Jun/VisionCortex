@@ -38,3 +38,23 @@ def compatible_performance(performance):
         legacy = {k:v for k,v in performance.items() if k != "shared_inference_enabled"}
         return dict(legacy, coarse_decode_lanes=["cuda"], cpu_decode_threads=12)
     return performance
+
+
+def independent_vision_backend_hash(path, checksum, *, legacy_understanding=False):
+    """An understanding-only edit cannot invalidate identical CV code.
+
+    Compare the complete AST except the understand method against the reviewed
+    baseline; any other edit fails closed. Only callers whose stage uses the
+    unchanged CV/legacy path may request this identity.
+    """
+    import ast
+    from .device_day_cache_identity import _normalized
+    if legacy_understanding and checksum != 'fd755dac9528bbc51d868de8ce8b08ed29cf43da4f1724c411af9927d8d2c4e4':
+        return checksum
+    tree = ast.parse(Path(path).read_text())
+    backend = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'DeviceDayModels')
+    backend.body = [n for n in backend.body if not isinstance(n, ast.FunctionDef) or n.name != 'understand']
+    fingerprint = hashlib.sha256(json.dumps(_normalized(tree), sort_keys=True).encode()).hexdigest()
+    if fingerprint == '0d5a14817187f10a3c9b61e218a841cfbdb4544a627389a4db0d093d43c7bee6':
+        return '3dda21db1a138404601bba1594ffb23f10eb97b933f15e78a46762d1c13a5e75'
+    return checksum

@@ -100,7 +100,10 @@ def render_day(layout, index):
                 paragraphs.append(f'<p class="uncertain">{text(uncertainty)}</p>')
                 uncertainty_rows.append(f'<li>{text(label)}：{text(uncertainty)}</li>')
         if not understanding:
-            paragraphs.append('<p>此片段的多模态理解尚未完成。</p>')
+            state = (recording.get('stages', {}).get('understanding') or {})
+            paragraphs.append(f'<p>此片段的多模态理解尚未完成。状态：{text(state.get("status", "pending"))}；{text(state.get("message"))}</p>')
+        elif understanding.get('status') == 'partial':
+            paragraphs.append('<p>已展示完成的理解窗口；其余窗口仍待完成，不能视为全片理解完成。</p>')
         frames = []
         for frame in [*segment["key_frames"], *segment["scene_frames"]]:
             frame_label = "动作关键帧" if frame.get("frame_kind") == "action_keyframe" else "场景采样帧"
@@ -117,12 +120,15 @@ def render_day(layout, index):
         briefs.append(f'<article><h3>{text(label)}</h3>{"".join(paragraphs)}<p>{video_link} · {metadata_link}</p>'
                       f'<details><summary>本时段动作关键帧与场景采样理解</summary><div class="frames">{"".join(frames)}</div></details></article>')
         daily_entries.append({"segment_id": segment["segment_id"], "label": label,
+                              "start_us": segment["start_us"], "end_us": segment["end_us"],
+                              "understanding_status": (understanding or {}).get('status', 'completed' if understanding else 'pending'),
                               "understanding": understanding, "key_frames": segment["key_frames"], "scene_frames": segment["scene_frames"],
                               "source_ref": segment["source_ref"], "segment_json": segment["json_path"],
                               "transcription": recording.get("transcription"), "audio": recording.get("audio")})
     pending = sum(1 for record in index["recordings"]
                   if not any(s["recording_id"] == record["recording_id"] for s in index["segments"])
-                  or any(s["recording_id"] == record["recording_id"] and s["segment_id"] not in by_segment
+                  or any(s["recording_id"] == record["recording_id"] and (s["segment_id"] not in by_segment
+                         or by_segment[s["segment_id"]].get('status') == 'partial')
                          for s in index["segments"]))
     overview = f'<p>{len(index["recordings"])} 个采集分片；{len(index["segments"])} 个保留区间；{pending} 个分片仍有阶段待完成。</p><p>有实验活动 {sum(s["activity"] == "active" for s in index["segments"])} 段，无活动／无关区间 {sum(s["activity"] == "inactive" for s in index["segments"])} 段。未通过活动筛选不证明人员没有其他行为。</p>'
     uncertainties = '<ul>' + ''.join(uncertainty_rows) + '</ul><p>单设备筛选不等于跨视角物理动作验收；稀疏抽帧不证明完整观察了相邻采样之间的过程。</p>'
