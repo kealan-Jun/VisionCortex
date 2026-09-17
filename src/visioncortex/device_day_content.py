@@ -141,10 +141,11 @@ def with_partial_understandings(config, index):
             previous = meanings.get(segment['segment_id'], {})
             meanings[segment['segment_id']] = {**previous, 'segment_id': segment['segment_id'],
                 'activity': segment['activity'], 'mode': 'historical_sampled_step_review',
+                'content_source': 'video_only',
                 'status': 'completed', 'evidence_status': 'PARTIAL_EVIDENCE',
                 'physical_action_confirmed': False, 'windows': [reviewed],
                 'prior_window_receipts': [w.get('model_receipt') for w in previous.get('windows', [])]}
-    value['understandings'] = list(meanings.values())
+    value['understandings'] = public_references(list(meanings.values()), mapping)
     return value
 
 
