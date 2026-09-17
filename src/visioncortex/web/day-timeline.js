@@ -25,7 +25,7 @@ window.VisionCortexDayTimeline = (() => {
       const visionDates=[...new Set(visionJobs.map(j=>j.date))];
       const waitLabels={upstream_failed:'上游失败待恢复',upstream_pending:'上游未完成',provider_blocked:'云端账户不可用',night_window:'等待夜间窗口',lease_recovery:'租约过期待恢复',pending_validation:'待校验调度'};
       const pendingLabels={retention:'尚未进入归档队列',vision:'尚未入队（待原片归档或校验）',stt:'尚未入队（待原片与录音归档或校验）',understanding:'尚未入队（待预处理、录音结果或校验）',report:'尚未入队（待理解结果或校验）'};
-      progressPanel.innerHTML=`${delayed?`<p role="alert">刷新暂时延迟，以下保留 ${new Date(p.observed_at*1000).toLocaleTimeString('zh-CN')} 的处理快照，并非当前实时状态。正在自动重试。</p>`:''}<div class="processing-heading"><div><p class="eyebrow">${delayed?'最近一次处理快照':'后台正在做什么'}</p><h2>${p.running.length?`${p.running.length} 个阶段任务${delayed?'在快照时运行':'正在处理'}`:'快照中没有可确认的运行任务'}</h2><p>历史补跑优先日期：<a href="#/day-timeline/${esc(p.focus_date||day)}">${esc(p.focus_date||'未指定')}</a> · 新采集优先，其他历史数据随后</p></div><small>更新于 ${new Date(p.observed_at*1000).toLocaleTimeString('zh-CN')}<br>每 5 秒自动更新处理状态</small></div>
+      progressPanel.innerHTML=`${delayed?`<p role="alert">刷新暂时延迟，以下保留 ${new Date(p.observed_at*1000).toLocaleTimeString('zh-CN')} 的处理快照，并非当前实时状态。正在自动重试。</p>`:''}<div class="processing-heading"><div><p class="eyebrow">${delayed?'最近一次处理快照':'后台正在做什么'}</p><h2>${p.running.length?`${p.running.length} 个阶段任务${delayed?'在快照时运行':'正在处理'}`:'快照中没有可确认的运行任务'}</h2><p>${p.process_since_us?`只自动处理 ${new Date(p.process_since_us/1000).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false})} 起的采集，历史补跑已暂停`:`历史补跑优先日期：<a href="#/day-timeline/${esc(p.focus_date||day)}">${esc(p.focus_date||'未指定')}</a> · 新采集优先，其他历史数据随后`}</p></div><small>更新于 ${new Date(p.observed_at*1000).toLocaleTimeString('zh-CN')}<br>每 5 秒自动更新处理状态</small></div>
       <p><strong>YOLO ${delayed?'快照':'当前'}：${visionJobs.length} 个分片任务运行中</strong>${visionDates.length?` · 采集日期 ${visionDates.map(d=>`<a href="#/day-timeline/${esc(d)}">${esc(d)}</a>`).join('、')}`:''}${visionJobs.length&&!visionJobs.some(j=>j.date===day)?`。${delayed?'快照中':'当前'}没有处理所选日期 ${esc(day)} 的分片，下面的进度仅统计所选日期。`:''}</p>
       ${p.night_schedule?.enabled?`<p><strong>多模态与日报：${p.night_schedule.open?'夜间处理窗口已开启':'等待今晚 '+esc(p.night_schedule.start)}</strong> · ${esc(p.night_schedule.timezone)} ${esc(p.night_schedule.start)}–次日 ${esc(p.night_schedule.end)}。白天原片归档、YOLO、录音识别继续运行；已开始的夜间任务会完成后结束。</p>`:''}
       ${p.capture_link_cleanup&&!p.capture_link_cleanup.enabled?'<p class="muted">采集端原片替换软链接尚未启用：NAS 原生链接及采集读取兼容性待验证，原片继续保留。预处理正常运行。</p>':''}
@@ -45,9 +45,32 @@ window.VisionCortexDayTimeline = (() => {
     }
     setTimeout(pollProgress,5000);
     const body=main.querySelector('[data-timeline-body]');
+    body.insertAdjacentHTML('beforebegin',`<section class="panel"><h2>按全局时间查找文件</h2><p>选择采集时刻，同时查找各设备的视频、原录音、识别文字和拍照图片。使用北京时间。</p><form data-material-query><label>采集时间 <input type="time" step="1" value="00:00:00" required data-material-time></label> <label>查看范围 <select data-material-window><option value="60">1 分钟</option><option value="1">1 秒</option><option value="300">5 分钟</option></select></label> <button class="primary-button" type="submit">查找对应文件</button></form><div data-material-result aria-live="polite"></div></section>`);
+    const queryForm=main.querySelector('[data-material-query]');
+    const queryResult=main.querySelector('[data-material-result]');
+    let queryTimer=null,queryGeneration=0;
+    async function lookup(generation=++queryGeneration){
+      clearTimeout(queryTimer);
+      const value=queryForm.querySelector('[data-material-time]').value;
+      const at=Date.parse(`${day}T${value.length===5?value+':00':value}+08:00`)*1000;
+      const duration=queryForm.querySelector('[data-material-window]').value;
+      if(!Number.isFinite(at))return;
+      try{
+        const result=await api(`/api/day-timeline/${encodeURIComponent(day)}/at?at_us=${at}&duration_seconds=${duration}`);
+        if(hash!==location.hash||!queryResult.isConnected||generation!==queryGeneration)return;
+        const fileLink=(url,label,offset)=>url?`<a href="${esc(url+(offset!=null?'#t='+Number(offset).toFixed(3):''))}" target="_blank" rel="noopener">${esc(label)}</a>`:'';
+        queryResult.innerHTML=`<p>${clock(result.start_us)}—${clock(result.end_us)} · ${result.devices.length} 台设备有可索引内容，结果每 5 秒更新。</p>${result.devices.map(device=>`<article><h3>${esc(device.camera)}</h3>${device.recordings.map(r=>`<section><p>${clock(r.start_us)}—${clock(r.end_us)} · ${fileLink(r.video_url,'视频',r.video_offset_seconds)} · ${fileLink(r.audio_url,'原录音',r.audio_offset_seconds)} · ${fileLink(r.transcript_url,'完整转写')}</p>${r.comments.map(c=>`<p><time>${clock(c.start_us)}—${clock(c.end_us)}</time> ${esc(c.text)} ${fileLink(c.transcript_url,'识别来源')}</p>`).join('')||`<p>该时间范围没有已发布的识别文字（${esc(r.transcription_outcome||r.transcription_status||'等待识别')}）。</p>`}${r.audio_url&&!r.audio_overlaps_query?'<small>原录音可回听，但当前范围内的音频时间对应关系尚未确认。</small>':''}</section>`).join('')}<div class="frames">${device.photos.map(p=>`<figure><a href="${esc(p.url)}" target="_blank" rel="noopener"><img loading="lazy" style="max-width:220px;max-height:160px" src="${esc(p.url)}" alt="${esc(device.camera)} ${clock(p.capture_us)} 拍照"></a><figcaption>${clock(p.capture_us)} · 拍照文件名时间（秒级，时钟未核验）</figcaption></figure>`).join('')}</div></article>`).join('')||'<p>这个时段尚无可索引内容，不代表没有采集；请检查设备是否已完成写入及后台状态。</p>'}${result.errors?.length||result.photo_errors?.length?'<p role="alert">部分索引暂不可读，当前结果可能不完整。</p>':''}<p class="muted">视频和音频保留各自采集时钟；时间关联不代表已验证精确声画同步。照片引用原位置，不移动到归档目录。${result.photo_history_paused_before_us?'历史照片暂停补索引。':''}</p>`;
+      }catch{
+        if(generation===queryGeneration&&hash===location.hash)queryResult.innerHTML='<p role="alert">时间索引暂不可读，正在重试。</p>';
+      }
+      if(hash===location.hash&&queryResult.isConnected&&generation===queryGeneration)queryTimer=setTimeout(()=>lookup(generation),5000);
+    }
+    queryForm.onsubmit=e=>{e.preventDefault();queryResult.textContent='正在查询对应文件…';lookup();};
     try {
       const data=await api(`/api/day-timeline/${encodeURIComponent(day)}`);
       if(hash!==location.hash)return;
+      const latest=Math.max(0,...(data.media_recordings||[]).map(r=>r.start_us));
+      if(latest)queryForm.querySelector('[data-material-time]').value=clock(latest);
       const entries=new Map(data.entries.map(e=>[e.id,e]));
       const link=(url,label)=>url?`<a href="${esc(url)}" target="_blank" rel="noopener">${esc(label)}</a>`:'';
       const sourceAt=(e,us)=>`${e.source_url}#t=${Math.max(0,(e.start_ms+(us-e.start_us)/1000)/1000).toFixed(3)}`;

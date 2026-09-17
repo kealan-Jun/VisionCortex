@@ -250,6 +250,7 @@ def snapshot(config):
                                        'p95_seconds': sorted(v)[math.ceil(len(v)*.95)-1]}
                                   for name, v in values.items()}
     return {'storage_maintenance': os.environ.get('VISIONCORTEX_STORAGE_MAINTENANCE', '0') == '1',
+            'process_since_us': config.get('device_day', {}).get('process_since_us'),
             'capture_link_cleanup': {'enabled': bool(cleanup.get('enabled')),
             'native_links_verified': bool(cleanup.get('native_links_verified')),
             'capture_readers_verified': bool(cleanup.get('capture_readers_verified'))},

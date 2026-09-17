@@ -29,11 +29,13 @@ def link(archive, reference):
 
 def build_timeline(day, indexes):
     lo, hi = day_bounds(day)
-    entries, recordings, seen = [], set(), set()
+    entries, recordings, seen, media = [], set(), set(), []
     for archive, index in indexes:
         validate_archive_name(archive)
         if archive[:10] != day:
             continue
+        from .device_day_time_lookup import material_records
+        media.extend(material_records(archive, index))
         record_map = {r['recording_id']: r for r in index.get('recordings', [])}
         meanings = {x['segment_id']: x for x in index.get('understandings', [])}
         recordings.update((archive, x['recording_id']) for x in index.get('recordings', []))
@@ -89,7 +91,7 @@ def build_timeline(day, indexes):
                             'entry_ids': {entries[n]['id'] for n in current}})
     for period in periods:
         period['entry_ids'] = sorted(period['entry_ids'])
-    return {'date': day, 'entries': entries, 'periods': periods,
+    return {'date': day, 'entries': entries, 'periods': periods, 'media_recordings': media,
             'input_index_digests': {name: digest(index.get('segments', [])) for name, index in indexes},
             'indexed_recordings': len(recordings), 'camera_count': len({name[11:] for name, _ in indexes}),
             'covered_seconds': sum((p['end_us']-p['start_us'])/1e6 for p in periods if p['state'] != 'missing'),
@@ -160,9 +162,15 @@ def load_timeline(config, day, *, audit=False):
 
 def refresh_timeline(config, day):
     from .device_day_contract import atomic_json
-    result = load_timeline(config, day, audit=True)
+    from .device_day_schedule import processing_cutoff
+    live_only = bool(processing_cutoff(config.get('device_day', {})))
+    result = load_timeline(config, day, audit=not live_only)
     path = Path(config['storage']['local_runtime_root'])/'device-day'/'DayTimeline'/f'{day}.json'
     atomic_json(path, result)
+    if live_only:
+        # Publish the time index without reprocessing old experiment groups or
+        # rewriting existing NAS indexes. Per-slice stages publish their own work.
+        return {'date': day, 'link_count': len(result['cross_view_links']), 'publication_pending': []}
     from .device_day import exclusive
     publication_pending = []
     for name in {entry['archive'] for entry in result['entries']}:
@@ -192,6 +200,32 @@ def refresh_timeline(config, day):
 def install_routes(app, settings_factory):
     from .device_day_progress import ProgressPoller, ProgressUnavailable
     progress_poller = ProgressPoller(settings_factory)
+
+    @app.get('/api/day-timeline/{day}/at')
+    def materials_at(day: str, at_us: int, duration_seconds: float = 60):
+        from .device_day_time_lookup import query_materials, attach_photos
+        config = settings_factory()
+        try:
+            # Validate before any NAS reads, including malformed time windows.
+            query_materials({'date': day}, at_us, duration_seconds)
+            result = query_materials(load_timeline(config, day), at_us, duration_seconds)
+            return attach_photos(config, result)
+        except ValueError as exc:
+            raise HTTPException(400, '请使用当天的全局时间戳和不超过一小时的查询范围') from exc
+        except OSError as exc:
+            raise HTTPException(503, '采集索引暂不可读，请稍后重试') from exc
+
+    @app.get('/api/day-timeline/{day}/photos/{camera}/{folder}/{filename}')
+    def capture_photo(day: str, camera: str, folder: str, filename: str):
+        from .device_day_time_lookup import photo_path
+        from fastapi.responses import FileResponse
+        try:
+            path, _ = photo_path(settings_factory(), day, camera, folder, filename)
+            if not path.is_file():
+                raise ValueError('Missing photo')
+            return FileResponse(path, headers={'Cache-Control': 'no-store'})
+        except (OSError, ValueError) as exc:
+            raise HTTPException(404, '该设备的采集照片不可用') from exc
 
     @app.get('/api/day-timeline/{day}/playback')
     def playback(day: str, archive: str, segment_id: str):
