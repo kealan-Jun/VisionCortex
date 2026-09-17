@@ -88,6 +88,8 @@ def render_day(layout, index):
                 for key in provider_usage:
                     provider_usage[key] += usage[key]
             paragraphs.append(f'<p>{text(window["summary"])}</p>')
+            if not window.get('step_schema'):
+                paragraphs.append('<p><small>旧版场景与行为观察；尚未生成结构化实验步骤。</small></p>')
             origin = segment["start_us"] - round(segment["start_ms"] * 1000)
             for step in window.get("steps", []):
                 when = clock(step.get("start_us", origin + round(step["start_ms"] * 1000)))

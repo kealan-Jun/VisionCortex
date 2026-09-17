@@ -55,6 +55,9 @@ def content_revision(config, index):
     backend = config['storage'].get('local_cache_root')
     receipts = Path(backend) / 'device-day-receipts' / index['archive'] if backend else None
     paths = [p for _, _, request, result in window_files(config, index) for p in (request, result)]
+    root = Path(config['storage']['archive_root']) / index['archive']
+    paths.extend(root/'MultimodalUnderstanding'/time_folder(s['start_us'], s['end_us'])/'Analysis/StepReview.json'
+                 for s in index.get('segments', []))
     if receipts:
         paths.extend(receipts / r['recording_id'] / 'understanding.json' for r in index.get('recordings', []))
     return tuple((str(p), p.stat().st_mtime_ns, p.stat().st_size) for p in paths if p.is_file())
@@ -106,8 +109,12 @@ def with_partial_understandings(config, index):
         record = records[segment['recording_id']]
         clock = (record.get('processing') or {}).get('clock_mapping') or {'origin_us': record['start_us']}
         try:
-            parsed = validate_understanding(raw, metadata['frames'], metadata.get('comments', []),
-                left, right, record['start_us'], clock)
+            if 'experiment_steps' in raw:
+                from .device_day_steps import validate
+                parsed = validate(raw, metadata['frames'], left, right, record['start_us'], clock)
+            else:
+                parsed = validate_understanding(raw, metadata['frames'], metadata.get('comments', []),
+                    left, right, record['start_us'], clock)
         except (ValueError, KeyError):
             continue  # Invalid model output remains in its receipt, not report prose.
         for step in parsed['steps']:
@@ -122,6 +129,22 @@ def with_partial_understandings(config, index):
             'input': request_path.relative_to(root).as_posix(), 'usage': raw.get('usage'),
             'response_cache_reused': result.get('response_cache_reused', False)})
     value['understandings'] = [*value.get('understandings', []), *partial.values()]
+    from .device_day_steps import reviewed_window
+    meanings = {u['segment_id']: u for u in value['understandings']}
+    for segment in value['segments']:
+        if not all(k in segment for k in ('start_us', 'end_us')):
+            continue
+        record = records[segment['recording_id']]
+        clock = (record.get('processing') or {}).get('clock_mapping') or {'origin_us': record['start_us']}
+        reviewed = reviewed_window(root, segment, clock)
+        if reviewed is not None:
+            previous = meanings.get(segment['segment_id'], {})
+            meanings[segment['segment_id']] = {**previous, 'segment_id': segment['segment_id'],
+                'activity': segment['activity'], 'mode': 'historical_sampled_step_review',
+                'status': 'completed', 'evidence_status': 'PARTIAL_EVIDENCE',
+                'physical_action_confirmed': False, 'windows': [reviewed],
+                'prior_window_receipts': [w.get('model_receipt') for w in previous.get('windows', [])]}
+    value['understandings'] = list(meanings.values())
     return value
 
 
@@ -164,7 +187,8 @@ def publish_content(config, index):
     for segment in index.get('segments', []):
         if segment['recording_id'] not in records:
             continue
-        meaning = meanings.get(segment['segment_id'])
+        from .device_day_steps import readable_meaning
+        meaning, experiment_steps, step_status = readable_meaning(meanings.get(segment['segment_id']))
         relative = 'MultimodalUnderstanding/' + time_folder(segment['start_us'], segment['end_us'])
         record = records[segment['recording_id']]
         stage = (record.get('stages') or {}).get('understanding') or {}
@@ -175,6 +199,8 @@ def publish_content(config, index):
             'source_video': segment['source_ref'], 'video': segment.get('video'),
             'activity': segment['activity'], 'status': (meaning or {}).get('status', 'completed' if meaning else stage.get('status', 'pending')),
             'message': stage.get('message'), 'understanding': meaning,
+            'experiment_steps': experiment_steps, 'step_understanding_status': step_status,
+            'step_accuracy': 'NOT_PROVEN',
             'transcript_content': next((a['content'] for a in audio_entries if a['recording_id'] == segment['recording_id']), None)}
         _write(safe_child(root, relative + '/Understanding.json'), value)
         visual_entries.append({k: value[k] for k in ('recording_id', 'segment_id', 'start_us', 'end_us', 'activity', 'status')} |

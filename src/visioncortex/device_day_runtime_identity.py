@@ -75,5 +75,5 @@ _REVIEWED['device_day_models.py'] = (
     'dfae6567ae073aebca46740b39da955f8710eff8aad1078922969433455de409',
     'fd755dac9528bbc51d868de8ce8b08ed29cf43da4f1724c411af9927d8d2c4e4')
 _REVIEWED['device_day_understanding.py'] = (
-    'cbf8b12f25dbcf0abebfe0c47a5d5bbe2eaf4cb50c457351c5cf391a96527c97',
+    '58c33e3f9daf018267846222a8986b1c345945cbe9cf2c2174eef14fdd113846',
     'c3b82cff2d2cf4b29c16fc1ed6a05569c489372c0cf2037d08075fa39e98641d')

@@ -73,7 +73,11 @@ def understand(backend, layout, recording, vision, context, key):
     from .device_day_models import SCENE_PROMPT, validate_understanding
     from .mllm import ArkAnalyzer
     from . import device_day_semantic_cache as cache
+    from . import device_day_steps
+    structured_steps = device_day_steps.enabled(backend.settings, recording)
     prompt = SCENE_PROMPT + '\n本任务只理解视频画面，不提供或引用录音转写。coverage给出实际输入覆盖；每帧文字简短，重复场景可简述。'
+    if structured_steps:
+        prompt = device_day_steps.PROMPT
     analyzer = ArkAnalyzer(backend.config)
     clock = vision.get('clock_mapping') or {'origin_us': recording['recording_start_us']}
     artifacts, meanings = [], []
@@ -130,7 +134,8 @@ def understand(backend, layout, recording, vision, context, key):
                     from .device_day_provider_gate import ProviderGate
                     ProviderGate(backend.config).record_failure(raw)
                     raise ValueError('Multimodal window failed; preceding windows remain published')
-                parsed = validate_understanding(raw, images, [], left, right, recording['recording_start_us'], clock)
+                parsed = (device_day_steps.validate(raw, images, left, right, recording['recording_start_us'], clock)
+                          if structured_steps else validate_understanding(raw, images, [], left, right, recording['recording_start_us'], clock))
                 if not reused:
                     cache.save(backend.config, response_identity, raw)
                 for step in parsed['steps']:

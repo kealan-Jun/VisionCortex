@@ -78,6 +78,21 @@ def test_new_coverage_policy_never_invalidates_completed_cv(device_config):
     assert original._key('understanding', old, {}) == current._key('understanding', old, {})
 
 
+def test_step_schema_cutover_keeps_existing_stages_and_old_paid_results(device_config):
+    capture(device_config)
+    record, _ = item_and_layout(device_config)
+    device_config['device_day']['understanding_coverage_since_us'] = record['recording_start_us'] - 1
+    original = DeviceDayRunner(device_config, FakeModels())
+    changed = deepcopy(device_config)
+    changed['device_day']['experiment_steps_since_us'] = record['recording_start_us']
+    current = DeviceDayRunner(changed, FakeModels())
+    for stage in ['retention', 'vision', 'stt']:
+        assert original._key(stage, record, {}) == current._key(stage, record, {})
+    assert original._key('understanding', record, {}) != current._key('understanding', record, {})
+    old = dict(record, recording_start_us=record['recording_start_us'] - 1)
+    assert original._key('understanding', old, {}) == current._key('understanding', old, {})
+
+
 def test_background_publisher_preserves_cv_index_and_updates_report(device_config):
     capture(device_config)
     record, layout = item_and_layout(device_config)

@@ -17,6 +17,8 @@ device_day:
   # New captures only: no historical paid reruns for this coverage upgrade.
   # 2026-09-17 20:00:00 Asia/Shanghai.
   understanding_coverage_since_us: 1789646400000000
+  # 2026-09-17 20:45:00 +08; existing recordings retain their actual receipts.
+  experiment_steps_since_us: 1789649100000000
   understanding_frames_per_request: 48
   understanding_window_seconds: 30
   inactive_sample_seconds: 1

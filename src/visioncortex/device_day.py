@@ -285,8 +285,12 @@ class DeviceDayRunner:
         sources.extend(directory / f"{name}.py" for name in dependencies[stage])
         from .device_day_understanding import enabled as full_coverage_enabled
         full_coverage = full_coverage_enabled(self.settings, recording)
+        from .device_day_steps import enabled as step_structure_enabled
+        structured_steps = step_structure_enabled(self.settings, recording)
         if stage == 'understanding' and full_coverage:
             sources.append(directory / 'device_day_understanding.py')
+            if structured_steps:
+                sources.append(directory / 'device_day_steps.py')
         keys = ("performance", "segmentation", "models", "alignment", "continuity") if stage == "vision" else ()
         from .device_day_runtime_identity import compatible_performance
         settings = {key: compatible_performance(self.config.get(key)) if key == "performance" else self.config.get(key) for key in keys}
@@ -314,6 +318,8 @@ class DeviceDayRunner:
             stage_settings.update({k: self.settings.get(k) for k in (
                 'understanding_coverage_since_us', 'understanding_frames_per_request',
                 'understanding_window_seconds', 'inactive_sample_seconds')})
+            if structured_steps:
+                stage_settings['experiment_steps_since_us'] = self.settings['experiment_steps_since_us']
         if stage == "retention":
             def retention_identity(value):
                 if isinstance(value, list):
