@@ -40,6 +40,10 @@ def build_file_index(config, index, photos):
             transcription_status=stt.get('status'), transcription_outcome=stt.get('outcome'),
             model_invocation=stt.get('model_invocation', 'NOT_PROVEN'),
             transcript_file=reference(stt.get('transcript_file'))))
+        entries.append(entry('original_video', rid, row.get('start_us'), row.get('end_us'),
+            file=reference(sources.get('video')),
+            clock_mapping=(row.get('processing') or {}).get('clock_mapping') or {},
+            capture_complete=row.get('capture_complete')))
         audio_ref = reference(sources.get('audio_audio') or next(
             (a for a in audio.get('artifacts', []) if a.get('kind') == 'audio_audio'), None))
         if audio_ref:
@@ -65,13 +69,22 @@ def build_file_index(config, index, photos):
             activity=segment['activity'], segment_id=segment['segment_id'],
             file=reference(segment.get('video')), source_video=reference(segment.get('source_ref')),
             source_start_ms=segment.get('start_ms'), source_end_ms=segment.get('end_ms'),
-            metadata_file=reference(segment.get('json_path')), understanding=meanings.get(segment['segment_id']),
+            metadata_file=reference(segment.get('json_path')),
             physical_action_confirmed=False))
+        meaning = meanings.get(segment['segment_id'])
+        if meaning:
+            # Existing understanding consumes video AND comments. A reference
+            # to that output must never be labeled pure video or verbatim audio.
+            entries.append(entry('multimodal_result', rid, segment['start_us'], segment['end_us'],
+                segment_id=segment['segment_id'], content_source='multimodal_context',
+                files=[reference(w['model_receipt']) for w in meaning.get('windows', []) if w.get('model_receipt')],
+                inputs=[reference(w['input']) for w in meaning.get('windows', []) if w.get('input')],
+                physical_action_confirmed=False))
         for key, kind in [('key_frames', 'key_frame'), ('scene_frames', 'scene_frame')]:
             for frame in segment.get(key, []):
                 captured = frame.get('capture_us')
                 entries.append(entry(kind, rid, captured, captured+1 if captured else None,
-                    file=reference(frame), frame_kind=frame.get('frame_kind'), text=frame.get('understanding_text'),
+                    file=reference(frame), frame_kind=frame.get('frame_kind'),
                     time_basis=frame.get('wall_time_basis', 'unknown'), physical_action_confirmed=False))
     for device in photos.get('devices', []):
         if device['camera'] != archive[11:]:
@@ -83,7 +96,25 @@ def build_file_index(config, index, photos):
             entries.append(entry('voice_photo', None, captured, captured+1000000,
                 file=reference(photo['source_ref'], 'capture_root'), time_basis=photo['time_basis'],
                 timestamp_resolution_us=1000000, capture_clock_verified=False))
-    return {'schema_version': 'visioncortex-file-time-index/1', 'archive': archive,
+    entries.sort(key=lambda e: (e['start_us'] or 0, e['kind']))
+    recordings = [e for e in entries if e['kind'] == 'recording']
+    streams = {'video': [], 'audio': [], 'images': [], 'multimodal': []}
+    for item in entries:
+        kind = item['kind']
+        if kind in {'original_video', 'video_segment'}:
+            streams['video'].append(item)
+        elif kind == 'audio':
+            stt = records[item['recording_id']].get('transcription') or {}
+            streams['audio'].append(item | {'transcription': {
+                'status': stt.get('status'), 'outcome': stt.get('outcome'),
+                'model_invocation': stt.get('model_invocation', 'NOT_PROVEN'),
+                'text_file': reference(stt.get('transcript_file')),
+                'sentences': [e for e in entries if e['kind'] == 'speech' and e['recording_id'] == item['recording_id']]}})
+        elif kind in {'key_frame', 'scene_frame', 'voice_photo'}:
+            streams['images'].append(item)
+        elif kind == 'multimodal_result':
+            streams['multimodal'].append(item)
+    return {'schema_version': 'visioncortex-file-time-index/2', 'archive': archive,
             'source_index_updated_at': index.get('updated_at'),
             'source_index': {'path': 'ProcessedClips/Index.json', 'path_base': 'device_day'},
             'cross_camera_alignment_verified': False, 'evidence_status': 'PARTIAL_EVIDENCE',
@@ -95,7 +126,7 @@ def build_file_index(config, index, photos):
             'process_since_us': cutoff, 'photo_index_observed_at': photos.get('observed_at'),
             'photo_index_errors': photos.get('photo_errors', []),
             'photo_index_status': 'available' if 'observed_at' in photos else 'pending',
-            'entries': sorted(entries, key=lambda e: (e['start_us'] or 0, e['kind']))}
+            'recordings': recordings, 'streams': streams}
 
 
 def publish_file_index(config, index, photos=None):

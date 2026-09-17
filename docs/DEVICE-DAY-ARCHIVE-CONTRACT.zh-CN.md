@@ -143,17 +143,33 @@ NAS 根目录的 `README.html` 是阅读入口，五个设备日主目录不变�
 每阶段发布索引时同步原子更新；后台每五秒检查晚到的图片和索引变化。尚未有视频的设备日也可发布图片引用。
 这里的五秒是轮询间隔，不是 NAS 写入到全部模型完成的时延承诺。
 
-`entries[]` 按全局 Unix 微秒时间排序，包括 recording、audio、speech、video_segment、
-key_frame、scene_frame、voice_photo。每项的 `start_us` / `end_us` 使用左闭右开区间，
-`start_time` / `end_time` 同时给出带 +08:00 时区的可读时间。查询区间 `[a,b)` 时筛选
-`start_us < b and end_us > a`，再读取条目中的文件引用即可；时间未知的条目保留 null，不能强行对齐。
+文件检索投影使用 `visioncortex-file-time-index/2`（原设备日 v1 契约不变）。
+`streams.video` 只包含原视频、处理后片段、片段元数据引用和采集时钟映射；
+`streams.audio` 只包含原录音、`transcription.sentences[].text` 原始机器转写及转写文件引用；
+`streams.images` 包含动作关键帧、场景采样帧和语音拍照图片；
+`streams.multimodal` 单独引用融合解释的 Input.json / Result.json，不能作为纯视频观察或录音原文。
+融合解释和模型生成的帧说明不嵌入视频、音频、图片索引。各类输出通过同一个实际采集时间查询关联。
 
-`speech.text` 是实际机器转写，`video_segment.understanding` 和帧条目的 `text` 保留已完成的理解文字，
-可作为自然语言检索的文本输入。`file`、`audio`、`source_video`、`transcript_file` 等引用使用
-`path_base` + `path`：`device_day` 表示当前设备日目录，`capture_root` 表示原始采集根。
+各组按全局 Unix 微秒时间排序。每项的 `start_us` / `end_us` 使用左闭右开区间，
+`start_time` / `end_time` 同时给出带 +08:00 时区的可读时间。查询区间 `[a,b)` 时筛选
+`start_us < b and end_us > a`；时间未知的条目保留 null，不能强行对齐。
+`file`、`audio`、`source_video`、`transcript_file` 等引用使用 `path_base` + `path`：
+`device_day` 表示当前设备日目录，`capture_root` 表示原始采集根。
 客户端可将 `path_bases.device_day` 替换成自己的 NAS 挂载前缀；相对路径不变。
-例如读 `/media/x1/RealityLoop-NAS/VisionCortexExperimentArchive/<日期>_<设备>/Comment/TimeIndex.json`，
-再解析 `MetaVideo/Audio/...opus` 或 `Comment/Stt/.../Transcript.txt`。
+
+无需网页的全设备时间查询命令（也可用 `--index` 指定一个或多个设备索引）：
+
+```bash
+python -m visioncortex.device_day_file_query \
+  --archive-root /media/x1/RealityLoop-NAS/VisionCortexExperimentArchive \
+  --at 2026-09-17T17:50:52+08:00 --duration-seconds 1 \
+  --output /tmp/TimeQuery.json
+```
+
+结果 `matches[].streams` 分别给出匹配的视频、音频、图片、多模态文件引用。
+视频 `file_offset_seconds` 优先使用已发布的 CSV 时钟映射；导出片段减去原片截取起点；
+无活动区间沿用原片路径和偏移，不伪造已导出视频。音频偏移使用音频自己的开始时间。
+缺失的时钟范围不能外推成可用视频，返回 null 和明确状态；原生 PTS 及跨设备精确对齐仍未验证。
 
 recording 条目区分 `transcription_status`、`transcription_outcome` 和 `model_invocation`。
 `no_transcript` 表示识别已执行但没返回文字，不能当成“没处理”或“没有人说话”。audio 条目保留
