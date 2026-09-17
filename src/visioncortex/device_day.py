@@ -649,7 +649,11 @@ class DeviceDayRunner:
     def _build_stage_inventory(self, inventory, stage, date, stop_event=None):
         from .device_day_schedule import in_processing_scope, priority_date, refresh_queue_priorities
         focus_date = priority_date(self.runtime_root)
-        refresh_queue_priorities(self.queues[stage], focus_date)
+        refresh_queue_priorities(
+            self.queues[stage],
+            focus_date,
+            self.settings.get('live_priority_seconds', 14400),
+        )
         from .input_availability import Availability, configured_record
         states = Availability(self.runtime_root).states()
         self.queues[stage].sync_availability(states)
@@ -672,7 +676,11 @@ class DeviceDayRunner:
                     ready.intersection_update(versions)
             durable = {key: row for key, row in durable.items() if key in ready}
         from .device_day_schedule import scheduling_record
-        records = sorted((scheduling_record(r, focus_date=focus_date) for r in durable.values()),
+        records = sorted((scheduling_record(
+                            r,
+                            focus_date=focus_date,
+                            live_priority_seconds=self.settings.get('live_priority_seconds', 14400),
+                         ) for r in durable.values()),
                          key=lambda r: (r["processing_priority"], r["recording_start_us"], r["camera_key"]))
         queue = self.queues[stage]
         with queue.connect() as db:

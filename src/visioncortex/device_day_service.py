@@ -408,7 +408,11 @@ class DeviceDayService:
                             next_poll.clear()
                     from .device_day_schedule import priority_date, scheduling_record
                     focus_date = priority_date(self._runner.runtime_root)
-                    records = {key: scheduling_record(row, focus_date=focus_date) for key, row in records.items()}
+                    records = {key: scheduling_record(
+                        row,
+                        focus_date=focus_date,
+                        live_priority_seconds=self._runner.settings.get('live_priority_seconds', 14400),
+                    ) for key, row in records.items()}
                     inventory = inventory | {"recordings": list(records.values())}
                     if recovery_job is None and time.monotonic() - last_recovery >= 1:
                         recovery_job = recovery_worker.submit(recovery.tick, self._runner)

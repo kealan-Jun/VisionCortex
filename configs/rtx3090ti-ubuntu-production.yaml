@@ -24,6 +24,9 @@ device_day:
   understanding_window_seconds: 30
   inactive_sample_seconds: 1
   camera_lanes: true
+  # Keep the newest four hours in a live lane ahead of the historical backlog.
+  # The ordinary same-day lane resumes automatically when this lane drains.
+  live_priority_seconds: 14400
   night_processing:
     enabled: false  # New slices proceed through every stage immediately.
     timezone: Asia/Shanghai

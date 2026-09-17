@@ -112,7 +112,9 @@ class DeviceDayQueue:
             if camera_serial:
                 ordering += ("COALESCE((SELECT last_claim FROM camera_dispatch "
                              "WHERE camera_key=json_extract(r.payload,'$.camera_key')),0),"
-                             "COALESCE(json_extract(r.payload,'$.recording_start_us'),0),")
+                             "CASE WHEN COALESCE(json_extract(r.payload,'$.processing_priority'),0)<0 "
+                             "THEN -COALESCE(json_extract(r.payload,'$.recording_start_us'),0) "
+                             "ELSE COALESCE(json_extract(r.payload,'$.recording_start_us'),0) END,")
             ordering += "r.queued_at,r.recording_id"
             row = db.execute("SELECT r.* FROM recordings r WHERE " + " AND ".join(conditions)
                              + " ORDER BY " + ordering + " LIMIT 1", parameters).fetchone()
