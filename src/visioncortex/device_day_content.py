@@ -149,6 +149,35 @@ def with_partial_understandings(config, index):
     return value
 
 
+def publish_transcript(config, archive, record):
+    """Publish one completed recording without walking or rewriting the day."""
+    root = Path(config['storage']['archive_root']) / archive
+    common = {'archive': archive, 'device': archive[11:], 'date': archive[:10],
+              'timezone': 'Asia/Shanghai', 'timestamp_unit': 'unix_microseconds',
+              'path_base': 'device_day', 'physical_action_confirmed': False}
+    relative = 'Comment/' + time_folder(record['start_us'], record['end_us'])
+    stt = record.get('transcription') or {}
+    value = {**common, 'schema_version': 'visioncortex-readable-transcript/1',
+        'recording_id': record['recording_id'], 'start_us': record['start_us'], 'end_us': record['end_us'],
+        'audio': record.get('audio'), 'status': stt.get('status'), 'outcome': stt.get('outcome'),
+        'content_source': 'machine_transcribed_speech', 'model_invocation': stt.get('model_invocation'),
+        'human_reviewed': False, 'accuracy': 'NOT_PROVEN', 'sentences': stt.get('comments') or [],
+        'execution_windows': stt.get('chunks') or [], 'original_transcript': stt.get('transcript_file')}
+    _write(safe_child(root, relative + '/Transcript.json'), value)
+    lines = [f"设备：{common['device']}  日期：{common['date']}",
+             f"录音识别状态：{value['status']} / {value['outcome']}",
+             '机器转写，未经人工复核。识别为空不证明录音没有语音。', '']
+    for row in value['sentences']:
+        stamp = datetime.fromtimestamp(row['start_us']/1e6, ZoneInfo('Asia/Shanghai')).isoformat(timespec='milliseconds')
+        lines.append(f"[{stamp}] {row['text']}")
+    target = safe_child(root, relative + '/Transcript.txt')
+    data = ('\n'.join(lines) + '\n').encode()
+    if not target.is_file() or target.read_bytes() != data:
+        atomic_bytes(target, data)
+    return ({k: value[k] for k in ('recording_id', 'start_us', 'end_us', 'status', 'outcome')} |
+            {'content': relative + '/Transcript.json', 'text': relative + '/Transcript.txt'})
+
+
 def publish_content(config, index):
     """Mutable readable projections; immutable execution paths stay resolvable."""
     root = Path(config['storage']['archive_root']) / index['archive']
@@ -163,27 +192,7 @@ def publish_content(config, index):
         records[record['recording_id']] = record
         if not record.get('start_us') or not record.get('end_us'):
             continue
-        relative = 'Comment/' + time_folder(record['start_us'], record['end_us'])
-        stt = record.get('transcription') or {}
-        value = {**common, 'schema_version': 'visioncortex-readable-transcript/1',
-            'recording_id': record['recording_id'], 'start_us': record['start_us'], 'end_us': record['end_us'],
-            'audio': record.get('audio'), 'status': stt.get('status'), 'outcome': stt.get('outcome'),
-            'content_source': 'machine_transcribed_speech', 'model_invocation': stt.get('model_invocation'),
-            'human_reviewed': False, 'accuracy': 'NOT_PROVEN', 'sentences': stt.get('comments') or [],
-            'execution_windows': stt.get('chunks') or [], 'original_transcript': stt.get('transcript_file')}
-        _write(safe_child(root, relative + '/Transcript.json'), value)
-        lines = [f"设备：{common['device']}  日期：{common['date']}",
-                 f"录音识别状态：{value['status']} / {value['outcome']}",
-                 '机器转写，未经人工复核。识别为空不证明录音没有语音。', '']
-        for row in value['sentences']:
-            stamp = datetime.fromtimestamp(row['start_us']/1e6, ZoneInfo('Asia/Shanghai')).isoformat(timespec='milliseconds')
-            lines.append(f"[{stamp}] {row['text']}")
-        target = safe_child(root, relative + '/Transcript.txt')
-        data = ('\n'.join(lines) + '\n').encode()
-        if not target.is_file() or target.read_bytes() != data:
-            atomic_bytes(target, data)
-        audio_entries.append({k: value[k] for k in ('recording_id', 'start_us', 'end_us', 'status', 'outcome')} |
-                             {'content': relative + '/Transcript.json', 'text': relative + '/Transcript.txt'})
+        audio_entries.append(publish_transcript(config, index['archive'], record))
     meanings = {u['segment_id']: u for u in index.get('understandings', [])}
     for segment in index.get('segments', []):
         if segment['recording_id'] not in records:

@@ -24,6 +24,7 @@ class CameraMonitor:
         self.discovery = {}
         self.completed_lanes = set()
         self.paused_folders = set()
+        self.sealed_folders = {}
         from .device_day_schedule import in_processing_scope, processing_cutoff
         if processing_cutoff(settings.get('device_day', {})):
             from .observed_inventory import read_inventory
@@ -47,7 +48,7 @@ class CameraMonitor:
 
     def _lane(self, camera, mode):
         key = (camera, mode)
-        interval = max(5, float(self.settings['collection_ingest'].get('poll_seconds', 5))) if mode == 'live' else 300
+        interval = max(1, float(self.settings['collection_ingest'].get('poll_seconds', 5))) if mode == 'live' else 300
         while not self.stop.is_set():
             started = time.time()
             with self.lock:
@@ -72,6 +73,10 @@ class CameraMonitor:
                     return
                 identity = digest(record)
                 with self.lock:
+                    recheck = float(self.settings['collection_ingest'].get('sealed_recheck_seconds', 0))
+                    if (mode == 'live' and recheck > 0 and record.get('processable')
+                            and record.get('audio', {}).get('status') in {'provided', 'no_input'}):
+                        self.sealed_folders[str(Path(record['video_path']).parent)] = time.monotonic() + recheck
                     previous = self.records.get(record['recording_id'], {})
                     if previous.get('updated_at', '') > record.get('updated_at', ''):
                         return
@@ -89,7 +94,9 @@ class CameraMonitor:
                     flush()
             try:
                 with self.lock:
-                    skipped = set(self.paused_folders)
+                    self.sealed_folders = {p: deadline for p, deadline in self.sealed_folders.items()
+                                           if deadline > time.monotonic()}
+                    skipped = set(self.paused_folders) | set(self.sealed_folders)
                 inventory = scan_recordings(config, on_record=forward, **({'skip_folders': skipped} if skipped else {}))
                 flush()
                 self.observe(self.settings, {'recordings': [], 'errors': inventory.get('errors', [])})

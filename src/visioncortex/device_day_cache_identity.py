@@ -29,6 +29,11 @@ def execution_identity(source):
     runner = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "DeviceDayRunner")
     nodes.extend(node for node in runner.body if isinstance(node, ast.FunctionDef) and node.name == "_process")
     fingerprint = hashlib.sha256(json.dumps([_normalized(node) for node in nodes], sort_keys=True).encode()).hexdigest()
+    # Exact publication-only revision: receipt/model execution is unchanged;
+    # retention/STT release their queues after durable per-record output, with
+    # the existing crash journal retaining the asynchronous day-index work.
+    if fingerprint == 'eadf9e7e91d6919e84e0882898b71727c2ba7e3d0c437300e60f4fef9f346e80':
+        return 'ac03f3ba8e0281bc7db26b2efb98b525ea0bdcb1dbd902807437c6e92aac9e33'
     # Exact reviewed runtime change: reuse independently verified copy hashes,
     # plus an opt-in cleanup callback after published preprocessing. Unknown
     # execution changes still receive their own fingerprint.

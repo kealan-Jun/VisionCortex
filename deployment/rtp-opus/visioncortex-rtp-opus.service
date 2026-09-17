@@ -1,0 +1,19 @@
+[Unit]
+Description=VisionCortex RTP/Opus capture receiver
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/x1/Projects/VisionCortex
+Environment=PYTHONPATH=/home/x1/Projects/VisionCortex/src
+ExecStart=/srv/sentinel-data/VisionCortex3090Ti/.venv/bin/python -m visioncortex.rtp_receiver --config /srv/sentinel-data/VisionCortex3090Ti/Runtime/RtpOpusReceiver/config.json
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
+LimitNOFILE=4096
+
+[Install]
+WantedBy=default.target

@@ -427,6 +427,8 @@ class DeviceDayRunner:
         needed = set(STAGES) if stage == "all" else {stage}
         for _ in STAGES:
             needed.update(parent for name in list(needed) for parent in DEPENDENCIES[name])
+        deferred_publication = (stage in {"retention", "stt"}
+                                and self.settings.get("defer_audio_day_publication", False))
         for current in STAGES:
             if current not in needed:
                 continue
@@ -507,12 +509,22 @@ class DeviceDayRunner:
             # rebuilding the whole day for each prerequisite read. Failures
             # still publish immediately; all-stage execution stays incremental.
             if stage == "all" or current == stage:
-                if not self.refresh_index(layout, recording_id=recording["recording_id"]):
+                if deferred_publication:
+                    if current == "stt":
+                        from .device_day_content import publish_transcript
+                        publish_transcript(self.config, layout.name, {
+                            "recording_id": recording["recording_id"],
+                            "start_us": recording["recording_start_us"], "end_us": recording["recording_end_us"],
+                            "audio": retention.get("audio"), "transcription": receipt})
+                elif not self.refresh_index(layout, recording_id=recording["recording_id"]):
                     return {"recording_id": recording["recording_id"], "status": "waiting_for_publication"}
             if current == "vision" and receipt.get("status") == "completed":
                 from .capture_link_cleanup import submit_after_preprocessing
                 submit_after_preprocessing(self, layout, recording)
-        publication_journal.complete(recording["recording_id"], publication_token)
+        if not deferred_publication:
+            publication_journal.complete(recording["recording_id"], publication_token)
+        # Deferred stages keep their durable journal entry until the background
+        # publisher finishes. CV always publishes before completion/cleanup.
         return {"schema_version": VERSION, "archive": layout.name,
                 "recording_id": recording["recording_id"], "status": "completed", "stage": stage,
                 "capture_deletion": "disabled_by_user",

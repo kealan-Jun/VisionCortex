@@ -190,15 +190,22 @@ class DeviceDayService:
         pending.update({r["recording_id"]: r for r in inventory.get("recordings", [])})
         from .device_day_schedule import in_processing_scope
         pending = {key: record for key, record in pending.items() if in_processing_scope(runner.settings, record)}
+        # Admission must not stat every historical NAS target for every idle
+        # retention slot. Local completions exclude unchanged originals; changed
+        # or unqueued inputs receive a conservative copy allowance. process()
+        # still verifies the source and retained bytes before accepting a receipt.
+        with runner.queues["retention"].connect() as db:
+            completed = {row["recording_id"]: json.loads(row["payload"]).get("source_signature")
+                         for row in db.execute("SELECT recording_id,payload FROM recordings WHERE status='completed'")}
         sizes = []
         for record in sorted(pending.values(), key=lambda r: (-r.get("size_bytes", 0), r["recording_start_us"])):
             if not record.get("processable", record.get("available")) or record.get("configured_role") not in {"first_person", "third_person"}:
                 continue
-            target = runner.layout(record).source_path(record, "video", Path(record["video_path"]))
-            if not target.is_file():
-                sizes.append(record["size_bytes"])
-                if len(sizes) == 8:
-                    break
+            if record.get("source_signature") and completed.get(record["recording_id"]) == record["source_signature"]:
+                continue
+            sizes.append(record["size_bytes"])
+            if len(sizes) == 8:
+                break
         available = shutil.disk_usage(runner.archive_root).free
         required = sum(sizes) * 3 + 20 * 1024**3
         return {"available_bytes": available, "required_bytes": required, "ready": available >= required,
