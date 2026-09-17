@@ -554,6 +554,7 @@ class DeviceDayRunner:
                                     understandings.extend(semantic.get("understandings", []))
                     from .device_day_content_paths import aliases, public_references
                     mapping = aliases(layout.root)
+                    understandings = public_references(understandings, mapping)
                     for row in recordings:
                         row['transcription'] = public_references(row.get('transcription'), mapping)
                     frame_text = {observation["frame_id"]: observation["text"]

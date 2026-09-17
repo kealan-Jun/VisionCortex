@@ -15,7 +15,9 @@
 各目录 `Index.json` 列出内容路径，`Comment/TimeIndex.json` 的分离媒体流引用这些文件。
 STT 执行文件统一收进对应时间目录的 `Recognition/<版本>/`，外层不再保留第二个 `Stt` 入口。
 `Comment/LegacyPaths.json` 明确映射旧引用，历史读取器通过 `safe_child` 继续校验和解析原回执；
-迁移备份及清单保存在后台缓存，原始录音不移动、不删除。ClipUnderstanding 执行回执仍保留。
+多模态原始输入、响应与图片统一收进对应时间目录的 `Analysis/<segment_id>/<版本>/`，
+外层不再保留 `ClipUnderstanding` 入口；其旧引用由 `MultimodalUnderstanding/LegacyPaths.json` 解析。
+迁移逐文件校验字节，备份及清单保存在后台缓存，原始音视频不移动、不删除，不重新调用模型。
 这些入口是可原子更新的投影，不冒充不可变执行证据，不复制或改动原始媒体。
 
 后台每 5 秒发布已通过校验的理解窗口，即使同一原片后续窗口未完成或失败，
@@ -70,10 +72,12 @@ VisionCortexExperimentArchive/
 ├── MultimodalUnderstanding/
 │   ├── Understanding.json
 │   ├── UnderstandingReport.html
-│   └── ClipUnderstanding/<segment_id>/<处理版本>/<片内开始时间>_<片内结束时间>/
-│       ├── Input.json                      # 帧索引、comment、protocol与来源快照
-│       ├── Result.json                      # 实际模型结果、请求回执和Token用量
-│       └── SceneFrames/<视频时间毫秒>.jpg
+│   └── <采集开始时间>_<采集结束时间>/
+│       ├── Understanding.json             # 直接查阅的理解内容与执行状态
+│       └── Analysis/<segment_id>/<处理版本>/<片内开始时间>_<片内结束时间>/
+│           ├── Input.json                 # 帧索引与来源快照
+│           ├── Result.json                # 实际模型结果、请求回执和Token用量
+│           └── SceneFrames/<视频时间毫秒>.jpg
 ├── LaboratoryDailyReport/
 │   ├── LaboratoryDailyReport.html                    # 单一日报的可阅读形式
 │   └── LaboratoryDailyReport.json                    # 同一份日报的结构化形式

@@ -40,7 +40,10 @@ def window_files(config, index):
         key = stage.get('key')
         if not isinstance(key, str) or len(key) != 64 or any(c not in '0123456789abcdef' for c in key):
             continue
-        folder = safe_child(root, f'MultimodalUnderstanding/ClipUnderstanding/{segment["segment_id"]}/{key}')
+        folder = safe_child(root, 'MultimodalUnderstanding/' + time_folder(segment['start_us'], segment['end_us'])
+                            + f'/Analysis/{segment["segment_id"]}/{key}')
+        if not folder.is_dir():
+            folder = safe_child(root, f'MultimodalUnderstanding/ClipUnderstanding/{segment["segment_id"]}/{key}')
         for path in sorted(folder.glob('*/Result.json')):
             request = path.with_name('Input.json')
             if request.is_file():
@@ -74,6 +77,7 @@ def with_partial_understandings(config, index):
     root = Path(config['storage']['archive_root']) / index['archive']
     from .device_day_content_paths import aliases, public_references
     mapping = aliases(root)
+    value['understandings'] = public_references(value['understandings'], mapping)
     for row in value['recordings']:
         row['transcription'] = public_references(row.get('transcription'), mapping)
     records = {r['recording_id']: r for r in index.get('recordings', [])}

@@ -94,7 +94,7 @@ def safe_child(root: Path, relative: str) -> Path:
     parts = relative.split("/")
     if any(part in {"", ".", ".."} for part in parts):
         raise ValueError("Invalid archive-relative reference")
-    if relative.startswith('Comment/Stt/'):
+    if relative.startswith(('Comment/Stt/', 'MultimodalUnderstanding/ClipUnderstanding/')):
         from .device_day_content_paths import aliases, relocated
         target = relocated(relative, aliases(root))
         if target != relative:

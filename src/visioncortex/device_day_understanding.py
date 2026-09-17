@@ -81,7 +81,8 @@ def understand(backend, layout, recording, vision, context, key):
         for segment in vision['segments']:
             active = segment['activity'] == 'active'
             source = safe_child(layout.root, segment['source_ref']['path'])
-            folder = layout.understanding / 'ClipUnderstanding' / segment['segment_id'] / key
+            from .device_day_content_paths import analysis_folder
+            folder = analysis_folder(layout, segment, key)
             results = []
             for left, right, frames in frame_windows(source, segment['start_ms'], segment['end_ms'], active, backend.settings):
                 directory = folder / media_interval_name(left, right)

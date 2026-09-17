@@ -17,7 +17,7 @@ _PERFORMANCE = ['fc756fe919bdaf341fffb32a771e485d07650d403f37ccfac6ca7a052845f3d
 # verified through explicit path aliases; ASR requests and model inputs are
 # unchanged. Unknown source revisions still invalidate normally.
 _REVIEWED['device_day_contract.py'] = (
-    '447b19e67253e394ab9ce4377555609ec7f833b6399b340105bfd238877872ab',
+    '1df5edbf53357f9d67134b386480e92056c71f492ab909cd473544c9f246be0b',
     '91addcf12669693241471bd8ebb8da3b4c6ad952ed1aef5699e2dc71d553f25a')
 _REVIEWED['device_day_stt.py'] = (
     '2da2d36d66ba60b07755c192237da12446edc24936b336dd59e178221f3af59a',
@@ -68,3 +68,12 @@ def independent_vision_backend_hash(path, checksum, *, legacy_understanding=Fals
     if fingerprint == '0d5a14817187f10a3c9b61e218a841cfbdb4544a627389a4db0d093d43c7bee6':
         return '3dda21db1a138404601bba1594ffb23f10eb97b933f15e78a46762d1c13a5e75'
     return checksum
+
+# Exact storage-only change: the same input images, prompt and response
+# bytes remain accessible through verified aliases.
+_REVIEWED['device_day_models.py'] = (
+    'dfae6567ae073aebca46740b39da955f8710eff8aad1078922969433455de409',
+    'fd755dac9528bbc51d868de8ce8b08ed29cf43da4f1724c411af9927d8d2c4e4')
+_REVIEWED['device_day_understanding.py'] = (
+    'cbf8b12f25dbcf0abebfe0c47a5d5bbe2eaf4cb50c457351c5cf391a96527c97',
+    'c3b82cff2d2cf4b29c16fc1ed6a05569c489372c0cf2037d08075fa39e98641d')

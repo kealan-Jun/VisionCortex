@@ -724,7 +724,8 @@ class DeviceDayModels:
                 active = segment["activity"] == "active"
                 duration = end - start
                 chunks = windows(duration, float(self.settings.get("active_window_seconds", 30))) if active else [(0, duration)]
-                folder = layout.understanding / "ClipUnderstanding" / segment["segment_id"] / key
+                from .device_day_content_paths import analysis_folder
+                folder = analysis_folder(layout, segment, key)
                 result_list = []
                 for a, b in chunks:
                     left, right = start + a, start + b
