@@ -93,3 +93,14 @@ def test_background_publisher_preserves_cv_index_and_updates_report(device_confi
     assert read_json(layout.comments/'TimeIndex.json')['readable_content']['multimodal']
     assert read_json(layout.reports/'LaboratoryDailyReport.json')['entries'][0]['understanding_status'] == 'completed'
     assert backend.vision_calls == backend.semantic_calls == 1
+
+
+def test_projection_does_not_duplicate_dense_cv_audit(device_config):
+    original = {'archive': '2026-09-10_a_cam01', 'recordings': [{'recording_id': 'r', 'processing': {
+        'batches': [{'large': 'dense audit'}], 'clock_mapping': {'origin_us': 1}}}],
+        'segments': [{'recording_id': 'r', 'activity_audit': {'large': 'dense audit'}}], 'understandings': []}
+    projected = with_partial_understandings(device_config, original)
+    assert 'batches' not in projected['recordings'][0]['processing']
+    assert 'activity_audit' not in projected['segments'][0]
+    assert projected['recordings'][0]['processing']['clock_mapping'] == {'origin_us': 1}
+    assert original['recordings'][0]['processing']['batches']

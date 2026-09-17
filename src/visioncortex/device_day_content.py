@@ -61,7 +61,16 @@ def with_partial_understandings(config, index):
     """Expose valid completed windows even when a later window is pending/failed."""
     from .device_day_models import validate_understanding
     from .media_time import capture_us
-    value = deepcopy(index)
+    # Dense CV candidate/audit arrays can make a day index tens of MB. The
+    # readable projection needs media references and clocks, not another copy
+    # of those unchanged diagnostics. Preserve the canonical index on disk.
+    value = {k: v for k, v in index.items() if k not in ('recordings', 'segments', 'understandings')}
+    value['recordings'] = [deepcopy({**r, 'processing': {k: v for k, v in (r.get('processing') or {}).items()
+                            if k not in ('batches', 'scan_reports', 'audit_artifacts')}})
+                           for r in index.get('recordings', [])]
+    value['segments'] = [deepcopy({k: v for k, v in s.items() if k != 'activity_audit'})
+                         for s in index.get('segments', [])]
+    value['understandings'] = deepcopy(index.get('understandings', []))
     root = Path(config['storage']['archive_root']) / index['archive']
     records = {r['recording_id']: r for r in index.get('recordings', [])}
     backend = config['storage'].get('local_cache_root')

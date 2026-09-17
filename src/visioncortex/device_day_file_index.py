@@ -154,6 +154,7 @@ def publish_file_index(config, index, photos=None):
 class FileIndexPublisher:
     def __init__(self, config):
         self.config, self.versions = config, {}
+        self.source_indexes = {}
         self.runtime = Path(config['storage']['local_runtime_root'])/'device-day'
 
     def tick(self):
@@ -196,7 +197,14 @@ class FileIndexPublisher:
                     stat = path.stat()
                     version = (stat.st_mtime_ns, stat.st_size, photo_version)
                     content_enabled = self.config.get('device_day', {}).get('readable_content_enabled', False)
-                    index = read_json(path) if content_enabled else None
+                    index = None
+                    if content_enabled:
+                        identity = (stat.st_mtime_ns, stat.st_size)
+                        cached = self.source_indexes.get(name)
+                        if cached is None or cached[0] != identity:
+                            cached = (identity, read_json(path))
+                            self.source_indexes[name] = cached
+                        index = cached[1]
                     if content_enabled:
                         from .device_day_content import content_revision
                         version += (content_revision(self.config, index),)
