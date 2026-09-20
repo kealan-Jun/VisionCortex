@@ -36,9 +36,9 @@ device_day:
   failure_retry_limit: 3
   preprocessing_only: false
   start_date: null
-  # Fixed user cutover: 2026-09-17 17:28:26 Asia/Shanghai. Include an active
-  # slice crossing this instant; preserve but do not replay earlier queues.
-  process_since_us: 1789637306000000
+  # 2026-09-20: resume historical work after ready live slices drain.
+  # Priority controls claim order; no capture date is permanently excluded.
+  process_since_us: null
   delete_capture_sources: false  # Legacy unlink-only deletion remains prohibited.
   capture_video_link_cleanup:
     enabled: false  # Native SMB symlink probe currently fails; retain capture originals.
