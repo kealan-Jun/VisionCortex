@@ -2,6 +2,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from visioncortex.config import load_config
 from visioncortex.device_day_queue import DeviceDayQueue
 from visioncortex.device_day_schedule import (
@@ -57,3 +59,61 @@ def test_production_drains_live_then_preserved_history_and_prioritizes_new_arriv
     assert len(rows) == 5
     assert all(row['status'] == 'completed' and row['attempts'] == 1
                and row['revision'] == row['recording_id'] + '-original-revision' for row in rows)
+
+
+@pytest.fixture
+def device_config(default_config, tmp_path):
+    from test_device_day import device_config as fixture
+    return fixture.__wrapped__(default_config, tmp_path)
+
+
+def test_pausing_semantics_keeps_video_and_speech_running_without_report_publication(device_config, monkeypatch):
+    from test_device_day import FakeModels, capture
+    from visioncortex.device_day import DeviceDayRunner
+    from visioncortex.nas_recordings import scan_recordings
+
+    class Backend(FakeModels):
+        speech_calls = 0
+
+        def transcribe(self, *args):
+            self.speech_calls += 1
+            return super().transcribe(*args)
+
+    capture(device_config)
+    device_config['device_day']['paused_stages'] = ['understanding', 'report']
+    inventory = scan_recordings(device_config)
+    record = inventory['recordings'][0]
+    backend = Backend()
+    runner = DeviceDayRunner(device_config, backend)
+    layout = runner.layout(record)
+    layout.reports.mkdir(parents=True)
+    old_report = layout.reports / 'LaboratoryDailyReport.html'
+    old_report.write_text('previous report remains readable')
+    monkeypatch.setattr('visioncortex.device_day_reports.render_day',
+                        lambda *args: pytest.fail('Report publication is paused'))
+    for stage in ('understanding', 'report'):
+        runner.queues[stage].enqueue(record, 'preserved-revision')
+        assert runner.run_once(stage=stage)['status'] == 'paused_by_user'
+
+    runner.run_once(inventory)
+    assert backend.vision_calls == backend.speech_calls == 1
+    assert backend.semantic_calls == 0
+    assert old_report.read_text() == 'previous report remains readable'
+    assert layout.index.is_file()
+    for stage in ('retention', 'vision', 'stt'):
+        assert runner.queues[stage].snapshot()['counts'] == {'completed': 1}
+    for stage in ('understanding', 'report'):
+        with runner.queues[stage].connect() as db:
+            assert tuple(db.execute('SELECT status,revision,attempts FROM recordings').fetchone()) == (
+                'queued', 'preserved-revision', 0)
+
+    # A restart retains the policy and full requests remain resumable.
+    from visioncortex.device_day_service import DeviceDayService
+    service = DeviceDayService(lambda: device_config, None)
+    service._runner = DeviceDayRunner(device_config, backend)
+    assert not service._request_complete({'recordings': []})
+    from visioncortex.device_day_progress import snapshot
+    progress = snapshot(device_config)
+    assert progress['night_schedule']['paused_stages'] == ['report', 'understanding']
+    waiting = next(iter(progress['waiting'].values()))
+    assert waiting['understanding'] == waiting['report'] == {'paused_by_user': 1}

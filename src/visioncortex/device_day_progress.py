@@ -207,10 +207,11 @@ def snapshot(config):
         b['camera_count'] = len(b.pop('cameras'))
         for counts in b['stages'].values():
             counts['not_enqueued'] = max(0, b['total']-sum(counts.values()))
-    from .device_day_night_schedule import night_schedule
+    from .device_day_night_schedule import night_schedule, paused_stages
     from .device_day_contract import DEPENDENCIES
     from .device_day_provider_gate import ProviderGate
     schedule = night_schedule(config)
+    paused = paused_stages(config)
     try:
         provider = ProviderGate(config).state()
     except (OSError, ValueError):
@@ -222,7 +223,8 @@ def snapshot(config):
             if status not in {'queued', 'expired'}:
                 continue
             parents = [row.get(p, ('missing', day))[0] for p in DEPENDENCIES[stage]]
-            reason = ('upstream_failed' if 'failed' in parents else
+            reason = ('paused_by_user' if stage in paused else
+                      'upstream_failed' if 'failed' in parents else
                       'upstream_pending' if any(p != 'completed' for p in parents) else
                       'provider_blocked' if stage in {'stt', 'understanding'} and provider.get('active')
                       and config.get('mllm', {}).get('provider') == 'aliyun' else

@@ -35,6 +35,8 @@ device_day:
   retention_io_workers: 2
   failure_retry_limit: 3
   preprocessing_only: false
+  # 2026-09-20: keep retention, video preprocessing and Fun ASR running.
+  paused_stages: [understanding, report]
   start_date: null
   # 2026-09-20: resume historical work after ready live slices drain.
   # Priority controls claim order; no capture date is permanently excluded.

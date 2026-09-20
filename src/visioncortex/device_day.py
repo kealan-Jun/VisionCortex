@@ -614,7 +614,9 @@ class DeviceDayRunner:
                     published(self.config, published_records)
                     atomic_json(layout.understanding / "Understanding.json", {
                         "schema_version": VERSION, "archive": layout.name, "understandings": understandings})
-                    render_day(layout, index)
+                    from .device_day_night_schedule import paused_stages
+                    if 'report' not in paused_stages(self.config):
+                        render_day(layout, index)
                     return True
             except BlockingIOError:
                 # The owning process publishes the complete index from receipts.
@@ -778,6 +780,11 @@ class DeviceDayRunner:
 
     def run_once(self, inventory: dict | None = None, *, stage="all", retry=False, date=None,
                  max_jobs=0, stop_event=None) -> dict:
+        from .device_day_night_schedule import paused_stages
+        paused = paused_stages(self.config)
+        if stage in paused:
+            return {"schema_version": VERSION, "status": "paused_by_user", "stage": stage,
+                    "results": [], "queue": self.queue_snapshot()}
         if inventory is None:
             from .nas_recordings import scan_recordings
             discovery = deepcopy(self.config)
@@ -812,7 +819,9 @@ class DeviceDayRunner:
                     finished[name].set()
             begun = time.perf_counter()
             with ThreadPoolExecutor(max_workers=len(STAGES), thread_name_prefix="device-stage") as stages:
-                jobs = {name: stages.submit(drain, name) for name in STAGES}
+                jobs = {name: stages.submit(drain, name) for name in STAGES if name not in paused}
+                for name in paused:
+                    finished[name].set()
                 results = [item for job in jobs.values() for item in job.result()]
             return {"schema_version": VERSION, "results": results, "queue": self.queue_snapshot(),
                     "wall_seconds": time.perf_counter() - begun, "completed_at": now(),

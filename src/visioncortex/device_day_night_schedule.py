@@ -5,6 +5,16 @@ from zoneinfo import ZoneInfo
 NIGHT_STAGES = frozenset({'understanding', 'report'})
 
 
+def paused_stages(config):
+    from .device_day_contract import STAGES
+    settings = config.get('device_day') or {}
+    paused = settings.get('paused_stages', [])
+    if not isinstance(paused, list) or any(stage not in STAGES for stage in paused):
+        raise ValueError('device_day.paused_stages must list known processing stages')
+    return set(paused) | (set(STAGES) - {'retention', 'vision'}
+                          if settings.get('preprocessing_only') else set())
+
+
 def night_schedule(config, now=None):
     settings = (config.get('device_day') or {}).get('night_processing') or {}
     zone = ZoneInfo(settings.get('timezone', 'Asia/Shanghai'))
@@ -22,8 +32,10 @@ def night_schedule(config, now=None):
     return {'enabled': enabled, 'open': not enabled or admitted,
             'start': start.strftime('%H:%M'), 'end': end.strftime('%H:%M'),
             'timezone': str(zone), 'next_start': next_start.isoformat(),
-            'stages': sorted(NIGHT_STAGES), 'running_jobs': 'finish_without_interruption'}
+            'stages': sorted(NIGHT_STAGES), 'paused_stages': sorted(paused_stages(config)),
+            'running_jobs': 'finish_without_interruption'}
 
 
 def stage_admitted(config, stage, now=None):
-    return stage not in NIGHT_STAGES or night_schedule(config, now)['open']
+    return stage not in paused_stages(config) and (
+        stage not in NIGHT_STAGES or night_schedule(config, now)['open'])

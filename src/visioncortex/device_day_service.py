@@ -150,7 +150,8 @@ class DeviceDayService:
         # Keep the full request resumable when only preprocessing is authorized.
         # Do not rescan every downstream receipt on every scheduler tick.
         from .device_day_provider_gate import ProviderGate
-        if self._runner.settings.get("preprocessing_only") or ProviderGate(self._runner.config).blocks("understanding"):
+        from .device_day_night_schedule import paused_stages
+        if paused_stages(self._runner.config) or ProviderGate(self._runner.config).blocks("understanding"):
             return False
         # Reject unfinished requests from local queues before touching the NAS.
         # Checking every historical request's remote receipts on the dispatcher
@@ -273,11 +274,11 @@ class DeviceDayService:
                     "pending_publications": bool(PublicationJournal(runner.runtime_root).pending(
                         1, since_us=processing_cutoff(runner.settings)))}
         def run_stage(runner, inventory, stage):
-            from .device_day_night_schedule import stage_admitted, night_schedule
+            from .device_day_night_schedule import stage_admitted, night_schedule, paused_stages
+            if stage in paused_stages(runner.config):
+                return {"status": "paused_by_user", "stage": stage}
             if not stage_admitted(runner.config, stage):
                 return {"status": "waiting_for_night_window", "schedule": night_schedule(runner.config)}
-            if runner.settings.get("preprocessing_only") and stage not in {"retention", "vision"}:
-                return {"status": "paused_by_user", "message": "当前仅执行预处理，云端理解与STT暂停"}
             from .device_day_provider_gate import ProviderGate
             gate = ProviderGate(runner.config)
             if gate.blocks(stage):
@@ -380,7 +381,10 @@ class DeviceDayService:
                         next_poll.clear()
                     from .device_day_provider_gate import ProviderGate
                     gate = ProviderGate(self._runner.config)
-                    from .device_day_night_schedule import stage_admitted
+                    from .device_day_night_schedule import stage_admitted, paused_stages
+                    paused = paused_stages(self._runner.config)
+                    for stage in paused:
+                        results[stage] = {"status": "paused_by_user", "stage": stage}
                     if stage_admitted(self._runner.config, "understanding") and (probe_job is None or probe_job.done()):
                         if gate.blocks("understanding") and time.time() >= gate.state().get("next_probe_at", 0):
                             probe_job = probe_worker.submit(gate.probe_if_due)
@@ -468,6 +472,7 @@ class DeviceDayService:
                     self.last_result = {"schema_version": VERSION, "status": "waiting_for_storage" if storage_wait else "running" if jobs else "waiting_for_nas_monitor",
                                         "process_since_us": processing_cutoff(self._runner.settings),
                                         "historical_backfill": "paused" if processing_cutoff(self._runner.settings) else "enabled",
+                                        "paused_stages": sorted(paused),
                                         "stages": results, "parallel_capacity": dict(capacities),
                                         "queue": self._runner.queue_snapshot(),
                                         "capture_deletion": "disabled_by_user"}

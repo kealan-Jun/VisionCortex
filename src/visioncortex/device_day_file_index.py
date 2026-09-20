@@ -222,7 +222,9 @@ class FileIndexPublisher:
                         if index.get('recordings'):
                             layout = DeviceDayLayout(Path(self.config['storage']['archive_root']), name[11:],
                                 index['recordings'][0]['start_us'])
-                            render_day(layout, index)
+                            from .device_day_night_schedule import paused_stages
+                            if 'report' not in paused_stages(self.config):
+                                render_day(layout, index)
                     publish_file_index(self.config, index, photos)
                     if before != index['time_index']:
                         if content_enabled:

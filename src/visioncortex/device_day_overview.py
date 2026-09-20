@@ -15,7 +15,8 @@ from .report_brand import brand_logo_data_url
 
 STAGE_NAMES = {'retention': '原片归档', 'vision': 'YOLO 预处理', 'stt': '录音识别',
                'understanding': '多模态理解', 'report': '日报更新'}
-WAIT_LABELS = {'upstream_failed': '上游失败待恢复', 'upstream_pending': '上游未完成',
+WAIT_LABELS = {'paused_by_user': '按用户要求暂停',
+               'upstream_failed': '上游失败待恢复', 'upstream_pending': '上游未完成',
                'provider_blocked': '云端账户不可用', 'night_window': '等待夜间窗口',
                'lease_recovery': '租约过期待恢复', 'pending_validation': '待校验调度'}
 
@@ -235,6 +236,8 @@ def render(data):
     updated = datetime.fromtimestamp(data['updated_at'],ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M:%S')
     schedule = progress['night_schedule']
     night = f'多模态和日报在 {schedule["start"]}–次日 {schedule["end"]} 运行。' if schedule['enabled'] else '夜间时段限制未启用。'
+    if schedule.get('paused_stages'):
+        night = '按用户要求暂停：' + '、'.join(STAGE_NAMES[s] for s in schedule['paused_stages']) + '。其他阶段继续按就绪顺序处理。'
     cloud = '<p class="error">云端账户当前不可用（Arrearage），录音识别和多模态等待服务恢复；原片归档与 YOLO 独立运行。</p>' if progress.get('provider',{}).get('active') else ''
     errors = ''.join(f'<li>{esc(e["archive"])}：{esc("总索引待恢复" if e["reason"] == "FileNotFoundError" else "总索引读取异常")}</li>' for e in data['errors'])
     errors += ''.join(f'<li>{esc(e)}</li>' for e in progress['errors'])
