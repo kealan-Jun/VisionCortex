@@ -3,6 +3,7 @@ import json
 from contextlib import ExitStack
 from pathlib import Path
 import uuid
+import time
 from .sqlite_store import connection
 
 
@@ -25,12 +26,14 @@ class PublicationJournal:
         with connection(self.path) as db:
             db.execute('DELETE FROM dirty WHERE id=? AND token=?', (identifier, token))
 
-    def pending(self, limit=32, *, since_us=None):
+    def pending(self, limit=32, *, since_us=None, prefer_since_us=None):
         with connection(self.path, readonly=True) as db:
             return [(row['token'], json.loads(row['record'])) for row in db.execute(
                 "SELECT * FROM dirty WHERE ? IS NULL OR MAX(COALESCE(json_extract(record,'$.recording_start_us'),0),"
-                "COALESCE(json_extract(record,'$.recording_end_us'),0))>=? ORDER BY rowid LIMIT ?",
-                (since_us, since_us, limit))]
+                "COALESCE(json_extract(record,'$.recording_end_us'),0))>=? ORDER BY "
+                "CASE WHEN ? IS NOT NULL AND COALESCE(json_extract(record,'$.recording_start_us'),0)>=? "
+                "THEN 0 ELSE 1 END,rowid LIMIT ?",
+                (since_us, since_us, prefer_since_us, prefer_since_us, limit))]
 
     def defer(self, identifier, token):
         with connection(self.path) as db:
@@ -47,7 +50,8 @@ def reconcile(runner):
     journal = PublicationJournal(runner.runtime_root)
     from .device_day_schedule import processing_cutoff
     completed = 0
-    for token, record in journal.pending(since_us=processing_cutoff(runner.settings)):
+    recent = round((time.time() - runner.settings.get('live_priority_seconds', 14400)) * 1e6)
+    for token, record in journal.pending(since_us=processing_cutoff(runner.settings), prefer_since_us=recent):
         try:
             # Never acknowledge an in-flight stage before its receipt exists.
             # A crash between receipt and index publication must remain replayable.

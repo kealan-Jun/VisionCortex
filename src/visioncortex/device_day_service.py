@@ -235,6 +235,7 @@ class DeviceDayService:
         from .device_day_contract import STAGES
         jobs, results, next_poll = {}, {}, {}
         publication_job = None
+        index_job, last_index = None, 0
         recovery_job, overview_job = None, None
         last_recovery, last_overview = 0, 0
         from .device_day_recovery import RetentionRecovery
@@ -250,8 +251,7 @@ class DeviceDayService:
             from .device_day_publication import reconcile_outputs
             from .capture_link_cleanup import resume_pending
             resume_pending(runner)
-            from .publication_journal import PublicationJournal, reconcile
-            reconcile(runner)
+            from .publication_journal import PublicationJournal
             from .device_day_schedule import in_processing_scope, processing_cutoff
             if processing_cutoff(runner.settings):
                 # Live-only mode must not walk or republish historical archives.
@@ -307,6 +307,7 @@ class DeviceDayService:
                       "understanding": settings.get("understanding_workers", 2), "report": 1}
         with ExitStack() as executor_stack:
             workers = executor_stack.enter_context(ThreadPoolExecutor(max_workers=1, thread_name_prefix="device-publication"))
+            index_worker = executor_stack.enter_context(ThreadPoolExecutor(max_workers=1, thread_name_prefix="device-index"))
             slot_workers = {}
             probe_worker = executor_stack.enter_context(ThreadPoolExecutor(max_workers=1, thread_name_prefix="provider-health"))
             timeline_worker = executor_stack.enter_context(ThreadPoolExecutor(max_workers=1, thread_name_prefix="day-timeline"))
@@ -321,6 +322,12 @@ class DeviceDayService:
                     if not (settings.get("device_day") or {}).get("enabled"):
                         break
                     changed_stages = set()
+                    if index_job is not None and index_job.done():
+                        try:
+                            results['index_publication'] = {'published': index_job.result()}
+                        except Exception as exc:
+                            results['index_publication'] = {'status': 'failed', 'error_type': type(exc).__name__}
+                        index_job = None
                     if overview_job is not None and overview_job.done():
                         try:
                             results['overview'] = overview_job.result()
@@ -362,7 +369,7 @@ class DeviceDayService:
                                 next_poll[(child, ordinal)] = 0
                     settings_key = json.dumps(settings, sort_keys=True, default=str)
                     if self._runner is None or self._settings_key != settings_key:
-                        if jobs or recovery_job is not None or overview_job is not None:
+                        if jobs or recovery_job is not None or overview_job is not None or index_job is not None:
                             self.wakeup.wait(1)
                             self.wakeup.clear()
                             continue
@@ -473,6 +480,12 @@ class DeviceDayService:
                                                                   defer_audit=defer_audit)
                             last_timeline = time.monotonic()
                     publication_dirty = publication_dirty or bool(changed_stages)
+                    # Replay sealed stage results independently of the full
+                    # auxiliary-file sweep, which can span many historical days.
+                    if index_job is None and time.monotonic() - last_index >= 5:
+                        from .publication_journal import reconcile
+                        index_job = index_worker.submit(reconcile, self._runner)
+                        last_index = time.monotonic()
                     storage_wait = results.get("retention", {}).get("status") == "waiting_for_storage"
                     self.last_result = {"schema_version": VERSION, "status": "waiting_for_storage" if storage_wait else "running" if jobs else "waiting_for_nas_monitor",
                                         "process_since_us": processing_cutoff(self._runner.settings),

@@ -145,3 +145,68 @@ def test_background_audit_waits_for_speech_and_video_then_resumes(tmp_path):
         with queue.connect() as db:
             db.execute("UPDATE recordings SET input_status='missing' WHERE recording_id='slice'")
         assert not defer_multiview_audit(runner), 'Unavailable input must not starve background work'
+
+
+def test_publication_prefers_recent_results_then_drains_history_without_losing_writes(tmp_path):
+    from visioncortex.publication_journal import PublicationJournal
+    journal = PublicationJournal(tmp_path)
+    old = journal.begin({'recording_id': 'history', 'recording_start_us': 10})
+    recent = journal.begin({'recording_id': 'recent', 'recording_start_us': 101})
+    assert journal.pending(1, prefer_since_us=100)[0][0] == recent
+    journal.complete('recent', recent)
+    assert journal.pending(1, prefer_since_us=100)[0][0] == old
+    arrival = journal.begin({'recording_id': 'arrival', 'recording_start_us': 102})
+    assert journal.pending(1, prefer_since_us=100)[0][0] == arrival
+    journal.complete('arrival', arrival)
+    assert journal.pending(1, prefer_since_us=100)[0][0] == old
+
+
+def test_speech_index_publishes_while_historical_auxiliary_sweep_is_busy(device_config, monkeypatch):
+    import threading
+    import time
+    from test_device_day import FakeModels, capture
+    from visioncortex import device_day_service
+    from visioncortex.device_day import DeviceDayRunner
+    from visioncortex.device_day_contract import read_json
+    from visioncortex.nas_recordings import scan_recordings
+
+    capture(device_config)
+    device_config['device_day'].update(paused_stages=['vision', 'understanding', 'report'],
+                                      defer_audio_day_publication=True)
+    inventory = scan_recordings(device_config)
+    record = inventory['recordings'][0]
+    runner = DeviceDayRunner(device_config, FakeModels())
+    runner.run_once(inventory, stage='retention')
+    runner.run_once(inventory, stage='stt')
+    busy, release = threading.Event(), threading.Event()
+
+    def slow_sweep(*args):
+        busy.set()
+        release.wait(15)
+        return []
+
+    monkeypatch.setattr(device_day_service, 'DeviceDayRunner', lambda _: runner)
+    monkeypatch.setattr('visioncortex.device_day_capture_files.reconcile_capture_files', slow_sweep)
+    monkeypatch.setattr('visioncortex.device_day_publication.reconcile_outputs', lambda *args: {})
+    monkeypatch.setattr('visioncortex.device_day_overview.ArchiveOverview.publish', lambda *args: {})
+    from visioncortex.publication_journal import reconcile
+    monkeypatch.setattr('visioncortex.publication_journal.reconcile',
+                        lambda current: reconcile(current) if busy.is_set() else 0)
+    service = device_day_service.DeviceDayService(lambda: device_config, threading.Lock())
+    monkeypatch.setattr(service, '_storage_available', lambda *args: {'ready': True})
+    service.observe(device_config, inventory)
+    service.start()
+    try:
+        assert busy.wait(8)
+        deadline = time.monotonic() + 10
+        while True:
+            path = runner.layout(record).index
+            published = read_json(path).get('recordings', []) if path.is_file() else []
+            if any(r.get('transcription', {}).get('status') == 'completed' for r in published):
+                break
+            assert time.monotonic() < deadline, 'Completed speech waited for historical auxiliary files'
+            time.sleep(.05)
+        assert not release.is_set()
+    finally:
+        release.set()
+        service.stop()
