@@ -745,48 +745,20 @@ class DeviceDayModels:
                                 "source_ref": segment["source_ref"], "physical_action_confirmed": False}
                     request_path = folder / media_interval_name(left, right) / "Input.json"
                     result_path = folder / media_interval_name(left, right) / "Result.json"
-                    input_key = digest([metadata, SCENE_PROMPT])
-                    raw_result = None
-                    if request_path.is_file() and result_path.is_file():
-                        saved = read_json(request_path)
-                        saved_result = read_json(result_path)
-                        if saved.get("input_key") == input_key and saved_result.get("input_key") == input_key:
-                            raw_result = saved_result.get("model_result")
-                    from . import device_day_semantic_cache as response_cache
-                    response_identity = response_cache.identity(self.config, SCENE_PROMPT, metadata)
-                    reused = raw_result is not None
-                    if raw_result is None or raw_result.get("status") != "completed":
-                        atomic_json(request_path, {"input_key": input_key, "prompt": SCENE_PROMPT, "metadata": metadata})
-                        raw_result = response_cache.load(self.config, response_identity)
-                        if raw_result is not None:
-                            try:
-                                validate_understanding(raw_result, images, selected_comments, left, right,
-                                                       recording["recording_start_us"], clock_mapping)
-                            except ValueError:
-                                response_cache.reject(self.config, response_identity)
-                                raw_result = None
-                        reused = raw_result is not None
-                        if raw_result is None:
-                            raw_result = analyzer._call(SCENE_PROMPT, metadata,
-                                                       [(f["frame_id"], safe_child(layout.root, f["path"])) for f in images],
-                                                       max_images=len(images))
-                        # Save usage and failure receipts before validation; failed
-                        # stages never automatically retry paid requests forever.
-                        atomic_json(result_path, {"input_key": input_key, "model_result": raw_result, "response_cache_reused": reused})
-                    if raw_result.get("status") != "completed":
-                        from .device_day_provider_gate import ProviderGate
-                        ProviderGate(self.config).record_failure(raw_result)
-                        raise ValueError("Multimodal stage did not complete; retained model receipt")
-                    parsed = validate_understanding(raw_result, images, selected_comments, left, right,
-                                                    recording["recording_start_us"], clock_mapping)
-                    if not reused:
-                        response_cache.save(self.config, response_identity, raw_result)
+                    from . import scene_requests
+                    def validate(raw):
+                        return validate_understanding(raw, images, selected_comments, left, right,
+                                                      recording['recording_start_us'], clock_mapping)
+                    raw_result, parsed, reused = scene_requests.window(self.config, analyzer, SCENE_PROMPT, metadata,
+                        [(f['frame_id'], safe_child(layout.root, f['path'])) for f in images],
+                        request_path, result_path, validate)
                     for step in parsed["steps"]:
                         step.update(start_us=capture_us(clock_mapping, step["start_ms"]),
                                     end_us=capture_us(clock_mapping, step["end_ms"]))
                     result_list.append({"start_ms": left, "end_ms": right, **parsed,
                                         "source_frames": images, "response_cache_reused": reused, "model_receipt": layout.relative(result_path),
-                                        "usage": raw_result.get("usage"), "input": layout.relative(request_path)})
+                                        "usage": raw_result.get("usage"), "input": layout.relative(request_path),
+                                        "additional_usage": scene_requests.additional_usage(raw_result, reused)})
                     artifacts.extend(artifact(layout.root, p) for p in (request_path, result_path))
                     artifacts.extend({k: f[k] for k in ("path", "size_bytes", "sha256")} for f in images)
                 understandings.append({"segment_id": segment["segment_id"], "activity": segment["activity"],

@@ -307,6 +307,8 @@ class DeviceDayRunner:
             mllm = self.config.get("mllm") or {}
             settings["mllm"] = {k: mllm.get(k) for k in (
                 "model", "provider", "base_url", "enabled", "max_images_per_group", "temperature")}
+            from .scene_requests import request_policy
+            settings['request_policy'] = request_policy(self.config)
         # Scheduling metadata must not invalidate already sealed media or
         # force unrelated stages to rerun when camera capacity changes.
         stage_settings = {"schema_version": self.settings.get("schema_version", VERSION),

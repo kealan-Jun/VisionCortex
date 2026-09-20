@@ -561,6 +561,14 @@ key_materials:
 
 mllm:
   enabled: true
+  # Candidate transport optimization; enable after a real-video comparison.
+  # Every image, timestamp, thinking setting and response field is retained.
+  compact_scene_metadata: false
+  # Optional device/day video-understanding limits, independent of speech.
+  # Attempts are reserved atomically. The token threshold stops NEW calls;
+  # a single call may exceed it and unknown usage keeps admission blocked.
+  scene_daily_attempt_limit: null
+  scene_daily_token_limit: null
   base_url: https://ark.cn-beijing.volces.com/api/v3
   model: doubao-seed-2-1-pro-260628
   api_key_env: ARK_API_KEY

@@ -12,14 +12,15 @@ DEVICE_SOURCES = {
                'actions', 'candidate_index', 'video_io', 'alignment', 'movement_verification', 'coarse_recall',
                'grouping', 'action_state_machine', 'action_semantics', 'archive', 'open_vocabulary_runtime', 'source_frames', 'media_time'],
     'stt': ['device_day_stt', 'speech', 'speech_worker', 'speech_qwen'],
-    'understanding': ['device_day_models', 'device_day_semantic_cache', 'mllm', 'mllm_provider', 'video_io', 'media_time'],
+    'understanding': ['device_day_models', 'device_day_semantic_cache', 'scene_requests', 'scene_transport',
+                      'mllm', 'mllm_provider', 'video_io', 'media_time'],
     'report': ['device_day_reports', 'daily_reports', 'report_presentations'],
 }
 CONTROL_MODULES = frozenset({
     'runtime_control', 'runtime_options', 'runtime_process', 'sqlite_store', 'observed_inventory',
     'receipt_projection', 'publication_journal', 'provider_control', 'build_identity', 'owned_subprocess',
     'runtime_services', 'task_events', 'input_availability', 'submission', 'knowledge', 'knowledge_api',
-    'stage_execution', 'stage_dependencies', 'artifact_reader', 'timeline_invalidation',
+    'stage_execution', 'stage_dependencies', 'artifact_reader', 'timeline_invalidation', 'multimodal_usage',
 })
 
 
