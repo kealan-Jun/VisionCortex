@@ -13,7 +13,22 @@ class TimelineInvalidations:
             db.executescript('''PRAGMA journal_mode=WAL;
                 CREATE TABLE IF NOT EXISTS inputs(archive TEXT PRIMARY KEY, digest TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS pending(day TEXT PRIMARY KEY, token TEXT NOT NULL,
-                    start_us INTEGER, end_us INTEGER, updated REAL NOT NULL);''')
+                    start_us INTEGER, end_us INTEGER, updated REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS deferred_audits(day TEXT PRIMARY KEY,
+                    token TEXT NOT NULL, updated REAL NOT NULL);''')
+
+    def defer_audit(self, day):
+        with connection(self.path) as db:
+            db.execute('INSERT INTO deferred_audits VALUES(?,?,?) ON CONFLICT(day) '
+                       'DO UPDATE SET token=excluded.token', (day, uuid.uuid4().hex, time.time()))
+
+    def deferred_audits(self):
+        with connection(self.path, readonly=True) as db:
+            return [dict(row) for row in db.execute('SELECT * FROM deferred_audits ORDER BY updated,day')]
+
+    def complete_audit(self, day, token):
+        with connection(self.path) as db:
+            db.execute('DELETE FROM deferred_audits WHERE day=? AND token=?', (day, token))
 
     def changed(self, archive, digest, start=None, end=None):
         with connection(self.path) as db:

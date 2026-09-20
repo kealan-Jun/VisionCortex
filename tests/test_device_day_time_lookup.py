@@ -127,6 +127,38 @@ def test_live_timeline_refresh_writes_only_runtime_index(tmp_path, monkeypatch):
     assert (tmp_path/'device-day/DayTimeline'/f'{DAY}.json').is_file()
 
 
+def test_backlog_refresh_keeps_speech_searchable_and_defers_media_audit_durably(default_config, tmp_path, monkeypatch):
+    from visioncortex.timeline_invalidation import TimelineInvalidations
+    config = deepcopy(default_config)
+    config['device_day'] = {'process_since_us': None}
+    config['storage'].update(local_runtime_root=str(tmp_path/'runtime'), archive_root=str(tmp_path/'archive'))
+    path = tmp_path/'archive'/ARCHIVE/'ProcessedClips/Index.json'
+    atomic_json(path, index() | {'aligned_experiments': [{'experiment_id': 'preserved'}]})
+    before = path.read_bytes()
+    calls = []
+
+    def analyze(*args):
+        calls.append(True)
+        return {'status': 'waiting_for_other_role', 'experiments': []}
+
+    monkeypatch.setattr('visioncortex.device_day_multiview.build_device_day_multiview', analyze)
+    assert refresh_timeline(config, DAY, defer_audit=True)['audit_deferred']
+    assert not calls and path.read_bytes() == before
+    timeline = query_timeline(config, DAY)
+    assert timeline['multiview_audit_deferred']
+    found = query_materials(timeline, BASE+3500000, 1)
+    assert found['devices'][0]['recordings'][0]['comments'][0]['text'] == '样本转写'
+    # A fresh queue instance models restart; refreshing the lookup does not lose audit debt.
+    invalidations = TimelineInvalidations(tmp_path/'runtime/device-day')
+    first = invalidations.deferred_audits()[0]
+    refresh_timeline(config, DAY, defer_audit=True)
+    invalidations.complete_audit(DAY, first['token'])
+    assert len(invalidations.deferred_audits()) == 1, 'An older generation cannot acknowledge a newer refresh'
+    refresh_timeline(config, DAY)
+    assert calls == [True] and not invalidations.deferred_audits()
+    assert not query_timeline(config, DAY)['multiview_audit_deferred']
+
+
 def test_queries_use_published_local_indexes_without_nas_scans(tmp_path, monkeypatch):
     config = photo_config(tmp_path)
     config['storage'] = {'local_runtime_root': str(tmp_path/'runtime')}

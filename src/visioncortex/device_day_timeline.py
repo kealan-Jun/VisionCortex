@@ -160,17 +160,33 @@ def load_timeline(config, day, *, audit=False):
         entry.pop('clock_mapping', None)
     return result
 
-def refresh_timeline(config, day):
+def defer_multiview_audit(runner):
+    """Source probing for an entire day yields to slice and speech queues."""
+    from .device_day_night_schedule import stage_admitted
+    return any(stage_admitted(runner.config, stage) and runner.queues[stage].has_processing_work(
+        runner.settings.get('failure_retry_limit', 0)) for stage in ('retention', 'vision', 'stt'))
+
+
+def refresh_timeline(config, day, *, defer_audit=False):
     from .device_day_contract import atomic_json
     from .device_day_schedule import processing_cutoff
+    from .timeline_invalidation import TimelineInvalidations
     live_only = bool(processing_cutoff(config.get('device_day', {})))
-    result = load_timeline(config, day, audit=not live_only)
-    path = Path(config['storage']['local_runtime_root'])/'device-day'/'DayTimeline'/f'{day}.json'
+    runtime = Path(config['storage']['local_runtime_root'])/'device-day'
+    invalidations = TimelineInvalidations(runtime)
+    deferred = defer_audit and not live_only
+    if deferred:
+        invalidations.defer_audit(day)
+    generation = next((r for r in invalidations.deferred_audits() if r['day'] == day), None)
+    result = load_timeline(config, day, audit=not (live_only or deferred))
+    result['multiview_audit_deferred'] = deferred
+    path = runtime/'DayTimeline'/f'{day}.json'
     atomic_json(path, result)
-    if live_only:
+    if live_only or deferred:
         # Publish the time index without reprocessing old experiment groups or
         # rewriting existing NAS indexes. Per-slice stages publish their own work.
-        return {'date': day, 'link_count': len(result['cross_view_links']), 'publication_pending': []}
+        return {'date': day, 'link_count': len(result['cross_view_links']),
+                'publication_pending': [], 'audit_deferred': deferred}
     from .device_day import exclusive
     publication_pending = []
     for name in {entry['archive'] for entry in result['entries']}:
@@ -194,6 +210,8 @@ def refresh_timeline(config, day):
                     retire_superseded_outputs(config, name, index['aligned_experiments'])
         except (OSError, ValueError, BlockingIOError):
             publication_pending.append(name)
+    if generation and not publication_pending:
+        invalidations.complete_audit(day, generation['token'])
     return {'date': day, 'link_count': len(result['cross_view_links']), 'publication_pending': publication_pending}
 
 

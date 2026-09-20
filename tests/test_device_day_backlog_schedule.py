@@ -117,3 +117,31 @@ def test_pausing_semantics_keeps_video_and_speech_running_without_report_publica
     assert progress['night_schedule']['paused_stages'] == ['report', 'understanding']
     waiting = next(iter(progress['waiting'].values()))
     assert waiting['understanding'] == waiting['report'] == {'paused_by_user': 1}
+
+
+def test_background_audit_waits_for_speech_and_video_then_resumes(tmp_path):
+    from types import SimpleNamespace
+    from visioncortex.device_day_timeline import defer_multiview_audit
+
+    settings = {'failure_retry_limit': 3, 'paused_stages': ['understanding', 'report']}
+    queues = {stage: DeviceDayQueue(tmp_path / f'{stage}.sqlite3')
+              for stage in ('retention', 'vision', 'stt', 'understanding', 'report')}
+    runner = SimpleNamespace(settings=settings, config={'device_day': settings}, queues=queues)
+    record = {'recording_id': 'slice', 'configured_role': 'first_person'}
+    queues['understanding'].enqueue(record, 'revision')
+    assert not defer_multiview_audit(runner)
+    for stage in ('retention', 'vision', 'stt'):
+        queue = queues[stage]
+        queue.enqueue(record, 'revision')
+        assert defer_multiview_audit(runner)
+        queue.claim('worker')
+        assert defer_multiview_audit(runner)
+        queue.finish('worker', 'slice', {'status': 'failed'}, 1)
+        assert defer_multiview_audit(runner), 'A retryable failure is still priority work'
+        with queue.connect() as db:
+            db.execute("UPDATE recordings SET attempts=3 WHERE recording_id='slice'")
+        assert not defer_multiview_audit(runner)
+        queue.enqueue(record, 'new-revision')
+        with queue.connect() as db:
+            db.execute("UPDATE recordings SET input_status='missing' WHERE recording_id='slice'")
+        assert not defer_multiview_audit(runner), 'Unavailable input must not starve background work'

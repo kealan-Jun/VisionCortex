@@ -452,7 +452,8 @@ class DeviceDayService:
                             results['timeline'] = {'status': 'failed', 'error_type': type(exc).__name__}
                         timeline_job = None
                     if timeline_job is None and time.monotonic() - last_timeline >= 5 and records:
-                        from .device_day_timeline import refresh_timeline
+                        from .device_day_timeline import refresh_timeline, defer_multiview_audit
+                        defer_audit = defer_multiview_audit(self._runner)
                         pending_days = invalidations.pending()
                         # Historical local caches get a one-time bootstrap. No
                         # new capture means no recurring all-date recomputation.
@@ -461,11 +462,15 @@ class DeviceDayService:
                         if processing_cutoff(self._runner.settings):
                             pending_days = [item for item in pending_days if item['day'] in days]
                         missing = [d for d in days if not (self._runner.runtime_root / 'DayTimeline' / f'{d}.json').is_file()]
+                        audits = ([] if defer_audit or processing_cutoff(self._runner.settings)
+                                  else [item['day'] for item in invalidations.deferred_audits()])
                         day = pending_days[0]['day'] if pending_days else (sorted(timeline_pending)[0] if timeline_pending else (missing[0] if missing else None))
+                        day = day or (audits[0] if audits else None)
                         if day:
                             timeline_pending.discard(day)
                             timeline_generation = next((item for item in pending_days if item['day'] == day), None)
-                            timeline_job = timeline_worker.submit(refresh_timeline, self._runner.config, day)
+                            timeline_job = timeline_worker.submit(refresh_timeline, self._runner.config, day,
+                                                                  defer_audit=defer_audit)
                             last_timeline = time.monotonic()
                     publication_dirty = publication_dirty or bool(changed_stages)
                     storage_wait = results.get("retention", {}).get("status") == "waiting_for_storage"

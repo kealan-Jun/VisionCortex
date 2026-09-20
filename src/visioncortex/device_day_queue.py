@@ -66,6 +66,15 @@ class DeviceDayQueue:
             return [json.loads(row["payload"]) for row in db.execute(
                 "SELECT payload FROM recordings WHERE status != 'completed'")]
 
+    def has_processing_work(self, max_attempts=0):
+        """Keep expensive background audits behind ready stage work."""
+        with self.connect() as db:
+            return db.execute(
+                "SELECT 1 FROM recordings WHERE input_status='ready' AND "
+                "(status IN ('queued','running') OR (status='failed' AND attempts<?)) LIMIT 1",
+                (max_attempts,),
+            ).fetchone() is not None
+
     def revise_verified_completion(self, recording, previous_revision, revision):
         """Keep completion only after the caller revalidates the current receipt.
 
