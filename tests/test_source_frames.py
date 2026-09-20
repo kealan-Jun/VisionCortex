@@ -204,6 +204,37 @@ def test_metadata_probe_failure_keeps_pixels_without_claiming_native_identity(tm
     trace.finish(None)
 
 
+@pytest.mark.parametrize(('duration_ms', 'budget'), [(1000, 120), (900000, 510), (3600000, 900)])
+@pytest.mark.parametrize('failure', [None, 'timeout', 'truncated'])
+def test_long_native_probe_gets_bounded_time_without_accepting_failed_ledgers(tmp_path, monkeypatch, duration_ms, budget, failure):
+    from types import SimpleNamespace
+    from visioncortex import source_frames as sf
+    source = tmp_path / 'source.mp4'
+    source.write_bytes(b'parser fixture')
+    monkeypatch.setattr(sf.shutil, 'which', lambda name: name)
+    monkeypatch.setattr(sf, '_encoder_stats_supported', lambda _: False)
+    calls = []
+
+    def run(command, **kwargs):
+        frames = '-read_intervals' in command
+        calls.append(kwargs['timeout'])
+        if frames and failure == 'timeout':
+            raise subprocess.TimeoutExpired(command, kwargs['timeout'])
+        if frames and failure == 'truncated':
+            return SimpleNamespace(stdout=b'{"frames":[')
+        payload = {'frames': [{'best_effort_timestamp': 7, 'pkt_pos': '20'}]} if frames else {
+            'streams': [{'time_base': '1/30'}], 'format': {'start_time': '0'}}
+        return SimpleNamespace(stdout=json.dumps(payload).encode())
+
+    monkeypatch.setattr(sf.subprocess, 'run', run)
+    trace = SourceFrameTrace(source, 0, duration_ms, 2)
+    assert calls == [120, budget]
+    if failure:
+        assert trace.failure == 'native_frame_probe_unavailable' and not trace.positions
+    else:
+        assert trace.failure is None and trace.positions == {20: [(7, 0)]}
+
+
 def test_showinfo_without_packet_position_reports_missing_identity_without_waiting(tmp_path, monkeypatch):
     source = tmp_path / "video.mp4"
     source.write_bytes(b"parser fixture")

@@ -7,6 +7,16 @@ from visioncortex.device_day_models import check_coverage
 from visioncortex.device_day_runtime_identity import compatible_runtime_hash
 
 
+def test_native_probe_deadline_only_compatibility_is_exact(tmp_path):
+    from visioncortex import source_frames
+    path = Path(source_frames.__file__)
+    actual = hashlib.sha256(path.read_bytes()).hexdigest()
+    assert compatible_runtime_hash(path, actual) == '3bf96e4268b9b164d75463b1b340037fc256315be94f6a1a2711da57712cb2fd'
+    changed = hashlib.sha256(path.read_bytes() + b'\n# unrelated change').hexdigest()
+    assert compatible_runtime_hash(path, changed) == changed
+    assert compatible_runtime_hash(tmp_path/path.name, actual) == actual
+
+
 def test_runtime_compatibility_never_accepts_unknown_code_or_external_name(tmp_path):
     import visioncortex.detection as detection
     path = Path(detection.__file__)

@@ -233,6 +233,10 @@ class SourceFrameTrace:
         self.origin_ms = 0.0
         self.encoder_stats = self.enabled and _encoder_stats_supported(shutil.which("ffmpeg"))
         self.start_ms = start_ms
+        # A full recording needs much more decoding than a small seek window.
+        # Allow half its media duration plus startup time, bounded at 15 minutes;
+        # the complete native ledger and unchanged-source checks still apply.
+        self.frame_probe_timeout = max(120.0, min(900.0, 60.0 + max(0, end_ms - start_ms) / 2000))
         self.timestamp_offset = 0
         self.native_pts = {}
         self.failure: str | None = None
@@ -331,7 +335,8 @@ class SourceFrameTrace:
         result = subprocess.run(
             ["ffprobe", "-v", "error", "-select_streams", "v:0", *arguments,
              "-of", "json", str(self.path)],
-            capture_output=True, check=True, timeout=120,
+            capture_output=True, check=True,
+            timeout=self.frame_probe_timeout if '-read_intervals' in arguments else 120,
         )
         return json.loads(result.stdout)
 

@@ -77,3 +77,9 @@ _REVIEWED['device_day_models.py'] = (
 _REVIEWED['device_day_understanding.py'] = (
     '58c33e3f9daf018267846222a8986b1c345945cbe9cf2c2174eef14fdd113846',
     'c3b82cff2d2cf4b29c16fc1ed6a05569c489372c0cf2037d08075fa39e98641d')
+
+# Only the native-probe deadline changes. Successful frame/PTS ledgers and
+# all source/coverage checks are identical; unknown edits still invalidate.
+_REVIEWED['source_frames.py'] = (
+    'f27275927934c866a3e48dddd0af23ae9a0246940ade92517e82c6d995a52b9a',
+    '3bf96e4268b9b164d75463b1b340037fc256315be94f6a1a2711da57712cb2fd')
