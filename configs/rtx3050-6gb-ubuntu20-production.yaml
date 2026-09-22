@@ -1,5 +1,8 @@
 extends: ./rtx3090ti-ubuntu-production.yaml
 
+device_day:
+  additional_labs: []
+
 # Ubuntu 20.04 / RTX 3050 6 GiB deployment. The full evidence chain remains
 # enabled, but only one full-timeline role engine is resident at a time and
 # heavyweight key-material sidecars are staged to avoid overlapping VRAM use.

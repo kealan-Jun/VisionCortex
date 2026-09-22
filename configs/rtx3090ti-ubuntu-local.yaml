@@ -2,6 +2,7 @@ extends: ./rtx3090ti-ubuntu-production.yaml
 
 device_day:
   enabled: false
+  additional_labs: []
   delete_capture_sources: false
 
 # Local/offline acceptance and Web profile. Every path is rooted on the local

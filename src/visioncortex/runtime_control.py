@@ -55,7 +55,7 @@ def analysis_execution(function):
 class ResourceCoordinator:
     """Cross-process leases, FIFO with priority aging, and bounded admission.
 
-    No model or media access. All participants must share the local runtime root.
+    No model or media access. All participants must share the resource database.
     Leases are renewed while an operation runs and expire after process death.
     """
     def __init__(self, path):
@@ -145,6 +145,13 @@ class ResourceCoordinator:
                 'SELECT resource,job,source,units,state,created FROM leases WHERE expires>? ORDER BY created', (time.time(),))]
 
 
+def resource_database(config):
+    root = Path((config.get('runtime') or {}).get('resource_root') or config['storage']['local_runtime_root'])
+    if not root.is_absolute() or str(root).startswith(('//', '\\\\')):
+        raise ValueError('Resource coordinator requires an absolute local runtime root')
+    return root / 'state' / 'resources.sqlite3'
+
+
 @contextmanager
 def resource_slot(config, resource, *, units=1):
     check_cancelled()
@@ -154,10 +161,7 @@ def resource_slot(config, resource, *, units=1):
     if capacity is None:
         yield
         return
-    root = Path(config['storage']['local_runtime_root'])
-    if not root.is_absolute() or str(root).startswith(('//', '\\\\')):
-        raise ValueError('Resource coordinator requires an absolute local runtime root')
-    coordinator = ResourceCoordinator(root/'state'/'resources.sqlite3')
+    coordinator = ResourceCoordinator(resource_database(config))
     with coordinator.acquire(resource, capacity=capacity, units=min(units, capacity),
                              timeout=settings.get('admission_timeout_seconds', 300)):
         yield
