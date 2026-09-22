@@ -125,25 +125,18 @@ async def _lifespan(_: FastAPI):
         return
     with worker_owner(settings):
         _expire_stale_upload_sessions(settings)
-        from contextlib import ExitStack
-        laboratories = ExitStack()
         try:
             _recover_jobs_from_archive_receipts(settings)
             _recover_orphaned_tasks()
             _start_queue_worker()
             _start_nas_monitor(settings)
             _device_day_service.start()
-            from .lab_sources import additional_laboratories
-            laboratories.enter_context(additional_laboratories(_settings, _device_day_service, _nas_monitor_loop))
             yield
         finally:
             from .owned_subprocess import decoder_shutdown_guard
             with decoder_shutdown_guard():
-                _device_day_service.stop_event.set()
-                _device_day_service.wakeup.set()
-                _stop_nas_monitor()
-                laboratories.close()
                 _device_day_service.stop()
+                _stop_nas_monitor()
                 _stop_queue_worker()
                 from .shared_inference import close_pools
                 close_pools()
@@ -230,10 +223,7 @@ def _publish_nas_monitor_snapshot(
     os.replace(temporary, path)
 
 
-def _nas_monitor_loop(settings: dict[str, Any], *, service=None, stop=None, publish=None) -> None:
-    service = service or _device_day_service
-    stop = stop or _nas_monitor_stop
-    publish = publish or _publish_nas_monitor_snapshot
+def _nas_monitor_loop(settings: dict[str, Any]) -> None:
     failures = 0
     last_success: dict[str, Any] | None = None
     interval = max(
@@ -243,8 +233,8 @@ def _nas_monitor_loop(settings: dict[str, Any], *, service=None, stop=None, publ
     camera_monitor = None
     if (settings.get("device_day") or {}).get("camera_lanes"):
         from .device_day_monitor import CameraMonitor
-        camera_monitor = CameraMonitor(settings, stop, service.observe)
-    while not stop.is_set():
+        camera_monitor = CameraMonitor(settings, _nas_monitor_stop, _device_day_service.observe)
+    while not _nas_monitor_stop.is_set():
         observed_at = datetime.now().astimezone().isoformat()
         try:
             if camera_monitor is not None:
@@ -258,11 +248,11 @@ def _nas_monitor_loop(settings: dict[str, Any], *, service=None, stop=None, publ
                     # Release each uploaded slice to preprocessing as soon as it is
                     # inspected, without waiting for every camera in the NAS scan.
                     inventory = scan_recordings(discovery, on_record=lambda record:
-                        service.observe(settings, {"recordings": [record]}))
+                        _device_day_service.observe(settings, {"recordings": [record]}))
                 else:
                     inventory = scan_recordings(discovery)
             if camera_monitor is None:
-                service.observe(settings, inventory)
+                _device_day_service.observe(settings, inventory)
             failures = 0
             last_success = inventory | {
                 "monitor": {
@@ -272,7 +262,7 @@ def _nas_monitor_loop(settings: dict[str, Any], *, service=None, stop=None, publ
                     "consecutive_failures": 0,
                 }
             }
-            publish(settings, last_success)
+            _publish_nas_monitor_snapshot(settings, last_success)
         except (OSError, ValueError, TypeError) as exc:
             failures += 1
             degraded = dict(
@@ -295,13 +285,12 @@ def _nas_monitor_loop(settings: dict[str, Any], *, service=None, stop=None, publ
                 "error_type": type(exc).__name__,
             }
             try:
-                publish(settings, degraded)
+                _publish_nas_monitor_snapshot(settings, degraded)
             except OSError:
-                if publish is _publish_nas_monitor_snapshot:
-                    with _nas_monitor_lock:
-                        global _nas_monitor_snapshot
-                        _nas_monitor_snapshot = degraded
-        stop.wait(interval)
+                with _nas_monitor_lock:
+                    global _nas_monitor_snapshot
+                    _nas_monitor_snapshot = degraded
+        _nas_monitor_stop.wait(interval)
 
 
 def _start_nas_monitor(settings: dict[str, Any]) -> None:
@@ -676,11 +665,7 @@ def _safe_file_name(value: str, fallback_stem: str = "file") -> str:
 def _settings() -> dict[str, Any]:
     configured = os.getenv(CONFIG_ENV)
     settings = load_config(Path(configured)) if configured else load_config()
-    settings = ai_settings.apply_active(settings)
-    if name := os.getenv('VISIONCORTEX_LAB'):
-        from .lab_sources import select_laboratory
-        settings = select_laboratory(settings, name)
-    return settings
+    return ai_settings.apply_active(settings)
 
 
 _device_day_service = DeviceDayService(_settings, _gpu_job_lock)
@@ -6719,10 +6704,10 @@ def liveness():
 @app.get('/api/runtime')
 def runtime_status():
     from .runtime_process import role, worker_status
-    from .runtime_control import ResourceCoordinator, resource_database
+    from .runtime_control import ResourceCoordinator
     from .build_identity import identity
     settings = _settings()
-    database = resource_database(settings)
+    database = Path(settings['storage']['local_runtime_root']) / 'state' / 'resources.sqlite3'
     resources = ResourceCoordinator(database).snapshot() if database.is_file() else []
     return {'build': identity(), 'role': role(settings), 'worker': worker_status(settings),
             'resources': resources, 'queue': _persistent_queue.stats() if _persistent_queue else {}}

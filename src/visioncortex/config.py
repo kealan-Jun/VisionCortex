@@ -83,8 +83,8 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
     paused_stages(config)
     from .multimodal_usage import validate as validate_usage
     validate_usage(config.get('mllm') or {})
-    from .lab_sources import laboratory_configs
-    laboratory_configs(config)
+    from .capture_layout import validate as validate_capture_layout
+    validate_capture_layout(config.get('collection_ingest') or {})
     return config
 
 

@@ -13,6 +13,10 @@ def configured_record(config, record):
     No camera-prefix inference: unregistered cameras still need a binding.
     Do not mutate an inventory or an actively leased worker's snapshot.
     """
+    from .capture_layout import bind_camera
+    record = bind_camera(config.get('collection_ingest', {}), record)
+    if record.get('camera_binding_status') == 'needs_directory_binding':
+        return record
     role = config.get("collection_ingest", {}).get("camera_role_map", {}).get(
         record.get("camera_key")
     )

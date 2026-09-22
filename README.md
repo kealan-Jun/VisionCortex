@@ -7,8 +7,9 @@
 NAS 自动采集的设备日五目录、按实际时长的采集分片处理、独立阶段队列与日报遵守
 [人的全流程实验归档契约 v1](docs/DEVICE-DAY-ARCHIVE-CONTRACT.zh-CN.md)。该结构已按用户要求固化；采集端原片删除保持关闭。
 
-3090 Ti 同时监控另一个实验室的 `Z:\lab_video`，使用独立队列和五目录归档，
-共用现有模型池。配置、阶段开关和查看入口见 [LabVideo 自动处理](docs/LAB-VIDEO-MONITORING.zh-CN.md)。
+3090 Ti 将 `Z:\lab_video` 的日期／视角目录映射为 `lab-video-1`、`lab-video-3`，
+共用现有处理队列、页面和 `VisionCortexExperimentArchive` 五目录归档。
+目录映射与阶段开关见 [LabVideo 自动处理](docs/LAB-VIDEO-MONITORING.zh-CN.md)。
 
 按角色选择入口，不需要从头通读所有文档：
 

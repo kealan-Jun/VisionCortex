@@ -13,17 +13,6 @@ runtime:
 
 device_day:
   enabled: true
-  # Independent laboratory; preserve recorder device IDs in its own archive.
-  additional_labs:
-    - name: LabVideo
-      source_root: /home/x1/桌面/nas/lab_video
-      archive_root: /home/x1/桌面/nas/lab_video/VisionCortexExperimentArchive
-      cache_root: /home/x1/桌面/nas/lab_video/VisionCortexExperimentCache
-      runtime_root: /srv/sentinel-data/VisionCortex3090Ti/Runtime/LabVideo
-      camera_directory_glob: "20??-??-??-*"
-      camera_role_map:
-        lubancat-4df661d7_cam01: first_person
-        orangepi5pro-f022c4_cam01: third_person
   readable_content_enabled: true
   defer_audio_day_publication: true
   # New captures only: no historical paid reruns for this coverage upgrade.
@@ -86,10 +75,21 @@ collection_ingest:
   source_root: /home/x1/桌面/nas
   camera_directories: []
   camera_directory_glob: "*_cam*"
+  additional_camera_directories: [lab_video]
+  directory_camera_bindings:
+    - directory_glob: "lab_video/20??-??-??-1/*"
+      camera_key: lab-video-1
+    - directory_glob: "lab_video/20??-??-??-3/*"
+      camera_key: lab-video-3
+  camera_group_map:
+    lab-video-1: lab-video
+    lab-video-3: lab-video
   # Frozen explicit device bindings; never infer a role from the device prefix.
   # Sample review and evidence limits: docs/CAMERA-VIEW-BINDINGS.md.
   # Reinspection and durable queue replay must retain these same bindings.
   camera_role_map:
+    lab-video-1: first_person
+    lab-video-3: third_person
     lubancat-4df661d7_cam01: first_person
     lubancat-52d2ef0c_cam01: first_person
     lubancat-e8cc0cb3_cam01: first_person

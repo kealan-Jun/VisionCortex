@@ -218,7 +218,11 @@ def _camera_directories(root: Path, settings: dict[str, Any], allow_plain: bool)
         return cameras
     if allow_plain:
         return [root]
-    return sorted(root.glob(settings.get("camera_directory_glob", "*_cam*")))
+    from .capture_layout import validate
+    validate(settings)
+    cameras = set(root.glob(settings.get("camera_directory_glob", "*_cam*")))
+    cameras.update(root / name for name in settings.get('additional_camera_directories') or [])
+    return sorted(cameras)
 
 
 def _merged_recording_intervals(
@@ -275,13 +279,14 @@ def _recording_batches(
     expected_cameras = {
         str(item) for item in (settings.get("camera_directories") or []) if str(item)
     }
-    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    from .capture_layout import camera_group
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for item in recordings:
         session_id = str(item.get("recording_session_id") or "")
         if session_id:
-            grouped[session_id].append(item)
+            grouped[item.get('source_group', camera_group(settings, item['camera_key'])), session_id].append(item)
     batches = []
-    for session_id, items in grouped.items():
+    for (source_group, session_id), items in grouped.items():
         cameras = {str(item.get("camera_key") or "") for item in items}
         items_by_camera: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for item in items:
@@ -343,6 +348,7 @@ def _recording_batches(
             {
                 "batch_id": f"nas-batch-{fingerprint[:24]}",
                 "recording_session_id": session_id,
+                "source_group": source_group,
                 "recording_start_us": start_us,
                 "recording_end_us": end_us,
                 "recording_start_time": _iso(start_us),
@@ -458,9 +464,8 @@ def scan_recordings(config: dict[str, Any], *, on_record=None, skip_folders=()) 
                         float(settings.get("settle_seconds", 120)),
                         allow_plain,
                     )
-                    item["configured_role"] = (settings.get("camera_role_map") or {}).get(
-                        item["camera_key"]
-                    )
+                    from .input_availability import configured_record
+                    item = configured_record(config, item)
                     recordings.append(item)
                     if on_record is not None:
                         on_record(item)
@@ -501,6 +506,9 @@ def scan_recordings(config: dict[str, Any], *, on_record=None, skip_folders=()) 
             camera
             for camera in monitored_camera_directories
             if camera != "." and camera not in (settings.get("camera_role_map") or {})
+            and not any(rule['directory_glob'].startswith(camera+'/')
+                        and rule['camera_key'] in (settings.get('camera_role_map') or {})
+                        for rule in settings.get('directory_camera_bindings') or [])
         ),
         "generated_at": _iso(round(now * 1e6)),
         "source_copy_bytes": 0, "video_decode": False,
@@ -555,6 +563,9 @@ def create_selection(config: dict[str, Any], payload: dict[str, Any]) -> dict[st
         by_camera[item["camera_key"]].append(item)
     if len(by_camera) < 2 or {item["role"] for item in selected} != {"first_person", "third_person"}:
         raise ValueError("至少需要两台相机，包含第一人称和第三人称")
+    from .capture_layout import camera_group
+    if len({camera_group(config['collection_ingest'], item['camera_key']) for item in selected}) != 1:
+        raise ValueError('不同实验室的素材不能合并为同一次实验')
     windows = []
     for items in by_camera.values():
         if len({item["role"] for item in items}) != 1 or len({item["recording_session_id"] for item in items}) != 1:

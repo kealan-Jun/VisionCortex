@@ -182,6 +182,33 @@ def shared_analysis(views, infos, sources, config):
 
 
 def build_device_day_multiview(config, day, indexes):
+    from .capture_layout import camera_group
+    partitions = {}
+    for name, index in indexes:
+        group = camera_group(config.get('collection_ingest', {}), name[11:])
+        partitions.setdefault(group, []).append((name, index))
+    if len(partitions) <= 1:
+        return _build_source_multiview(config, day, indexes)
+    results = {}
+    for group, rows in partitions.items():
+        try:
+            results[group] = _build_source_multiview(config, day, rows)
+        except (OSError, ValueError, RuntimeError, KeyError) as exc:
+            results[group] = {'status': 'failed', 'error_type': type(exc).__name__}
+    result = {'key': digest({group: row.get('key', row) for group, row in results.items()}),
+              'date': day, 'status': 'completed' if all(row.get('status') == 'completed' for row in results.values()) else 'partial',
+              'source_groups': {group: {key: row.get(key) for key in
+                  ('key', 'status', 'receipt_path', 'alignment_quality', 'error_type')} for group, row in results.items()},
+              'detector_invoked': False, 'cloud_model_invoked': False, 'evidence_status': 'PARTIAL_EVIDENCE'}
+    for key in ('experiments', 'aligned_recordings', 'missing_sources', 'formal_decisions', 'capture_alignment_errors'):
+        result[key] = [item for row in results.values() for item in row.get(key, [])]
+    result['algorithms'] = sorted({item for row in results.values() for item in row.get('algorithms', [])})
+    path = Path(config['storage']['local_runtime_root'])/'device-day/Multiview'/day/result['key']/'SourceGroups.json'
+    atomic_json(path, result)
+    return result | {'receipt_path': str(path)}
+
+
+def _build_source_multiview(config, day, indexes):
     from .schemas import ViewInput, VideoSegmentInput
     root = Path(config['storage']['archive_root'])
     backend = Path(config['storage']['local_cache_root'])

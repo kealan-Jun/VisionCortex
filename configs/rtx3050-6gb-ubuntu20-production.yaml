@@ -1,8 +1,5 @@
 extends: ./rtx3090ti-ubuntu-production.yaml
 
-device_day:
-  additional_labs: []
-
 # Ubuntu 20.04 / RTX 3050 6 GiB deployment. The full evidence chain remains
 # enabled, but only one full-timeline role engine is resident at a time and
 # heavyweight key-material sidecars are staged to avoid overlapping VRAM use.
@@ -150,6 +147,8 @@ validation:
 # Read the recorder's own MP4/CSV/JSON sidecars. Internal selection manifests
 # are generated only when the user groups sources into an experiment.
 collection_ingest:
+  additional_camera_directories: []
+  directory_camera_bindings: []
   discover_plain_video_csv: true
   max_scan_depth: 6
   enabled: true

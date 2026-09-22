@@ -9,6 +9,8 @@ def associate(entries, roles, config, audit=True):
     from .schemas import ActionCandidate, AlignmentTransform, TimestampPoint
     from .alignment import _absolute_clock_transform
     links = []
+    from .capture_layout import camera_group
+    ingest = config.get('collection_ingest', {})
     algorithm = digest([config.get('alignment'), config.get('performance'), config.get('segmentation'),
                         file_hash(Path(__file__).with_name('actions.py')), file_hash(Path(__file__))])
     identities = {e['id']: digest([e, algorithm]) for e in entries}
@@ -22,6 +24,8 @@ def associate(entries, roles, config, audit=True):
         for right in ordered[i+1:]:
             if right['start_us'] >= left['end_us']:
                 break
+            if camera_group(ingest, left['camera']) != camera_group(ingest, right['camera']):
+                continue
             other = roles.get(right['camera'])
             if other not in {'first_person', 'third_person'} or role == other:
                 continue

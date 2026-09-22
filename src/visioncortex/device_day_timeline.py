@@ -138,7 +138,7 @@ def load_timeline(config, day, *, audit=False):
         try:
             shared = build_device_day_multiview(config, day, indexes)
             result['multiview_analysis'] = {k: shared.get(k) for k in
-                ('key', 'status', 'receipt_path', 'algorithms', 'alignment_quality', 'missing_sources', 'aligned_recordings', 'formal_decisions', 'capture_alignment_errors')}
+                ('key', 'status', 'receipt_path', 'algorithms', 'alignment_quality', 'missing_sources', 'aligned_recordings', 'formal_decisions', 'capture_alignment_errors', 'source_groups')}
             result['aligned_experiments'] = shared.get('experiments', [])
         except (OSError, ValueError, RuntimeError, KeyError) as exc:
             result['multiview_analysis'] = {'status': 'failed', 'error_type': type(exc).__name__, 'message': str(exc)}

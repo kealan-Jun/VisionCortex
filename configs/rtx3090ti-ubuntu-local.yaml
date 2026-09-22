@@ -2,7 +2,6 @@ extends: ./rtx3090ti-ubuntu-production.yaml
 
 device_day:
   enabled: false
-  additional_labs: []
   delete_capture_sources: false
 
 # Local/offline acceptance and Web profile. Every path is rooted on the local
@@ -30,6 +29,8 @@ storage:
 
 collection_ingest:
   enabled: false
+  additional_camera_directories: []
+  directory_camera_bindings: []
   source_root: /srv/sentinel-data/VisionCortex3090Ti/Runtime/NoNasWeb/Originals
   snapshot_path: /srv/sentinel-data/VisionCortex3090Ti/Runtime/NoNasWeb/collection-snapshot.json
 
