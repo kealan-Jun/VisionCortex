@@ -10,7 +10,7 @@ Environment=PYTHONPATH=/home/x1/Projects/VisionCortex/src
 Environment=VISIONCORTEX_RUNTIME_ROLE=web
 Environment=VISIONCORTEX_LAB=LabVideo
 Environment=VISIONCORTEX_WEB_AI_SETTINGS=1
-ExecStart=/srv/sentinel-data/VisionCortex3090Ti/.venv/bin/python -m visioncortex serve --host 127.0.0.1 --port 8003 --config /home/x1/Projects/VisionCortex/configs/rtx3090ti-ubuntu-production.yaml
+ExecStart=/srv/sentinel-data/VisionCortex3090Ti/.venv/bin/python -m visioncortex serve --host 127.0.0.1 --port 8004 --config /home/x1/Projects/VisionCortex/configs/rtx3090ti-ubuntu-production.yaml
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=45

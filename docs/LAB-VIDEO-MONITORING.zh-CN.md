@@ -47,7 +47,7 @@ systemctl --user daemon-reload
 systemctl --user enable --now visioncortex-lab-video-web.service
 ```
 
-主机浏览器入口：`http://127.0.0.1:8003/#/device-days`。
+主机浏览器入口：`http://127.0.0.1:8004/#/device-days`。
 网页通过 `VISIONCORTEX_LAB=LabVideo` 选择独立配置，未知实验室拒绝启动，
 不能静默回退到原实验室。网页默认只监听本机；Windows 用户可直接查看上述 NAS 归档。
 
