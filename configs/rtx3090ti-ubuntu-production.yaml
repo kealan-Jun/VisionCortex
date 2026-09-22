@@ -24,6 +24,8 @@ device_day:
   understanding_window_seconds: 30
   inactive_sample_seconds: 1
   camera_lanes: true
+  # Independent slices share the existing model pool and archive publication locks.
+  vision_jobs_per_camera: 2
   # Keep the newest four hours in a live lane ahead of the historical backlog.
   # The ordinary same-day lane resumes automatically when this lane drains.
   live_priority_seconds: 14400

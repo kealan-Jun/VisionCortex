@@ -2,6 +2,10 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
+import logging
+import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -90,7 +94,9 @@ class DeviceDayQueue:
             ).rowcount == 1
 
     def claim(self, owner, *, retry=False, date=None, exclude=(), allowed=None, camera_serial=False,
-              max_attempts=None):
+              camera_limit=1, max_attempts=None):
+        if isinstance(camera_limit, bool) or not isinstance(camera_limit, int) or camera_limit < 1:
+            raise ValueError('Camera concurrency must be a positive integer')
         current = time.time()
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -113,10 +119,13 @@ class DeviceDayQueue:
                 conditions.append("json_extract(r.payload,'$.archive_date')=?")
                 parameters.append(date)
             if camera_serial:
-                conditions.append("""NOT EXISTS (SELECT 1 FROM recordings busy
+                # Compute occupied camera slots once, rather than re-reading
+                # every running JSON payload for each item in a large backlog.
+                conditions.append("""COALESCE(json_extract(r.payload,'$.camera_key'),'') NOT IN (
+                  SELECT COALESCE(json_extract(busy.payload,'$.camera_key'),'') FROM recordings busy
                   WHERE busy.status='running' AND busy.lease_until>=?
-                  AND json_extract(busy.payload,'$.camera_key') IS json_extract(r.payload,'$.camera_key'))""")
-                parameters.append(current)
+                  GROUP BY COALESCE(json_extract(busy.payload,'$.camera_key'),'') HAVING COUNT(*)>=?)""")
+                parameters.extend((current, camera_limit))
             ordering = "COALESCE(json_extract(r.payload,'$.processing_priority'),0),"
             if camera_serial:
                 ordering += ("COALESCE((SELECT last_claim FROM camera_dispatch "
@@ -146,6 +155,24 @@ class DeviceDayQueue:
         with self.connect() as db:
             db.execute("UPDATE recordings SET lease_until=? WHERE status='running' AND lease_owner=?",
                        (time.time() + 90, owner))
+
+    @contextmanager
+    def heartbeat(self, owner, interval=10):
+        """Renew while result publication or queue summaries occupy the caller."""
+        stopped = threading.Event()
+        def renew():
+            while not stopped.wait(interval):
+                try:
+                    self.renew(owner)
+                except sqlite3.OperationalError:
+                    logging.getLogger(__name__).warning('Queue lease renewal delayed: %s', self.path.name)
+        thread = threading.Thread(target=renew, name='device-queue-lease', daemon=True)
+        thread.start()
+        try:
+            yield
+        finally:
+            stopped.set()
+            thread.join(timeout=31)
 
     def finish(self, owner, recording_id, result, seconds):
         if result.get("status") in {"running_elsewhere", "waiting_for_publication", "waiting_for_provider", "cancelled"}:

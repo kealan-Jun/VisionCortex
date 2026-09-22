@@ -399,20 +399,23 @@ class DeviceDayRunner:
             return {"recording_id": recording["recording_id"], "status": "waiting_for_capture"}
         if recording.get("configured_role") not in {"first_person", "third_person"}:
             return {"recording_id": recording["recording_id"], "status": "needs_camera_role"}
-        from .device_day_activity import job
         from .runtime_control import execution_context
         with execution_context(job_id=recording["recording_id"], source="nas",
-                               priority=recording.get("processing_priority", 1), stop=stop_event), job(stage, recording["recording_id"], root=self.runtime_root) as measured:
-            result = self._observed_process(recording, stage=stage, retry=retry)
-        return result | {'component_timings': dict(measured['phase_seconds']),
-                         'measured_frame_counts': dict(measured['frame_counts'])}
+                               priority=recording.get("processing_priority", 1), stop=stop_event):
+            return self._observed_process(recording, stage=stage, retry=retry)
 
     def _observed_process(self, recording, *, stage, retry):
         layout = self.layout(recording)
         layout.create()
         try:
             with exclusive(self.runtime_root / "locks" / f"{recording['recording_id']}.{stage}.lock"):
-                return self._process(layout, recording, stage=stage, retry=retry)
+                # A duplicate queue claim must not replace or clear the active
+                # owner's phase state while its model invocation is running.
+                from .device_day_activity import job
+                with job(stage, recording["recording_id"], root=self.runtime_root) as measured:
+                    result = self._process(layout, recording, stage=stage, retry=retry)
+                return result | {'component_timings': dict(measured['phase_seconds']),
+                                 'measured_frame_counts': dict(measured['frame_counts'])}
         except BlockingIOError:
             return {"recording_id": recording["recording_id"], "status": "running_elsewhere"}
 
@@ -839,12 +842,13 @@ class DeviceDayRunner:
         owner = uuid.uuid4().hex
         claimed = set()
         begun = time.perf_counter()
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="device-day") as pool:
+        with queue.heartbeat(owner), ThreadPoolExecutor(max_workers=workers, thread_name_prefix="device-day") as pool:
             jobs = {}
             while True:
                 while len(jobs) < workers and (not max_jobs or len(claimed) < max_jobs) and not (stop_event and stop_event.is_set()):
                     record = queue.claim(owner, retry=retry, date=date, exclude=claimed, allowed=eligible,
                                          camera_serial=bool(self.settings.get("camera_lanes", False)),
+                                         camera_limit=self.settings.get("vision_jobs_per_camera", 1) if stage == "vision" else 1,
                                          max_attempts=self.settings.get("failure_retry_limit"))
                     if record is None:
                         break
@@ -854,7 +858,6 @@ class DeviceDayRunner:
                 if not jobs:
                     break
                 done, _ = wait(jobs, timeout=10, return_when=FIRST_COMPLETED)
-                queue.renew(owner)
                 for job in done:
                     record, started = jobs.pop(job)
                     try:

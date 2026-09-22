@@ -67,6 +67,50 @@ def device_config(default_config, tmp_path):
     return fixture.__wrapped__(default_config, tmp_path)
 
 
+def test_camera_concurrency_is_bounded_and_claims_remain_exclusive(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    queue = DeviceDayQueue(tmp_path / 'queue.sqlite3')
+    for camera in ('a', 'b'):
+        for n in range(3):
+            queue.enqueue({'recording_id': f'{camera}-{n}', 'camera_key': camera,
+                           'configured_role': 'first_person', 'recording_start_us': n + 1}, 'v1')
+    def claim(n):
+        return queue.claim(str(n), camera_serial=True, camera_limit=2)
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        rows = [row for row in pool.map(claim, range(6)) if row]
+    assert len({row['recording_id'] for row in rows}) == 4
+    assert [row['camera_key'] for row in rows].count('a') == 2
+    assert [row['camera_key'] for row in rows].count('b') == 2
+    assert queue.claim('full', camera_serial=True, camera_limit=2) is None
+    # An expired worker releases only its slot; other leases remain exclusive.
+    with queue.connect() as db:
+        db.execute('UPDATE recordings SET lease_until=0 WHERE recording_id=?', (rows[0]['recording_id'],))
+    assert queue.claim('replacement', camera_serial=True, camera_limit=2)['recording_id'] == rows[0]['recording_id']
+    assert queue.claim('full-again', camera_serial=True, camera_limit=2) is None
+
+
+def test_lease_heartbeat_does_not_depend_on_result_publication(tmp_path, monkeypatch):
+    from threading import Event
+    import time
+    queue = DeviceDayQueue(tmp_path / 'queue.sqlite3')
+    queue.enqueue({'recording_id': 'slice', 'camera_key': 'a', 'configured_role': 'first_person'}, 'v1')
+    queue.claim('owner')
+    with queue.connect() as db:
+        db.execute('UPDATE recordings SET lease_until=0')
+    renewed = Event()
+    original = queue.renew
+    def renew(owner):
+        original(owner)
+        renewed.set()
+    monkeypatch.setattr(queue, 'renew', renew)
+    with queue.heartbeat('owner', interval=.01):
+        # The publisher remains blocked here while the independent heartbeat runs.
+        assert renewed.wait(2)
+        with queue.connect() as db:
+            assert db.execute('SELECT lease_until FROM recordings').fetchone()[0] > time.time() + 60
+        assert queue.claim('duplicate') is None
+
+
 def test_pausing_semantics_keeps_video_and_speech_running_without_report_publication(device_config, monkeypatch):
     from test_device_day import FakeModels, capture
     from visioncortex.device_day import DeviceDayRunner

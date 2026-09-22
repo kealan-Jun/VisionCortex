@@ -1554,12 +1554,43 @@ def test_process_preserves_measured_components_without_changing_outcome(device_c
         with phase('coarse_scan_seconds'):
             counted('coarse', 12)
         return {'status': 'completed'}
-    monkeypatch.setattr(runner, '_observed_process', execute)
+    monkeypatch.setattr(runner, '_process', execute)
     result = runner.process({'recording_id': 'measured', 'available': True,
-                             'configured_role': 'first_person'}, stage='vision')
+                             'configured_role': 'first_person', 'camera_key': 'camera',
+                             'recording_start_us': 1789459916524544}, stage='vision')
     assert result['status'] == 'completed'
     assert result['component_timings']['coarse_scan_seconds'] >= 0
     assert result['measured_frame_counts'] == {'coarse': 12}
+    assert not observations()
+
+
+def test_duplicate_claim_cannot_clear_active_model_progress(device_config, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from visioncortex.device_day_activity import phase, counted, observations
+    runner = DeviceDayRunner(device_config, FakeModels())
+    record = {'recording_id': 'duplicate', 'processable': True,
+              'configured_role': 'first_person', 'camera_key': 'camera',
+              'recording_start_us': 1789459916524544}
+    started, release = Event(), Event()
+    def execute(*args, **kwargs):
+        with phase('coarse_scan_seconds'):
+            counted('coarse', 12)
+            started.set()
+            assert release.wait(3)
+        with phase('fine_scan_seconds'):
+            counted('fine', 4)
+        return {'status': 'completed'}
+    monkeypatch.setattr(runner, '_process', execute)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        first = pool.submit(runner.process, record, stage='vision')
+        try:
+            assert started.wait(2)
+            assert runner.process(record, stage='vision')['status'] == 'running_elsewhere'
+            assert observations()[('vision', 'duplicate')]['frame_counts'] == {'coarse': 12}
+        finally:
+            release.set()
+        assert first.result()['measured_frame_counts'] == {'coarse': 12, 'fine': 4}
     assert not observations()
 
 
