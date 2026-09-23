@@ -10,6 +10,7 @@ import time
 from collections.abc import Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+from contextvars import copy_context
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -24,6 +25,7 @@ from .performance_stages import StageTimings, MeasuredWriter, prediction_timings
 from .key_material_verification import validate_selective_key_material_verification
 from .schemas import AlignmentTransform, BoxEvidence, FrameEvidence, SourceFrameIdentity, VideoInfo, ViewInput, ViewRole
 from .source_frames import SOURCE_FRAME_CONTRACT
+from .runtime_control import CURRENT, CancellationSignal, ExecutionCancelled, execution_context
 from .liquid_semantic import validate_liquid_semantic_runtime
 from .temporal_segmentation import validate_temporal_segmentation_runtime
 from .video_io import (
@@ -701,11 +703,6 @@ def _producer(
     def iter_decoded_frames(start_ms, end_ms, chunk_index=None):
         return component_timings.frames(raw_decoded_frames(start_ms, end_ms, chunk_index))
 
-    def decoded_frames(
-        start_ms: float, end_ms: float, chunk_index: int | None = None
-    ) -> list[tuple[int, float, np.ndarray]]:
-        return list(iter_decoded_frames(start_ms, end_ms, chunk_index))
-
     def emit_frames(frames: Iterable[tuple[int, float, np.ndarray]], start_ms: float) -> None:
         nonlocal previous_gray, previous_signature
         nonlocal previous_probe_signature, next_shared_probe_ms
@@ -912,41 +909,16 @@ def _producer(
         and bool(work_units)
     )
     try:
-        if parallel_probe:
-            futures: dict[int, Any] = {}
-            with ThreadPoolExecutor(
-                max_workers=min(parallel_probe_workers, len(work_units)),
-                thread_name_prefix=f"probe-segment-{view.view_id}",
-            ) as executor:
-                for chunk_index, (start_ms, end_ms) in enumerate(work_units):
-                    activity("source_unit_started", chunk_index)
-                    if chunk_index not in completed_chunks:
-                        futures[chunk_index] = executor.submit(
-                            decoded_frames, start_ms, end_ms, chunk_index
-                        )
-                for chunk_index, (start_ms, _end_ms) in enumerate(work_units):
-                    if chunk_index in completed_chunks:
-                        activity("source_unit_reused", chunk_index)
-                        output_queue.put(
-                            ChunkEnd(
-                                view_id=view.view_id,
-                                chunk_index=chunk_index,
-                                total_chunks=len(work_units),
-                            )
-                        )
-                        continue
-                    emit_frames(futures[chunk_index].result(), start_ms)
-                    finish_unit(chunk_index, len(work_units))
-            return
-
-        if ordered_decode:
-            from .decode_buffers import DEFAULT_FRAME_BUFFER_BYTES, frame_queue_limit
-            decode_workers = min(ordered_decode_workers, len(work_units))
+        if (ordered_decode or parallel_probe) and work_units:
+            from .decode_buffers import CancellableQueue, DEFAULT_FRAME_BUFFER_BYTES, frame_queue_limit
+            decode_workers = min(parallel_probe_workers if parallel_probe else ordered_decode_workers,
+                                 len(work_units))
             prefetch_frames = frame_queue_limit(
                 perf.get("fine_decode_prefetch_frames", 12), info.width, info.height,
                 max_bytes=perf.get("fine_decode_prefetch_max_bytes", DEFAULT_FRAME_BUFFER_BYTES),
                 queues=decode_workers, bytes_per_pixel=3)
-            stop_event = threading.Event()
+            parent_context = CURRENT.get()
+            stop_event = CancellationSignal(parent_context.stop)
             unit_queues: dict[int, queue.Queue[Any]] = {}
 
             def put_until_stopped(target: queue.Queue[Any], item: Any) -> bool:
@@ -956,6 +928,8 @@ def _producer(
                         return True
                     except queue.Full:
                         continue
+                    except ExecutionCancelled:
+                        return False
                 return False
 
             def decode_unit(
@@ -966,7 +940,9 @@ def _producer(
             ) -> None:
                 activity("source_unit_started", chunk_index)
                 try:
-                    with closing(iter_decoded_frames(start_ms, end_ms, chunk_index)) as frames:
+                    with execution_context(job_id=parent_context.job_id, source=parent_context.source,
+                                           priority=parent_context.priority, stop=stop_event), \
+                            closing(iter_decoded_frames(start_ms, end_ms, chunk_index)) as frames:
                         for decoded in frames:
                             if not put_until_stopped(target, decoded):
                                 return
@@ -989,7 +965,7 @@ def _producer(
 
             executor = ThreadPoolExecutor(
                 max_workers=decode_workers,
-                thread_name_prefix=f"fine-prefetch-{view.view_id}",
+                thread_name_prefix=f"{'probe-segment' if parallel_probe else 'fine-prefetch'}-{view.view_id}",
             )
             try:
                 futures: dict[int, Any] = {}
@@ -1001,10 +977,10 @@ def _producer(
                     if next_unit is None:
                         return
                     chunk_index, (start_ms, end_ms) = next_unit
-                    target: queue.Queue[Any] = queue.Queue(maxsize=prefetch_frames)
+                    target: queue.Queue[Any] = CancellableQueue(maxsize=prefetch_frames, stop=stop_event)
                     unit_queues[chunk_index] = target
                     futures[chunk_index] = executor.submit(
-                        decode_unit,
+                        copy_context().run, decode_unit,
                         chunk_index,
                         start_ms,
                         end_ms,
@@ -1055,16 +1031,24 @@ def _producer(
             finish_unit(chunk_index, len(work_units))
             if wave_barrier is not None:
                 wave_barrier.wait(timeout=float(perf.get("segment_wave_timeout_seconds", 3600)))
+    except ExecutionCancelled:
+        pass  # The consumer owns cancellation; do not block sending to its abandoned queue.
     except Exception as exc:  # producer errors must cross the thread boundary
         if wave_barrier is not None:
             try:
                 wave_barrier.abort()
             except threading.BrokenBarrierError:
                 pass
-        output_queue.put(ProducerError(view_id=view.view_id, message=f"{type(exc).__name__}: {exc}"))
+        try:
+            output_queue.put(ProducerError(view_id=view.view_id, message=f"{type(exc).__name__}: {exc}"))
+        except ExecutionCancelled:
+            pass
     finally:
         activity("source_worker_ended")
-        output_queue.put(ProducerEnd(view_id=view.view_id))
+        try:
+            output_queue.put(ProducerEnd(view_id=view.view_id))
+        except ExecutionCancelled:
+            pass
 
 
 def _roi_motion(previous: np.ndarray | None, current: np.ndarray, box: Sequence[float]) -> float:
@@ -2005,22 +1989,34 @@ def scan_videos(
                 "decode_queue_depth", config["performance"].get("frame_queue_size", 64)
             )
         )
-        from .decode_buffers import DEFAULT_FRAME_BUFFER_BYTES, frame_queue_limit
+        from .decode_buffers import CancellableQueue, DEFAULT_FRAME_BUFFER_BYTES, frame_queue_limit
         largest = max((infos[v.view_id] for v in role_views), key=lambda info: info.width * info.height)
         queue_budget = config["performance"].get("decode_queue_max_bytes", DEFAULT_FRAME_BUFFER_BYTES)
         queue_depth = frame_queue_limit(requested_queue_depth, largest.width, largest.height,
                                         max_bytes=queue_budget)
-        frame_queue: queue.Queue[Any] = queue.Queue(maxsize=max(1, queue_depth))
+        parent_context = CURRENT.get()
+        scan_stop = CancellationSignal(parent_context.stop)
+        frame_queue: queue.Queue[Any] = CancellableQueue(maxsize=max(1, queue_depth), stop=scan_stop)
         frame_queue.activity_path = (
             work_dir
             / f"source_activity_{phase}_{role.value}{scanner_suffix}.jsonl"
         )
         frame_queue.component_timings = component_timings
         frame_queue.activity_lock = threading.Lock()
+
+        def produce(*args):
+            try:
+                with execution_context(job_id=parent_context.job_id, source=parent_context.source,
+                                       priority=parent_context.priority, stop=scan_stop):
+                    _producer(*args)
+            except ExecutionCancelled:
+                pass
+
         threads = [
             threading.Thread(
-                target=_producer,
+                target=copy_context().run,
                 args=(
+                    produce,
                     view,
                     infos[view.view_id],
                     frame_queue,
@@ -2255,8 +2251,15 @@ def scan_videos(
             if errors:
                 raise RuntimeError("；".join(errors))
         finally:
+            scan_stop.set()
+            if wave_barrier is not None and len(ended) < len(role_views):
+                wave_barrier.abort()
+            join_deadline = time.monotonic() + 10.0
             for thread in threads:
-                thread.join(timeout=5.0)
+                thread.join(timeout=max(0, join_deadline - time.monotonic()))
+            pending_items.clear()
+            with frame_queue.mutex:
+                frame_queue.queue.clear()
             processing_write_seconds = component_timings.snapshot().get("ledger_write_seconds", 0)
             for writer in writers.values():
                 writer.close()
@@ -2266,6 +2269,7 @@ def scan_videos(
             runtime_report.update(
                 {
                     "completed_source_workers": len(ended),
+                    "decoder_threads_alive_after_cleanup": [t.name for t in threads if t.is_alive()],
                     "inference_call_count": len(batch_sizes),
                     "inference_frame_count": sum(batch_sizes),
                     "motion_sample_count": motion_sample_count,

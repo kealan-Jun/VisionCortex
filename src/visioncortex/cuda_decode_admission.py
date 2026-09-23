@@ -9,6 +9,7 @@ import inspect
 import os
 from pathlib import Path
 import subprocess
+import threading
 
 
 def _supports_fd_inheritance():
@@ -28,28 +29,50 @@ class DecoderPermit:
     def __init__(self, fd=None, *, device=0, reason=None):
         self.fd, self.device, self.reason = fd, device, reason
         self.process = None
+        self._finished = threading.Event()
+        self._watcher = None
 
     def popen(self, command, **kwargs):
+        from .runtime_control import CURRENT, check_cancelled
+        stop = CURRENT.get().stop
+        check_cancelled(stop)
         if self.fd is not None:
             kwargs['pass_fds'] = (self.fd,)
         self.process = subprocess.Popen(command, **kwargs)
+        if stop is not None:
+            # A pipe read cannot check a token. Reap this permit's child to
+            # unblock it; never signal unrelated decoders or release its fd here.
+            def cancel_child():
+                while not self._finished.wait(.05):
+                    if stop.is_set():
+                        self._terminate_child()
+                        return
+            self._watcher = threading.Thread(target=cancel_child, daemon=True,
+                                            name='decoder-cancellation')
+            self._watcher.start()
         return self.process
+
+    def _terminate_child(self):
+        if self.process is not None and self.process.poll() is None:
+            try:
+                self.process.terminate()
+            except ProcessLookupError:
+                pass
+            try:
+                self.process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                try:
+                    self.process.kill()
+                except ProcessLookupError:
+                    pass
+                self.process.wait(timeout=2)
 
     def close(self):
         try:
-            if self.process is not None and self.process.poll() is None:
-                try:
-                    self.process.terminate()
-                except ProcessLookupError:
-                    pass
-                try:
-                    self.process.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    try:
-                        self.process.kill()
-                    except ProcessLookupError:
-                        pass
-                    self.process.wait(timeout=2)
+            self._finished.set()
+            if self._watcher is not None:
+                self._watcher.join(timeout=5)
+            self._terminate_child()
         finally:
             # No LOCK_UN: the inherited open-file description remains locked
             # until the child exits even if termination/wait failed here.
@@ -147,6 +170,12 @@ def managed_cuda_decoder(function):
                 for frame in frames:
                     check_cancelled()
                     yield frame
+                check_cancelled()
+            except Exception:
+                # Cancellation can interrupt a blocking read with FFmpeg's
+                # nonzero exit; do not mistake that for a GPU fallback request.
+                check_cancelled()
+                raise
             finally:
                 frames.close()
         finally:

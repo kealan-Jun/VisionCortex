@@ -812,10 +812,16 @@ def test_fine_prefetch_decodes_concurrently_but_emits_in_time_order(
     ]
 
 
-def test_completed_prefetch_futures_cannot_accumulate_all_later_chunks(monkeypatch, default_config):
+@pytest.mark.parametrize('parallel_probe', [False, True])
+def test_completed_prefetch_futures_cannot_accumulate_all_later_chunks(monkeypatch, default_config, parallel_probe):
     view = ViewInput(view_id="fp", role=ViewRole.FIRST_PERSON, video=Path("fixture.mp4"))
     info = VideoInfo(path=view.video, duration_ms=40000, fps=30, width=8, height=8,
                      frame_count=1200, size_bytes=100)
+    if parallel_probe:
+        info.segments = [VideoSegmentInfo(path=Path(f'{i}.mp4'), virtual_start_ms=i*1000,
+                         virtual_end_ms=(i+1)*1000, duration_ms=1000, fps=30,
+                         width=8, height=8, frame_count=30, frame_start_index=i*30)
+                         for i in range(40)]
     release_first, second_finished, extra_started = (threading.Event() for _ in range(3))
 
     def fake_frames(_view, _info, start_ms, *_args, **_kwargs):
@@ -829,10 +835,11 @@ def test_completed_prefetch_futures_cannot_accumulate_all_later_chunks(monkeypat
 
     monkeypatch.setattr("visioncortex.detection.iter_view_sampled_frames", fake_frames)
     default_config["performance"].update(fine_chunk_seconds=1, fine_first_person_decode_workers=2,
-                                        fine_decode_prefetch_frames=48)
+                                        fine_decode_prefetch_frames=48, motion_probe_segment_workers=2)
     output = queue.Queue()
     worker = threading.Thread(target=_producer, args=(view, info, output, set(), default_config,
-        [(0, 40000)], 1, 8, False, "cpu", 1, (8, 8), None, "fine"))
+        None if parallel_probe else [(0, 40000)], 1, 8, parallel_probe, "cpu", 1, (8, 8), None,
+        "motion_probe" if parallel_probe else "fine"))
     worker.start()
     try:
         assert second_finished.wait(5)

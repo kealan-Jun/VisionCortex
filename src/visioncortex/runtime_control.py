@@ -15,12 +15,34 @@ class ExecutionCancelled(RuntimeError):
     pass
 
 
+class CancellationSignal:
+    """Local cancellation also observes its parent, without cancelling siblings."""
+    def __init__(self, parent=None):
+        self.parent = parent
+        self.local = threading.Event()
+
+    def is_set(self):
+        return self.local.is_set() or (self.parent is not None and self.parent.is_set())
+
+    def set(self):
+        self.local.set()
+
+    def wait(self, timeout=None):
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while not self.is_set():
+            remaining = .05 if deadline is None else min(.05, deadline - time.monotonic())
+            if remaining <= 0:
+                break
+            self.local.wait(remaining)
+        return self.is_set()
+
+
 @dataclass(frozen=True)
 class ExecutionContext:
     job_id: str = 'interactive'
     source: str = 'offline'
     priority: int = 1
-    stop: threading.Event | None = None
+    stop: threading.Event | CancellationSignal | None = None
 
 
 CURRENT = ContextVar('visioncortex_execution', default=ExecutionContext())

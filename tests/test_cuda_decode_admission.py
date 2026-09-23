@@ -214,6 +214,59 @@ def test_cancellation_closes_child_without_starting_fallback(decoder, tmp_path):
     permit.close()
 
 
+@pytest.mark.parametrize('hwaccel', [None, 'cuda'])
+@pytest.mark.parametrize('ignore_term', [False, True])
+def test_cancel_interrupts_real_blocked_pipe_and_reaps_only_owned_child(tmp_path, hwaccel, ignore_term):
+    policy = admission.CudaDecodeAdmission(tmp_path, 1)
+    stop, entered = threading.Event(), threading.Event()
+    children, errors = [], []
+    unrelated = subprocess.Popen([sys.executable, '-c', 'import sys; sys.stdin.read()'],
+                                 stdin=subprocess.PIPE)
+
+    @admission.managed_cuda_decoder
+    def blocked(hwaccel=None, cuda_scale=False, decoder_lease=None):
+        setup = 'import signal; signal.signal(signal.SIGTERM, signal.SIG_IGN);' if ignore_term else ''
+        child = decoder_lease.popen([sys.executable, '-c',
+                                    setup + 'import sys; sys.stdout.write("R"); sys.stdout.flush(); sys.stdin.read()'],
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        children.append(child)
+        try:
+            assert child.stdout.read(1) == b'R'
+            entered.set()
+            yield child.stdout.read(1)  # No more bytes until cancellation kills this child.
+        finally:
+            child.stdout.close()
+            child.stdin.close()
+
+    def run():
+        try:
+            with execution_context(stop=stop):
+                list(blocked(hwaccel=hwaccel, decoder_admission=policy))
+        except ExecutionCancelled:
+            errors.append('cancelled')
+
+    worker = threading.Thread(target=run, daemon=True)
+    try:
+        worker.start()
+        assert entered.wait(5)
+        stop.set()
+        worker.join(5)
+        assert not worker.is_alive() and errors == ['cancelled']
+        assert len(children) == 1 and children[0].poll() is not None
+        assert unrelated.poll() is None
+        permit = policy.acquire()
+        assert permit.fd is not None
+        permit.close()
+    finally:
+        stop.set()
+        for child in [*children, unrelated]:
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=3)
+        unrelated.stdin.close()
+        worker.join(3)
+
+
 def test_popen_failure_returns_permit(monkeypatch, decoder, tmp_path):
     def fail(*args, **kwargs):
         raise OSError('fixture startup failure')
