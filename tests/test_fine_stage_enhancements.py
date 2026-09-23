@@ -519,7 +519,7 @@ def test_fine_roi_open_vocabulary_only_adds_bounded_recall(
         "prompt_map": {"tube": "tube"},
     }
     monkeypatch.setattr(
-        "visioncortex.coarse_recall.read_view_frame_at",
+        "visioncortex.coarse_recall.ViewFrameReader.read",
         lambda *_args, **_kwargs: np.zeros((360, 640, 3), dtype=np.uint8),
     )
     monkeypatch.setattr(
@@ -577,7 +577,7 @@ def test_fine_roi_open_vocabulary_fails_closed_on_unreadable_frame(
         "prompt_map": {"tube": "tube"},
     }
     monkeypatch.setattr(
-        "visioncortex.coarse_recall.read_view_frame_at",
+        "visioncortex.coarse_recall.ViewFrameReader.read",
         lambda *_args, **_kwargs: None,
     )
 

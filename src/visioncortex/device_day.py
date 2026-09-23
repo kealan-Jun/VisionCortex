@@ -264,6 +264,8 @@ class DeviceDayRunner:
         self._record_readiness = {stage: {} for stage in STAGES}
         self._admitted = {stage: set() for stage in STAGES}
         self._prerequisite_generation = {stage: 0 for stage in STAGES}
+        from .device_day_prerequisites import PrerequisiteChecks
+        self._prerequisite_checks = PrerequisiteChecks()
         from .device_day_queue import DeviceDayQueue
         self.queues = {stage: DeviceDayQueue(self.runtime_root / f"queue-{stage}.sqlite3") for stage in STAGES}
         self.queue = self.queues["vision"]
@@ -419,7 +421,15 @@ class DeviceDayRunner:
                 # owner's phase state while its model invocation is running.
                 from .device_day_activity import job
                 with job(stage, recording["recording_id"], root=self.runtime_root) as measured:
-                    result = self._process(layout, recording, stage=stage, retry=retry)
+                    try:
+                        result = self._process(layout, recording, stage=stage, retry=retry)
+                    except ValueError as exc:
+                        from .device_day_prerequisites import legacy_prerequisite_failure
+                        prerequisite = legacy_prerequisite_failure({'error_type': 'ValueError', 'message': str(exc)})
+                        if prerequisite is None:
+                            raise
+                        result = {'recording_id': recording['recording_id'],
+                                  'status': 'waiting_for_prerequisite', 'prerequisite_stage': prerequisite}
                 return result | {'component_timings': dict(measured['phase_seconds']),
                                  'measured_frame_counts': dict(measured['frame_counts'])}
         except BlockingIOError:
@@ -669,6 +679,7 @@ class DeviceDayRunner:
         )
         from .input_availability import Availability, configured_record
         states = Availability(self.runtime_root).states()
+        self.queues[stage].migrate_prerequisite_failures()
         self.queues[stage].sync_availability(states)
         durable = {r["recording_id"]: r for r in self.queues[stage].pending()}
         durable.update({r["recording_id"]: r for r in inventory.get("recordings", [])})
@@ -699,6 +710,8 @@ class DeviceDayRunner:
         with queue.connect() as db:
             completed_revisions = {row['recording_id']: row['revision'] for row in
                                    db.execute("SELECT recording_id,revision FROM recordings WHERE status='completed'")}
+            pending_states = {row['recording_id']: (row['revision'], row['status']) for row in
+                              db.execute("SELECT recording_id,revision,status FROM recordings WHERE status!='completed'")}
         eligible = set()
         for record in records:
             if stop_event is not None and stop_event.is_set():
@@ -717,7 +730,9 @@ class DeviceDayRunner:
             scheduling_key = digest([record, date, {p: v.get(record["recording_id"])
                                                     for p, v in parent_versions.items()}])
             cached = self._record_readiness[stage].get(record["recording_id"])
-            if stage in {"retention", "vision", "stt"} and cached and cached[0] == scheduling_key:
+            previous_revision, previous_status = pending_states.get(record['recording_id'], (None, None))
+            waiting = previous_status == 'waiting_for_prerequisite'
+            if stage in {"retention", "vision", "stt"} and cached and cached[0] == scheduling_key and not waiting:
                 eligible.add(record["recording_id"])
                 self._admitted[stage].add(record["recording_id"])
                 continue
@@ -733,6 +748,7 @@ class DeviceDayRunner:
                 for _ in STAGES:
                     needed.update(p for name in list(needed) for p in DEPENDENCIES[name])
                 prerequisites = {}
+                prerequisite_checks = []
                 valid = True
                 for prerequisite in STAGES:
                     if prerequisite not in needed:
@@ -745,11 +761,18 @@ class DeviceDayRunner:
                                        retained if prerequisite == "stt" else
                                        {"vision": prerequisites.get("vision"), "stt": prerequisites.get("stt"),
                                         "context": context})
-                    if receipt.get("status") != "completed" or not self._accepts_receipt(receipt, self._key(prerequisite, record, expected_inputs)):
+                    expected_key = self._key(prerequisite, record, expected_inputs)
+                    if receipt.get("status") != "completed" or not self._accepts_receipt(receipt, expected_key):
+                        if previous_revision:
+                            queue.wait_for_prerequisite(record['recording_id'], previous_revision, prerequisite)
                         valid = False
                         break
                     prerequisites[prerequisite] = receipt
+                    prerequisite_checks.append((path, expected_key, layout, receipt))
                 if not valid:
+                    continue
+                if waiting and not self._prerequisite_checks.ready(
+                        record['recording_id'], previous_revision, prerequisite_checks):
                     continue
                 inputs = {p: prerequisites[p] for p in DEPENDENCIES[stage]}
             if stage == "vision":
@@ -782,6 +805,8 @@ class DeviceDayRunner:
                 if self._load(self._receipt(layout, record, stage), receipt_key, layout) is not None:
                     queue.revise_verified_completion(record, previous_revision, revision)
             queue.enqueue(record, revision)
+            if waiting:
+                queue.resume_prerequisite(record['recording_id'], revision)
             eligible.add(record["recording_id"])
             self._admitted[stage].add(record["recording_id"])
             self._record_readiness[stage][record["recording_id"]] = (scheduling_key, time.monotonic())
@@ -872,6 +897,10 @@ class DeviceDayRunner:
                         result = {"recording_id": record["recording_id"], "status": "failed",
                                   "error_type": type(exc).__name__, "message": str(exc)[:1000]}
                     queue.finish(owner, record["recording_id"], result, time.perf_counter() - started)
+                    if result.get('status') == 'waiting_for_prerequisite':
+                        self._record_readiness[stage].pop(record['recording_id'], None)
+                        self._admitted[stage].discard(record['recording_id'])
+                        self._prepared.pop(stage, None)
                     if result.get("status") == "completed":
                         changed = {stage}
                         for _ in STAGES:

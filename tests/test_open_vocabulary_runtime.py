@@ -60,6 +60,41 @@ def test_shared_mutable_model_prompt_and_inference_are_atomic():
         assert list(pool.map(worker, ['a', 'b', 'c', 'd'])) == ['a', 'b', 'c', 'd']
 
 
+def test_serialized_receipt_separates_wait_and_service_without_mutating_result(monkeypatch):
+    from visioncortex import open_vocabulary_runtime as runtime
+    clock = [10.0]
+    released = []
+
+    class Lock:
+        def __enter__(self):
+            clock[0] += 2
+
+        def __exit__(self, *_args):
+            released.append(True)
+
+    monkeypatch.setattr(runtime, '_OPEN_VOCABULARY_LOCK', Lock())
+    monkeypatch.setattr(runtime.time, 'perf_counter', lambda: clock[0])
+    receipt = {'status': 'executed'}
+    boxes = []
+
+    @runtime.serialized_open_vocabulary
+    def predict(fail=False):
+        clock[0] += 3
+        if fail:
+            raise ValueError('model failure')
+        return boxes, receipt
+
+    detections, measured = predict()
+    assert detections is boxes
+    assert receipt == {'status': 'executed'}
+    assert measured['serialization_wait_seconds'] == 2
+    assert measured['serialized_service_seconds'] == 3
+    assert measured['serialized_timing_scope'].endswith('not_gpu_only')
+    with pytest.raises(ValueError, match='model failure'):
+        predict(fail=True)
+    assert released == [True, True]
+
+
 
 def test_coarse_lanes_preserve_each_prompt_and_share_local_loader(tmp_path, monkeypatch):
     import threading

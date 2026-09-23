@@ -317,8 +317,9 @@ def test_missing_prerequisite_and_failed_scan_never_become_inactive(device_confi
     item, layout = item_and_layout(device_config)
     backend = FakeModels()
     runner = DeviceDayRunner(device_config, backend)
-    with pytest.raises(ValueError, match="Prerequisite"):
-        runner.process(item, stage="understanding")
+    waiting = runner.process(item, stage="understanding")
+    assert waiting['status'] == 'waiting_for_prerequisite'
+    assert waiting['prerequisite_stage'] == 'retention'
     assert runner.process(item, stage="retention")["status"] == "completed"
     backend.fail = True
     assert runner.process(item)["status"] == "failed"

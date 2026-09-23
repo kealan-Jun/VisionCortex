@@ -34,6 +34,25 @@ def test_uninitialized_progress_does_not_create_runtime(tmp_path):
     assert not (tmp_path/'absent').exists()
 
 
+def test_prerequisite_wait_is_visible_without_live_lease_or_model_failure(tmp_path):
+    root = tmp_path / 'device-day'
+    record = {'recording_id': 'blocked', 'camera_key': 'camera', 'configured_role': 'first_person',
+              'recording_start_us': 1787792400000000, 'recording_end_us': 1787792410000000}
+    queue = DeviceDayQueue(root/'queue-vision.sqlite3')
+    queue.enqueue(record, 'v1')
+    queue.wait_for_prerequisite('blocked', 'v1', 'retention')
+    config = {'storage': {'local_runtime_root': str(tmp_path)}}
+    value = snapshot(config)
+    day = next(iter(value['days']))
+    counts = value['days'][day]['stages']['vision']
+    assert counts['waiting_for_prerequisite'] == 1
+    assert counts['failed'] == counts['running'] == counts['queued'] == 0
+    assert value['running'] == []
+    assert value['waiting'][day]['vision'] == {'prerequisite_not_verified': 1}
+    config['device_day'] = {'paused_stages': ['vision']}
+    assert snapshot(config)['waiting'][day]['vision'] == {'paused_by_user': 1}
+
+
 def test_waiting_counts_distinguish_failed_upstream_from_compute_backlog(tmp_path):
     root = tmp_path / 'device-day'
     rows = [{'recording_id': str(n), 'camera_key': f'camera{n}', 'configured_role': 'first_person',

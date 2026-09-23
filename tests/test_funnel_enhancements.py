@@ -263,7 +263,7 @@ def test_open_vocabulary_coarse_candidate_only_adds_a_recall_window(
     }
 
     monkeypatch.setattr(
-        "visioncortex.coarse_recall.read_view_frame_at",
+        "visioncortex.coarse_recall.ViewFrameReader.read",
         lambda *_args, **_kwargs: np.zeros((360, 640, 3), dtype=np.uint8),
     )
     monkeypatch.setattr(
@@ -573,7 +573,7 @@ def test_open_vocabulary_errors_make_the_recall_receipt_not_formal(
         "prompt_map": {"gloved hand": "gloved_hand", "beaker": "beaker"},
     }
     monkeypatch.setattr(
-        "visioncortex.coarse_recall.read_view_frame_at",
+        "visioncortex.coarse_recall.ViewFrameReader.read",
         lambda *_args, **_kwargs: np.zeros((360, 640, 3), dtype=np.uint8),
     )
     monkeypatch.setattr(

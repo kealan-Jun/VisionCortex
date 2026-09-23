@@ -3,6 +3,7 @@ from __future__ import annotations
 from functools import wraps
 from pathlib import Path
 import threading
+import time
 from typing import Any
 
 
@@ -36,6 +37,18 @@ _OPEN_VOCABULARY_LOCK = threading.RLock()
 def serialized_open_vocabulary(function):
     @wraps(function)
     def guarded(*args, **kwargs):
+        waiting = time.perf_counter()
         with _OPEN_VOCABULARY_LOCK:
-            return function(*args, **kwargs)
+            started = time.perf_counter()
+            result = function(*args, **kwargs)
+            elapsed = time.perf_counter() - started
+        # The callers return (detections, receipt). Keep the decorator useful
+        # for other return types and do not mutate a cached receipt in place.
+        if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], dict):
+            result = (result[0], {**result[1],
+                "serialization_wait_seconds": round(started - waiting, 6),
+                "serialized_service_seconds": round(elapsed, 6),
+                "serialized_timing_scope": "current_call_wall_time_nested_calls_overlap_not_gpu_only",
+            })
+        return result
     return guarded

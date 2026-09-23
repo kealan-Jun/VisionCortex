@@ -16,6 +16,7 @@ from .report_brand import brand_logo_data_url
 STAGE_NAMES = {'retention': '原片归档', 'vision': 'YOLO 预处理', 'stt': '录音识别',
                'understanding': '多模态理解', 'report': '日报更新'}
 WAIT_LABELS = {'paused_by_user': '按用户要求暂停',
+               'prerequisite_not_verified': '等待前置产物校验或修复',
                'upstream_failed': '上游失败待恢复', 'upstream_pending': '上游未完成',
                'provider_blocked': '云端账户不可用', 'night_window': '等待夜间窗口',
                'lease_recovery': '租约过期待恢复', 'pending_validation': '待校验调度'}

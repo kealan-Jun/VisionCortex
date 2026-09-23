@@ -63,10 +63,12 @@ def content_revision(config, index):
     return tuple((str(p), p.stat().st_mtime_ns, p.stat().st_size) for p in paths if p.is_file())
 
 
-def with_partial_understandings(config, index):
-    """Expose valid completed windows even when a later window is pending/failed."""
-    from .device_day_models import validate_understanding
-    from .media_time import capture_us
+def readable_source_index(index):
+    """Copy only source fields consumed by the readable/time projections.
+
+    This is never a replacement for the canonical ProcessedClips/Index.json.
+    It can be cached without retaining a second set of dense CV diagnostics.
+    """
     # Dense CV candidate/audit arrays can make a day index tens of MB. The
     # readable projection needs media references and clocks, not another copy
     # of those unchanged diagnostics. Preserve the canonical index on disk.
@@ -77,6 +79,14 @@ def with_partial_understandings(config, index):
     value['segments'] = [deepcopy({k: v for k, v in s.items() if k != 'activity_audit'})
                          for s in index.get('segments', [])]
     value['understandings'] = deepcopy(index.get('understandings', []))
+    return value
+
+
+def with_partial_understandings(config, index):
+    """Expose valid completed windows even when a later window is pending/failed."""
+    from .device_day_models import validate_understanding
+    from .media_time import capture_us
+    value = readable_source_index(index)
     root = Path(config['storage']['archive_root']) / index['archive']
     from .device_day_content_paths import aliases, public_references
     mapping = aliases(root)

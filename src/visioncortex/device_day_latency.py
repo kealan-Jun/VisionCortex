@@ -4,6 +4,7 @@ NAS mtimes may be preserved by an uploader. They are estimates, never receiver
 upload acknowledgements. Existing jobs receive no reconstructed timestamps.
 """
 from datetime import datetime
+import json
 import math
 from pathlib import Path
 import sqlite3
@@ -80,6 +81,78 @@ def _elapsed(start, end):
     return round(end-start, 3) if start is not None and end is not None and end >= start else None
 
 
+def live_observations(config, since):
+    """All live revisions in the observation window, never the UI's recent-50 page."""
+    from .sqlite_store import connection
+    root = _root(config)
+    path = root / 'latency.sqlite3'
+    if not path.is_file():
+        return []
+    with connection(path, readonly=True, timeout=2) as db:
+        rows = [dict(r) for r in db.execute(
+            "SELECT * FROM observations WHERE cohort='live_observation' AND revision_observed_at>=?", (since,))]
+    queue = {}
+    path = root / 'queue-vision.sqlite3'
+    if rows and path.is_file():
+        with connection(path, readonly=True, timeout=2) as db:
+            columns = {r[1] for r in db.execute('PRAGMA table_info(recordings)')}
+            if 'started_at' in columns:
+                queue = {r['recording_id']: dict(r) for r in db.execute(
+                    "SELECT recording_id,started_at,json_extract(payload,'$.source_signature') AS signature FROM recordings")}
+    for r in rows:
+        v = queue.get(r['recording_id'], {})
+        start = v.get('started_at') if v.get('signature') == r['source_signature'] else None
+        valid_start = start if _elapsed(r['ready_at'], start) is not None else None
+        done = r['published_at']
+        r.update(vision_started_at=valid_start,
+                 preprocessing_completed_at=done if _elapsed(valid_start, done) is not None else None)
+    return rows
+
+
+def discovery_health(config, *, now):
+    """Local coordinator heartbeat and lane coverage; not an upstream camera health claim."""
+    result = {'poll_status': 'unavailable', 'poll_observed_at': None, 'poll_age_seconds': None,
+              'coverage_status': 'unavailable', 'lane_count': 0, 'lane_issues': [],
+              'scope': 'local_monitor_poll_and_scan_coverage_not_new_input_arrival'}
+    path = _root(config).parent / 'state' / 'nas-recording-monitor.json'
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+        monitor = data['monitor']
+        at = datetime.fromisoformat(monitor['observed_at'])
+        if at.tzinfo is None:
+            raise ValueError('monitor clock requires timezone')
+        age = now - at.timestamp()
+        threshold = max(30, 3 * float(monitor['poll_seconds']))
+        if not math.isfinite(age) or not math.isfinite(threshold):
+            raise ValueError('invalid monitor clock')
+        result.update(poll_observed_at=at.timestamp(), poll_age_seconds=round(age, 3),
+                      poll_stale_after_seconds=threshold)
+        result['poll_status'] = ('clock_invalid' if age < -5 else 'stale' if age > threshold
+                                 else monitor['status'])
+        lanes = data.get('discovery_lanes', [])
+        result['lane_count'] = len(lanes)
+        for lane in lanes:
+            interval = 300 if lane['mode'] == 'history' else float(monitor['poll_seconds'])
+            timestamp = lane.get('started_at') if lane['status'] in {'scanning', 'starting'} else lane.get('completed_at')
+            overdue = timestamp is not None and now - timestamp > max(120, 3 * interval)
+            if (not lane.get('thread_alive') or lane['status'] not in {'watching', 'scanning', 'starting'}
+                    or timestamp is None or lane.get('errors') or lane.get('truncated') or overdue):
+                result['lane_issues'].append({'camera_key': lane['camera_key'], 'mode': lane['mode'],
+                                              'status': lane['status'], 'overdue': overdue})
+        result['pending_publication_count'] = data.get('pending_publication_count', 0)
+        result['truncated'] = bool(data.get('truncated'))
+        if result['poll_status'] != 'watching' or result['lane_issues'] or data.get('errors') or result['truncated']:
+            result['coverage_status'] = 'degraded'
+        elif result['pending_publication_count'] or any(lane['status'] != 'watching' for lane in lanes):
+            result['coverage_status'] = 'in_progress'
+        elif lanes:
+            result['coverage_status'] = 'healthy'
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        result['poll_status'] = 'unavailable'
+        result['coverage_status'] = 'unavailable'
+    return result
+
+
 def snapshot(config, *, now=None):
     now = time.time() if now is None else now
     root = _root(config)
@@ -87,6 +160,8 @@ def snapshot(config, *, now=None):
               'upload_completion_time_available': False, 'errors': [], 'recent': [], 'cohorts': {},
               'poll_seconds': (config.get('collection_ingest') or {}).get('poll_seconds'),
               'settle_seconds': (config.get('collection_ingest') or {}).get('settle_seconds')}
+    result['discovery'] = discovery_health(config, now=now)
+    result['latest_revision_observed_at'] = None
     path = root / 'latency.sqlite3'
     if not path.is_file():
         return result
@@ -140,6 +215,7 @@ def snapshot(config, *, now=None):
                 'vision_started_at': valid_start, 'preprocessing_completed_at': valid_done,
                 'vision_status': v.get('status', 'not_enqueued'), 'attempts': v.get('attempts', 0)})
         rows.sort(key=lambda r: r['revision_observed_at'], reverse=True)
+        result['latest_revision_observed_at'] = rows[0]['revision_observed_at'] if rows else None
         result['recent'] = rows[:50]
         result['upload_completion_time_available'] = any(r['upload_completed_at'] is not None for r in rows)
         metrics = ('discovery_delay_seconds', 'upload_to_preprocessing_start_seconds', 'upload_to_preprocessing_completed_seconds', 'ready_to_start_seconds', 'ready_to_completed_seconds', 'vision_queue_seconds', 'vision_run_seconds')
@@ -164,6 +240,16 @@ def render(data):
         return f'{n:.1f} 秒' if n is not None else '尚无测量'
     def clock(n):
         return datetime.fromtimestamp(n, ZoneInfo('Asia/Shanghai')).strftime('%H:%M:%S') if n is not None else '尚未确认'
+    discovery = data.get('discovery', {})
+    labels = {'watching': '正常更新', 'stale': '已过期', 'retrying': '重试中', 'clock_invalid': '时钟异常',
+              'unavailable': '暂无可信记录', 'healthy': '最近扫描正常', 'degraded': '存在未完成或异常覆盖',
+              'in_progress': '扫描或发布进行中'}
+    latest = data.get('latest_revision_observed_at')
+    latest = datetime.fromtimestamp(latest, ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M:%S') if latest is not None else '尚无记录'
+    discovery_html = ('<p>采集轮询：' + labels.get(discovery.get('poll_status'), '暂无可信记录')
+                      + '；距轮询快照 ' + seconds(discovery.get('poll_age_seconds'))
+                      + '。扫描覆盖：' + labels.get(discovery.get('coverage_status'), '暂无可信记录')
+                      + f'。最后新源版本到达：{latest}。无新版本不等于轮询停止，也不能据此确认上游相机健康。</p>')
     cohort_names = {'live_observation': '持续监控发现', 'startup_inventory': '启动时已有数据',
                     'historical_backfill': '历史补跑'}
     rows = []
@@ -189,6 +275,7 @@ def render(data):
                      f'<td>{seconds(r["ready_to_completed_seconds"])}</td></tr>' for r in data.get('recent', [])[:20])
     return ('<h3>新分片多久开始处理</h3><p>从确认文件可处理开始计时，包含归档和调度等待；'
             '结束时间为预处理任务成功落盘，不等待夜间多模态。以下统计最近 24 小时发现的分片。</p>'
+            + discovery_html +
             '<p>采集端尚未提供可信的 NAS 上传完成回执，写入完成到发现的时延暂无法精确测量；'
             '文件修改时间只作估计，不能当作上传完成时间。启动盘点和历史补跑单独统计。</p>'
             '<div class="table-wrap"><table><thead><tr><th>来源</th><th>发现分片</th>'

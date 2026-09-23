@@ -233,7 +233,7 @@ class DeviceDayService:
         from concurrent.futures import ThreadPoolExecutor
         from contextlib import ExitStack
         from .device_day_contract import STAGES
-        jobs, results, next_poll = {}, {}, {}
+        jobs, results, next_poll, job_generations = {}, {}, {}, {}
         publication_job = None
         index_job, last_index = None, 0
         recovery_job, overview_job = None, None
@@ -337,10 +337,17 @@ class DeviceDayService:
                     if recovery_job is not None and recovery_job.done():
                         try:
                             results['retention_recovery'] = recovery_job.result()
-                            if results['retention_recovery'].get('status') == 'restored_input_queued':
+                            if results['retention_recovery'].get('status') in {'restored_input_queued', 'retention_repair_queued'}:
                                 next_poll.clear()
                                 self._runner._prepared.pop('retention', None)
-                            if results['retention_recovery'].get('status') == 'completed':
+                                self._runner._prerequisite_generation['retention'] += 1
+                            if results['retention_recovery'].get('status') in {'completed', 'prerequisite_restored'}:
+                                if results['retention_recovery'].get('status') == 'prerequisite_restored':
+                                    next_poll.clear()
+                                    getattr(self._runner, '_rejected_prerequisites', {}).clear()
+                                    checks = getattr(self._runner, '_prerequisite_checks', None)
+                                    if checks is not None:
+                                        checks.invalidate_failed(results['retention_recovery']['recording_id'])
                                 changed_stages.add('retention')
                                 for child in ('vision', 'stt', 'understanding', 'report'):
                                     self._runner._prerequisite_generation[child] += 1
@@ -356,7 +363,10 @@ class DeviceDayService:
                             except Exception as exc:
                                 results[stage] = {"status": "failed", "error_type": type(exc).__name__}
                             changed = bool(results[stage].get("results"))
-                            next_poll[slot] = time.monotonic() + (0 if changed else 30)
+                            invalidated = job_generations.pop(slot) != self._runner._prerequisite_generation[stage]
+                            # A pre-recovery empty result must not overwrite the
+                            # wakeup issued while that old preparation ran.
+                            next_poll[slot] = time.monotonic() + (0 if changed or invalidated else 30)
                             if changed:
                                 changed_stages.add(stage)
                                 if stage in {'retention', 'vision', 'understanding', 'stt'}:
@@ -447,6 +457,7 @@ class DeviceDayService:
                                     if slot not in slot_workers:
                                         slot_workers[slot] = executor_stack.enter_context(ThreadPoolExecutor(
                                             max_workers=1, thread_name_prefix=f"device-{stage}-{ordinal}"))
+                                    job_generations[slot] = self._runner._prerequisite_generation[stage]
                                     jobs[slot] = slot_workers[slot].submit(run_stage, self._runner, inventory, stage)
                     from .timeline_invalidation import TimelineInvalidations
                     invalidations = TimelineInvalidations(self._runner.runtime_root)

@@ -220,10 +220,11 @@ def snapshot(config):
     waiting = {day: {s: {} for s in STAGES} for day in days}
     for row in states.values():
         for stage, (status, day) in row.items():
-            if status not in {'queued', 'expired'}:
+            if status not in {'queued', 'expired', 'waiting_for_prerequisite'}:
                 continue
             parents = [row.get(p, ('missing', day))[0] for p in DEPENDENCIES[stage]]
             reason = ('paused_by_user' if stage in paused else
+                      'prerequisite_not_verified' if status == 'waiting_for_prerequisite' else
                       'upstream_failed' if 'failed' in parents else
                       'upstream_pending' if any(p != 'completed' for p in parents) else
                       'provider_blocked' if stage in {'stt', 'understanding'} and provider.get('active')

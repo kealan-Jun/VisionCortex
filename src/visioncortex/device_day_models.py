@@ -600,18 +600,24 @@ class DeviceDayModels:
         main = next(s for s in retention["sources"] if s["kind"] == "video")
         clock = next(s for s in retention["sources"] if s["kind"] == "clock")
         with timings.measure("source_validation_and_setup_seconds"):
-            if not all(verify_artifact(layout.root, r) for r in retention["artifacts"]):
-                raise ValueError("Retained source verification failed")
+            with timings.measure("source_artifact_verification_seconds", cpu=True):
+                if not all(verify_artifact(layout.root, r) for r in retention["artifacts"]):
+                    raise ValueError("Retained source verification failed")
             source = safe_child(layout.root, main["retained"]["path"])
-            info = self._probe(source)
+            with timings.measure("source_probe_seconds", cpu=True):
+                info = self._probe(source)
             view = ViewInput(view_id=recording["camera_key"], role=ViewRole(recording["configured_role"]),
                              video=source, timestamps_csv=safe_child(layout.root, clock["retained"]["path"]))
-            clock_mapping = capture_clock(view.timestamps_csv, info.fps, recording["recording_start_us"], info)
+            with timings.measure("source_clock_mapping_seconds", cpu=True):
+                clock_mapping = capture_clock(view.timestamps_csv, info.fps, recording["recording_start_us"], info)
             transform = AlignmentTransform(view_id=view.view_id, reference_view_id=view.view_id,
                                            state="uncertain", alignment_basis="device_local_activity_only")
+            validation_wait = time.perf_counter()
             with self._validation_lock:
+                timings.add("model_validation_wait_seconds", time.perf_counter() - validation_wait)
                 if self._validated is None:
-                    self._validated = validate_models(self.config)
+                    with timings.measure("model_validation_seconds", cpu=True):
+                        self._validated = validate_models(self.config)
         perf = self.config["performance"]
         artifacts, audit_artifacts, segments, batches, scan_reports = [], [], [], [], []
         # Keep the recording as one queue item, but never analyse held images
@@ -756,6 +762,12 @@ class DeviceDayModels:
                         audit_artifacts.extend(references)
         timings.add("total_seconds", time.perf_counter() - vision_started)
         return {"component_timings": timings.snapshot(),
+                "timing_scope": {
+                    "nested_in_source_validation_and_setup": ["source_artifact_verification_seconds",
+                        "source_probe_seconds", "source_clock_mapping_seconds",
+                        "model_validation_wait_seconds", "model_validation_seconds"],
+                    "non_cpu": "wall_minus_calling_thread_cpu_includes_io_locks_scheduling",
+                },
                 "native_frame_index_policy": "bounded_process_cache_source_stat_and_covering_window",
                 "segments": segments, "artifacts": artifacts, "audit_artifacts": audit_artifacts, "batches": batches, "scan_reports": scan_reports,
                 "media_coverage": media_coverage,

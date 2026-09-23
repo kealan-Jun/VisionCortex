@@ -145,16 +145,29 @@ class RetentionRecovery:
         self.checked = {}
 
     def tick(self, runner):
+        # Admission only posts one local-receipt snapshot. All NAS metadata and
+        # byte checks for a waiting stage run on this existing bounded worker.
+        verified = runner._prerequisite_checks.verify_pending(runner)
+        if verified and verified['prerequisite_artifacts_verified']:
+            return verified
         # Unblock already waiting preprocessing before investigating capture
         # paths which have never supplied a downstream task.
         with runner.queues['vision'].connect() as db:
             waiting = {row[0] for row in db.execute("SELECT recording_id FROM recordings WHERE status='queued' "
                 "OR (status='running' AND COALESCE(lease_until,0)<?)", (time.time(),))}
+        blocked = set()
+        for stage in ('vision', 'stt', 'understanding', 'report'):
+            with runner.queues[stage].connect() as db:
+                blocked.update(row[0] for row in db.execute(
+                    "SELECT recording_id FROM recordings WHERE status='waiting_for_prerequisite' "
+                    "AND json_extract(result,'$.prerequisite_stage')='retention'"))
+        waiting.update(blocked)
         with runner.queues['retention'].connect() as db:
             rows = list(db.execute("SELECT * FROM recordings WHERE (status='failed' AND json_extract(result,'$.error_type')='FileNotFoundError') "
                                    "OR (status='queued' AND input_status='missing') "
+                                   "OR (status='completed' AND recording_id IN (SELECT value FROM json_each(?))) "
                                    "ORDER BY COALESCE(json_extract(payload,'$.processing_priority'),0),"
-                                   "json_extract(payload,'$.recording_start_us')"))
+                                   "json_extract(payload,'$.recording_start_us')", (json.dumps(sorted(blocked)),)))
         rows.sort(key=lambda row: row['recording_id'] not in waiting)
         from .device_day_schedule import in_processing_scope
         for row in rows:
@@ -166,7 +179,8 @@ class RetentionRecovery:
                 continue
             self.checked[row['recording_id']] = (identity, time.monotonic() + 900)
             try:
-                result = recover_one(runner, row)
+                result = (repair_completed_retention(runner, row) if row['status'] == 'completed'
+                          else recover_one(runner, row))
                 if result.get('status') == 'capture_present':
                     result = resume_reappeared_input(runner, row)
             except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -178,6 +192,84 @@ class RetentionRecovery:
                         'queue_revision': row['revision'], 'queue_updated_at': row['updated_at']})
             return result
         return {'status': 'idle'}
+
+
+def repair_completed_retention(runner, row):
+    """Requeue one damaged archive only after its unchanged source is ready.
+
+    A downstream metadata rejection alone never revokes historical completion.
+    Recheck the exact receipt and artifacts on this bounded recovery worker,
+    before and after inspecting the source. Transient/unreadable sources stay
+    blocked; a repair identity can be scheduled only once, durably and by CAS.
+    """
+    from .nas_recordings import _inspect
+    record = json.loads(row['payload'])
+    rid = record['recording_id']
+    layout = runner.layout(record)
+    path = runner._receipt(layout, record, 'retention')
+    try:
+        receipt = read_json(path)
+    except FileNotFoundError:
+        receipt = None
+    key = runner._key('retention', record, record)
+    if receipt is not None and (receipt.get('status') != 'completed' or not runner._accepts_receipt(receipt, key)):
+        return {'status': 'retention_identity_changed', 'recording_id': rid}
+    if runner._load(path, key, layout) is not None:
+        return {'status': 'prerequisite_restored', 'recording_id': rid}
+    root = Path(runner.config['collection_ingest']['source_root'])
+    video = Path(record['video_path'])
+    try:
+        video.stat()
+        if not layout.raw.is_dir():
+            return {'status': 'archive_unavailable', 'recording_id': rid}
+        source_observed_at = time.time()
+        fresh = _inspect(root, video, source_observed_at,
+                         float(runner.config['collection_ingest'].get('settle_seconds', 120)))
+        identities = []
+        for source in (video, Path(record['frames_path'])):
+            info = source.stat()
+            identities.append((str(source), info.st_dev, info.st_ino, info.st_size,
+                               info.st_mtime_ns, info.st_ctime_ns))
+    except OSError as exc:
+        return {'status': 'waiting_for_retention_source', 'recording_id': rid,
+                'error_type': type(exc).__name__}
+    if not fresh.get('processable', fresh.get('available')):
+        return {'status': 'capture_not_ready', 'recording_id': rid}
+    if (fresh.get('source_signature') != record.get('source_signature')
+            or fresh.get('audio', {}).get('source_signature') != record.get('audio', {}).get('source_signature')):
+        return {'status': 'changed_input_waiting_for_monitor', 'recording_id': rid}
+    try:
+        current_receipt = read_json(path)
+    except FileNotFoundError:
+        current_receipt = None
+    if current_receipt != receipt:
+        return {'status': 'retention_identity_changed', 'recording_id': rid}
+    if runner._load(path, key, layout) is not None:
+        return {'status': 'prerequisite_restored', 'recording_id': rid}
+    identity = digest([identities, digest(receipt)])
+    result = {'status': 'retention_repair_queued', 'recording_id': rid,
+              'repair_identity': identity, 'receipt_digest': digest(receipt),
+              'receipt_missing': receipt is None,
+              'source_signature_unchanged': True, 'model_invoked': False,
+              'previous_attempts': row['attempts']}
+    with runner.queues['retention'].connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        if db.execute("SELECT 1 FROM task_events WHERE task_id=? AND state='retention_repair_queued' "
+                      "AND json_extract(data,'$.repair_identity')=? LIMIT 1", (rid, identity)).fetchone():
+            return {'status': 'unchanged_retention_repair_already_attempted', 'recording_id': rid}
+        changed = db.execute("UPDATE recordings SET status='queued',attempts=0,input_status='ready',"
+                             "result=?,queued_at=?,updated_at=?,lease_owner=NULL,lease_until=NULL "
+                             "WHERE recording_id=? AND status='completed' AND revision=? AND updated_at=? AND payload=?",
+                             (json.dumps(result), time.time(), time.time(), rid, row['revision'],
+                              row['updated_at'], row['payload'])).rowcount
+        if not changed:
+            return {'status': 'queue_changed', 'recording_id': rid}
+        from .task_events import append
+        append(db, rid, 'retention_repair_queued', revision=row['revision'], data=result)
+    from .input_availability import Availability
+    Availability(runner.runtime_root).mark(record, 'ready', observed=source_observed_at,
+                                          reason='verified_retention_repair_source')
+    return result
 
 
 def resume_reappeared_input(runner, row):

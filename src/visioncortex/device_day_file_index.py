@@ -156,35 +156,50 @@ class FileIndexPublisher:
         self.config, self.versions = config, {}
         self.source_indexes = {}
         self.runtime = Path(config['storage']['local_runtime_root'])/'device-day'
+        self.last_result = {'status': 'not_started'}
 
     def tick(self):
+        import logging
         from .device_day import exclusive
         from .device_day_contract import archive_name, DeviceDayLayout, VERSION
         from .observed_inventory import read_inventory
+        result = {'status': 'completed', 'published': 0, 'unchanged': 0, 'busy': 0, 'errors': []}
+
+        def failed(name, operation, exc):
+            result['status'] = 'partial'
+            result['errors'].append({'archive': name, 'operation': operation, 'error_type': type(exc).__name__})
+            logging.getLogger(__name__).warning('File time index unavailable for %s during %s: %s',
+                                               name, operation, type(exc).__name__)
         names = {archive_name(r['camera_key'], r['recording_start_us'])
                  for r in read_inventory(self.runtime)['recordings']
                  if in_processing_scope(self.config.get('device_day', {}), r)}
         photo_indexes, photo_starts = {}, {}
         cutoff = processing_cutoff(self.config.get('device_day', {}))
         for path in (self.runtime/'CapturePhotos').glob('*.json'):
-            snapshot = read_json(path)
-            for device in snapshot.get('devices', []):
-                for photo in device.get('photos', []):
-                    stamp = photo['capture_us']
-                    if cutoff and stamp < cutoff:
-                        continue
-                    name = archive_name(device['camera'], stamp)
-                    if path.stem == name:
-                        names.add(name)
-                        photo_indexes[name] = snapshot
-                        photo_starts[name] = stamp
-        for name in sorted(names):
-            photo_path = self.runtime/'CapturePhotos'/f'{name}.json'
-            photos = photo_indexes.get(name) or (read_json(photo_path) if photo_path.is_file() else {})
-            # A five-second photo heartbeat alone must not rewrite NAS indexes.
-            from .device_day_contract import digest
-            photo_version = digest({k: v for k, v in photos.items() if k != 'observed_at'})
             try:
+                snapshot = read_json(path)
+                for device in snapshot.get('devices', []):
+                    for photo in device.get('photos', []):
+                        stamp = photo['capture_us']
+                        if cutoff and stamp < cutoff:
+                            continue
+                        name = archive_name(device['camera'], stamp)
+                        if path.stem == name:
+                            names.add(name)
+                            photo_indexes[name] = snapshot
+                            photo_starts[name] = stamp
+            except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+                failed(path.stem, 'photo_index', exc)
+        self.source_indexes = {name: value for name, value in self.source_indexes.items() if name in names}
+        for name in sorted(names):
+            operation = 'photo_index'
+            try:
+                photo_path = self.runtime/'CapturePhotos'/f'{name}.json'
+                photos = photo_indexes.get(name) or (read_json(photo_path) if photo_path.is_file() else {})
+                # A five-second photo heartbeat alone must not rewrite NAS indexes.
+                from .device_day_contract import digest
+                photo_version = digest({k: v for k, v in photos.items() if k != 'observed_at'})
+                operation = 'source_index'
                 with exclusive(self.runtime/'locks'/f'{name}.index.lock'):
                     path = safe_child(Path(self.config['storage']['archive_root']), name+'/ProcessedClips/Index.json')
                     if not path.is_file() and name in photo_starts:
@@ -202,13 +217,16 @@ class FileIndexPublisher:
                         identity = (stat.st_mtime_ns, stat.st_size)
                         cached = self.source_indexes.get(name)
                         if cached is None or cached[0] != identity:
-                            cached = (identity, read_json(path))
+                            from .device_day_content import readable_source_index
+                            cached = (identity, readable_source_index(read_json(path)))
                             self.source_indexes[name] = cached
                         index = cached[1]
                     if content_enabled:
                         from .device_day_content import content_revision
+                        operation = 'content_revision'
                         version += (content_revision(self.config, index),)
                     if self.versions.get(name) == version:
+                        result['unchanged'] += 1
                         continue
                     index = index or read_json(path)
                     before = index.get('time_index')
@@ -216,26 +234,45 @@ class FileIndexPublisher:
                         from .device_day_content import publish_content, with_partial_understandings
                         from .device_day_contract import DeviceDayLayout
                         from .device_day_reports import render_day
-                        original = index
+                        source = index
+                        operation = 'partial_understandings'
                         index = with_partial_understandings(self.config, index)
+                        operation = 'readable_content'
                         index['readable_content'] = publish_content(self.config, index)
                         if index.get('recordings'):
-                            layout = DeviceDayLayout(Path(self.config['storage']['archive_root']), name[11:],
-                                index['recordings'][0]['start_us'])
                             from .device_day_night_schedule import paused_stages
                             if 'report' not in paused_stages(self.config):
+                                operation = 'day_report'
+                                # Failed retention rows can have no start_us.
+                                # The validated archive name identifies the day
+                                # directory; it does not supply a media timestamp.
+                                from .device_day_timeline import day_bounds
+                                day_start, _ = day_bounds(validate_archive_name(name)[:10])
+                                layout = DeviceDayLayout(Path(self.config['storage']['archive_root']), name[11:],
+                                    day_start)
                                 render_day(layout, index)
+                    operation = 'time_index'
                     publish_file_index(self.config, index, photos)
                     if before != index['time_index']:
+                        operation = 'source_index_pointer'
                         if content_enabled:
+                            # The cache deliberately omits dense CV evidence.
+                            # Under the same day lock, change only this pointer
+                            # in a fresh canonical index, never save the cache.
+                            original = read_json(path)
                             original['time_index'] = index['time_index']
                         atomic_json(path, original if content_enabled else index)
                     stat = path.stat()
                     self.versions[name] = (stat.st_mtime_ns, stat.st_size, photo_version)
                     if content_enabled:
                         self.versions[name] += (version[-1],)
+                        source['time_index'] = index['time_index']
+                        self.source_indexes[name] = ((stat.st_mtime_ns, stat.st_size), source)
+                    result['published'] += 1
             except BlockingIOError:
+                result['busy'] += 1
                 continue  # Producer still publishing; retry without dropping references.
-            except OSError as exc:
-                import logging
-                logging.getLogger(__name__).warning('File time index unavailable for %s: %s', name, type(exc).__name__)
+            except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+                failed(name, operation, exc)
+        self.last_result = result
+        return result

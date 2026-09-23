@@ -11,7 +11,7 @@ from .detection import iter_frame_evidence
 from .ordering import candidate_sort_key
 from .open_vocabulary_runtime import load_yolo_world_with_local_clip, serialized_open_vocabulary
 from .schemas import ActionCandidate, ActionType, FrameEvidence, VideoInfo, ViewInput
-from .video_io import read_view_frame_at
+from .video_io import ViewFrameReader
 
 
 _ACTOR_CLASSES = {"hand", "gloved_hand"}
@@ -362,40 +362,27 @@ def generate_open_vocabulary_coarse_candidates(
         for item in dict(settings.get("prompt_map") or {}).values()
         if _normalize_class(item)
     }
-    for selected_frame in selected:
-        view = view_by_id[selected_frame.view_id]
-        info = infos[view.view_id]
-        frame_report: dict[str, Any] = {
-            "view_id": view.view_id,
-            "frame_index": selected_frame.frame_index,
-            "local_ms": selected_frame.local_ms,
-            "global_ms": selected_frame.global_ms,
-            "motion_score": selected_frame.motion_score,
-        }
-        frame = read_view_frame_at(view, info, selected_frame.local_ms)
-        if frame is None:
-            frame_report["status"] = "frame_unreadable"
-            report["frames"].append(frame_report)
-            continue
-        try:
-            grounded, inference_report = _yolo_world_detections(frame, settings)
-            actor_boxes = [
-                box for box in grounded if box["class_name"] in _ACTOR_CLASSES
-            ]
-            object_boxes = [
-                box
-                for box in grounded
-                if box["class_name"] not in _ACTOR_CLASSES | _NON_ACTION_CLASSES
-            ]
-            if (not actor_boxes or not object_boxes) and requested_classes:
-                from .archive import _grounding_dino_key_frame_detections
-
-                fallback_boxes, fallback_report = (
-                    _grounding_dino_key_frame_detections(
-                        frame, requested_classes, settings
-                    )
-                )
-                grounded.extend(fallback_boxes)
+    # Reuse timestamp-checked handles with bounded NAS open/read waits.
+    with ViewFrameReader(max_open=1) as reader:
+        for selected_frame in selected:
+            view = view_by_id[selected_frame.view_id]
+            info = infos[view.view_id]
+            frame_report: dict[str, Any] = {
+                "view_id": view.view_id,
+                "frame_index": selected_frame.frame_index,
+                "local_ms": selected_frame.local_ms,
+                "global_ms": selected_frame.global_ms,
+                "motion_score": selected_frame.motion_score,
+            }
+            read_started = time.perf_counter()
+            frame = reader.read(view, info, selected_frame.local_ms)
+            frame_report["source_read_seconds"] = round(time.perf_counter() - read_started, 6)
+            if frame is None:
+                frame_report["status"] = "frame_unreadable"
+                report["frames"].append(frame_report)
+                continue
+            try:
+                grounded, inference_report = _yolo_world_detections(frame, settings)
                 actor_boxes = [
                     box for box in grounded if box["class_name"] in _ACTOR_CLASSES
                 ]
@@ -404,91 +391,109 @@ def generate_open_vocabulary_coarse_candidates(
                     for box in grounded
                     if box["class_name"] not in _ACTOR_CLASSES | _NON_ACTION_CLASSES
                 ]
-                inference_report["grounding_dino_fallback"] = fallback_report
-            pairs = [
-                (actor, obj, _box_edge_gap_norm(actor, obj))
-                for actor in actor_boxes
-                for obj in object_boxes
-                if _box_edge_gap_norm(actor, obj) <= maximum_gap
-            ]
-            if not pairs:
+                if (not actor_boxes or not object_boxes) and requested_classes:
+                    from .archive import _grounding_dino_key_frame_detections
+
+                    fallback_boxes, fallback_report = (
+                        _grounding_dino_key_frame_detections(
+                            frame, requested_classes, settings
+                        )
+                    )
+                    grounded.extend(fallback_boxes)
+                    actor_boxes = [
+                        box for box in grounded if box["class_name"] in _ACTOR_CLASSES
+                    ]
+                    object_boxes = [
+                        box
+                        for box in grounded
+                        if box["class_name"] not in _ACTOR_CLASSES | _NON_ACTION_CLASSES
+                    ]
+                    inference_report["grounding_dino_fallback"] = fallback_report
+                pairs = [
+                    (actor, obj, _box_edge_gap_norm(actor, obj))
+                    for actor in actor_boxes
+                    for obj in object_boxes
+                    if _box_edge_gap_norm(actor, obj) <= maximum_gap
+                ]
+                if not pairs:
+                    frame_report.update(
+                        {
+                            "status": "no_actor_object_contact",
+                            "inference": inference_report,
+                        }
+                    )
+                    report["frames"].append(frame_report)
+                    continue
+                actor, obj, gap = min(
+                    pairs,
+                    key=lambda item: (
+                        item[2],
+                        -min(float(item[0]["confidence"]), float(item[1]["confidence"])),
+                    ),
+                )
+                global_ms = float(
+                    selected_frame.global_ms
+                    if selected_frame.global_ms is not None
+                    else selected_frame.local_ms
+                )
+                local_start = max(0.0, selected_frame.local_ms - half_window_ms)
+                local_end = min(float(info.duration_ms), selected_frame.local_ms + half_window_ms)
+                candidate = ActionCandidate(
+                    candidate_id=(
+                        f"COARSE-OPEN-VOCAB-{view.view_id}-{len(candidates) + 1:06d}"
+                    ),
+                    action_type=ActionType.OBJECT_MOVEMENT,
+                    view_id=view.view_id,
+                    role=view.role,
+                    local_start_ms=local_start,
+                    local_end_ms=local_end,
+                    global_start_ms=global_ms - (selected_frame.local_ms - local_start),
+                    global_end_ms=global_ms + (local_end - selected_frame.local_ms),
+                    key_global_ms=global_ms,
+                    objects=[str(obj["class_name"])],
+                    confidence=min(
+                        0.89,
+                        max(
+                            0.35,
+                            min(float(actor["confidence"]), float(obj["confidence"])),
+                        ),
+                    ),
+                    evidence=[
+                        {
+                            "frame_index": selected_frame.frame_index,
+                            "motion_score": selected_frame.motion_score,
+                            "actor": actor,
+                            "object": obj,
+                            "actor_object_gap_norm": gap,
+                            "source_stage": "coarse",
+                        }
+                    ],
+                    uncertainty=[
+                        "开放词汇粗筛只补充精筛召回窗口，不独立确认物理动作"
+                    ],
+                )
+                candidates.append(candidate)
                 frame_report.update(
                     {
-                        "status": "no_actor_object_contact",
+                        "status": "candidate_added",
+                        "candidate_id": candidate.candidate_id,
                         "inference": inference_report,
                     }
                 )
-                report["frames"].append(frame_report)
-                continue
-            actor, obj, gap = min(
-                pairs,
-                key=lambda item: (
-                    item[2],
-                    -min(float(item[0]["confidence"]), float(item[1]["confidence"])),
-                ),
-            )
-            global_ms = float(
-                selected_frame.global_ms
-                if selected_frame.global_ms is not None
-                else selected_frame.local_ms
-            )
-            local_start = max(0.0, selected_frame.local_ms - half_window_ms)
-            local_end = min(float(info.duration_ms), selected_frame.local_ms + half_window_ms)
-            candidate = ActionCandidate(
-                candidate_id=(
-                    f"COARSE-OPEN-VOCAB-{view.view_id}-{len(candidates) + 1:06d}"
-                ),
-                action_type=ActionType.OBJECT_MOVEMENT,
-                view_id=view.view_id,
-                role=view.role,
-                local_start_ms=local_start,
-                local_end_ms=local_end,
-                global_start_ms=global_ms - (selected_frame.local_ms - local_start),
-                global_end_ms=global_ms + (local_end - selected_frame.local_ms),
-                key_global_ms=global_ms,
-                objects=[str(obj["class_name"])],
-                confidence=min(
-                    0.89,
-                    max(
-                        0.35,
-                        min(float(actor["confidence"]), float(obj["confidence"])),
-                    ),
-                ),
-                evidence=[
+            except Exception as exc:  # Keep the established closed-set funnel available.
+                frame_report.update(
                     {
-                        "frame_index": selected_frame.frame_index,
-                        "motion_score": selected_frame.motion_score,
-                        "actor": actor,
-                        "object": obj,
-                        "actor_object_gap_norm": gap,
-                        "source_stage": "coarse",
+                        "status": "open_vocabulary_error_closed_set_preserved",
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
                     }
-                ],
-                uncertainty=[
-                    "开放词汇粗筛只补充精筛召回窗口，不独立确认物理动作"
-                ],
-            )
-            candidates.append(candidate)
-            frame_report.update(
-                {
-                    "status": "candidate_added",
-                    "candidate_id": candidate.candidate_id,
-                    "inference": inference_report,
-                }
-            )
-        except Exception as exc:  # Keep the established closed-set funnel available.
-            frame_report.update(
-                {
-                    "status": "open_vocabulary_error_closed_set_preserved",
-                    "error_type": type(exc).__name__,
-                    "error": str(exc),
-                }
-            )
-        report["frames"].append(frame_report)
+                )
+            report["frames"].append(frame_report)
     candidates = sorted(candidates, key=candidate_sort_key)
     report["candidate_count"] = len(candidates)
     report["error_count"] = sum(
-        str(item.get("status") or "").startswith("open_vocabulary_error")
+        item.get("status") == "frame_unreadable"
+        or str(item.get("status") or "").startswith("open_vocabulary_error")
         for item in report["frames"]
     )
     report["status"] = (
@@ -626,169 +631,171 @@ def generate_open_vocabulary_fine_candidates(
                 selected.append((view, window_index, frame))
     report["selected_frame_count"] = len(selected)
     candidates: list[ActionCandidate] = []
-    for view, window_index, selected_frame in selected:
-        frame_report: dict[str, Any] = {
-            "view_id": view.view_id,
-            "window_index": window_index,
-            "frame_index": selected_frame.frame_index,
-            "local_ms": selected_frame.local_ms,
-            "global_ms": selected_frame.global_ms,
-        }
-        frame = read_view_frame_at(
-            view, infos[view.view_id], selected_frame.local_ms
-        )
-        if frame is None:
-            frame_report["status"] = "frame_unreadable"
-            report["frames"].append(frame_report)
-            continue
-        hand = max(
-            (
-                box
-                for box in selected_frame.detections
-                if box.class_name in _ACTOR_CLASSES
-            ),
-            key=lambda box: box.confidence,
-        )
-        x1, y1, x2, y2 = hand.xyxy_norm
-        crop_norm = (
-            max(0.0, x1 - padding),
-            max(0.0, y1 - padding),
-            min(1.0, x2 + padding),
-            min(1.0, y2 + padding),
-        )
-        height, width = frame.shape[:2]
-        left = max(0, int(crop_norm[0] * width))
-        top = max(0, int(crop_norm[1] * height))
-        right = min(width, int(np.ceil(crop_norm[2] * width)))
-        bottom = min(height, int(np.ceil(crop_norm[3] * height)))
-        if right - left < 4 or bottom - top < 4:
-            frame_report["status"] = "invalid_hand_roi"
-            report["frames"].append(frame_report)
-            continue
-        try:
-            grounded, inference = _yolo_world_detections(
-                frame[top:bottom, left:right], settings
+    # Reuse timestamp-checked handles with bounded NAS open/read waits.
+    with ViewFrameReader(max_open=1) as reader:
+        for view, window_index, selected_frame in selected:
+            frame_report: dict[str, Any] = {
+                "view_id": view.view_id,
+                "window_index": window_index,
+                "frame_index": selected_frame.frame_index,
+                "local_ms": selected_frame.local_ms,
+                "global_ms": selected_frame.global_ms,
+            }
+            read_started = time.perf_counter()
+            frame = reader.read(view, infos[view.view_id], selected_frame.local_ms)
+            frame_report["source_read_seconds"] = round(time.perf_counter() - read_started, 6)
+            if frame is None:
+                frame_report["status"] = "frame_unreadable"
+                report["frames"].append(frame_report)
+                continue
+            hand = max(
+                (
+                    box
+                    for box in selected_frame.detections
+                    if box.class_name in _ACTOR_CLASSES
+                ),
+                key=lambda box: box.confidence,
             )
-            crop_width = max(1e-9, crop_norm[2] - crop_norm[0])
-            crop_height = max(1e-9, crop_norm[3] - crop_norm[1])
-            objects = []
-            for box in grounded:
-                if box["class_name"] in _ACTOR_CLASSES | _NON_ACTION_CLASSES:
-                    continue
-                bx1, by1, bx2, by2 = box["xyxy_norm"]
-                normalized = {
-                    **box,
-                    "xyxy_norm": [
-                        crop_norm[0] + float(bx1) * crop_width,
-                        crop_norm[1] + float(by1) * crop_height,
-                        crop_norm[0] + float(bx2) * crop_width,
-                        crop_norm[1] + float(by2) * crop_height,
-                    ],
-                    "detector_source": "yolo_world_v2_fine_hand_roi_recall",
-                }
-                gap = _box_edge_gap_norm(
-                    {
-                        "xyxy_norm": list(hand.xyxy_norm),
-                    },
-                    normalized,
+            x1, y1, x2, y2 = hand.xyxy_norm
+            crop_norm = (
+                max(0.0, x1 - padding),
+                max(0.0, y1 - padding),
+                min(1.0, x2 + padding),
+                min(1.0, y2 + padding),
+            )
+            height, width = frame.shape[:2]
+            left = max(0, int(crop_norm[0] * width))
+            top = max(0, int(crop_norm[1] * height))
+            right = min(width, int(np.ceil(crop_norm[2] * width)))
+            bottom = min(height, int(np.ceil(crop_norm[3] * height)))
+            if right - left < 4 or bottom - top < 4:
+                frame_report["status"] = "invalid_hand_roi"
+                report["frames"].append(frame_report)
+                continue
+            try:
+                grounded, inference = _yolo_world_detections(
+                    frame[top:bottom, left:right], settings
                 )
-                if gap <= maximum_gap:
-                    objects.append((gap, normalized))
-            if not objects:
+                crop_width = max(1e-9, crop_norm[2] - crop_norm[0])
+                crop_height = max(1e-9, crop_norm[3] - crop_norm[1])
+                objects = []
+                for box in grounded:
+                    if box["class_name"] in _ACTOR_CLASSES | _NON_ACTION_CLASSES:
+                        continue
+                    bx1, by1, bx2, by2 = box["xyxy_norm"]
+                    normalized = {
+                        **box,
+                        "xyxy_norm": [
+                            crop_norm[0] + float(bx1) * crop_width,
+                            crop_norm[1] + float(by1) * crop_height,
+                            crop_norm[0] + float(bx2) * crop_width,
+                            crop_norm[1] + float(by2) * crop_height,
+                        ],
+                        "detector_source": "yolo_world_v2_fine_hand_roi_recall",
+                    }
+                    gap = _box_edge_gap_norm(
+                        {
+                            "xyxy_norm": list(hand.xyxy_norm),
+                        },
+                        normalized,
+                    )
+                    if gap <= maximum_gap:
+                        objects.append((gap, normalized))
+                if not objects:
+                    frame_report.update(
+                        {
+                            "status": "no_manipulated_object_in_hand_roi",
+                            "inference": inference,
+                            "crop_norm": crop_norm,
+                        }
+                    )
+                    report["frames"].append(frame_report)
+                    continue
+                gap, obj = min(
+                    objects,
+                    key=lambda item: (
+                        item[0],
+                        -float(item[1]["confidence"]),
+                    ),
+                )
+                global_ms = float(
+                    selected_frame.global_ms
+                    if selected_frame.global_ms is not None
+                    else selected_frame.local_ms
+                )
+                half_window_ms = 2000.0
+                local_start_ms = max(
+                    0.0, selected_frame.local_ms - half_window_ms
+                )
+                local_end_ms = min(
+                    float(infos[view.view_id].duration_ms),
+                    selected_frame.local_ms + half_window_ms,
+                )
+                candidates.append(
+                    ActionCandidate(
+                        candidate_id=(
+                            f"FINE-OPEN-VOCAB-{view.view_id}-"
+                            f"{len(candidates) + 1:06d}"
+                        ),
+                        action_type=ActionType.HAND_OBJECT_CONTACT,
+                        view_id=view.view_id,
+                        role=view.role,
+                        local_start_ms=local_start_ms,
+                        local_end_ms=local_end_ms,
+                        global_start_ms=(
+                            global_ms
+                            - (selected_frame.local_ms - local_start_ms)
+                        ),
+                        global_end_ms=(
+                            global_ms
+                            + (local_end_ms - selected_frame.local_ms)
+                        ),
+                        key_global_ms=global_ms,
+                        objects=sorted({hand.class_name, str(obj["class_name"])}),
+                        confidence=min(
+                            float(hand.confidence), float(obj["confidence"])
+                        ),
+                        evidence=[
+                            {
+                                "frame_index": selected_frame.frame_index,
+                                "hand_track_id": hand.track_id,
+                                "hand_box_norm": list(hand.xyxy_norm),
+                                "object": obj,
+                                "actor_object_gap_norm": gap,
+                                "hand_roi_norm": crop_norm,
+                                "source_stage": "candidate_fine",
+                                "recall_only": True,
+                            }
+                        ],
+                        uncertainty=[
+                            "手部ROI开放词汇结果只补充精扫召回，不能单独确认物理动作"
+                        ],
+                        provenance={
+                            "source_stage": "candidate_fine",
+                            "detector_source": (
+                                "yolo_world_v2_fine_hand_roi_recall"
+                            ),
+                            "recall_only": True,
+                        },
+                    )
+                )
                 frame_report.update(
                     {
-                        "status": "no_manipulated_object_in_hand_roi",
+                        "status": "candidate_added",
+                        "candidate_id": candidates[-1].candidate_id,
                         "inference": inference,
                         "crop_norm": crop_norm,
                     }
                 )
-                report["frames"].append(frame_report)
-                continue
-            gap, obj = min(
-                objects,
-                key=lambda item: (
-                    item[0],
-                    -float(item[1]["confidence"]),
-                ),
-            )
-            global_ms = float(
-                selected_frame.global_ms
-                if selected_frame.global_ms is not None
-                else selected_frame.local_ms
-            )
-            half_window_ms = 2000.0
-            local_start_ms = max(
-                0.0, selected_frame.local_ms - half_window_ms
-            )
-            local_end_ms = min(
-                float(infos[view.view_id].duration_ms),
-                selected_frame.local_ms + half_window_ms,
-            )
-            candidates.append(
-                ActionCandidate(
-                    candidate_id=(
-                        f"FINE-OPEN-VOCAB-{view.view_id}-"
-                        f"{len(candidates) + 1:06d}"
-                    ),
-                    action_type=ActionType.HAND_OBJECT_CONTACT,
-                    view_id=view.view_id,
-                    role=view.role,
-                    local_start_ms=local_start_ms,
-                    local_end_ms=local_end_ms,
-                    global_start_ms=(
-                        global_ms
-                        - (selected_frame.local_ms - local_start_ms)
-                    ),
-                    global_end_ms=(
-                        global_ms
-                        + (local_end_ms - selected_frame.local_ms)
-                    ),
-                    key_global_ms=global_ms,
-                    objects=sorted({hand.class_name, str(obj["class_name"])}),
-                    confidence=min(
-                        float(hand.confidence), float(obj["confidence"])
-                    ),
-                    evidence=[
-                        {
-                            "frame_index": selected_frame.frame_index,
-                            "hand_track_id": hand.track_id,
-                            "hand_box_norm": list(hand.xyxy_norm),
-                            "object": obj,
-                            "actor_object_gap_norm": gap,
-                            "hand_roi_norm": crop_norm,
-                            "source_stage": "candidate_fine",
-                            "recall_only": True,
-                        }
-                    ],
-                    uncertainty=[
-                        "手部ROI开放词汇结果只补充精扫召回，不能单独确认物理动作"
-                    ],
-                    provenance={
-                        "source_stage": "candidate_fine",
-                        "detector_source": (
-                            "yolo_world_v2_fine_hand_roi_recall"
-                        ),
-                        "recall_only": True,
-                    },
+            except Exception as exc:
+                frame_report.update(
+                    {
+                        "status": "open_vocabulary_error_closed_set_preserved",
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    }
                 )
-            )
-            frame_report.update(
-                {
-                    "status": "candidate_added",
-                    "candidate_id": candidates[-1].candidate_id,
-                    "inference": inference,
-                    "crop_norm": crop_norm,
-                }
-            )
-        except Exception as exc:
-            frame_report.update(
-                {
-                    "status": "open_vocabulary_error_closed_set_preserved",
-                    "error_type": type(exc).__name__,
-                    "error": str(exc),
-                }
-            )
-        report["frames"].append(frame_report)
+            report["frames"].append(frame_report)
     report["candidate_count"] = len(candidates)
     failure_statuses = {"frame_unreadable", "invalid_hand_roi"}
     report["inference_error_count"] = sum(

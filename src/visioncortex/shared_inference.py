@@ -15,8 +15,28 @@ _POOLS = {}
 _LOCK = Lock()
 
 
+class _InferencePool(list):
+    def __init__(self, capacity):
+        super().__init__()
+        self.capacity = capacity
+        self.initialized = False
+        self.growth_failures = 0
+        self.last_growth_error_type = None
+        self.retry_after = 0.0
+
+    def stats(self):
+        brokers = list(self)
+        return {'context_limit': self.capacity, 'allocated_contexts': len(brokers),
+                'healthy_contexts': sum(b.healthy() for b in brokers),
+                'initializing_or_stopping_contexts': sum(
+                    b.thread.is_alive() and not b.healthy() for b in brokers),
+                'growth_failures': self.growth_failures,
+                'last_growth_error_type': self.last_growth_error_type,
+                'growth_retry_after_seconds': max(0.0, self.retry_after - time.monotonic())}
+
+
 class InferenceBroker:
-    def __init__(self, factory, wait_seconds=.005, timeout_seconds=120):
+    def __init__(self, factory, wait_seconds=.005, timeout_seconds=120, *, defer_ready=False):
         self.queue = Queue(maxsize=32)
         self.wait_seconds = wait_seconds
         self.timeout_seconds = timeout_seconds
@@ -27,13 +47,22 @@ class InferenceBroker:
         self.calls = self.frames = self.mixed_calls = 0
         self.engine_batches = []
         self.engine_batch_size_counts = Counter()
+        self.scanner = None
+        self.pool = None
         self.thread = Thread(target=self._run, args=(factory,), daemon=True, name='shared-role-inference')
         self.thread.start()
+        if not defer_ready:
+            self.wait_ready()
+
+    def wait_ready(self):
         try:
-            self.scanner = self.ready.result(timeout=timeout_seconds)
+            self.scanner = self.ready.result(timeout=self.timeout_seconds)
         except BaseException:
             self.stop.set()
             raise
+
+    def healthy(self):
+        return self.scanner is not None and self.thread.is_alive() and not self.stop.is_set()
 
     def _run(self, factory):
         scanner, carry = None, None
@@ -151,6 +180,7 @@ class InferenceBroker:
                     'oom_batch_contractions': [dict(item) for item in
                                                getattr(self.scanner, 'batch_contractions', [])],
                     'worker_alive': self.thread.is_alive(), 'quarantined': self.stop.is_set(),
+                    'context_pool': self.pool.stats() if self.pool is not None else None,
                     'model_component_seconds': getattr(self.scanner, 'component_timings', None).snapshot() if hasattr(self.scanner, 'component_timings') else {}}
 
 
@@ -214,15 +244,37 @@ def acquire_scanner(factory, role, config, image_size, batch_size, appearance_en
                 if idle is None or not all(b.close() for b in _POOLS[idle]):
                     raise RuntimeError('Inference pool capacity exhausted; active models remain bounded')
                 del _POOLS[idle]
-            brokers = []
+            brokers = _InferencePool(capacity)
             _POOLS[key] = brokers
+        healthy = [b for b in brokers if b.healthy()]
+        if brokers.initialized and not healthy:
+            raise RuntimeError('Inference pool quarantined; worker restart required')
+        # Failed initialization is removable only once its owning thread has
+        # actually exited. Timed-out native calls retain a physical pool slot.
+        brokers[:] = [b for b in brokers if b.leases or b.thread.is_alive()]
+        stopping = any(b.stop.is_set() and b.thread.is_alive() for b in brokers)
         # Allocate a context only for an active caller. Creating three eager
         # models for every role/phase consumes memory and cold-start time even
         # when just one camera has a ready slice. Released contexts stay warm.
-        if len(brokers) < capacity and not any(item.leases == 0 for item in brokers):
-            brokers.append(InferenceBroker(lambda:factory(role,config,image_size,batch_size,appearance_enabled=False),
-                                           timeout_seconds=config['performance'].get('shared_inference_timeout_seconds', 120)))
-        healthy = [b for b in brokers if not b.stop.is_set()]
+        if (len(brokers) < capacity and not any(item.leases == 0 for item in healthy)
+                and not stopping and time.monotonic() >= brokers.retry_after):
+            candidate = InferenceBroker(lambda:factory(role,config,image_size,batch_size,appearance_enabled=False),
+                                        timeout_seconds=config['performance'].get('shared_inference_timeout_seconds', 120),
+                                        defer_ready=True)
+            candidate.pool = brokers
+            brokers.append(candidate)
+            try:
+                candidate.wait_ready()
+                brokers.initialized = True
+            except Exception as exc:
+                brokers.growth_failures += 1
+                brokers.last_growth_error_type = type(exc).__name__
+                brokers.retry_after = time.monotonic() + 30
+                # Optional capacity growth must not fail a video that can use
+                # an identical live model. First/all-bad contexts still fail.
+                if not any(b.healthy() for b in brokers):
+                    raise
+        healthy = [b for b in brokers if b.healthy()]
         if not healthy:
             raise RuntimeError('Inference pool quarantined; worker restart required')
         broker = min(healthy, key=lambda item:(item.leases,item.queue.qsize()))

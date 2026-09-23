@@ -1,6 +1,8 @@
 from copy import deepcopy
 from pathlib import Path
 
+import pytest
+
 from test_device_day_time_lookup import ARCHIVE, BASE, index
 from visioncortex.device_day_contract import DIRECTORIES, atomic_json, read_json
 from visioncortex.device_day_file_index import build_file_index, publish_file_index, FileIndexPublisher
@@ -119,3 +121,111 @@ def test_photo_only_device_publishes_without_waiting_for_video(tmp_path):
     assert {p.name for p in root.iterdir()} == set(DIRECTORIES)
     assert read_json(root/'ProcessedClips/Index.json')['recordings'] == []
     assert [e['kind'] for e in all_entries(read_json(root/'Comment/TimeIndex.json'))] == ['voice_photo']
+
+
+def test_readable_cache_drops_dense_cv_but_pointer_update_preserves_canonical(tmp_path, monkeypatch):
+    from visioncortex import device_day_content
+    from visioncortex.observed_inventory import observe
+    cfg, source = config(tmp_path), index()
+    cfg['device_day'].update(readable_content_enabled=True, paused_stages=['report'])
+    source['recordings'][0]['processing'] = {'clock_mapping': {'origin_us': BASE},
+        'batches': [{'dense': 'x' * 10000}], 'scan_reports': [{'dense': True}], 'audit_artifacts': [{'dense': True}]}
+    source['segments'] = [{'recording_id': 'slice', 'segment_id': 's', 'start_us': BASE,
+        'end_us': BASE+10000000, 'start_ms': 0, 'end_ms': 10000, 'activity': 'inactive',
+        'source_ref': {'path': 'MetaVideo/Original.mp4'}, 'activity_audit': {'dense': 'x' * 10000}}]
+    path = Path(cfg['storage']['archive_root'])/ARCHIVE/'ProcessedClips/Index.json'
+    atomic_json(path, source)
+    observe(Path(cfg['storage']['local_runtime_root'])/'device-day', {'recordings': [{
+        'recording_id': 'slice', 'camera_key': ARCHIVE[11:], 'recording_start_us': BASE}]})
+    # No understanding exists; the test only exercises projection and pointer writes.
+    monkeypatch.setattr(device_day_content, 'content_revision', lambda *args: ())
+    publisher = FileIndexPublisher(cfg)
+    assert publisher.tick()['published'] == 1
+    cached = publisher.source_indexes[ARCHIVE][1]
+    assert cached['recordings'][0]['processing'] == {'clock_mapping': {'origin_us': BASE}}
+    assert 'activity_audit' not in cached['segments'][0]
+    published = read_json(path)
+    pointer = published.pop('time_index')
+    assert published == source  # Only the pointer may alter canonical evidence.
+    assert pointer['path'] == 'Comment/TimeIndex.json'
+    before = path.stat().st_mtime_ns
+    assert publisher.tick()['unchanged'] == 1
+    assert path.stat().st_mtime_ns == before
+
+
+@pytest.mark.parametrize('failure', ['content_revision', 'partial_understandings', 'readable_content', 'time_index'])
+def test_bad_day_does_not_block_other_days_or_advance_failed_version(tmp_path, monkeypatch, failure):
+    from visioncortex import device_day_content, device_day_file_index
+    from visioncortex.observed_inventory import observe
+    cfg = config(tmp_path)
+    cfg['device_day'].update(readable_content_enabled=True, paused_stages=['report'])
+    names = [ARCHIVE, ARCHIVE.replace('camera_cam01', 'camera_cam02')]
+    runtime = Path(cfg['storage']['local_runtime_root'])/'device-day'
+    observe(runtime, {'recordings': [{'recording_id': str(i), 'camera_key': name[11:],
+        'recording_start_us': BASE} for i, name in enumerate(names)]})
+    for name in names:
+        atomic_json(Path(cfg['storage']['archive_root'])/name/'ProcessedClips/Index.json', index() | {'archive': name})
+    module, function = (device_day_file_index, 'publish_file_index') if failure == 'time_index' else (
+        device_day_content, {'content_revision': 'content_revision',
+                            'partial_understandings': 'with_partial_understandings',
+                            'readable_content': 'publish_content'}[failure])
+    original = getattr(module, function)
+    failing = [True]
+
+    def call(config, value, *args):
+        if failing[0] and value['archive'] == names[0]:
+            raise TypeError('invalid receipt field')
+        return original(config, value, *args)
+
+    monkeypatch.setattr(module, function, call)
+    publisher = FileIndexPublisher(cfg)
+    result = publisher.tick()
+    assert result['status'] == 'partial' and result['published'] == 1
+    assert result['errors'] == [{'archive': names[0], 'operation': failure, 'error_type': 'TypeError'}]
+    assert names[0] not in publisher.versions and names[1] in publisher.versions
+    assert (Path(cfg['storage']['archive_root'])/names[1]/'Comment/TimeIndex.json').is_file()
+    failing[0] = False
+    result = publisher.tick()
+    assert result['status'] == 'completed' and result['published'] == 1 and result['unchanged'] == 1
+
+
+def test_bad_photo_json_is_visible_failure_without_blocking_other_days(tmp_path):
+    from visioncortex.observed_inventory import observe
+    cfg = config(tmp_path)
+    runtime = Path(cfg['storage']['local_runtime_root'])/'device-day'
+    observe(runtime, {'recordings': [{'recording_id': 'slice', 'camera_key': ARCHIVE[11:],
+                                    'recording_start_us': BASE}]})
+    atomic_json(Path(cfg['storage']['archive_root'])/ARCHIVE/'ProcessedClips/Index.json', index())
+    bad = runtime/'CapturePhotos'/'2026-09-18_other_cam01.json'
+    bad.parent.mkdir(parents=True)
+    bad.write_text('{broken')
+    result = FileIndexPublisher(cfg).tick()
+    assert result['status'] == 'partial' and result['published'] == 1
+    assert result['errors'][0]['operation'] == 'photo_index'
+
+
+@pytest.mark.parametrize('paused', [[], ['report']])
+def test_failed_first_retention_without_clock_does_not_block_time_index(tmp_path, monkeypatch, paused):
+    from visioncortex import device_day_reports
+    from visioncortex.observed_inventory import observe
+    cfg, source = config(tmp_path), index()
+    cfg['device_day'].update(readable_content_enabled=True, paused_stages=paused)
+    failed = {'recording_id': 'failed', 'start_us': None, 'end_us': None,
+              'sources': [], 'stages': {'retention': {'status': 'failed'}}}
+    source['recordings'].insert(0, failed)
+    path = Path(cfg['storage']['archive_root'])/ARCHIVE/'ProcessedClips/Index.json'
+    atomic_json(path, source)
+    observe(Path(cfg['storage']['local_runtime_root'])/'device-day', {'recordings': [{
+        'recording_id': 'slice', 'camera_key': ARCHIVE[11:], 'recording_start_us': BASE}]})
+    reports = []
+
+    def render(layout, value):
+        assert value['recordings'][0] == failed | {'processing': {}, 'transcription': None}
+        reports.append(layout.name)
+
+    monkeypatch.setattr(device_day_reports, 'render_day', render)
+    result = FileIndexPublisher(cfg).tick()
+    assert result == {'status': 'completed', 'published': 1, 'unchanged': 0, 'busy': 0, 'errors': []}
+    assert reports == ([] if paused else [ARCHIVE])
+    assert read_json(path)['recordings'][0] == failed  # Never invent the missing capture clock.
+    assert read_json(path.parent.parent/'Comment/TimeIndex.json')['archive'] == ARCHIVE

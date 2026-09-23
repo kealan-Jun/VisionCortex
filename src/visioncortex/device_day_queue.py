@@ -175,6 +175,20 @@ class DeviceDayQueue:
             thread.join(timeout=31)
 
     def finish(self, owner, recording_id, result, seconds):
+        if result.get('status') == 'waiting_for_prerequisite':
+            with self.connect() as db:
+                db.execute('BEGIN IMMEDIATE')
+                row = db.execute('SELECT revision,attempts FROM recordings WHERE recording_id=? AND lease_owner=?',
+                                 (recording_id, owner)).fetchone()
+                if row:
+                    db.execute("UPDATE recordings SET status='waiting_for_prerequisite',result=?,"
+                               "attempts=MAX(0,attempts-1),lease_owner=NULL,lease_until=NULL,updated_at=? "
+                               "WHERE recording_id=? AND lease_owner=?",
+                               (json.dumps(result), time.time(), recording_id, owner))
+                    from .task_events import append
+                    append(db, recording_id, 'waiting_for_prerequisite', revision=row['revision'],
+                           attempt=row['attempts'], data={'prerequisite_stage': result.get('prerequisite_stage')})
+            return
         if result.get("status") in {"running_elsewhere", "waiting_for_publication", "waiting_for_provider", "cancelled"}:
             # Lock contention is not a model failure. Return the slice to
             # scheduling; completed model receipts remain available for reuse.
@@ -205,6 +219,62 @@ class DeviceDayQueue:
             record = json.loads(row['payload'])
             Availability(self.path.parent).mark(record, state, reason=result['error_type'])
 
+    def wait_for_prerequisite(self, recording_id, revision, prerequisite):
+        """CAS a queued or precisely identified legacy failure into a wait.
+
+        Only the final historical attempt is known to be a prerequisite error.
+        Refund that one attempt, preserving any earlier genuine failure budget.
+        """
+        from .device_day_prerequisites import legacy_prerequisite_failure
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT * FROM recordings WHERE recording_id=? AND revision=?',
+                             (recording_id, revision)).fetchone()
+            expired = bool(row and row['status'] == 'running' and (row['lease_until'] or 0) < time.time())
+            if not row or row['status'] not in {'queued', 'failed'} and not expired:
+                return False
+            previous = json.loads(row['result'] or '{}')
+            failed = row['status'] == 'failed'
+            if failed and legacy_prerequisite_failure(previous) != prerequisite:
+                return False
+            result = {'status': 'waiting_for_prerequisite', 'recording_id': recording_id,
+                      'prerequisite_stage': prerequisite}
+            if failed:
+                result['previous_failure'] = previous
+            db.execute("UPDATE recordings SET status='waiting_for_prerequisite',result=?,"
+                       "attempts=MAX(0,attempts-?),lease_owner=NULL,lease_until=NULL,updated_at=? "
+                       "WHERE recording_id=? AND revision=?",
+                       (json.dumps(result), int(failed), time.time(), recording_id, revision))
+            from .task_events import append
+            append(db, recording_id, 'waiting_for_prerequisite', revision=revision,
+                   attempt=row['attempts'], data={'prerequisite_stage': prerequisite,
+                   'legacy_failure_refunded': failed, 'refunded_attempts': int(failed),
+                   'expired_lease_recovered': expired})
+            return True
+
+    def migrate_prerequisite_failures(self):
+        from .device_day_prerequisites import legacy_prerequisite_failure
+        with self.connect() as db:
+            rows = list(db.execute("SELECT recording_id,revision,result FROM recordings WHERE status='failed' "
+                                   "AND json_extract(result,'$.error_type')='ValueError'"))
+        for row in rows:
+            prerequisite = legacy_prerequisite_failure(json.loads(row['result'] or '{}'))
+            if prerequisite:
+                self.wait_for_prerequisite(row['recording_id'], row['revision'], prerequisite)
+
+    def resume_prerequisite(self, recording_id, revision):
+        """Caller has verified every exact prerequisite receipt and artifact."""
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            changed = db.execute("UPDATE recordings SET status='queued',updated_at=? "
+                                 "WHERE recording_id=? AND revision=? AND status='waiting_for_prerequisite'",
+                                 (time.time(), recording_id, revision)).rowcount
+            if changed:
+                from .task_events import append
+                append(db, recording_id, 'prerequisite_ready', revision=revision,
+                       data={'all_prerequisites_verified': True})
+            return bool(changed)
+
     def sync_availability(self, states):
         with self.connect() as db:
             db.executemany("UPDATE recordings SET input_status=? WHERE recording_id=? AND status NOT IN ('completed','running') AND input_status!=? AND json_extract(payload,'$.source_signature') IS ?",
@@ -221,6 +291,9 @@ class DeviceDayQueue:
               FROM recordings GROUP BY effective_status""", (current,))}
             expired = db.execute("SELECT COUNT(*) FROM recordings WHERE status='running' AND COALESCE(lease_until,0)<?",
                                  (current,)).fetchone()[0]
+            prerequisite_waits = {row['stage'] or 'unknown': row['n'] for row in db.execute(
+                "SELECT json_extract(result,'$.prerequisite_stage') AS stage,COUNT(*) AS n "
+                "FROM recordings WHERE status='waiting_for_prerequisite' GROUP BY stage")}
             queued = db.execute("""SELECT MIN(queued_at) oldest,
               COALESCE(SUM(COALESCE(json_extract(payload,'$.duration_seconds'),0)),0) capture_seconds,
               COALESCE(SUM(json_extract(payload,'$.media_duration_seconds')),0) media_seconds,
@@ -232,6 +305,8 @@ class DeviceDayQueue:
         known = [(json.loads(r["result"] or "{}").get("media_duration_seconds"), r["wall_seconds"]) for r in completed]
         measured = [(float(media), float(wall)) for media, wall in known if media is not None and wall and wall > 0]
         return {"counts": counts,
+                "prerequisite_wait_count": sum(prerequisite_waits.values()),
+                "prerequisite_waits_by_stage": prerequisite_waits,
                 "expired_lease_count": expired,
                 "queued_capture_window_seconds": queued["capture_seconds"],
                 "queued_media_seconds": queued["media_seconds"] if not queued["unknown"] else None,
