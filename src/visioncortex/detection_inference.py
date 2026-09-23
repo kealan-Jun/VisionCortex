@@ -5,9 +5,36 @@ from __future__ import annotations
 from collections.abc import Mapping
 import hashlib
 import math
+import logging
 from pathlib import Path
+import threading
 
 from .schemas import ViewRole
+
+
+def predict_complete_batch(model, *, source, options):
+    """Never accept Ultralytics' time-limited, silently truncated NMS batch."""
+    owner = threading.get_ident()
+    logger = logging.getLogger("ultralytics")
+
+    class TimeoutCapture(logging.Handler):
+        timed_out = False
+
+        def emit(self, record):
+            if record.thread == owner and "NMS time limit" in record.getMessage():
+                self.timed_out = True
+
+    capture = TimeoutCapture()
+    logger.addHandler(capture)
+    try:
+        for retry in range(3):
+            capture.timed_out = False
+            predictions = model.predict(source=source, **options)
+            if not capture.timed_out:
+                return predictions, retry
+        raise RuntimeError("NMS postprocessing repeatedly timed out; refusing incomplete frame evidence")
+    finally:
+        logger.removeHandler(capture)
 
 
 def prediction_branches(config: dict) -> dict[ViewRole, str]:

@@ -12,6 +12,45 @@ from visioncortex.detection_inference import prediction_branches, prediction_con
 from visioncortex.schemas import ViewInput, ViewRole
 
 
+@pytest.mark.parametrize('timeouts', [0, 1, 2, 3])
+def test_nms_timeouts_retry_whole_batch_or_refuse_partial_evidence(timeouts):
+    import logging
+    from visioncortex.detection_inference import predict_complete_batch
+    logger = logging.getLogger('ultralytics')
+    before = list(logger.handlers)
+    calls = []
+    class Model:
+        def predict(self, **kwargs):
+            calls.append(kwargs)
+            if len(calls) <= timeouts:
+                logger.warning('NMS time limit 2.800s exceeded')
+                return ['partial']
+            return ['complete', 'complete']
+    if timeouts == 3:
+        with pytest.raises(RuntimeError, match='refusing incomplete'):
+            predict_complete_batch(Model(), source=['a', 'b'], options={'conf': .25})
+    else:
+        results, retries = predict_complete_batch(Model(), source=['a', 'b'], options={'conf': .25})
+        assert results == ['complete', 'complete']
+        assert retries == timeouts
+    assert len(calls) == min(timeouts + 1, 3)
+    assert all(c == {'source': ['a', 'b'], 'conf': .25} for c in calls)
+    assert logger.handlers == before
+
+
+def test_nms_timeout_in_other_inference_thread_does_not_discard_this_batch():
+    import logging
+    from threading import Thread
+    from visioncortex.detection_inference import predict_complete_batch
+    class Model:
+        def predict(self, **kwargs):
+            other = Thread(target=lambda: logging.getLogger('ultralytics').warning('NMS time limit exceeded'))
+            other.start()
+            other.join()
+            return ['complete']
+    assert predict_complete_batch(Model(), source=['a'], options={}) == (['complete'], 0)
+
+
 @pytest.mark.parametrize("value", [None, [], True, {"cam01": "one2many"},
                                   {"first_person": False}, {"third_person": "automatic"}])
 def test_bad_branch_configuration_does_not_silently_fall_back(value):

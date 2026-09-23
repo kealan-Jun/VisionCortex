@@ -1460,6 +1460,7 @@ class RoleScanner:
         )
         self.prediction_end2end = None if branch is None else branch == "one2one"
         self.last_prediction_end2end = None
+        self.nms_timeout_retries = 0
         self.requested_batch_size = int(
             batch_size or config["performance"]["batch_size"]
         )
@@ -1527,6 +1528,9 @@ class RoleScanner:
         try:
             self.initialization_phase = "predictor_setup"
             import torch
+            # The installed compiled CUDA NMS avoids the per-box Python/CUDA
+            # synchronization loop used when torchvision has not been loaded.
+            import torchvision  # noqa: F401
             from ultralytics.utils.checks import check_imgsz
 
             options = {**self.model.overrides, "conf": .25, "batch": 1,
@@ -1638,10 +1642,13 @@ class RoleScanner:
                         )
                     engine_batch_sizes.append(len(execution_batch))
                     expected_end2end = getattr(self, "prediction_end2end", None)
-                    predictions = self.model.predict(
+                    from .detection_inference import predict_complete_batch
+                    predictions, nms_retries = predict_complete_batch(
+                        self.model,
                         source=[packet.frame for packet in execution_batch],
-                        **self._prediction_options(),
+                        options=self._prediction_options(),
                     )
+                    self.nms_timeout_retries += nms_retries
                     prediction_timings(predictions, self.component_timings)
                     if expected_end2end is not None:
                         observed = getattr(self.model.predictor.model, "end2end", None)
@@ -2288,6 +2295,7 @@ def scan_videos(
                     "queue_wait_seconds": round(queue_wait_seconds, 6),
                     "inference_seconds": round(inference_seconds, 6),
                     "observed_prediction_end2end": getattr(scanner, "last_prediction_end2end", None),
+                    "nms_timeout_retries": getattr(scanner, "nms_timeout_retries", 0),
                     "tracking_and_ledger_seconds": round(postprocess_seconds, 6),
                     "component_timings": {
                         "schema_version": "visioncortex-component-timing/1",

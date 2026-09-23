@@ -202,6 +202,7 @@ class InferenceBroker:
                                                  sorted(self.engine_batch_size_counts.items())},
                     'engine_batch_size_max': max(self.engine_batch_size_counts, default=0),
                     'effective_batch_size': getattr(self.scanner, 'batch_size', None),
+                    'nms_timeout_retries': getattr(self.scanner, 'nms_timeout_retries', 0),
                     'oom_batch_contractions': [dict(item) for item in
                                                getattr(self.scanner, 'batch_contractions', [])],
                     'worker_alive': self.thread.is_alive(), 'quarantined': self.stop.is_set(),
