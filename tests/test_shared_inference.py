@@ -298,3 +298,181 @@ def test_expansion_does_not_swallow_base_exceptions(shared_pool):
             shared.acquire_scanner(factory, 'first_person', config, 640, 4)
     finally:
         first.close()
+
+
+def test_ready_waits_for_owned_preparation_and_does_not_count_warmup():
+    entered, release = Event(), Event()
+    closed = []
+
+    class PreparedScanner(Scanner):
+        def prepare(self):
+            assert self.owner == get_ident()
+            entered.set()
+            assert release.wait(3)
+
+        def close(self):
+            closed.append(get_ident())
+
+    broker = InferenceBroker(PreparedScanner, defer_ready=True)
+    try:
+        assert entered.wait(1)
+        assert not broker.ready.done()
+        assert not broker.healthy()
+        assert broker.initialization_phase == 'prepare'
+        release.set()
+        broker.wait_ready()
+        assert broker.healthy()
+        assert broker.stats()['model_calls'] == 0
+        assert broker.stats()['frames'] == 0
+        assert broker.stats()['engine_batch_size_counts'] == {}
+        assert broker.submit([1]) == [('box', 1)]
+    finally:
+        release.set()
+        assert broker.close()
+    assert closed == [broker.thread.ident]
+
+
+@pytest.mark.parametrize('fails', [False, True])
+def test_nonshared_scanner_prepares_before_return_and_closes_on_failure(fails):
+    from visioncortex.shared_inference import acquire_scanner
+
+    events = []
+
+    class DirectScanner(Scanner):
+        def prepare(self):
+            assert self.owner == get_ident()
+            events.append('prepare')
+            if fails:
+                raise ValueError('cannot initialize')
+
+        def close(self):
+            events.append('close')
+
+    def factory(*args, **kwargs):
+        return DirectScanner()
+
+    if fails:
+        with pytest.raises(ValueError, match='cannot initialize'):
+            acquire_scanner(factory, 'first_person', {'performance': {}}, 640, 4)
+        assert events == ['prepare', 'close']
+    else:
+        scanner = acquire_scanner(factory, 'first_person', {'performance': {}}, 640, 4)
+        assert events == ['prepare']
+        scanner.close()
+
+
+def test_preparation_failure_uses_healthy_context_and_preserves_failure_phase(shared_pool):
+    shared, config, created, closed = shared_pool, shared_config(), [], []
+
+    class PreparedScanner(Scanner):
+        def __init__(self):
+            super().__init__()
+            created.append(self)
+
+        def prepare(self):
+            assert self.owner == get_ident()
+            if len(created) == 2:
+                self.initialization_failure_phase = 'warmup'
+                raise AttributeError('context unavailable')
+
+        def close(self):
+            assert self.owner == get_ident()
+            closed.append(self)
+
+    def factory(*args, **kwargs):
+        return PreparedScanner()
+    first = shared.acquire_scanner(factory, 'first_person', config, 640, 4)
+    fallback = shared.acquire_scanner(factory, 'first_person', config, 640, 4)
+    try:
+        assert fallback.broker is first.broker
+        pool = next(iter(shared._POOLS.values()))
+        failed = pool[1]
+        failed.thread.join(1)
+        assert not failed.thread.is_alive()
+        assert closed == [created[1]]
+        stats = first.shared_statistics()['context_pool']
+        assert stats['last_growth_failure_phase'] == 'warmup'
+        assert stats['last_growth_broker_id'] == failed.broker_id
+        assert stats['last_growth_error_type'] == 'AttributeError'
+        assert failed.broker_id != first.broker.broker_id
+        assert fallback.infer([1]) == [('box', 1)]
+        for _ in range(3):
+            lease = shared.acquire_scanner(factory, 'first_person', config, 640, 4)
+            lease.close()
+        assert len(created) == 2
+    finally:
+        fallback.close()
+        first.close()
+
+
+def test_first_preparation_failure_is_cleaned_up_and_never_ready(shared_pool):
+    shared, config, created, closed = shared_pool, shared_config(), [], []
+
+    class FailedPreparation(Scanner):
+        def __init__(self):
+            super().__init__()
+            created.append(self)
+
+        def prepare(self):
+            self.initialization_failure_phase = 'predictor_setup'
+            raise RuntimeError('CUDA out of memory')
+
+        def close(self):
+            assert self.owner == get_ident()
+            closed.append(self)
+
+    def factory(*args, **kwargs):
+        return FailedPreparation()
+    with pytest.raises(RuntimeError, match='CUDA out of memory') as error:
+        shared.acquire_scanner(factory, 'first_person', config, 640, 4)
+    failed = next(iter(shared._POOLS.values()))[0]
+    failed.thread.join(1)
+    assert closed == created
+    assert not failed.healthy()
+    assert failed.stats()['initialization_phase'] == 'failed'
+    assert failed.stats()['model_calls'] == 0
+    assert 'predictor_setup' in error.value.__notes__[0]
+    with pytest.raises(RuntimeError, match='quarantined'):
+        shared.acquire_scanner(factory, 'first_person', config, 640, 4)
+    assert len(created) == 1
+
+
+def test_timed_out_preparation_keeps_slot_and_closes_in_owner_thread(shared_pool):
+    shared, config, created, closed = shared_pool, shared_config(), [], []
+    config['performance']['shared_inference_timeout_seconds'] = .05
+    release = Event()
+
+    class SlowPreparation(Scanner):
+        def __init__(self):
+            super().__init__()
+            created.append(self)
+
+        def prepare(self):
+            if len(created) == 2:
+                assert release.wait(3)
+
+        def close(self):
+            assert self.owner == get_ident()
+            closed.append(self)
+
+    def factory(*args, **kwargs):
+        return SlowPreparation()
+    leases = [shared.acquire_scanner(factory, 'first_person', config, 640, 4)]
+    try:
+        leases.append(shared.acquire_scanner(factory, 'first_person', config, 640, 4))
+        assert leases[1].broker is leases[0].broker
+        pool = next(iter(shared._POOLS.values()))
+        pending = pool[1]
+        assert pending.thread.is_alive() and pending.stop.is_set()
+        assert not pending.healthy()
+        pool.retry_after = 0
+        leases.append(shared.acquire_scanner(factory, 'first_person', config, 640, 4))
+        assert len(created) == 2
+        release.set()
+        pending.thread.join(1)
+        assert closed == [created[1]]
+        assert pending.initialization_phase == 'failed'
+    finally:
+        release.set()
+        for lease in leases:
+            lease.close()

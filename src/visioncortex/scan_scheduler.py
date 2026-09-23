@@ -17,10 +17,12 @@ def scan_views_concurrently(config, views, infos, transforms, work_dir, **kwargs
 
 
 def _admitted_scan(config, views, infos, transforms, work_dir, **kwargs):
-    """Share optional NVDEC capacity across independent recorder jobs.
+    """Share optional coarse CUDA preference across recorder jobs.
 
     Excess ready sources use CPU decoding immediately; they do not wait behind
     another camera's decoder. Explicit caller assignments retain precedence.
+    The actual process limit for every phase is enforced at FFmpeg startup by
+    cuda_decode_admission; a preferred CUDA lane is not a reserved context.
     """
     global _COARSE_CUDA_USERS
     if kwargs.get("phase", "fine") == "coarse":

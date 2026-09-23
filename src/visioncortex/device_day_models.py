@@ -5,6 +5,7 @@ import math
 import threading
 import time
 from bisect import bisect_left
+from collections import Counter
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -74,6 +75,57 @@ def windows(duration_ms: float, seconds: float) -> list[tuple[float, float]]:
             for start in (i * width for i in range(math.ceil(duration_ms / width)))]
 
 
+class RecallEvidenceGateError(ValueError):
+    """Preserve the failed recall evidence instead of losing it at the gate."""
+
+    def __init__(self, gate, report):
+        self.gate = gate
+        self.report = deepcopy(report)
+        frames = report.get("frames", [])
+        self.summary = {
+            "status": report.get("status"),
+            "selected_frame_count": report.get("selected_frame_count"),
+            "error_count": report.get("error_count"),
+            "error_rate": report.get("error_rate"),
+            "maximum_error_rate": report.get("maximum_error_rate"),
+            "frame_status_counts": dict(Counter(str(f.get("status", "unknown")) for f in frames)),
+            "inference_error_types": dict(Counter(str(f["error_type"]) for f in frames if f.get("error_type"))),
+        }
+        description = "coarse open-vocabulary recall" if gate == "coarse" else "fine ROI"
+        self.message = (
+            f"Existing {description} evidence gate did not pass; "
+            f"status={self.summary['status']}; "
+            f"errors={self.summary['error_count']}/{self.summary['selected_frame_count']}; "
+            f"frames={self.summary['frame_status_counts']}; "
+            f"inference_errors={self.summary['inference_error_types']}"
+        )
+        super().__init__(self.message)
+
+    def persist(self, config, context):
+        """Append diagnostics locally; never make a failed report a plan cache."""
+        import logging
+
+        root = config.get("storage", {}).get("local_runtime_root")
+        if not root:
+            self.args = (self.message + "; diagnostic_write=runtime_root_unconfigured",)
+            return
+        payload = {"schema_version": "visioncortex-recall-failure/1",
+                   "at": time.time(), "gate": self.gate, "context": context,
+                   "summary": self.summary, "report": self.report,
+                   "formal_evidence_ready": False,
+                   "scope": "failed_recall_diagnostic_not_success_or_action_evidence"}
+        path = (Path(root) / "device-day" / "RecallFailures"
+                / f"RecallFailure{time.time_ns()}-{digest(payload)[:16]}.json")
+        try:
+            atomic_json(path, payload)
+        except (OSError, ValueError) as exc:
+            # Keep the actual gate failure even if the diagnostic disk fails.
+            self.args = (self.message + f"; diagnostic_write={type(exc).__name__}",)
+            logging.getLogger(__name__).warning("Recall failure diagnostic unavailable: %s", type(exc).__name__)
+        else:
+            self.args = (self.message + f"; diagnostic={path}",)
+
+
 
 
 def device_scan_plan(view, coarse, config, info, start, end, sample_fps):
@@ -91,7 +143,7 @@ def device_scan_plan(view, coarse, config, info, start, end, sample_fps):
         [view], {view.view_id: info}, coarse, coarse_config)
     if (coarse_config["performance"].get("candidate_discovery_quality_gate_enabled")
             and not vocabulary_report.get("formal_evidence_ready")):
-        raise ValueError("Existing coarse open-vocabulary recall evidence gate did not pass")
+        raise RecallEvidenceGateError("coarse", vocabulary_report)
     candidates = [*candidates, *motion, *vocabulary]
     perf = coarse_config["performance"]
     short = bool(candidates and perf.get("auto_exhaustive_short_timeline_enabled")
@@ -260,7 +312,7 @@ class DeviceDayModels:
     def scan_identity(self, retention, info, phase, scan_windows, fps, image_size):
         directory = Path(__file__).parent
         modules = ("shared_inference", "scan_scheduler", "detection", "detection_inference", "detection_duplicates", "video_io",
-                   "source_frames", "schemas", "model_registry", "actions", "alignment")
+                   "cuda_decode_admission", "source_frames", "schemas", "model_registry", "actions", "alignment")
         from .device_day_runtime_identity import compatible_performance
         return {"schema_version": "visioncortex-device-scan/1", "phase": phase,
                 "source": [{"kind": x["kind"], "sha256": x["retained"]["sha256"]}
@@ -351,7 +403,13 @@ class DeviceDayModels:
                         "original_wall_seconds": saved["wall_seconds"]}
             except (ValueError, KeyError, TypeError):
                 pass
-        candidates, windows_, report = device_scan_plan(view, coarse, self.config, info, start, end, fps)
+        try:
+            candidates, windows_, report = device_scan_plan(view, coarse, self.config, info, start, end, fps)
+        except RecallEvidenceGateError as exc:
+            exc.persist(self.config, {"plan_key": plan_key, "view_id": view.view_id,
+                        "source": str(view.video), "window": [start, end, fps],
+                        "ledger": identity["ledger"]})
+            raise
         result = {"candidates": [c.model_dump(mode="json") for c in candidates],
                   "windows": windows_, "report": report}
         elapsed = time.perf_counter() - started
@@ -416,7 +474,7 @@ class DeviceDayModels:
         roi, roi_report = generate_open_vocabulary_fine_candidates(
             [view], {view.view_id: info}, fine, {view.view_id: scan_windows}, self.config)
         if self.config["performance"].get("fine_roi_open_vocabulary_recall_enabled") and not roi_report.get("formal_evidence_ready"):
-            raise ValueError("Existing fine ROI evidence gate did not pass")
+            raise RecallEvidenceGateError("fine", roi_report)
         candidates = [*candidates, *roi]
         movement = verify_movement_candidates(candidates, [view], {view.view_id: info}, fine, self.config)
         events, rejected = audit_candidates(candidates, transforms, self.config)
@@ -545,6 +603,10 @@ class DeviceDayModels:
             candidates = generate_candidates([view], fine, self.config)
             intervals, audit = self._audit_activity(view, info, fine, candidates, coarse_candidates, scan_windows)
             return candidates, intervals, audit, self._key_frame_choices(view, fine, audit)
+        except RecallEvidenceGateError as exc:
+            exc.persist(self.config, {"view_id": view.view_id, "source": str(view.video),
+                        "windows": scan_windows, "fine_index": report})
+            raise
         finally:
             # These are this job's rebuildable local exports, already verified
             # at the durable backend paths. Do not retain another growing copy

@@ -361,7 +361,7 @@ def test_frame_identity_reaches_model_packet_without_retiming(default_config, mo
         decoded_pixels_sha256=hashlib.sha256(frame.tobytes()).hexdigest(),
     )
     monkeypatch.setattr("visioncortex.detection.iter_view_sampled_frames",
-                        lambda *_: iter([SampledFrame(0, 0, frame, identity)]))
+                        lambda *_, **__: iter([SampledFrame(0, 0, frame, identity)]))
     output = queue.Queue()
     _producer(view, info, output, set(), default_config, None, 8, 8, False, "cpu", 1, (8, 8), None)
     packets = []

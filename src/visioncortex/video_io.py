@@ -11,6 +11,7 @@ import time
 from collections import OrderedDict
 from collections.abc import Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import closing
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -22,6 +23,8 @@ import numpy as np
 from .schemas import VideoInfo, VideoSegmentInfo, ViewInput
 from .source_frames import SOURCE_FRAME_FILTER, SampledFrame, SourceFrameTrace, retime_sampled_frame
 from .storage import read_source_file_edges
+from .cuda_decode_admission import CudaDecodeAdmission, managed_cuda_decoder, wait_decoder
+from .runtime_control import ExecutionCancelled
 
 
 LOGGER = logging.getLogger(__name__)
@@ -503,6 +506,7 @@ def _scaled_size(width: int, height: int, max_width: int) -> tuple[int, int]:
     return max_width - max_width % 2, scaled_h - scaled_h % 2
 
 
+@managed_cuda_decoder
 def _ffmpeg_frame_iterator(
     path: Path,
     info: VideoInfo,
@@ -514,6 +518,8 @@ def _ffmpeg_frame_iterator(
     keyframes_only: bool,
     decoder_threads: int | None,
     cuda_scale: bool = False,
+    receipt: dict[str, Any] | None = None,
+    *, decoder_lease=None,
 ) -> Iterator[tuple[int, float, np.ndarray]]:
     width, height = _scaled_size(info.width, info.height, max_width)
     use_cuda_scale = bool(cuda_scale and hwaccel == "cuda")
@@ -529,6 +535,8 @@ def _ffmpeg_frame_iterator(
     command = ["ffmpeg", "-hide_banner", "-loglevel", "info" if trace.enabled else "error", *trace.input_options()]
     if hwaccel:
         command += ["-hwaccel", hwaccel]
+        if hwaccel == 'cuda':
+            command += ['-hwaccel_device', str(decoder_lease.device)]
         if use_cuda_scale:
             command += ["-hwaccel_output_format", "cuda"]
     elif decoder_threads:
@@ -553,7 +561,7 @@ def _ffmpeg_frame_iterator(
         *trace.output_options(),
         "pipe:1",
     ]
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    process = decoder_lease.popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     trace.start(process.stderr)
     assert process.stdout is not None
     frame_bytes = width * height * 3
@@ -583,7 +591,7 @@ def _ffmpeg_frame_iterator(
         if not exhausted and hasattr(process, "terminate"):
             process.terminate()
         process.stdout.close()
-        process.wait()
+        wait_decoder(process)
         stderr = trace.finish(process.stderr)
         if process.stderr is not None:
             process.stderr.close()
@@ -791,6 +799,7 @@ def _aligned_grid_start_ms(
     return aligned
 
 
+@managed_cuda_decoder
 def _ffmpeg_multi_window_iterator(
     path: Path,
     info: VideoInfo,
@@ -803,6 +812,7 @@ def _ffmpeg_multi_window_iterator(
     decoder_threads: int | None,
     cuda_scale: bool = False,
     receipt: dict[str, Any] | None = None,
+    *, decoder_lease=None,
 ) -> Iterator[tuple[int, float, np.ndarray]]:
     """Decode one physical span once and emit only its requested 10 FPS windows."""
 
@@ -873,6 +883,8 @@ def _ffmpeg_multi_window_iterator(
     command = ["ffmpeg", "-hide_banner", "-loglevel", "info" if trace.enabled else "error", *trace.input_options()]
     if hwaccel:
         command += ["-hwaccel", hwaccel]
+        if hwaccel == 'cuda':
+            command += ['-hwaccel_device', str(decoder_lease.device)]
         if use_cuda_scale:
             command += ["-hwaccel_output_format", "cuda"]
     elif decoder_threads:
@@ -898,7 +910,7 @@ def _ffmpeg_multi_window_iterator(
         *trace.output_options(),
         "pipe:1",
     ]
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    process = decoder_lease.popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     trace.start(process.stderr)
     assert process.stdout is not None
     frame_bytes = width * height * 3
@@ -940,7 +952,7 @@ def _ffmpeg_multi_window_iterator(
         if not exhausted and hasattr(process, "terminate"):
             process.terminate()
         process.stdout.close()
-        process.wait()
+        wait_decoder(process)
         stderr = trace.finish(process.stderr)
         if process.stderr is not None:
             process.stderr.close()
@@ -1094,23 +1106,39 @@ def iter_sampled_frames(
     decoder_threads: int | None = None,
     sparse_strategy: str = "indexed_seek",
     cuda_scale: bool = False,
+    *,
+    decoder_admission: CudaDecodeAdmission | None = None,
+    receipt: dict[str, Any] | None = None,
 ) -> Iterator[tuple[int, float, np.ndarray]]:
     emitted = False
+    decode_options = {}
+    if decoder_admission is not None:
+        decode_options["decoder_admission"] = decoder_admission
+    if receipt is not None:
+        decode_options["receipt"] = receipt
 
     def observed(frames):
         nonlocal emitted
-        for item in frames:
-            emitted = True
-            yield item
+        try:
+            for item in frames:
+                emitted = True
+                yield item
+        finally:
+            frames.close()
 
     if sparse_strategy not in {"indexed_seek", "sequential_keyframes"}:
         raise ValueError(f"unsupported sparse decode strategy: {sparse_strategy}")
     if keyframes_only and sample_fps <= 1.0 and sparse_strategy == "indexed_seek":
         try:
+            if receipt is not None:
+                receipt.update(actual_hwaccel=None, actual_cuda_scale=False,
+                               actual_decoder_backend="opencv_indexed_seek")
             yield from observed(_opencv_indexed_seek_iterator(
                 path, info, start_ms, end_ms, sample_fps, max_width
             ))
             return
+        except ExecutionCancelled:
+            raise
         except RuntimeError as exc:
             if emitted:
                 raise
@@ -1126,8 +1154,11 @@ def iter_sampled_frames(
             yield from observed(_ffmpeg_frame_iterator(
                 path, info, start_ms, end_ms, sample_fps, max_width, hwaccel, keyframes_only,
                 decoder_threads, cuda_scale,
+                **decode_options,
             ))
             return
+        except ExecutionCancelled:
+            raise
         except RuntimeError as exc:
             if emitted:
                 raise
@@ -1155,8 +1186,11 @@ def iter_sampled_frames(
                             keyframes_only,
                             decoder_threads,
                             False,
+                            **decode_options,
                         ))
                         return
+                    except ExecutionCancelled:
+                        raise
                     except RuntimeError as scaled_exc:
                         if emitted:
                             raise
@@ -1169,8 +1203,11 @@ def iter_sampled_frames(
                     yield from observed(_ffmpeg_frame_iterator(
                         path, info, start_ms, end_ms, sample_fps, max_width, None, keyframes_only,
                         decoder_threads, False,
+                        **decode_options,
                     ))
                     return
+                except ExecutionCancelled:
+                    raise
                 except RuntimeError as cpu_exc:
                     if emitted:
                         raise
@@ -1185,6 +1222,9 @@ def iter_sampled_frames(
         start_ms,
         end_ms,
     )
+    if receipt is not None:
+        receipt.update(actual_hwaccel=None, actual_cuda_scale=False,
+                       actual_decoder_backend="opencv")
     yield from _opencv_frame_iterator(path, info, start_ms, end_ms, sample_fps, max_width)
 
 
@@ -1199,6 +1239,8 @@ def iter_physical_segment_session_frames(
     receipt: dict[str, Any] | None = None,
     sampling_grid_origin_ms: float | None = None,
     sampling_grid_period_ms: float | None = None,
+    *,
+    decoder_admission: CudaDecodeAdmission | None = None,
 ) -> Iterator[tuple[int, float, np.ndarray]]:
     """Serve disjoint target windows with one physical MP4 decoder session."""
 
@@ -1256,13 +1298,16 @@ def iter_physical_segment_session_frames(
     def convert(
         frames: Iterator[tuple[int, float, np.ndarray]],
     ) -> Iterator[tuple[int, float, np.ndarray]]:
-        for item in frames:
-            frame_index, source_ms, _frame = item
-            yield retime_sampled_frame(
-                item,
-                segment.frame_start_index + frame_index,
-                segment.virtual_start_ms + source_ms,
-            )
+        try:
+            for item in frames:
+                frame_index, source_ms, _frame = item
+                yield retime_sampled_frame(
+                    item,
+                    segment.frame_start_index + frame_index,
+                    segment.virtual_start_ms + source_ms,
+                )
+        finally:
+            frames.close()
 
     if shutil.which("ffmpeg"):
         attempts = [(hwaccel, cuda_scale)]
@@ -1273,7 +1318,10 @@ def iter_physical_segment_session_frames(
         for attempt_hwaccel, attempt_cuda_scale in attempts:
             emitted = False
             try:
-                for item in convert(
+                if receipt is not None:
+                    receipt.update(actual_hwaccel=attempt_hwaccel,
+                                   actual_cuda_scale=bool(attempt_cuda_scale))
+                with closing(convert(
                     _ffmpeg_multi_window_iterator(
                         segment.path,
                         source_info,
@@ -1286,22 +1334,25 @@ def iter_physical_segment_session_frames(
                         decoder_threads,
                         attempt_cuda_scale,
                         receipt,
+                        **({"decoder_admission": decoder_admission}
+                           if decoder_admission is not None else {}),
                     )
-                ):
-                    emitted = True
-                    yield item
+                )) as frames:
+                    for item in frames:
+                        emitted = True
+                        yield item
                 if receipt is not None:
                     receipt.update(
                         {
                             "actual_decoder_session_mode": (
                                 "ffmpeg_persistent_physical_segment"
                             ),
-                            "actual_hwaccel": attempt_hwaccel,
-                            "actual_cuda_scale": bool(attempt_cuda_scale),
                             "fallback_reopened_windows": 0,
                         }
                     )
                 return
+            except ExecutionCancelled:
+                raise
             except RuntimeError as exc:
                 if receipt is not None:
                     receipt.setdefault("attempt_errors", []).append(
@@ -1323,6 +1374,7 @@ def iter_physical_segment_session_frames(
             {
                 "actual_decoder_session_mode": "compatibility_per_window_fallback",
                 "actual_hwaccel": None,
+                "actual_decoder_backend": "cpu",
                 "actual_cuda_scale": False,
                 "fallback_reopened_windows": len(session.target_source_windows),
             }
@@ -1348,7 +1400,7 @@ def iter_physical_segment_session_frames(
                 effective_sample_fps,
             )
         )
-        for item in convert(
+        with closing(convert(
             iter_sampled_frames(
                 segment.path,
                 source_info,
@@ -1362,9 +1414,10 @@ def iter_physical_segment_session_frames(
                 "indexed_seek",
                 False,
             )
-        ):
-            fallback_actual_frames += 1
-            yield item
+        )) as frames:
+            for item in frames:
+                fallback_actual_frames += 1
+                yield item
     if receipt is not None:
         receipt.update(
             {
@@ -1393,12 +1446,21 @@ def iter_view_sampled_frames(
     decoder_threads: int | None = None,
     sparse_strategy: str = "indexed_seek",
     cuda_scale: bool = False,
+    *,
+    decoder_admission: CudaDecodeAdmission | None = None,
+    receipt: dict[str, Any] | None = None,
 ) -> Iterator[tuple[int, float, np.ndarray]]:
+    decode_options = {}
+    if decoder_admission is not None:
+        decode_options["decoder_admission"] = decoder_admission
+    if receipt is not None:
+        decode_options["receipt"] = receipt
     if not info.segments:
         assert view.video is not None
         yield from iter_sampled_frames(
             view.video, info, start_ms, end_ms, sample_fps, max_width, hwaccel,
             keyframes_only, decoder_threads, sparse_strategy, cuda_scale,
+            **decode_options,
         )
         return
     for segment in info.segments:
@@ -1417,16 +1479,18 @@ def iter_view_sampled_frames(
         )
         segment_start = overlap_start - segment.virtual_start_ms
         segment_end = overlap_end - segment.virtual_start_ms
-        for item in iter_sampled_frames(
+        with closing(iter_sampled_frames(
             segment.path, source_info, segment_start, segment_end, sample_fps, max_width,
             hwaccel, keyframes_only, decoder_threads, sparse_strategy, cuda_scale,
-        ):
-            frame_index, source_ms, _frame = item
-            yield retime_sampled_frame(
-                item,
-                segment.frame_start_index + frame_index,
-                segment.virtual_start_ms + source_ms,
-            )
+            **decode_options,
+        )) as frames:
+            for item in frames:
+                frame_index, source_ms, _frame = item
+                yield retime_sampled_frame(
+                    item,
+                    segment.frame_start_index + frame_index,
+                    segment.virtual_start_ms + source_ms,
+                )
 
 
 def benchmark_sparse_decode_strategy(
@@ -1439,6 +1503,7 @@ def benchmark_sparse_decode_strategy(
     decoder_threads: int | None,
     cuda_scale: bool,
     benchmark_seconds: float,
+    decoder_admission: CudaDecodeAdmission | None = None,
 ) -> dict[str, Any]:
     """Choose a sparse decoder from a short read of the active storage path."""
 
@@ -1498,6 +1563,7 @@ def benchmark_sparse_decode_strategy(
             started = time.perf_counter()
             frame_count = 0
             error: str | None = None
+            decoder_receipt: dict[str, Any] = {}
             try:
                 for _frame_index, _local_ms, _frame in iter_view_sampled_frames(
                     benchmark_view,
@@ -1511,8 +1577,12 @@ def benchmark_sparse_decode_strategy(
                     decoder_threads,
                     strategy,
                     cuda_scale,
+                    decoder_admission=decoder_admission,
+                    receipt=decoder_receipt,
                 ):
                     frame_count += 1
+            except ExecutionCancelled:
+                raise
             except Exception as exc:
                 error = f"{type(exc).__name__}: {exc}"
             elapsed_seconds = time.perf_counter() - started
@@ -1538,6 +1608,7 @@ def benchmark_sparse_decode_strategy(
                         else None
                     ),
                     "error": error,
+                    "decoder_receipt": decoder_receipt,
                 }
             )
         reports.extend(attempt_reports)

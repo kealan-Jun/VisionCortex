@@ -10,6 +10,7 @@ import json
 from queue import Queue, Empty, Full
 from threading import Event, Lock, Thread
 import time
+import uuid
 
 _POOLS = {}
 _LOCK = Lock()
@@ -22,6 +23,8 @@ class _InferencePool(list):
         self.initialized = False
         self.growth_failures = 0
         self.last_growth_error_type = None
+        self.last_growth_failure_phase = None
+        self.last_growth_broker_id = None
         self.retry_after = 0.0
 
     def stats(self):
@@ -32,6 +35,8 @@ class _InferencePool(list):
                     b.thread.is_alive() and not b.healthy() for b in brokers),
                 'growth_failures': self.growth_failures,
                 'last_growth_error_type': self.last_growth_error_type,
+                'last_growth_failure_phase': self.last_growth_failure_phase,
+                'last_growth_broker_id': self.last_growth_broker_id,
                 'growth_retry_after_seconds': max(0.0, self.retry_after - time.monotonic())}
 
 
@@ -49,6 +54,9 @@ class InferenceBroker:
         self.engine_batch_size_counts = Counter()
         self.scanner = None
         self.pool = None
+        self.broker_id = uuid.uuid4().hex
+        self.initialization_phase = 'factory'
+        self.initialization_failure_phase = None
         self.thread = Thread(target=self._run, args=(factory,), daemon=True, name='shared-role-inference')
         self.thread.start()
         if not defer_ready:
@@ -68,6 +76,14 @@ class InferenceBroker:
         scanner, carry = None, None
         try:
             scanner = factory()
+            if self.stop.is_set():
+                raise RuntimeError('Inference initialization cancelled before preparation')
+            self.initialization_phase = 'prepare'
+            if hasattr(scanner, 'prepare'):
+                scanner.prepare()
+            if self.stop.is_set():
+                raise RuntimeError('Inference initialization cancelled before ready')
+            self.initialization_phase = 'ready'
             self.ready.set_result(scanner)
             while not self.stop.is_set():
                 try:
@@ -115,6 +131,12 @@ class InferenceBroker:
                         raise
         except BaseException as exc:
             if not self.ready.done():
+                self.initialization_failure_phase = (
+                    getattr(scanner, 'initialization_failure_phase', None)
+                    or self.initialization_phase)
+                self.initialization_phase = 'failed'
+                exc.add_note(f'Inference broker {self.broker_id}: '
+                             f'initialization failed during {self.initialization_failure_phase}')
                 self.ready.set_exception(exc)
         finally:
             self.stop.set()
@@ -171,12 +193,15 @@ class InferenceBroker:
     def stats(self):
         with self.lock:
             return {'scope': 'process_role_pool_cumulative_not_per_video', 'model_calls': self.calls,
+                    'broker_id': self.broker_id,
+                    'initialization_phase': self.initialization_phase,
+                    'initialization_failure_phase': self.initialization_failure_phase,
                     'frames': self.frames, 'mixed_request_calls': self.mixed_calls,
                     'last_engine_batch_sizes': list(self.engine_batches), 'waiting_requests': self.queue.qsize(),
                     'engine_batch_size_counts': {str(size): count for size, count in
                                                  sorted(self.engine_batch_size_counts.items())},
                     'engine_batch_size_max': max(self.engine_batch_size_counts, default=0),
-                    'effective_batch_size': self.scanner.batch_size,
+                    'effective_batch_size': getattr(self.scanner, 'batch_size', None),
                     'oom_batch_contractions': [dict(item) for item in
                                                getattr(self.scanner, 'batch_contractions', [])],
                     'worker_alive': self.thread.is_alive(), 'quarantined': self.stop.is_set(),
@@ -224,7 +249,15 @@ class ScannerLease:
 
 def acquire_scanner(factory, role, config, image_size, batch_size, appearance_enabled=False):
     if not config['performance'].get('shared_inference_enabled',False):
-        return factory(role,config,image_size,batch_size,appearance_enabled=appearance_enabled)
+        scanner = factory(role,config,image_size,batch_size,appearance_enabled=appearance_enabled)
+        try:
+            if hasattr(scanner, 'prepare'):
+                scanner.prepare()
+        except BaseException:
+            if hasattr(scanner, 'close'):
+                scanner.close()
+            raise
+        return scanner
     capacity = config['performance'].get('shared_inference_contexts_per_pool', 3)
     if isinstance(capacity, bool) or not isinstance(capacity, int) or not 1 <= capacity <= 8:
         raise ValueError('shared_inference_contexts_per_pool must be an integer in [1,8]')
@@ -269,6 +302,8 @@ def acquire_scanner(factory, role, config, image_size, batch_size, appearance_en
             except Exception as exc:
                 brokers.growth_failures += 1
                 brokers.last_growth_error_type = type(exc).__name__
+                brokers.last_growth_failure_phase = candidate.initialization_failure_phase or candidate.initialization_phase
+                brokers.last_growth_broker_id = candidate.broker_id
                 brokers.retry_after = time.monotonic() + 30
                 # Optional capacity growth must not fail a video that can use
                 # an identical live model. First/all-bad contexts still fail.

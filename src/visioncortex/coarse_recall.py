@@ -10,12 +10,98 @@ from .candidate_index import CoarseFrameIndex, FineFrameIndex
 from .detection import iter_frame_evidence
 from .ordering import candidate_sort_key
 from .open_vocabulary_runtime import load_yolo_world_with_local_clip, serialized_open_vocabulary
+from .runtime_control import ExecutionCancelled, check_cancelled
 from .schemas import ActionCandidate, ActionType, FrameEvidence, VideoInfo, ViewInput
 from .video_io import ViewFrameReader
 
 
 _ACTOR_CLASSES = {"hand", "gloved_hand"}
 _NON_ACTION_CLASSES = {"person", "face", "background"}
+
+
+def _read_recall_frame(reader, view, info, local_ms, report):
+    """Recover one selected slot without moving its requested source time."""
+    attempts = report["source_read_attempts"] = []
+    started = time.perf_counter()
+    try:
+        for attempt in (1, 2):
+            check_cancelled()
+            item = {"attempt": attempt, "requested_local_ms": local_ms,
+                    "fresh_reader": attempt == 2}
+            attempts.append(item)
+            read_started = time.perf_counter()
+            try:
+                if attempt == 1:
+                    frame = reader.read(view, info, local_ms)
+                else:
+                    with ViewFrameReader(max_open=1) as fresh:
+                        frame = fresh.read(view, info, local_ms)
+                check_cancelled()
+                item["status"] = "read" if frame is not None else "frame_unreadable"
+            except OSError as exc:
+                frame = None
+                item.update(status="read_error", error_type=type(exc).__name__, error=str(exc),
+                            retryable=not isinstance(exc, (FileNotFoundError, PermissionError)))
+            finally:
+                item["wall_seconds"] = round(time.perf_counter() - read_started, 6)
+            if frame is not None:
+                report["source_read_recovered"] = attempt > 1
+                return frame
+            if item.get("retryable") is False:
+                break
+        report["source_read_recovered"] = False
+        return None
+    finally:
+        report["source_read_seconds"] = round(time.perf_counter() - started, 6)
+
+
+def _transient_recall_error(error):
+    if (not isinstance(error, RuntimeError) or isinstance(error, ExecutionCancelled)
+            or type(error).__name__ == "OutOfMemoryError"
+            or getattr(error, "open_vocabulary_recovery_attempted", False)):
+        return False
+    message = str(error).lower()
+    if any(word in message for word in (
+        "missing", "not found", "no such file", "hash mismatch", "prompt_map",
+        "configuration", "invalid", "unsupported", "unavailable", "size mismatch",
+        "shape", "expected scalar type", "out of memory",
+    )):
+        return False
+    # Unknown RuntimeErrors can be deterministic model/configuration bugs.
+    # Retry only explicit temporary execution failures, never all exceptions.
+    return any(word in message for word in (
+        "temporar", "timeout", "timed out", "cuda error",
+        "cuda runtime", "cudnn", "cublas",
+    ))
+
+
+def _run_recall_model(name, infer, report):
+    """Retain successful model work while retrying only a failed invocation."""
+    attempts = report.setdefault("model_attempts", {}).setdefault(name, [])
+    for attempt in (1, 2):
+        check_cancelled()
+        started = time.perf_counter()
+        item = {"attempt": attempt}
+        attempts.append(item)
+        try:
+            boxes, receipt = infer()
+            check_cancelled()
+        except ExecutionCancelled:
+            raise
+        except Exception as exc:
+            retryable = _transient_recall_error(exc)
+            item.update(status="error", error_type=type(exc).__name__, error=str(exc),
+                        retryable=retryable)
+            if attempt == 2 or not retryable:
+                raise
+        else:
+            item["status"] = "completed"
+            report.setdefault("model_receipts", {})[name] = receipt
+            report.setdefault("model_recovered", {})[name] = bool(
+                attempt > 1 or receipt.get("device_fallback"))
+            return boxes, receipt
+        finally:
+            item["wall_seconds"] = round(time.perf_counter() - started, 6)
 
 
 def _normalize_class(value: Any) -> str:
@@ -223,15 +309,29 @@ def _yolo_world_detections(
         model.to("cpu")
         model.set_classes(prompts)
         cached["prompts"] = list(prompts)
+    from .open_vocabulary_runtime import (
+        park_open_vocabulary_model,
+        run_with_cuda_oom_cpu_fallback,
+        yolo_world_prediction_device,
+    )
+
+    def infer_once(device):
+        result = model.predict(
+            frame,
+            device=device,
+            imgsz=int(settings.get("image_size", 1280)),
+            conf=float(settings.get("confidence", 0.03)),
+            iou=float(settings.get("iou", 0.50)),
+            half=False,
+            verbose=False,
+        )[0]
+        return result, {"actual_device": yolo_world_prediction_device(model)}
+
     started = time.perf_counter()
-    result = model.predict(
-        frame,
-        device=int(settings.get("device", 0)),
-        imgsz=int(settings.get("image_size", 1280)),
-        conf=float(settings.get("confidence", 0.03)),
-        iou=float(settings.get("iou", 0.50)),
-        verbose=False,
-    )[0]
+    result, device_receipt = run_with_cuda_oom_cpu_fallback(
+        infer_once, device=settings.get("device", 0),
+        enabled=bool(settings.get("cuda_oom_fallback_cpu", False)),
+        cleanup=lambda: park_open_vocabulary_model(model))
     inference_seconds = time.perf_counter() - started
     height, width = frame.shape[:2]
     admitted: list[dict[str, Any]] = []
@@ -283,6 +383,7 @@ def _yolo_world_detections(
         "admitted_count": len(admitted),
         "model_load_seconds": round(model_load_seconds, 6),
         "inference_seconds": round(inference_seconds, 6),
+        **device_receipt,
     }
 
 
@@ -307,6 +408,9 @@ def generate_open_vocabulary_coarse_candidates(
         "candidate_count": 0,
         "frames": [],
         "formal_evidence_ready": not enabled,
+        "gate_metric": "selected_frame_execution_completion",
+        "read_error_count": 0,
+        "inference_error_count": 0,
         "selection": {
             "motion_percentile": float(
                 config["performance"].get(
@@ -374,15 +478,15 @@ def generate_open_vocabulary_coarse_candidates(
                 "global_ms": selected_frame.global_ms,
                 "motion_score": selected_frame.motion_score,
             }
-            read_started = time.perf_counter()
-            frame = reader.read(view, info, selected_frame.local_ms)
-            frame_report["source_read_seconds"] = round(time.perf_counter() - read_started, 6)
+            frame = _read_recall_frame(reader, view, info, selected_frame.local_ms, frame_report)
             if frame is None:
                 frame_report["status"] = "frame_unreadable"
                 report["frames"].append(frame_report)
                 continue
             try:
-                grounded, inference_report = _yolo_world_detections(frame, settings)
+                grounded, inference_report = _run_recall_model(
+                    "yolo_world", lambda: _yolo_world_detections(frame, settings), frame_report)
+                frame_report["inference"] = inference_report
                 actor_boxes = [
                     box for box in grounded if box["class_name"] in _ACTOR_CLASSES
                 ]
@@ -394,11 +498,10 @@ def generate_open_vocabulary_coarse_candidates(
                 if (not actor_boxes or not object_boxes) and requested_classes:
                     from .archive import _grounding_dino_key_frame_detections
 
-                    fallback_boxes, fallback_report = (
-                        _grounding_dino_key_frame_detections(
-                            frame, requested_classes, settings
-                        )
-                    )
+                    fallback_boxes, fallback_report = _run_recall_model(
+                        "grounding_dino",
+                        lambda: _grounding_dino_key_frame_detections(frame, requested_classes, settings),
+                        frame_report)
                     grounded.extend(fallback_boxes)
                     actor_boxes = [
                         box for box in grounded if box["class_name"] in _ACTOR_CLASSES
@@ -480,6 +583,8 @@ def generate_open_vocabulary_coarse_candidates(
                         "inference": inference_report,
                     }
                 )
+            except ExecutionCancelled:
+                raise
             except Exception as exc:  # Keep the established closed-set funnel available.
                 frame_report.update(
                     {
@@ -491,11 +596,17 @@ def generate_open_vocabulary_coarse_candidates(
             report["frames"].append(frame_report)
     candidates = sorted(candidates, key=candidate_sort_key)
     report["candidate_count"] = len(candidates)
-    report["error_count"] = sum(
-        item.get("status") == "frame_unreadable"
-        or str(item.get("status") or "").startswith("open_vocabulary_error")
+    report["recovered_frame_count"] = sum(
+        item.get("status") in {"candidate_added", "no_actor_object_contact"}
+        and bool(item.get("source_read_recovered") or any(item.get("model_recovered", {}).values()))
+        for item in report["frames"])
+    report["read_error_count"] = sum(
+        item.get("status") == "frame_unreadable" for item in report["frames"])
+    report["inference_error_count"] = sum(
+        str(item.get("status") or "").startswith("open_vocabulary_error")
         for item in report["frames"]
     )
+    report["error_count"] = report["read_error_count"] + report["inference_error_count"]
     report["status"] = (
         "completed_with_errors_closed_set_preserved"
         if report["error_count"]
@@ -540,6 +651,9 @@ def generate_open_vocabulary_fine_candidates(
         "error_count": 0,
         "frames": [],
         "formal_evidence_ready": not enabled,
+        "gate_metric": "selected_frame_execution_completion",
+        "read_error_count": 0,
+        "inference_error_count": 0,
     }
     if not enabled:
         report["status"] = "disabled"
@@ -641,9 +755,8 @@ def generate_open_vocabulary_fine_candidates(
                 "local_ms": selected_frame.local_ms,
                 "global_ms": selected_frame.global_ms,
             }
-            read_started = time.perf_counter()
-            frame = reader.read(view, infos[view.view_id], selected_frame.local_ms)
-            frame_report["source_read_seconds"] = round(time.perf_counter() - read_started, 6)
+            frame = _read_recall_frame(
+                reader, view, infos[view.view_id], selected_frame.local_ms, frame_report)
             if frame is None:
                 frame_report["status"] = "frame_unreadable"
                 report["frames"].append(frame_report)
@@ -673,9 +786,10 @@ def generate_open_vocabulary_fine_candidates(
                 report["frames"].append(frame_report)
                 continue
             try:
-                grounded, inference = _yolo_world_detections(
-                    frame[top:bottom, left:right], settings
-                )
+                grounded, inference = _run_recall_model(
+                    "yolo_world",
+                    lambda: _yolo_world_detections(frame[top:bottom, left:right], settings),
+                    frame_report)
                 crop_width = max(1e-9, crop_norm[2] - crop_norm[0])
                 crop_height = max(1e-9, crop_norm[3] - crop_norm[1])
                 objects = []
@@ -787,6 +901,8 @@ def generate_open_vocabulary_fine_candidates(
                         "crop_norm": crop_norm,
                     }
                 )
+            except ExecutionCancelled:
+                raise
             except Exception as exc:
                 frame_report.update(
                     {
@@ -798,6 +914,12 @@ def generate_open_vocabulary_fine_candidates(
             report["frames"].append(frame_report)
     report["candidate_count"] = len(candidates)
     failure_statuses = {"frame_unreadable", "invalid_hand_roi"}
+    report["recovered_frame_count"] = sum(
+        item.get("status") in {"candidate_added", "no_manipulated_object_in_hand_roi"}
+        and bool(item.get("source_read_recovered") or any(item.get("model_recovered", {}).values()))
+        for item in report["frames"])
+    report["read_error_count"] = sum(
+        item.get("status") == "frame_unreadable" for item in report["frames"])
     report["inference_error_count"] = sum(
         str(item.get("status") or "").startswith("open_vocabulary_error")
         for item in report["frames"]

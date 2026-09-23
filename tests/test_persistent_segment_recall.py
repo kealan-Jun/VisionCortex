@@ -246,7 +246,10 @@ def test_persistent_ffmpeg_fills_and_records_one_terminal_eof_shortfall(
             self.stderr = io.BytesIO()
             self.returncode = 0
 
-        def wait(self):
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
             return self.returncode
 
     monkeypatch.setattr(
@@ -302,7 +305,10 @@ def test_persistent_ffmpeg_fills_seven_frame_terminal_tail_within_one_second(
             self.stderr = io.BytesIO()
             self.returncode = 0
 
-        def wait(self):
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
             return self.returncode
 
     monkeypatch.setattr(

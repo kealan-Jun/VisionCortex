@@ -110,6 +110,9 @@ def test_requested_batch_16_executes_within_engine_capacity(
     default_config["performance"]["tensor_rt"] = "required"
     from visioncortex.detection import RoleScanner
 
+    # This test isolates batch capacity; persistent predictor initialization
+    # is exercised with its SDK contract in test_detection_inference.py.
+    monkeypatch.setattr(RoleScanner, "prepare", lambda self: None)
     scanner = RoleScanner(ViewRole.FIRST_PERSON, default_config, batch_size=16)
     packets = [SimpleNamespace(frame=np.zeros((8, 8, 3), dtype=np.uint8)) for _ in range(16)]
     assert scanner.infer(packets) == [[] for _ in packets]
@@ -638,6 +641,9 @@ def test_role_scanner_records_oom_batch_contraction(default_config):
             return [Prediction() for _ in source]
 
     scanner = RoleScanner.__new__(RoleScanner)
+    scanner._prepared = True
+    scanner._closed = False
+    scanner.prediction_end2end = None
     scanner.config = default_config
     scanner.model = FakeModel()
     scanner.names = {}
@@ -1030,6 +1036,9 @@ def test_decode_fallback_is_visible_in_audit_log(monkeypatch, tmp_path, caplog):
 
 def test_short_microbatch_does_not_permanently_contract_engine_capacity(monkeypatch, default_config):
     scanner = RoleScanner.__new__(RoleScanner)
+    scanner._prepared = True
+    scanner._closed = False
+    scanner.prediction_end2end = None
     scanner.role = ViewRole.FIRST_PERSON
     scanner.config = default_config
     scanner.model_path = Path("model.engine")
@@ -1091,7 +1100,10 @@ def test_ffmpeg_cuda_scale_resizes_before_host_download(monkeypatch, tmp_path):
             self.stderr = io.BytesIO(b"")
             self.returncode = 0
 
-        def wait(self):
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
             return self.returncode
 
     def fake_popen(command, **kwargs):
@@ -1112,6 +1124,7 @@ def test_ffmpeg_cuda_scale_resizes_before_host_download(monkeypatch, tmp_path):
             False,
             None,
             True,
+            decoder_admission=video_io.CudaDecodeAdmission(tmp_path, capacity=1),
         )
     )
 

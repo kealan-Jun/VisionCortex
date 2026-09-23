@@ -9,6 +9,7 @@ import threading
 import time
 from collections.abc import Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -17,6 +18,7 @@ import cv2
 import numpy as np
 
 from .detection_duplicates import duplicate_suppression_policies, suppress_duplicate_boxes
+from .cuda_decode_admission import CudaDecodeAdmission
 from .detection_inference import prediction_branches, prediction_contract
 from .performance_stages import StageTimings, MeasuredWriter, prediction_timings
 from .key_material_verification import validate_selective_key_material_verification
@@ -497,6 +499,7 @@ def _producer(
     decode_worker_override: int | None = None,
 ) -> None:
     perf = config["performance"]
+    decoder_admission = CudaDecodeAdmission.from_config(config)
     component_timings = getattr(output_queue, "component_timings", StageTimings())
     chunk_ms = float(perf.get(f"{phase}_chunk_seconds", perf["chunk_seconds"])) * 1000.0
     spans = windows if windows is not None else [(0.0, info.duration_ms)]
@@ -604,6 +607,10 @@ def _producer(
                 else "window_or_chunk"
             ),
         }
+        decoder_receipt = session_decode_receipts.get(chunk_index)
+        if decoder_receipt:
+            payload["decoder_receipt"] = decoder_receipt
+            payload["actual_decode_backend"] = decoder_receipt.get("actual_decoder_backend")
         if persistent_sessions and chunk_index is not None:
             session = persistent_sessions[chunk_index]
             decoder_receipt = session_decode_receipts.get(chunk_index)
@@ -644,10 +651,10 @@ def _producer(
     def raw_decoded_frames(
         start_ms: float, end_ms: float, chunk_index: int | None = None
     ) -> Iterable[tuple[int, float, np.ndarray]]:
+        receipt = session_decode_receipts.setdefault(chunk_index, {})
         if persistent_sessions:
             if chunk_index is None:
                 raise ValueError("persistent decode requires a source unit index")
-            receipt = session_decode_receipts.setdefault(chunk_index, {})
             receipt.update(
                 {
                     "sampling_grid_mode": "aligned_global_timeline",
@@ -667,14 +674,13 @@ def _producer(
                 decode_fps,
                 max_width,
                 "cuda" if decode_backend == "cuda" else None,
-                int(perf.get("cpu_decode_threads", 0))
-                if decode_backend == "cpu"
-                else None,
+                int(perf.get("cpu_decode_threads", 2)),
                 bool(perf.get("ffmpeg_cuda_scale", False))
                 and decode_backend == "cuda",
                 receipt,
                 local_grid_origin_ms,
                 local_decode_period_ms,
+                decoder_admission=decoder_admission,
             )
         return iter_view_sampled_frames(
             view,
@@ -685,9 +691,11 @@ def _producer(
             max_width,
             "cuda" if decode_backend == "cuda" else None,
             keyframes_only,
-            int(perf.get("cpu_decode_threads", 0)) if decode_backend == "cpu" else None,
+            int(perf.get("cpu_decode_threads", 2)),
             str(perf.get("motion_probe_sparse_strategy", "indexed_seek")),
             bool(perf.get("ffmpeg_cuda_scale", False)) and decode_backend == "cuda",
+            decoder_admission=decoder_admission,
+            receipt=receipt,
         )
 
     def iter_decoded_frames(start_ms, end_ms, chunk_index=None):
@@ -955,9 +963,10 @@ def _producer(
             ) -> None:
                 activity("source_unit_started", chunk_index)
                 try:
-                    for decoded in iter_decoded_frames(start_ms, end_ms, chunk_index):
-                        if not put_until_stopped(target, decoded):
-                            return
+                    with closing(iter_decoded_frames(start_ms, end_ms, chunk_index)) as frames:
+                        for decoded in frames:
+                            if not put_until_stopped(target, decoded):
+                                return
                 except Exception as exc:
                     put_until_stopped(
                         target,
@@ -1025,7 +1034,8 @@ def _producer(
                         timeout=float(perf.get("segment_wave_timeout_seconds", 3600))
                     )
                 continue
-            emit_frames(iter_decoded_frames(start_ms, end_ms, chunk_index), start_ms)
+            with closing(iter_decoded_frames(start_ms, end_ms, chunk_index)) as frames:
+                emit_frames(frames, start_ms)
             finish_unit(chunk_index, len(work_units))
             if wave_barrier is not None:
                 wave_barrier.wait(timeout=float(perf.get("segment_wave_timeout_seconds", 3600)))
@@ -1421,21 +1431,6 @@ class RoleScanner:
         )
         self.prediction_end2end = None if branch is None else branch == "one2one"
         self.last_prediction_end2end = None
-        self.model = YOLO(str(self.model_path))
-        if branch is not None:
-            head = self.model.model.model[-1]
-            if any(getattr(head, name, None) is None for name in (
-                "cv2", "cv3", "one2one_cv2", "one2one_cv3"
-            )):
-                raise ValueError("Selected model does not contain both candidate prediction branches")
-            self.model.model.end2end = self.prediction_end2end
-        self.names = {
-            int(key): str(value).replace("-", "_")
-            for key, value in self.model.names.items()
-        }
-        expected = int(config["models"]["expected_class_count"])
-        if len(self.names) != expected:
-            raise ValueError(f"{self.model_path} 不是 {expected} 类模型")
         self.requested_batch_size = int(
             batch_size or config["performance"]["batch_size"]
         )
@@ -1452,9 +1447,127 @@ class RoleScanner:
         self.exact_batch_padding_frames = 0
         self.image_size = int(image_size or config["performance"]["image_size"])
         self.appearance_enabled = bool(appearance_enabled)
+        self.names = {}
+        self.model = None
+        self._prepared = False
+        self._closed = False
+        self.initialization_phase = "model_wrapper"
+        self.initialization_failure_phase = None
+        try:
+            self.model = YOLO(str(self.model_path))
+            if branch is not None:
+                head = self.model.model.model[-1]
+                if any(getattr(head, name, None) is None for name in (
+                    "cv2", "cv3", "one2one_cv2", "one2one_cv3"
+                )):
+                    raise ValueError("Selected model does not contain both candidate prediction branches")
+                self.model.model.end2end = self.prediction_end2end
+        except BaseException:
+            self.close()
+            raise
+
+    def _prediction_options(self) -> dict[str, Any]:
+        perf, model_cfg = self.config["performance"], self.config["models"]
+        options = {
+            "imgsz": self.image_size,
+            "conf": float(model_cfg["confidence"]),
+            "iou": float(model_cfg["iou"]),
+            "max_det": int(model_cfg["max_detections"]),
+            "device": perf["device"],
+            "half": bool(perf["half"]),
+            "verbose": False,
+        }
+        if self.prediction_end2end is not None:
+            options["end2end"] = self.prediction_end2end
+        return options
+
+    def prepare(self) -> None:
+        """Initialize and warm the persistent predictor in its owning thread.
+
+        Ultralytics Model.names constructs a temporary predictor for engines;
+        using it before Model.predict would allocate a second context later.
+        Mirror predict's setup and first-call warmup without emitting evidence.
+        """
+        if self._closed:
+            raise RuntimeError("Inference scanner is already closed")
+        if self._prepared:
+            return
+        import traceback
+
+        predictor = None
+        try:
+            self.initialization_phase = "predictor_setup"
+            import torch
+            from ultralytics.utils.checks import check_imgsz
+
+            options = {**self.model.overrides, "conf": .25, "batch": 1,
+                       "save": False, "mode": "predict", "rect": True,
+                       **self._prediction_options()}
+            predictor = self.model._smart_load("predictor")(
+                overrides=options, _callbacks=self.model.callbacks)
+            self.model.predictor = predictor
+            predictor.setup_model(model=self.model.model, verbose=False)
+            self.initialization_phase = "class_names"
+            self.names = {int(key): str(value).replace("-", "_")
+                          for key, value in predictor.model.names.items()}
+            expected = int(self.config["models"]["expected_class_count"])
+            if len(self.names) != expected:
+                raise ValueError(f"{self.model_path} 不是 {expected} 类模型")
+            self.initialization_phase = "prediction_branch"
+            if self.prediction_end2end is not None:
+                observed = getattr(predictor.model, "end2end", None)
+                if type(observed) is not bool or observed != self.prediction_end2end:
+                    raise RuntimeError("Prediction backend did not honor the configured branch")
+            self.initialization_phase = "image_size"
+            # setup_model replaces args.imgsz with static export metadata, but
+            # the first predict call supplies the requested size again. Refuse
+            # a mismatch before reporting ready instead of warming one shape
+            # and failing the first real frame with another shape.
+            size = check_imgsz(self.image_size, stride=predictor.model.stride, min_dim=2)
+            if (predictor.model.format == "engine"
+                    and not getattr(predictor.model, "dynamic", False)
+                    and hasattr(predictor.model, "imgsz")):
+                exported = list(predictor.model.imgsz)
+                if list(size) != exported:
+                    raise ValueError(
+                        f"Requested inference image size {list(size)} does not match static engine export {exported}"
+                    )
+            self.initialization_phase = "warmup"
+            # Match BasePredictor.setup_source/stream_inference. No source
+            # frame, detector result, batch counter or evidence is produced.
+            warmup_batch = (1 if predictor.model.format in {"pt", "triton"}
+                            else self.engine_build_batch if self.engine_requires_exact_batch
+                            else self.batch_size)
+            with torch.inference_mode():
+                predictor.model.warmup(imgsz=(warmup_batch, predictor.model.channels, *size))
+            if predictor.device.type == "cuda":
+                torch.cuda.synchronize(predictor.device)
+            predictor.done_warmup = True
+            self._prepared = True
+            self.initialization_phase = "ready"
+        except BaseException as exc:
+            self.initialization_failure_phase = self.initialization_phase
+            # A Future retains the exception for its waiter. Release backend
+            # frame locals before close() collects and empties the CUDA cache.
+            traceback.clear_frames(exc.__traceback__)
+            try:
+                self.close()
+            except Exception as cleanup_error:
+                exc.add_note(f"Scanner cleanup failed: {type(cleanup_error).__name__}")
+            predictor = None
+            raise
 
     def close(self) -> None:
-        del self.model
+        if self._closed:
+            return
+        self._closed = True
+        self._prepared = False
+        if self.model is not None:
+            predictor = getattr(self.model, "predictor", None)
+            if predictor is not None:
+                predictor.model = None
+                self.model.predictor = None
+            self.model = None
         gc.collect()
         try:
             import torch
@@ -1467,7 +1580,9 @@ class RoleScanner:
     def infer(self, packets: Sequence[FramePacket]) -> list[list[BoxEvidence]]:
         from .runtime_control import check_cancelled
         check_cancelled()
-        perf, model_cfg = self.config["performance"], self.config["models"]
+        if not packets:
+            return []
+        self.prepare()
         # A short queue flush is not a memory-pressure signal. Keep the engine
         # capacity unchanged unless inference actually raises CUDA OOM.
         batch_size = min(self.batch_size, len(packets))
@@ -1495,17 +1610,9 @@ class RoleScanner:
                         )
                     engine_batch_sizes.append(len(execution_batch))
                     expected_end2end = getattr(self, "prediction_end2end", None)
-                    branch_options = {} if expected_end2end is None else {"end2end": expected_end2end}
                     predictions = self.model.predict(
                         source=[packet.frame for packet in execution_batch],
-                        imgsz=self.image_size,
-                        conf=float(model_cfg["confidence"]),
-                        iou=float(model_cfg["iou"]),
-                        max_det=int(model_cfg["max_detections"]),
-                        device=perf["device"],
-                        half=bool(perf["half"]),
-                        verbose=False,
-                        **branch_options,
+                        **self._prediction_options(),
                     )
                     prediction_timings(predictions, self.component_timings)
                     if expected_end2end is not None:

@@ -55,6 +55,10 @@ models:
   confidence: 0.25
   iou: 0.55
   max_detections: 300
+  open_vocabulary_key_frame:
+    cuda_oom_fallback_cpu: false
+    grounding_dino_fallback:
+      cuda_oom_fallback_cpu: false
 
 # Optional specialist for liquid visibility, meniscus, fill ratio and flow.
 # The foundation is intentionally disabled and is not connected to preprocessing;
@@ -218,6 +222,10 @@ performance:
   motion_burst_min_observations: 2
   max_gpu_memory_fraction: 0.92
   ffmpeg_hwaccel: cuda
+  # Actual CUDA decoder children, shared by processes using this runtime/GPU.
+  # Excess per-video workers use CPU decoding immediately.
+  cuda_decode_process_limit: 6
+  cuda_decode_device: 0
   ffmpeg_cuda_scale: false
   ffmpeg_video_encoder: h264_nvenc
   workers: 2

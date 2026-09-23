@@ -14,7 +14,10 @@ import time
 import uuid
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from itertools import product
-from .open_vocabulary_runtime import serialized_open_vocabulary
+from .open_vocabulary_runtime import (
+    park_open_vocabulary_model, run_with_cuda_oom_cpu_fallback,
+    serialized_open_vocabulary, yolo_world_prediction_device,
+)
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -4186,10 +4189,11 @@ def _rerender_curated_participant_annotations(
 
 _OPEN_VOCABULARY_MODEL_CACHE: dict[str, Any] = {}
 _OPEN_VOCABULARY_ASSET_VALIDATION: set[tuple[str, str, str, str]] = set()
-_GROUNDING_DINO_MODEL_CACHE: dict[tuple[str, str, str], Any] = {}
+_GROUNDING_DINO_MODEL_CACHE: dict[tuple[str, str], Any] = {}
 _GROUNDING_DINO_ASSET_VALIDATION: set[tuple[str, str]] = set()
 
 
+@serialized_open_vocabulary
 def _release_auxiliary_model_caches(*, retain_on_cpu: bool = False) -> dict[str, int]:
     """Release VRAM between models; optionally retain weights in host RAM."""
 
@@ -4203,6 +4207,9 @@ def _release_auxiliary_model_caches(*, retain_on_cpu: bool = False) -> dict[str,
         if model is not None and hasattr(model, "to"):
             try:
                 model.to("cpu")
+                if hasattr(model, "predictor"):
+                    model.predictor = None
+                cached["device"] = "cpu"
             except (RuntimeError, TypeError, ValueError):
                 pass
     if not retain_on_cpu:
@@ -4732,24 +4739,23 @@ def _grounding_dino_key_frame_detections(
     settings: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     fallback = dict(settings.get("grounding_dino_fallback") or {})
-    if not (str(fallback.get("device", "cuda")).startswith("cuda")
-            and fallback.get("cuda_oom_fallback_cpu")):
-        return _grounding_dino_key_frame_detections_once(frame, canonical_classes, settings)
-    import torch
-
-    try:
-        return _grounding_dino_key_frame_detections_once(frame, canonical_classes, settings)
-    except torch.cuda.OutOfMemoryError:
-        # Retry the identical FP32 model and input on CPU after unwinding GPU
-        # intermediates. Other failures must still propagate to the stage.
-        pass
-    _release_auxiliary_model_caches(retain_on_cpu=True)
-    fallback["device"] = "cpu"
-    boxes, receipt = _grounding_dino_key_frame_detections_once(
-        frame, canonical_classes, {**settings, "grounding_dino_fallback": fallback}
+    if not fallback.get("enabled"):
+        return [], {"status": "disabled"}
+    def infer_once(device):
+        return _grounding_dino_key_frame_detections_once(
+            frame, canonical_classes,
+            {**settings, "grounding_dino_fallback": {**fallback, "device": device}},
+        )
+    def cleanup():
+        model_path = str(Path(str(fallback.get("model_path") or "")).resolve())
+        cached = _GROUNDING_DINO_MODEL_CACHE.get((model_path, str(fallback.get("model_sha256") or "")))
+        if cached is not None:
+            park_open_vocabulary_model(cached["model"])
+            cached["device"] = "cpu"
+    return run_with_cuda_oom_cpu_fallback(
+        infer_once, device=str(fallback.get("device") or "cuda"),
+        enabled=bool(fallback.get("cuda_oom_fallback_cpu", False)), cleanup=cleanup,
     )
-    receipt["device_fallback"] = "cuda_out_of_memory_to_cpu"
-    return boxes, receipt
 
 
 def _grounding_dino_key_frame_detections_once(
@@ -4804,7 +4810,9 @@ def _grounding_dino_key_frame_detections_once(
     )
 
     device = str(fallback.get("device") or "cuda")
-    cache_key = (str(model_path), model_sha256, device)
+    # Device is mutable residency, not a second model identity. CPU recovery
+    # reuses the same validated weights instead of loading another DINO copy.
+    cache_key = (str(model_path), model_sha256)
     cached = _GROUNDING_DINO_MODEL_CACHE.get(cache_key)
     model_cache_reused = cached is not None
     model_load_seconds = 0.0
@@ -4821,18 +4829,22 @@ def _grounding_dino_key_frame_detections_once(
         )
         if device.startswith("cuda") and not torch.cuda.is_available():
             raise RuntimeError("Grounding DINO requires CUDA but CUDA is unavailable")
-        model = model.to(device).eval()
+        # Retain the validated CPU weights before CUDA restoration so an OOM
+        # can park and reuse this same model instead of loading a second copy.
+        cached = {"processor": processor, "model": model.eval(), "device": "cpu"}
+        _GROUNDING_DINO_MODEL_CACHE[cache_key] = cached
+        model.to(device)
         if device.startswith("cuda"):
             torch.cuda.synchronize()
         model_load_seconds = time.perf_counter() - load_started
-        cached = {"processor": processor, "model": model, "device": device}
-        _GROUNDING_DINO_MODEL_CACHE[cache_key] = cached
+        cached["device"] = str(model.device)
     else:
         restore_started = time.perf_counter()
         cached["model"].to(device)
         if device.startswith("cuda"):
             torch.cuda.synchronize()
         model_restore_seconds = time.perf_counter() - restore_started
+        cached["device"] = str(cached["model"].device)
     processor = cached["processor"]
     model = cached["model"]
     device = str(cached["device"])
@@ -5180,16 +5192,22 @@ def _open_vocabulary_key_frame_supplement(
         model.to("cpu")
         model.set_classes(prompts)
         cached["prompts"] = list(prompts)
-    inference_started = time.perf_counter()
-    result = model.predict(
-        frame,
-        device=int(settings.get("device", 0)),
-        imgsz=int(settings.get("image_size", 1280)),
-        conf=float(settings.get("confidence", 0.03)),
-        iou=float(settings.get("iou", 0.50)),
-        verbose=False,
-    )[0]
-    inference_seconds = time.perf_counter() - inference_started
+    def infer_once(device):
+        inference_started = time.perf_counter()
+        result = model.predict(
+            frame, device=device, half=False,
+            imgsz=int(settings.get("image_size", 1280)),
+            conf=float(settings.get("confidence", 0.03)),
+            iou=float(settings.get("iou", 0.50)), verbose=False,
+        )[0]
+        return result, {"inference_seconds": round(time.perf_counter() - inference_started, 6),
+                        "actual_device": yolo_world_prediction_device(model)}
+    result, execution_receipt = run_with_cuda_oom_cpu_fallback(
+        infer_once, device=settings.get("device", 0),
+        enabled=bool(settings.get("cuda_oom_fallback_cpu", False)),
+        cleanup=lambda: park_open_vocabulary_model(model),
+    )
+    inference_seconds = execution_receipt["inference_seconds"]
     height, width = frame.shape[:2]
     grounded: list[dict[str, Any]] = []
     for class_index, confidence, coordinates in zip(
@@ -5607,6 +5625,7 @@ def _open_vocabulary_key_frame_supplement(
         "model_cache_hit": model_cache_hit,
         "model_load_seconds": round(model_load_seconds, 6),
         "inference_seconds": round(inference_seconds, 6),
+        **execution_receipt,
         "clip_model": str(clip_path),
         "clip_model_sha256": clip_sha256,
         "prompts": prompts,

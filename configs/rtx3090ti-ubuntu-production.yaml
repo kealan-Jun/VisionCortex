@@ -128,6 +128,8 @@ models:
   third_person_coarse_engine: /srv/sentinel-data/VisionCortex3090Ti/Engines/third_person_coarse32_20260914.engine
   open_vocabulary_key_frame:
     enabled: true
+    # Retry only typed CUDA OOM once on the same FP32 model/input on CPU.
+    cuda_oom_fallback_cpu: true
     model_path: /srv/sentinel-data/VisionCortex3090Ti/Engines/yolov8s-worldv2.pt
     model_sha256: 9b2c17ab6124a913e9b3a5c170617920d91b0f01111a8479da69f00e2cf27792
     model_download_url: https://github.com/ultralytics/assets/releases/download/v8.4.0/yolov8s-worldv2.pt
@@ -156,6 +158,7 @@ models:
     grounded_actor_confidence_ratio: 0.75
     grounding_dino_fallback:
       enabled: true
+      cuda_oom_fallback_cpu: true
       model_path: /srv/sentinel-data/VisionCortex3090Ti/Engines/grounding-dino-base
       model_repository: IDEA-Research/grounding-dino-base
       model_revision: 12bdfa3120f3e7ec7b434d90674b3396eccf88eb
@@ -490,6 +493,10 @@ performance:
   coarse_decode_lanes: [cuda]
   coarse_cuda_max_concurrent_sources: 2
   fine_decode_lanes: [cuda]
+  # Cooperative total across this runtime's coarse/fine FFmpeg children.
+  # Independent GPU programs are outside this quota; runtime validation pending.
+  cuda_decode_process_limit: 6
+  cuda_decode_device: 0
   # CUDA decode remains enabled, but GPU resize is deliberately disabled.
   # Two cold A0004 audits (nearest and bicubic) reduced wall time yet shifted
   # the reviewed start boundary by +13.6 s, beyond the 8 s quality contract.

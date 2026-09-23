@@ -4940,6 +4940,7 @@ class EvidencePipeline:
         )
         if configured_sparse_strategy == "auto":
             sentinel = c.motion_probe_views[0]
+            from .cuda_decode_admission import CudaDecodeAdmission
             sparse_report = benchmark_sparse_decode_strategy(
                 sentinel,
                 c.infos[sentinel.view_id],
@@ -4963,6 +4964,7 @@ class EvidencePipeline:
                         "motion_probe_sparse_benchmark_seconds", 60.0
                     )
                 ),
+                decoder_admission=CudaDecodeAdmission.from_config(self.config),
             )
             selected_sparse_strategy = str(sparse_report["selected_strategy"])
         else:

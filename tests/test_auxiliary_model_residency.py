@@ -18,6 +18,7 @@ class Model:
 
 def test_park_reuses_same_weights_and_evicts_when_host_memory_is_low(monkeypatch):
     models = [Model() for _ in range(4)]
+    models[0].predictor = object()
     monkeypatch.setattr(archive, "_OPEN_VOCABULARY_MODEL_CACHE", {"world": {"model": models[0]}})
     monkeypatch.setattr(archive, "_GROUNDING_DINO_MODEL_CACHE", {("dino", "sha", "cuda"): {"model": models[1]}})
     monkeypatch.setattr(temporal_segmentation, "_MODEL_CACHE", {("sam",): {"predictor": models[2]}})
@@ -28,6 +29,7 @@ def test_park_reuses_same_weights_and_evicts_when_host_memory_is_low(monkeypatch
     receipt = archive._park_auxiliary_model_caches(config)
     assert receipt["retained_on_cpu"]
     assert all(model.device == "cpu" for model in models)
+    assert models[0].predictor is None
     assert temporal_segmentation._MODEL_CACHE[("sam",)]["predictor"] is models[2]
     assert liquid_semantic._MODEL_CACHE[("labpics",)] is models[3]
     monkeypatch.setattr("psutil.virtual_memory", lambda: SimpleNamespace(available=4 * 1024**3))
@@ -55,9 +57,10 @@ def test_cuda_retry_uses_identical_input_and_only_retries_oom(monkeypatch, compo
     class OOM(RuntimeError):
         pass
 
-    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(cuda=SimpleNamespace(OutOfMemoryError=OOM)))
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(cuda=SimpleNamespace(
+        OutOfMemoryError=OOM, is_available=lambda: False)))
     frame = np.zeros((8, 8, 3), dtype=np.uint8)
-    settings = {"device": "cuda", "cuda_oom_fallback_cpu": True, "half": False}
+    settings = {"enabled": True, "device": "cuda", "cuda_oom_fallback_cpu": True, "half": False}
     calls = []
 
     def once(image, *args):
@@ -88,3 +91,70 @@ def test_cuda_retry_uses_identical_input_and_only_retries_oom(monkeypatch, compo
         with pytest.raises(ValueError, match="invalid input"):
             call()
         assert calls == ["cuda"]
+
+
+def test_dino_cold_cuda_oom_reuses_loaded_weights_on_cpu_then_restores_same_cache(tmp_path, monkeypatch):
+    from contextlib import nullcontext
+
+    class OOM(RuntimeError):
+        pass
+
+    calls, loads = [], []
+    class CachedModel:
+        device = 'cpu'
+        failed_cuda = False
+
+        def to(self, device):
+            calls.append(device)
+            if device == 'cuda' and not self.failed_cuda:
+                self.failed_cuda = True
+                raise OOM('initial CUDA restoration')
+            self.device = 'cuda:0' if device == 'cuda' else device
+            return self
+
+        def eval(self):
+            return self
+
+        def __call__(self, **_):
+            return object()
+
+    class Tensor:
+        def to(self, _device):
+            return self
+
+    class Processor:
+        def __call__(self, **_):
+            return {'input_ids': Tensor()}
+
+        def post_process_grounded_object_detection(self, *_args, **_kwargs):
+            return [{'scores': [], 'text_labels': [], 'boxes': []}]
+
+    model = CachedModel()
+    def load(*_args, **_kwargs):
+        loads.append(True)
+        return model
+
+    monkeypatch.setitem(sys.modules, 'torch', SimpleNamespace(
+        float32='float32', inference_mode=nullcontext,
+        cuda=SimpleNamespace(OutOfMemoryError=OOM, is_available=lambda: True,
+                             empty_cache=lambda: None, synchronize=lambda: None)))
+    monkeypatch.setitem(sys.modules, 'transformers', SimpleNamespace(
+        AutoModelForZeroShotObjectDetection=SimpleNamespace(from_pretrained=load),
+        AutoProcessor=SimpleNamespace(from_pretrained=lambda *_args, **_kwargs: Processor())))
+    monkeypatch.setattr(archive, '_GROUNDING_DINO_MODEL_CACHE', {})
+    monkeypatch.setattr(archive, '_GROUNDING_DINO_ASSET_VALIDATION', set())
+    (tmp_path / 'model.safetensors').write_bytes(b'fake pinned model')
+    settings = {'grounding_dino_fallback': {
+        'enabled': True, 'device': 'cuda', 'cuda_oom_fallback_cpu': True,
+        'model_path': str(tmp_path), 'prompt_map': {'paper': 'paper'},
+    }}
+    frame = np.zeros((8, 8, 3), dtype=np.uint8)
+    _, recovered = archive._grounding_dino_key_frame_detections(frame, {'paper'}, settings)
+    assert recovered['actual_device'] == 'cpu'
+    assert recovered['model_cache_reused'] is True
+    assert calls == ['cuda', 'cpu', 'cpu']
+    _, restored = archive._grounding_dino_key_frame_detections(frame, {'paper'}, settings)
+    assert restored['actual_device'] == 'cuda:0'
+    assert restored['model_cache_reused'] is True
+    assert len(loads) == 1
+    assert len(archive._GROUNDING_DINO_MODEL_CACHE) == 1

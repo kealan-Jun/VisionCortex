@@ -74,6 +74,8 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
     _apply_environment_overrides(config)
     from .runtime_options import validate as validate_runtime
     validate_runtime(config)
+    from .cuda_decode_admission import validate as validate_cuda_decode
+    validate_cuda_decode(config)
     _validate_mllm_evidence_config(config)
     from .device_day_contract import validate_config as validate_device_day_config
     validate_device_day_config(config)

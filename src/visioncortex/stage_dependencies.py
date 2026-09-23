@@ -9,7 +9,7 @@ import hashlib
 DEVICE_SOURCES = {
     'retention': ['nas_recordings', 'device_day_audio'],
     'vision': ['shared_inference', 'scan_scheduler', 'device_day_models', 'detection', 'detection_inference',
-               'actions', 'candidate_index', 'video_io', 'alignment', 'movement_verification', 'coarse_recall',
+               'actions', 'candidate_index', 'video_io', 'cuda_decode_admission', 'alignment', 'movement_verification', 'coarse_recall',
                'grouping', 'action_state_machine', 'action_semantics', 'archive', 'open_vocabulary_runtime', 'source_frames', 'media_time'],
     'stt': ['device_day_stt', 'speech', 'speech_worker', 'speech_qwen'],
     'understanding': ['device_day_models', 'device_day_semantic_cache', 'scene_requests', 'scene_transport',
