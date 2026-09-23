@@ -48,7 +48,7 @@ def validate_request(request: dict, root: Path) -> None:
         if window["id"] != window_index or not 1 <= len(window["frames"]) <= 50:
             raise ValueError("Invalid bounded window")
         prompts = window["prompts"]
-        if not 1 <= len(prompts) <= 3 or len({p["id"] for p in prompts}) != len(prompts):
+        if not 1 <= len(prompts) <= 8 or len({p["id"] for p in prompts}) != len(prompts):
             raise ValueError("Invalid prompt identities")
         for prompt in prompts:
             x1, y1, x2, y2 = prompt["box"]
@@ -148,7 +148,8 @@ def run(request_path: Path, config: dict, output: Path) -> dict:
                                 "seed_frame_index": window["frames"][0]["frame_index"],
                                 "state": "prompted" if index == 0 else "memory_propagated",
                                 "confidence": None, "status": "unreviewed_model_proposal",
-                                **mask_record(mask, output, name)})
+                                **mask_record(mask, output, name),
+                                **({"proposal_group": prompt["proposal_group"]} if "proposal_group" in prompt else {})})
                         frames.append({**frame, "window_id": window["id"], "temporal_instances": instances})
                     if seen != set(range(len(window["frames"]))):
                         raise ValueError("Temporal predictor skipped sampled frames")
