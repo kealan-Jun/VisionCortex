@@ -461,11 +461,14 @@ performance:
   coarse_batch_size: 16
   motion_probe_batch_size: 16
   fine_batch_size: 16
-  fine_active_decode_slots: 1
+  # A budget of one caps a single-source fine scan at one decoder despite
+  # the role limits below. Six permits up to four first-person or six
+  # third-person decoders, bounded by the available physical work units.
+  fine_active_decode_slots: 6
   # Four real-source cold runs on 2026-09-08 preserved all 2014 candidates,
   # 979 movement receipts, five boundaries and 61 selected event identities.
   # The single-role supplemental wave can now use independent contexts;
-  # they share the eight decode slots instead of multiplying that budget.
+  # they share the six decode slots instead of multiplying that budget.
   fine_inference_workers_per_role: 3
   fine_first_person_decode_workers: 4
   fine_third_person_decode_workers: 6

@@ -22,6 +22,26 @@ safe batches of at most 4. Batch or worker increases require a bounded,
 telemetry-backed acceptance run; they must not be changed during a production
 collection.
 
+The fine-scan profile sets six decode slots per scanner's role group, with
+per-source limits of four for first-person and six for third-person video. Setting
+`fine_active_decode_slots` to one prevents those per-source limits from being
+used. A same-role supplemental wave with three scanner contexts shares the
+six slots (two per context). Mixed-role concurrent scanners receive separate
+budgets; six is not a service-wide limit. Actual decoder concurrency is also
+bounded by the available physical decode sessions. A single session can
+still use only one decoder.
+
+New Web submissions read the current profile. Persisted offline jobs retain
+their submitted performance settings, while the device/day service adopts
+changed settings after its active work drains. Editing the YAML alone is
+not evidence that a running task uses it. Verify the task's
+`runtime_fine_*.json` receipts (`active_decode_slot_budget`,
+`ordered_source_decode_workers`, and `total_ordered_source_decode_workers`)
+after the changed settings are adopted. These fields prove allocation, not a
+speedup. Throughput remains `NOT_PROVEN` without comparable real-video runs
+at budgets one and six, using the same inputs, models and cache conditions,
+with stage wall time, resource telemetry and output-quality checks.
+
 ## Python environment
 
 The normal PATH exposes Python 3.13, while the project requires Python 3.11 or

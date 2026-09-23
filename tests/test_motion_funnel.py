@@ -1,9 +1,11 @@
 import json
 import io
 import queue
+import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -11,6 +13,7 @@ import pytest
 from visioncortex import video_io
 from visioncortex.actions import fuse_motion_probe_candidates
 from visioncortex.alignment import _absolute_clock_transform
+from visioncortex.config import load_config
 from visioncortex.detection import (
     ChunkEnd,
     FramePacket,
@@ -35,6 +38,7 @@ from visioncortex.schemas import (
     ViewInput,
     ViewRole,
 )
+from visioncortex.scan_scheduler import scan_views_concurrently
 from visioncortex.video_io import probe_views
 
 
@@ -376,6 +380,72 @@ def test_fine_scan_uses_six_decode_slots_without_multiplying_every_source(
     assert first_runtime["total_ordered_source_decode_workers"] == 2
     assert third_runtime["active_decode_slot_budget"] == 6
     assert third_runtime["total_ordered_source_decode_workers"] == 6
+
+
+@pytest.mark.parametrize(
+    "role,source_count,workers_per_source",
+    [
+        (ViewRole.FIRST_PERSON, 1, 4),
+        (ViewRole.THIRD_PERSON, 1, 6),
+        (ViewRole.THIRD_PERSON, 3, 2),
+    ],
+)
+def test_rtx3090ti_fine_decode_allocation_reaches_producers(
+    monkeypatch, tmp_path, default_config, role, source_count, workers_per_source
+):
+    profile = Path(__file__).resolve().parents[1] / "configs" / "rtx3090ti-ubuntu-production.yaml"
+    # Exercise production scheduling without its model, NAS or GPU dependencies.
+    default_config["performance"] = load_config(profile)["performance"]
+    monkeypatch.setitem(sys.modules, "torch", None)
+    monkeypatch.setattr(
+        "visioncortex.shared_inference.acquire_scanner",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            model_path=Path("fake.engine"), batch_size=16,
+            engine_build_batch=4, close=lambda: None,
+        ),
+    )
+    views = [
+        ViewInput(view_id=f"view{index}", role=role, video=Path(f"unused{index}.mp4"))
+        for index in range(source_count)
+    ]
+    infos = {
+        view.view_id: VideoInfo(
+            path=view.video, duration_ms=2_000.0, fps=30.0,
+            width=8, height=8, frame_count=60, size_bytes=100,
+        )
+        for view in views
+    }
+    transforms = {
+        view.view_id: AlignmentTransform(
+            view_id=view.view_id, reference_view_id=views[0].view_id,
+            state="aligned", confidence=1.0,
+        )
+        for view in views
+    }
+    decode_workers = {}
+
+    def fake_producer(view, _info, output, *_args):
+        decode_workers[view.view_id] = _args[-1]
+        output.put(ProducerEnd(view_id=view.view_id))
+
+    monkeypatch.setattr("visioncortex.detection._producer", fake_producer)
+    scan_views_concurrently(
+        default_config, views, infos, transforms, tmp_path,
+        windows={view.view_id: [(0.0, 1_000.0)] for view in views},
+        phase="fine",
+    )
+
+    assert decode_workers == {view.view_id: workers_per_source for view in views}
+    runtimes = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in tmp_path.glob(f"runtime_fine_{role.value}*.json")
+    ]
+    assert len(runtimes) == source_count
+    assert all(item["active_decode_slot_budget"] == 6 // source_count for item in runtimes)
+    assert all(item["total_ordered_source_decode_workers"] == workers_per_source for item in runtimes)
+    scheduler = json.loads((tmp_path / "scheduler_fine.json").read_text(encoding="utf-8"))
+    assert scheduler["active_scanner_count"] == source_count
+    assert default_config["performance"]["fine_active_decode_slots"] == 6
 
 
 def test_motion_probe_can_run_yolo_on_the_same_sampled_frames(

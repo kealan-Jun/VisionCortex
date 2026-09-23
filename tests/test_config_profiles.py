@@ -147,6 +147,17 @@ def test_rtx3090ti_local_profile_has_no_nas_storage_paths():
         )
 
 
+@pytest.mark.parametrize("mode", ["production", "local"])
+def test_rtx3090ti_profiles_preserve_fine_decode_capacity(mode):
+    profile = Path(__file__).resolve().parents[1] / "configs" / f"rtx3090ti-ubuntu-{mode}.yaml"
+    performance = load_config(profile)["performance"]
+
+    assert performance["fine_active_decode_slots"] == 6
+    assert performance["fine_first_person_decode_workers"] == 4
+    assert performance["fine_third_person_decode_workers"] == 6
+    assert performance["fine_inference_workers_per_role"] == 3
+
+
 def test_ubuntu_runtime_paths_and_engines_can_be_overridden(monkeypatch):
     profile = Path(__file__).resolve().parents[1] / "configs" / "rtx3090ti-ubuntu-production.yaml"
     monkeypatch.setenv("VISIONCORTEX_OUTPUT_ROOT", "/runtime/outputs")
