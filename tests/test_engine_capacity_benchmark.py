@@ -152,9 +152,10 @@ def model_files(tmp_path):
     return {"models": paths}
 
 
-def test_model_snapshot_embeds_existing_build_identity_without_inventing_missing_receipts(model_files):
+@pytest.mark.parametrize("suffix", [".build.json", ".engine.build.json"])
+def test_model_snapshot_embeds_existing_build_identity_without_inventing_missing_receipts(model_files, suffix):
     engine = Path(model_files["models"]["first_person_engine"])
-    sidecar = engine.with_suffix(".build.json")
+    sidecar = engine.with_suffix(suffix)
     build = {"engine_sha256": benchmark.sha256(engine),
              "weights_sha256": benchmark.sha256(Path(model_files["models"]["first_person"]))}
     sidecar.write_text(json.dumps(build))

@@ -1296,8 +1296,36 @@ def _validate_class_names(names: list[str], expected: int, source: Path) -> None
         raise ValueError(f"{source} 的规范化类别表包含重复类别")
 
 
+def _role_class_names(config: dict, role: ViewRole) -> list[str] | None:
+    """Allow explicit append-only ontology growth without coupling role upgrades."""
+    configured = config["models"].get("class_names_by_role")
+    if configured is None:
+        return None
+    if not isinstance(configured, dict) or set(configured) != {r.value for r in ViewRole}:
+        raise ValueError("class_names_by_role must explicitly define both view roles")
+    normalized = {}
+    for name, values in configured.items():
+        if not isinstance(values, list) or not values or any(not isinstance(v, str) or not v for v in values):
+            raise ValueError("Role class names must be nonempty ordered string lists")
+        normalized[name] = [v.replace("-", "_") for v in values]
+        if len(set(normalized[name])) != len(values):
+            raise ValueError("Role ontology contains duplicate normalized class names")
+    first, third = (normalized[r.value] for r in ViewRole)
+    common = min(len(first), len(third))
+    if first[:common] != third[:common]:
+        raise ValueError("Role ontologies must preserve common class IDs; only append-only growth is allowed")
+    return normalized[role.value]
+
+
+def _validate_role_class_names(names: list[str], config: dict, role: ViewRole, source: Path) -> None:
+    configured = _role_class_names(config, role)
+    expected = len(configured) if configured is not None else int(config["models"]["expected_class_count"])
+    _validate_class_names(names, expected, source)
+    if configured is not None and names != configured:
+        raise ValueError(f"{role.value} model classes differ from the explicit role ontology")
+
+
 def validate_models(config: dict[str, Any]) -> dict[str, Any]:
-    expected = int(config["models"]["expected_class_count"])
     mode = str(config["performance"].get("tensor_rt", "auto")).lower()
     report: dict[str, Any] = {}
     class_sets: dict[str, list[str]] = {}
@@ -1316,7 +1344,7 @@ def validate_models(config: dict[str, Any]) -> dict[str, Any]:
 
         model = YOLO(str(path))
         names = _normalized_class_names(model.names)
-        _validate_class_names(names, expected, path)
+        _validate_role_class_names(names, config, role, path)
         class_sets[role.value] = names
         report[role.value] = {
             "path": str(path),
@@ -1351,7 +1379,7 @@ def validate_models(config: dict[str, Any]) -> dict[str, Any]:
                 raise RuntimeError(
                     f"TensorRT engine has no embedded class metadata: {engine_path}"
                 )
-            _validate_class_names(engine_names, expected, engine_path)
+            _validate_role_class_names(engine_names, config, role, engine_path)
             source_names = class_sets.get(role.value)
             if source_names is not None and source_names != engine_names:
                 raise ValueError(
@@ -1388,7 +1416,8 @@ def validate_models(config: dict[str, Any]) -> dict[str, Any]:
                 "backend": "TensorRT" if selected.suffix.lower() == ".engine" else "PyTorch",
                 "path": str(selected),
             }
-    if class_sets[ViewRole.FIRST_PERSON.value] != class_sets[ViewRole.THIRD_PERSON.value]:
+    if (_role_class_names(config, ViewRole.FIRST_PERSON) is None
+            and class_sets[ViewRole.FIRST_PERSON.value] != class_sets[ViewRole.THIRD_PERSON.value]):
         raise ValueError("第一/第三人称模型的规范化类别表不一致")
     runtime["temporal_participant_segmentation"] = (
         validate_temporal_segmentation_runtime(config)
@@ -1510,9 +1539,8 @@ class RoleScanner:
             self.initialization_phase = "class_names"
             self.names = {int(key): str(value).replace("-", "_")
                           for key, value in predictor.model.names.items()}
-            expected = int(self.config["models"]["expected_class_count"])
-            if len(self.names) != expected:
-                raise ValueError(f"{self.model_path} 不是 {expected} 类模型")
+            _validate_role_class_names(_normalized_class_names(self.names), self.config,
+                                       self.role, self.model_path)
             self.initialization_phase = "prediction_branch"
             if self.prediction_end2end is not None:
                 observed = getattr(predictor.model, "end2end", None)

@@ -121,3 +121,34 @@ def test_non_tensorrt_mode_still_requires_source_weights(tmp_path):
 
     with pytest.raises(FileNotFoundError, match="first_person 模型不存在"):
         detection.validate_models(config)
+
+
+def test_explicit_append_only_role_upgrade_validates_each_actual_engine(tmp_path, monkeypatch):
+    _install_fake_tensorrt(monkeypatch)
+    config = _config(tmp_path)
+    old = [v.replace("-", "_") for v in CLASSES.values()]
+    new = old + ["pipette_rack", "pipette_tip_box"]
+    config["models"]["class_names_by_role"] = {"first_person": old, "third_person": new}
+    def metadata(path):
+        names = new if path.name.startswith("third") else old
+        return b"plan", {"batch": 4, "names": names}, "ultralytics"
+    monkeypatch.setattr(detection, "_tensorrt_plan_and_metadata", metadata)
+    report = detection.validate_models(config)
+    assert report["first_person"]["class_count"] == 21
+    assert report["third_person"]["class_count"] == 23
+    config["models"]["class_names_by_role"]["third_person"] = old + ["wrong", "other"]
+    with pytest.raises(ValueError, match="explicit role ontology"):
+        detection.validate_models(config)
+
+
+@pytest.mark.parametrize("values", [
+    {}, {"first_person": ["a"]},
+    {"first_person": ["a"], "third_person": ["b", "a"]},
+    {"first_person": ["a"], "third_person": ["a", "a"]},
+    {"first_person": [], "third_person": []},
+])
+def test_role_ontology_rejects_missing_reordered_or_duplicate_classes(tmp_path, values):
+    config = _config(tmp_path)
+    config["models"]["class_names_by_role"] = values
+    with pytest.raises(ValueError):
+        detection._role_class_names(config, detection.ViewRole.FIRST_PERSON)

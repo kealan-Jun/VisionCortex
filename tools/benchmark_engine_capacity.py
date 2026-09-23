@@ -91,7 +91,9 @@ def model_identities(config: dict) -> dict:
         if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
             raise RuntimeError(f"Model identity changed while reading: {key}")
         if key.endswith("_engine"):
-            sidecar = path.with_suffix(".build.json")
+            sidecar = path.with_suffix(path.suffix + ".build.json")
+            if not sidecar.exists():
+                sidecar = path.with_suffix(".build.json")
             if sidecar.exists():
                 with sidecar.open("rb") as handle:
                     encoded = handle.read(1024 * 1024 + 1)
@@ -489,7 +491,9 @@ def scan(args: argparse.Namespace) -> None:
                 inference_batch_wait_ms=args.wait_ms, coarse_decode_lanes=[args.coarse_decode])
     # Owned benchmark outputs only. Source paths come solely from the manifest.
     config["storage"]["local_cache_root"] = str(output / "Cache")
-    config["storage"]["local_runtime_root"] = str(output / "Runtime")
+    runtime_root = getattr(args, "runtime_root", None)
+    config["storage"]["local_runtime_root"] = str(
+        runtime_root.resolve() if runtime_root else output / "Runtime")
     config = DeviceDayModels(config).config
     perf = config["performance"]
     identity = comparison_identity(config, args.manifest)
@@ -605,6 +609,8 @@ def main() -> None:
     s.add_argument("--config", type=Path, required=True)
     s.add_argument("--manifest", type=Path, required=True)
     s.add_argument("--output", type=Path, required=True)
+    s.add_argument("--runtime-root", type=Path,
+                   help="Local IPC/lock directory when benchmark outputs are on NAS")
     s.add_argument("--first-person-engine", type=Path)
     s.add_argument("--third-person-engine", type=Path)
     s.add_argument("--batch", type=int, default=16)
