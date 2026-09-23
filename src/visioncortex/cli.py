@@ -1839,6 +1839,7 @@ def prepare_engine_command(
     settings = load_config(config)
     perf = settings["performance"]
     from ultralytics import YOLO
+    from .engine_export import export_branch_options, verify_export_branch
 
     configured_candidates = perf.get("engine_batch_candidates")
     if configured_candidates is None:
@@ -1932,9 +1933,11 @@ def prepare_engine_command(
                 torch.cuda.empty_cache()
 
     for role in ("first_person", "third_person"):
+        branch_options = export_branch_options(settings, role)
         source = Path(settings["models"][role])
         destination = Path(settings["models"][f"{role}_engine"])
         if destination.is_file():
+            verify_export_branch(destination, branch_options)
             typer.echo(f"{role}: 已存在 {destination}")
             continue
         typer.echo(f"{role}: 从 {source} 导出 TensorRT；候选 batch={batch_candidates}")
@@ -1961,12 +1964,14 @@ def prepare_engine_command(
                         batch=batch,
                         workspace=workspace,
                         device=perf["device"],
+                        **branch_options,
                     )
                 )
                 if not exported.is_file():
                     raise RuntimeError(
                         f"TensorRT exporter returned a missing artifact: {exported}"
                     )
+                verify_export_branch(exported, branch_options)
                 del model
                 model = None
                 gc.collect()
@@ -2034,6 +2039,8 @@ def prepare_engine_command(
             "engine_sha256": hashlib.sha256(destination.read_bytes()).hexdigest(),
             "image_size": int(perf["image_size"]),
             "half": bool(perf["half"]),
+            "export_branch_options": branch_options,
+            "engine_end2end": verify_export_branch(destination, branch_options).get("end2end"),
             "dynamic": dynamic,
             "batch_candidates": batch_candidates,
             "selected_batch": selected_batch,
