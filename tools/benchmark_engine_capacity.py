@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import argparse
 import ast
+from collections import Counter
+from copy import deepcopy
 import hashlib
 import json
 import shutil
@@ -27,27 +29,102 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def fresh_output_directory(path: Path) -> Path:
+    """Never resume a candidate from someone else's checkpoint or receipt."""
+    output = path.resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    if any(output.iterdir()):
+        raise FileExistsError(f"Benchmark output directory must be empty: {output}")
+    return output
+
+
+def comparison_identity(config: dict, manifest: Path) -> dict:
+    """Pin comparison semantics while allowing only engine/batch replacements."""
+    normalized = deepcopy(config)
+    for key in ("batch_size", "fine_batch_size", "coarse_batch_size"):
+        normalized.get("performance", {}).pop(key, None)
+    models = normalized.get("models", {})
+    for key in list(models):
+        if key.endswith("_engine"):
+            del models[key]
+    for key in ("local_cache_root", "local_runtime_root"):
+        normalized.get("storage", {}).pop(key, None)
+    encoded = json.dumps(normalized, sort_keys=True, separators=(",", ":"),
+                         ensure_ascii=False).encode("utf-8")
+    repository = Path(__file__).resolve().parents[1]
+    commit = subprocess.run(["git", "-C", str(repository), "rev-parse", "HEAD"],
+                            check=True, capture_output=True, text=True).stdout.strip()
+    dirty = subprocess.run(["git", "-C", str(repository), "status", "--porcelain",
+                            "--untracked-files=all"], check=True,
+                           capture_output=True, text=True).stdout
+    return {"code_sha": commit, "git_dirty": bool(dirty),
+            "config_sha256": hashlib.sha256(encoded).hexdigest(),
+            "manifest_sha256": sha256(manifest)}
+
+
+def require_requested_batch(scanner, requested: int) -> None:
+    if not scanner.engine_build_batch or scanner.engine_build_batch < requested:
+        raise ValueError(f"Requested batch {requested} exceeds verified engine capacity "
+                         f"{scanner.engine_build_batch}; candidate capacity is NOT_PROVEN")
+    if scanner.batch_size < requested:
+        raise ValueError(f"Requested batch {requested} contracted to {scanner.batch_size}; "
+                         "candidate capacity is NOT_PROVEN")
+
+
+def record_engine_batches(histogram: Counter, scanner) -> None:
+    sizes = scanner.last_engine_batch_sizes
+    if not sizes or any(type(size) is not int or size < 1 for size in sizes):
+        raise ValueError("Actual engine batch sizes are missing; capacity is NOT_PROVEN")
+    histogram.update(sizes)
+
+
+def model_identities(config: dict) -> dict:
+    """Snapshot weights, engine bytes and any recorded candidate-build origin."""
+    identities = {}
+    for key, value in config["models"].items():
+        if not value or (key not in ("first_person", "third_person") and not key.endswith("_engine")):
+            continue
+        path = Path(value).resolve(strict=True)
+        before = path.stat()
+        identity = {"path": str(path), "sha256": sha256(path)}
+        after = path.stat()
+        if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+            raise RuntimeError(f"Model identity changed while reading: {key}")
+        if key.endswith("_engine"):
+            sidecar = path.with_suffix(".build.json")
+            if sidecar.exists():
+                with sidecar.open("rb") as handle:
+                    encoded = handle.read(1024 * 1024 + 1)
+                if len(encoded) > 1024 * 1024:
+                    raise ValueError(f"Engine build receipt exceeds 1 MiB: {key}")
+                identity["build_receipt"] = json.loads(encoded)
+                identity["build_receipt_sha256"] = hashlib.sha256(encoded).hexdigest()
+        identities[key] = identity
+    return identities
+
+
+def verify_model_identities(config: dict, expected: dict) -> None:
+    if model_identities(config) != expected:
+        raise RuntimeError("Model, engine or build receipt changed during the scan; comparison is NOT_PROVEN")
+
+
 def build(args: argparse.Namespace) -> None:
+    root = fresh_output_directory(args.output)
     import tensorrt as trt
 
-    root = args.output.resolve()
-    root.mkdir(parents=True, exist_ok=True)
     destination = root / f"batch-{args.batch}.engine"
-    if destination.exists():
-        raise FileExistsError(destination)
     source = args.weights.resolve(strict=True)
+    weights_sha256 = sha256(source)
     copied = root / "source.pt"
-    if not copied.exists():
-        shutil.copy2(source, copied)
-    if sha256(copied) != sha256(source):
+    shutil.copy2(source, copied)
+    if sha256(copied) != weights_sha256:
         raise ValueError("Frozen weights differ from requested weights")
     onnx = copied.with_suffix(".onnx")
-    if args.export_like_reference and onnx.exists():
-        raise FileExistsError("Use a fresh build directory for reference-compatible export")
-    if not onnx.exists():
-        # CPU export changes CUDA_VISIBLE_DEVICES in Ultralytics; isolate it
-        # so the TensorRT builder still sees the original GPU environment.
-        script = ("""import sys
+    if onnx.exists():
+        raise FileExistsError("Candidate builds cannot reuse an existing ONNX graph")
+    # CPU export changes CUDA_VISIBLE_DEVICES in Ultralytics; isolate it
+    # so the TensorRT builder still sees the original GPU environment.
+    script = ("""import sys
 from ultralytics import YOLO
 from ultralytics.engine.exporter import Exporter
 class GraphOnly(Exporter):
@@ -56,11 +133,11 @@ class GraphOnly(Exporter):
 GraphOnly(overrides=dict(format='engine', imgsz=int(sys.argv[2]), batch=4,
     dynamic=True, half=True, simplify=True, device=0))(model=YOLO(sys.argv[1], task='detect').model)
 """ if args.export_like_reference else
-            "import sys; from ultralytics import YOLO; "
-            "YOLO(sys.argv[1], task='detect').export(format='onnx', "
-            "imgsz=int(sys.argv[2]), batch=1, dynamic=True, simplify=False, "
-            "opset=17, device='cpu')")
-        subprocess.run([sys.executable, "-c", script, str(copied), str(args.image_size)], check=True)
+        "import sys; from ultralytics import YOLO; "
+        "YOLO(sys.argv[1], task='detect').export(format='onnx', "
+        "imgsz=int(sys.argv[2]), batch=1, dynamic=True, simplify=False, "
+        "opset=17, device='cpu')")
+    subprocess.run([sys.executable, "-c", script, str(copied), str(args.image_size)], check=True)
     with args.reference_engine.open("rb") as handle:
         length = struct.unpack("<I", handle.read(4))[0]
         if not 0 < length < 1024 * 1024:
@@ -106,12 +183,14 @@ GraphOnly(overrides=dict(format='engine', imgsz=int(sys.argv[2]), batch=4,
     metadata.update(batch=args.batch, dynamic=True, imgsz=[args.image_size, args.image_size])
     metadata.setdefault("args", {}).update(batch=args.batch, dynamic=True, half=True)
     header = json.dumps(metadata).encode()
+    if sha256(source) != weights_sha256 or sha256(copied) != weights_sha256:
+        raise ValueError("Source or frozen weights changed during the build; candidate will not be published")
     with destination.open("xb") as handle:
         handle.write(struct.pack("<I", len(header)))
         handle.write(header)
         handle.write(serialized)
     receipt = {"schema_version": "visioncortex-engine-capacity-build/1", "engine": str(destination),
-               "weights_sha256": sha256(source), "onnx_sha256": sha256(onnx),
+               "weights_sha256": weights_sha256, "onnx_sha256": sha256(onnx),
                "engine_sha256": sha256(destination), "tensorrt": trt.__version__,
                "min_opt_max_shapes": shapes, "workspace_gib": args.workspace_gib,
                "build_seconds": time.perf_counter() - started,
@@ -169,21 +248,29 @@ def infer(args: argparse.Namespace) -> None:
     monitor = ResourceMonitor(output / "telemetry.json", .5)
     monitor.start()
     try:
+        require_requested_batch(scanner, args.batch)
         batch = [packets[i % len(packets)] for i in range(args.batch)]
         for _ in range(5):
             scanner.infer(batch)
+        require_requested_batch(scanner, args.batch)
         torch.cuda.synchronize()
         start = time.perf_counter()
         frames, latencies, offset = 0, [], 0
+        engine_batches = Counter()
         while time.perf_counter() - start < args.seconds:
             batch = [packets[(offset + i) % len(packets)] for i in range(args.batch)]
             before = time.perf_counter()
             scanner.infer(batch)
             torch.cuda.synchronize()
             latencies.append(time.perf_counter() - before)
+            record_engine_batches(engine_batches, scanner)
             frames += len(batch)
             offset += len(batch)
         elapsed = time.perf_counter() - start
+        timed_effective_batch = scanner.batch_size
+        requested_batch_reached = bool(engine_batches) and (
+            min(engine_batches) >= args.batch and timed_effective_batch >= args.batch
+        )
         predictions = scanner.infer(packets)
         quality = [[box.model_dump(mode="json") for box in boxes] for boxes in predictions]
         receipt = {"schema_version": "visioncortex-engine-capacity-inference/1",
@@ -191,12 +278,19 @@ def infer(args: argparse.Namespace) -> None:
             "role": args.role, "engine_sha256": sha256(args.engine),
             "requested_batch": args.batch, "effective_batch": scanner.batch_size,
             "engine_capacity": scanner.engine_build_batch, "contractions": scanner.batch_contractions,
+            "timed_effective_batch": timed_effective_batch,
+            "timed_engine_batch_histogram": dict(sorted(engine_batches.items())),
+            "timed_engine_batch_histogram_scope": "Successful timed engine invocations only; excludes warmup and quality prediction",
+            "requested_batch_reached": requested_batch_reached,
+            "capacity_evidence": "PROVEN" if requested_batch_reached else "NOT_PROVEN",
             "frames": frames, "seconds": elapsed, "frames_per_second": frames / elapsed,
             "batch_latency_ms_mean": sum(latencies) / len(latencies) * 1000,
             "frame_identities": identities, "predictions": quality,
             "quality_evidence": "PARTIAL_EVIDENCE; comparison required; no human ground truth"}
         receipt_path.write_text(json.dumps(receipt, ensure_ascii=False, indent=2))
         print(json.dumps({k: v for k, v in receipt.items() if k not in {"frame_identities", "predictions"}}), flush=True)
+        if not requested_batch_reached:
+            raise RuntimeError("Timed inference did not sustain the requested batch; see result.json")
     finally:
         monitor.stop()
         scanner.close()
@@ -374,6 +468,7 @@ def scan(args: argparse.Namespace) -> None:
     Inputs are referenced in place; no raw media or NAS archive is written.
     Timing covers decode, inference, tracking and action audit, not rendering.
     """
+    output = fresh_output_directory(args.output)
     from visioncortex.config import load_config, load_manifest
     from visioncortex.device_day_models import DeviceDayModels, check_coverage, device_scan_plan
     from visioncortex.actions import generate_candidates
@@ -384,10 +479,6 @@ def scan(args: argparse.Namespace) -> None:
     from visioncortex.schemas import AlignmentTransform
     from visioncortex.video_io import probe_video
 
-    output = args.output.resolve()
-    output.mkdir(parents=True, exist_ok=True)
-    if (output / "result.json").exists():
-        raise FileExistsError(output / "result.json")
     config = load_config(args.config)
     for role in ("first_person", "third_person"):
         engine = getattr(args, role + "_engine")
@@ -401,6 +492,8 @@ def scan(args: argparse.Namespace) -> None:
     config["storage"]["local_runtime_root"] = str(output / "Runtime")
     config = DeviceDayModels(config).config
     perf = config["performance"]
+    identity = comparison_identity(config, args.manifest)
+    models = model_identities(config)
     manifest = load_manifest(args.manifest)
     views = manifest.views
     if any(view.video is None for view in views):
@@ -465,13 +558,30 @@ def scan(args: argparse.Namespace) -> None:
     start = time.perf_counter()
     with ThreadPoolExecutor(max_workers=len(views)) as pool:
         rows = list(pool.map(work, views))
+    elapsed = time.perf_counter() - start
+    verify_model_identities(config, models)
     receipt = {"scope": "Real-source per-camera concurrent decode/inference/tracking/action audit; excludes media rendering",
-               "phase": args.phase, "wall_seconds": time.perf_counter() - start, "rows": rows,
-               "models": {k: {"path": v, "sha256": sha256(Path(v))} for k, v in config["models"].items()
-                          if k in ("first_person", "third_person", "first_person_engine", "third_person_engine")},
+               "comparison_identity": identity,
+               "phase": args.phase, "wall_seconds": elapsed, "rows": rows,
+               "models": models,
                "performance": perf, "evidence_status": "PARTIAL_EVIDENCE; no human action ground truth"}
     (output / "result.json").write_text(json.dumps(receipt, ensure_ascii=False, indent=2))
     print(json.dumps({"phase": args.phase, "wall_seconds": receipt["wall_seconds"]}), flush=True)
+
+
+def compare(args: argparse.Namespace) -> None:
+    from visioncortex.fine_batch_acceptance import compare_fine_scans
+
+    output = args.output.resolve()
+    if output.exists():
+        raise FileExistsError(output)
+    receipt = compare_fine_scans(args.baseline, args.candidate, target_batch=args.target_batch)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("x", encoding="utf-8") as handle:
+        json.dump(receipt, handle, ensure_ascii=False, indent=2)
+    print(json.dumps(receipt, ensure_ascii=False), flush=True)
+    if receipt["comparison_status"] != "passed":
+        raise SystemExit(1)
 
 
 def main() -> None:
@@ -522,11 +632,22 @@ def main() -> None:
     m.add_argument("--workers", type=int, default=1)
     m.add_argument("--cache-frames", type=int, default=96)
     m.add_argument("--opencv-threads", type=int, default=1)
+    comparison = commands.add_parser("compare")
+    comparison.add_argument("--baseline", type=Path, required=True)
+    comparison.add_argument("--candidate", type=Path, required=True)
+    comparison.add_argument("--output", type=Path, required=True,
+                            help="New JSON receipt file; existing files are never overwritten")
+    comparison.add_argument("--target-batch", type=int, default=16)
     for command in (b, i):
         command.add_argument("--batch", type=int, required=True)
         command.add_argument("--image-size", type=int, default=640)
         command.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    if args.command == "compare":
+        if not 1 <= args.target_batch <= 512:
+            parser.error("target-batch must be in [1, 512]")
+        compare(args)
+        return
     if args.command == "scan":
         if not 1 <= args.batch <= 64 or not 1 <= args.wait_ms <= 2000:
             parser.error("batch must be in [1,64], wait-ms in [1,2000]")

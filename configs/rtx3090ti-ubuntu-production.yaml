@@ -455,12 +455,13 @@ performance:
   # Retain the existing batch-4 engines. A 2026-09-08 bounded 640px profile
   # successfully built batch 32, so four is not the GPU's memory ceiling.
   # That candidate changed several detection receipts and is not promoted.
-  # Runtime requests are split according to the loaded engine's real capacity.
+  # Fine requests match the accepted engines. Batch 16 remains a candidate
+  # until same-input physical-action and runtime batch receipts pass review.
   engine_batch_size: 4
   batch_size: 16
   coarse_batch_size: 16
   motion_probe_batch_size: 16
-  fine_batch_size: 16
+  fine_batch_size: 4
   # A budget of one caps a single-source fine scan at one decoder despite
   # the role limits below. Six permits up to four first-person or six
   # third-person decoders, bounded by the available physical work units.

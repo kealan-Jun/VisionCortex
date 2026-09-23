@@ -13,14 +13,43 @@ not modify or claim compatibility with the frozen Windows RTX 4090 package.
 - Local environment/engine/runtime volume: `/srv/sentinel-data`
 - NAS mount: `/home/x1/桌面/nas`
 
-Runtime phases may request batch 16, but the TensorRT FP16 dynamic engine is
-built with a maximum batch of 4. Ultralytics expands a dynamic 640 profile as
-far as 1920x1920 during engine construction; the former build batch of 16 ran
-out of builder memory in the YOLO attention block on this actual RTX 3090 Ti.
-The scanner reads the engine metadata and splits larger runtime requests into
-safe batches of at most 4. Batch or worker increases require a bounded,
-telemetry-backed acceptance run; they must not be changed during a production
-collection.
+The production fine engines and fine request are batch 4; the separate coarse
+engines support batch 32 with requests of 16. A fine request of 16 would be capped at 4 by
+`RoleScanner`. Keep that capacity guard: increasing a YAML value does not
+resize an engine. The former ordinary Ultralytics batch-16 dynamic build
+expanded the spatial profile to 1920x1920 and ran out of builder memory.
+Bounded 640px candidates can support larger batches, but previous candidates
+changed physical-action decisions and were not promoted to fine scanning.
+
+Fine-engine promotion requires same-input comparisons of frame identities,
+activity intervals and selected actions, plus actual physical batch and OOM
+receipts. The shared model pool reports cumulative physical batches separately
+from each caller's submissions; those submissions alone cannot prove batch 16.
+Benchmark in a maintenance window with fresh output directories and a fixed
+reviewed SHA. Keep production engine files intact, then restore the service
+with its accepted bindings after the experiment.
+
+`tools/benchmark_engine_capacity.py build --export-like-reference` creates an
+isolated candidate with bounded image shapes; use the registered role weights,
+the matching production reference engine, `--batch 16 --image-size 640`, and a
+new output directory for each role. Run `scan --phase fine` twice with the same
+local manifest, configuration, window, decode mode and `--wait-ms`: baseline
+`--batch 4`, then candidate `--batch 16` with both candidate engine overrides.
+Use the local profile so the experiment cannot inherit NAS storage roots.
+Compare the completed runs without loading a model:
+
+```bash
+PYTHONPATH=src /srv/sentinel-data/VisionCortex3090Ti/.venv/bin/python tools/benchmark_engine_capacity.py compare \
+  --baseline /local/benchmark/Baseline --candidate /local/benchmark/Candidate \
+  --target-batch 16 --output /local/benchmark/Comparison.json
+```
+
+Missing identity/physical-batch evidence or changed actions prevents a passing
+comparison. Historical receipts remain historical; equal timestamps without
+equal decoded-pixel hashes do not establish identical inputs. A passing
+bounded comparison is `PARTIAL_EVIDENCE`, not a production promotion or human
+accuracy certificate; real workload concurrency and wider action coverage
+remain separate gates.
 
 The fine-scan profile sets six decode slots per scanner's role group, with
 per-source limits of four for first-person and six for third-person video. Setting

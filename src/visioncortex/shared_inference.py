@@ -4,6 +4,7 @@ Frame packets and returned boxes retain caller order. Tracking, temporal action
 logic and publication stay in the caller. This changes execution, not labels.
 """
 from concurrent.futures import Future, TimeoutError as FutureTimeout
+from collections import Counter
 import hashlib
 import json
 from queue import Queue, Empty, Full
@@ -25,6 +26,7 @@ class InferenceBroker:
         self.leases = 0
         self.calls = self.frames = self.mixed_calls = 0
         self.engine_batches = []
+        self.engine_batch_size_counts = Counter()
         self.thread = Thread(target=self._run, args=(factory,), daemon=True, name='shared-role-inference')
         self.thread.start()
         try:
@@ -72,6 +74,7 @@ class InferenceBroker:
                         self.frames += len(packets)
                         self.mixed_calls += len(group) > 1
                         self.engine_batches = list(getattr(scanner, 'last_engine_batch_sizes', []))
+                        self.engine_batch_size_counts.update(self.engine_batches)
                     offset = 0
                     for request, future in group:
                         future.set_result(output[offset:offset+len(request)])
@@ -141,6 +144,12 @@ class InferenceBroker:
             return {'scope': 'process_role_pool_cumulative_not_per_video', 'model_calls': self.calls,
                     'frames': self.frames, 'mixed_request_calls': self.mixed_calls,
                     'last_engine_batch_sizes': list(self.engine_batches), 'waiting_requests': self.queue.qsize(),
+                    'engine_batch_size_counts': {str(size): count for size, count in
+                                                 sorted(self.engine_batch_size_counts.items())},
+                    'engine_batch_size_max': max(self.engine_batch_size_counts, default=0),
+                    'effective_batch_size': self.scanner.batch_size,
+                    'oom_batch_contractions': [dict(item) for item in
+                                               getattr(self.scanner, 'batch_contractions', [])],
                     'worker_alive': self.thread.is_alive(), 'quarantined': self.stop.is_set(),
                     'model_component_seconds': getattr(self.scanner, 'component_timings', None).snapshot() if hasattr(self.scanner, 'component_timings') else {}}
 
@@ -154,7 +163,6 @@ class ScannerLease:
         self.component_timings = StageTimings()
         self.last_inference_batch_sizes = []
         self.exact_batch_padding_frames = 0
-        self.batch_contractions = []
 
     def __getattr__(self, name):
         return getattr(self.broker.scanner,name)

@@ -158,6 +158,15 @@ def test_rtx3090ti_profiles_preserve_fine_decode_capacity(mode):
     assert performance["fine_inference_workers_per_role"] == 3
 
 
+@pytest.mark.parametrize("mode", ["production", "local"])
+def test_rtx3090ti_fine_batch_matches_accepted_engine_capacity(mode):
+    profile = Path(__file__).resolve().parents[1] / "configs" / f"rtx3090ti-ubuntu-{mode}.yaml"
+    performance = load_config(profile)["performance"]
+
+    assert performance["fine_batch_size"] == performance["engine_batch_size"] == 4
+    assert performance["coarse_batch_size"] == 16
+
+
 def test_ubuntu_runtime_paths_and_engines_can_be_overridden(monkeypatch):
     profile = Path(__file__).resolve().parents[1] / "configs" / "rtx3090ti-ubuntu-production.yaml"
     monkeypatch.setenv("VISIONCORTEX_OUTPUT_ROOT", "/runtime/outputs")

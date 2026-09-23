@@ -86,6 +86,38 @@ def test_ultralytics_engine_metadata_caps_runtime_batch(tmp_path):
     assert _engine_build_batch(engine) == 8
 
 
+@pytest.mark.parametrize("capacity,expected_batches", [(4, [4] * 4), (16, [16]), (32, [16])])
+def test_requested_batch_16_executes_within_engine_capacity(
+    monkeypatch, tmp_path, default_config, capacity, expected_batches
+):
+    engine = tmp_path / "candidate.engine"
+    metadata = json.dumps({"batch": capacity, "dynamic": True}).encode()
+    engine.write_bytes(len(metadata).to_bytes(4, "little") + metadata + b"fake-plan")
+    calls = []
+
+    class FakeYolo:
+        names = {index: str(index) for index in range(21)}
+
+        def __init__(self, _path):
+            pass
+
+        def predict(self, *, source, **_kwargs):
+            calls.append(len(source))
+            return [SimpleNamespace(boxes=None, speed={}) for _ in source]
+
+    monkeypatch.setitem(sys.modules, "ultralytics", SimpleNamespace(YOLO=FakeYolo))
+    default_config["models"]["first_person_engine"] = str(engine)
+    default_config["performance"]["tensor_rt"] = "required"
+    from visioncortex.detection import RoleScanner
+
+    scanner = RoleScanner(ViewRole.FIRST_PERSON, default_config, batch_size=16)
+    packets = [SimpleNamespace(frame=np.zeros((8, 8, 3), dtype=np.uint8)) for _ in range(16)]
+    assert scanner.infer(packets) == [[] for _ in packets]
+    assert scanner.requested_batch_size == 16
+    assert scanner.batch_size == min(16, capacity)
+    assert scanner.last_engine_batch_sizes == calls == expected_batches
+
+
 def test_parallel_segment_probe_preserves_virtual_order(monkeypatch):
     view = ViewInput(
         view_id="fp",
