@@ -1,6 +1,8 @@
 import os
 from concurrent.futures import ThreadPoolExecutor
 
+import pytest
+
 from visioncortex.device_day_contract import artifact, atomic_json, DeviceDayLayout
 from visioncortex.device_day_models import DeviceDayModels
 from visioncortex import device_day_verification as module
@@ -90,3 +92,22 @@ def test_storage_capacity_does_not_limit_dynamic_yolo_lanes():
         for stage in ["vision", "stt", "understanding", "report"]:
             assert stage_worker_capacity(settings, stage, cameras) == cameras
     assert stage_worker_capacity({"camera_lanes": True}, "retention", 12) == 12
+
+
+@pytest.mark.parametrize("camera_count", [1, 2, 9])
+def test_vision_worker_capacity_matches_per_camera_slots(camera_count):
+    from visioncortex.device_day import stage_worker_capacity
+    settings = {"camera_lanes": True, "vision_jobs_per_camera": 2, "retention_io_workers": 2}
+    assert stage_worker_capacity(settings, "vision", camera_count) == camera_count * 2
+    for stage in ("stt", "understanding", "report"):
+        assert stage_worker_capacity(settings, stage, camera_count) == camera_count
+    assert stage_worker_capacity(settings, "retention", camera_count) == min(camera_count, 2)
+    settings.update(camera_lanes=False, vision_workers=3)
+    assert stage_worker_capacity(settings, "vision", camera_count) == 3
+
+
+@pytest.mark.parametrize("camera_jobs", [0, -1, True, 1.5, "2"])
+def test_vision_worker_capacity_rejects_invalid_per_camera_slots(camera_jobs):
+    from visioncortex.device_day import stage_worker_capacity
+    with pytest.raises(ValueError, match="positive integer"):
+        stage_worker_capacity({"camera_lanes": True, "vision_jobs_per_camera": camera_jobs}, "vision", 2)

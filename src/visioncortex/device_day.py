@@ -219,8 +219,14 @@ def stage_worker_capacity(settings, stage, camera_count):
     if not settings.get("camera_lanes"):
         return max(1, settings.get(stage + "_workers", defaults[stage]))
     capacity = max(1, camera_count)
-    # Camera lanes remain dynamic. Only bulk retention I/O may be capped,
-    # independently of GPU, STT and semantic executors.
+    if stage == "vision":
+        camera_jobs = settings.get("vision_jobs_per_camera", 1)
+        if isinstance(camera_jobs, bool) or not isinstance(camera_jobs, int) or camera_jobs < 1:
+            raise ValueError("vision_jobs_per_camera must be a positive integer")
+        # Queue claims enforce this per-camera limit; scan admission still
+        # applies the shared runtime vision resource limit to actual work.
+        capacity *= camera_jobs
+    # Bulk retention I/O has its own cap, independent of model executors.
     if stage == "retention":
         limit = settings.get("retention_io_workers", 0)
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:

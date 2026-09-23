@@ -15,14 +15,23 @@ class StageTimings:
             self.values[key] = self.values.get(key, 0) + value
 
     @contextmanager
-    def measure(self, key):
+    def measure(self, key, *, cpu=False):
         started = time.perf_counter()
+        cpu_started = time.thread_time() if cpu else None
         try:
             from .device_day_activity import phase
             with phase(key):
                 yield
         finally:
-            self.add(key, time.perf_counter() - started)
+            elapsed = time.perf_counter() - started
+            self.add(key, elapsed)
+            if cpu_started is not None:
+                consumed = time.thread_time() - cpu_started
+                prefix = key.removesuffix("_seconds")
+                self.add(f"{prefix}_thread_cpu_seconds", consumed)
+                # This includes I/O, locks and scheduling; it is not a NAS
+                # latency measurement or process-wide CPU accounting.
+                self.add(f"{prefix}_non_cpu_seconds", max(0.0, elapsed - consumed))
 
     def frames(self, frames):
         iterator = iter(frames)

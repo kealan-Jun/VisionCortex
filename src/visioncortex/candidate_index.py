@@ -107,6 +107,18 @@ class FineFrameIndex:
     def __init__(self, path: Path):
         self.path = path
 
+    def iter_local_times(self, view_id: str) -> Iterable[float]:
+        """Read coverage keys without reparsing detection payloads."""
+        connection = sqlite3.connect(self.path)
+        try:
+            for (local_ms,) in connection.execute(
+                "SELECT local_ms FROM fine_frames WHERE view_id = ? ORDER BY local_ms",
+                (view_id,),
+            ):
+                yield float(local_ms)
+        finally:
+            connection.close()
+
     def iter_frames(
         self,
         view_id: str,
@@ -342,16 +354,16 @@ def _next_track_ids(connection: sqlite3.Connection) -> dict[str, int]:
     }
 
 
-def _existing_frame_at(
+def _existing_frame_payload_at(
     connection: sqlite3.Connection,
     view_id: str,
     local_ms: float,
-) -> FrameEvidence | None:
+) -> str | None:
     row = connection.execute(
         "SELECT payload_json FROM fine_frames WHERE view_id = ? AND local_ms = ?",
         (view_id, float(local_ms)),
     ).fetchone()
-    return FrameEvidence.model_validate_json(row[0]) if row else None
+    return str(row[0]) if row else None
 
 
 def _select_unified_track(
@@ -418,6 +430,7 @@ def ingest_fine_frame_ledgers(
     stitching_enabled: bool = True,
     maximum_stitch_gap_ms: float = 2500.0,
     maximum_center_distance: float = 0.12,
+    timings: Any | None = None,
 ) -> dict[str, Any]:
     """Append one fine-scan pass and stitch track identities when provable."""
 
@@ -434,17 +447,31 @@ def ingest_fine_frame_ledgers(
             # a nearby new object can steal an existing mapping and both
             # objects subsequently share one trajectory.
             assigned_tracks: set[int] = set()
+            # Assigned tracks cannot participate in another match this pass.
+            # Keep their endpoints in memory and publish each track once;
+            # unassigned tracks stay queryable in SQLite for stitching.
+            track_states: dict[int, list[Any]] = {}
             used_by_frame: set[int] = set()
             input_frames = 0
             replaced_frames = 0
             stitched_tracks: set[int] = set()
             new_tracks: set[int] = set()
-            for frame in iter_frame_evidence(path):
+            frames = iter(iter_frame_evidence(path))
+            while True:
+                try:
+                    if timings is None:
+                        frame = next(frames)
+                    else:
+                        with timings.measure("ledger_read_parse_seconds", cpu=True):
+                            frame = next(frames)
+                except StopIteration:
+                    break
                 input_frames += 1
-                overlapping = _existing_frame_at(
+                overlapping_payload = _existing_frame_payload_at(
                     connection, view.view_id, frame.local_ms
                 )
-                if overlapping is not None:
+                overlapping = None
+                if overlapping_payload is not None:
                     replaced_frames += 1
                 used_by_frame.clear()
                 normalized_detections = []
@@ -459,6 +486,8 @@ def ingest_fine_frame_ledgers(
                     center_distance: float | None = None
                     if unified_track_id is None:
                         if stitching_enabled:
+                            if overlapping is None and overlapping_payload is not None:
+                                overlapping = FrameEvidence.model_validate_json(overlapping_payload)
                             (
                                 unified_track_id,
                                 method,
@@ -505,51 +534,26 @@ def ingest_fine_frame_ledgers(
                     center_x, center_y = _box_center_from_norm(
                         detection.xyxy_norm
                     )
-                    existing_track = connection.execute(
-                        "SELECT first_local_ms, last_local_ms, last_center_x, "
-                        "last_center_y, source_refs_json FROM fine_tracks "
-                        "WHERE view_id = ? AND unified_track_id = ?",
-                        (view.view_id, unified_track_id),
-                    ).fetchone()
-                    source_ref = f"{source_pass}:{int(source_track_id)}"
-                    if existing_track:
-                        refs = set(json.loads(existing_track[4]))
-                        refs.add(source_ref)
-                        existing_last_ms = float(existing_track[1])
-                        update_last = float(frame.local_ms) >= existing_last_ms
-                        connection.execute(
-                            "UPDATE fine_tracks SET first_local_ms = ?, "
-                            "last_local_ms = ?, last_center_x = ?, last_center_y = ?, "
-                            "source_refs_json = ? "
+                    state = track_states.get(unified_track_id)
+                    if state is None:
+                        existing_track = connection.execute(
+                            "SELECT first_local_ms, last_local_ms, last_center_x, "
+                            "last_center_y, source_refs_json FROM fine_tracks "
                             "WHERE view_id = ? AND unified_track_id = ?",
-                            (
-                                min(float(existing_track[0]), float(frame.local_ms)),
-                                (
-                                    float(frame.local_ms)
-                                    if update_last
-                                    else existing_last_ms
-                                ),
-                                center_x if update_last else float(existing_track[2]),
-                                center_y if update_last else float(existing_track[3]),
-                                json.dumps(sorted(refs)),
-                                view.view_id,
-                                unified_track_id,
-                            ),
-                        )
-                    else:
-                        connection.execute(
-                            "INSERT INTO fine_tracks VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                            (
-                                view.view_id,
-                                unified_track_id,
-                                detection.class_name,
-                                float(frame.local_ms),
-                                float(frame.local_ms),
-                                center_x,
-                                center_y,
-                                json.dumps([source_ref]),
-                            ),
-                        )
+                            (view.view_id, unified_track_id),
+                        ).fetchone()
+                        source_ref = f"{source_pass}:{int(source_track_id)}"
+                        if existing_track:
+                            refs = set(json.loads(existing_track[4]))
+                            refs.add(source_ref)
+                            state = [detection.class_name, *map(float, existing_track[:4]), json.dumps(sorted(refs))]
+                        else:
+                            state = [detection.class_name, float(frame.local_ms), float(frame.local_ms),
+                                     center_x, center_y, json.dumps([source_ref])]
+                        track_states[unified_track_id] = state
+                    state[1] = min(state[1], float(frame.local_ms))
+                    if float(frame.local_ms) >= state[2]:
+                        state[2:5] = [float(frame.local_ms), center_x, center_y]
                 normalized = frame.model_copy(
                     update={"detections": normalized_detections}
                 )
@@ -574,6 +578,14 @@ def ingest_fine_frame_ledgers(
                         source_pass,
                     ),
                 )
+            connection.executemany(
+                "INSERT INTO fine_tracks VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(view_id, unified_track_id) DO UPDATE SET "
+                "first_local_ms = excluded.first_local_ms, last_local_ms = excluded.last_local_ms, "
+                "last_center_x = excluded.last_center_x, last_center_y = excluded.last_center_y, "
+                "source_refs_json = excluded.source_refs_json",
+                ((view.view_id, track_id, *state) for track_id, state in track_states.items()),
+            )
             indexed_frames = int(
                 connection.execute(
                     "SELECT COUNT(*) FROM fine_frames WHERE view_id = ?",

@@ -116,7 +116,11 @@ def device_scan_plan(view, coarse, config, info, start, end, sample_fps):
 
 
 def check_coverage(frames, start, end, fps):
-    times = sorted({f.local_ms for f in frames if start <= f.local_ms < end})
+    return check_coverage_times((f.local_ms for f in frames), start, end, fps)
+
+
+def check_coverage_times(timestamps, start, end, fps):
+    times = sorted({value for value in timestamps if start <= value < end})
     period = 1000.0 / fps
     expected = max(1, math.floor((end - start) / period))
     ratio = min(1.0, len(times) / expected)
@@ -464,33 +468,90 @@ class DeviceDayModels:
     def _index_fine(self, layout, recording, key, ordinal, view, info, fine, scan_windows, *, index_name="FineIndex"):
         from .candidate_index import create_fine_frame_index, fine_frame_coverage_report, ingest_fine_frame_ledgers, local_frame_index_path
         from .device_day import copy_verified
+        from .performance_stages import StageTimings
         perf = self.config["performance"]
+        sample_fps = min(info.fps, float(perf["detection_fps"]))
+        timings = StageTimings()
+
+        def coverage(timestamps):
+            times = sorted(timestamps)
+            return [check_coverage_times(times[bisect_left(times, a):bisect_left(times, b)], a, b, sample_fps)
+                    for a, b in scan_windows]
+
         if not perf.get("fine_frame_index_enabled"):
             if perf.get("fine_coverage_gate_enabled"):
                 raise ValueError("Existing fine coverage gate requires its frame index")
+            from .detection import iter_frame_evidence
+            coverage(frame.local_ms for frame in iter_frame_evidence(fine[view.view_id]))
             return fine, {"enabled": False}, []
         directory = layout.receipts / recording["recording_id"] / "YOLO" / key / f"{ordinal:04d}" / index_name
-        index = create_fine_frame_index(local_frame_index_path(self.config, directory, "FineIndex.sqlite3"))
-        ingest = ingest_fine_frame_ledgers(
-            index, [view], fine, source_pass="single-pass",
-            stitching_enabled=bool(perf.get("fine_track_stitching_enabled", False)),
-            maximum_stitch_gap_ms=float(perf.get("fine_track_stitch_max_gap_seconds", 2.5)) * 1000,
-            maximum_center_distance=float(perf.get("fine_track_stitch_max_center_distance", .12)))
-        report = fine_frame_coverage_report(
-            index, [view], {view.view_id: info}, {view.view_id: scan_windows},
-            sample_fps=min(info.fps, float(perf["detection_fps"])),
-            minimum_coverage_ratio=float(perf.get("fine_minimum_coverage_ratio", .98)),
-            maximum_gap_periods=float(perf.get("fine_maximum_gap_periods", 4)),
-            alignment_scales={view.view_id: 1.0})
+        with timings.measure("index_ingest_seconds", cpu=True):
+            index = create_fine_frame_index(local_frame_index_path(self.config, directory, "FineIndex.sqlite3"))
+            ingest = ingest_fine_frame_ledgers(
+                index, [view], fine, source_pass="single-pass", timings=timings,
+                stitching_enabled=bool(perf.get("fine_track_stitching_enabled", False)),
+                maximum_stitch_gap_ms=float(perf.get("fine_track_stitch_max_gap_seconds", 2.5)) * 1000,
+                maximum_center_distance=float(perf.get("fine_track_stitch_max_center_distance", .12)))
+        with timings.measure("coverage_query_seconds", cpu=True):
+            # Retain the original per-window, half-open gate as well as the
+            # index's aggregate gate. Read only keys, not frame JSON twice.
+            window_coverage = coverage(index.iter_local_times(view.view_id))
+            report = fine_frame_coverage_report(
+                index, [view], {view.view_id: info}, {view.view_id: scan_windows},
+                sample_fps=sample_fps,
+                minimum_coverage_ratio=float(perf.get("fine_minimum_coverage_ratio", .98)),
+                maximum_gap_periods=float(perf.get("fine_maximum_gap_periods", 4)),
+                alignment_scales={view.view_id: 1.0})
+        report["window_coverage"] = window_coverage
         report["ingest_passes"] = [ingest]
-        atomic_json(directory / "Manifest.json", report)
         if perf.get("fine_coverage_gate_enabled") and not report.get("formal_evidence_ready"):
+            report["component_timings"] = timings.snapshot()
+            atomic_json(directory / "Manifest.json", report)
             raise ValueError("Existing fine frame coverage evidence gate did not pass")
-        ledgers = index.materialize_ledgers(directory / "IndexedDetections", [view])
-        snapshot = directory / "FineIndex.sqlite3"
-        copy_verified(index.path, snapshot)
-        return ledgers, report, [layout.backend_artifact(p) for p in
-                                (snapshot, directory / "Manifest.json", *ledgers.values())]
+        with timings.measure("ledger_materialization_seconds", cpu=True):
+            # The subsequent candidate/audit/keyframe passes all read this
+            # local copy. Publish the same bytes once to durable receipts.
+            ledgers = index.materialize_ledgers(index.path.parent / "IndexedDetections", [view])
+
+        def publish(source, target):
+            relative = target.relative_to(layout.backend_root).as_posix()
+            safe_child(layout.backend_root, relative)
+            verified = copy_verified(source, target)
+            # copy_verified already read back the durable target and checked
+            # its digest. Do not hash the entire published file a third time.
+            return {"path": relative, "storage_root": "local_cache_root",
+                    "size_bytes": verified["size_bytes"], "sha256": verified["sha256"]}
+
+        with timings.measure("index_publication_seconds", cpu=True):
+            artifacts = [publish(index.path, directory / "FineIndex.sqlite3")]
+        with timings.measure("ledger_publication_seconds", cpu=True):
+            artifacts.extend(publish(path, directory / "IndexedDetections" / path.name) for path in ledgers.values())
+        report["component_timings"] = timings.snapshot()
+        report["timing_scope"] = {
+            "cpu": "calling_thread_only",
+            "non_cpu": "wall_minus_thread_cpu_includes_io_locks_scheduling_not_nas_attribution",
+            "nested": {"ledger_read_parse": "included_in_index_ingest"},
+            "excludes": "manifest_publication",
+        }
+        report["ledger_parse_passes"] = 1
+        report["audit_ledger_storage"] = "local_runtime_root"
+        atomic_json(directory / "Manifest.json", report)
+        artifacts.insert(1, layout.backend_artifact(directory / "Manifest.json"))
+        return ledgers, report, artifacts
+
+    def _audit_fine(self, view, info, fine, report, coarse_candidates, scan_windows):
+        from .actions import generate_candidates
+        try:
+            candidates = generate_candidates([view], fine, self.config)
+            intervals, audit = self._audit_activity(view, info, fine, candidates, coarse_candidates, scan_windows)
+            return candidates, intervals, audit, self._key_frame_choices(view, fine, audit)
+        finally:
+            # These are this job's rebuildable local exports, already verified
+            # at the durable backend paths. Do not retain another growing copy
+            # after the last audit reader, even if an audit gate fails.
+            if (report or {}).get("audit_ledger_storage") == "local_runtime_root":
+                for path in fine.values():
+                    path.unlink(missing_ok=True)
 
     def _recover_short_fine(self, error, layout, recording, key, ordinal, view, info,
                             transform, retention, scan_windows, previous_directory):
@@ -528,7 +589,6 @@ class DeviceDayModels:
             return self._vision(layout, retention, key, reader)
 
     def _vision(self, layout, retention, key, reader):
-        from .actions import generate_candidates
         from .detection import iter_frame_evidence, validate_models
         from .schemas import AlignmentTransform, ViewInput, ViewRole
         from .video_io import extract_clip
@@ -590,12 +650,6 @@ class DeviceDayModels:
                         view, info, transform, retention, "fine", coarse_windows,
                         float(perf["detection_fps"]), int(perf["image_size"]))
                 with timings.measure("fine_index_and_coverage_seconds"):
-                    coverage_frames = sorted(iter_frame_evidence(fine[view.view_id]), key=lambda frame: frame.local_ms)
-                    coverage_times = [frame.local_ms for frame in coverage_frames]
-                    for a, b in coarse_windows:
-                        selected = coverage_frames[bisect_left(coverage_times, a):bisect_left(coverage_times, b)]
-                        check_coverage(selected, a, b, min(info.fps, float(perf["detection_fps"])))
-                    del coverage_frames, coverage_times
                     try:
                         fine, fine_index_report, fine_index_artifacts = self._index_fine(
                             layout, recording, key, ordinal, view, info, fine, coarse_windows)
@@ -605,9 +659,8 @@ class DeviceDayModels:
                             transform, retention, coarse_windows, fine_dir)
                     audit_artifacts.extend(fine_index_artifacts)
                 with timings.measure("fine_activity_audit_seconds"):
-                    fine_candidates = generate_candidates([view], fine, self.config)
-                    audited_intervals, audit = self._audit_activity(view, info, fine, fine_candidates, candidates, coarse_windows)
-                    key_frame_choices = self._key_frame_choices(view, fine, audit)
+                    fine_candidates, audited_intervals, audit, key_frame_choices = self._audit_fine(
+                        view, info, fine, fine_index_report, candidates, coarse_windows)
             # Coarse positives remain in the audit ledger. Only the existing
             # fine audit and experiment-boundary logic may publish activity.
             active = merge_intervals(audited_intervals, start, end)

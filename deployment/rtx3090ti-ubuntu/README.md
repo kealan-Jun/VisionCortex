@@ -71,6 +71,40 @@ speedup. Throughput remains `NOT_PROVEN` without comparable real-video runs
 at budgets one and six, using the same inputs, models and cache conditions,
 with stage wall time, resource telemetry and output-quality checks.
 
+## Device/day fine-index throughput
+
+With `camera_lanes` enabled, vision executors use the observed camera count
+multiplied by `vision_jobs_per_camera`. Two slots per camera therefore create
+two executors for one camera and four for two cameras. Queue claims still
+enforce the per-camera limit, and shared `runtime.resource_limits.vision`
+admission still bounds active scans across processes. Executor capacity alone
+does not prove a corresponding GPU throughput increase.
+
+Fine ledgers are parsed once during indexing. Per-window coverage reads the
+local SQLite timestamps, retaining both the half-open window checks and the
+aggregate coverage gate. Track endpoints accumulate per source pass and are
+written once per track, preserving the injective source-track mapping and
+overlapping-frame replacement policy. Normalized ledgers are materialized on
+local runtime storage for subsequent audits; the same bytes and the SQLite
+snapshot are published to the existing backend receipt paths with independent
+read-back verification. Completed receipt validation and multiview queries
+continue to use those durable backend artifacts. The temporary local ledger
+copy is removed after the audit readers finish, including audit failures.
+
+Each fine-index `Manifest.json` and its batch report contain
+`component_timings` for ingestion, coverage queries, ledger materialization,
+index publication and ledger publication. `ledger_read_parse_seconds` is
+nested inside `index_ingest_seconds`; do not add them together. Each component
+also records calling-thread CPU and wall-minus-thread-CPU time. The remainder
+includes I/O, locks and scheduler waits; it is **not** a measurement of NAS
+latency alone. Manifest publication is excluded from these components but
+included in the outer `fine_index_and_coverage_seconds` stage time.
+
+Code synchronization does not reload a running Python service. Compare new
+task receipts after the service adopts the reviewed revision; local ledger
+replays establish output equivalence and local indexing cost, not production
+NAS speed or real-video model quality.
+
 ## Python environment
 
 The normal PATH exposes Python 3.13, while the project requires Python 3.11 or

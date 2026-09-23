@@ -1153,6 +1153,80 @@ def test_camera_lanes_claim_heads_and_do_not_wait_for_other_cameras(tmp_path, ca
     assert next_slice['recording_start_us'] == 2000
 
 
+@pytest.mark.parametrize("camera_count,vision_limit", [(1, 2), (2, 4), (2, 2)])
+def test_vision_camera_slots_keep_per_camera_and_shared_resource_limits(
+    device_config, monkeypatch, tmp_path, camera_count, vision_limit
+):
+    from collections import Counter
+    from concurrent.futures import ThreadPoolExecutor
+    from visioncortex.runtime_control import ResourceCoordinator
+    from visioncortex.scan_scheduler import scan_views_concurrently
+    from visioncortex.schemas import ViewInput
+
+    device_config['device_day'].update(camera_lanes=True, vision_jobs_per_camera=2)
+    device_config.setdefault('runtime', {})['resource_limits'] = {'vision': vision_limit}
+    runner = DeviceDayRunner(device_config, backend=object())
+    coordinator = ResourceCoordinator(runner.runtime_root.parent / 'state' / 'resources.sqlite3')
+    records = [{'recording_id': f'camera{camera}-slice{slice_index}', 'camera_key': f'camera{camera}',
+                'recording_start_us': slice_index * 1000, 'configured_role': 'first_person'}
+               for camera in range(camera_count) for slice_index in range(3)]
+    for record in records:
+        runner.queue.enqueue(record, 'v1')
+    monkeypatch.setattr(runner, '_prepare_stage', lambda *args: {r['recording_id'] for r in records})
+    jobs = camera_count * 2
+    started = threading.Barrier(jobs + 1)
+    saturated, release, stop = threading.Event(), threading.Event(), threading.Event()
+    lock = threading.Lock()
+    active, maximum = Counter(), Counter()
+    total_maximum = 0
+
+    def process(record, **kwargs):
+        started.wait(timeout=10)
+        view = ViewInput(view_id=record['recording_id'], role='first_person', video=tmp_path / 'unread.mp4')
+
+        def scan(*args, **kwargs):
+            nonlocal total_maximum
+            camera = record['camera_key']
+            with lock:
+                active[camera] += 1
+                maximum[camera] = max(maximum[camera], active[camera])
+                total_maximum = max(total_maximum, sum(active.values()))
+                if sum(active.values()) == min(jobs, vision_limit):
+                    saturated.set()
+            try:
+                assert release.wait(10)
+                return {}
+            finally:
+                with lock:
+                    active[camera] -= 1
+
+        scan_views_concurrently(runner.config, [view], {}, {}, tmp_path / view.view_id,
+                                phase='fine', scanner=scan)
+        return {'recording_id': record['recording_id'], 'status': 'completed'}
+
+    monkeypatch.setattr(runner, 'process', process)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(runner.run_once, {'recordings': records}, stage='vision', stop_event=stop)
+        try:
+            started.wait(timeout=10)
+            assert saturated.wait(10)
+            # All available camera slots are leased, while a third slice from
+            # every camera remains queued. No extra caller may bypass the cap.
+            assert runner.queue.claim('extra', camera_serial=True, camera_limit=2) is None
+            admitted = [r for r in coordinator.snapshot() if r['state'] == 'running']
+            assert sum(r['units'] for r in admitted) == min(jobs, vision_limit)
+        finally:
+            stop.set()
+            release.set()
+            started.abort()
+        result = future.result(timeout=10)
+    assert len(result['results']) == jobs
+    assert all(r['status'] == 'completed' for r in result['results'])
+    assert total_maximum == min(jobs, vision_limit)
+    assert all(count <= 2 for count in maximum.values())
+    assert runner.queue.snapshot()['counts'] == {'completed': jobs, 'queued': camera_count}
+
+
 def test_stage_preparation_shared_until_inventory_or_parent_changes(device_config, monkeypatch):
     runner = DeviceDayRunner(device_config, backend=object())
     calls = []
