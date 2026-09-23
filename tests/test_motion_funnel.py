@@ -645,6 +645,7 @@ def test_role_scanner_records_oom_batch_contraction(default_config):
     scanner._closed = False
     scanner.prediction_end2end = None
     scanner.config = default_config
+    scanner.nms_timeout_retries = 0
     scanner.model = FakeModel()
     scanner.names = {}
     scanner.batch_size = 8
@@ -809,6 +810,41 @@ def test_fine_prefetch_decodes_concurrently_but_emits_in_time_order(
         2,
         3,
     ]
+
+
+def test_completed_prefetch_futures_cannot_accumulate_all_later_chunks(monkeypatch, default_config):
+    view = ViewInput(view_id="fp", role=ViewRole.FIRST_PERSON, video=Path("fixture.mp4"))
+    info = VideoInfo(path=view.video, duration_ms=40000, fps=30, width=8, height=8,
+                     frame_count=1200, size_bytes=100)
+    release_first, second_finished, extra_started = (threading.Event() for _ in range(3))
+
+    def fake_frames(_view, _info, start_ms, *_args, **_kwargs):
+        if start_ms == 0:
+            assert release_first.wait(5)
+        elif start_ms == 1000:
+            second_finished.set()
+        elif not release_first.is_set():
+            extra_started.set()
+        yield int(start_ms / 1000), start_ms, np.zeros((8, 8, 3), dtype=np.uint8)
+
+    monkeypatch.setattr("visioncortex.detection.iter_view_sampled_frames", fake_frames)
+    default_config["performance"].update(fine_chunk_seconds=1, fine_first_person_decode_workers=2,
+                                        fine_decode_prefetch_frames=48)
+    output = queue.Queue()
+    worker = threading.Thread(target=_producer, args=(view, info, output, set(), default_config,
+        [(0, 40000)], 1, 8, False, "cpu", 1, (8, 8), None, "fine"))
+    worker.start()
+    try:
+        assert second_finished.wait(5)
+        assert not extra_started.wait(.2), "Finished future buffers escaped the admission window"
+    finally:
+        release_first.set()
+        worker.join(timeout=5)
+    assert not worker.is_alive()
+    items = list(output.queue)
+    assert [x.local_ms for x in items if isinstance(x, FramePacket)] == list(range(0, 40000, 1000))
+    assert len([x for x in items if isinstance(x, ChunkEnd)]) == 40
+    assert not any(isinstance(x, ProducerError) for x in items)
 
 
 def test_fine_prefetch_stops_other_decoders_after_failure(monkeypatch, default_config):
@@ -1039,6 +1075,7 @@ def test_short_microbatch_does_not_permanently_contract_engine_capacity(monkeypa
     scanner._prepared = True
     scanner._closed = False
     scanner.prediction_end2end = None
+    scanner.nms_timeout_retries = 0
     scanner.role = ViewRole.FIRST_PERSON
     scanner.config = default_config
     scanner.model_path = Path("model.engine")

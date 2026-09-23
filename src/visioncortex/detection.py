@@ -940,9 +940,12 @@ def _producer(
             return
 
         if ordered_decode:
-            prefetch_frames = max(
-                1, int(perf.get("fine_decode_prefetch_frames", 12))
-            )
+            from .decode_buffers import DEFAULT_FRAME_BUFFER_BYTES, frame_queue_limit
+            decode_workers = min(ordered_decode_workers, len(work_units))
+            prefetch_frames = frame_queue_limit(
+                perf.get("fine_decode_prefetch_frames", 12), info.width, info.height,
+                max_bytes=perf.get("fine_decode_prefetch_max_bytes", DEFAULT_FRAME_BUFFER_BYTES),
+                queues=decode_workers, bytes_per_pixel=3)
             stop_event = threading.Event()
             unit_queues: dict[int, queue.Queue[Any]] = {}
 
@@ -985,14 +988,19 @@ def _producer(
                     yield item
 
             executor = ThreadPoolExecutor(
-                max_workers=min(ordered_decode_workers, len(work_units)),
+                max_workers=decode_workers,
                 thread_name_prefix=f"fine-prefetch-{view.view_id}",
             )
             try:
                 futures: dict[int, Any] = {}
-                for chunk_index, (start_ms, end_ms) in enumerate(work_units):
-                    if chunk_index in completed_chunks:
-                        continue
+                waiting_units = iter((i, bounds) for i, bounds in enumerate(work_units)
+                                     if i not in completed_chunks)
+
+                def submit_next():
+                    next_unit = next(waiting_units, None)
+                    if next_unit is None:
+                        return
+                    chunk_index, (start_ms, end_ms) = next_unit
                     target: queue.Queue[Any] = queue.Queue(maxsize=prefetch_frames)
                     unit_queues[chunk_index] = target
                     futures[chunk_index] = executor.submit(
@@ -1002,6 +1010,11 @@ def _producer(
                         end_ms,
                         target,
                     )
+                # A finished future still owns its buffered frames. Admit a
+                # replacement only after consuming that unit, not merely when
+                # an executor thread becomes available.
+                for _ in range(decode_workers):
+                    submit_next()
                 for chunk_index, (start_ms, _end_ms) in enumerate(work_units):
                     if chunk_index in completed_chunks:
                         activity("source_unit_reused", chunk_index)
@@ -1009,7 +1022,10 @@ def _producer(
                         continue
                     emit_frames(ordered_frames(unit_queues[chunk_index]), start_ms)
                     futures[chunk_index].result()
+                    del unit_queues[chunk_index]
+                    del futures[chunk_index]
                     finish_unit(chunk_index, len(work_units))
+                    submit_next()
             except Exception:
                 stop_event.set()
                 raise
@@ -1984,11 +2000,16 @@ def scan_videos(
         duplicate_timestamp_frames: dict[str, int] = {
             view.view_id: 0 for view in role_views
         }
-        queue_depth = int(
+        requested_queue_depth = int(
             config["performance"].get(
                 "decode_queue_depth", config["performance"].get("frame_queue_size", 64)
             )
         )
+        from .decode_buffers import DEFAULT_FRAME_BUFFER_BYTES, frame_queue_limit
+        largest = max((infos[v.view_id] for v in role_views), key=lambda info: info.width * info.height)
+        queue_budget = config["performance"].get("decode_queue_max_bytes", DEFAULT_FRAME_BUFFER_BYTES)
+        queue_depth = frame_queue_limit(requested_queue_depth, largest.width, largest.height,
+                                        max_bytes=queue_budget)
         frame_queue: queue.Queue[Any] = queue.Queue(maxsize=max(1, queue_depth))
         frame_queue.activity_path = (
             work_dir
@@ -2277,7 +2298,9 @@ def scan_videos(
                         else []
                     ),
                     "max_observed_queue_depth": max_queue_size,
-                    "configured_queue_depth": queue_depth,
+                    "configured_queue_depth": requested_queue_depth,
+                    "effective_queue_depth": queue_depth,
+                    "decode_queue_max_bytes": queue_budget,
                     "inference_batch_wait_ms": round(batch_wait_seconds * 1000.0, 3),
                     "duplicate_timestamp_frames_removed": sum(
                         duplicate_timestamp_frames.values()

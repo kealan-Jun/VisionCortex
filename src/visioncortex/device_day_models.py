@@ -310,19 +310,25 @@ class DeviceDayModels:
             return checksum
 
     def scan_identity(self, retention, info, phase, scan_windows, fps, image_size):
+        from .scan_dependencies import scan_model_dependencies
         directory = Path(__file__).parent
         modules = ("shared_inference", "scan_scheduler", "detection", "detection_inference", "detection_duplicates", "video_io",
-                   "cuda_decode_admission", "source_frames", "schemas", "model_registry", "actions", "alignment")
+                   "cuda_decode_admission", "source_frames", "schemas", "model_registry", "actions", "alignment",
+                   "scan_dependencies", "decode_buffers")
         from .device_day_runtime_identity import compatible_performance
-        return {"schema_version": "visioncortex-device-scan/1", "phase": phase,
+        effective, models, detector, files = scan_model_dependencies(
+            self.config, retention["recording"]["configured_role"], phase)
+        detector["sha256"] = self._identity_hash(Path(detector["path"]))
+        return {"schema_version": "visioncortex-device-scan/2", "phase": phase,
                 "source": [{"kind": x["kind"], "sha256": x["retained"]["sha256"]}
                            for x in retention["sources"] if x["kind"] in {"video", "clock"}],
                 "view_id": retention["recording"]["camera_key"], "role": retention["recording"]["configured_role"],
                 "media": {"duration_ms": info.duration_ms, "fps": info.fps, "frame_count": info.frame_count},
                 "windows": scan_windows, "sample_fps": fps, "image_size": image_size,
-                "config": {k: compatible_performance(self.config.get(k)) if k == "performance" else self.config.get(k) for k in ("performance", "models", "segmentation")},
-                "model_hashes": {k: self._identity_hash(Path(v)) for k, v in self.config["models"].items()
-                                 if isinstance(v, str) and Path(v).is_file()},
+                "config": {"performance": compatible_performance(effective.get("performance")),
+                           "models": models, "segmentation": effective.get("segmentation")},
+                "selected_detector": detector,
+                "model_hashes": {key: self._identity_hash(path) for key, path in files.items()},
                 "code": {name: value for name in modules if (value := self._identity_hash(directory / f"{name}.py")) is not None}}
 
     def _scan(self, view, info, transform, retention, phase, scan_windows, fps, image_size):

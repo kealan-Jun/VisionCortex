@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from contextvars import copy_context
 from .schemas import ViewInput, ViewRole
+from .scan_dependencies import phase_config
 
 _COARSE_DECODE_LOCK = threading.Lock()
 _COARSE_CUDA_USERS = 0
@@ -25,17 +26,7 @@ def _admitted_scan(config, views, infos, transforms, work_dir, **kwargs):
     cuda_decode_admission; a preferred CUDA lane is not a reserved context.
     """
     global _COARSE_CUDA_USERS
-    if kwargs.get("phase", "fine") == "coarse":
-        # Both entry points use the same detector and action algorithm. An
-        # independently accepted coarse engine need not replace fine evidence
-        # inference, where small numeric shifts can change threshold decisions.
-        config = deepcopy(config)
-        for role in ("first_person", "third_person"):
-            engine = config.get("models", {}).get(f"{role}_coarse_engine")
-            if engine:
-                config["models"][f"{role}_engine"] = engine
-        if "coarse_inference_batch_wait_ms" in config["performance"]:
-            config["performance"]["inference_batch_wait_ms"] = config["performance"]["coarse_inference_batch_wait_ms"]
+    config = phase_config(config, kwargs.get("phase", "fine"))
     perf = config["performance"]
     limit = perf.get("coarse_cuda_max_concurrent_sources", 0)
     if isinstance(limit, bool) or not isinstance(limit, int) or not 0 <= limit <= 32:
