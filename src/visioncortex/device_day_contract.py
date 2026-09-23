@@ -34,8 +34,36 @@ DEPENDENCIES = {name: EXECUTION_STAGES[name].parents for name in STAGES}
 
 
 def digest(value: Any) -> str:
-    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
-                                     separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+    result = hashlib.sha256()
+    encoder = json.JSONEncoder(ensure_ascii=False, sort_keys=True,
+                               separators=(",", ":"), allow_nan=False)
+    for block in _json_blocks(value, encoder):
+        result.update(block)
+    return result.hexdigest()
+
+
+def _json_blocks(value, encoder, block_bytes=1024 * 1024):
+    """Bound serialization copies; the caller's object and one string remain owned.
+
+    iterencode preserves json.dumps formatting but avoids building another full
+    day-sized string and UTF-8 copy. A single large JSON string can exceed the
+    buffer limit; this is not a bound on the original parsed object.
+    """
+    buffer = bytearray()
+    for chunk in encoder.iterencode(value):
+        encoded = chunk.encode('utf-8')
+        if len(encoded) >= block_bytes:
+            if buffer:
+                yield bytes(buffer)
+                buffer.clear()
+            yield encoded
+        else:
+            buffer.extend(encoded)
+            if len(buffer) >= block_bytes:
+                yield bytes(buffer)
+                buffer.clear()
+    if buffer:
+        yield bytes(buffer)
 
 
 def media_sidecar_name(source: Path) -> str:
@@ -70,16 +98,24 @@ def read_json(path: Path) -> Any:
 
 
 def atomic_json(path: Path, value: Any) -> None:
-    atomic_bytes(path, (json.dumps(value, ensure_ascii=False, indent=2,
-                                  allow_nan=False) + "\n").encode())
+    encoder = json.JSONEncoder(ensure_ascii=False, indent=2, allow_nan=False)
+    def blocks():
+        yield from _json_blocks(value, encoder)
+        yield b'\n'
+    _atomic_blocks(path, blocks())
 
 
 def atomic_bytes(path: Path, value: bytes) -> None:
+    _atomic_blocks(path, (value,))
+
+
+def _atomic_blocks(path, blocks):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.partial")
     try:
         with temporary.open("xb") as handle:
-            handle.write(value)
+            for block in blocks:
+                handle.write(block)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)

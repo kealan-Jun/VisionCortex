@@ -560,37 +560,39 @@ class DeviceDayRunner:
                     recordings, segments, understandings, published_records = [], [], [], []
                     day_context = None
                     from .receipt_projection import ReceiptProjection
-                    for identifier, stages in ReceiptProjection(self.runtime_root).records(layout, STAGES, recording_id=recording_id):
-                        if not stages.get('retention'):
-                            continue
-                        retained = stages.get("retention") or {}
-                        record = retained.get("recording") or {}
-                        visual = stages.get("vision") or {}
-                        recordings.append({"recording_id": identifier, "start_us": record.get("recording_start_us"),
-                                           "end_us": record.get("recording_end_us"),
-                                           "capture_complete": record.get("capture_complete"), "capture_issues": record.get("issues", []),
-                                           "audio": retained.get("audio", {"status": "not_provided", "artifacts": []}),
-                                           "sources": retained.get("sources", []),
-                                           "processing": {k: visual.get(k) for k in ("status", "source_duration_ms", "batches", "scan_reports", "audit_artifacts", "clock_mapping")},
-                                           "transcription": {k: stages.get("stt", {}).get(k) for k in
-                                                             ("status", "outcome", "model_invocation", "comments", "chunks", "transcript_file")},
-                                           "stages": {s: {k: value.get(k) for k in ("status", "key", "message", "completed_at")}
-                                                      for s, value in stages.items()}})
-                        visual = stages.get("vision") or {}
-                        if (visual.get("status") == "completed" and retained.get("status") == "completed"
-                                and visual.get("vision_input_digest") == digest(visual_input(retained))
-                                and self._accepts_receipt(visual, self._key("vision", record, visual_input(retained)))):
-                            segments.extend(visual["segments"])
-                            published_records.append(record)
-                            semantic = stages.get("understanding") or {}
-                            stt = stages.get("stt") or {}
-                            if (semantic.get("status") == "completed" and semantic.get("vision_key") == visual.get("key")
-                                    and stt.get("status") == "completed" and self._accepts_receipt(stt, self._key("stt", record, retained))):
-                                if day_context is None:
-                                    day_context = load_day_context(layout)
-                                context = recording_context(day_context, record, stt)
-                                if self._accepts_receipt(semantic, self._key("understanding", record, {"vision": visual, "stt": stt, "context": context})):
-                                    understandings.extend(semantic.get("understandings", []))
+                    from contextlib import closing
+                    with closing(ReceiptProjection(self.runtime_root).iter_records(layout, STAGES, recording_id=recording_id)) as projected:
+                        for identifier, stages in projected:
+                            if not stages.get('retention'):
+                                continue
+                            retained = stages.get("retention") or {}
+                            record = retained.get("recording") or {}
+                            visual = stages.get("vision") or {}
+                            recordings.append({"recording_id": identifier, "start_us": record.get("recording_start_us"),
+                                               "end_us": record.get("recording_end_us"),
+                                               "capture_complete": record.get("capture_complete"), "capture_issues": record.get("issues", []),
+                                               "audio": retained.get("audio", {"status": "not_provided", "artifacts": []}),
+                                               "sources": retained.get("sources", []),
+                                               "processing": {k: visual.get(k) for k in ("status", "source_duration_ms", "batches", "scan_reports", "audit_artifacts", "clock_mapping")},
+                                               "transcription": {k: stages.get("stt", {}).get(k) for k in
+                                                                 ("status", "outcome", "model_invocation", "comments", "chunks", "transcript_file")},
+                                               "stages": {s: {k: value.get(k) for k in ("status", "key", "message", "completed_at")}
+                                                          for s, value in stages.items()}})
+                            visual = stages.get("vision") or {}
+                            if (visual.get("status") == "completed" and retained.get("status") == "completed"
+                                    and visual.get("vision_input_digest") == digest(visual_input(retained))
+                                    and self._accepts_receipt(visual, self._key("vision", record, visual_input(retained)))):
+                                segments.extend(visual["segments"])
+                                published_records.append(record)
+                                semantic = stages.get("understanding") or {}
+                                stt = stages.get("stt") or {}
+                                if (semantic.get("status") == "completed" and semantic.get("vision_key") == visual.get("key")
+                                        and stt.get("status") == "completed" and self._accepts_receipt(stt, self._key("stt", record, retained))):
+                                    if day_context is None:
+                                        day_context = load_day_context(layout)
+                                    context = recording_context(day_context, record, stt)
+                                    if self._accepts_receipt(semantic, self._key("understanding", record, {"vision": visual, "stt": stt, "context": context})):
+                                        understandings.extend(semantic.get("understandings", []))
                     from .device_day_content_paths import aliases, public_references
                     mapping = aliases(layout.root)
                     understandings = public_references(understandings, mapping)
