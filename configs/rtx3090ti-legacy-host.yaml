@@ -1,0 +1,5 @@
+# Discovery, HTTP-independent queues and existing host services stay available.
+# Automatic device/day execution belongs to the separately supervised companion.
+extends: rtx3090ti-ubuntu-production.yaml
+device_day:
+  enabled: false

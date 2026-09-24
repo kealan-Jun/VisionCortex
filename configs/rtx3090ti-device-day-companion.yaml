@@ -1,0 +1,7 @@
+# Dedicated automatic stage owner after a verified live handoff.
+# Shared camera/storage settings continue to come from the production profile.
+extends: rtx3090ti-ubuntu-production.yaml
+device_day:
+  enabled: true
+speech_recognition:
+  adapter_sha256: 7f80e9a0420904ee7c044a52ce98792fb19453ca7995cd18c03ccfd41353ed6f

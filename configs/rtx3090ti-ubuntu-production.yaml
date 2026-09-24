@@ -92,6 +92,7 @@ collection_ingest:
   camera_role_map:
     lab-video-1: first_person
     lab-video-3: third_person
+    lubancat-0282f88a_cam02: first_person
     lubancat-4df661d7_cam01: first_person
     lubancat-52d2ef0c_cam01: first_person
     lubancat-e8cc0cb3_cam01: first_person

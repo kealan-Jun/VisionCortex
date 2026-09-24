@@ -8,6 +8,7 @@
 
 | 相机 | 固化配置 | 本次画面复核 |
 | --- | --- | --- |
+| lubancat-0282f88a_cam02 | first_person | 2026-09-24 用户明确确认佩戴视角；据此补入自动处理配置，未将确认视角表述为实验行为质量验收 |
 | lubancat-4df661d7_cam01 | first_person | 8 月 27 日 13:32–13:38，近身白袖和戴手套双手，从操作者一侧拍摄 |
 | lubancat-52d2ef0c_cam01 | first_person | 8 月 27 日近身、倾斜台面视角；另有用户明确确认的 9 月 9 日第一人称实验画面 |
 | lubancat-e8cc0cb3_cam01 | first_person | 8 月 27 日近身衣物、椅子及台下画面，9 月 16 日椅背；保留既有绑定，画面独立确证为 PARTIAL_EVIDENCE |

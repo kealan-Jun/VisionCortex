@@ -736,51 +736,54 @@ class DeviceDayRunner:
         # This prevents thousands of not-yet-retained slices from blocking all
         # camera lanes on remote metadata reads every scheduling round.
         from .device_day_inplace import active, enqueue as enqueue_inplace
-        inplace_eligible = set()
-        legacy = {}
-        for identifier, record in durable.items():
-            if not active(self, record):
-                legacy[identifier] = record
-                continue
-            if date and self.layout(record).name[:10] != date:
-                continue
-            admitted = enqueue_inplace(self, record, stage)
-            if admitted is None:
-                legacy[identifier] = record
-            elif admitted:
-                inplace_eligible.add(identifier)
-        durable = legacy
         parent_versions = {}
+        ready = set(durable)
         if self.settings.get("camera_lanes") and DEPENDENCIES[stage]:
-            ready = set(durable)
             for parent in DEPENDENCIES[stage]:
                 with self.queues[parent].connect() as db:
                     versions = {row["recording_id"]: (row["revision"], row["completed_at"])
                                 for row in db.execute("SELECT recording_id,revision,completed_at FROM recordings WHERE status='completed'")}
                     parent_versions[parent] = versions
                     ready.intersection_update(versions)
-            durable = {key: row for key, row in durable.items() if key in ready}
         from .device_day_schedule import scheduling_record
         records = sorted((scheduling_record(
                             r,
                             focus_date=focus_date,
                             live_priority_seconds=self.settings.get('live_priority_seconds', 14400),
                          ) for r in durable.values()),
-                         key=lambda r: (r["processing_priority"], r["recording_start_us"], r["camera_key"]))
+                         key=lambda r: (r["processing_priority"],
+                                        -r["recording_start_us"] if r["processing_priority"] < 0 else r["recording_start_us"],
+                                        r["camera_key"]))
         queue = self.queues[stage]
         with queue.connect() as db:
             completed_revisions = {row['recording_id']: row['revision'] for row in
                                    db.execute("SELECT recording_id,revision FROM recordings WHERE status='completed'")}
             pending_states = {row['recording_id']: (row['revision'], row['status']) for row in
                               db.execute("SELECT recording_id,revision,status FROM recordings WHERE status!='completed'")}
-        eligible = set(inplace_eligible)
+        eligible = set()
+        legacy = set()
         for record in records:
             if stop_event is not None and stop_event.is_set():
                 return eligible
+            if not record.get("processable", record.get("available")):
+                continue
+            if date and self.layout(record).name[:10] != date:
+                continue
+            # Mode markers and legacy checkpoints may live on NAS. Inspect one
+            # source in queue order, then immediately expose its admission to
+            # other camera slots; a later slow source must not block ready work.
+            if active(self, record):
+                admitted = enqueue_inplace(self, record, stage)
+                if admitted is not None:
+                    if admitted:
+                        eligible.add(record["recording_id"])
+                        self._admitted[stage].add(record["recording_id"])
+                    continue
+            legacy.add(record["recording_id"])
+            if record["recording_id"] not in ready:
+                continue
             if (states.get(record['recording_id'], {}).get('state', 'ready') != 'ready'
                     and states[record['recording_id']].get('signature') == record.get('source_signature')):
-                continue
-            if not record.get("processable", record.get("available")):
                 continue
             # Reuse only readiness, never acceptance of source media. process()
             # still verifies exact prerequisite keys and artifact hashes before
@@ -871,8 +874,7 @@ class DeviceDayRunner:
             eligible.add(record["recording_id"])
             self._admitted[stage].add(record["recording_id"])
             self._record_readiness[stage][record["recording_id"]] = (scheduling_key, time.monotonic())
-        self._record_readiness[stage] = {k: v for k, v in self._record_readiness[stage].items() if k in durable}
-        self._admitted[stage].update(inplace_eligible)
+        self._record_readiness[stage] = {k: v for k, v in self._record_readiness[stage].items() if k in legacy}
         self._admitted[stage].intersection_update(eligible)
         return eligible
 

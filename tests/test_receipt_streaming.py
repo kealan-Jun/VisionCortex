@@ -71,7 +71,7 @@ def test_receipts_are_released_between_nas_reads_and_output_rows(tmp_path,monkey
     rows=projection.iter_records(layout,['retention'])
     assert next(rows)[0]=='a'
     assert not any(ref() is not None for ref in refs)
-    assert not list(projection.path.parent.glob('receipt-projection-*'))
+    assert not [p for p in projection.path.parent.glob('receipt-projection-*') if p.is_dir()]
     # Only one JSON parse per next(), rather than a list of all decoded rows.
     parse=original
     calls=[]
@@ -106,7 +106,7 @@ def test_full_rebuild_failure_keeps_previous_generation_and_cleans_spool(tmp_pat
     with sqlite3.connect(projection.path) as db:
         saved=[(x[0],json.loads(x[1])) for x in db.execute('SELECT id,payload FROM receipts ORDER BY id')]
     assert saved==before
-    assert not list(projection.path.parent.glob('receipt-projection-*'))
+    assert not [p for p in projection.path.parent.glob('receipt-projection-*') if p.is_dir()]
 
 
 def test_nas_reads_do_not_hold_projection_writer_lock(tmp_path,monkeypatch):
@@ -119,3 +119,80 @@ def test_nas_reads_do_not_hold_projection_writer_lock(tmp_path,monkeypatch):
         return original(path,*args,**kwargs)
     monkeypatch.setattr(Path,'read_text',read)
     assert len(projection.records(layout,['retention']))==3
+
+
+def test_large_receipt_uses_bounded_values_and_preserves_complete_evidence(tmp_path, monkeypatch):
+    """Exercise SQLite's real bind limit with small fixtures, without a 2GB test."""
+    from contextlib import contextmanager
+    from visioncortex import receipt_projection as module
+    layout, projection = fixture(tmp_path)
+    monkeypatch.setattr(module, '_CHUNK_BYTES', 256)
+    value = {'status': 'completed', 'dense_audit': [
+        {'frame': i, 'text': '实验🧪' * 12, 'score': i / 7, 'large_integer': 2**80}
+        for i in range(100)]}
+    source = layout.receipts/'a'/'retention.json'
+    source.write_text(json.dumps(value, ensure_ascii=False))
+    original_connection = module.connection
+    @contextmanager
+    def limited(*args, **kwargs):
+        with original_connection(*args, **kwargs) as db:
+            db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 4096)
+            yield db
+    monkeypatch.setattr(module, 'connection', limited)
+    original_read = Path.read_text
+    def read(path, *args, **kwargs):
+        assert path != source and path.stat().st_size <= 256, 'Large receipt read as one string'
+        return original_read(path, *args, **kwargs)
+    monkeypatch.setattr(Path, 'read_text', read)
+    assert dict(projection.records(layout, ['retention']))['a'] == {'retention': value}
+    with sqlite3.connect(projection.path) as db:
+        count, maximum = db.execute('SELECT count(*),max(length(payload)) FROM receipt_chunks').fetchone()
+    assert count > 1 and maximum <= 256
+    assert not [p for p in projection.path.parent.glob('receipt-projection-*') if p.is_dir()]
+
+
+def test_large_projection_failure_keeps_complete_previous_generation(tmp_path, monkeypatch):
+    from visioncortex import receipt_projection as module
+    layout, projection = fixture(tmp_path)
+    monkeypatch.setattr(module, '_CHUNK_BYTES', 64)
+    source = layout.receipts/'a'/'retention.json'
+    original = {'evidence': 'original' * 100}
+    source.write_text(json.dumps(original))
+    before = projection.records(layout, ['retention'])
+    with sqlite3.connect(projection.path) as db:
+        db.execute("CREATE TRIGGER fail_chunk BEFORE INSERT ON receipt_chunks WHEN NEW.ordinal=1 "
+                   "BEGIN SELECT RAISE(ABORT,'injected chunk failure'); END")
+    source.write_text(json.dumps({'evidence': 'replacement' * 100}))
+    with pytest.raises(sqlite3.DatabaseError):
+        projection.records(layout, ['retention'])
+    with module.connection(projection.path, readonly=True) as db:
+        saved = module._read_chunks(db.execute("SELECT payload FROM receipt_chunks WHERE id='a' ORDER BY ordinal"))
+    assert saved == dict(before)['a'] == {'retention': original}
+    assert not [p for p in projection.path.parent.glob('receipt-projection-*') if p.is_dir()]
+
+
+def test_incremental_projection_clears_old_chunks_and_rejects_invalid_large_json(tmp_path, monkeypatch):
+    from visioncortex import receipt_projection as module
+    layout, projection = fixture(tmp_path)
+    monkeypatch.setattr(module, '_CHUNK_BYTES', 64)
+    source = layout.receipts/'a'/'retention.json'
+    source.write_text(json.dumps({'evidence': 'x' * 1000}))
+    projection.records(layout, ['retention'])
+    source.write_text('{"unfinished":' + ' ' * 1000)
+    with pytest.raises(ValueError, match='Invalid receipt JSON'):
+        projection.records(layout, ['retention'], recording_id='a')
+    source.write_text('{"status":"replacement"}')
+    assert dict(projection.records(layout, ['retention'], recording_id='a'))['a'] == {
+        'retention': {'status': 'replacement'}}
+    with sqlite3.connect(projection.path) as db:
+        assert db.execute("SELECT count(*) FROM receipt_chunks WHERE id='a'").fetchone()[0] == 0
+
+
+def test_chunked_projection_does_not_modify_legacy_worker_database(tmp_path):
+    root = tmp_path/'runtime'
+    root.mkdir()
+    legacy = root/'receipt-projection.sqlite3'
+    legacy.write_bytes(b'owned by the previous worker')
+    projection = ReceiptProjection(root)
+    assert projection.path != legacy
+    assert legacy.read_bytes() == b'owned by the previous worker'

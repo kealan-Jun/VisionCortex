@@ -3059,6 +3059,17 @@ def repair_key_material_presentation_command(
     typer.echo(json.dumps(receipt, ensure_ascii=False, indent=2))
 
 
+@app.command("device-day-companion")
+def device_day_companion_command(
+    config: Annotated[Path, typer.Option("--config", "-c", exists=True, dir_okay=False)],
+    handoff_receipt: Annotated[Path, typer.Option("--handoff-receipt", exists=True, dir_okay=False)],
+    legacy_config: Annotated[Path | None, typer.Option("--legacy-config", exists=True, dir_okay=False)] = None,
+):
+    """Own automatic device/day work after a verified live host handoff."""
+    from .device_day_companion import run_companion
+    run_companion(config, handoff_receipt, legacy_config_path=legacy_config)
+
+
 @app.command("worker")
 def worker_command(config: Annotated[Path, typer.Option("--config", "-c", exists=True, dir_okay=False)]):
     """Run the common durable worker without starting an HTTP server."""
