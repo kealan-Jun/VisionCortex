@@ -189,9 +189,11 @@ class Companion:
         from .shared_inference import close_pools
         status_path = self.root / 'state' / 'DeviceDayCompanionStatus.json'
         build = identity()
+        start_ticks = process_start_ticks(os.getpid())
         def publish(state, **extra):
             atomic_json(status_path, {'schema_version': 'visioncortex-device-day-companion/1',
                 'pid': os.getpid(), 'build': build, 'status': state, 'at': time.time(),
+                'process_start_ticks': start_ticks,
                 'config_path': str(self.config_path.resolve()),
                 'legacy_config_path': str(self.legacy_config_path.resolve()),
                 'handoff_receipt': str(self.handoff_path.resolve()),

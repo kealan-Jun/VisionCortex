@@ -5,7 +5,10 @@ execution metric. Neither is human ground truth or a current release receipt.
 """
 from datetime import datetime
 import html
+import json
+import math
 from pathlib import Path
+import time
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
@@ -20,6 +23,108 @@ WAIT_LABELS = {'paused_by_user': '按用户要求暂停',
                'upstream_failed': '上游失败待恢复', 'upstream_pending': '上游未完成',
                'provider_blocked': '云端账户不可用', 'night_window': '等待夜间窗口',
                'lease_recovery': '租约过期待恢复', 'pending_validation': '待校验调度'}
+
+
+def processing_service_status(config, *, now=None, proc_root=Path('/proc')):
+    """Read each owner's status independently; a stale host is not a stopped lane.
+
+    Only the companion's fresh heartbeat bound to a live process incarnation
+    proves it online. Never update WorkerStatus or infer completion/throughput.
+    """
+    now = time.time() if now is None else now
+    root = Path(config['storage']['local_runtime_root']) / 'state'
+
+    def read(name):
+        try:
+            value = json.loads((root / name).read_text())
+            return value if isinstance(value, dict) else {'status': 'unavailable'}
+        except FileNotFoundError:
+            return {'status': 'missing'}
+        except (OSError, ValueError):
+            return {'status': 'unavailable'}
+
+    def valid_time(value):
+        return type(value) in (int, float) and 0 <= value <= now + 5 and math.isfinite(value)
+
+    host = read('WorkerStatus.json')
+    host_at = host.get('at')
+    host_state = host.get('status')
+    if not isinstance(host_state, str):
+        host_state = 'unavailable'
+    if host_state == 'running':
+        host_state = ('unavailable' if not valid_time(host_at) else
+                      'heartbeat_expired' if now - host_at > 15 else 'running')
+    host = {'status': host_state if host_state in {
+        'running', 'heartbeat_expired', 'stopped', 'missing', 'unavailable'} else 'unavailable',
+        'heartbeat_at': host_at if valid_time(host_at) else None}
+
+    raw = read('DeviceDayCompanionStatus.json')
+    companion = {'status': 'unavailable', 'process_identity_verified': False}
+    result = {'observed_at': now, 'snapshot_expires_at': now + 90,
+              'companion': companion, 'host': host}
+    if not isinstance(raw.get('status'), str):
+        return result
+    if raw.get('status') in {'missing', 'unavailable'}:
+        companion['status'] = raw['status']
+        return result
+    pid, ticks, at = raw.get('pid'), raw.get('process_start_ticks'), raw.get('at')
+    if (raw.get('schema_version') != 'visioncortex-device-day-companion/1'
+            or raw.get('status') not in {'running', 'draining', 'stopped'}
+            or type(pid) is not int or pid <= 0 or type(ticks) is not int or ticks <= 0
+            or not valid_time(at)):
+        return result
+    companion.update(pid=pid, heartbeat_at=at)
+    if now - at > 15:
+        companion['status'] = 'expired'
+        return result
+    if raw['status'] == 'stopped':
+        companion['status'] = 'stopped'  # A recorded exit, not a claim about the host.
+        return result
+    try:
+        stat = (proc_root / str(pid) / 'stat').read_text().rsplit(')', 1)[1].split()
+        if int(stat[19]) != ticks or stat[0] in {'Z', 'X', 'x'}:
+            companion['status'] = 'unverified'
+            return result
+    except (OSError, ValueError, IndexError):
+        companion['status'] = 'unverified'
+        return result
+    companion.update(status=raw['status'], process_identity_verified=True,
+                     needs_attention=bool(raw.get('error') or raw.get('ancillary_errors')))
+    return result
+
+
+def render_service_status(data):
+    if not data:
+        return ''
+    companion = data['companion']
+    labels = {'running': '在线', 'draining': '正在收尾', 'expired': '状态已过期',
+              'unverified': '暂未确认运行', 'missing': '尚无状态记录',
+              'unavailable': '状态暂不可读', 'stopped': '已记录退出'}
+    host_labels = {'running': '心跳正常', 'heartbeat_expired': '心跳已过期',
+                   'stopped': '已记录退出', 'missing': '尚无心跳记录', 'unavailable': '状态暂不可读'}
+    checked = datetime.fromtimestamp(data['observed_at'], ZoneInfo('Asia/Shanghai')).strftime('%H:%M:%S')
+    label = labels.get(companion['status'], '状态暂不可读')
+    if companion.get('needs_attention'):
+        label += '，有状态待核查'
+    host_label = host_labels.get(data['host']['status'], '状态暂不可读')
+    return (f'<p><strong data-companion-status data-status-expiry="{data["snapshot_expires_at"]}">'
+            f'自动处理执行器：{label}</strong><small>最近核验：{checked}（北京时间）；这是定时更新的状态快照。</small></p>'
+            f'<details><summary>查看原宿主状态</summary><p>原宿主：{host_label}。'
+            '宿主心跳与自动处理执行器分别记录；心跳过期不等于处理已停止。</p></details>')
+
+
+SERVICE_STATUS_SCRIPT = """(() => {
+  const label = document.querySelector('[data-companion-status]');
+  if (!label) return;
+  const expires = Number(label.dataset.statusExpiry);
+  const refresh = () => {
+    if (!Number.isFinite(expires) || Date.now() / 1000 > expires) {
+      label.textContent = '自动处理执行器：状态已过期，请刷新核验（不代表已停止）';
+    }
+  };
+  refresh();
+  setInterval(refresh, 1000);
+})();"""
 
 
 def union_seconds(intervals):
@@ -141,6 +246,7 @@ class ArchiveOverview:
                 errors.append({'archive': root.name, 'reason': type(exc).__name__})
         self.cache = {k: v for k, v in self.cache.items() if k in seen}
         data = assemble(progress, archives, errors)
+        data['processing_services'] = processing_service_status(runner.config)
         data['archive_root'] = str(runner.archive_root.resolve())
         body = render(data).encode()
         atomic_json(runner.runtime_root / 'ArchiveOverview.json', data)
@@ -253,7 +359,7 @@ def render(data):
 <section id="Experiments"><h2>实验片段，从这里看</h2><nav class="date-chips">{activity_dates or '当前暂无已发布活动片段。'}</nav><p>选择日期，然后点击“打开实验视频”；“同一时段 · 多视角”可查看其他相机，包括未检出活动的对照画面。</p><small>以下是模型筛选结果，未作人工确认。每个片段都存放在 NAS 对应设备日的 ProcessedClips/Clips 中，展开“在 NAS 中的位置”可复制完整路径。</small></section>
 {''.join(ordered_details)}
 <div id="Operations"></div>
-<section><h2>当前运行情况</h2><p>原片、YOLO 按新分片持续处理。{night}无新增采集的日期不会被当作“无实验活动”。</p>{cloud}
+<section><h2>当前运行情况</h2>{render_service_status(data.get('processing_services'))}<p>原片、YOLO 按新分片持续处理。{night}无新增采集的日期不会被当作“无实验活动”。</p>{cloud}
 <ul>{running or '<li>当前没有有效运行任务，具体等待原因见各日期的阶段状态。</li>'}</ul>
 {progress.get('latency_html', '')}
 <p>采集端原视频软链接替换：{'已启用' if progress['capture_link_cleanup']['enabled'] else '尚未启用，原片可能仍有两份'}。</p>{'<details class="error"><summary>查看索引与队列读取异常（正在后台核对恢复）</summary><ul>'+errors+'</ul></details>' if errors else ''}</section>
@@ -264,4 +370,5 @@ def render(data):
 <dialog id="Playback"><form method="dialog"><button aria-label="关闭播放器">关闭</button></form><h2 id="PlaybackTitle">实验视频</h2><div id="PlaybackBody"></div></dialog>
 <style>header{{padding:16px 24px}}header p{{margin:6px 0 12px}}h2{{margin-top:0}}.date-chip{{border:1px solid #b9d4d7;padding:6px 12px;border-radius:8px;text-decoration:none;background:#edf7f5}}.date-chip b{{display:block;font-size:12px}}.play-button{{display:inline-block;padding:8px 14px;background:#1e4a52;color:white;border-radius:6px;text-decoration:none;white-space:nowrap;margin-bottom:6px}}button{{cursor:pointer}}.nas-location input{{font:12px monospace;max-width:100%;width:420px;box-sizing:border-box;padding:8px}}td small,td input{{overflow-wrap:anywhere}}dialog{{border:1px solid #bfd3d6;border-radius:12px;width:min(1320px,94vw);max-height:90vh;box-sizing:border-box;color:#112d32}}dialog::backdrop{{background:#102e35b3}}dialog form{{float:right}}dialog video{{display:block;width:100%;max-height:65vh;background:#132328}}.view-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,310px),1fr));gap:16px}}.view-grid article{{min-width:0;border:1px solid #d5e3e6;padding:12px;border-radius:8px}}.view-grid h3{{overflow-wrap:anywhere}}.view-grid video{{aspect-ratio:1.6;max-height:45vh}}.playback-controls{{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin:14px 0}}.playback-controls input{{flex:1;min-width:150px}}section[id]{{scroll-margin-top:12px}}</style>
 <script>{Path(__file__).with_name('web').joinpath('archive-playback.js').read_text()}</script>
+<script>{SERVICE_STATUS_SCRIPT}</script>
 <script>{Path(__file__).with_name('web').joinpath('archive-overview.js').read_text()}</script></body></html>'''

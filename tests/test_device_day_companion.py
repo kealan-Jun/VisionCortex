@@ -166,6 +166,8 @@ def test_shutdown_finishes_existing_job_and_never_sets_cancellation(tmp_path, mo
     status = json.loads((companion.root / 'state' / 'DeviceDayCompanionStatus.json').read_text())
     assert status['status'] == 'stopped'
     assert status['pipeline']['status'] == 'completed'
+    from visioncortex.device_day_companion import process_start_ticks
+    assert status['process_start_ticks'] == process_start_ticks(status['pid'])
 
 
 def test_companion_singleton_does_not_conflict_with_host_worker_lock(tmp_path, monkeypatch):

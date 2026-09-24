@@ -258,6 +258,9 @@ class DeviceDayRunner:
         from .device_day_engine_rollover import CompletedStageReceipts, CompletedVisionReceipts
         self._completed_vision_receipts = CompletedVisionReceipts(self.settings)
         self._completed_stage_receipts = CompletedStageReceipts(self.settings)
+        from .device_day_bindings import CompletedExecutionBindings
+        self._completed_execution_bindings = CompletedExecutionBindings(self.settings)
+        self._completion_hold_cache = {}
         from .device_day_cache_identity import execution_identity
         self._execution_identity = execution_identity(Path(__file__).read_text(encoding="utf-8"))
         from .device_day_inplace import execution_identity as inplace_identity
@@ -290,7 +293,10 @@ class DeviceDayRunner:
             self._hash_cache[identity] = file_hash(path)
         return self._hash_cache[identity]
 
-    def _key(self, stage: str, recording: dict, inputs: Any) -> str:
+    def _key(self, stage: str, recording: dict, inputs: Any, *, _binding=True) -> str:
+        binding = self._completed_execution_bindings.candidate(stage, recording) if _binding else None
+        original_inputs = inputs
+        config = self._completed_execution_bindings.config_for(self.config, binding) if binding else self.config
         directory = Path(__file__).parent
         sources = [directory / "device_day_contract.py", directory / "device_day_verification.py", Path(__file__)]
         from .stage_dependencies import DEVICE_SOURCES as dependencies
@@ -305,26 +311,26 @@ class DeviceDayRunner:
                 sources.append(directory / 'device_day_steps.py')
         keys = ("performance", "segmentation", "models", "alignment", "continuity") if stage == "vision" else ()
         from .device_day_runtime_identity import compatible_performance
-        settings = {key: compatible_performance(self.config.get(key)) if key == "performance" else self.config.get(key) for key in keys}
+        settings = {key: compatible_performance(config.get(key)) if key == "performance" else config.get(key) for key in keys}
         if stage == "stt":
-            settings["speech_recognition"] = deepcopy(self.config.get("speech_recognition"))
+            settings["speech_recognition"] = deepcopy(config.get("speech_recognition"))
             if settings['speech_recognition'] and settings['speech_recognition'].get('adapter_sha256'):
                 from .device_day_runtime_identity import compatible_runtime_hash
                 settings['speech_recognition']['adapter_sha256'] = compatible_runtime_hash(
                     directory / 'speech_qwen.py', settings['speech_recognition']['adapter_sha256'])
-            registry = Path(self.config.get("speech_recognition", {}).get("model_registry") or "configs/models/speech-recognition.json")
+            registry = Path(config.get("speech_recognition", {}).get("model_registry") or "configs/models/speech-recognition.json")
             if registry.is_file():
                 settings["model_registry_hash"] = self._hash(registry)
         if stage == "vision":
             settings["model_files"] = {k: {"path": v, "sha256": self._hash(v)}
-                                       for k, v in (self.config.get("models") or {}).items()
+                                       for k, v in (config.get("models") or {}).items()
                                        if isinstance(v, str) and Path(v).is_file()}
         if stage == "understanding":
-            mllm = self.config.get("mllm") or {}
+            mllm = config.get("mllm") or {}
             settings["mllm"] = {k: mllm.get(k) for k in (
                 "model", "provider", "base_url", "enabled", "max_images_per_group", "temperature")}
             from .scene_requests import request_policy
-            settings['request_policy'] = request_policy(self.config)
+            settings['request_policy'] = request_policy(config)
         # Scheduling metadata must not invalidate already sealed media or
         # force unrelated stages to rerun when camera capacity changes.
         stage_settings = {"schema_version": self.settings.get("schema_version", VERSION),
@@ -367,6 +373,10 @@ class DeviceDayRunner:
                       "code": [self._execution_identity if p == Path(__file__) else code_hash(p) for p in sources]}
         descriptor["code"] = [value for value in descriptor["code"] if value is not None]
         key = digest(descriptor)
+        if binding and not self._completed_execution_bindings.match_key(binding, key):
+            # A saved provider binding applies only to its exact completed
+            # execution. Changed inputs or code use the current provider/key.
+            return self._key(stage, recording, original_inputs, _binding=False)
         # Exact compatibility with the pre-verifier retention implementation:
         # copy_verified and retained_recording ASTs are byte-identical in their
         # semantics. Accept only the known old recipe with CURRENT source,
@@ -383,6 +393,8 @@ class DeviceDayRunner:
         return actual == expected or actual in self._key_aliases.get(expected, ())
 
     def _accepts_receipt(self, receipt, expected):
+        if self._completed_execution_bindings.requires(expected):
+            return self._completed_execution_bindings.accepts(receipt, expected)
         return (self._matches_key(receipt.get("key"), expected)
                 or self._completed_vision_receipts.accepts(receipt, expected)
                 or self._completed_stage_receipts.accepts(receipt, expected))
@@ -396,7 +408,11 @@ class DeviceDayRunner:
     def _load(self, path, key, layout):
         from .device_day_activity import phase
         with phase('prerequisites'):
-            return self._load_verified(path, key, layout)
+            receipt = self._load_verified(path, key, layout)
+            # Never execute a new provider under a historical provider's key
+            # when the pinned receipt or any of its artifacts is unavailable.
+            self._completed_execution_bindings.require_valid(receipt, key)
+            return receipt
 
     def _load_verified(self, path, key, layout):
         if not path.is_file():
@@ -437,7 +453,71 @@ class DeviceDayRunner:
                                priority=recording.get("processing_priority", 1), stop=stop_event):
             return self._observed_process(recording, stage=stage, retry=retry)
 
+    def _completion_hold(self, recording, stage):
+        """Pause one reviewed historical completion; never accept its result.
+
+        Only unchanged source, current input recipe and scheduling recipe are
+        held. New comments, upstream receipts or source revisions release it.
+        """
+        hold = self._completed_execution_bindings.held(stage, recording)
+        if hold is None:
+            return None
+        layout = self.layout(recording)
+        parents = {'stt': ('retention',), 'understanding': ('vision', 'stt'),
+                   'report': ('understanding',)}[stage]
+        paths = [self._receipt(layout, recording, parent) for parent in parents]
+        if stage == 'understanding':
+            paths.extend((layout.comments / 'Comment.jsonl', layout.comments / 'Protocol.json'))
+        from .device_day_inplace import marker
+        inplace = stage == 'stt' and marker(self, recording).is_file()
+        def metadata(path):
+            try:
+                stat = path.stat()
+                return (str(path), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+            except OSError as exc:
+                return (str(path), type(exc).__name__)
+        # Cache only this scheduling decision; _load still owns acceptance and
+        # byte verification. Changed local receipts invalidate the decision.
+        before = [metadata(path) for path in paths]
+        identity = digest([recording['source_signature'], before, inplace,
+                           self.config.get('mllm'), self.config.get('speech_recognition'), self.settings,
+                           self._execution_identity, self._inplace_execution_identity])
+        cache_key = (stage, recording['recording_id'])
+        cached = self._completion_hold_cache.get(cache_key)
+        if cached and cached[0] == identity:
+            return hold if cached[1] else None
+        try:
+            receipts = {parent: read_json(path) if path.is_file() else {}
+                        for parent, path in zip(parents, paths[:len(parents)], strict=True)}
+            context = load_context(layout, recording) if stage == 'understanding' else None
+            inputs = (receipts['retention'] if stage == 'stt' else receipts['understanding'] if stage == 'report'
+                      else receipts | {'context': context})
+            observed_key = self._key(stage, recording, inputs, _binding=False)
+            if inplace:
+                queue_key = digest(['inplace-queue/1', stage, recording['recording_id'],
+                                    recording.get('audio', {}).get('source_signature'),
+                                    self._key(stage, recording, {}, _binding=False)])
+            else:
+                queue_key = self._key(stage, recording, [receipts, context], _binding=False)
+        except (OSError, ValueError, KeyError, TypeError):
+            # A damaged historical input cannot authorize paid execution and
+            # must not prevent other records from being admitted this round.
+            return hold | {'reason': 'historical_completion_inputs_unreadable'}
+        matches = observed_key == hold['observed_key'] and queue_key == hold['observed_queue_key']
+        # Do not cache across a concurrent receipt/comment update.
+        if [metadata(path) for path in paths] == before:
+            self._completion_hold_cache[cache_key] = (identity, matches)
+        return hold if matches else None
+
     def _observed_process(self, recording, *, stage, retry):
+        needed = set(STAGES) if stage == 'all' else {stage}
+        for _ in STAGES:
+            needed.update(parent for name in list(needed) for parent in DEPENDENCIES[name])
+        held = [name for name in STAGES if name in needed and self._completion_hold(recording, name)]
+        if held:
+            return {'recording_id': recording['recording_id'], 'status': 'historical_completion_held',
+                    'held_stages': held, 'historical_receipts_verified': False,
+                    'message': '历史完成项在切换前已无法验证，保留原结果并暂停自动重算，等待单独审查'}
         layout = self.layout(recording)
         layout.create()
         try:
@@ -779,6 +859,8 @@ class DeviceDayRunner:
             # Mode markers and legacy checkpoints may live on NAS. Inspect one
             # source in queue order, then immediately expose its admission to
             # other camera slots; a later slow source must not block ready work.
+            if self._completion_hold(record, stage):
+                continue
             if active(self, record):
                 admitted = enqueue_inplace(self, record, stage)
                 if admitted is not None:
@@ -858,8 +940,10 @@ class DeviceDayRunner:
                 checkpoint_key = self._key(stage, record, receipt_inputs)
                 path = self._receipt(layout, record, stage)
                 checkpoint = read_json(path) if path.is_file() else {}
-                if self._completed_stage_receipts.accepts(checkpoint, checkpoint_key,
-                                                         queue_revision=previous_revision):
+                if (self._completed_stage_receipts.accepts(checkpoint, checkpoint_key,
+                                                          queue_revision=previous_revision)
+                        or self._completed_execution_bindings.accepts(
+                            checkpoint, checkpoint_key, queue_revision=previous_revision)):
                     # Preserve the original completed checkpoint, not a claim
                     # that this old result was executed by the new build. Any
                     # downstream consumer still verifies its actual bytes.
