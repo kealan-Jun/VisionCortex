@@ -1228,6 +1228,51 @@ def test_vision_camera_slots_keep_per_camera_and_shared_resource_limits(
     assert runner.queue.snapshot()['counts'] == {'completed': jobs, 'queued': camera_count}
 
 
+@pytest.mark.parametrize('stage', ['vision', 'stt'])
+def test_stop_between_claim_and_process_requeues_without_failure(device_config, monkeypatch, stage):
+    runner = DeviceDayRunner(device_config, backend=object())
+    record = {'recording_id': 'cancel-at-entry', 'camera_key': 'a_cam01',
+              'recording_start_us': 1789005600000000, 'configured_role': 'first_person',
+              'processable': True}
+    queue = runner.queues[stage]
+    queue.enqueue(record, 'same-input-revision')
+    monkeypatch.setattr(runner, '_prepare_stage', lambda *args: {record['recording_id']})
+    calls = []
+
+    def observed(record, **kwargs):
+        calls.append(record['recording_id'])
+        return {'recording_id': record['recording_id'], 'status': 'completed'}
+
+    monkeypatch.setattr(runner, '_observed_process', observed)
+    stop = threading.Event()
+    native_claim = queue.claim
+
+    def claim_then_stop(*args, **kwargs):
+        claimed = native_claim(*args, **kwargs)
+        stop.set()
+        return claimed
+
+    monkeypatch.setattr(queue, 'claim', claim_then_stop)
+    result = runner.run_once({'recordings': [record]}, stage=stage, stop_event=stop)
+    assert result['results'][0]['status'] == 'cancelled'
+    assert calls == []  # Cancelled at the real execution-context entry, before any stage work.
+    with queue.connect() as db:
+        row = db.execute('SELECT * FROM recordings').fetchone()
+        assert row['status'] == 'queued' and row['attempts'] == 0
+        assert row['lease_owner'] is None and row['lease_until'] is None
+        assert row['revision'] == 'same-input-revision' and row['completed_at'] is None
+        assert [r['state'] for r in db.execute('SELECT state FROM task_events')] == ['queued', 'running']
+
+    monkeypatch.setattr(queue, 'claim', native_claim)
+    stop.clear()
+    result = runner.run_once({'recordings': [record]}, stage=stage, stop_event=stop)
+    assert result['results'][0]['status'] == 'completed'
+    assert calls == [record['recording_id']]
+    with queue.connect() as db:
+        row = db.execute('SELECT * FROM recordings').fetchone()
+        assert row['status'] == 'completed' and row['attempts'] == 1
+
+
 def test_stage_preparation_shared_until_inventory_or_parent_changes(device_config, monkeypatch):
     runner = DeviceDayRunner(device_config, backend=object())
     calls = []

@@ -960,8 +960,16 @@ class DeviceDayRunner:
                 done, _ = wait(jobs, timeout=10, return_when=FIRST_COMPLETED)
                 for job in done:
                     record, started = jobs.pop(job)
+                    from .runtime_control import ExecutionCancelled
                     try:
                         result = job.result()
+                    except ExecutionCancelled as exc:
+                        # A stop can arrive after claim but before process()
+                        # enters its execution context / stage error handler.
+                        # Reuse the queue's cancellation path to release the
+                        # lease and refund this non-failure attempt.
+                        result = {"recording_id": record["recording_id"], "status": "cancelled",
+                                  "error_type": type(exc).__name__, "message": str(exc)[:1000]}
                     except Exception as exc:
                         result = {"recording_id": record["recording_id"], "status": "failed",
                                   "error_type": type(exc).__name__, "message": str(exc)[:1000]}
