@@ -620,7 +620,6 @@ class DeviceDayRunner:
                             if (visual.get("status") == "completed" and retained.get("status") == "completed"
                                     and visual.get("vision_input_digest") == digest(visual_input(retained))
                                     and self._accepts_receipt(visual, self._key("vision", record, visual_input(retained)))):
-                                segments.extend(visual["segments"])
                                 published_records.append(record)
                                 semantic = stages.get("understanding") or {}
                                 stt = stages.get("stt") or {}
@@ -631,6 +630,14 @@ class DeviceDayRunner:
                                     context = recording_context(day_context, record, stt)
                                     if self._accepts_receipt(semantic, self._key("understanding", record, {"vision": visual, "stt": stt, "context": context})):
                                         understandings.extend(semantic.get("understandings", []))
+                                # Only after every original receipt/key check:
+                                # publish a lighter derived view, preserving the
+                                # full authoritative receipt and semantic input.
+                                from .device_day_audit import compact_index_visual
+                                index_visual = compact_index_visual(layout, visual, recording_id=identifier)
+                                segments.extend(index_visual["segments"])
+                                recordings[-1]['processing'] = {k: index_visual.get(k) for k in (
+                                    "status", "source_duration_ms", "batches", "scan_reports", "audit_artifacts", "clock_mapping")}
                     from .device_day_content_paths import aliases, public_references
                     mapping = aliases(layout.root)
                     understandings = public_references(understandings, mapping)

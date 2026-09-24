@@ -752,14 +752,20 @@ class DeviceDayModels:
                 previous = right
             if previous < end:
                 intervals.append((previous, end, "inactive"))
+            fine_seconds = time.perf_counter() - fine_started if coarse_windows else 0
+            from .device_day_audit import persist
+            with timings.measure("audit_publication_seconds"):
+                audit_summary, audit_reference = persist(layout, recording["recording_id"], key, ordinal, audit)
+                audit_artifacts.append(audit_reference)
             batches.append({"start_ms": start, "end_ms": end, "coverage": coverage,
                             "media_coverage": media_coverage,
                             "scan_plan": scan_plan,
                             "fine_frame_index": fine_index_report,
                             "coarse_wall_seconds": coarse_seconds, "coarse_timing": coarse_timing, "fine_timing": fine_timing,
-                            "fine_wall_seconds": time.perf_counter() - fine_started if coarse_windows else 0,
+                            "fine_wall_seconds": fine_seconds,
                             "fine_scan": "completed" if coarse_windows else "skipped_no_coarse_activity",
-                            "activity_audit": audit, "coarse_candidates": [c.model_dump(mode="json") for c in candidates],
+                            "activity_audit": audit_summary, "activity_audit_ref": audit_reference,
+                            "coarse_candidates": [c.model_dump(mode="json") for c in candidates],
                             "fine_candidates": [c.model_dump(mode="json") for c in fine_candidates]})
             with timings.measure("materialization_seconds"):
                 for left, right, activity in intervals:
@@ -812,7 +818,7 @@ class DeviceDayModels:
                               "source_ref": main["retained"], "video": video, "key_frames": key_refs, "scene_frames": frame_refs,
                               "evidence_status": "PARTIAL_EVIDENCE", "physical_action_confirmed": False,
                               "classification_basis": "existing_fine_audit_and_device_boundaries_not_ground_truth",
-                              "activity_audit": audit,
+                              "activity_audit": audit_summary, "activity_audit_ref": audit_reference,
                               "sampling_coverage": coverage,
                               "visibility": "dark_or_obscured" if all(f["brightness"] < 5 for f in frame_refs) else "sampled_images_available",
                               "uncertainties": ["单设备活动筛选，不代表物理动作确认或完整实验召回；录像切点不是实验结束"]}

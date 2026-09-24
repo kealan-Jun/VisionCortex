@@ -127,12 +127,14 @@ def shared_analysis(views, infos, sources, config):
     clock_errors = _validate_capture_alignment(transforms, infos, sources, settings)
     quality = alignment_quality_report(views, infos, transforms, settings)
     candidates, coarse = [], []
+    from .device_day_audit import AuditReader
+    audits = AuditReader(config)
     for view in views:
         for source, info in zip(sources[view.view_id], infos[view.view_id].segments, strict=True):
             source['info'] = info
             seen = set()
             for batch in source['record']['processing'].get('batches') or []:
-                raw_candidates = [c for e in batch.get('activity_audit', {}).get('events', [])
+                raw_candidates = [c for e in audits.read(batch).get('events', [])
                                   for c in e.get('candidates', [])]
                 # Keep candidates rejected in a single view: the offline auditor
                 # must see both views before deciding. Enriched audit rows win.

@@ -45,12 +45,12 @@ def digest(value: Any) -> str:
 def _json_blocks(value, encoder, block_bytes=1024 * 1024):
     """Bound serialization copies; the caller's object and one string remain owned.
 
-    iterencode preserves json.dumps formatting but avoids building another full
-    day-sized string and UTF-8 copy. A single large JSON string can exceed the
-    buffer limit; this is not a bound on the original parsed object.
+    Compact digest subtrees use the stdlib C encoder. Pretty output retains
+    iterencode's exact whitespace. One individual large string can exceed the
+    block limit, as before; neither path duplicates the whole serialized day.
     """
     buffer = bytearray()
-    for chunk in encoder.iterencode(value):
+    for chunk in _json_fragments(value, encoder):
         encoded = chunk.encode('utf-8')
         if len(encoded) >= block_bytes:
             if buffer:
@@ -64,6 +64,90 @@ def _json_blocks(value, encoder, block_bytes=1024 * 1024):
                 buffer.clear()
     if buffer:
         yield bytes(buffer)
+
+
+def _json_subtree_fits(value, ancestors, *, budget=16384, nodes=512):
+    """Bound temporary C output without a second traversal of the whole day."""
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        nodes -= 1
+        budget -= 8
+        if nodes < 0 or budget < 0:
+            return False
+        if isinstance(item, str):
+            budget -= len(item) * 6  # covers UTF-8 and every JSON escape
+        elif isinstance(item, (list, tuple, dict)):
+            if type(item) not in (list, tuple, dict) or id(item) in ancestors or len(item) > nodes:
+                return False
+            if isinstance(item, dict):
+                pending.extend(item)
+                pending.extend(item.values())
+            else:
+                pending.extend(item)
+        elif isinstance(item, int):
+            budget -= item.bit_length() // 3 + 1
+        elif isinstance(item, float):
+            budget -= 24  # longest finite float spelling plus punctuation
+    # Cycles exhaust the node budget above; the streaming walker reports them.
+    return budget >= 0
+
+
+def _json_fragments(value, encoder):
+    # Pretty-printing cannot use the stdlib C encoder on Python 3.12. Preserve
+    # that proven stream and custom encoder behavior without extra traversal.
+    if (type(encoder) is not json.JSONEncoder or encoder.indent is not None
+            or encoder.item_separator != ',' or not encoder.check_circular
+            or encoder.ensure_ascii or encoder.key_separator not in (':', ': ')
+            or getattr(encoder.default, '__func__', None) is not json.JSONEncoder.default):
+        yield from encoder.iterencode(value)
+        return
+    ancestors = set()
+    def fragments(item):
+        container = isinstance(item, (list, tuple, dict))
+        if container and type(item) not in (list, tuple, dict):
+            yield from encoder.iterencode(item)
+            return
+        if container and id(item) in ancestors:
+            raise ValueError('Circular reference detected')
+        if not container or _json_subtree_fits(item, ancestors):
+            yield encoder.encode(item)  # indent=None selects the CPython C encoder
+            return
+        ancestors.add(id(item))
+        try:
+            first = True
+            yield '{' if isinstance(item, dict) else '['
+            if isinstance(item, dict):
+                items = sorted(item.items()) if encoder.sort_keys else item.items()
+                for key, child in items:
+                    if not isinstance(key, (str, int, float, bool, type(None))):
+                        if encoder.skipkeys:
+                            continue
+                        raise TypeError('keys must be str, int, float, bool or None, '
+                                        f'not {key.__class__.__name__}')
+                    # Let the same C encoder perform the stdlib's exact key
+                    # coercion, float spelling, escaping and NaN validation.
+                    key_text = encoder.encode({key: None})[1:-(len(encoder.key_separator) + 5)]
+                    yield ('' if first else ',') + key_text + encoder.key_separator
+                    first = False
+                    yield from fragments(child)
+            else:
+                for offset in range(0, len(item), 8):
+                    group = item[offset:offset + 8]
+                    if len(group) > 1 and _json_subtree_fits(group, ancestors):
+                        # Encode several adjacent small records in one C call.
+                        text = encoder.encode(group)
+                        yield ('' if first else ',') + text[1:-1]
+                        first = False
+                    else:
+                        for child in group:
+                            yield '' if first else ','
+                            first = False
+                            yield from fragments(child)
+            yield '}' if isinstance(item, dict) else ']'
+        finally:
+            ancestors.remove(id(item))
+    yield from fragments(value)
 
 
 def media_sidecar_name(source: Path) -> str:

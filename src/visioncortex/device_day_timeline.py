@@ -27,7 +27,9 @@ def link(archive, reference):
     return f'/api/device-days/{quote(archive, safe="")}/files/{quote(value, safe="/")}'
 
 
-def build_timeline(day, indexes):
+def build_timeline(day, indexes, *, config=None):
+    from .device_day_audit import AuditReader
+    audits = AuditReader(config)
     lo, hi = day_bounds(day)
     entries, recordings, seen, media = [], set(), set(), []
     for archive, index in indexes:
@@ -57,7 +59,7 @@ def build_timeline(day, indexes):
                             'start_us': start, 'end_us': end, 'activity': segment['activity'],
                             'start_ms': segment.get('start_ms'), 'end_ms': segment.get('end_ms'),
                             'action_candidates': list({c['candidate_id']: c
-                                for e in segment.get('activity_audit', {}).get('events', [])
+                                for e in audits.read(segment).get('events', [])
                                 for c in e.get('candidates', [])
                                 if c['local_start_ms'] <= segment['end_ms'] and c['local_end_ms'] >= segment['start_ms']}.values()),
                             'clock_ref': segment.get('clock_ref'),
@@ -125,7 +127,7 @@ def load_timeline(config, day, *, audit=False):
             indexes.append((name, read_json(path)))
         except (OSError, ValueError) as exc:
             errors.append({'archive': name, 'status': 'index_unavailable', 'error_type': type(exc).__name__})
-    result = build_timeline(day, indexes)
+    result = build_timeline(day, indexes, config=config)
     published = {(e['archive'], e['recording_id']) for e in result['entries']}
     result.update(discovered_recordings=len(records),
                   pending_recordings=sum((day+'_'+r['camera_key'], r['recording_id']) not in published for r in records),
