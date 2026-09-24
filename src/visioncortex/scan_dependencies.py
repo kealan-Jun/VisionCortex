@@ -3,6 +3,7 @@ from copy import deepcopy
 from pathlib import Path
 
 from .schemas import ViewRole
+from .detection_thresholds import prediction_confidence, role_thresholds
 
 
 def phase_config(config, phase):
@@ -10,6 +11,10 @@ def phase_config(config, phase):
     if phase != "coarse":
         return config
     effective = deepcopy(config)
+    models = effective.get("models", {})
+    if "confidence_by_role" in models or "coarse_confidence_by_role" in models:
+        # Fine-model calibration must not silently alter the retained coarse model.
+        models["confidence_by_role"] = role_thresholds(models.get("coarse_confidence_by_role", {}))
     for role in ViewRole:
         engine = effective.get("models", {}).get(f"{role.value}_coarse_engine")
         if engine:
@@ -40,7 +45,8 @@ def scan_model_dependencies(config, role, phase):
     detector_paths = {r.value + suffix for r in ViewRole
                       for suffix in ("", "_engine", "_coarse_engine")}
     models = {key: deepcopy(value) for key, value in effective["models"].items()
-              if key not in detector_paths}
+              if key not in detector_paths | {"confidence_by_role", "coarse_confidence_by_role"}}
+    models["confidence"] = prediction_confidence(effective, role)
     files = {key: Path(value) for key, value in models.items()
              if isinstance(value, str) and Path(value).is_file()}
     # A separate field avoids colliding with future producer model settings.

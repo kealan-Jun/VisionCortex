@@ -314,7 +314,7 @@ class DeviceDayModels:
         directory = Path(__file__).parent
         modules = ("shared_inference", "scan_scheduler", "detection", "detection_inference", "detection_duplicates", "video_io",
                    "cuda_decode_admission", "source_frames", "schemas", "model_registry", "actions", "alignment",
-                   "scan_dependencies", "decode_buffers")
+                   "scan_dependencies", "decode_buffers", "detection_thresholds")
         from .device_day_runtime_identity import compatible_performance
         effective, models, detector, files = scan_model_dependencies(
             self.config, retention["recording"]["configured_role"], phase)

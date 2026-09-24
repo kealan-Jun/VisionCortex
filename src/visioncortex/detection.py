@@ -1439,6 +1439,11 @@ def validate_models(config: dict[str, Any]) -> dict[str, Any]:
 
 
 class RoleScanner:
+    @property
+    def prediction_confidence(self) -> float:
+        from .detection_thresholds import prediction_confidence
+        return prediction_confidence(self.config, self.role)
+
     def __init__(
         self,
         role: ViewRole,
@@ -1500,7 +1505,7 @@ class RoleScanner:
         perf, model_cfg = self.config["performance"], self.config["models"]
         options = {
             "imgsz": self.image_size,
-            "conf": float(model_cfg["confidence"]),
+            "conf": self.prediction_confidence,
             "iou": float(model_cfg["iou"]),
             "max_det": int(model_cfg["max_detections"]),
             "device": perf["device"],
@@ -1839,6 +1844,9 @@ def scan_videos(
             "role": role.value,
             "scanner_id": scanner_id,
             "model_path": str(scanner.model_path) if scanner is not None else None,
+            "prediction_confidence": (
+                getattr(scanner, "prediction_confidence", None) if scanner is not None else None
+            ),
             "prediction_policy": prediction_policies.get(role),
             "backend": (
                 "motion_only"

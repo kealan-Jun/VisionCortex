@@ -58,6 +58,19 @@ def test_coarse_without_override_depends_on_fine_engine(setup):
     assert before["selected_detector"]["path"] == config["models"]["third_person_engine"]
 
 
+def test_fine_role_calibration_invalidates_only_affected_scan(setup):
+    config, _, _ = setup
+    before = {(r.value, phase): identity(setup, r.value, phase)
+              for r in ViewRole for phase in ("fine", "coarse")}
+    config['models']['confidence_by_role'] = {'first_person': .225}
+    changed = [key for key, value in before.items() if value != identity(setup, *key)]
+    assert changed == [('first_person', 'fine')]
+    before = {(r.value, phase): identity(setup, r.value, phase)
+              for r in ViewRole for phase in ("fine", "coarse")}
+    config['models']['coarse_confidence_by_role'] = {'third_person': .32}
+    assert [key for key, value in before.items() if value != identity(setup, *key)] == [('third_person', 'coarse')]
+
+
 def test_auto_fallback_and_pytorch_mode_track_selected_bytes(setup):
     config, _, _ = setup
     config["performance"]["tensor_rt"] = "auto"
