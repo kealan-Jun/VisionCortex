@@ -4,7 +4,9 @@ The host's disabled dispatcher and an explicit drained-thread receipt are the
 handoff fence. This process never acquires Worker.lock or starts a NAS scanner.
 """
 from copy import deepcopy
+from datetime import datetime
 import json
+import math
 import os
 from pathlib import Path
 import signal
@@ -50,11 +52,18 @@ def validate_handoff(config, config_path, receipt, *, legacy_config=None,
 
 class MonitorBridge:
     """Forward the host's existing local monitor snapshot, including after restart."""
-    def __init__(self, runtime_root):
+    def __init__(self, runtime_root, *, handoff=None, process_identity=process_start_ticks):
         self.path = Path(runtime_root) / 'state' / 'nas-recording-monitor.json'
         self.generation = None
+        self.handoff = handoff
+        self.process_identity = process_identity
 
     def poll(self, service, settings):
+        # The original host's camera lanes already publish directly to the
+        # catalog. Only its replacement (disabled dispatcher) needs this bridge.
+        if (self.handoff is not None
+                and self.process_identity(self.handoff['legacy_pid']) == self.handoff['legacy_start_ticks']):
+            return False
         try:
             stat = self.path.stat()
         except FileNotFoundError:
@@ -63,13 +72,40 @@ class MonitorBridge:
         if generation == self.generation:
             return False
         inventory = json.loads(self.path.read_text())
-        if not isinstance(inventory.get('recordings'), list):
+        if not isinstance(inventory, dict) or not isinstance(inventory.get('recordings'), list):
             raise ValueError('NAS monitor snapshot has no recording inventory')
         # A retry snapshot is a previous successful snapshot, not a fresh input
         # readiness observation. Keep its old catalog without refreshing it.
-        if inventory.get('monitor', {}).get('status') != 'watching':
+        monitor = inventory.get('monitor') or {}
+        if not isinstance(monitor, dict) or monitor.get('status') != 'watching':
             return False
-        service.observe(settings, inventory)
+        now = time.time()
+        try:
+            stamp = datetime.fromisoformat(monitor['observed_at'])
+            if stamp.tzinfo is None:
+                return False
+            observed = stamp.timestamp()
+            poll = float(monitor.get('poll_seconds',
+                settings.get('collection_ingest', {}).get('poll_seconds', 5)))
+            age = now - observed
+            if (not math.isfinite(age) or not math.isfinite(poll) or poll <= 0
+                    or age < -5 or age > max(30, 3 * poll)):
+                return False
+            discovery = {}
+            original_discovery = inventory.get('discovery') or {}
+            if not isinstance(original_discovery, dict):
+                return False
+            for record in inventory['recordings']:
+                key = record['recording_id']
+                info = dict(original_discovery.get(key, {}))
+                at = info.get('observed_at', observed)
+                if type(at) not in (int, float) or not 0 <= at <= now + 5 or not math.isfinite(at):
+                    return False
+                discovery[key] = info | {'observed_at': at}
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return False
+        # Replaying a stored observation never turns it into a current one.
+        service.observe(settings, inventory | {'discovery': discovery})
         self.generation = generation  # A failed write must be retried.
         return True
 
@@ -142,7 +178,7 @@ class Companion:
                          legacy_config_path=self.legacy_config_path)
         self.roots = self._roots(config)
         self.root = Path(config['storage']['local_runtime_root'])
-        self.bridge = MonitorBridge(self.root)
+        self.bridge = MonitorBridge(self.root, handoff=self.handoff)
         self.settings()
         self.service = (service_factory or DeviceDayService)(self.settings, threading.Lock())
         self.ancillaries = AncillaryIndexes(self.handoff, self.settings)

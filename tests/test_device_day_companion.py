@@ -1,5 +1,6 @@
 """Live handoff tests use local fake processes/services; no NAS, GPU or HTTP."""
 from copy import deepcopy
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import threading
@@ -68,12 +69,14 @@ def test_bridge_forwards_host_snapshot_even_when_host_dispatch_disabled(tmp_path
     class Service:
         def observe(self, settings, inventory):
             calls.append((settings, inventory))
-    snapshot = {'monitor': {'status': 'watching'}, 'recordings': [{'recording_id': 'new'}]}
+    at = datetime.now(timezone.utc)
+    snapshot = {'monitor': {'status': 'watching', 'observed_at': at.isoformat()},
+                'recordings': [{'recording_id': 'new'}]}
     atomic_json(bridge.path, snapshot)
     settings = {'device_day': {'enabled': True}}
     assert bridge.poll(Service(), settings)
     assert not bridge.poll(Service(), settings)
-    assert calls == [(settings, snapshot)]
+    assert calls == [(settings, snapshot | {'discovery': {'new': {'observed_at': at.timestamp()}}})]
     atomic_json(bridge.path, snapshot | {'monitor': {'status': 'retrying'}})
     assert not bridge.poll(Service(), settings)
     assert len(calls) == 1
@@ -81,7 +84,8 @@ def test_bridge_forwards_host_snapshot_even_when_host_dispatch_disabled(tmp_path
 
 def test_bridge_retries_uncommitted_snapshot(tmp_path):
     bridge = MonitorBridge(tmp_path)
-    atomic_json(bridge.path, {'monitor': {'status': 'watching'}, 'recordings': []})
+    atomic_json(bridge.path, {'monitor': {'status': 'watching',
+        'observed_at': datetime.now(timezone.utc).isoformat()}, 'recordings': []})
     class Service:
         calls = 0
         def observe(self, *_):
@@ -93,6 +97,60 @@ def test_bridge_retries_uncommitted_snapshot(tmp_path):
         bridge.poll(service, {})
     assert bridge.poll(service, {})
     assert service.calls == 2
+
+
+def test_bridge_skips_original_host_and_starts_after_incarnation_changes(tmp_path, monkeypatch):
+    monkeypatch.setattr('visioncortex.device_day_companion.time.time', lambda: 1000)
+    ticks = [123]
+    bridge = MonitorBridge(tmp_path, handoff={'legacy_pid': 42, 'legacy_start_ticks': 123},
+                           process_identity=lambda pid: ticks[0])
+    snapshot = {'monitor': {'status': 'watching', 'observed_at': '1970-01-01T00:16:35+00:00'},
+                'recordings': [{'recording_id': 'new'}]}
+    atomic_json(bridge.path, snapshot)
+    calls = []
+    class Service:
+        def observe(self, settings, inventory):
+            calls.append(inventory)
+    assert not bridge.poll(Service(), {})
+    assert not calls and bridge.generation is None
+    ticks[0] = 124  # Same PID, restarted host, now using disabled dispatcher profile.
+    assert bridge.poll(Service(), {})
+    assert calls[0]['discovery']['new']['observed_at'] == 995
+
+
+@pytest.mark.parametrize(('observed_at', 'poll'), [
+    ('1970-01-01T00:16:00+00:00', 5),  # 40 seconds old, threshold 30.
+    ('1970-01-01T00:15:30+00:00', 20),  # 70 seconds old, threshold 60.
+    ('1970-01-01T00:16:35', 5),  # No timezone.
+    ('1970-01-01T00:16:46+00:00', 5),  # Six seconds in the future.
+    ('broken', 5), (None, 5), ('1970-01-01T00:16:35+00:00', 'nan'),
+])
+def test_bridge_rejects_stale_or_invalid_snapshot_clock(tmp_path, monkeypatch, observed_at, poll):
+    monkeypatch.setattr('visioncortex.device_day_companion.time.time', lambda: 1000)
+    bridge = MonitorBridge(tmp_path)
+    atomic_json(bridge.path, {'monitor': {'status': 'watching', 'observed_at': observed_at,
+        'poll_seconds': poll}, 'recordings': [{'recording_id': 'new'}]})
+    class Service:
+        def observe(self, *_):
+            pytest.fail('Stale snapshot must not refresh the catalog or availability')
+    assert not bridge.poll(Service(), {})
+    assert bridge.generation is None
+
+
+def test_bridge_preserves_original_record_observation_and_poll_budget(tmp_path, monkeypatch):
+    monkeypatch.setattr('visioncortex.device_day_companion.time.time', lambda: 1000)
+    bridge = MonitorBridge(tmp_path)
+    atomic_json(bridge.path, {'monitor': {'status': 'watching',
+        'observed_at': '1970-01-01T00:16:00+00:00', 'poll_seconds': 20},
+        'recordings': [{'recording_id': 'old'}, {'recording_id': 'new'}],
+        'discovery': {'old': {'observed_at': 900, 'cohort': 'live_observation'}}})
+    calls = []
+    class Service:
+        def observe(self, settings, inventory):
+            calls.append(inventory)
+    assert bridge.poll(Service(), {})
+    assert calls[0]['discovery'] == {'old': {'observed_at': 900, 'cohort': 'live_observation'},
+                                      'new': {'observed_at': 960}}
 
 
 class DrainingService:
