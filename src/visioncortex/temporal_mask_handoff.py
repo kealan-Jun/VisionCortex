@@ -22,6 +22,7 @@ from PIL import Image
 from . import temporal_segmentation as temporal
 
 REQUEST_SCHEMA = "visioncortex-temporal-mask-request/1"
+OBSERVATION_REQUEST_SCHEMA = "visioncortex-temporal-mask-request/2"
 RESULT_SCHEMA = "visioncortex-temporal-mask-result/1"
 
 
@@ -30,14 +31,28 @@ def _hash(value: str) -> bool:
 
 
 def validate_request(request: dict, root: Path) -> None:
-    if request.get("schema_version") != REQUEST_SCHEMA:
+    version = request.get("schema_version")
+    if version not in {REQUEST_SCHEMA, OBSERVATION_REQUEST_SCHEMA}:
         raise ValueError("Unsupported temporal request")
     source = request["source"]
+    development = source["split"] in {"train", "val"}
+    if version == OBSERVATION_REQUEST_SCHEMA:
+        purpose = request.get("data_use", {}).get("purpose")
+        if purpose == "production_observation":
+            allowed = (source["split"] is None
+                       and source.get("schema_version") == "labprism-local-observation/1"
+                       and source.get("training_use_authorized") is False
+                       and source.get("independent_ground_truth") is False)
+        else:
+            allowed = purpose == "development" and development
+        if not allowed:
+            raise ValueError("Invalid observation purpose or training exposure")
+    elif not development:
+        raise ValueError("Version 1 requires development exposure identity")
     if (source["camera_role"] not in {"first_person", "third_person"}
-            or source["split"] not in {"train", "val"}
             or not source["camera_id"] or not _hash(source["source_sha256"])
             or not _hash(request["parent_result_sha256"])):
-        raise ValueError("Missing source, role or development exposure identity")
+        raise ValueError("Missing source, role or exposure identity")
     width, height = request["dimensions"]
     if any(type(v) is not int or not 1 <= v <= 16384 for v in (width, height)):
         raise ValueError("Invalid dimensions")
@@ -168,6 +183,8 @@ def run(request_path: Path, config: dict, output: Path) -> dict:
               "identity_across_windows": False, "quality_status": "unreviewed_model_proposals",
               "metrics": {"stage_seconds": time.perf_counter() - started,
                           "window_seconds": window_times, "accuracy": None, "temporal_quality": None}}
+    if request["schema_version"] == OBSERVATION_REQUEST_SCHEMA:
+        result["data_use"] = request["data_use"]
     (output / "result.json").write_text(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
     receipt = {"schema_version": "visioncortex-temporal-mask-receipt/1",
                "request_sha256": result["request_sha256"],

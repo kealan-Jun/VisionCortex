@@ -52,8 +52,14 @@ def test_reject_bad_input_before_gpu(payload, tmp_path, kind):
 
 
 @pytest.mark.parametrize('skip', [False, True])
-def test_real_raster_receipt_and_missing_frame_failure(payload, tmp_path, monkeypatch, skip):
+@pytest.mark.parametrize('observation', [False, True])
+def test_real_raster_receipt_and_missing_frame_failure(payload, tmp_path, monkeypatch, skip, observation):
     import torch
+    if observation:
+        payload['schema_version'] = handoff.OBSERVATION_REQUEST_SCHEMA
+        payload['data_use'] = {'purpose': 'production_observation'}
+        payload['source'].update(schema_version='labprism-local-observation/1', split=None,
+                                training_use_authorized=False, independent_ground_truth=False)
     class Predictor:
         reset = False
 
@@ -86,6 +92,7 @@ def test_real_raster_receipt_and_missing_frame_failure(payload, tmp_path, monkey
         assert not (output / 'receipt.json').exists()
     else:
         result = handoff.run(path, config, output)
+        assert result.get('data_use') == payload.get('data_use')
         first, second = [f['temporal_instances'][0] for f in result['frames']]
         assert first['visible_pixels'] == 48
         assert len(first['mask_contours']) == 2
@@ -96,3 +103,30 @@ def test_real_raster_receipt_and_missing_frame_failure(payload, tmp_path, monkey
         receipt = json.loads((output / 'receipt.json').read_text())
         assert receipt['files'][first['mask']['file']] == first['mask']['sha256']
     assert predictor.reset
+
+
+@pytest.mark.parametrize('bad', [None, 'legacy', 'test', 'evaluation', 'training', 'truth', 'schema', 'missing'])
+def test_explicit_observations_preserve_non_training_scope(payload, tmp_path, bad):
+    payload['schema_version'] = handoff.OBSERVATION_REQUEST_SCHEMA
+    payload['data_use'] = {'purpose': 'production_observation'}
+    payload['source'].update(schema_version='labprism-local-observation/1', split=None,
+                             training_use_authorized=False, independent_ground_truth=False)
+    if bad == 'legacy':
+        payload['schema_version'] = handoff.REQUEST_SCHEMA
+    elif bad == 'test':
+        payload['source']['split'] = 'test'
+    elif bad == 'evaluation':
+        payload['data_use']['purpose'] = 'evaluation'
+    elif bad == 'training':
+        payload['source']['training_use_authorized'] = True
+    elif bad == 'truth':
+        payload['source']['independent_ground_truth'] = True
+    elif bad == 'schema':
+        payload['source']['schema_version'] = 'unknown'
+    elif bad == 'missing':
+        del payload['data_use']
+    if bad:
+        with pytest.raises(ValueError):
+            handoff.validate_request(payload, tmp_path)
+    else:
+        handoff.validate_request(payload, tmp_path)
