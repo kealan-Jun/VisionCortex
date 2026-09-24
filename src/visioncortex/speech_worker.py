@@ -52,6 +52,23 @@ def file_record(path: Path) -> dict[str, Any]:
     return {"size": path.stat().st_size, "sha256": sha256(path)}
 
 
+def resolve_source(source):
+    """Resolve a mutable location only against an immutable content binding.
+
+    The request and all utterance/chunk checkpoints keep the same hash when
+    capture media is later read from its independently verified MetaVideo copy.
+    The normal verify_files gate still verifies actual bytes at this location.
+    """
+    if 'content_locator' not in source:
+        return source
+    located = read_json(Path(source['content_locator']))
+    if (located.get('binding') != source['binding'] or len(located.get('files', {})) != 1
+            or located.get('audio_file') not in located['files']
+            or located['files'][located['audio_file']] != source['content']):
+        raise ValueError('Audio location does not match sealed content binding')
+    return located | {'start_global_us': source['start_global_us'], 'playback_events': []}
+
+
 def verify_files(root: Path, files: dict[str, Any]) -> None:
     for name, expected in files.items():
         if Path(name).name != name or name in {"", ".", ".."} or "\\" in name:
@@ -155,7 +172,7 @@ def execute(request_path: Path, *, reuse: bool = True) -> None:
     request_hash = sha256(request_path)
     if sha256(Path(__file__)) != request["worker_sha256"]:
         raise ValueError("转写执行代码已变化，请重新提交")
-    source = request["source"]
+    source = resolve_source(request["source"])
     folder = Path(source["folder"])
     # Check resolved location again after queueing, including parent symlinks.
     if folder.resolve() != Path(source["resolved_folder"]):

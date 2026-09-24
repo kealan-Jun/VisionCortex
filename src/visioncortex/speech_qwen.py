@@ -184,7 +184,7 @@ def invoke(directory, request, *, reuse=True):
     started = time.monotonic()
     if request["worker_sha256"] != files.sha256(Path(__file__)):
         raise ValueError("Qwen ASR implementation changed after queueing")
-    source = request["source"]
+    source = files.resolve_source(request["source"])
     folder = Path(source["folder"])
     if folder.resolve() != Path(source["resolved_folder"]):
         raise ValueError("Audio source directory changed after queueing")

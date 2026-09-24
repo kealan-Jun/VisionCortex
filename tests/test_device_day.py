@@ -28,7 +28,7 @@ def device_config(default_config, tmp_path):
                                         camera_role_map={"a_cam01": "first_person", "b_cam02": "third_person"})
     config["storage"].update(archive_root=str(tmp_path / "archives"), local_cache_root=str(tmp_path / "cache"),
                               local_runtime_root=str(tmp_path / "runtime"))
-    config["device_day"].update(enabled=True, vision_workers=2, understanding_workers=2)
+    config["device_day"].update(enabled=True, vision_workers=2, understanding_workers=2, inplace_preprocessing=False)
     return config
 
 

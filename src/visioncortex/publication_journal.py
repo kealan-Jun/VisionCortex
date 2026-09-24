@@ -59,7 +59,10 @@ def reconcile(runner):
                 for stage in ('all', *STAGES):
                     locks.enter_context(exclusive(runner.runtime_root / 'locks' /
                         f"{record['recording_id']}.{stage}.lock"))
-                if runner.refresh_index(runner.layout(record), recording_id=record['recording_id']):
+                from .device_day_inplace import active, publish
+                done = (publish(runner, record) if active(runner, record) else
+                        runner.refresh_index(runner.layout(record), recording_id=record['recording_id']))
+                if done:
                     journal.complete(record['recording_id'], token)
                     completed += 1
         except (OSError, ValueError):

@@ -83,3 +83,15 @@ _REVIEWED['device_day_understanding.py'] = (
 _REVIEWED['source_frames.py'] = (
     'f27275927934c866a3e48dddd0af23ae9a0246940ade92517e82c6d995a52b9a',
     '3bf96e4268b9b164d75463b1b340037fc256315be94f6a1a2711da57712cb2fd')
+
+# Exact input-path adapter; legacy retained-input behavior is unchanged.
+_REVIEWED['device_day_models.py'] = ('47b7460f97d5c671894b49dfdf5a629813799fa7b9dde73b6ab5a02ad7303fd6', '7c04a7a02843f482f30e5524a1e84cbbaea21278b03fbe8d494789fd24e1b3cd')
+
+# Exact input-path adapter; legacy retained-input behavior is unchanged.
+_REVIEWED['device_day_stt.py'] = ('08a23bc1a6b5c4ecf11544f411363bc2abbaa27ce9f2732187720d711ec4d2ac', '4809d85774f2e6e743bcbd37c19cdca73a23bcd09cc3922c8ae776ee2bdfee56')
+
+# Exact input-path adapter; legacy retained-input behavior is unchanged.
+_REVIEWED['speech_worker.py'] = ('7b52906ffc73e2e1628a30ab5bafd5a5674325e95ff26b2ac99ca73a62c477ea', 'a5894d18a71afd228332dbc24b770c924509f60e9fd9372a902e55b1f3980b63')
+
+# Exact input-path adapter; legacy retained-input behavior is unchanged.
+_REVIEWED['speech_qwen.py'] = ('7f80e9a0420904ee7c044a52ce98792fb19453ca7995cd18c03ccfd41353ed6f', '888cc607b9243b31571c51d8cd8989e342f544263a8e133b5afd50426dad54d7')

@@ -24,6 +24,7 @@ from .device_day_contract import (
 )
 
 from .device_day_verification import verify_artifact_cached as verify_artifact
+from .device_day_inputs import plan_config, plan_sources, relocate_evidence, source_path, source_relative
 
 
 class SceneStep(BaseModel):
@@ -283,7 +284,7 @@ class DeviceDayModels:
                 atomic_bytes(path, encoded.tobytes())
                 reference = artifact(layout.root, path)
                 results.append({"frame_id": "frame-" + digest([reference["sha256"], timestamp])[:24],
-                                "frame_kind": "scene_sample", "local_ms": timestamp, "requested_ms": requested, "source_frame_index_estimate": frame_index, "source_path": layout.relative(source),
+                                "frame_kind": "scene_sample", "local_ms": timestamp, "requested_ms": requested, "source_frame_index_estimate": frame_index, "source_path": source_relative(layout, source),
                                 "source_time_basis": "requested_decode_time_native_pts_unverified",
                                 "brightness": float(image.mean()), **reference})
         for item in results:
@@ -388,11 +389,12 @@ class DeviceDayModels:
                 if path.is_file():
                     return [(str(path.resolve()), self._identity_hash(path))]
             return []
+        view_identity, media_identity = plan_sources(view, info)
         identity = {
-            "version": "device-recall-plan/1", "view": view.model_dump(mode="json"),
-            "media": info.model_dump(mode="json"), "window": [start, end, fps],
+            "version": "device-recall-plan/1", "view": view_identity,
+            "media": media_identity, "window": [start, end, fps],
             "ledger": {k: file_hash(v) for k, v in coarse.items()},
-            "config": self.config, "model_files": model_files(self.config.get("models", {})),
+            "config": plan_config(self.config), "model_files": model_files(self.config.get("models", {})),
             "planner": digest(inspect.getsource(device_scan_plan)),
             "code": {m: self._identity_hash(Path(__file__).with_name(m + ".py")) for m in modules}}
         plan_key = digest(identity)
@@ -446,7 +448,10 @@ class DeviceDayModels:
         from .schemas import FrameEvidence
         from .source_frames import read_evidence_frame
         evidence = FrameEvidence.model_validate(choice["frame_evidence"])
+        evidence, relocation = relocate_evidence(view, evidence)
         image, proof = read_evidence_frame(view, info, evidence)
+        if relocation:
+            proof["source_relocation"] = relocation
         if image is None or proof.get("status") != "verified":
             raise ValueError(f"Action frame source verification failed: {proof.get('reason')}")
         timestamp = proof["view_local_ms"]
@@ -458,7 +463,7 @@ class DeviceDayModels:
         reference = artifact(layout.root, path)
         return [{"frame_id": "frame-" + digest([reference["sha256"], timestamp])[:24],
                  "frame_kind": "action_keyframe", "local_ms": timestamp,
-                 "requested_ms": evidence.local_ms, "source_path": layout.relative(view.video),
+                 "requested_ms": evidence.local_ms, "source_path": source_relative(layout, view.video),
                  "source_time_basis": "verified_native_source_frame",
                  "source_frame_verification": proof, "brightness": float(image.mean()),
                  "visibility": "dark_or_obscured" if image.mean() < 5 else "image_available", **reference}]
@@ -671,11 +676,11 @@ class DeviceDayModels:
             with timings.measure("source_artifact_verification_seconds", cpu=True):
                 if not all(verify_artifact(layout.root, r) for r in retention["artifacts"]):
                     raise ValueError("Retained source verification failed")
-            source = safe_child(layout.root, main["retained"]["path"])
+            source = source_path(layout, main)
             with timings.measure("source_probe_seconds", cpu=True):
                 info = self._probe(source)
             view = ViewInput(view_id=recording["camera_key"], role=ViewRole(recording["configured_role"]),
-                             video=source, timestamps_csv=safe_child(layout.root, clock["retained"]["path"]))
+                             video=source, timestamps_csv=source_path(layout, clock))
             with timings.measure("source_clock_mapping_seconds", cpu=True):
                 clock_mapping = capture_clock(view.timestamps_csv, info.fps, recording["recording_start_us"], info)
             transform = AlignmentTransform(view_id=view.view_id, reference_view_id=view.view_id,

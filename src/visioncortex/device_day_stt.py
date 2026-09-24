@@ -5,7 +5,7 @@ import math
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from .device_day_contract import artifact, atomic_bytes, atomic_json, digest, media_interval_name, read_json, safe_child
+from .device_day_contract import artifact, atomic_bytes, atomic_json, digest, media_interval_name, read_json
 
 
 def transcript_text(recording, source, comments, outcome):
@@ -31,6 +31,7 @@ def audio_windows(duration, maximum):
 
 
 def transcribe(config, layout, retention, key):
+    from .device_day_inputs import source_path
     from . import speech
     recording = retention["recording"]
     audio = retention.get("audio") or {}
@@ -41,7 +42,7 @@ def transcribe(config, layout, retention, key):
     if not audio_sources:
         # An embedded audio track is still a source, even without audio.opus.
         source = next(s for s in retention["sources"] if s["kind"] == "video")
-        path = safe_child(layout.root, source["retained"]["path"])
+        path = source_path(layout, source)
         info = speech.probe_audio(path)
         if info is None:
             return {"outcome": "no_audio", "comments": [], "artifacts": [],
@@ -50,7 +51,7 @@ def transcribe(config, layout, retention, key):
         embedded = True
     else:
         source = audio_sources[0]
-        path = safe_child(layout.root, source["retained"]["path"])
+        path = source_path(layout, source)
         info = speech.probe_audio(path)
         if info is None:
             raise ValueError("Published recorder audio contains no decodable audio track")
@@ -62,6 +63,13 @@ def transcribe(config, layout, retention, key):
     sealed = {"folder": str(path.parent), "resolved_folder": str(path.parent.resolve()),
               "files": {path.name: {"size": source["retained"]["size_bytes"], "sha256": source["retained"]["sha256"]}},
               "audio_file": path.name, "start_global_us": origin, "playback_events": []}
+    if retention.get('input_binding_version') == 1:
+        from .device_day_inputs import durable_json
+        locator = layout.receipts / recording['recording_id'] / 'InputLocations' / (retention['input_binding'] + '.json')
+        durable_json(locator, sealed | {'binding': retention['input_binding']})
+        sealed = {'content_locator': str(locator), 'binding': retention['input_binding'],
+                  'content': {'size': source['retained']['size_bytes'], 'sha256': source['retained']['sha256']},
+                  'start_global_us': origin, 'playback_events': []}
     from .device_day_content import time_folder
     root = layout.comments / time_folder(recording['recording_start_us'], recording['recording_end_us']) / 'Recognition' / key
     duration, maximum = info["duration_seconds"], runtime["max_audio_seconds"]

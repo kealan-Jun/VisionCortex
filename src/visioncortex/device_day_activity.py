@@ -13,6 +13,13 @@ _CURRENT = ContextVar('device_day_activity', default=None)
 _LOCK = Lock()
 _ACTIVE = {}
 PHASES = {
+ 'io_queue_seconds': '等待共享 I/O 名额',
+ 'input_validation_seconds': '验证封口输入身份与稳定性',
+ 'input_hash_seconds': '输入内容哈希',
+ 'decode_inference_seconds': '解码与模型处理',
+ 'archive_copy_seconds': '原始素材归档复制',
+ 'archive_hash_seconds': '归档内容与持久化校验',
+ 'formal_publication_seconds': '正式设备日索引发布',
  'retention_work': '原片及采集资料归档（含完整性校验）',
  'stt_work': '录音归档与转写', 'understanding_work': '多模态理解', 'report_work': '整合并发布日报',
  'claimed': '检查分片与输出目录', 'prerequisites': '校验原片及上游产物',

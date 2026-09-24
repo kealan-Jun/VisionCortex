@@ -217,12 +217,16 @@ def snapshot(config):
     except (OSError, ValueError):
         provider = {'active': None, 'reason': 'state_unavailable'}
         errors.append('云端状态暂不可读')
+    from .device_day_inplace import progress as input_progress
+    lifecycle = input_progress(config)
+    inplace_ids = {item['recording_id'] for item in lifecycle}
     waiting = {day: {s: {} for s in STAGES} for day in days}
-    for row in states.values():
+    for identifier, row in states.items():
         for stage, (status, day) in row.items():
             if status not in {'queued', 'expired', 'waiting_for_prerequisite'}:
                 continue
-            parents = [row.get(p, ('missing', day))[0] for p in DEPENDENCIES[stage]]
+            dependencies = () if identifier in inplace_ids and stage in {'vision', 'stt'} else DEPENDENCIES[stage]
+            parents = [row.get(p, ('missing', day))[0] for p in dependencies]
             reason = ('paused_by_user' if stage in paused else
                       'prerequisite_not_verified' if status == 'waiting_for_prerequisite' else
                       'upstream_failed' if 'failed' in parents else
@@ -252,7 +256,10 @@ def snapshot(config):
         component_timings[day] = {name: {'samples': len(v), 'median_seconds': median(v),
                                        'p95_seconds': sorted(v)[math.ceil(len(v)*.95)-1]}
                                   for name, v in values.items()}
-    return {'storage_maintenance': os.environ.get('VISIONCORTEX_STORAGE_MAINTENANCE', '0') == '1',
+    lifecycle_html = '<ul>' + ''.join(f'<li>{escape(row["archive"])} · {escape(row["recording_id"])}：{escape(row["label"])}'
+        + ('；外部采集保留期限未知' if row['retention_policy']['status'] == 'unknown' else '') + '</li>'
+        for row in lifecycle if row['publication_status'] != 'completed') + '</ul>'
+    return {'input_lifecycle': lifecycle, 'storage_maintenance': os.environ.get('VISIONCORTEX_STORAGE_MAINTENANCE', '0') == '1',
             'process_since_us': config.get('device_day', {}).get('process_since_us'),
             'capture_link_cleanup': {'enabled': bool(cleanup.get('enabled')),
             'native_links_verified': bool(cleanup.get('native_links_verified')),
@@ -262,7 +269,7 @@ def snapshot(config):
             'observed_at': now, 'focus_date': priority_date(root), 'days': days, 'vision_timings': timings,
             'failure_categories': failures, 'vision_component_timings': component_timings,
             'running': jobs, 'errors': errors + latency['errors'], 'latency': latency,
-            'latency_html': render_latency(latency) + render_diagnostics(failures, component_timings),
+            'latency_html': lifecycle_html + render_latency(latency) + render_diagnostics(failures, component_timings),
             'scope': 'queue_records_not_current_version_acceptance'}
 
 

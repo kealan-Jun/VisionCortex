@@ -127,6 +127,10 @@ class DeviceDayQueue:
                   GROUP BY COALESCE(json_extract(busy.payload,'$.camera_key'),'') HAVING COUNT(*)>=?)""")
                 parameters.extend((current, camera_limit))
             ordering = "COALESCE(json_extract(r.payload,'$.processing_priority'),0),"
+            if self.path.stem == 'queue-retention':
+                ordering = ("CASE WHEN json_extract(r.payload,'$.archive_urgent') THEN 0 "
+                            "WHEN json_extract(r.payload,'$.archive_aged') THEN 1 ELSE 2 END,"
+                            "COALESCE(json_extract(r.payload,'$.archive_deadline'),9e99),r.queued_at," + ordering)
             if camera_serial:
                 ordering += ("COALESCE((SELECT last_claim FROM camera_dispatch "
                              "WHERE camera_key=json_extract(r.payload,'$.camera_key')),0),"
@@ -211,10 +215,10 @@ class DeviceDayQueue:
                 from .task_events import append
                 append(db, recording_id, status, revision=row['revision'], attempt=row['attempts'], data={
                     key: result[key] for key in ('archive', 'stage', 'error_type', 'component_timings', 'measured_frame_counts') if key in result})
-                if self.path.stem == 'queue-retention' and result.get('error_type') in {'FileNotFoundError', 'PermissionError', 'OSError'}:
+                if self.path.stem == 'queue-retention' and result.get('input_binding_version') != 1 and result.get('error_type') in {'FileNotFoundError', 'PermissionError', 'OSError'}:
                     state = 'missing' if result['error_type'] == 'FileNotFoundError' else 'unavailable'
                     db.execute('UPDATE recordings SET input_status=? WHERE recording_id=?', (state, recording_id))
-        if row and self.path.stem == 'queue-retention' and result.get('error_type') in {'FileNotFoundError', 'PermissionError', 'OSError'}:
+        if row and self.path.stem == 'queue-retention' and result.get('input_binding_version') != 1 and result.get('error_type') in {'FileNotFoundError', 'PermissionError', 'OSError'}:
             from .input_availability import Availability
             record = json.loads(row['payload'])
             Availability(self.path.parent).mark(record, state, reason=result['error_type'])

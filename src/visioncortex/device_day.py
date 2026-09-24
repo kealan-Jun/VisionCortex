@@ -239,6 +239,8 @@ def stage_worker_capacity(settings, stage, camera_count):
 class DeviceDayRunner:
     def __init__(self, config: dict, backend=None):
         validate_config(config)
+        from .device_day_inplace import validate_settings
+        validate_settings(config.get('device_day') or {})
         self.config = deepcopy(config)
         self.settings = self.config.get("device_day") or {}
         self.archive_root = Path(config["storage"]["archive_root"])
@@ -258,6 +260,8 @@ class DeviceDayRunner:
         self._completed_stage_receipts = CompletedStageReceipts(self.settings)
         from .device_day_cache_identity import execution_identity
         self._execution_identity = execution_identity(Path(__file__).read_text(encoding="utf-8"))
+        from .device_day_inplace import execution_identity as inplace_identity
+        self._inplace_execution_identity = inplace_identity()
         self._backend_lock = threading.Lock()
         self._preparation_locks = {stage: threading.Lock() for stage in STAGES}
         self._prepared = {}
@@ -303,7 +307,11 @@ class DeviceDayRunner:
         from .device_day_runtime_identity import compatible_performance
         settings = {key: compatible_performance(self.config.get(key)) if key == "performance" else self.config.get(key) for key in keys}
         if stage == "stt":
-            settings["speech_recognition"] = self.config.get("speech_recognition")
+            settings["speech_recognition"] = deepcopy(self.config.get("speech_recognition"))
+            if settings['speech_recognition'] and settings['speech_recognition'].get('adapter_sha256'):
+                from .device_day_runtime_identity import compatible_runtime_hash
+                settings['speech_recognition']['adapter_sha256'] = compatible_runtime_hash(
+                    directory / 'speech_qwen.py', settings['speech_recognition']['adapter_sha256'])
             registry = Path(self.config.get("speech_recognition", {}).get("model_registry") or "configs/models/speech-recognition.json")
             if registry.is_file():
                 settings["model_registry_hash"] = self._hash(registry)
@@ -335,9 +343,15 @@ class DeviceDayRunner:
                 if isinstance(value, list):
                     return [retention_identity(item) for item in value]
                 if isinstance(value, dict) and value.get("recording_id") == recording["recording_id"]:
-                    return {k: v for k, v in value.items() if k not in {"processing_priority", "archive_date", "updated_at"}}
+                    return {k: v for k, v in value.items() if k not in {"processing_priority", "archive_date", "updated_at", "source_expires_at",
+                                                                                       "source_retention_status", "archive_urgent", "archive_aged", "archive_deadline"}}
                 return value
             inputs = retention_identity(inputs)
+        from .device_day_inplace import marker
+        if recording.get('camera_key') and recording.get('recording_start_us') and marker(self, recording).is_file():
+            stage_settings['inplace_execution_identity'] = self._inplace_execution_identity
+            stage_settings['input_binding_version'] = 1
+            stage_settings['input_contract_sha256'] = self._hash(directory / 'device_day_inputs.py')
         from .device_day_runtime_identity import compatible_runtime_hash
         def code_hash(path):
             checksum = compatible_runtime_hash(path, self._hash(path))
@@ -345,6 +359,9 @@ class DeviceDayRunner:
                 from .device_day_runtime_identity import independent_vision_backend_hash
                 return independent_vision_backend_hash(path, checksum, legacy_understanding=stage == 'understanding')
             return checksum
+        if stage == 'stt' and isinstance(inputs, dict) and inputs.get('input_binding_version') == 1:
+            from .device_day_inputs import canonical_stt
+            inputs = canonical_stt(inputs)
         descriptor = {"stage": stage, "source": recording["recording_id"] if stage == "vision" else recording["source_signature"],
                       "inputs": inputs, "settings": settings, "device_day": stage_settings,
                       "code": [self._execution_identity if p == Path(__file__) else code_hash(p) for p in sources]}
@@ -396,7 +413,12 @@ class DeviceDayRunner:
                 references.append((self.backend_root, reference))
         except (ValueError, KeyError, TypeError):
             return None
-        if not all(verify_artifact_cached(root, r) for root, r in references):
+        if receipt.get('input_binding_version') == 1 and receipt.get('stage') == 'retention':
+            from .device_day_inputs import verify_content
+            verified = all(verify_content(safe_child(root, r['path']), r) for root, r in references)
+        else:
+            verified = all(verify_artifact_cached(root, r) for root, r in references)
+        if not verified:
             return None
         return receipt
 
@@ -407,6 +429,9 @@ class DeviceDayRunner:
             return {"recording_id": recording["recording_id"], "status": "waiting_for_capture"}
         if recording.get("configured_role") not in {"first_person", "third_person"}:
             return {"recording_id": recording["recording_id"], "status": "needs_camera_role"}
+        from .device_day_inplace import active
+        if active(self, recording) and not active(self, recording, initialize=True):
+            return {'recording_id': recording['recording_id'], 'status': 'running_elsewhere'}
         from .runtime_control import execution_context
         with execution_context(job_id=recording["recording_id"], source="nas",
                                priority=recording.get("processing_priority", 1), stop=stop_event):
@@ -422,7 +447,16 @@ class DeviceDayRunner:
                 from .device_day_activity import job
                 with job(stage, recording["recording_id"], root=self.runtime_root) as measured:
                     try:
-                        result = self._process(layout, recording, stage=stage, retry=retry)
+                        from .device_day_inplace import active, execute
+                        function = execute if active(self, recording) else None
+                        if function:
+                            result = function(self, layout, recording, stage=stage, retry=retry)
+                        else:
+                            from .device_day_io import slot
+                            controlled = self.settings.get('inplace_preprocessing') and stage in {'vision', 'stt', 'retention'}
+                            copy_limit = slot(self.config, copy=True, whole_copy=True) if controlled and stage == 'retention' else nullcontext()
+                            with copy_limit, (slot(self.config, copy=stage == 'retention') if controlled else nullcontext()):
+                                result = self._process(layout, recording, stage=stage, retry=retry)
                     except ValueError as exc:
                         from .device_day_prerequisites import legacy_prerequisite_failure
                         prerequisite = legacy_prerequisite_failure({'error_type': 'ValueError', 'message': str(exc)})
@@ -430,6 +464,8 @@ class DeviceDayRunner:
                             raise
                         result = {'recording_id': recording['recording_id'],
                                   'status': 'waiting_for_prerequisite', 'prerequisite_stage': prerequisite}
+                from .device_day_inplace import record_timings
+                record_timings(self, recording, stage, measured['phase_seconds'])
                 return result | {'component_timings': dict(measured['phase_seconds']),
                                  'measured_frame_counts': dict(measured['frame_counts'])}
         except BlockingIOError:
@@ -563,6 +599,8 @@ class DeviceDayRunner:
                     from contextlib import closing
                     with closing(ReceiptProjection(self.runtime_root).iter_records(layout, STAGES, recording_id=recording_id)) as projected:
                         for identifier, stages in projected:
+                            from .device_day_inplace import publication_filter
+                            stages = publication_filter(self, layout, stages)
                             if not stages.get('retention'):
                                 continue
                             retained = stages.get("retention") or {}
@@ -684,6 +722,12 @@ class DeviceDayRunner:
         self.queues[stage].migrate_prerequisite_failures()
         self.queues[stage].sync_availability(states)
         durable = {r["recording_id"]: r for r in self.queues[stage].pending()}
+        if self.settings.get('inplace_preprocessing'):
+            # A restart may see only an older stage queue before discovery
+            # republishes its inventory. Preserve its independent downstream work.
+            for parent in ('vision', 'stt', 'retention'):
+                for record in self.queues[parent].pending():
+                    durable.setdefault(record['recording_id'], record)
         durable.update({r["recording_id"]: r for r in inventory.get("recordings", [])})
         durable = {key: record for key, record in durable.items() if in_processing_scope(self.settings, record)}
         durable = {key: configured_record(self.config, record) for key, record in durable.items()}
@@ -691,6 +735,21 @@ class DeviceDayRunner:
         # the exact NAS receipt/key below only after upstream has produced it.
         # This prevents thousands of not-yet-retained slices from blocking all
         # camera lanes on remote metadata reads every scheduling round.
+        from .device_day_inplace import active, enqueue as enqueue_inplace
+        inplace_eligible = set()
+        legacy = {}
+        for identifier, record in durable.items():
+            if not active(self, record):
+                legacy[identifier] = record
+                continue
+            if date and self.layout(record).name[:10] != date:
+                continue
+            admitted = enqueue_inplace(self, record, stage)
+            if admitted is None:
+                legacy[identifier] = record
+            elif admitted:
+                inplace_eligible.add(identifier)
+        durable = legacy
         parent_versions = {}
         if self.settings.get("camera_lanes") and DEPENDENCIES[stage]:
             ready = set(durable)
@@ -714,7 +773,7 @@ class DeviceDayRunner:
                                    db.execute("SELECT recording_id,revision FROM recordings WHERE status='completed'")}
             pending_states = {row['recording_id']: (row['revision'], row['status']) for row in
                               db.execute("SELECT recording_id,revision,status FROM recordings WHERE status!='completed'")}
-        eligible = set()
+        eligible = set(inplace_eligible)
         for record in records:
             if stop_event is not None and stop_event.is_set():
                 return eligible
@@ -813,6 +872,7 @@ class DeviceDayRunner:
             self._admitted[stage].add(record["recording_id"])
             self._record_readiness[stage][record["recording_id"]] = (scheduling_key, time.monotonic())
         self._record_readiness[stage] = {k: v for k, v in self._record_readiness[stage].items() if k in durable}
+        self._admitted[stage].update(inplace_eligible)
         self._admitted[stage].intersection_update(eligible)
         return eligible
 
@@ -833,6 +893,10 @@ class DeviceDayRunner:
             discovery["collection_ingest"]["capture_since_date"] = None if date else self.settings.get("start_date")
             inventory = scan_recordings(discovery)
         if stage == "all":
+            from .device_day_inplace import active
+            for record in inventory.get('recordings', []):
+                if record.get('configured_role') in {'first_person', 'third_person'}:
+                    active(self, record, initialize=True)
             # Independent persistent stage queues: a slow model request never
             # occupies the retention or YOLO executor. Downstream consumes each
             # completed receipt while upstream continues with later slices.
@@ -841,6 +905,9 @@ class DeviceDayRunner:
                 results = []
                 retry_now = retry
                 upstream = DEPENDENCIES[name]
+                if self.settings.get('inplace_preprocessing'):
+                    upstream = {'retention': ('vision', 'stt'), 'vision': (), 'stt': (),
+                                'understanding': ('retention', 'vision', 'stt'), 'report': ('understanding',)}[name]
                 try:
                     while not (stop_event and stop_event.is_set()):
                         upstream_done = all(finished[parent].is_set() for parent in upstream)
@@ -904,6 +971,8 @@ class DeviceDayRunner:
                         self._admitted[stage].discard(record['recording_id'])
                         self._prepared.pop(stage, None)
                     if result.get("status") == "completed":
+                        if self.settings.get('inplace_preprocessing') and stage in {'vision', 'stt'}:
+                            self._prerequisite_generation['retention'] += 1
                         changed = {stage}
                         for _ in STAGES:
                             changed.update(child for child, parents in DEPENDENCIES.items()

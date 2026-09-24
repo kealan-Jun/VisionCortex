@@ -129,7 +129,7 @@ def test_archive_revision_reuses_exact_asr_request_without_mutating_history(tmp_
     original = layout.raw / "Audio" / "Fixture.opus"
     original.parent.mkdir(parents=True)
     original.write_bytes(b"synthetic-audio-not-runtime-evidence")
-    retention = {"recording": {"recording_id": "fixture", "recording_start_us": start},
+    retention = {"recording": {"recording_id": "fixture", "recording_start_us": start, "recording_end_us": start + 2000000},
                  "audio": {"status": "complete", "start_us": start},
                  "sources": [{"kind": "audio_audio", "retained": artifact(layout.root, original)}]}
     runtime = {"provider": "aliyun_qwen", "worker_sha256": speech_worker.sha256(Path(qwen.__file__)),

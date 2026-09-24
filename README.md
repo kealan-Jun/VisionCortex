@@ -5,7 +5,7 @@
 ## 交付与使用文档
 
 NAS 自动采集的设备日五目录、按实际时长的采集分片处理、独立阶段队列与日报遵守
-[人的全流程实验归档契约 v1](docs/DEVICE-DAY-ARCHIVE-CONTRACT.zh-CN.md)。该结构已按用户要求固化；采集端原片删除保持关闭。
+[人的全流程实验归档契约 v1](docs/DEVICE-DAY-ARCHIVE-CONTRACT.zh-CN.md)。该结构已按用户要求固化；采集端原片删除保持关闭。新分片支持[原位预处理、独立归档及保留期限调度](docs/NAS-INPLACE-PREPROCESSING.zh-CN.md)，预处理结果不冒充正式归档完成。
 
 3090 Ti 将 `Z:\lab_video` 的日期／视角目录映射为 `lab-video-1`、`lab-video-3`，
 共用现有处理队列、页面和 `VisionCortexExperimentArchive` 五目录归档。

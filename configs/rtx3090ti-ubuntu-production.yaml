@@ -66,7 +66,7 @@ speech_recognition:
   # Fun Flash: 90-second real sample / 15 phrases in 5.75 seconds locally measured.
   provider: aliyun_qwen
   model: fun-asr-flash-2026-06-15
-  adapter_sha256: 888cc607b9243b31571c51d8cd8989e342f544263a8e133b5afd50426dad54d7
+  adapter_sha256: 7f80e9a0420904ee7c044a52ce98792fb19453ca7995cd18c03ccfd41353ed6f
   max_audio_seconds: 180
   python_executable: /srv/sentinel-data/VisionCortex3090Ti/Runtime/ASR-Pilot/.venv/bin/python
   model_directory: /srv/sentinel-data/VisionCortex3090Ti/Models/Speech/faster-whisper-small/536b0662742c02347bc0e980a01041f333bce120

@@ -374,6 +374,8 @@ class DeviceDayService:
                                                             if item.get('archive'))
                     from .device_day_contract import DEPENDENCIES
                     for child, parents in DEPENDENCIES.items():
+                        if self._runner is not None and self._runner.settings.get('inplace_preprocessing') and child == 'retention':
+                            parents = ('vision', 'stt')
                         if changed_stages.intersection(parents):
                             for ordinal in range(capacities[child]):
                                 next_poll[(child, ordinal)] = 0

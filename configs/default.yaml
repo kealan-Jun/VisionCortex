@@ -25,6 +25,19 @@ speech_recognition:
   context_max_characters: 8000
 
 device_day:
+  # Applies to newly admitted/unstarted records; historical receipts are retained.
+  inplace_preprocessing: true
+  nas_io_slots: 3
+  archive_copy_workers: 1
+  archive_copy_bytes_per_second: 8388608
+  archive_max_wait_seconds: 900
+  nas_io_timeout_seconds: 3600
+  capture_retention:
+    # External collector retention/overwrite policy has not been supplied.
+    seconds: null
+    cleanup_risk: false
+    safety_margin_seconds: 3600
+    cameras: {}
   schema_version: visioncortex-device-day/1
   enabled: false
   chunk_seconds: 900

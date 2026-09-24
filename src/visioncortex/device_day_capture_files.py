@@ -45,8 +45,10 @@ def retain_capture_files(runner, record):
                 if identity in destinations:
                     raise ValueError("Capture file names collide after PascalCase conversion")
                 destinations.add(identity)
-                copy_verified(source, destination)
-                reference = artifact(layout.root, destination)
+                from .device_day_io import slot
+                with slot(runner.config, copy=True, whole_copy=True), slot(runner.config, copy=True):
+                    copy_verified(source, destination)
+                    reference = artifact(layout.root, destination)
             files.append({"original_name": relative.as_posix(), "original_path": str(source), "retained": reference})
         catalog = {"recording_id": record["recording_id"], "camera_key": record["camera_key"],
                    "archive_date": layout.name[:10], "files": files, "excluded": excluded,
