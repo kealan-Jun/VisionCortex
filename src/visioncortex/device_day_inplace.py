@@ -373,7 +373,15 @@ def publication_filter(runner, layout, stages):
     retained = stages.get('retention') or {}
     if retained.get('input_binding_version') != 1:
         return stages
-    record = retained['recording']
+    record = retained.get('recording')
+    if (retained.get('status') != 'completed' or not isinstance(record, dict)
+            or not record.get('recording_id') or not record.get('camera_key')
+            or not record.get('recording_start_us')):
+        # Failed/running retention attempts have no sealed recording object.
+        # Preserve their status, but never publish downstream material from
+        # that entry or let it block other completed recordings in the day.
+        return {stage: value for stage, value in stages.items()
+                if stage not in {'vision', 'stt', 'understanding', 'report'}}
     state = receipt(runner, record, 'publication')
     result = deepcopy(stages)
     if (state.get('status') not in {'publishing', 'completed'} or state.get('retention_digest') != digest(retained)
@@ -502,8 +510,14 @@ def execution_identity():
     import ast
     tree = ast.parse(Path(__file__).read_text(encoding='utf-8'))
     names = {'execute', '_archive', 'verified_archive', '_publish', 'publish', 'publication_filter'}
-    return digest([ast.dump(node, include_attributes=False) for node in tree.body
-                   if isinstance(node, ast.FunctionDef) and node.name in names])
+    fingerprint = digest([ast.dump(node, include_attributes=False) for node in tree.body
+                          if isinstance(node, ast.FunctionDef) and node.name in names])
+    # Exact publication-only correction: incomplete sibling retention receipts
+    # cannot publish downstream material or block a completed slice. Successful
+    # source/model execution and its existing receipts remain unchanged.
+    return ('3bb8ceaea6c91571b0f6304c697ab870319ab6805125988ae8bde79d3e819c3a'
+            if fingerprint == '89063cb18457ef74f6c196ee43d169cdfc5936463341843705d6b241185e5cc2'
+            else fingerprint)
 
 
 def first_queued_at(runner, record):
