@@ -158,7 +158,23 @@ class FileIndexPublisher:
         self.runtime = Path(config['storage']['local_runtime_root'])/'device-day'
         self.last_result = {'status': 'not_started'}
 
-    def tick(self):
+    def _output_revision(self, name, index):
+        from .device_day_content import time_folder
+        root = safe_child(Path(self.config['storage']['archive_root']), name)
+        paths = [root/'LaboratoryDailyReport'/f'LaboratoryDailyReport.{suffix}' for suffix in ('json', 'html')]
+        paths.extend(root/'MultimodalUnderstanding'/time_folder(s['start_us'], s['end_us'])/'Understanding.json'
+                     for s in index.get('segments', []) if s.get('start_us') and s.get('end_us'))
+        result = []
+        for path in paths:
+            try:
+                stat = path.stat()
+                value = (stat.st_ino, stat.st_mtime_ns, stat.st_size)
+            except FileNotFoundError:
+                value = None
+            result.append((str(path), value))
+        return tuple(result)
+
+    def tick(self, *, archives=None):
         import logging
         from .device_day import exclusive
         from .device_day_contract import archive_name, DeviceDayLayout, VERSION
@@ -173,9 +189,14 @@ class FileIndexPublisher:
         names = {archive_name(r['camera_key'], r['recording_start_us'])
                  for r in read_inventory(self.runtime)['recordings']
                  if in_processing_scope(self.config.get('device_day', {}), r)}
+        requested = None if archives is None else tuple(dict.fromkeys(validate_archive_name(n) for n in archives))
+        if requested is not None:
+            names.intersection_update(requested)
         photo_indexes, photo_starts = {}, {}
         cutoff = processing_cutoff(self.config.get('device_day', {}))
         for path in (self.runtime/'CapturePhotos').glob('*.json'):
+            if requested is not None and path.stem not in requested:
+                continue
             try:
                 snapshot = read_json(path)
                 for device in snapshot.get('devices', []):
@@ -191,7 +212,7 @@ class FileIndexPublisher:
             except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
                 failed(path.stem, 'photo_index', exc)
         self.source_indexes = {name: value for name, value in self.source_indexes.items() if name in names}
-        for name in sorted(names):
+        for name in sorted(names) if requested is None else (n for n in requested if n in names):
             operation = 'photo_index'
             try:
                 photo_path = self.runtime/'CapturePhotos'/f'{name}.json'
@@ -224,7 +245,8 @@ class FileIndexPublisher:
                     if content_enabled:
                         from .device_day_content import content_revision
                         operation = 'content_revision'
-                        version += (content_revision(self.config, index),)
+                        content_version = content_revision(self.config, index)
+                        version += (content_version, self._output_revision(name, index))
                     if self.versions.get(name) == version:
                         result['unchanged'] += 1
                         continue
@@ -265,7 +287,10 @@ class FileIndexPublisher:
                     stat = path.stat()
                     self.versions[name] = (stat.st_mtime_ns, stat.st_size, photo_version)
                     if content_enabled:
-                        self.versions[name] += (version[-1],)
+                        # Remember our own completed writes. A later canonical
+                        # renderer may overwrite partial meaning with pending;
+                        # changed output stats trigger restoration on next tick.
+                        self.versions[name] += (content_version, self._output_revision(name, index))
                         source['time_index'] = index['time_index']
                         self.source_indexes[name] = ((stat.st_mtime_ns, stat.st_size), source)
                     result['published'] += 1
