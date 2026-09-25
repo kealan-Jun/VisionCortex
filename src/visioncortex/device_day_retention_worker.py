@@ -1,4 +1,4 @@
-"""Continuously archive ready slices using the shared production queue."""
+"""Continuously archive or transcribe ready slices through the shared queue."""
 from __future__ import annotations
 
 from contextlib import ExitStack
@@ -17,7 +17,10 @@ from .sqlite_store import connection
 class RetentionWorker:
     """One claim per tick; local discovery only, existing execution validates NAS."""
 
-    def __init__(self, *, failure_cooldown=60):
+    def __init__(self, *, stage='retention', failure_cooldown=60):
+        if stage not in {'retention', 'stt'}:
+            raise ValueError('Only independent retention and speech stages are supported')
+        self.stage = stage
         self.failure_cooldown = max(5, float(failure_cooldown))
         self.deferred = {}
 
@@ -26,11 +29,13 @@ class RetentionWorker:
         if not path.is_file():
             return []
         current = time.time()
-        with connection(runner.queues['retention'].path, readonly=True) as db:
+        with connection(runner.queues[self.stage].path, readonly=True) as db:
             states = {r['recording_id']: dict(r) for r in db.execute(
                 'SELECT recording_id,status,lease_until,attempts,updated_at FROM recordings')}
-        with connection(runner.queues['vision'].path, readonly=True) as db:
-            visual = {r[0] for r in db.execute("SELECT recording_id FROM recordings WHERE status='completed'")}
+        visual = set()
+        if self.stage == 'retention':
+            with connection(runner.queues['vision'].path, readonly=True) as db:
+                visual = {r[0] for r in db.execute("SELECT recording_id FROM recordings WHERE status='completed'")}
         with connection(path, readonly=True) as db:
             records = [json.loads(r[0]) for r in db.execute('SELECT payload FROM observations')]
         maximum = runner.settings.get('failure_retry_limit') or 3
@@ -51,12 +56,18 @@ class RetentionWorker:
             if (not record.get('processable', record.get('available'))
                     or record.get('configured_role') not in {'first_person', 'third_person'}):
                 continue
-            policy = retention_policy(runner, record)
-            deadline = policy['deadline']
-            urgent = policy['cleanup_risk'] or (deadline is not None and
-                        current >= deadline - policy['safety_margin_seconds'])
-            order = (not urgent, deadline if deadline is not None else float('inf'),
-                     rid not in visual, -record['recording_start_us'], record['camera_key'])
+            if self.stage == 'stt':
+                audio = record.get('audio') or {}
+                if audio.get('status') != 'provided' or not audio.get('capture_complete'):
+                    continue
+                order = (-record['recording_start_us'], record['camera_key'])
+            else:
+                policy = retention_policy(runner, record)
+                deadline = policy['deadline']
+                urgent = policy['cleanup_risk'] or (deadline is not None and
+                            current >= deadline - policy['safety_margin_seconds'])
+                order = (not urgent, deadline if deadline is not None else float('inf'),
+                         rid not in visual, -record['recording_start_us'], record['camera_key'])
             candidates.append((order, record))
         # A camera contributes its newest ready slice; queue.claim retains
         # camera fairness and all running leases, including the main service's.
@@ -74,11 +85,11 @@ class RetentionWorker:
         from .device_day import exclusive
         from .device_day_night_schedule import paused_stages
         from .runtime_control import ExecutionCancelled
-        if 'retention' in paused_stages(runner.config):
+        if self.stage in paused_stages(runner.config):
             return {'status': 'paused_by_user'}
         with ExitStack() as locks:
             try:
-                locks.enter_context(exclusive(runner.runtime_root / 'locks' / 'retention-worker.lock'))
+                locks.enter_context(exclusive(runner.runtime_root / 'locks' / f'{self.stage}-worker.lock'))
             except BlockingIOError:
                 return {'status': 'running_elsewhere'}
             admitted = set()
@@ -86,30 +97,36 @@ class RetentionWorker:
                 if stop.is_set():
                     return {'status': 'stopping'}
                 try:
-                    if enqueue(runner, record, 'retention'):
+                    if enqueue(runner, record, self.stage):
                         admitted.add(record['recording_id'])
                 except (OSError, ValueError, KeyError, TypeError):
                     self.deferred[record['recording_id']] = time.time() + self.failure_cooldown
             if not admitted or stop.is_set():
                 return {'status': 'waiting', 'admitted': len(admitted)}
-            queue = runner.queues['retention']
+            queue = runner.queues[self.stage]
             # The main service may have failed a candidate during admission.
             # Honor that fresh failure's cooldown before this worker retries it.
             with connection(queue.path, readonly=True) as db:
                 for row in db.execute("SELECT recording_id,updated_at FROM recordings WHERE status='failed'"):
                     if time.time() - row['updated_at'] < self.failure_cooldown:
                         admitted.discard(row['recording_id'])
-            owner = 'retention-worker-' + uuid.uuid4().hex
+            owner = self.stage + '-worker-' + uuid.uuid4().hex
+            # One older slice may still wait in the original worker's I/O
+            # path. Speech can use its second configured global slot for the
+            # newest slice; neither its lease nor its stage lock is disturbed.
+            speech_capacity = ((runner.config.get('runtime') or {}).get('resource_limits') or {}).get('stt', 2)
+            camera_limit = min(2, speech_capacity) if self.stage == 'stt' else 1
             with queue.heartbeat(owner):
                 record = queue.claim(owner, retry=True, allowed=admitted, camera_serial=True,
-                                     camera_limit=1, max_attempts=runner.settings.get('failure_retry_limit') or 3)
+                                     camera_limit=camera_limit,
+                                     max_attempts=runner.settings.get('failure_retry_limit') or 3)
                 if record is None:
                     return {'status': 'waiting', 'admitted': len(admitted)}
                 started = time.perf_counter()
                 try:
                     # Stop only prevents new claims. An already leased archive
                     # copy and publication finish normally during handover.
-                    result = runner.process(record, stage='retention', retry=True)
+                    result = runner.process(record, stage=self.stage, retry=True)
                 except ExecutionCancelled as exc:
                     result = {'status': 'cancelled', 'recording_id': record['recording_id'],
                               'error_type': type(exc).__name__, 'message': str(exc)[:1000]}
@@ -124,18 +141,18 @@ class RetentionWorker:
                         'wall_seconds': seconds, 'result': result}
 
 
-def serve(config_path, stop):
+def serve(config_path, stop, *, stage='retention'):
     from .ai_settings import apply_active
     from .config import load_config
     from .device_day import DeviceDayRunner
-    worker = RetentionWorker()
+    worker = RetentionWorker(stage=stage)
     runner, generation, roots, status_path = None, None, None, None
     while not stop.is_set():
         try:
             config = apply_active(load_config(Path(config_path)))
             settings = config.get('device_day') or {}
             if not settings.get('enabled') or not settings.get('inplace_preprocessing') or not settings.get('latest_first'):
-                raise ValueError('Continuous retention requires enabled inplace latest-first processing')
+                raise ValueError('Continuous stages require enabled inplace latest-first processing')
             current_roots = {key: config['storage'].get(key) for key in
                              ('local_runtime_root', 'local_cache_root', 'archive_root')}
             if roots is not None and roots != current_roots:
@@ -145,18 +162,18 @@ def serve(config_path, stop):
             if runner is None or generation != key:
                 runner = DeviceDayRunner(config)
                 generation = key
-            status_path = runner.runtime_root / 'RetentionWorker' / 'Service.json'
-            atomic_json(status_path, {'status': 'running', 'updated_at': time.time(), 'stage': 'retention'})
+            status_path = runner.runtime_root / ('RetentionWorker' if stage == 'retention' else 'SpeechWorker') / 'Service.json'
+            atomic_json(status_path, {'status': 'running', 'updated_at': time.time(), 'stage': stage})
             result = worker.tick(runner, stop)
-            status = {'status': 'running', 'updated_at': time.time(), 'stage': 'retention', 'last_result': result}
+            status = {'status': 'running', 'updated_at': time.time(), 'stage': stage, 'last_result': result}
         except Exception as exc:
-            status = {'status': 'failed', 'updated_at': time.time(), 'stage': 'retention',
+            status = {'status': 'failed', 'updated_at': time.time(), 'stage': stage,
                       'error_type': type(exc).__name__}
         if status_path is not None:
             atomic_json(status_path, status)
         stop.wait(5)
     if status_path is not None:
-        atomic_json(status_path, {'status': 'stopped', 'updated_at': time.time(), 'stage': 'retention'})
+        atomic_json(status_path, {'status': 'stopped', 'updated_at': time.time(), 'stage': stage})
 
 
 def main(argv=None):
@@ -165,12 +182,12 @@ def main(argv=None):
     import threading
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', required=True)
-    parser.add_argument('--stage', choices=['retention'], default='retention')
+    parser.add_argument('--stage', choices=['retention', 'stt'], default='retention')
     args = parser.parse_args(argv)
     stop = threading.Event()
     previous = {sig: signal.signal(sig, lambda *_: stop.set()) for sig in (signal.SIGTERM, signal.SIGINT)}
     try:
-        serve(args.config, stop)
+        serve(args.config, stop, stage=args.stage)
     finally:
         for sig, handler in previous.items():
             signal.signal(sig, handler)

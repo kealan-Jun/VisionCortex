@@ -13,7 +13,7 @@ from test_device_day import FakeModels, capture, device_config, item_and_layout 
 def setup(tmp_path, monkeypatch, records):
     root = tmp_path / 'runtime'
     queues = {stage: DeviceDayQueue(root / f'queue-{stage}.sqlite3', latest_first=True)
-              for stage in ('retention', 'vision')}
+              for stage in ('retention', 'vision', 'stt')}
     runner = SimpleNamespace(runtime_root=root, queues=queues,
         settings={'failure_retry_limit': 3}, config={'collection_ingest': {}})
     runner.process = lambda record, **kw: {'status': 'completed', 'recording_id': record['recording_id']}
@@ -135,3 +135,86 @@ def test_real_inplace_receipt_pipeline_is_reused_without_visual_rerun(device_con
     for field in ('key', 'segments', 'artifacts', 'input_binding'):
         assert current[field] == original[field]
     assert RetentionWorker().tick(runner, threading.Event())['status'] == 'waiting'
+
+
+def test_speech_is_latest_first_independent_of_vision_and_repeats_for_new_arrivals(tmp_path, monkeypatch):
+    audio = {'status': 'provided', 'capture_complete': True}
+    rows = [record('old', 1_000_000, audio=audio), record('new', 2_000_000, audio=audio),
+            record('open', 3_000_000, audio={'status': 'provided', 'capture_complete': False})]
+    runner = setup(tmp_path, monkeypatch, rows)
+    calls = []
+    def process(record, *, stage, retry):
+        calls.append((record['recording_id'], stage, retry))
+        return {'status': 'completed'}
+    runner.process = process
+    # A missing vision queue proves speech candidate selection cannot read it.
+    del runner.queues['vision']
+    worker = RetentionWorker(stage='stt')
+    assert worker.tick(runner, threading.Event())['recording_id'] == 'new'
+    observe(runner.runtime_root, {'recordings': [record('arrived', 4_000_000, audio=audio)]})
+    assert worker.tick(runner, threading.Event())['recording_id'] == 'arrived'
+    assert worker.tick(runner, threading.Event())['recording_id'] == 'old'
+    assert worker.tick(runner, threading.Event())['status'] == 'waiting'
+    assert calls == [('new', 'stt', True), ('arrived', 'stt', True), ('old', 'stt', True)]
+
+
+def test_speech_main_lease_and_completed_receipt_are_not_reclaimed(tmp_path, monkeypatch):
+    audio = {'status': 'provided', 'capture_complete': True}
+    done, busy = record('done', 1_000_000, audio=audio), record('busy', 2_000_000, audio=audio)
+    runner = setup(tmp_path, monkeypatch, [done, busy])
+    queue = runner.queues['stt']
+    queue.enqueue(done, 'done')
+    queue.claim('old-owner')
+    queue.finish('old-owner', 'done', {'status': 'completed', 'original_provider': 'aliyun'}, 1)
+    queue.enqueue(busy, 'busy')
+    queue.claim('main-service')
+    with queue.connect() as db:
+        before = [dict(row) for row in db.execute('SELECT * FROM recordings ORDER BY recording_id')]
+    assert RetentionWorker(stage='stt').tick(runner, threading.Event())['status'] == 'waiting'
+    with queue.connect() as db:
+        assert before == [dict(row) for row in db.execute('SELECT * FROM recordings ORDER BY recording_id')]
+
+
+def test_speech_pause_and_cli_stage_are_respected(tmp_path, monkeypatch):
+    from visioncortex import device_day_retention_worker as module
+    runner = setup(tmp_path, monkeypatch, [])
+    runner.config['device_day'] = {'paused_stages': ['stt']}
+    assert RetentionWorker(stage='stt').tick(runner, threading.Event())['status'] == 'paused_by_user'
+    observed = []
+    monkeypatch.setattr(module, 'serve', lambda config, stop, stage: observed.append((config, stage)))
+    module.main(['--config', 'owned-fixture.yaml', '--stage', 'stt'])
+    assert observed == [('owned-fixture.yaml', 'stt')]
+
+
+def test_speech_can_pass_one_old_waiter_but_never_exceeds_two_camera_slots(tmp_path, monkeypatch):
+    audio = {'status': 'provided', 'capture_complete': True}
+    old, new = record('old', 1_000_000, audio=audio), record('new', 2_000_000, audio=audio)
+    runner = setup(tmp_path, monkeypatch, [old, new])
+    runner.config['runtime'] = {'resource_limits': {'stt': 2}}
+    queue = runner.queues['stt']
+    queue.enqueue(old, 'old')
+    queue.claim('original-main', camera_serial=True)
+    with queue.connect() as db:
+        original = dict(db.execute("SELECT * FROM recordings WHERE recording_id='old'").fetchone())
+    worker = RetentionWorker(stage='stt')
+    assert worker.tick(runner, threading.Event())['recording_id'] == 'new'
+    with queue.connect() as db:
+        assert original == dict(db.execute("SELECT * FROM recordings WHERE recording_id='old'").fetchone())
+    second = record('second', 3_000_000, audio=audio)
+    queue.enqueue(second, 'second')
+    assert queue.claim('second-owner', camera_serial=True, camera_limit=2)['recording_id'] == 'second'
+    observe(runner.runtime_root, {'recordings': [record('third', 4_000_000, audio=audio)]})
+    assert worker.tick(runner, threading.Event())['status'] == 'waiting'
+    with queue.connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM recordings WHERE status='running'").fetchone()[0] == 2
+
+
+def test_speech_respects_configured_capacity_of_one(tmp_path, monkeypatch):
+    audio = {'status': 'provided', 'capture_complete': True}
+    old, new = record('old', 1_000_000, audio=audio), record('new', 2_000_000, audio=audio)
+    runner = setup(tmp_path, monkeypatch, [old, new])
+    runner.config['runtime'] = {'resource_limits': {'stt': 1}}
+    queue = runner.queues['stt']
+    queue.enqueue(old, 'old')
+    queue.claim('original-main')
+    assert RetentionWorker(stage='stt').tick(runner, threading.Event())['status'] == 'waiting'
