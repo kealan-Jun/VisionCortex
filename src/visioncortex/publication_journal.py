@@ -65,8 +65,14 @@ def reconcile(runner):
                 if done:
                     journal.complete(record['recording_id'], token)
                     completed += 1
-        except (OSError, ValueError):
+                else:
+                    journal.defer(record['recording_id'], token)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
             # One unavailable archive must not block other recoverable days.
             # The unacknowledged item stays pending for a later bounded round.
+            if not isinstance(exc, BlockingIOError):
+                import logging
+                logging.getLogger(__name__).warning('Publication replay deferred %s: %s',
+                                                    record['recording_id'], type(exc).__name__)
             journal.defer(record['recording_id'], token)
     return completed

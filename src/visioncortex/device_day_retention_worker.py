@@ -7,7 +7,7 @@ from pathlib import Path
 import time
 import uuid
 
-from .device_day_contract import atomic_json, digest
+from .device_day_contract import DEPENDENCIES, STAGES, atomic_json, digest, read_json
 from .device_day_inplace import enqueue, retention_policy
 from .device_day_schedule import in_processing_scope
 from .input_availability import configured_record
@@ -18,8 +18,8 @@ class RetentionWorker:
     """One claim per tick; local discovery only, existing execution validates NAS."""
 
     def __init__(self, *, stage='retention', failure_cooldown=60, recent_seconds=None):
-        if stage not in {'retention', 'stt', 'vision'}:
-            raise ValueError('Only independent retention, speech and vision stages are supported')
+        if stage not in STAGES:
+            raise ValueError('Unknown device/day stage')
         self.stage = stage
         self.recent_seconds = recent_seconds
         self.failure_cooldown = max(5, float(failure_cooldown))
@@ -37,12 +37,21 @@ class RetentionWorker:
         if self.stage == 'retention':
             with connection(runner.queues['vision'].path, readonly=True) as db:
                 visual = {r[0] for r in db.execute("SELECT recording_id FROM recordings WHERE status='completed'")}
+        ready = None
+        if self.stage in {'understanding', 'report'}:
+            for parent in self.parents():
+                with connection(runner.queues[parent].path, readonly=True) as db:
+                    completed = {r[0] for r in db.execute(
+                        "SELECT recording_id FROM recordings WHERE status='completed'")}
+                ready = completed if ready is None else ready & completed
         with connection(path, readonly=True) as db:
             records = [json.loads(r[0]) for r in db.execute('SELECT payload FROM observations')]
         maximum = runner.settings.get('failure_retry_limit') or 3
         candidates = []
         for record in records:
             rid = record['recording_id']
+            if ready is not None and rid not in ready:
+                continue
             state = states.get(rid, {})
             if (state.get('status') == 'completed'
                     or state.get('status') == 'running' and (state.get('lease_until') or 0) >= current
@@ -60,7 +69,7 @@ class RetentionWorker:
             if (not record.get('processable', record.get('available'))
                     or record.get('configured_role') not in {'first_person', 'third_person'}):
                 continue
-            if self.stage == 'vision':
+            if self.stage in {'vision', 'understanding', 'report'}:
                 order = (-record['recording_start_us'], record['camera_key'])
             elif self.stage == 'stt':
                 audio = record.get('audio') or {}
@@ -87,12 +96,60 @@ class RetentionWorker:
                 break
         return chosen
 
+    def parents(self):
+        needed = set(DEPENDENCIES[self.stage])
+        for _ in STAGES:
+            needed.update(parent for stage in tuple(needed) for parent in DEPENDENCIES[stage])
+        return [stage for stage in STAGES if stage in needed]
+
+    def admit(self, runner, record):
+        if self.stage not in {'understanding', 'report'}:
+            return enqueue(runner, record, self.stage)
+        from .device_day import load_context, visual_input
+        from .device_day_inplace import receipt
+        if runner._completion_hold(record, self.stage):
+            return False
+        if receipt(runner, record, 'publication').get('status') != 'completed':
+            return False
+        layout = runner.layout(record)
+        record = record | {'archive_date': layout.name[:10]}
+        context = load_context(layout, record)
+        prerequisites = {}
+        for parent in self.parents():
+            retained = prerequisites.get('retention')
+            inputs = (record if parent == 'retention' else visual_input(retained) if parent == 'vision'
+                      else retained if parent == 'stt' else
+                      {'vision': prerequisites.get('vision'), 'stt': prerequisites.get('stt'), 'context': context})
+            key = runner._key(parent, record, inputs)
+            path = runner._receipt(layout, record, parent)
+            saved = read_json(path) if path.is_file() else {}
+            if saved.get('status') != 'completed' or not runner._accepts_receipt(saved, key):
+                return False
+            loaded = runner._load(path, key, layout)
+            if loaded is None:
+                return False
+            prerequisites[parent] = loaded
+        # This is the ordinary single-record scheduling recipe. process()
+        # rechecks publication, identities and all artifact bytes after claim;
+        # it never runs a missing parent model for a single-stage request.
+        inputs = {parent: prerequisites[parent] for parent in DEPENDENCIES[self.stage]}
+        revision = runner._key(self.stage, record, [inputs, context if self.stage == 'understanding' else None])
+        runner.queues[self.stage].enqueue(record, revision)
+        runner.queues[self.stage].resume_prerequisite(record['recording_id'], revision)
+        return True
+
     def tick(self, runner, stop):
         from .device_day import exclusive
-        from .device_day_night_schedule import paused_stages
+        from .device_day_night_schedule import paused_stages, stage_admitted
         from .runtime_control import ExecutionCancelled
         if self.stage in paused_stages(runner.config):
             return {'status': 'paused_by_user'}
+        if self.stage in {'understanding', 'report'}:
+            if not stage_admitted(runner.config, self.stage):
+                return {'status': 'waiting_for_night_window'}
+            from .device_day_provider_gate import ProviderGate
+            if ProviderGate(runner.config).blocks(self.stage):
+                return {'status': 'waiting_for_provider'}
         with ExitStack() as locks:
             try:
                 locks.enter_context(exclusive(runner.runtime_root / 'locks' / f'{self.stage}-worker.lock'))
@@ -103,8 +160,10 @@ class RetentionWorker:
                 if stop.is_set():
                     return {'status': 'stopping'}
                 try:
-                    if enqueue(runner, record, self.stage):
+                    if self.admit(runner, record):
                         admitted.add(record['recording_id'])
+                    elif self.stage in {'understanding', 'report'}:
+                        self.deferred[record['recording_id']] = time.time() + self.failure_cooldown
                 except (OSError, ValueError, KeyError, TypeError):
                     self.deferred[record['recording_id']] = time.time() + self.failure_cooldown
             if not admitted or stop.is_set():
@@ -161,7 +220,7 @@ def serve(config_path, stop, *, stage='retention'):
     from .device_day import DeviceDayRunner
     # Historical work remains with the existing service. Its old per-camera
     # fairness must not admit history into the extra lane reserved for live video.
-    worker = RetentionWorker(stage=stage, recent_seconds=14400 if stage == 'vision' else None)
+    worker = RetentionWorker(stage=stage, recent_seconds=14400 if stage in {'vision', 'understanding', 'report'} else None)
     runner, generation, roots, status_path = None, None, None, None
     while not stop.is_set():
         try:
@@ -178,7 +237,8 @@ def serve(config_path, stop, *, stage='retention'):
             if runner is None or generation != key:
                 runner = DeviceDayRunner(config)
                 generation = key
-            directory = {'retention': 'RetentionWorker', 'stt': 'SpeechWorker', 'vision': 'VisionWorker'}[stage]
+            directory = {'retention': 'RetentionWorker', 'stt': 'SpeechWorker', 'vision': 'VisionWorker',
+                         'understanding': 'UnderstandingWorker', 'report': 'ReportWorker'}[stage]
             status_path = runner.runtime_root / directory / 'Service.json'
             atomic_json(status_path, {'status': 'running', 'updated_at': time.time(), 'stage': stage})
             result = worker.tick(runner, stop)
@@ -199,7 +259,7 @@ def main(argv=None):
     import threading
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', required=True)
-    parser.add_argument('--stage', choices=['retention', 'stt', 'vision'], default='retention')
+    parser.add_argument('--stage', choices=STAGES, default='retention')
     args = parser.parse_args(argv)
     stop = threading.Event()
     previous = {sig: signal.signal(sig, lambda *_: stop.set()) for sig in (signal.SIGTERM, signal.SIGINT)}
