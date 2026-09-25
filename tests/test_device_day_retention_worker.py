@@ -32,6 +32,29 @@ def record(rid, start, camera='a', **extra):
             'source_signature': rid, 'processable': True, **extra}
 
 
+def test_memory_hold_leaves_pending_attempts_and_active_leases_untouched_then_resumes(tmp_path, monkeypatch):
+    busy, latest = record('busy', 1_000_000), record('latest', 2_000_000, camera='b')
+    runner = setup(tmp_path, monkeypatch, [busy, latest])
+    runner.config['device_day'] = {'admission_min_available_gib': 4}
+    queue = runner.queues['vision']
+    for row in (busy, latest):
+        queue.enqueue(row, row['source_signature'])
+    queue.claim('original-owner', allowed={'busy'})
+    with queue.connect() as db:
+        before = [tuple(r) for r in db.execute('SELECT * FROM recordings ORDER BY recording_id')]
+    available = [3 * 1024**3]
+    monkeypatch.setattr('visioncortex.device_day_admission.psutil.virtual_memory',
+                        lambda: SimpleNamespace(available=available[0]))
+    worker = RetentionWorker(stage='vision')
+    assert worker.tick(runner, threading.Event())['status'] == 'waiting_for_memory'
+    with queue.connect() as db:
+        assert [tuple(r) for r in db.execute('SELECT * FROM recordings ORDER BY recording_id')] == before
+    available[0] = 5 * 1024**3
+    assert worker.tick(runner, threading.Event())['recording_id'] == 'latest'
+    with queue.connect() as db:
+        assert dict(db.execute("SELECT * FROM recordings WHERE recording_id='busy'").fetchone())['lease_owner'] == 'original-owner'
+
+
 def test_new_arrivals_continue_without_restarting_and_completed_never_replays(tmp_path, monkeypatch):
     runner = setup(tmp_path, monkeypatch, [record('old', 1_000_000), record('new', 2_000_000)])
     worker = RetentionWorker()

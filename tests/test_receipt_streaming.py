@@ -2,6 +2,7 @@
 import hashlib
 import json
 import math
+import io
 import sqlite3
 import weakref
 from pathlib import Path
@@ -87,17 +88,17 @@ def test_receipts_are_released_between_nas_reads_and_output_rows(tmp_path,monkey
 def test_full_rebuild_failure_keeps_previous_generation_and_cleans_spool(tmp_path,monkeypatch,failure):
     layout,projection=fixture(tmp_path)
     before=projection.records(layout,['retention'])
-    original=Path.read_text
+    original=Path.open
     def read(path, *args, **kwargs):
         if path.parent.name=='b':
             if failure=='read':
                 raise OSError('injected NAS failure')
             if failure=='invalid_json':
-                return '{"incomplete":'
+                return io.BytesIO(b'{"incomplete":')
         if path.name=='retention.json':
-            return '{"version":"replacement"}'
+            return io.BytesIO(b'{"version":"replacement"}')
         return original(path,*args,**kwargs)
-    monkeypatch.setattr(Path,'read_text',read)
+    monkeypatch.setattr(Path,'open',read)
     if failure=='sql':
         with sqlite3.connect(projection.path) as db:
             db.execute("CREATE TRIGGER fail_insert BEFORE INSERT ON receipts WHEN NEW.id='b' BEGIN SELECT RAISE(ABORT,'injected SQL failure'); END")
@@ -111,13 +112,13 @@ def test_full_rebuild_failure_keeps_previous_generation_and_cleans_spool(tmp_pat
 
 def test_nas_reads_do_not_hold_projection_writer_lock(tmp_path,monkeypatch):
     layout,projection=fixture(tmp_path)
-    original=Path.read_text
+    original=Path.open
     def read(path,*args,**kwargs):
         if path.is_relative_to(layout.receipts):
             with sqlite3.connect(projection.path,timeout=.1) as db:
                 db.execute('BEGIN IMMEDIATE')
         return original(path,*args,**kwargs)
-    monkeypatch.setattr(Path,'read_text',read)
+    monkeypatch.setattr(Path,'open',read)
     assert len(projection.records(layout,['retention']))==3
 
 

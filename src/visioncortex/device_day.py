@@ -215,11 +215,14 @@ def load_context(layout: DeviceDayLayout, recording: dict) -> dict:
 
 
 def stage_worker_capacity(settings, stage, camera_count):
+    from .device_day_admission import validate
+    validate(settings)
     defaults = {"retention": 2, "vision": 2, "stt": 1, "understanding": 2, "report": 1}
     if not settings.get("camera_lanes"):
-        return max(1, settings.get(stage + "_workers", defaults[stage]))
-    capacity = max(1, camera_count)
-    if stage == "vision":
+        capacity = max(1, settings.get(stage + "_workers", defaults[stage]))
+    else:
+        capacity = max(1, camera_count)
+    if settings.get("camera_lanes") and stage == "vision":
         camera_jobs = settings.get("vision_jobs_per_camera", 1)
         if isinstance(camera_jobs, bool) or not isinstance(camera_jobs, int) or camera_jobs < 1:
             raise ValueError("vision_jobs_per_camera must be a positive integer")
@@ -227,13 +230,13 @@ def stage_worker_capacity(settings, stage, camera_count):
         # applies the shared runtime vision resource limit to actual work.
         capacity *= camera_jobs
     # Bulk retention I/O has its own cap, independent of model executors.
-    if stage == "retention":
+    if settings.get("camera_lanes") and stage == "retention":
         limit = settings.get("retention_io_workers", 0)
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
             raise ValueError("retention_io_workers must be a nonnegative integer")
         if limit:
             capacity = min(capacity, limit)
-    return capacity
+    return min(capacity, settings.get('stage_worker_limits', {}).get(stage, capacity))
 
 
 class DeviceDayRunner:
@@ -266,6 +269,9 @@ class DeviceDayRunner:
         from .device_day_inplace import execution_identity as inplace_identity
         self._inplace_execution_identity = inplace_identity()
         self._backend_lock = threading.Lock()
+        self._queue_snapshot_lock = threading.Lock()
+        self._queue_snapshot_value = None
+        self._queue_snapshot_until = 0
         self._preparation_locks = {stage: threading.Lock() for stage in STAGES}
         self._prepared = {}
         self._record_readiness = {stage: {} for stage in STAGES}
@@ -1071,6 +1077,8 @@ class DeviceDayRunner:
                         result = {"recording_id": record["recording_id"], "status": "failed",
                                   "error_type": type(exc).__name__, "message": str(exc)[:1000]}
                     queue.finish(owner, record["recording_id"], result, time.perf_counter() - started)
+                    with self._queue_snapshot_lock:
+                        self._queue_snapshot_until = 0
                     if result.get('status') == 'waiting_for_prerequisite':
                         self._record_readiness[stage].pop(record['recording_id'], None)
                         self._admitted[stage].discard(record['recording_id'])
@@ -1091,8 +1099,18 @@ class DeviceDayRunner:
                 "wall_seconds": time.perf_counter() - begun, "queue": self.queue_snapshot(),
                 "discovery_truncated": inventory.get("truncated", False)}
 
-    def queue_snapshot(self):
-        return {name: queue.snapshot() for name, queue in self.queues.items()}
+    def queue_snapshot(self, *, force=False):
+        """Single-flight display statistics, at most 500 ms old across workers.
+
+        Claims, receipt validation and dependency readiness never use this
+        cache. Return an independent small value so callers cannot mutate it.
+        """
+        with self._queue_snapshot_lock:
+            if force or self._queue_snapshot_value is None or time.monotonic() >= self._queue_snapshot_until:
+                value = {name: queue.snapshot() for name, queue in self.queues.items()}
+                self._queue_snapshot_value = value
+                self._queue_snapshot_until = time.monotonic() + .5
+            return deepcopy(self._queue_snapshot_value)
 
 
 def append_comment(archive_root: Path, name: str, payload: dict, runtime_root: Path) -> dict:

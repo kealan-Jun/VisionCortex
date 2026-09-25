@@ -144,6 +144,10 @@ class RetentionWorker:
         from .runtime_control import ExecutionCancelled
         if self.stage in paused_stages(runner.config):
             return {'status': 'paused_by_user'}
+        from .device_day_admission import admission_status
+        hold = admission_status(runner.config, self.stage)
+        if hold:
+            return hold
         if self.stage in {'understanding', 'report'}:
             if not stage_admitted(runner.config, self.stage):
                 return {'status': 'waiting_for_night_window'}

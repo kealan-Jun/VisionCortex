@@ -1,10 +1,42 @@
 """Small file-only time index inside the existing Comment directory."""
+from collections import OrderedDict
 from datetime import datetime
+from itertools import chain
 from pathlib import Path, PurePosixPath
+import sys
 from zoneinfo import ZoneInfo
 
 from .device_day_contract import DIRECTORIES, atomic_json, read_json, safe_child, validate_archive_name
 from .device_day_schedule import in_processing_scope, processing_cutoff
+
+
+_SOURCE_INDEX_CACHE_DAYS = 4
+_SOURCE_INDEX_CACHE_BYTES = 128 * 1024 * 1024
+
+
+def _source_index_size(value, limit):
+    """Bound retained JSON objects, not total RSS or the active publication.
+
+    Twice the shallow Python sizes covers container overhead conservatively;
+    shared children are deliberately counted again. Walk iterators rather than
+    serializing/copying the index, and abandon oversized values immediately.
+    The input is an acyclic JSON projection produced by readable_source_index.
+    """
+    total, pending = 0, [iter((value,))]
+    while pending:
+        try:
+            item = next(pending[-1])
+        except StopIteration:
+            pending.pop()
+            continue
+        total += 2 * sys.getsizeof(item)
+        if total > limit:
+            return total
+        if isinstance(item, dict):
+            pending.append(chain(item.keys(), item.values()))
+        elif isinstance(item, (list, tuple)):
+            pending.append(iter(item))
+    return total
 
 
 def build_file_index(config, index, photos):
@@ -154,9 +186,35 @@ def publish_file_index(config, index, photos=None):
 class FileIndexPublisher:
     def __init__(self, config):
         self.config, self.versions = config, {}
-        self.source_indexes = {}
+        self.source_indexes = OrderedDict()
+        self._source_index_sizes = {}
+        self.source_index_bytes = 0
         self.runtime = Path(config['storage']['local_runtime_root'])/'device-day'
         self.last_result = {'status': 'not_started'}
+
+    def _drop_source(self, name):
+        self.source_indexes.pop(name, None)
+        self.source_index_bytes -= self._source_index_sizes.pop(name, 0)
+
+    def _cached_source(self, name, identity):
+        cached = self.source_indexes.get(name)
+        if cached is None or cached[0] != identity:
+            self._drop_source(name)
+            return None
+        self.source_indexes.move_to_end(name)
+        return cached[1]
+
+    def _remember_source(self, name, identity, index):
+        self._drop_source(name)
+        size = _source_index_size(index, _SOURCE_INDEX_CACHE_BYTES)
+        if size > _SOURCE_INDEX_CACHE_BYTES or _SOURCE_INDEX_CACHE_DAYS <= 0:
+            return  # Publish a large day normally, without keeping it warm.
+        while self.source_indexes and (len(self.source_indexes) >= _SOURCE_INDEX_CACHE_DAYS
+                or self.source_index_bytes + size > _SOURCE_INDEX_CACHE_BYTES):
+            self._drop_source(next(iter(self.source_indexes)))
+        self.source_indexes[name] = (identity, index)
+        self._source_index_sizes[name] = size
+        self.source_index_bytes += size
 
     def _output_revision(self, name, index):
         from .device_day_content import time_folder
@@ -211,7 +269,9 @@ class FileIndexPublisher:
                             photo_starts[name] = stamp
             except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
                 failed(path.stem, 'photo_index', exc)
-        self.source_indexes = {name: value for name, value in self.source_indexes.items() if name in names}
+        for name in tuple(self.source_indexes):
+            if name not in names:
+                self._drop_source(name)
         for name in sorted(names) if requested is None else (n for n in requested if n in names):
             operation = 'photo_index'
             try:
@@ -236,12 +296,11 @@ class FileIndexPublisher:
                     index = None
                     if content_enabled:
                         identity = (stat.st_mtime_ns, stat.st_size)
-                        cached = self.source_indexes.get(name)
-                        if cached is None or cached[0] != identity:
+                        index = self._cached_source(name, identity)
+                        if index is None:
                             from .device_day_content import readable_source_index
-                            cached = (identity, readable_source_index(read_json(path)))
-                            self.source_indexes[name] = cached
-                        index = cached[1]
+                            index = readable_source_index(read_json(path))
+                            self._remember_source(name, identity, index)
                     if content_enabled:
                         from .device_day_content import content_revision
                         operation = 'content_revision'
@@ -292,7 +351,7 @@ class FileIndexPublisher:
                         # changed output stats trigger restoration on next tick.
                         self.versions[name] += (content_version, self._output_revision(name, index))
                         source['time_index'] = index['time_index']
-                        self.source_indexes[name] = ((stat.st_mtime_ns, stat.st_size), source)
+                        self._remember_source(name, (stat.st_mtime_ns, stat.st_size), source)
                     result['published'] += 1
             except BlockingIOError:
                 result['busy'] += 1

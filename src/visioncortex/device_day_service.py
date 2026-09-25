@@ -278,10 +278,19 @@ class DeviceDayService:
                         1, since_us=processing_cutoff(runner.settings)))}
         def run_stage(runner, inventory, stage):
             from .device_day_night_schedule import stage_admitted, night_schedule, paused_stages
-            if stage in paused_stages(runner.config):
+            latest = self.settings_factory()
+            if not (latest.get('device_day') or {}).get('enabled'):
+                return {'status': 'admission_stopped', 'stage': stage}
+            if stage in paused_stages(latest):
                 return {"status": "paused_by_user", "stage": stage}
-            if not stage_admitted(runner.config, stage):
-                return {"status": "waiting_for_night_window", "schedule": night_schedule(runner.config)}
+            if json.dumps(latest, sort_keys=True, default=str) != self._settings_key:
+                return {'status': 'waiting_for_config_reload', 'stage': stage}
+            if not stage_admitted(latest, stage):
+                return {"status": "waiting_for_night_window", "schedule": night_schedule(latest)}
+            from .device_day_admission import admission_status
+            memory_wait = admission_status(latest, stage)
+            if memory_wait:
+                return memory_wait
             from .device_day_provider_gate import ProviderGate
             gate = ProviderGate(runner.config)
             if gate.blocks(stage):
@@ -392,6 +401,11 @@ class DeviceDayService:
                     settings_key = json.dumps(settings, sort_keys=True, default=str)
                     if self._runner is None or self._settings_key != settings_key:
                         if jobs or recovery_job is not None or overview_job is not None or index_job is not None or transcript_job is not None:
+                            from .device_day_night_schedule import paused_stages
+                            self.last_result = self.last_result | {
+                                'status': 'waiting_for_config_reload',
+                                'paused_stages': sorted(paused_stages(settings)),
+                                'admission_stopped': True}
                             self.wakeup.wait(1)
                             self.wakeup.clear()
                             continue
@@ -454,15 +468,20 @@ class DeviceDayService:
                     if overview_job is None and time.monotonic() - last_overview >= 30:
                         overview_job = overview_worker.submit(overview.publish, self._runner)
                         last_overview = time.monotonic()
-                    if self._runner.settings.get("camera_lanes"):
-                        camera_count = max(1, len({r.get("camera_key") for r in records.values()
-                                                  if r.get("configured_role") in {"first_person", "third_person"}}))
-                        from .device_day import stage_worker_capacity
-                        capacities.update({stage: stage_worker_capacity(self._runner.settings, stage, camera_count)
-                                           for stage in STAGES})
+                    camera_count = max(1, len({r.get("camera_key") for r in records.values()
+                                              if r.get("configured_role") in {"first_person", "third_person"}}))
+                    from .device_day import stage_worker_capacity
+                    capacities.update({stage: stage_worker_capacity(settings.get('device_day') or {}, stage, camera_count)
+                                       for stage in STAGES})
+                    from .device_day_admission import admission_status
+                    memory_waits = {}
                     if records or any(q.pending() for q in self._runner.queues.values()):
                         for stage in STAGES:
-                            if not stage_admitted(self._runner.config, stage):
+                            if not stage_admitted(settings, stage):
+                                continue
+                            memory_wait = admission_status(settings, stage)
+                            if memory_wait:
+                                memory_waits[stage] = memory_wait
                                 continue
                             for ordinal in range(capacities[stage]):
                                 slot = (stage, ordinal)
@@ -522,6 +541,7 @@ class DeviceDayService:
                                         "historical_backfill": "paused" if processing_cutoff(self._runner.settings) else "enabled",
                                         "paused_stages": sorted(paused),
                                         "stages": results, "parallel_capacity": dict(capacities),
+                                        "memory_admission": memory_waits,
                                         "queue": self._runner.queue_snapshot(),
                                         "capture_deletion": "disabled_by_user"}
                     atomic_json(self._runner.runtime_root / "service.json", self.last_result)

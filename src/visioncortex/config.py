@@ -88,6 +88,8 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
     processing_cutoff(config.get('device_day', {}))
     from .device_day_night_schedule import paused_stages
     paused_stages(config)
+    from .device_day_admission import validate as validate_admission
+    validate_admission(config.get('device_day') or {})
     from .multimodal_usage import validate as validate_usage
     validate_usage(config.get('mllm') or {})
     from .capture_layout import validate as validate_capture_layout
