@@ -10,6 +10,21 @@ from .runtime_control import CURRENT, ResourceCoordinator
 
 
 _COPY_QUEUED_AT = ContextVar('device_day_copy_queued_at', default=None)
+_LIVE_VISION = ContextVar('device_day_live_vision_lane', default=False)
+
+
+@contextmanager
+def live_vision_lane():
+    """One extra live decoder alongside the existing shared I/O budget.
+
+    Only the independent single-job worker opts in. All processes share its
+    capacity-one lease; archive/STT work still uses the ordinary total budget.
+    """
+    token = _LIVE_VISION.set(True)
+    try:
+        yield
+    finally:
+        _LIVE_VISION.reset(token)
 
 
 @contextmanager
@@ -21,9 +36,10 @@ def slot(config, *, copy=False, urgent=False, whole_copy=False):
     # Keep a copy's age across bounded blocks. Rejoining behind every long
     # decoder after each 8 MiB block can otherwise starve archival for hours.
     queued_at = (_COPY_QUEUED_AT.get() or time.time()) if copy else None
+    live = _LIVE_VISION.get() and current_stage() == 'vision' and not copy and not whole_copy
     with ExitStack() as stack:
         with phase('io_queue_seconds'):
-            if not copy and not whole_copy and capacity > 1 and current_stage() != 'stt':
+            if not live and not copy and not whole_copy and capacity > 1 and current_stage() != 'stt':
                 # Keep one shared slot available for bounded archive work. A
                 # long vision operation must not occupy every NAS I/O slot.
                 stack.enter_context(coordinator.acquire(
@@ -33,7 +49,8 @@ def slot(config, *, copy=False, urgent=False, whole_copy=False):
             # behind whole-video decoding. It still shares the total I/O cap
             # with archival and every other reader below.
             stack.enter_context(coordinator.acquire(
-                'nas-copy' if whole_copy else 'nas-io', capacity=capacity,
+                'nas-live-vision' if live else 'nas-copy' if whole_copy else 'nas-io',
+                capacity=1 if live else capacity,
                 timeout=settings.get('nas_io_timeout_seconds', 3600), context=context, queued_at=queued_at))
         token = _COPY_QUEUED_AT.set(queued_at) if whole_copy else None
         try:

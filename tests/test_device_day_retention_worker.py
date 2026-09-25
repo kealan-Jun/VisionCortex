@@ -1,5 +1,6 @@
 """Persistent queue tests; no NAS or real models are involved."""
 from types import SimpleNamespace
+from contextlib import contextmanager
 import json
 import threading
 import time
@@ -139,8 +140,9 @@ def test_real_inplace_receipt_pipeline_is_reused_without_visual_rerun(device_con
 
 def test_speech_is_latest_first_independent_of_vision_and_repeats_for_new_arrivals(tmp_path, monkeypatch):
     audio = {'status': 'provided', 'capture_complete': True}
-    rows = [record('old', 1_000_000, audio=audio), record('new', 2_000_000, audio=audio),
-            record('open', 3_000_000, audio={'status': 'provided', 'capture_complete': False})]
+    rows = [record('old', 1_000_000, audio=audio),
+            record('new', 2_000_000, audio={'status': 'provided', 'capture_complete': False}),
+            record('open', 3_000_000, audio={'status': 'pending_publication', 'capture_complete': False})]
     runner = setup(tmp_path, monkeypatch, rows)
     calls = []
     def process(record, *, stage, retry):
@@ -218,3 +220,76 @@ def test_speech_respects_configured_capacity_of_one(tmp_path, monkeypatch):
     queue.enqueue(old, 'old')
     queue.claim('original-main')
     assert RetentionWorker(stage='stt').tick(runner, threading.Event())['status'] == 'waiting'
+
+
+def test_latest_vision_uses_explicit_lane_and_one_extra_camera_slot(tmp_path, monkeypatch):
+    from visioncortex import device_day_io
+    rows = [record('older-one', 1_000_000, capture_complete=True),
+            record('older-two', 2_000_000, capture_complete=True),
+            record('newest', 3_000_000, capture_complete=False),
+            record('open', 4_000_000, capture_complete=False, processable=False)]
+    runner = setup(tmp_path, monkeypatch, rows)
+    runner.settings['vision_jobs_per_camera'] = 2
+    runner.config['runtime'] = {'resource_limits': {'vision': 12}}
+    queue = runner.queues['vision']
+    for row in rows[:2]:
+        queue.enqueue(row, row['source_signature'])
+        queue.claim(row['recording_id'], camera_serial=True, camera_limit=2)
+    active = []
+    @contextmanager
+    def lane():
+        active.append(True)
+        try:
+            yield
+        finally:
+            active.pop()
+    monkeypatch.setattr(device_day_io, 'live_vision_lane', lane, raising=False)
+    calls = []
+    def process(row, *, stage, retry):
+        assert active == [True]
+        calls.append((row['recording_id'], stage))
+        return {'status': 'completed'}
+    runner.process = process
+    with queue.connect() as db:
+        previous = [dict(row) for row in db.execute("SELECT * FROM recordings WHERE status='running' ORDER BY recording_id")]
+    worker = RetentionWorker(stage='vision')
+    assert worker.tick(runner, threading.Event())['recording_id'] == 'newest'
+    assert calls == [('newest', 'vision')]
+    assert active == []
+    assert worker.tick(runner, threading.Event())['status'] == 'waiting'
+    with queue.connect() as db:
+        assert previous == [dict(row) for row in db.execute("SELECT * FROM recordings WHERE status='running' ORDER BY recording_id")]
+
+
+def test_vision_cannot_claim_fourth_slice_and_new_arrival_is_continuously_seen(tmp_path, monkeypatch):
+    from visioncortex import device_day_io
+    from contextlib import nullcontext
+    old = [record(str(i), i * 1_000_000, capture_complete=True) for i in (1, 2, 3)]
+    runner = setup(tmp_path, monkeypatch, old)
+    runner.settings['vision_jobs_per_camera'] = 2
+    runner.config['runtime'] = {'resource_limits': {'vision': 12}}
+    queue = runner.queues['vision']
+    for row in old:
+        queue.enqueue(row, row['source_signature'])
+        queue.claim(row['recording_id'], camera_serial=True, camera_limit=3)
+    fresh = record('fresh', 5_000_000, capture_complete=True)
+    observe(runner.runtime_root, {'recordings': [fresh]})
+    worker = RetentionWorker(stage='vision')
+    assert worker.tick(runner, threading.Event())['status'] == 'waiting'
+    monkeypatch.setattr(device_day_io, 'live_vision_lane', nullcontext, raising=False)
+    queue.finish('3', '3', {'status': 'completed'}, 1)
+    assert worker.tick(runner, threading.Event())['recording_id'] == 'fresh'
+
+
+def test_vision_configured_total_capacity_and_pause_still_limit_claims(tmp_path, monkeypatch):
+    rows = [record('old', 1_000_000, capture_complete=True), record('new', 2_000_000, capture_complete=True)]
+    runner = setup(tmp_path, monkeypatch, rows)
+    runner.settings['vision_jobs_per_camera'] = 2
+    runner.config['runtime'] = {'resource_limits': {'vision': 1}}
+    queue = runner.queues['vision']
+    queue.enqueue(rows[0], 'old')
+    queue.claim('old-owner')
+    worker = RetentionWorker(stage='vision')
+    assert worker.tick(runner, threading.Event())['status'] == 'waiting'
+    runner.config['device_day'] = {'paused_stages': ['vision']}
+    assert worker.tick(runner, threading.Event())['status'] == 'paused_by_user'

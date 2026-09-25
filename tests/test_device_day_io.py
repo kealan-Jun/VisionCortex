@@ -126,6 +126,30 @@ def test_speech_uses_reserved_io_capacity_without_exceeding_total(tmp_path):
     assert coordinator.snapshot() == []
 
 
+def test_live_vision_has_exactly_one_extra_slot_and_leaves_short_work_independent(tmp_path):
+    from visioncortex.device_day_activity import job
+    config = settings(tmp_path)
+    coordinator = ResourceCoordinator(tmp_path/'state/resources.sqlite3')
+    with io.slot(config), io.slot(config):
+        with io.live_vision_lane(), job('vision', 'latest-video'), io.slot(config):
+            assert not coordinator.try_claim('second-live', 'nas-live-vision', 1, 1, ExecutionContext())
+            coordinator.release('second-live')
+            # The opt-in never diverts copies or speech into the long lane.
+            with io.slot(config, copy=True):
+                leases = coordinator.snapshot()
+                assert sum(r['state'] == 'running' for r in leases if r['resource'] == 'nas-io') == 3
+                assert sum(r['state'] == 'running' for r in leases if r['resource'] == 'nas-live-vision') == 1
+            with job('stt', 'speech'), io.slot(config):
+                assert sum(r['state'] == 'running' for r in coordinator.snapshot()
+                           if r['resource'] == 'nas-io') == 3
+    assert coordinator.snapshot() == []
+    # Leaving the opt-in restores the normal reader reservation.
+    with job('vision', 'ordinary'), io.slot(config):
+        leases = coordinator.snapshot()
+        assert any(r['resource'] == 'nas-io-read' for r in leases)
+        assert not any(r['resource'] == 'nas-live-vision' for r in leases)
+
+
 def test_transient_sqlite_busy_retries_but_other_database_errors_propagate(tmp_path, monkeypatch):
     coordinator = ResourceCoordinator(tmp_path/'resources.sqlite3')
     original = coordinator.try_claim

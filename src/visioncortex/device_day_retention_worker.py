@@ -1,4 +1,4 @@
-"""Continuously archive or transcribe ready slices through the shared queue."""
+"""Continuously process ready slices through the shared production queues."""
 from __future__ import annotations
 
 from contextlib import ExitStack
@@ -18,8 +18,8 @@ class RetentionWorker:
     """One claim per tick; local discovery only, existing execution validates NAS."""
 
     def __init__(self, *, stage='retention', failure_cooldown=60):
-        if stage not in {'retention', 'stt'}:
-            raise ValueError('Only independent retention and speech stages are supported')
+        if stage not in {'retention', 'stt', 'vision'}:
+            raise ValueError('Only independent retention, speech and vision stages are supported')
         self.stage = stage
         self.failure_cooldown = max(5, float(failure_cooldown))
         self.deferred = {}
@@ -56,9 +56,11 @@ class RetentionWorker:
             if (not record.get('processable', record.get('available'))
                     or record.get('configured_role') not in {'first_person', 'third_person'}):
                 continue
-            if self.stage == 'stt':
+            if self.stage == 'vision':
+                order = (-record['recording_start_us'], record['camera_key'])
+            elif self.stage == 'stt':
                 audio = record.get('audio') or {}
-                if audio.get('status') != 'provided' or not audio.get('capture_complete'):
+                if audio.get('status') != 'provided':
                     continue
                 order = (-record['recording_start_us'], record['camera_key'])
             else:
@@ -116,6 +118,9 @@ class RetentionWorker:
             # newest slice; neither its lease nor its stage lock is disturbed.
             speech_capacity = ((runner.config.get('runtime') or {}).get('resource_limits') or {}).get('stt', 2)
             camera_limit = min(2, speech_capacity) if self.stage == 'stt' else 1
+            if self.stage == 'vision':
+                vision_capacity = ((runner.config.get('runtime') or {}).get('resource_limits') or {}).get('vision', 12)
+                camera_limit = min(vision_capacity, runner.settings.get('vision_jobs_per_camera', 1) + 1)
             with queue.heartbeat(owner):
                 record = queue.claim(owner, retry=True, allowed=admitted, camera_serial=True,
                                      camera_limit=camera_limit,
@@ -126,7 +131,12 @@ class RetentionWorker:
                 try:
                     # Stop only prevents new claims. An already leased archive
                     # copy and publication finish normally during handover.
-                    result = runner.process(record, stage=self.stage, retry=True)
+                    if self.stage == 'vision':
+                        from .device_day_io import live_vision_lane
+                        with live_vision_lane():
+                            result = runner.process(record, stage=self.stage, retry=True)
+                    else:
+                        result = runner.process(record, stage=self.stage, retry=True)
                 except ExecutionCancelled as exc:
                     result = {'status': 'cancelled', 'recording_id': record['recording_id'],
                               'error_type': type(exc).__name__, 'message': str(exc)[:1000]}
@@ -162,7 +172,8 @@ def serve(config_path, stop, *, stage='retention'):
             if runner is None or generation != key:
                 runner = DeviceDayRunner(config)
                 generation = key
-            status_path = runner.runtime_root / ('RetentionWorker' if stage == 'retention' else 'SpeechWorker') / 'Service.json'
+            directory = {'retention': 'RetentionWorker', 'stt': 'SpeechWorker', 'vision': 'VisionWorker'}[stage]
+            status_path = runner.runtime_root / directory / 'Service.json'
             atomic_json(status_path, {'status': 'running', 'updated_at': time.time(), 'stage': stage})
             result = worker.tick(runner, stop)
             status = {'status': 'running', 'updated_at': time.time(), 'stage': stage, 'last_result': result}
@@ -182,7 +193,7 @@ def main(argv=None):
     import threading
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', required=True)
-    parser.add_argument('--stage', choices=['retention', 'stt'], default='retention')
+    parser.add_argument('--stage', choices=['retention', 'stt', 'vision'], default='retention')
     args = parser.parse_args(argv)
     stop = threading.Event()
     previous = {sig: signal.signal(sig, lambda *_: stop.set()) for sig in (signal.SIGTERM, signal.SIGINT)}
