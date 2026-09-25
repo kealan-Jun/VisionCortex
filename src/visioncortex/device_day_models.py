@@ -9,6 +9,7 @@ from collections import Counter
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Literal
 from zoneinfo import ZoneInfo
 
@@ -554,59 +555,69 @@ class DeviceDayModels:
             coverage(frame.local_ms for frame in iter_frame_evidence(fine[view.view_id]))
             return fine, {"enabled": False}, []
         directory = layout.receipts / recording["recording_id"] / "YOLO" / key / f"{ordinal:04d}" / index_name
-        with timings.measure("index_ingest_seconds", cpu=True):
-            index = create_fine_frame_index(local_frame_index_path(self.config, directory, "FineIndex.sqlite3"))
-            ingest = ingest_fine_frame_ledgers(
-                index, [view], fine, source_pass="single-pass", timings=timings,
-                stitching_enabled=bool(perf.get("fine_track_stitching_enabled", False)),
-                maximum_stitch_gap_ms=float(perf.get("fine_track_stitch_max_gap_seconds", 2.5)) * 1000,
-                maximum_center_distance=float(perf.get("fine_track_stitch_max_center_distance", .12)))
-        with timings.measure("coverage_query_seconds", cpu=True):
-            # Retain the original per-window, half-open gate as well as the
-            # index's aggregate gate. Read only keys, not frame JSON twice.
-            window_coverage = coverage(index.iter_local_times(view.view_id))
-            report = fine_frame_coverage_report(
-                index, [view], {view.view_id: info}, {view.view_id: scan_windows},
-                sample_fps=sample_fps,
-                minimum_coverage_ratio=float(perf.get("fine_minimum_coverage_ratio", .98)),
-                maximum_gap_periods=float(perf.get("fine_maximum_gap_periods", 4)),
-                alignment_scales={view.view_id: 1.0})
-        report["window_coverage"] = window_coverage
-        report["ingest_passes"] = [ingest]
-        if perf.get("fine_coverage_gate_enabled") and not report.get("formal_evidence_ready"):
+        local_root = local_frame_index_path(self.config, directory, "FineIndex.sqlite3").parent
+        local_root.mkdir(parents=True, exist_ok=True)
+        directory.mkdir(parents=True, exist_ok=True)
+        # Each invocation owns its temporary files. Never replace a legacy
+        # index that an older worker may still use during a rolling upgrade.
+        # All queries close before these contexts release their builders.
+        with (TemporaryDirectory(prefix="active-", dir=local_root) as local_temporary,
+              TemporaryDirectory(prefix=".ledger-", dir=directory) as backend_temporary):
+            with timings.measure("index_ingest_seconds", cpu=True):
+                index = create_fine_frame_index(Path(local_temporary) / "FineIndex.sqlite3")
+                ingest = ingest_fine_frame_ledgers(
+                    index, [view], fine, source_pass="single-pass", timings=timings,
+                    stitching_enabled=bool(perf.get("fine_track_stitching_enabled", False)),
+                    maximum_stitch_gap_ms=float(perf.get("fine_track_stitch_max_gap_seconds", 2.5)) * 1000,
+                    maximum_center_distance=float(perf.get("fine_track_stitch_max_center_distance", .12)))
+            with timings.measure("coverage_query_seconds", cpu=True):
+                # Retain the original per-window, half-open gate as well as the
+                # index's aggregate gate. Read only keys, not frame JSON twice.
+                window_coverage = coverage(index.iter_local_times(view.view_id))
+                report = fine_frame_coverage_report(
+                    index, [view], {view.view_id: info}, {view.view_id: scan_windows},
+                    sample_fps=sample_fps,
+                    minimum_coverage_ratio=float(perf.get("fine_minimum_coverage_ratio", .98)),
+                    maximum_gap_periods=float(perf.get("fine_maximum_gap_periods", 4)),
+                    alignment_scales={view.view_id: 1.0})
+            report["window_coverage"] = window_coverage
+            report["ingest_passes"] = [ingest]
+            if perf.get("fine_coverage_gate_enabled") and not report.get("formal_evidence_ready"):
+                report["component_timings"] = timings.snapshot()
+                atomic_json(directory / "Manifest.json", report)
+                raise ValueError("Existing fine frame coverage evidence gate did not pass")
+            with timings.measure("ledger_materialization_seconds", cpu=True):
+                # Large JSONL payloads belong to the configured evidence cache.
+                # Only the active SQLite/WAL builder needs a local filesystem.
+                ledgers = index.materialize_ledgers(Path(backend_temporary), [view])
+
+            def publish(source, target):
+                relative = target.relative_to(layout.backend_root).as_posix()
+                safe_child(layout.backend_root, relative)
+                verified = copy_verified(source, target)
+                # copy_verified already read back the durable target and checked
+                # its digest. Do not hash the entire published file a third time.
+                return {"path": relative, "storage_root": "local_cache_root",
+                        "size_bytes": verified["size_bytes"], "sha256": verified["sha256"]}
+
+            with timings.measure("index_publication_seconds", cpu=True):
+                artifacts = [publish(index.path, directory / "FineIndex.sqlite3")]
+            with timings.measure("ledger_publication_seconds", cpu=True):
+                artifacts.extend(publish(path, directory / "IndexedDetections" / path.name) for path in ledgers.values())
             report["component_timings"] = timings.snapshot()
+            report["timing_scope"] = {
+                "cpu": "calling_thread_only",
+                "non_cpu": "wall_minus_thread_cpu_includes_io_locks_scheduling_not_nas_attribution",
+                "nested": {"ledger_read_parse": "included_in_index_ingest"},
+                "excludes": "manifest_publication",
+            }
+            report["ledger_parse_passes"] = 1
+            report["index_path"] = str(directory / "FineIndex.sqlite3")
+            report["audit_ledger_storage"] = "local_cache_root"
             atomic_json(directory / "Manifest.json", report)
-            raise ValueError("Existing fine frame coverage evidence gate did not pass")
-        with timings.measure("ledger_materialization_seconds", cpu=True):
-            # The subsequent candidate/audit/keyframe passes all read this
-            # local copy. Publish the same bytes once to durable receipts.
-            ledgers = index.materialize_ledgers(index.path.parent / "IndexedDetections", [view])
-
-        def publish(source, target):
-            relative = target.relative_to(layout.backend_root).as_posix()
-            safe_child(layout.backend_root, relative)
-            verified = copy_verified(source, target)
-            # copy_verified already read back the durable target and checked
-            # its digest. Do not hash the entire published file a third time.
-            return {"path": relative, "storage_root": "local_cache_root",
-                    "size_bytes": verified["size_bytes"], "sha256": verified["sha256"]}
-
-        with timings.measure("index_publication_seconds", cpu=True):
-            artifacts = [publish(index.path, directory / "FineIndex.sqlite3")]
-        with timings.measure("ledger_publication_seconds", cpu=True):
-            artifacts.extend(publish(path, directory / "IndexedDetections" / path.name) for path in ledgers.values())
-        report["component_timings"] = timings.snapshot()
-        report["timing_scope"] = {
-            "cpu": "calling_thread_only",
-            "non_cpu": "wall_minus_thread_cpu_includes_io_locks_scheduling_not_nas_attribution",
-            "nested": {"ledger_read_parse": "included_in_index_ingest"},
-            "excludes": "manifest_publication",
-        }
-        report["ledger_parse_passes"] = 1
-        report["audit_ledger_storage"] = "local_runtime_root"
-        atomic_json(directory / "Manifest.json", report)
-        artifacts.insert(1, layout.backend_artifact(directory / "Manifest.json"))
-        return ledgers, report, artifacts
+            artifacts.insert(1, layout.backend_artifact(directory / "Manifest.json"))
+            published_ledgers = {key: directory / "IndexedDetections" / path.name for key, path in ledgers.items()}
+            return published_ledgers, report, artifacts
 
     def _audit_fine(self, view, info, fine, report, coarse_candidates, scan_windows):
         from .actions import generate_candidates

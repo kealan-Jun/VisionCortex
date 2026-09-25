@@ -11,7 +11,10 @@ from pathlib import Path
 
 
 class DeviceDayQueue:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, latest_first=False):
+        if not isinstance(latest_first, bool):
+            raise ValueError('device_day.latest_first must be a boolean')
+        self.latest_first = latest_first
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
         with self.connect() as db:
@@ -62,8 +65,9 @@ class DeviceDayQueue:
             # Never replace an actively leased worker's input snapshot.
             db.execute("""UPDATE recordings SET payload=?
               WHERE recording_id=? AND revision=? AND payload!=? AND
-                (status!='running' OR COALESCE(lease_until,0)<?)""",
-                       (payload, recording["recording_id"], revision, payload, observed))
+                (status!='running' OR COALESCE(lease_until,0)<?) AND
+                (?=0 OR status!='completed')""",
+                       (payload, recording["recording_id"], revision, payload, observed, self.latest_first))
 
     def pending(self):
         with self.connect() as db:
@@ -126,15 +130,24 @@ class DeviceDayQueue:
                   WHERE busy.status='running' AND busy.lease_until>=?
                   GROUP BY COALESCE(json_extract(busy.payload,'$.camera_key'),'') HAVING COUNT(*)>=?)""")
                 parameters.extend((current, camera_limit))
-            ordering = "COALESCE(json_extract(r.payload,'$.processing_priority'),0),"
+            ordering = "" if self.latest_first else "COALESCE(json_extract(r.payload,'$.processing_priority'),0),"
             if self.path.stem == 'queue-retention':
-                ordering = ("CASE WHEN json_extract(r.payload,'$.archive_urgent') THEN 0 "
-                            "WHEN json_extract(r.payload,'$.archive_aged') THEN 1 ELSE 2 END,"
-                            "COALESCE(json_extract(r.payload,'$.archive_deadline'),9e99),r.queued_at," + ordering)
+                if self.latest_first:
+                    # A known cleanup risk or deadline still protects source
+                    # media. Mere backlog age must not starve newer slices.
+                    ordering = ("CASE WHEN json_extract(r.payload,'$.archive_urgent') THEN 0 ELSE 1 END,"
+                                "COALESCE(json_extract(r.payload,'$.archive_deadline'),9e99),")
+                else:
+                    ordering = ("CASE WHEN json_extract(r.payload,'$.archive_urgent') THEN 0 "
+                                "WHEN json_extract(r.payload,'$.archive_aged') THEN 1 ELSE 2 END,"
+                                "COALESCE(json_extract(r.payload,'$.archive_deadline'),9e99),r.queued_at," + ordering)
             if camera_serial:
                 ordering += ("COALESCE((SELECT last_claim FROM camera_dispatch "
-                             "WHERE camera_key=json_extract(r.payload,'$.camera_key')),0),"
-                             "CASE WHEN COALESCE(json_extract(r.payload,'$.processing_priority'),0)<0 "
+                             "WHERE camera_key=json_extract(r.payload,'$.camera_key')),0),")
+            if self.latest_first:
+                ordering += "COALESCE(json_extract(r.payload,'$.recording_start_us'),0) DESC,"
+            elif camera_serial:
+                ordering += ("CASE WHEN COALESCE(json_extract(r.payload,'$.processing_priority'),0)<0 "
                              "THEN -COALESCE(json_extract(r.payload,'$.recording_start_us'),0) "
                              "ELSE COALESCE(json_extract(r.payload,'$.recording_start_us'),0) END,")
             ordering += "r.queued_at,r.recording_id"

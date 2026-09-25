@@ -435,6 +435,7 @@ class DeviceDayService:
                         row,
                         focus_date=focus_date,
                         live_priority_seconds=self._runner.settings.get('live_priority_seconds', 14400),
+                        latest_first=self._runner.settings.get('latest_first', False),
                     ) for key, row in records.items()}
                     inventory = inventory | {"recordings": list(records.values())}
                     if recovery_job is None and time.monotonic() - last_recovery >= 1:

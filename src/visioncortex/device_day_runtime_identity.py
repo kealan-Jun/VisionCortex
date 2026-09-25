@@ -20,6 +20,11 @@ _PERFORMANCE = ['fc756fe919bdaf341fffb32a771e485d07650d403f37ccfac6ca7a052845f3d
 _AUDIT_BACKEND = ('de18f0bfdf127e0c3f1b5b732d150e53cca4c01a95b1146540d4b23ea0adaba5',
                   '7c04a7a02843f482f30e5524a1e84cbbaea21278b03fbe8d494789fd24e1b3cd')
 _AUDIT_HELPER = '9250a97ddbce642dcfc50a78b41ba19a2b62136058a318239eae7f029eeb38ef'
+# Exact cache-lifetime revision: the same FineIndex/JSONL bytes are published
+# under the existing paths; only owned local builders are released and audits
+# read the verified backend ledger. Keep prior completed receipts untouched.
+# Unknown edits and a changed audit helper still invalidate normally.
+_FRAME_CACHE_BACKEND = '1b2f1213f58f9d7c4f99bd14b22cf6358e3ff7b73a72769c2f85d5649c0731e6'
 # Bounded C encoding keeps digest bytes identical; pretty receipt serialization
 # retains the original implementation. Unknown contract revisions still fail
 # closed, including changes to layout, validation or hashing semantics.
@@ -54,7 +59,7 @@ def compatible_runtime_hash(path, checksum):
             return _JSON_ENCODING[1]
         if path.name == 'device_day_audit.py' and checksum == _AUDIT_HELPER:
             return None
-        if path.name == 'device_day_models.py' and checksum == _AUDIT_BACKEND[0]:
+        if path.name == 'device_day_models.py' and checksum in (_AUDIT_BACKEND[0], _FRAME_CACHE_BACKEND):
             helper = path.with_name('device_day_audit.py')
             if hashlib.sha256(helper.read_bytes()).hexdigest() == _AUDIT_HELPER:
                 return _AUDIT_BACKEND[1]

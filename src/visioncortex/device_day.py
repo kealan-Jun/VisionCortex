@@ -274,7 +274,8 @@ class DeviceDayRunner:
         from .device_day_prerequisites import PrerequisiteChecks
         self._prerequisite_checks = PrerequisiteChecks()
         from .device_day_queue import DeviceDayQueue
-        self.queues = {stage: DeviceDayQueue(self.runtime_root / f"queue-{stage}.sqlite3") for stage in STAGES}
+        self.queues = {stage: DeviceDayQueue(self.runtime_root / f"queue-{stage}.sqlite3",
+                                           latest_first=self.settings.get('latest_first', False)) for stage in STAGES}
         self.queue = self.queues["vision"]
 
     def _backend(self):
@@ -803,6 +804,7 @@ class DeviceDayRunner:
             self.queues[stage],
             focus_date,
             self.settings.get('live_priority_seconds', 14400),
+            latest_first=self.settings.get('latest_first', False),
         )
         from .input_availability import Availability, configured_record
         states = Availability(self.runtime_root).states()
@@ -837,6 +839,7 @@ class DeviceDayRunner:
                             r,
                             focus_date=focus_date,
                             live_priority_seconds=self.settings.get('live_priority_seconds', 14400),
+                            latest_first=self.settings.get('latest_first', False),
                          ) for r in durable.values()),
                          key=lambda r: (r["processing_priority"],
                                         -r["recording_start_us"] if r["processing_priority"] < 0 else r["recording_start_us"],

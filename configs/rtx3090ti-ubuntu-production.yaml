@@ -26,9 +26,10 @@ device_day:
   camera_lanes: true
   # Independent slices share the existing model pool and archive publication locks.
   vision_jobs_per_camera: 2
-  # Keep the newest four hours in a live lane ahead of the historical backlog.
-  # The ordinary same-day lane resumes automatically when this lane drains.
+  # Keep the four-hour policy available for rollback. latest_first uses capture
+  # time across dates; only explicit archive deadlines/cleanup risk override it.
   live_priority_seconds: 14400
+  latest_first: true
   night_processing:
     enabled: false  # New slices proceed through every stage immediately.
     timezone: Asia/Shanghai

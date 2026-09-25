@@ -675,8 +675,9 @@ def test_shared_activity_projection_preserves_camera_and_clock_identity(device_c
     assert event.model_dump() == original
 
 
-def test_fine_index_uses_shared_local_storage_and_publishes_verified_snapshot(device_config, tmp_path):
+def test_fine_index_releases_local_builder_and_publishes_verified_snapshot(device_config, tmp_path):
     from visioncortex.candidate_index import local_frame_index_path
+    from visioncortex.device_day_contract import verify_artifact
     from visioncortex.device_day_models import DeviceDayModels
     from visioncortex.schemas import ViewInput, VideoInfo
     view = ViewInput(view_id="a", role=ViewRole.FIRST_PERSON, video=tmp_path / "fixture.mp4")
@@ -692,7 +693,10 @@ def test_fine_index_uses_shared_local_storage_and_publishes_verified_snapshot(de
     snapshot = layout.backend_root / next(r["path"] for r in artifacts if r["path"].endswith(".sqlite3"))
     live_index = local_frame_index_path(device_config, snapshot.parent, snapshot.name)
     assert live_index.is_relative_to(Path(device_config["storage"]["local_runtime_root"]).resolve())
-    assert snapshot.read_bytes() == live_index.read_bytes()
+    assert not live_index.exists()
+    assert not list(live_index.parent.glob("active-*"))
+    assert verify_artifact(layout.backend_root, next(r for r in artifacts if r["path"].endswith(".sqlite3")))
+    assert paths["a"].is_relative_to(layout.backend_root)
     assert report["formal_evidence_ready"] is True and paths["a"].is_file()
 
 

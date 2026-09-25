@@ -1,10 +1,15 @@
 """Cooperative cross-process NAS admission; no media access on import."""
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar
 from dataclasses import replace
 from pathlib import Path
+import time
 
 from .device_day_activity import phase
 from .runtime_control import CURRENT, ResourceCoordinator
+
+
+_COPY_QUEUED_AT = ContextVar('device_day_copy_queued_at', default=None)
 
 
 @contextmanager
@@ -12,18 +17,27 @@ def slot(config, *, copy=False, urgent=False, whole_copy=False):
     settings = config.get('device_day', {})
     coordinator = ResourceCoordinator(Path(config['storage']['local_runtime_root']) / 'state' / 'resources.sqlite3')
     capacity = settings.get('archive_copy_workers', 1) if whole_copy else settings.get('nas_io_slots', 3)
-    context = replace(CURRENT.get(), priority=(-10 if urgent else 10) if copy else 0)
-    # ResourceCoordinator ages waiting jobs every 30 seconds. A waiting copy
-    # eventually precedes new decoders, even under continuous live intake.
-    with phase('io_queue_seconds'):
-        manager = coordinator.acquire('nas-copy' if whole_copy else 'nas-io', capacity=capacity,
-                                      timeout=settings.get('nas_io_timeout_seconds', 3600), context=context)
-        manager.__enter__()
-    try:
-        yield
-    finally:
-        import sys
-        manager.__exit__(*sys.exc_info())
+    context = replace(CURRENT.get(), priority=-10 if copy and urgent else 0)
+    # Keep a copy's age across bounded blocks. Rejoining behind every long
+    # decoder after each 8 MiB block can otherwise starve archival for hours.
+    queued_at = (_COPY_QUEUED_AT.get() or time.time()) if copy else None
+    with ExitStack() as stack:
+        with phase('io_queue_seconds'):
+            if not copy and not whole_copy and capacity > 1:
+                # Keep one shared slot available for bounded archive work. A
+                # long vision operation must not occupy every NAS I/O slot.
+                stack.enter_context(coordinator.acquire(
+                    'nas-io-read', capacity=capacity - 1,
+                    timeout=settings.get('nas_io_timeout_seconds', 3600), context=context))
+            stack.enter_context(coordinator.acquire(
+                'nas-copy' if whole_copy else 'nas-io', capacity=capacity,
+                timeout=settings.get('nas_io_timeout_seconds', 3600), context=context, queued_at=queued_at))
+        token = _COPY_QUEUED_AT.set(queued_at) if whole_copy else None
+        try:
+            yield
+        finally:
+            if token is not None:
+                _COPY_QUEUED_AT.reset(token)
 
 
 def pace_copy(config, size):

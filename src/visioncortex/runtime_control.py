@@ -4,6 +4,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import wraps
 from pathlib import Path
+import sqlite3
 import threading
 import time
 import uuid
@@ -92,8 +93,21 @@ class ResourceCoordinator:
                     created REAL NOT NULL, expires REAL NOT NULL, state TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS resource_waiters ON leases(resource,state,created);''')
 
-    def try_claim(self, identifier, resource, units, capacity, context, *, now=None):
+    def try_claim(self, identifier, resource, units, capacity, context, *, now=None, queued_at=None):
         now = time.time() if now is None else now
+        # A live waiting request need not obtain the SQLite writer lock merely
+        # to learn that all capacity is still occupied. Renew it only near its
+        # expiry; admission itself always rechecks under BEGIN IMMEDIATE below.
+        with connection(self.path, readonly=True) as db:
+            own = db.execute('SELECT expires,state FROM leases WHERE id=?', (identifier,)).fetchone()
+            configured = db.execute('SELECT capacity FROM resources WHERE name=?', (resource,)).fetchone()
+            if own and own['state'] == 'waiting' and own['expires'] > now + 30 and configured and configured[0] == capacity:
+                used = db.execute("SELECT COALESCE(SUM(units),0) FROM leases WHERE resource=? AND state='running' AND expires>?",
+                                  (resource, now)).fetchone()[0]
+                first = db.execute("""SELECT id FROM leases WHERE resource=? AND state='waiting' AND expires>?
+                    ORDER BY priority-CAST((?-created)/30 AS INTEGER),created,id LIMIT 1""", (resource, now, now)).fetchone()
+                if used + units > capacity or (first and first[0] != identifier):
+                    return False
         with connection(self.path) as db:
             db.execute('BEGIN IMMEDIATE')
             db.execute('DELETE FROM leases WHERE expires<=?', (now,))
@@ -105,7 +119,7 @@ class ResourceCoordinator:
                 db.execute('UPDATE resources SET capacity=? WHERE name=?', (capacity, resource))
             db.execute('INSERT OR IGNORE INTO leases VALUES(?,?,?,?,?,?,?,?,?)',
                        (identifier, resource, context.job_id, context.source, units,
-                        context.priority, now, now+90, 'waiting'))
+                        context.priority, min(now, queued_at) if queued_at is not None else now, now+90, 'waiting'))
             db.execute('UPDATE leases SET expires=? WHERE id=?', (now+90, identifier))
             first = db.execute('''SELECT id FROM leases WHERE resource=? AND state='waiting'
                 ORDER BY priority-CAST((?-created)/30 AS INTEGER),created,id LIMIT 1''', (resource, now)).fetchone()
@@ -120,7 +134,7 @@ class ResourceCoordinator:
             db.execute('DELETE FROM leases WHERE id=?', (identifier,))
 
     @contextmanager
-    def acquire(self, resource, *, capacity, units=1, timeout=300, context=None):
+    def acquire(self, resource, *, capacity, units=1, timeout=300, context=None, queued_at=None):
         if not 1 <= units <= capacity:
             raise ValueError('Resource request must fit its capacity')
         context = context or CURRENT.get()
@@ -142,14 +156,20 @@ class ResourceCoordinator:
         try:
             while True:
                 check_cancelled(context.stop)
-                if self.try_claim(identifier, resource, units, capacity, context):
+                try:
+                    admitted = self.try_claim(identifier, resource, units, capacity, context, queued_at=queued_at)
+                except sqlite3.OperationalError as exc:
+                    if getattr(exc, 'sqlite_errorcode', None) not in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+                        raise
+                    admitted = False
+                if admitted:
                     break
                 if time.monotonic() >= deadline:
                     raise TimeoutError(f'Resource admission timed out: {resource}')
                 if context.stop is not None:
-                    context.stop.wait(.05)
+                    context.stop.wait(.25)
                 else:
-                    time.sleep(.05)
+                    time.sleep(.25)
             renewer = threading.Thread(target=renew, daemon=True, name='resource-lease')
             renewer.start()
             yield

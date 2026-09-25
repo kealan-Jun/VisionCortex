@@ -28,7 +28,11 @@ def priority_date(runtime_root):
 
 
 def scheduling_record(record, today=None, focus_date=None, live_priority_seconds=14400,
-                      now_us=None):
+                      now_us=None, *, latest_first=False):
+    if latest_first:
+        # One time-descending lane across dates. A saved backfill focus cannot
+        # demote yesterday's newest slice at midnight or after four hours.
+        return record | {'processing_priority': -1}
     zone = ZoneInfo('Asia/Shanghai')
     today = today or datetime.now(zone).date().isoformat()
     start_us = int(record.get('recording_start_us') or 0)
@@ -45,9 +49,15 @@ def scheduling_record(record, today=None, focus_date=None, live_priority_seconds
     return record | {'processing_priority': priority}
 
 
-def refresh_queue_priorities(queue, focus_date=None, live_priority_seconds=14400):
+def refresh_queue_priorities(queue, focus_date=None, live_priority_seconds=14400, *, latest_first=False):
     """Reclassify old pending rows without resetting results, attempts or leases."""
     import time
+    if latest_first:
+        with queue.connect() as db:
+            db.execute("UPDATE recordings SET payload=json_set(payload,'$.processing_priority',-1) "
+                       "WHERE status!='completed' AND (status!='running' OR COALESCE(lease_until,0)<?) "
+                       "AND COALESCE(json_extract(payload,'$.processing_priority'),0)!=-1", (time.time(),))
+        return
     zone = ZoneInfo('Asia/Shanghai')
     midnight = datetime.now(zone).replace(hour=0, minute=0, second=0, microsecond=0)
     cutoff = round(midnight.timestamp()*1e6)

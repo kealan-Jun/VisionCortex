@@ -42,7 +42,7 @@ def fine_case(default_config, tmp_path):
     return config, layout, source, run
 
 
-def test_fine_source_parsed_once_and_local_audit_bytes_published_verified(fine_case, monkeypatch):
+def test_fine_source_parsed_once_and_backend_audit_bytes_published_verified(fine_case, monkeypatch):
     config, layout, source, run = fine_case
     calls = []
     original = candidate_index.iter_frame_evidence
@@ -65,7 +65,11 @@ def test_fine_source_parsed_once_and_local_audit_bytes_published_verified(fine_c
     ledgers, report, artifacts = run((500, 0, 500))
     assert calls == [source]
     assert hashed == ["Manifest.json"]
-    assert ledgers["camera"].is_relative_to(Path(config["storage"]["local_runtime_root"]))
+    assert ledgers["camera"].is_relative_to(Path(config["storage"]["local_cache_root"]))
+    assert not list(Path(config["storage"]["local_runtime_root"]).rglob("*.sqlite3*"))
+    assert report["audit_ledger_storage"] == "local_cache_root"
+    assert Path(report["index_path"]).is_relative_to(layout.backend_root)
+    assert Path(report["index_path"]).is_file()
     frames = list(original(ledgers["camera"]))
     assert [frame.local_ms for frame in frames] == [0, 500]
     assert [frame.frame_index for frame in frames] == [1, 2]  # Last overlapping observation wins.
@@ -105,7 +109,7 @@ def test_fine_publication_refuses_existing_modified_snapshot(fine_case):
 
 
 @pytest.mark.parametrize("fail", [False, True])
-def test_local_audit_copy_released_but_published_evidence_preserved(fine_case, monkeypatch, fail):
+def test_backend_audit_ledger_preserved_on_success_and_failure(fine_case, monkeypatch, fail):
     config, layout, source, run = fine_case
     ledgers, report, artifacts = run()
     model = DeviceDayModels(config)
@@ -124,13 +128,49 @@ def test_local_audit_copy_released_but_published_evidence_preserved(fine_case, m
             model._audit_fine(None, None, ledgers, report, [], [])
     else:
         assert model._audit_fine(None, None, ledgers, report, [], []) == ([], [], {}, {})
-    assert not ledgers["camera"].exists()
+    assert ledgers["camera"].is_file()
     assert source.is_file()
     assert all(verify_artifact(layout.backend_root, ref) for ref in artifacts)
     # The index-disabled route still consumes its original authoritative file.
     monkeypatch.setattr(model, "_audit_activity", lambda *args: ([], {}))
     model._audit_fine(None, None, {"camera": source}, {"enabled": False}, [], [])
     assert source.is_file()
+
+
+@pytest.mark.parametrize("failure", ["ingest", "publication", None])
+def test_only_owned_local_builder_removed_and_legacy_index_untouched(fine_case, monkeypatch, failure):
+    from visioncortex import device_day
+    config, layout, _, run = fine_case
+    directory = layout.receipts / "fixture" / "YOLO" / "key" / "0000" / "FineIndex"
+    legacy = candidate_index.local_frame_index_path(config, directory, "FineIndex.sqlite3")
+    legacy.parent.mkdir(parents=True)
+    legacy.write_bytes(b"older worker owns this index")
+    builders = []
+    original = candidate_index.create_fine_frame_index
+
+    def create(path):
+        assert path != legacy and path.is_relative_to(legacy.parent)
+        builders.append(path)
+        return original(path)
+
+    monkeypatch.setattr(candidate_index, "create_fine_frame_index", create)
+
+    def failed(*args, **kwargs):
+        raise OSError("fixture storage failure")
+
+    if failure == "ingest":
+        monkeypatch.setattr(candidate_index, "ingest_fine_frame_ledgers", failed)
+    elif failure == "publication":
+        monkeypatch.setattr(device_day, "copy_verified", failed)
+    if failure:
+        with pytest.raises(OSError, match="fixture storage failure"):
+            run()
+    else:
+        _, _, artifacts = run()
+        assert all(verify_artifact(layout.backend_root, ref) for ref in artifacts)
+    assert builders and all(not p.parent.exists() for p in builders)
+    assert legacy.read_bytes() == b"older worker owns this index"
+    assert not list(directory.glob(".ledger-*"))
 
 
 def test_optional_thread_cpu_timing_does_not_claim_io_is_nas(monkeypatch):

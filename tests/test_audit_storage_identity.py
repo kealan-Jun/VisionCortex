@@ -59,6 +59,27 @@ def test_unknown_audit_helper_invalidates_the_stage(device_config, monkeypatch, 
     assert runner._key('retention', record, record) == retained
 
 
+@pytest.mark.parametrize('coverage', [False, True])
+@pytest.mark.parametrize('stage', ['vision', 'understanding'])
+def test_cache_lifetime_revision_keeps_exact_parent_stage_keys(device_config, monkeypatch, coverage, stage):
+    from visioncortex import device_day_models
+    capture(device_config)
+    record, _ = item_and_layout(device_config)
+    device_config['device_day']['understanding_coverage_since_us'] = (
+        record['recording_start_us'] if coverage else None)
+    runner = DeviceDayRunner(device_config, FakeModels())
+    actual_key = runner._key(stage, record, {})
+    original = runner._hash
+    parent = 'de18f0bfdf127e0c3f1b5b732d150e53cca4c01a95b1146540d4b23ea0adaba5'
+    monkeypatch.setattr(runner, '_hash',
+                        lambda path: parent if Path(path).name == 'device_day_models.py' else original(path))
+    assert runner._key(stage, record, {}) == actual_key
+    unknown = hashlib.sha256(Path(device_day_models.__file__).read_bytes() + b'\n# unknown edit').hexdigest()
+    monkeypatch.setattr(runner, '_hash',
+                        lambda path: unknown if Path(path).name == 'device_day_models.py' else original(path))
+    assert runner._key(stage, record, {}) != actual_key
+
+
 def test_completed_legacy_vision_is_reused_without_rewriting_its_receipt(device_config, monkeypatch):
     capture(device_config)
     record, layout = item_and_layout(device_config)
