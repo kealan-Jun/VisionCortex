@@ -12,6 +12,13 @@ import logging
 _CURRENT = ContextVar('device_day_activity', default=None)
 _LOCK = Lock()
 _ACTIVE = {}
+
+
+def current_stage():
+    value = _CURRENT.get()
+    return value[0] if value else None
+
+
 PHASES = {
  'io_queue_seconds': '等待共享 I/O 名额',
  'input_validation_seconds': '验证封口输入身份与稳定性',

@@ -5,7 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 import time
 
-from .device_day_activity import phase
+from .device_day_activity import current_stage, phase
 from .runtime_control import CURRENT, ResourceCoordinator
 
 
@@ -23,12 +23,15 @@ def slot(config, *, copy=False, urgent=False, whole_copy=False):
     queued_at = (_COPY_QUEUED_AT.get() or time.time()) if copy else None
     with ExitStack() as stack:
         with phase('io_queue_seconds'):
-            if not copy and not whole_copy and capacity > 1:
+            if not copy and not whole_copy and capacity > 1 and current_stage() != 'stt':
                 # Keep one shared slot available for bounded archive work. A
                 # long vision operation must not occupy every NAS I/O slot.
                 stack.enter_context(coordinator.acquire(
                     'nas-io-read', capacity=capacity - 1,
                     timeout=settings.get('nas_io_timeout_seconds', 3600), context=context))
+            # STT has its own bounded execution capacity and must not queue
+            # behind whole-video decoding. It still shares the total I/O cap
+            # with archival and every other reader below.
             stack.enter_context(coordinator.acquire(
                 'nas-copy' if whole_copy else 'nas-io', capacity=capacity,
                 timeout=settings.get('nas_io_timeout_seconds', 3600), context=context, queued_at=queued_at))

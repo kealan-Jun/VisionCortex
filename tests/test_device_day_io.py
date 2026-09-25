@@ -112,6 +112,20 @@ def test_single_io_slot_does_not_create_zero_capacity_reader_gate(tmp_path):
             assert [r[0] for r in db.execute('SELECT name FROM resources')] == ['nas-io']
 
 
+def test_speech_uses_reserved_io_capacity_without_exceeding_total(tmp_path):
+    from visioncortex.device_day_activity import job
+    config = settings(tmp_path)
+    coordinator = ResourceCoordinator(tmp_path/'state/resources.sqlite3')
+    with io.slot(config), io.slot(config):
+        with job('stt', 'latest-speech'), io.slot(config):
+            leases = coordinator.snapshot()
+            assert sum(r['state'] == 'running' and r['resource'] == 'nas-io' for r in leases) == 3
+            assert sum(r['state'] == 'running' and r['resource'] == 'nas-io-read' for r in leases) == 2
+            assert not coordinator.try_claim('fourth', 'nas-io', 1, 3, ExecutionContext())
+            coordinator.release('fourth')
+    assert coordinator.snapshot() == []
+
+
 def test_transient_sqlite_busy_retries_but_other_database_errors_propagate(tmp_path, monkeypatch):
     coordinator = ResourceCoordinator(tmp_path/'resources.sqlite3')
     original = coordinator.try_claim
