@@ -5,7 +5,7 @@ import threading
 import time
 import logging
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -14,8 +14,9 @@ from .nas_recordings import _camera_directories, _recording_batches, _root, scan
 
 
 class CameraMonitor:
-    def __init__(self, settings, stop, observe):
+    def __init__(self, settings, stop, observe, *, live_only=False):
         self.settings, self.stop, self.observe = settings, stop, observe
+        self.live_only = live_only
         self.lock = threading.Lock()
         self.flush_lock = threading.Lock()
         self.threads, self.states, self.records, self.seen = {}, {}, {}, {}
@@ -26,7 +27,7 @@ class CameraMonitor:
         self.paused_folders = set()
         self.sealed_folders = {}
         from .device_day_schedule import in_processing_scope, processing_cutoff
-        if processing_cutoff(settings.get('device_day', {})):
+        if not live_only and processing_cutoff(settings.get('device_day', {})):
             from .observed_inventory import read_inventory
             root = Path(settings['storage']['local_runtime_root']) / 'device-day'
             for record in read_inventory(root)['recordings']:
@@ -59,6 +60,10 @@ class CameraMonitor:
             config['collection_ingest']['capture_since_date'] = (
                 datetime.now(ZoneInfo('Asia/Shanghai')).date().isoformat() if mode == 'live'
                 else self.settings.get('device_day', {}).get('start_date'))
+            if self.live_only:
+                current_day = datetime.now(ZoneInfo('Asia/Shanghai')).date()
+                live_dates = {current_day.isoformat(), (current_day - timedelta(days=1)).isoformat()}
+                config['collection_ingest'].update(capture_date=None, capture_since_date=min(live_dates))
             pending, last_emit = [], [0.0]
             def flush():
                 if pending:
@@ -97,6 +102,13 @@ class CameraMonitor:
                     self.sealed_folders = {p: deadline for p, deadline in self.sealed_folders.items()
                                            if deadline > time.monotonic()}
                     skipped = set(self.paused_folders) | set(self.sealed_folders)
+                if self.live_only:
+                    # The existing parser also supports lab_video/YYYY-MM-DD-1
+                    # and -3 directories. Exclude other days before traversal,
+                    # not after their metadata has already been inspected.
+                    directory = _root(config) / camera
+                    skipped.update(str(p) for p in directory.iterdir()
+                                   if not any(p.name == day or p.name.startswith(day + '-') for day in live_dates))
                 inventory = scan_recordings(config, on_record=forward, **({'skip_folders': skipped} if skipped else {}))
                 flush()
                 self.observe(self.settings, {'recordings': [], 'errors': inventory.get('errors', [])})
@@ -136,11 +148,11 @@ class CameraMonitor:
         finally:
             self.flush_lock.release()
 
-    def poll(self):
+    def poll(self, *, include_recordings=True):
         root = _root(self.settings)
         cameras = _camera_directories(root, self.settings['collection_ingest'], False)
         from .device_day_schedule import processing_cutoff
-        modes = ('live',) if processing_cutoff(self.settings.get('device_day', {})) else ('live', 'history')
+        modes = ('live',) if self.live_only or processing_cutoff(self.settings.get('device_day', {})) else ('live', 'history')
         for camera in cameras:
             for mode in modes:
                 key = (camera.name, mode)
@@ -168,8 +180,8 @@ class CameraMonitor:
         for state in states:
             if state['status'] == 'scanning' and time.time() - state['started_at'] > 120:
                 state['status'] = 'slow_or_unavailable'
-        return {'mode': 'directory_metadata', 'recordings': records, 'recording_count': len(records),
-                'batches': _recording_batches(records, self.settings['collection_ingest']),
+        return {'mode': 'directory_metadata', 'recordings': records if include_recordings else [], 'recording_count': len(records),
+                'batches': _recording_batches(records, self.settings['collection_ingest']) if include_recordings else [],
                 'errors': publication_errors + [error for state in states for error in state.get('errors', [])],
                 'truncated': any(state.get('truncated') for state in states),
                 'camera_directories': [camera.name for camera in cameras],
