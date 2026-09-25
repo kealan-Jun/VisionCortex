@@ -122,3 +122,10 @@ _REVIEWED['speech_worker.py'] = ('7b52906ffc73e2e1628a30ab5bafd5a5674325e95ff26b
 
 # Exact input-path adapter; legacy retained-input behavior is unchanged.
 _REVIEWED['speech_qwen.py'] = ('7f80e9a0420904ee7c044a52ce98792fb19453ca7995cd18c03ccfd41353ed6f', '888cc607b9243b31571c51d8cd8989e342f544263a8e133b5afd50426dad54d7')
+
+# Exact owned-copy verification fix: only newly created temporary archive
+# copies can retry metadata stabilization. Source seals, expected size/SHA,
+# existing artifacts and model execution are unchanged. Unknown edits fail closed.
+_REVIEWED['device_day_inputs.py'] = (
+    '3713f16c0b05c3c5ed850bc71d3a8f3d2c25f085cd655b9f9ca24b910871a61b',
+    '6a92d972cc2721f852d5774be6a2ea771eaf1a594f389778ebab0d691e6def20')

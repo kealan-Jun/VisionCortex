@@ -355,11 +355,12 @@ class DeviceDayRunner:
                 return value
             inputs = retention_identity(inputs)
         from .device_day_inplace import marker
+        from .device_day_runtime_identity import compatible_runtime_hash
         if recording.get('camera_key') and recording.get('recording_start_us') and marker(self, recording).is_file():
             stage_settings['inplace_execution_identity'] = self._inplace_execution_identity
             stage_settings['input_binding_version'] = 1
-            stage_settings['input_contract_sha256'] = self._hash(directory / 'device_day_inputs.py')
-        from .device_day_runtime_identity import compatible_runtime_hash
+            input_contract = directory / 'device_day_inputs.py'
+            stage_settings['input_contract_sha256'] = compatible_runtime_hash(input_contract, self._hash(input_contract))
         def code_hash(path):
             checksum = compatible_runtime_hash(path, self._hash(path))
             if path.name == 'device_day_models.py' and (stage == 'vision' or stage == 'understanding' and not full_coverage):

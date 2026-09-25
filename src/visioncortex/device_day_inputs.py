@@ -216,8 +216,34 @@ def processing_input(layout, seal, archived=None):
             'artifacts': [], 'input_binding': binding(seal)}
 
 
+def _verify_owned_copy(path, reference):
+    """Re-read our exclusive temporary copy after an SMB metadata refresh.
+
+    Never relax source/previous-artifact verification. Every attempt reads all
+    bytes and requires the sealed size/hash and the same device/inode; only
+    timestamps may settle, within three passes, before publication is allowed.
+    """
+    owned = identity(path)
+    if owned[2] != reference['size_bytes']:
+        raise InputChanged('Durable archive copy size differs from sealed input')
+    for _ in range(3):
+        before = identity(path)
+        if before[:3] != owned[:3]:
+            raise InputChanged('Owned archive copy was replaced or resized')
+        checksum = hashlib.sha256()
+        with path.open('rb') as handle:
+            for block in iter(lambda: handle.read(8 * 1024 * 1024), b''):
+                checksum.update(block)
+        after = identity(path)
+        if after[:3] != owned[:3] or checksum.hexdigest() != reference['sha256']:
+            raise InputChanged('Durable archive copy failed verification')
+        if before == after:
+            return True
+    raise InputChanged('Owned archive copy metadata did not stabilize')
+
+
 def copy_sealed(config, source, target, *, urgent=False):
-    """One source copy/hash pass and one durable destination verification pass."""
+    """One source copy/hash pass followed by bounded full-copy verification."""
     original = Path(source['original_path'])
     reference = source['retained']
     if target.exists():
@@ -247,7 +273,7 @@ def copy_sealed(config, source, target, *, urgent=False):
         if checksum.hexdigest() != reference['sha256'] or identity(original) != source['identity']:
             raise InputChanged('Capture input changed during archival copy')
         with slot(config, copy=True, urgent=urgent), phase('archive_hash_seconds'):
-            if not verify_content(temporary, reference):
+            if not _verify_owned_copy(temporary, reference):
                 raise InputChanged('Durable archive copy failed verification')
         # Retention stage lock owns this destination. Never replace existing media.
         if target.exists():

@@ -237,6 +237,9 @@ class DeviceDayService:
         publication_job = None
         index_job, last_index = None, 0
         recovery_job, overview_job = None, None
+        transcript_job, last_transcript = None, 0
+        from .device_day_transcript_publication import TranscriptPublication
+        transcripts = TranscriptPublication()
         last_recovery, last_overview = 0, 0
         from .device_day_recovery import RetentionRecovery
         recovery = RetentionRecovery()
@@ -308,6 +311,7 @@ class DeviceDayService:
         with ExitStack() as executor_stack:
             workers = executor_stack.enter_context(ThreadPoolExecutor(max_workers=1, thread_name_prefix="device-publication"))
             index_worker = executor_stack.enter_context(ThreadPoolExecutor(max_workers=1, thread_name_prefix="device-index"))
+            transcript_worker = executor_stack.enter_context(ThreadPoolExecutor(max_workers=1, thread_name_prefix="device-transcript"))
             slot_workers = {}
             probe_worker = executor_stack.enter_context(ThreadPoolExecutor(max_workers=1, thread_name_prefix="provider-health"))
             timeline_worker = executor_stack.enter_context(ThreadPoolExecutor(max_workers=1, thread_name_prefix="day-timeline"))
@@ -322,6 +326,12 @@ class DeviceDayService:
                     if not (settings.get("device_day") or {}).get("enabled"):
                         break
                     changed_stages = set()
+                    if transcript_job is not None and transcript_job.done():
+                        try:
+                            results['transcript_publication'] = transcript_job.result()
+                        except Exception as exc:
+                            results['transcript_publication'] = {'status': 'failed', 'error_type': type(exc).__name__}
+                        transcript_job = None
                     if index_job is not None and index_job.done():
                         try:
                             results['index_publication'] = {'published': index_job.result()}
@@ -381,7 +391,7 @@ class DeviceDayService:
                                 next_poll[(child, ordinal)] = 0
                     settings_key = json.dumps(settings, sort_keys=True, default=str)
                     if self._runner is None or self._settings_key != settings_key:
-                        if jobs or recovery_job is not None or overview_job is not None or index_job is not None:
+                        if jobs or recovery_job is not None or overview_job is not None or index_job is not None or transcript_job is not None:
                             self.wakeup.wait(1)
                             self.wakeup.clear()
                             continue
@@ -494,6 +504,12 @@ class DeviceDayService:
                                                                   defer_audit=defer_audit)
                             last_timeline = time.monotonic()
                     publication_dirty = publication_dirty or bool(changed_stages)
+                    # Speech is already durable when its queue row completes.
+                    # Do not make readable subtitles wait for video archival,
+                    # a large day index or the historical auxiliary-file sweep.
+                    if transcript_job is None and time.monotonic() - last_transcript >= 5:
+                        transcript_job = transcript_worker.submit(transcripts.tick, self._runner)
+                        last_transcript = time.monotonic()
                     # Replay sealed stage results independently of the full
                     # auxiliary-file sweep, which can span many historical days.
                     if index_job is None and time.monotonic() - last_index >= 5:
