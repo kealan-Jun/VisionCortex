@@ -109,3 +109,57 @@ def test_downstream_pause_schedule_and_cli_keep_stage_independence(tmp_path, mon
     monkeypatch.setattr(module, 'serve', lambda config, stop, stage: calls.append(stage))
     module.main(['--config', 'owned-fixture.yaml', '--stage', stage])
     assert calls == [stage]
+
+
+@pytest.mark.parametrize('stage,capacity,process_new', [
+    ('understanding', 4, True), ('understanding', 1, False), ('report', 4, False),
+])
+def test_latest_understanding_can_pass_one_main_slice_but_not_two(tmp_path, monkeypatch, stage, capacity, process_new):
+    busy, latest = record('busy', 1_000_000), record('latest', 2_000_000)
+    runner = setup(tmp_path, monkeypatch, [busy, latest])
+    runner.config.update(storage={'local_runtime_root': str(runner.runtime_root)},
+                         runtime={'resource_limits': {'cloud': capacity}})
+    for name in ('understanding', 'report'):
+        runner.queues[name] = DeviceDayQueue(runner.runtime_root / f'queue-{name}.sqlite3', latest_first=True)
+    worker = RetentionWorker(stage=stage)
+    def complete_parents(row):
+        for parent in worker.parents():
+            queue = runner.queues[parent]
+            queue.enqueue(row, row['source_signature'])
+            assert queue.claim('parent', allowed={row['recording_id']})
+            queue.finish('parent', row['recording_id'], {'status': 'completed'}, 1)
+    for row in (busy, latest):
+        complete_parents(row)
+    queue = runner.queues[stage]
+    queue.enqueue(busy, busy['source_signature'])
+    assert queue.claim('main', allowed={'busy'})
+    with queue.connect() as db:
+        original = dict(db.execute("SELECT * FROM recordings WHERE recording_id='busy'").fetchone())
+    def admit(runner, row):
+        runner.queues[stage].enqueue(row, row['source_signature'])
+        return True
+    monkeypatch.setattr(worker, 'admit', admit)
+    calls = []
+    def process(row, **kwargs):
+        # The extra camera lease never substitutes for provider-wide admission.
+        from visioncortex.provider_control import provider_request
+        from visioncortex.runtime_control import ResourceCoordinator
+        with provider_request(runner.config, 'understanding', {}):
+            active = ResourceCoordinator(runner.runtime_root / 'state/resources.sqlite3').snapshot()
+            assert sum(r['units'] for r in active if r['resource'] == 'cloud' and r['state'] == 'running') <= capacity
+            calls.append(row['recording_id'])
+        return {'status': 'completed'}
+    runner.process = process
+    result = worker.tick(runner, threading.Event())
+    assert calls == (['latest'] if process_new else [])
+    assert result['status'] == ('processed' if process_new else 'waiting')
+    with queue.connect() as db:
+        assert original == dict(db.execute("SELECT * FROM recordings WHERE recording_id='busy'").fetchone())
+    if process_new:
+        second, third = record('second', 3_000_000), record('third', 4_000_000)
+        queue.enqueue(second, second['source_signature'])
+        assert queue.claim('another-owner', allowed={'second'}, camera_serial=True, camera_limit=2)
+        complete_parents(third)
+        observe(runner.runtime_root, {'recordings': [third]})
+        assert worker.tick(runner, threading.Event())['status'] == 'waiting'
+        assert calls == ['latest']

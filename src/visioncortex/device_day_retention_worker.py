@@ -181,6 +181,12 @@ class RetentionWorker:
             # newest slice; neither its lease nor its stage lock is disturbed.
             speech_capacity = ((runner.config.get('runtime') or {}).get('resource_limits') or {}).get('stt', 2)
             camera_limit = min(2, speech_capacity) if self.stage == 'stt' else 1
+            if self.stage == 'understanding':
+                # A long, all-frame slice already owned by the main service
+                # must leave one lane for a newer slice. Provider requests
+                # still acquire the same cross-process cloud resource slots.
+                cloud_capacity = ((runner.config.get('runtime') or {}).get('resource_limits') or {}).get('cloud', 4)
+                camera_limit = min(2, cloud_capacity)
             if self.stage == 'vision':
                 vision_capacity = ((runner.config.get('runtime') or {}).get('resource_limits') or {}).get('vision', 12)
                 camera_limit = min(vision_capacity, runner.settings.get('vision_jobs_per_camera', 1) + 1)
