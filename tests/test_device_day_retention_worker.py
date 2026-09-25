@@ -293,3 +293,12 @@ def test_vision_configured_total_capacity_and_pause_still_limit_claims(tmp_path,
     assert worker.tick(runner, threading.Event())['status'] == 'waiting'
     runner.config['device_day'] = {'paused_stages': ['vision']}
     assert worker.tick(runner, threading.Event())['status'] == 'paused_by_user'
+
+
+def test_dedicated_live_lane_does_not_fill_with_another_cameras_history(tmp_path, monkeypatch):
+    now = int(time.time() * 1_000_000)
+    rows = [record('history', now - 86400_000_000, camera='old'),
+            record('live', now - 60_000_000, camera='current', capture_complete=False)]
+    runner = setup(tmp_path, monkeypatch, rows)
+    worker = RetentionWorker(stage='vision', recent_seconds=14400)
+    assert [r['recording_id'] for r in worker.candidates(runner)] == ['live']

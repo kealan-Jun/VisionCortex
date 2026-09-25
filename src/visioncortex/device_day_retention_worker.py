@@ -17,10 +17,11 @@ from .sqlite_store import connection
 class RetentionWorker:
     """One claim per tick; local discovery only, existing execution validates NAS."""
 
-    def __init__(self, *, stage='retention', failure_cooldown=60):
+    def __init__(self, *, stage='retention', failure_cooldown=60, recent_seconds=None):
         if stage not in {'retention', 'stt', 'vision'}:
             raise ValueError('Only independent retention, speech and vision stages are supported')
         self.stage = stage
+        self.recent_seconds = recent_seconds
         self.failure_cooldown = max(5, float(failure_cooldown))
         self.deferred = {}
 
@@ -51,6 +52,9 @@ class RetentionWorker:
                     or self.deferred.get(rid, 0) > current):
                 continue
             if not in_processing_scope(runner.settings, record):
+                continue
+            if self.recent_seconds is not None and max(record.get('recording_start_us', 0),
+                    record.get('recording_end_us', 0)) < (current - self.recent_seconds) * 1_000_000:
                 continue
             record = configured_record(runner.config, record)
             if (not record.get('processable', record.get('available'))
@@ -155,7 +159,9 @@ def serve(config_path, stop, *, stage='retention'):
     from .ai_settings import apply_active
     from .config import load_config
     from .device_day import DeviceDayRunner
-    worker = RetentionWorker(stage=stage)
+    # Historical work remains with the existing service. Its old per-camera
+    # fairness must not admit history into the extra lane reserved for live video.
+    worker = RetentionWorker(stage=stage, recent_seconds=14400 if stage == 'vision' else None)
     runner, generation, roots, status_path = None, None, None, None
     while not stop.is_set():
         try:
