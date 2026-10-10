@@ -49,9 +49,10 @@ def failure_kind(result):
         return 'storage_access'
     if error == 'OperationalError' and 'database is locked' in message.lower():
         return 'database_lock'
-    if 'nms' in message.lower() and any(word in message.lower() for word in ('timeout', 'time limit')):
+    if 'nms' in message.lower() and any(word in message.lower() for word in ('timeout', 'time limit', 'timed out')):
         return 'vision_nms'
-    if any(word in message.lower() for word in ('decode source frame', 'source frame decoding', 'source-frame decoding')):
+    if any(word in message.lower() for word in ('decode source frame', 'source frame decoding', 'source-frame decoding',
+                                                'required source frame could not be decoded')):
         return 'media_decode'
     return None
 

@@ -1,21 +1,22 @@
 window.VisionCortexDayTimeline = (() => {
   const clock = us => new Date(us/1000).toLocaleTimeString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false});
+  let latestProgress=null;
   async function render({main,api,esc,setChrome,state}, day) {
     setChrome('day-timeline');
-    const initialProgress=await api('/api/device-day-progress').catch(()=>null);
+    const requestedDay=day;
     const dates=[...new Set((state.deviceDayArchives||[]).map(x=>x.archive.slice(0,10)))].sort().reverse();
-    day=day||initialProgress?.focus_date||dates[0]||new Date().toLocaleDateString('sv-SE',{timeZone:'Asia/Shanghai'});
+    day=day||latestProgress?.focus_date||dates[0]||new Date().toLocaleDateString('sv-SE',{timeZone:'Asia/Shanghai'});
     const hash=location.hash;
     main.innerHTML=`<div class="page"><header class="page-hero compact"><div><p class="eyebrow">当天实验观察记录</p><h1>${esc(day)} 时间线</h1><p>按真实采集时间查看全部设备；同一时刻的多路画面不重复计算时长。</p></div></header><section class="panel processing-overview" data-processing-overview aria-live="polite">正在读取后台处理进度…</section><section class="panel"><label>查看采集日期 <input type="date" value="${esc(day)}" data-timeline-date></label> <button class="secondary-button" data-timeline-refresh>刷新</button> <a href="#/device-days">设备日归档</a> · <a href="/archive-overview" target="_blank" rel="noopener">实验数据总览</a></section><section class="panel" data-timeline-body>正在读取当天产出…</section></div>`;
     main.querySelector('[data-timeline-date]').onchange=e=>{location.hash=`#/day-timeline/${encodeURIComponent(e.target.value)}`;};
     main.querySelector('[data-timeline-refresh]').onclick=()=>render({main,api,esc,setChrome,state},day);
     const progressPanel=main.querySelector('[data-processing-overview]');
     const stageNames={retention:'原片与资料归档',vision:'YOLO 预处理',stt:'录音识别',understanding:'多模态理解',report:'日报更新'};
-    let lastProgress=null;
+    let lastProgress=latestProgress;
     function showProgress(p) {
       const delayed=!p || p.available === false || p.snapshot_stale;
       if(p?.available === false)p=null;
-      if(p)lastProgress=p;
+      if(p)latestProgress=lastProgress=p;
       p=p||lastProgress;
       if(!p){progressPanel.innerHTML='<p role="alert">处理状态暂时读取不到，后台任务可能仍在运行。页面会自动重试；也可打开<a href="/archive-overview" target="_blank" rel="noopener">实验数据总览</a>查看后台定期发布的处理状态与分片时延。</p>';return;}
       const chip=document.querySelector("#phase-chip span");
@@ -37,13 +38,18 @@ window.VisionCortexDayTimeline = (() => {
       <details open><summary>${delayed?'快照中':'现在'}具体在跑哪些分片（全部日期）</summary><div class="processing-table-wrap"><table class="processing-table"><thead><tr><th>采集日期</th><th>设备</th><th>正在执行</th><th>分片采集时段</th></tr></thead><tbody>${p.running.map(j=>`<tr><td><a href="#/day-timeline/${esc(j.date)}">${esc(j.date)}</a></td><td>${esc(j.camera)}</td><td><strong>${stageNames[j.stage]}</strong><br><small>${esc(j.phase||'等待阶段详情')}${j.phase_elapsed_seconds!=null?` · ${Math.floor(j.phase_elapsed_seconds)} 秒`:''}${j.frame_counts?`<br>推理帧：粗扫 ${j.frame_counts.coarse||0} · 精扫 ${j.frame_counts.fine||0}`:''}</small></td><td>${clock(j.start_us)}—${j.end_us?clock(j.end_us):'结束时间未知'}</td></tr>`).join('')||'<tr><td colspan="4">暂无有效运行租约；其余分片可能在等待上游、重试或调度。</td></tr>'}</tbody></table></div></details>
       ${p.errors.length?`<p role="alert">${p.errors.map(esc).join('；')}，上述状态可能不完整。</p>`:''}`;
     }
-    showProgress(initialProgress);
+    if(lastProgress)showProgress({...lastProgress,snapshot_stale:true});
     async function pollProgress(){
       if(hash!==location.hash||!progressPanel.isConnected)return;
-      if(!document.hidden){const p=await api('/api/device-day-progress').catch(()=>null);if(hash!==location.hash||!progressPanel.isConnected)return;showProgress(p);}
+      if(!document.hidden){
+        const p=await api('/api/device-day-progress',{readTimeoutMs:10000}).catch(()=>null);
+        if(hash!==location.hash||!progressPanel.isConnected)return;
+        showProgress(p);
+        if(!requestedDay&&p?.focus_date&&p.focus_date!==day){void render({main,api,esc,setChrome,state},p.focus_date);return;}
+      }
       setTimeout(pollProgress,5000);
     }
-    setTimeout(pollProgress,5000);
+    void pollProgress();
     const body=main.querySelector('[data-timeline-body]');
     body.insertAdjacentHTML('beforebegin',`<section class="panel"><h2>按全局时间查找文件</h2><p>选择采集时刻，同时查找各设备的视频、原录音、识别文字和拍照图片。使用北京时间。</p><form data-material-query><label>采集时间 <input type="time" step="1" value="00:00:00" required data-material-time></label> <label>查看范围 <select data-material-window><option value="60">1 分钟</option><option value="1">1 秒</option><option value="300">5 分钟</option></select></label> <button class="primary-button" type="submit">查找对应文件</button></form><div data-material-result aria-live="polite"></div></section>`);
     const queryForm=main.querySelector('[data-material-query]');
@@ -56,19 +62,19 @@ window.VisionCortexDayTimeline = (() => {
       const duration=queryForm.querySelector('[data-material-window]').value;
       if(!Number.isFinite(at))return;
       try{
-        const result=await api(`/api/day-timeline/${encodeURIComponent(day)}/at?at_us=${at}&duration_seconds=${duration}`);
+        const result=await api(`/api/day-timeline/${encodeURIComponent(day)}/at?at_us=${at}&duration_seconds=${duration}`,{readTimeoutMs:15000});
         if(hash!==location.hash||!queryResult.isConnected||generation!==queryGeneration)return;
         const fileLink=(url,label,offset)=>url?`<a href="${esc(url+(offset!=null?'#t='+Number(offset).toFixed(3):''))}" target="_blank" rel="noopener">${esc(label)}</a>`:'';
         queryResult.innerHTML=`<p>${clock(result.start_us)}—${clock(result.end_us)} · ${result.devices.length} 台设备有可索引内容，结果每 5 秒更新。</p>${result.devices.map(device=>`<article><h3>${esc(device.camera)}</h3>${device.recordings.map(r=>`<section><p>${clock(r.start_us)}—${clock(r.end_us)} · ${fileLink(r.video_url,'视频',r.video_offset_seconds)} · ${fileLink(r.audio_url,'原录音',r.audio_offset_seconds)} · ${fileLink(r.transcript_url,'完整转写')}</p>${r.comments.map(c=>`<p><time>${clock(c.start_us)}—${clock(c.end_us)}</time> ${esc(c.text)} ${fileLink(c.transcript_url,'识别来源')}</p>`).join('')||`<p>该时间范围没有已发布的识别文字（${esc(r.transcription_outcome||r.transcription_status||'等待识别')}）。</p>`}${r.audio_url&&!r.audio_overlaps_query?'<small>原录音可回听，但当前范围内的音频时间对应关系尚未确认。</small>':''}</section>`).join('')}<div class="frames">${device.photos.map(p=>`<figure><a href="${esc(p.url)}" target="_blank" rel="noopener"><img loading="lazy" style="max-width:220px;max-height:160px" src="${esc(p.url)}" alt="${esc(device.camera)} ${clock(p.capture_us)} 拍照"></a><figcaption>${clock(p.capture_us)} · 拍照文件名时间（秒级，时钟未核验）</figcaption></figure>`).join('')}</div></article>`).join('')||'<p>这个时段尚无可索引内容，不代表没有采集；请检查设备是否已完成写入及后台状态。</p>'}${result.errors?.length||result.photo_errors?.length?'<p role="alert">部分索引暂不可读，当前结果可能不完整。</p>':''}<p class="muted">视频和音频保留各自采集时钟；时间关联不代表已验证精确声画同步。照片引用原位置，不移动到归档目录。${result.photo_history_paused_before_us?'历史照片暂停补索引。':''}</p>`;
       }catch{
-        if(generation===queryGeneration&&hash===location.hash)queryResult.innerHTML='<p role="alert">时间索引暂不可读，正在重试。</p>';
+        if(generation===queryGeneration&&hash===location.hash&&queryResult.isConnected)queryResult.innerHTML='<p role="alert">时间索引暂不可读，正在重试。</p>';
       }
       if(hash===location.hash&&queryResult.isConnected&&generation===queryGeneration)queryTimer=setTimeout(()=>lookup(generation),5000);
     }
     queryForm.onsubmit=e=>{e.preventDefault();queryResult.textContent='正在查询对应文件…';lookup();};
     try {
-      const data=await api(`/api/day-timeline/${encodeURIComponent(day)}`);
-      if(hash!==location.hash)return;
+      const data=await api(`/api/day-timeline/${encodeURIComponent(day)}`,{readTimeoutMs:15000});
+      if(hash!==location.hash||!body.isConnected)return;
       const latest=Math.max(0,...(data.media_recordings||[]).map(r=>r.start_us));
       if(latest)queryForm.querySelector('[data-material-time]').value=clock(latest);
       const entries=new Map(data.entries.map(e=>[e.id,e]));
@@ -89,7 +95,7 @@ window.VisionCortexDayTimeline = (() => {
       }
       draw();
     } catch {
-      if(hash===location.hash)body.innerHTML='<p role="alert">当天时间线暂时无法读取，请刷新重试。原有后台处理继续运行。</p>';
+      if(hash===location.hash&&body.isConnected)body.innerHTML='<p role="alert">当天时间线暂时无法读取，请刷新重试。原有后台处理继续运行。</p>';
     }
   }
   return {render};

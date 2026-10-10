@@ -117,6 +117,30 @@ class ProgressPoller:
 STAGES = ('retention', 'vision', 'stt', 'understanding', 'report')
 
 
+def queue_lifecycle(records, *, limit=100):
+    """Bounded local hints; queue reports never prove artifact publication."""
+    selected = sorted(records.values(), key=lambda row: row['capture_us'], reverse=True)[:limit]
+    rows = []
+    for item in selected:
+        stages = item['stage_states']
+        visual = stages.get('vision', 'pending')
+        archived = stages.get('retention', 'pending')
+        label = ('预处理完成，等待归档' if visual == 'completed' and archived != 'completed'
+                 else '本地队列记录：原片归档已完成' if archived == 'completed'
+                 else '本地队列记录：等待输入或预处理')
+        rows.append({key: value for key, value in item.items() if key != 'capture_us'} | {
+            'archive_status': 'completed' if archived == 'completed' else 'pending',
+            'preprocessing': {stage: stages.get(stage, 'pending') for stage in ('vision', 'stt')},
+            'publication_status': item.get('publication_status', 'unverified'),
+            'publication_verified': False, 'retention_policy': {'status': 'unknown'},
+            'scope': 'local_queue_hints_not_receipt_or_artifact_acceptance',
+            'label': label + '；正式发布证据尚未核实'})
+    return rows, {'source': 'local_queues', 'available': bool(records),
+                  'record_count': len(records), 'returned_records': len(rows), 'limit': limit,
+                  'publication_verified': False,
+                  'reason': None if records else 'local_queue_lifecycle_unavailable'}
+
+
 def snapshot(config):
     root = Path(config['storage']['local_runtime_root']) / 'device-day'
     now = time.time()
@@ -126,6 +150,7 @@ def snapshot(config):
     component_samples = {}
     missing_inputs = {}
     source_signatures = {}
+    lifecycle_records = {}
     from .input_availability import Availability
     availability = Availability(root).states() if (root/'InputAvailability.sqlite3').is_file() else {}
     def bucket(day):
@@ -157,11 +182,13 @@ def snapshot(config):
             with closing(sqlite3.connect(path.as_uri()+'?mode=ro', uri=True, timeout=2)) as db:
                 columns = {row[1] for row in db.execute('PRAGMA table_info(recordings)')}
                 limit_column = 'retry_limit' if 'retry_limit' in columns else '0 AS retry_limit'
+                started_column = 'started_at' if 'started_at' in columns else 'NULL AS started_at'
                 rows = db.execute("SELECT recording_id,status,lease_until,queued_at,updated_at, "
                                   "json_extract(payload,'$.camera_key'),json_extract(payload,'$.recording_start_us'),"
                                   "json_extract(payload,'$.recording_end_us'),wall_seconds,completed_at,result,"
-                                  "json_extract(payload,'$.source_signature'),attempts,input_status," + limit_column + " FROM recordings")
-                for rid, status, lease, _queued, updated, camera, start, end, wall, completed_at, raw_result, signature, attempts, input_status, authorized_limit in rows:
+                                  "json_extract(payload,'$.source_signature'),attempts,input_status," + limit_column +
+                                  ',' + started_column + " FROM recordings")
+                for rid, status, lease, queued, updated, camera, start, end, wall, completed_at, raw_result, signature, attempts, input_status, authorized_limit, started_at in rows:
                     if not start:
                         continue
                     day = date_of(start)
@@ -189,6 +216,24 @@ def snapshot(config):
                             result = {}
                     except (ValueError, TypeError):
                         result = {}
+                    if signature == source_signatures[rid]:
+                        lifecycle = lifecycle_records.setdefault(rid, {
+                            'recording_id': rid, 'archive': day + '_' + str(camera),
+                            'capture_us': max(start or 0, end or 0), 'stage_states': {},
+                            'input_ready': {}, 'timings': {}})
+                        lifecycle['stage_states'][stage] = state
+                        lifecycle['input_ready'][stage] = input_status
+                        components = result.get('component_timings')
+                        timing = {name: value for name, value in (components if isinstance(components, dict) else {}).items()
+                                  if type(value) in (int, float) and math.isfinite(value) and value >= 0}
+                        if started_at is not None and queued is not None and started_at >= queued:
+                            timing['queue_wait_seconds'] = started_at - queued
+                        lifecycle['timings'][stage] = timing
+                        publication = result.get('formal_publication')
+                        if publication == 'completed':
+                            lifecycle['publication_status'] = 'reported_completed'
+                        elif publication == 'pending' and lifecycle.get('publication_status') != 'reported_completed':
+                            lifecycle['publication_status'] = 'pending'
                     if state == 'failed':
                         reason = result.get('error_type') or result.get('status') or 'unknown'
                         group = failures.setdefault(day, {}).setdefault(stage, {})
@@ -237,9 +282,10 @@ def snapshot(config):
     except (OSError, ValueError):
         provider = {'active': None, 'reason': 'state_unavailable'}
         errors.append('云端状态暂不可读')
-    from .device_day_inplace import progress as input_progress
-    lifecycle = input_progress(config)
-    inplace_ids = {item['recording_id'] for item in lifecycle}
+    # Observer hosts need no execution package or NAS receipt-tree traversal.
+    # Reuse the local rows already read for queue counts, with explicit proof
+    # limits. Missing lifecycle evidence cannot suppress the entire snapshot.
+    lifecycle, lifecycle_observation = queue_lifecycle(lifecycle_records)
     from .device_day_consumers import consumer_snapshot
     from .device_day_retry import retry_limit
     consumers = consumer_snapshot(config, now=now)
@@ -251,7 +297,7 @@ def snapshot(config):
             if status not in {'queued', 'expired', 'waiting_for_prerequisite', 'failed',
                               'input_missing', 'input_unavailable', 'needs_camera_role'}:
                 continue
-            dependencies = () if identifier in inplace_ids and stage in {'vision', 'stt'} else DEPENDENCIES[stage]
+            dependencies = () if settings.get('inplace_preprocessing') and stage in {'vision', 'stt'} else DEPENDENCIES[stage]
             parents = [row.get(p, ('missing', day))[0] for p in dependencies]
             details = queue_details.get((identifier, stage), {})
             scope = 'recent' if capture_times.get(identifier, 0) >= cutoff else 'history'
@@ -306,7 +352,8 @@ def snapshot(config):
         + ('；外部采集保留期限未知' if row['retention_policy']['status'] == 'unknown' else '') + '</li>'
         for row in lifecycle if row['publication_status'] != 'completed') + '</ul>'
     return {'consumers': consumers, 'consumer_html': render_consumers(consumers),
-            'input_lifecycle': lifecycle, 'storage_maintenance': os.environ.get('VISIONCORTEX_STORAGE_MAINTENANCE', '0') == '1',
+            'input_lifecycle': lifecycle, 'input_lifecycle_observation': lifecycle_observation,
+            'storage_maintenance': os.environ.get('VISIONCORTEX_STORAGE_MAINTENANCE', '0') == '1',
             'process_since_us': config.get('device_day', {}).get('process_since_us'),
             'capture_link_cleanup': {'enabled': bool(cleanup.get('enabled')),
             'native_links_verified': bool(cleanup.get('native_links_verified')),

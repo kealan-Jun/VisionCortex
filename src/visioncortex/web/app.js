@@ -300,21 +300,40 @@ const GUIDED_PIPELINE = [
 ];
 
 async function api(url, options) {
-  const response = await fetch(url, options);
-  let payload;
-  try { payload = await response.json(); } catch { payload = null; }
-  if (!response.ok) {
-    const detail = payload?.detail;
-    const shortage = Number(detail?.missing_bytes || 0);
-    const message = typeof detail === "string"
-      ? detail
-      : `${detail?.message || `${response.status} ${response.statusText}`}${shortage ? `，还差 ${formatBytes(shortage)}` : ""}`;
-    const error = new Error(message);
-    error.status = response.status;
-    error.payload = payload;
-    throw error;
+  const request = {...options};
+  const timeoutMs = request.readTimeoutMs;
+  delete request.readTimeoutMs;
+  let timer, controller;
+  const callerSignal = request.signal;
+  const cancel = () => controller.abort(callerSignal.reason);
+  if ((request.method || "GET").toUpperCase() === "GET" && timeoutMs > 0) {
+    controller = new AbortController();
+    if (callerSignal?.aborted) cancel();
+    else callerSignal?.addEventListener("abort", cancel, {once:true});
+    request.signal = controller.signal;
+    timer = setTimeout(() => controller.abort(), timeoutMs);
   }
-  return payload;
+  try {
+    const response = await fetch(url, request);
+    let payload;
+    try { payload = await response.json(); }
+    catch (error) { if (request.signal?.aborted) throw error; payload = null; }
+    if (!response.ok) {
+      const detail = payload?.detail;
+      const shortage = Number(detail?.missing_bytes || 0);
+      const message = typeof detail === "string"
+        ? detail
+        : `${detail?.message || `${response.status} ${response.statusText}`}${shortage ? `，还差 ${formatBytes(shortage)}` : ""}`;
+      const error = new Error(message);
+      error.status = response.status;
+      error.payload = payload;
+      throw error;
+    }
+    return payload;
+  } finally {
+    clearTimeout(timer);
+    if (controller) callerSignal?.removeEventListener("abort", cancel);
+  }
 }
 
 function toast(message, tone = "") {
@@ -400,7 +419,7 @@ async function loadNasRecordings() {
   const requestId = state.nasRequestId = (state.nasRequestId || 0) + 1;
   state.nasLoading = true;
   try {
-    const payload = await api("/api/nas-recordings");
+    const payload = await api("/api/nas-recordings", {readTimeoutMs:15000});
     if (requestId !== state.nasRequestId) return null;
     state.nasRecordings = payload.recordings || [];
     state.nasBatches = payload.batches || [];
@@ -426,7 +445,12 @@ async function loadAll() {
   const runRequestId = state.runPollRequestId || 0;
   const nasRequest = loadNasRecordings();
   const archiveQuery = archiveSearchQuery();
-  const results = await Promise.allSettled([api("/api/health"), loadArchiveListing(archiveQuery), api("/api/runs"), api("/api/collections?limit=200"), loadDeviceDayArchives()]);
+  const deviceDayRoute = routeParts()[0] === "device-days";
+  const deviceDays = loadDeviceDayArchives();
+  void deviceDays.then(() => {
+    if (deviceDayRoute && routeParts()[0] === "device-days") return router();
+  }).catch(() => {});
+  const results = await Promise.allSettled([api("/api/health", {readTimeoutMs:15000}), loadArchiveListing(archiveQuery), api("/api/runs", {readTimeoutMs:15000}), api("/api/collections?limit=200", {readTimeoutMs:15000}), deviceDays]);
   if (results[0].status === "fulfilled") state.health = results[0].value;
   if (runRequestId === (state.runPollRequestId || 0)) {
     state.taskSyncError = results[2].status === "rejected";
@@ -460,6 +484,7 @@ function refreshLibraryOverview(recordsChanged = false) {
   if (route === "materials") renderMaterialsLibrary(true);
   if (route === "reports") renderReportsLibrary(true);
   if (route === "home") renderHome();
+  if (route === "device-days") void router();
   if (route === "experiments") { syncArchiveFiltersFromRoute(); renderExperiments(); }
 }
 
@@ -659,10 +684,13 @@ function archiveRows(archives, target = "experiments", view = "list", hasActiveF
 }
 
 async function loadDeviceDayArchives() {
+  const requestId = loadDeviceDayArchives.requestId = (loadDeviceDayArchives.requestId || 0) + 1;
   try {
-    const data = await api("/api/device-days");
+    const data = await api("/api/device-days", {readTimeoutMs:15000});
+    if (requestId !== loadDeviceDayArchives.requestId) return false;
     const changed = JSON.stringify(state.deviceDayArchives) !== JSON.stringify(data.archives || []) ||
-      JSON.stringify(state.deviceDayErrors) !== JSON.stringify(data.discovery_errors || []);
+      JSON.stringify(state.deviceDayErrors) !== JSON.stringify(data.discovery_errors || []) ||
+      JSON.stringify(state.deviceDayQueue) !== JSON.stringify(data.queue || {}) || Boolean(state.deviceDaySyncError);
     state.deviceDayArchives = data.archives || [];
     state.deviceDayErrors = data.discovery_errors || [];
     state.deviceDayQueue = data.queue || {};
@@ -670,6 +698,7 @@ async function loadDeviceDayArchives() {
     state.deviceDaySyncError = false;
     return changed;
   } catch {
+    if (requestId !== loadDeviceDayArchives.requestId) return false;
     state.deviceDaySyncError = true;
     state.deviceDayUpdatedAt = Date.now();
     return false;
@@ -2593,7 +2622,7 @@ const { buildUploadPlan, cachedUploadSession, rememberUploadSession, forgetUploa
 });
 
 const { invalidateArchiveCache, applyArchiveListingPage, loadArchiveListing, cachedArchiveDetail, libraryRecordKey, cachedLibraryDetail, libraryRecordQueryKey, libraryRequestKey, libraryLoadState, libraryFailureNotice, bindLibraryRetry, loadLibraryRecord, libraryQueryKey, queueLibraryReleaseRefresh, loadLibraryDetail, ensureLibraryDetails, loadMoreArchives, loadArchive, loadArchiveSection, materialQueryParameters, loadArchiveMaterials, loadArchiveExperiments, loadArchiveView } = window.VisionCortexArchives.createArchives({
-  api: (...args) => api(...args),
+  api: (url, options) => api(url, url.startsWith("/api/archives?") ? {...options,readTimeoutMs:15000} : options),
   archiveProcessStopped: (...args) => archiveProcessStopped(...args),
   archiveSearchQuery: (...args) => archiveSearchQuery(...args),
   ensureMaterialFilters: (...args) => ensureMaterialFilters(...args),
@@ -2658,7 +2687,7 @@ const { materialLibraryEntries, automaticReviewLabel, materialFocusRoute, global
 const { refreshTaskSnapshots, renderStages, stageDisplayState, pollRun, rememberRunSnapshot, showAcceptedRun, renderTasks, retryRetainedRun, submitRecoveryAction, normalizedViews, newestFreshness, elapsedForRun, rememberRunDisclosures, updateRunElapsedLabels, guidedStageState, stageArtifactUrl, stageResultRoute, guidedPipelineView, runObservabilityCard, productRunMessage, beginStageFollow, followStageResults, stageDeliveryView, stageSnapshotVersion } = window.VisionCortexTasks.createTasks({
   GUIDED_PIPELINE,
   STAGE_LABELS,
-  api: (...args) => api(...args),
+  api: (url, options) => api(url, url === "/api/runs" ? {...options,readTimeoutMs:15000} : options),
   archiveViewBusy: (...args) => archiveViewBusy(...args),
   bindArchiveActions: (...args) => bindArchiveActions(...args),
   delay,
@@ -2782,9 +2811,9 @@ main.addEventListener("toggle", event => {
 hydrateIcons();
 const legacyArchive = new URLSearchParams(location.search).get("archive");
 if (legacyArchive && !location.hash) location.hash = `#/archive/${encodeURIComponent(legacyArchive)}/experiments`;
-if (["day-timeline", "knowledge"].includes(routeParts()[0])) routeFromNavigation();
-loadAll().then(() => { if (!["day-timeline", "knowledge"].includes(routeParts()[0])) return routeFromNavigation(); }).catch(() => {
-  if (["day-timeline", "knowledge"].includes(routeParts()[0])) return;
+if (["day-timeline", "knowledge", "device-days", "device-day"].includes(routeParts()[0])) routeFromNavigation();
+loadAll().then(() => { if (!["day-timeline", "knowledge", "device-days", "device-day"].includes(routeParts()[0])) return routeFromNavigation(); }).catch(() => {
+  if (["day-timeline", "knowledge", "device-days", "device-day"].includes(routeParts()[0])) return;
   main.innerHTML = productState("error", "server", "实验目录暂时无法载入", "目录读取失败，暂时无法确认素材与报告数量；系统会自动重试。", `<button class="primary-button" type="button" data-retry-service>重新连接</button>`);
   document.querySelector("[data-retry-service]")?.addEventListener("click", ()=>location.reload());
 });
