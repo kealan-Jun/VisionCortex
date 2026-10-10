@@ -68,7 +68,9 @@ class ProgressPoller:
             # restarting analysis or writing a competing progress snapshot.
             from .device_day_consumers import consumer_snapshot
             consumers = consumer_snapshot(config)
-            self.consumer_state = {'consumers': consumers, 'consumer_html': render_consumers(consumers)}
+            repair = retry_observation(config)
+            self.consumer_state = {'consumers': consumers, 'consumer_html': render_consumers(consumers),
+                                   'retry_repair': repair, 'retry_repair_html': render_retry_observation(repair)}
             return cached | self.consumer_state
         # Only the publisher writes the shared file. A slow HTTP fallback must
         # never overwrite a newer independently published observation.
@@ -268,10 +270,18 @@ def snapshot(config):
                    if states.get(rid, {}).get('vision', ('missing',))[0] != 'completed'}
         b['missing_input_count'] = len(missing)
         b['processing_total'] = len(b['recordings']) - len(missing)
-        b['total'] = len(b.pop('recordings'))
+        recordings = b.pop('recordings')
+        b['total'] = len(recordings)
         b['camera_count'] = len(b.pop('cameras'))
-        for counts in b['stages'].values():
+        for stage, counts in b['stages'].items():
             counts['not_enqueued'] = max(0, b['total']-sum(counts.values()))
+            # Missing originals exclude only unfinished work for THIS stage.
+            # A completed historical/no-audio result or an active lease still
+            # belongs to its own denominator, regardless of other stages.
+            excluded = {rid for rid in missing_inputs.get(day, set()) & recordings
+                        if states.get(rid, {}).get(stage, ('missing',))[0] not in {'completed', 'running'}}
+            counts['missing_input_count'] = len(excluded)
+            counts['processing_total'] = b['total'] - len(excluded)
     from .device_day_night_schedule import night_schedule, paused_stages
     from .device_day_contract import DEPENDENCIES
     from .device_day_provider_gate import ProviderGate
@@ -289,6 +299,7 @@ def snapshot(config):
     from .device_day_consumers import consumer_snapshot
     from .device_day_retry import retry_limit
     consumers = consumer_snapshot(config, now=now)
+    repair = retry_observation(config, now=now)
     settings = config.get('device_day') or {}
     cutoff = (now - settings.get('live_priority_seconds', 14400)) * 1_000_000
     waiting = {day: {s: {} for s in STAGES} for day in days}
@@ -352,6 +363,7 @@ def snapshot(config):
         + ('；外部采集保留期限未知' if row['retention_policy']['status'] == 'unknown' else '') + '</li>'
         for row in lifecycle if row['publication_status'] != 'completed') + '</ul>'
     return {'consumers': consumers, 'consumer_html': render_consumers(consumers),
+            'retry_repair': repair, 'retry_repair_html': render_retry_observation(repair),
             'input_lifecycle': lifecycle, 'input_lifecycle_observation': lifecycle_observation,
             'storage_maintenance': os.environ.get('VISIONCORTEX_STORAGE_MAINTENANCE', '0') == '1',
             'process_since_us': config.get('device_day', {}).get('process_since_us'),
@@ -365,6 +377,93 @@ def snapshot(config):
             'running': jobs, 'errors': errors + latency['errors'], 'latency': latency,
             'latency_html': lifecycle_html + render_latency(latency) + render_diagnostics(failures, component_timings),
             'scope': 'queue_records_not_current_version_acceptance'}
+
+
+def retry_observation(config, *, now=None):
+    """Read only the repair owner's bounded local heartbeat, never its verifier."""
+    try:
+        from .device_day_retry_worker import retry_service_snapshot
+        return retry_service_snapshot(config, now=now)
+    except (ImportError, OSError, ValueError, TypeError):
+        return {'available': False, 'reason': 'repair_service_observation_unavailable', 'local_metadata_only': True}
+
+
+def render_retry_observation(repair):
+    title = '<details><summary>自动修复重试服务</summary>'
+    if not repair.get('available'):
+        label = ('尚无本地服务心跳，运行状态未核实' if repair.get('reason') == 'repair_service_observation_absent'
+                 else '本地服务快照暂不可核实')
+        return title + '<p>' + label + '。</p></details>'
+    enabled = ('已启用' if repair.get('configured_enabled') is True else
+               '未启用' if repair.get('configured_enabled') is False else '启用配置未核实')
+    owner = repair.get('owner_state')
+    status = repair.get('status')
+    if owner == 'verified':
+        label = ('已核验进程正在核验修复条件' if status == 'running' and repair.get('phase') == 'checking'
+                 else '已核验进程等待下一轮核验' if status == 'running'
+                 else '已核验进程，自动修复未启用' if status == 'disabled'
+                 else '进程状态已核实，当前不在核验')
+    else:
+        label = {'stale': '服务心跳已过期', 'stopped': '服务已停止', 'failed': '服务发生错误'}.get(
+            owner, '进程身份尚未核实')
+    identity = ' · 进程 ' + str(repair['pid']) if owner == 'verified' and type(repair.get('pid')) is int else ''
+    last = repair.get('last_result') or {}
+    reasons = {'waiting': '本轮没有可授权候选', 'running_elsewhere': '另一进程正在核验',
+               'verification_rejected': '候选未通过当前输入、前序回执或修复核验',
+               'stale_or_already_applied': '候选已变化或同一修复已授权', 'granted': '已授予有限重试预算'}
+    reason = reasons.get(last.get('status'), '尚无本轮核验结果')
+    if last.get('status') == 'verification_rejected' and isinstance(last.get('reason'), str):
+        reason += '；阻塞原因：' + retry_rejection_label(last['reason'])
+    error = last.get('error_type') or repair.get('error_type')
+    if error:
+        reason += '（' + escape(str(error)) + '）'
+    scanned = last.get('scanned')
+    counts = [('outside_scope', '不在自动修复范围'), ('unknown_or_disabled', '原因未识别或未授权'),
+              ('cooling', '等待冷却')]
+    hints = ([f'本轮检查 {scanned} 条本地候选'] if type(scanned) is int else [])
+    hints += [str(last[key]) + ' ' + label for key, label in counts if type(last.get(key)) is int and last[key] > 0]
+    kinds = {'provider_binding': '服务账户绑定', 'database_lock': '数据库锁', 'storage_access': '存储访问',
+             'vision_nms': '视觉 NMS', 'receipt_projection': '回执映射',
+             'resource_coordination': '资源协调', 'storage_capacity': '存储留空'}
+    allowed = repair.get('allowed_classes')
+    scope = ('；'.join(kinds.get(kind, escape(str(kind))) for kind in allowed) or '未配置自动修复类别'
+             if isinstance(allowed, list) else '范围未核实')
+    return (title + '<p>' + enabled + ' · ' + label + identity + '。自动核验范围：' + scope + '。</p>'
+            '<p>最近服务快照累计：授权 ' + str(repair.get('granted_count', 0)) + ' 次，核验未通过 '
+            + str(repair.get('rejected_count', 0)) + ' 次，已完成核验轮次 '
+            + str(repair.get('completed_tick_count', 0)) + '。' + reason + '。</p>'
+            + ('<p>' + ' · '.join(hints) + '。</p>' if hints else '')
+            + '<p>授权仅增加有限重试预算，不代表模型已执行、阶段已完成或成果已发布；原失败记录保留。</p></details>')
+
+
+def retry_rejection_label(reason):
+    names = dict(zip(STAGES, ('归档', '视觉预处理', '录音识别', '多模态理解', '日报'), strict=True))
+    for prefix, label in [('parent_queue_not_completed_', '前序队列尚未完成'),
+                          ('parent_receipt_or_artifact_unverified_', '前序回执或产物尚未通过核验'),
+                          ('parent_queue_revision_not_bound_to_accepted_receipt_', '前序队列版本尚未绑定已接受回执'),
+                          ('consumer_owner_not_unique_or_fresh_', '消费者身份不唯一或心跳过期')]:
+        stage = reason.removeprefix(prefix)
+        if reason.startswith(prefix) and stage in names:
+            return names[stage] + '：' + label
+    labels = {
+        'repair_already_authorized': '同一修复已授予预算',
+        'failed_budget_state_changed': '失败记录或重试预算状态已变化',
+        'current_source_proof_incomplete_or_stale': '当前原文件核验证明不足或已过期',
+        'current_parent_context_proof_incomplete': '当前前序回执或上下文证明不足',
+        'specific_repair_proof_incomplete': '此类修复尚无足够验证证据',
+        'current_proof_changed_before_grant': '授权前核验证明已变化',
+        'current_verification_rejected': '当前核验条件未满足',
+        'queue_input_differs_from_current_inventory': '队列输入与当前采集清单不一致',
+        'archived_source_snapshot_or_stable_bytes_unverified': '归档原片快照或稳定字节核验未通过',
+        'current_input_availability_not_ready': '当前输入尚未就绪',
+        'current_queue_recipe_changed_normal_admission_required': '当前执行配方已变化，须走正常任务准入',
+        'effective_runtime_recipe_differs_from_reviewed_preflight': '有效运行配方与审核预检不一致',
+        'source_view_guard_rejected_current_namespace': '当前存储视图未通过核验',
+        'source_view_guard_not_proven': '当前存储视图尚未核实',
+        'failed_target_has_unreconciled_lease': '失败记录仍有未协调的运行租约',
+        'current_local_capacity_admission_closed': '当前本地容量尚未允许新任务准入',
+    }
+    return labels.get(reason, escape(reason))
 
 
 def render_consumers(consumers):

@@ -130,6 +130,30 @@ NAS 的 `Readme.html` 保留相对素材链接；应用 HTTP 页面将链接映�
 缺失的派生总索引由总览线程每轮最多重建一个，复用 `DeviceDayRunner.refresh_index` 的当前回执过滤规则；不手工将历史模型结果标为当前结果。不可读或无法恢复的索引明确显示异常。
 证明材料保存在本地运行目录的 `device-day/RetentionRecovery` 与 `device-day/IndexRecovery`。
 
+耗尽失败预算后的自动修复由独立的
+[`device_day_retry_worker.py`](../src/visioncortex/device_day_retry_worker.py) 消费者负责，
+默认关闭；站点必须明确设置 `device_day.retry_repair.enabled: true`、`allowed_classes`
+和 `verification_factory: 模块:工厂`，再按固定源码与解释器部署
+`python -m visioncortex.device_day_retry_worker --config <私有配置>`。验证端口只负责复核，
+不得调用模型或厂商 API；凭据修复读取既有本地验证回执，不另发探测请求。
+命令加 `--once` 时至多核验并授权一条候选后退出；常驻轮询间隔由
+`interval_seconds` 配置，默认 5 秒。单次命令的预算事务不代表常驻服务仍在线。
+
+每轮至多检查 128 条本地失败元数据、核验一条输入并授予一次预算，五阶段轮转；
+`process_since_us` 范围保持有效，越界排除数与检查结果写入本地状态。
+前序尚未完成、来源缺失或核验失败进入持久冷却，默认 900 秒后允许重新检查。
+验证端口必须提供新鲜的完整稳定来源字节、所有前序回执、上下文及当前执行键证明，
+绑定完整失败行摘要，并在授权前再次复核；存储与来源命名空间门禁先于 NAS 读取。
+
+通过 [`device_day_retry.py`](../src/visioncortex/device_day_retry.py) 的事务比较并交换，
+默认只增加一次尝试，累计次数、原失败、回执与付费请求缓存保留。
+同一个稳定修复身份不能重复续预算；NMS 复用已验证的模型、权重和线程策略修复身份，
+其他输入逐条核验后获得预算，不因此宣称这些输入已推理或质量通过。
+仅配置中明确允许的已知故障类别可进入修复；精确的投影、资源与容量错误各需相应证明，
+未知、覆盖不足、内容质量及解码失败仍由独立证据门槛处理。此消费者不删除或改写采集数据。
+`device-day/RetryRepair/Service.json` 分别记录心跳、实际完成轮次、授权与拒绝数量；
+进程在线和授权预算都不等于阶段完成、浏览器交付或生产验收通过。
+
 ## 原视频唯一留存与软链接
 
 此总览和恢复功能不启用采集端删除。软链接替换仍受独立的 `capture_video_link_cleanup` 配置与验证门槛约束。

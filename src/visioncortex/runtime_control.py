@@ -312,7 +312,8 @@ def resource_slot(config, resource, *, units=1):
     coordinator = ResourceCoordinator(root/'state'/'resources.sqlite3')
     with coordinator.acquire(resource, capacity=capacity, units=min(units, capacity),
                              timeout=settings.get('admission_timeout_seconds', 300)):
-        token = _OWNED_RESOURCES.set(owned | {key} if CURRENT.get().source == 'device_day_backfill' else owned)
+        token = _OWNED_RESOURCES.set(owned | {key} if CURRENT.get().source == 'device_day_backfill'
+                                    or CURRENT.get().yield_signal is not None else owned)
         try:
             yield
         finally:

@@ -463,6 +463,7 @@ async function loadAll() {
     if (routeParts()[0] === "new") refreshNasPickers();
   });
   // Each page decides whether it needs the directory; direct archive links remain readable.
+  loadAll.initialized = true;
   return results[1].status === "fulfilled" && results[1].value === true;
 }
 
@@ -2775,14 +2776,51 @@ const mobileMoreDialog = document.querySelector("#mobile-more-dialog");
 document.querySelector("#mobile-more-button")?.addEventListener("click", ()=>mobileMoreDialog?.showModal());
 document.querySelectorAll("[data-close-mobile-more]").forEach((button)=>button.addEventListener("click", ()=>mobileMoreDialog?.close()));
 mobileMoreDialog?.querySelectorAll("a").forEach((link)=>link.addEventListener("click", ()=>mobileMoreDialog.close()));
-function routeFromNavigation() {
+async function routeFromNavigation() {
   const follow = state.followRun;
   if (follow?.enabled) {
     if (location.hash !== follow.expectedHash) follow.enabled = false;
     follow.expectedHash = null;
   }
   window.scrollTo({ top: 0, left: 0, behavior: "auto" });
-  return router();
+  const requestedHash = location.hash;
+  const route = routeParts()[0];
+  if (!["day-timeline", "knowledge", "device-days", "device-day"].includes(route) && !loadAll.initialized) {
+    if (!loadAll.initialization) loadAll.initialization = loadAll().finally(() => {loadAll.initialization = null;});
+    await loadAll.initialization;
+    if (requestedHash !== location.hash) return;
+  }
+  const rendering = router();
+  if (route === "device-days" && !loadAll.initialized) void refreshPageSnapshots(true);
+  return rendering;
+}
+
+async function refreshPageSnapshots(force = false) {
+  const route = routeParts()[0];
+  if (["day-timeline", "knowledge", "device-day"].includes(route)) return;
+  if (route !== "device-days") return refreshTaskSnapshots();
+  if (document.hidden || refreshPageSnapshots.pending || !force && Date.now()-state.deviceDayUpdatedAt < 30000) return;
+  const requestedHash = location.hash;
+  refreshPageSnapshots.pending = true;
+  try {
+    await loadDeviceDayArchives();
+    if (requestedHash === location.hash) return router();
+  } finally { refreshPageSnapshots.pending = false; }
+}
+
+async function initializePage() {
+  const route = routeParts()[0], requestedHash = location.hash;
+  if (["day-timeline", "knowledge", "device-days", "device-day"].includes(route)) {
+    const rendering = routeFromNavigation();
+    void api("/api/health", {readTimeoutMs:15000}).then(data => {state.health=data;updateServiceChrome();}).catch(() => {});
+    return rendering;
+  }
+  try { return await routeFromNavigation(); }
+  catch {
+    if (requestedHash !== location.hash) return;
+    main.innerHTML = productState("error", "server", "实验目录暂时无法载入", "目录读取失败，暂时无法确认素材与报告数量；系统会自动重试。", `<button class="primary-button" type="button" data-retry-service>重新连接</button>`);
+    document.querySelector("[data-retry-service]")?.addEventListener("click", ()=>location.reload());
+  }
 }
 
 document.querySelector("#follow-stage-results")?.addEventListener("click", () => {
@@ -2799,7 +2837,7 @@ window.addEventListener("hashchange", routeFromNavigation);
 window.addEventListener("scroll", updateResultNavDensity, { passive: true });
 window.addEventListener("resize", updateResultNavDensity, { passive: true });
 window.addEventListener("keydown", handleMaterialReviewShortcut);
-window.setInterval(refreshTaskSnapshots, 4000);
+window.setInterval(refreshPageSnapshots, 4000);
 window.setInterval(updateRunElapsedLabels, 1000);
 main.addEventListener("toggle", event => {
   const item = event.target;
@@ -2811,12 +2849,7 @@ main.addEventListener("toggle", event => {
 hydrateIcons();
 const legacyArchive = new URLSearchParams(location.search).get("archive");
 if (legacyArchive && !location.hash) location.hash = `#/archive/${encodeURIComponent(legacyArchive)}/experiments`;
-if (["day-timeline", "knowledge", "device-days", "device-day"].includes(routeParts()[0])) routeFromNavigation();
-loadAll().then(() => { if (!["day-timeline", "knowledge", "device-days", "device-day"].includes(routeParts()[0])) return routeFromNavigation(); }).catch(() => {
-  if (["day-timeline", "knowledge", "device-days", "device-day"].includes(routeParts()[0])) return;
-  main.innerHTML = productState("error", "server", "实验目录暂时无法载入", "目录读取失败，暂时无法确认素材与报告数量；系统会自动重试。", `<button class="primary-button" type="button" data-retry-service>重新连接</button>`);
-  document.querySelector("[data-retry-service]")?.addEventListener("click", ()=>location.reload());
-});
+void initializePage();
 
 let refreshingNasRecordings = false;
 function refreshNasPickers() {

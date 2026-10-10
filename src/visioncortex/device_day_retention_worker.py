@@ -1,7 +1,7 @@
 """Continuously process ready slices through the shared production queues."""
 from __future__ import annotations
 
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 import json
 from pathlib import Path
 import time
@@ -177,7 +177,7 @@ class RetentionWorker:
     def tick(self, runner, stop):
         from .device_day import exclusive
         from .device_day_night_schedule import paused_stages, stage_admitted
-        from .runtime_control import ExecutionCancelled
+        from .runtime_control import ExecutionCancelled, ExecutionYielded, execution_context
         if self.stage in paused_stages(runner.config):
             return {'status': 'paused_by_user'}
         from .device_day_admission import admission_status
@@ -238,14 +238,26 @@ class RetentionWorker:
                     return {'status': 'waiting', 'admitted': len(admitted)}
                 started = time.perf_counter()
                 try:
-                    # Stop only prevents new claims. An already leased archive
-                    # copy and publication finish normally during handover.
-                    if self.stage == 'vision':
-                        from .device_day_io import live_vision_lane
-                        with live_vision_lane():
+                    # Archive copies retain their finish-before-handover
+                    # semantics. Incremental work observes shutdown only at a
+                    # reusable unit boundary, without cancelling an issued call.
+                    incremental = self.stage in {'vision', 'understanding'}
+                    context = (execution_context(job_id=record['recording_id'], source='nas', priority=3,
+                                                 stop=None, yield_signal=stop)
+                               if incremental else nullcontext())
+                    with context:
+                        if self.stage == 'vision':
+                            from .device_day_io import live_vision_lane
+                            with live_vision_lane():
+                                result = runner.process(record, stage=self.stage, retry=True)
+                        else:
                             result = runner.process(record, stage=self.stage, retry=True)
-                    else:
-                        result = runner.process(record, stage=self.stage, retry=True)
+                    if incremental and result.get('status') == 'paused_for_live' and stop.is_set():
+                        result = result | {'reason': 'stopping'}
+                except ExecutionYielded as exc:
+                    result = {'status': 'paused_for_live', 'recording_id': record['recording_id'],
+                              'error_type': type(exc).__name__,
+                              'reason': 'stopping' if stop.is_set() else exc.reason}
                 except ExecutionCancelled as exc:
                     result = {'status': 'cancelled', 'recording_id': record['recording_id'],
                               'error_type': type(exc).__name__, 'message': str(exc)[:1000]}
@@ -254,7 +266,8 @@ class RetentionWorker:
                               'error_type': type(exc).__name__, 'message': str(exc)[:1000]}
                 seconds = time.perf_counter() - started
                 queue.finish(owner, record['recording_id'], result, seconds)
-                if result.get('status') != 'completed':
+                if result.get('status') != 'completed' and not (
+                        self.stage in {'vision', 'understanding'} and result.get('status') == 'paused_for_live'):
                     self.deferred[record['recording_id']] = time.time() + self.failure_cooldown
                 return {'status': 'processed', 'recording_id': record['recording_id'],
                         'wall_seconds': seconds, 'result': result}
