@@ -292,7 +292,9 @@ def _repair_order(db, stage):
     if not {'retry_limit', 'revision'} <= columns or not db.execute(
             f"SELECT 1 FROM q_{stage}.sqlite_master WHERE name='retry_authorizations'").fetchone():
         return ''
-    return ("CASE WHEN q.status='failed' AND q.retry_limit>:attempts AND q.attempts<q.retry_limit "
+    # A normal publication/resource yield refunds the claim and returns queued;
+    # the unchanged, unconsumed authorization still owns the next repair turn.
+    return ("CASE WHEN q.status IN ('failed','queued') AND q.retry_limit>:attempts AND q.attempts<q.retry_limit "
             f"AND {_signature_matches('q', 'o', stage)} AND EXISTS(SELECT 1 FROM q_{stage}.retry_authorizations a "
             "WHERE a.recording_id=q.recording_id AND a.revision=q.revision AND a.retry_limit=q.retry_limit) "
             "THEN 0 ELSE 1 END,")
