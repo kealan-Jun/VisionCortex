@@ -36,6 +36,14 @@ class DeviceDayQueue:
                 db.execute("ALTER TABLE recordings ADD COLUMN input_status TEXT NOT NULL DEFAULT 'ready'")
             if "started_at" not in columns:
                 db.execute("ALTER TABLE recordings ADD COLUMN started_at REAL")
+            if "retry_limit" not in columns:
+                db.execute("ALTER TABLE recordings ADD COLUMN retry_limit INTEGER NOT NULL DEFAULT 0")
+            db.execute("""CREATE TABLE IF NOT EXISTS retry_authorizations (
+                recording_id TEXT NOT NULL, revision TEXT NOT NULL, repair_id TEXT NOT NULL,
+                authorized_at REAL NOT NULL, previous_attempts INTEGER NOT NULL,
+                previous_retry_limit INTEGER NOT NULL, retry_limit INTEGER NOT NULL,
+                previous_result TEXT NOT NULL, evidence TEXT NOT NULL,
+                PRIMARY KEY(recording_id, revision, repair_id))""")
 
     def connect(self):
         from .sqlite_store import connection
@@ -50,7 +58,7 @@ class DeviceDayQueue:
               VALUES(?,?,?,?,?,?) ON CONFLICT(recording_id) DO UPDATE SET
               revision=excluded.revision,payload=excluded.payload,status=excluded.status,
               queued_at=excluded.queued_at,updated_at=excluded.updated_at,lease_owner=NULL,
-              lease_until=NULL,result=NULL,completed_at=NULL,wall_seconds=NULL,started_at=NULL,attempts=0,
+              lease_until=NULL,result=NULL,completed_at=NULL,wall_seconds=NULL,started_at=NULL,attempts=0,retry_limit=0,
               input_status=CASE WHEN recordings.revision!=excluded.revision THEN 'ready' ELSE recordings.input_status END
               WHERE (recordings.revision != excluded.revision OR
                 (recordings.status='needs_camera_role' AND excluded.status='queued')) AND
@@ -79,7 +87,7 @@ class DeviceDayQueue:
         with self.connect() as db:
             return db.execute(
                 "SELECT 1 FROM recordings WHERE input_status='ready' AND "
-                "(status IN ('queued','running') OR (status='failed' AND attempts<?)) LIMIT 1",
+                "(status IN ('queued','running') OR (status='failed' AND attempts<MAX(?,retry_limit))) LIMIT 1",
                 (max_attempts,),
             ).fetchone() is not None
 
@@ -108,7 +116,7 @@ class DeviceDayQueue:
             # implementation decoded every pending JSON for every camera slot.
             # json_each keeps large allowlists below SQLite's parameter limit.
             conditions = ["(r.status='queued' OR (r.status='running' AND COALESCE(r.lease_until,0)<?)"
-                          + (" OR (r.status='failed' AND (? IS NULL OR r.attempts<?)))" if retry else ")")]
+                          + (" OR (r.status='failed' AND (? IS NULL OR r.attempts<MAX(?,r.retry_limit))))" if retry else ")")]
             conditions.append("r.input_status='ready'")
             parameters = [current]
             if retry:

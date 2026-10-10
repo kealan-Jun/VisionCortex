@@ -11,7 +11,20 @@ import time
 
 from .device_day import exclusive, now
 from .device_day_contract import VERSION, atomic_json, digest, read_json, safe_child
-from .device_day_verification import verify_artifact_cached
+from .runtime_control import check_cancelled
+from .sqlite_store import connection
+
+
+def verify_recovery_artifact(root, reference):
+    """Verify stable complete bytes, observing shutdown between hash blocks."""
+    from .device_day_inputs import verify_content
+    check_cancelled()
+    try:
+        valid = verify_content(safe_child(root, reference['path']), reference)
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    check_cancelled()
+    return valid
 
 
 def source_identity(record):
@@ -70,7 +83,7 @@ def verified_original(runner, record, receipt):
             return False
         if source['kind'] == 'video' and source['size_bytes'] != record['size_bytes']:
             return False
-        if not verify_artifact_cached(layout.root, reference):
+        if not verify_recovery_artifact(layout.root, reference):
             return False
     audio = receipt.get('audio', {}).get('artifacts', [])
     expected_audio = [s['retained'] | {'kind': s['kind']} for s in sources if s['kind'].startswith('audio_')]
@@ -118,6 +131,7 @@ def recover_one(runner, row):
                 return {'status': 'capture_present', 'recording_id': rid}
             except FileNotFoundError:
                 pass
+            check_cancelled()
             # Publish before the queue commit. A crash between them is recoverable
             # from the current receipt. CAS leaves new inputs/owners untouched.
             with queue.connect() as db:
@@ -131,9 +145,11 @@ def recover_one(runner, row):
                     atomic_json(path.parent / 'history' / f'retention-{digest(previous)}.json', previous)
                 atomic_json(path, recovered)
                 atomic_json(safe_child(runner.runtime_root, f'RetentionRecovery/{rid}.json'), proof)
-                db.execute("UPDATE recordings SET status='completed',revision=?,result=?,completed_at=?,"
+                db.execute("UPDATE recordings SET status='completed',input_status='ready',revision=?,result=?,completed_at=?,"
                            "wall_seconds=0,lease_owner=NULL,lease_until=NULL,updated_at=? WHERE recording_id=?",
                            (revision, json.dumps(result), time.time(), time.time(), rid))
+            from .input_availability import Availability
+            Availability(runner.runtime_root).mark(record, 'ready', reason='verified_archived_original')
             return result
     return {'status': 'no_verified_archive', 'recording_id': rid}
 
@@ -141,10 +157,43 @@ def recover_one(runner, row):
 class RetentionRecovery:
     """One bounded archive verification on its own worker; live intake stays free."""
 
-    def __init__(self):
+    def __init__(self, *, batch_size=128, cooldown_seconds=900):
+        if type(batch_size) is not int or not 1 <= batch_size <= 512:
+            raise ValueError('Recovery batch size must be between 1 and 512')
+        if not 5 <= cooldown_seconds <= 86400:
+            raise ValueError('Recovery cooldown must be between 5 and 86400 seconds')
+        self.batch_size = batch_size
+        self.cooldown_seconds = cooldown_seconds
         self.checked = {}
 
+    def _checkpoint(self, runner):
+        path = runner.runtime_root / 'RetentionRecovery' / 'Checks.sqlite3'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with connection(path) as db:
+            db.execute('PRAGMA journal_mode=WAL')
+            db.execute('''CREATE TABLE IF NOT EXISTS checks(recording_id TEXT PRIMARY KEY,
+                revision TEXT, queue_updated_at REAL, checked_at REAL, next_retry REAL, status TEXT)''')
+        return path
+
+    def _checked(self, runner, row, status):
+        current = time.time()
+        with connection(self._checkpoint(runner)) as db:
+            db.execute('INSERT OR REPLACE INTO checks VALUES(?,?,?,?,?,?)',
+                       (row['recording_id'], row['revision'], row['updated_at'], current,
+                        current + self.cooldown_seconds, status))
+        self.checked[row['recording_id']] = ((row['revision'], row['updated_at']),
+                                            time.monotonic() + self.cooldown_seconds)
+        while len(self.checked) > self.batch_size * 2:
+            self.checked.pop(next(iter(self.checked)))
+
     def tick(self, runner):
+        try:
+            with exclusive(runner.runtime_root / 'locks' / 'retention-recovery-worker.lock'):
+                return self._tick(runner)
+        except BlockingIOError:
+            return {'status': 'running_elsewhere'}
+
+    def _tick(self, runner):
         # Admission only posts one local-receipt snapshot. All NAS metadata and
         # byte checks for a waiting stage run on this existing bounded worker.
         verified = runner._prerequisite_checks.verify_pending(runner)
@@ -154,30 +203,40 @@ class RetentionRecovery:
         # paths which have never supplied a downstream task.
         with runner.queues['vision'].connect() as db:
             waiting = {row[0] for row in db.execute("SELECT recording_id FROM recordings WHERE status='queued' "
-                "OR (status='running' AND COALESCE(lease_until,0)<?)", (time.time(),))}
+                "OR (status='running' AND COALESCE(lease_until,0)<?) ORDER BY queued_at LIMIT ?",
+                (time.time(), self.batch_size))}
         blocked = set()
         for stage in ('vision', 'stt', 'understanding', 'report'):
             with runner.queues[stage].connect() as db:
                 blocked.update(row[0] for row in db.execute(
                     "SELECT recording_id FROM recordings WHERE status='waiting_for_prerequisite' "
-                    "AND json_extract(result,'$.prerequisite_stage')='retention'"))
+                    "AND json_extract(result,'$.prerequisite_stage')='retention' ORDER BY queued_at LIMIT ?",
+                    (self.batch_size,)))
         waiting.update(blocked)
+        checkpoint = self._checkpoint(runner)
         with runner.queues['retention'].connect() as db:
-            rows = list(db.execute("SELECT * FROM recordings WHERE (status='failed' AND json_extract(result,'$.error_type')='FileNotFoundError') "
-                                   "OR (status='queued' AND input_status='missing') "
-                                   "OR (status='completed' AND recording_id IN (SELECT value FROM json_each(?))) "
-                                   "ORDER BY COALESCE(json_extract(payload,'$.processing_priority'),0),"
-                                   "json_extract(payload,'$.recording_start_us')", (json.dumps(sorted(blocked)),)))
-        rows.sort(key=lambda row: row['recording_id'] not in waiting)
+            db.execute('ATTACH DATABASE ? AS recovery_progress', (str(checkpoint),))
+            rows = list(db.execute("SELECT q.* FROM recordings q LEFT JOIN recovery_progress.checks c "
+                                   "ON c.recording_id=q.recording_id WHERE "
+                                   "((q.status='failed' AND json_extract(q.result,'$.error_type')='FileNotFoundError') "
+                                   "OR (q.status='queued' AND q.input_status='missing') "
+                                   "OR (q.status='completed' AND q.recording_id IN (SELECT value FROM json_each(?)))) "
+                                   "AND (c.recording_id IS NULL OR c.revision!=q.revision "
+                                   "OR c.queue_updated_at!=q.updated_at OR c.next_retry<=?) "
+                                   "ORDER BY q.recording_id NOT IN (SELECT value FROM json_each(?)),"
+                                   "COALESCE(json_extract(q.payload,'$.processing_priority'),0),"
+                                   "json_extract(q.payload,'$.recording_start_us'),q.recording_id LIMIT ?",
+                                   (json.dumps(sorted(blocked)), time.time(), json.dumps(sorted(waiting)), self.batch_size)))
         from .device_day_schedule import in_processing_scope
         for row in rows:
+            check_cancelled()
             if not in_processing_scope(runner.settings, json.loads(row['payload'])):
+                self._checked(runner, row, 'outside_processing_scope')
                 continue
             identity = (row['revision'], row['updated_at'])
             previous = self.checked.get(row['recording_id'])
             if previous and previous[0] == identity and time.monotonic() < previous[1]:
                 continue
-            self.checked[row['recording_id']] = (identity, time.monotonic() + 900)
             try:
                 result = (repair_completed_retention(runner, row) if row['status'] == 'completed'
                           else recover_one(runner, row))
@@ -190,6 +249,7 @@ class RetentionRecovery:
             previous_status = read_json(status_path) if status_path.is_file() else {}
             atomic_json(status_path, previous_status | result | {'checked_at': now(),
                         'queue_revision': row['revision'], 'queue_updated_at': row['updated_at']})
+            self._checked(runner, row, result['status'])
             return result
         return {'status': 'idle'}
 

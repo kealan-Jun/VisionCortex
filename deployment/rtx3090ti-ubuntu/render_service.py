@@ -127,6 +127,28 @@ def main() -> None:
             print(name + "=" + shlex.quote(value))
     elif command == "render":
         render(*args)
+    elif command == "render-recovery":
+        project, python, config, template, target = args
+        project, config = absolute(project), absolute(config)
+        settings = settings_for(project, config, "production")
+        recovery = (settings.get("device_day") or {}).get("recovery") or {}
+        if not recovery.get("storage_checks"):
+            raise ValueError("Archive recovery requires private storage identity checks.")
+        if not Path(config).is_file() or not os.access(python, os.X_OK):
+            raise ValueError("Prepared recovery configuration or Python is missing.")
+        text = Path(template).read_text(encoding="utf-8")
+        for marker, value in {
+            "@PROJECT_ROOT@": project.replace("%", "%%"),
+            "@ENVIRONMENT@": "Environment=" + quoted("PYTHONPATH=" + str(Path(project) / "src")) + "\nEnvironment=PYTHONDONTWRITEBYTECODE=1",
+            # Preserve a venv interpreter's prefix; resolving its symlink
+            # selects the base interpreter and can lose the verified packages.
+            "@PYTHON@": quoted(os.path.abspath(python), argument=True),
+            "@CONFIG@": quoted(config, argument=True),
+        }.items():
+            if text.count(marker) != 1:
+                raise ValueError("Invalid recovery service template.")
+            text = text.replace(marker, value)
+        Path(target).write_text(text, encoding="utf-8")
     elif command == "render-rtp":
         project, python, config, template, target = args
         project, config = absolute(project), absolute(config)

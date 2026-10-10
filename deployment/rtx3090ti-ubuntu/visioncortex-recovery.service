@@ -1,0 +1,22 @@
+[Unit]
+Description=VisionCortex verified device-day archive recovery
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# Render with render_service.py render-recovery and a private site config.
+WorkingDirectory=@PROJECT_ROOT@
+@ENVIRONMENT@
+ExecStart=@PYTHON@ -m visioncortex.device_day_recovery_worker --config @CONFIG@
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=180
+KillMode=mixed
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
+
+[Install]
+WantedBy=default.target

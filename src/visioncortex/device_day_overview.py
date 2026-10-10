@@ -22,7 +22,13 @@ WAIT_LABELS = {'paused_by_user': '按用户要求暂停',
                'prerequisite_not_verified': '等待前置产物校验或修复',
                'upstream_failed': '上游失败待恢复', 'upstream_pending': '上游未完成',
                'provider_blocked': '云端账户不可用', 'night_window': '等待夜间窗口',
-               'lease_recovery': '租约过期待恢复', 'pending_validation': '待校验调度'}
+               'lease_recovery': '租约过期待恢复', 'pending_validation': '等待调度（旧版本状态）',
+               'waiting_for_dispatch': '等待实时任务调度', 'waiting_for_history_dispatch': '等待历史任务调度',
+               'history_waiting_for_live': '历史任务等待实时容量', 'no_consumer': '缺少已核验消费者',
+               'consumer_evidence_unavailable': '消费者状态暂不可核实', 'retry_exhausted': '重试预算耗尽，待核验修复',
+               'failure_cooldown': '失败后等待冷却', 'input_missing': '输入缺失，待归档原件核验',
+               'waiting_for_storage': '等待本地存储达到留空要求',
+               'input_unavailable': '输入暂不可用', 'camera_role_unconfigured': '尚未配置机位角色', 'disabled': '未启用'}
 
 
 def processing_service_status(config, *, now=None, proc_root=Path('/proc')):

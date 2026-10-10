@@ -259,17 +259,17 @@ def _record_conditions(config, attached):
     return clauses, {'roles': json.dumps(role_map), 'scope': cutoff}
 
 
-def _eligible_conditions(stage, *, historical=False):
+def _eligible_conditions(stage, *, historical=False, retry_budget=':attempts'):
     matches = _signature_matches('q', 'o', stage)
     clauses = [
         "(q.recording_id IS NULL OR q.status!='running' OR COALESCE(q.lease_until,0)<:now)",
         f"(q.recording_id IS NULL OR NOT {matches} OR (q.status!='completed' AND "
         "NOT(q.status='running' AND COALESCE(q.lease_until,0)>=:now) AND "
-        "NOT(q.status='failed' AND (q.attempts>=:attempts OR q.updated_at>:retry_before))))",
+        f"NOT(q.status='failed' AND (q.attempts>={retry_budget} OR q.updated_at>:retry_before))))",
         f"(q.recording_id IS NULL OR NOT {matches} OR q.input_status='ready')",
     ]
     if stage == 'stt':
-        clauses.append("json_extract(o.payload,'$.audio.status')='provided'")
+        clauses.append("json_extract(o.payload,'$.audio.status') IN ('provided','no_input','not_provided')")
     # In-place primary stages are independent: vision/STT must not wait for a
     # full original copy. Downstream still needs every current transitive parent.
     if stage in {'understanding', 'report'}:
@@ -277,6 +277,13 @@ def _eligible_conditions(stage, *, historical=False):
             clauses.append(f"EXISTS(SELECT 1 FROM q_{parent}.recordings p WHERE p.recording_id=o.id "
                            f"AND p.status='completed' AND {_signature_matches('p', 'o', parent)})")
     return clauses
+
+
+def _retry_budget(db, stage):
+    # Read old immutable deployments without a schema migration; queue owners
+    # add the optional, audited recovery ceiling when opening their own store.
+    columns = {row['name'] for row in db.execute(f'PRAGMA q_{stage}.table_info(recordings)')}
+    return 'MAX(:attempts,COALESCE(q.retry_limit,0))' if 'retry_limit' in columns else ':attempts'
 
 
 def _provider_blocked(config, stage, db, attached, root, now):
@@ -325,6 +332,17 @@ def live_demand(config, stage, now=None):
                 str(exc) if isinstance(exc, PolicyUnavailable) else 'monitor_snapshot_unavailable'])
             return result
         with _snapshot(root) as (db, attached):
+            fair = ((config.get('device_day') or {}).get('backfill') or {}).get('mode', 'idle') == 'fair'
+            if fair:
+                if stage in paused_stages(config):
+                    result.update(status='paused_by_user', reasons=['paused_by_user'])
+                    return result
+                if not stage_admitted(config, stage, datetime.fromtimestamp(current).astimezone()):
+                    result.update(status='waiting_for_night_window', reasons=['waiting_for_night_window'])
+                    return result
+                if stage != 'stt' and _provider_blocked(config, stage, db, attached, root, current):
+                    result.update(status='waiting_for_provider', reasons=['waiting_for_provider'])
+                    return result
             clauses, parameters = _record_conditions(config, attached)
             parameters.update(now=current, cutoff=cutoff, retry_before=current - cooldown,
                               attempts=(config.get('device_day') or {}).get('failure_retry_limit') or 3)
@@ -346,7 +364,8 @@ def live_demand(config, stage, now=None):
                     continue
                 if _provider_blocked(config, live_stage, db, attached, root, current):
                     continue
-                eligible = clauses + [recent] + _eligible_conditions(live_stage)
+                eligible = clauses + [recent] + _eligible_conditions(
+                    live_stage, retry_budget=_retry_budget(db, live_stage))
                 counts['eligible'] += db.execute(
                     f"SELECT COUNT(*) FROM observations o LEFT JOIN q_{live_stage}.recordings q "
                     "ON q.recording_id=o.id WHERE " + ' AND '.join(eligible), parameters).fetchone()[0]
@@ -363,8 +382,11 @@ def live_demand(config, stage, now=None):
                     "MAX(COALESCE(json_extract(record,'$.recording_start_us'),0),"
                     "COALESCE(json_extract(record,'$.recording_end_us'),0))>=?", (cutoff,)).fetchone()[0]
         result['reasons'] = [name for name, count in counts.items() if count]
-        result.update(status='waiting_for_live' if result['reasons'] else 'idle',
-                      blocked=bool(result['reasons']))
+        fair = ((config.get('device_day') or {}).get('backfill') or {}).get('mode', 'idle') == 'fair'
+        # Fair history joins the same bounded resource queues, with aging.
+        # Live demand remains visible, but it cannot veto history indefinitely.
+        result.update(status='fair_capacity' if fair else 'waiting_for_live' if result['reasons'] else 'idle',
+                      blocked=False if fair else bool(result['reasons']))
     except (OSError, ValueError, KeyError, TypeError, sqlite3.Error, OverflowError) as exc:
         result['reasons'] = [str(exc) if isinstance(exc, PolicyUnavailable) else 'local_snapshot_unavailable']
     return result
@@ -389,7 +411,8 @@ def historical_candidates(config, stage, *, limit=16, now=None, exclude=()):
         return []
     try:
         with _snapshot(root) as (db, attached):
-            if _provider_blocked(config, stage, db, attached, root, current):
+            provider_blocked = _provider_blocked(config, stage, db, attached, root, current)
+            if provider_blocked and stage != 'stt':
                 return []
             clauses, parameters = _record_conditions(config, attached)
             parameters.update(now=current, cutoff=cutoff, retry_before=current - cooldown, limit=limit,
@@ -397,11 +420,17 @@ def historical_candidates(config, stage, *, limit=16, now=None, exclude=()):
                               excluded=json.dumps(list(exclude)))
             clauses += ["MAX(COALESCE(json_extract(o.payload,'$.recording_start_us'),0),"
                         "COALESCE(json_extract(o.payload,'$.recording_end_us'),0))<:cutoff"]
-            clauses += _eligible_conditions(stage, historical=True)
+            clauses += _eligible_conditions(stage, historical=True, retry_budget=_retry_budget(db, stage))
+            if provider_blocked:
+                # A video with no separately published audio still needs its
+                # actual track probe. Transport gates protect any embedded ASR.
+                clauses.append("json_extract(o.payload,'$.audio.status') IN ('no_input','not_provided')")
             clauses.append('o.id NOT IN (SELECT value FROM json_each(:excluded))')
+            fair = ((config.get('device_day') or {}).get('backfill') or {}).get('mode', 'idle') == 'fair'
+            order = 'ASC' if fair else 'DESC'
             rows = db.execute(f"SELECT o.payload FROM observations o LEFT JOIN q_{stage}.recordings q "
                               "ON q.recording_id=o.id WHERE " + ' AND '.join(clauses) +
-                              " ORDER BY json_extract(o.payload,'$.recording_start_us') DESC,o.id LIMIT :limit",
+                              f" ORDER BY json_extract(o.payload,'$.recording_start_us') {order},o.id LIMIT :limit",
                               parameters)
             from .input_availability import configured_record
             return [configured_record(config, json.loads(row['payload'])) for row in rows]
