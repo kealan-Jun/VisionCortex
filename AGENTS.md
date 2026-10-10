@@ -39,6 +39,8 @@
 - Synchronize the same reviewed commit to the configured synchronization targets and explicitly shared branches. Resolve targets from trusted local Git configuration; do not embed maintainer identities or internal repository roles in public guidance.
 - Before consequential Git work, verify URLs, default branch, current branch, local and target SHAs, upstream, and working-tree status. Complete synchronization requires querying all targets and confirming identical target SHAs.
 - Preserve remote commits, other branches and tags; reconcile divergence before pushing. Never force-push or use `--mirror` for routine synchronization.
+- When a synchronization target has an explicitly authorized new Git history baseline, begin work from a fresh checkout of that target. Apply reviewed file changes onto its history; never merge, rebase or push retired ancestry into it.
+- Keep frozen execution checkouts on their assigned immutable SHA. They are not a source for repository synchronization; preserve their runtime receipts and use the current authoritative checkout for development and pushes.
 - Apply `docs/RELEASE-POLICY.md`. Synchronization does not deploy services or establish release readiness. CI is manual-only; routine code management must not trigger or wait for it.
 - Execution nodes use task-specified immutable code and private site configuration. They execute and return evidence without editing, testing or tuning code unless explicitly authorized.
 - Preserve unrelated work. In a dirty tree, stage only named paths; never use `git add -A` or `git add .`.
