@@ -71,3 +71,13 @@ def test_recent_ready_work_has_explicit_dispatch_reason(tmp_path, monkeypatch):
     consumers['stages']['retention']['scopes']['recent']['status'] = 'covered'
     monkeypatch.setattr('visioncortex.device_day_consumers.consumer_snapshot', lambda *_args, **_kwargs: consumers)
     assert reason(config) == {'waiting_for_dispatch': 1}
+
+
+def test_disabled_observer_does_not_hide_dispatch_by_separate_verified_owner(tmp_path, monkeypatch):
+    config, _queue = setup(tmp_path, age=10)
+    config['device_day']['enabled'] = False
+    monkeypatch.setattr('visioncortex.device_day_progress.time.time', lambda: NOW)
+    consumers = consumer_snapshot(config, now=NOW)
+    consumers['stages']['retention']['scopes']['recent']['status'] = 'covered'
+    monkeypatch.setattr('visioncortex.device_day_consumers.consumer_snapshot', lambda *_args, **_kwargs: consumers)
+    assert reason(config) == {'waiting_for_dispatch': 1}

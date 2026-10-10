@@ -276,7 +276,7 @@ def snapshot(config):
                       'waiting_for_storage' if storage_hold else
                       'camera_role_unconfigured' if status == 'needs_camera_role' else
                       'lease_recovery' if status == 'expired' else
-                      'disabled' if settings.get('enabled') is False else
+                      'disabled' if settings.get('enabled') is False and coverage == 'disabled' else
                       'no_consumer' if coverage == 'no_consumer' else
                       'consumer_evidence_unavailable' if coverage == 'evidence_unavailable' else
                       'history_waiting_for_live' if scope == 'history' and live_hold else
