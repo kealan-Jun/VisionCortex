@@ -275,11 +275,8 @@ assert.equal(metricTokenValue({total_tokens:120},"total_tokens"),"120");
     "tasks", "new", "operations", "ai-settings",
 ])
 def test_initial_directory_failure_does_not_block_independent_pages(route):
-    source = web_source()
-    startup = "loadAll().then(" + source.split(
-        "loadAll().then(", 1
-    )[1].split("\n\nlet refreshingNasRecordings", 1)[0]
-    run_javascript(("loadAll", "loadNasRecordings", "loadArchiveListing", "router", "routeFromNavigation"), r'''
+    run_javascript(("loadAll", "loadNasRecordings", "loadArchiveListing", "router", "routeFromNavigation",
+                    "initializePage"), r'''
 const state={archives:[],archiveListingQuery:null,runs:[]},main={innerHTML:""};
 const document={activeElement:null,querySelector:()=>({addEventListener:()=>{}})};
 const archiveSearchQuery=()=>"",updateServiceChrome=()=>{},setChrome=()=>{};
@@ -297,8 +294,7 @@ async function api(url){
   if(url==="/api/runs")return {runs:[{run_id:"R",state:"completed"}]};
   return {};
 }
-const startup=
-''' + startup + r'''
+const startup=initializePage();
 (async()=>{
   await startup;
   assert.equal(main.innerHTML,location.hash.slice(2),"a directory outage must not replace an independently readable page");

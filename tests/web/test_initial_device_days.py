@@ -129,24 +129,79 @@ def test_timeline_detached_time_query_cannot_rewrite_a_refreshed_page(fail):
 
 
 @pytest.mark.parametrize("route", ["device-days", "device-day", "day-timeline", "knowledge"])
-def test_direct_delivery_route_renders_before_initial_snapshot_bundle(route):
-    source = (WEB / "app.js").read_text(encoding="utf-8")
-    startup = source.split('if (["day-timeline", "knowledge"', 1)[1].split(
-        "\nlet refreshingNasRecordings", 1,
-    )[0]
+def test_direct_delivery_route_renders_without_unrelated_initial_reads(route):
     run_node(f'const route="{route}";\n' + r'''
-const main={innerHTML:"skeleton"},routeParts=()=>[route],events=[];
-const routeFromNavigation=()=>{events.push("render");main.innerHTML="delivery shell";};
-let finish;
-const loadAll=()=>{events.push("snapshots");return new Promise(resolve=>{finish=resolve;});};
-const document={querySelector:()=>null},productState=()=>"error";
-''' + 'if (["day-timeline", "knowledge"' + startup + r'''
+const location={hash:`#/${route}`},main={innerHTML:"skeleton"},routeParts=()=>[route],events=[];
+const state={},document={hidden:false,querySelector:()=>null};window.scrollTo=()=>{};
+const router=()=>{events.push("render");main.innerHTML="delivery shell";};
+const loadAll=()=>{throw Error("unrelated initial directory reads");};
+const loadDeviceDayArchives=()=>{events.push("own listing");return new Promise(()=>{});};
+const refreshTaskSnapshots=()=>{throw Error("unrelated periodic snapshots");};
+const api=(url,options)=>{events.push(url);assert.equal(options.readTimeoutMs,15000);return new Promise(()=>{});};
+const updateServiceChrome=()=>{},productState=()=>"error";
+void initializePage();
 assert.equal(main.innerHTML,"delivery shell");
-assert.deepEqual(events,["render","snapshots"]);
-(async()=>{finish();await new Promise(setImmediate);
-  assert.deepEqual(events,["render","snapshots"],"bundle completion must not reset the direct page");
+assert.deepEqual(events,route==="device-days"?["render","own listing","/api/health"]:["render","/api/health"]);
+(async()=>{await refreshPageSnapshots();
+  assert.deepEqual(events,route==="device-days"?["render","own listing","/api/health"]:["render","/api/health"]);
 })().catch(error=>{console.error(error);process.exitCode=1;});
-''')
+''', functions=("initializePage", "routeFromNavigation", "refreshPageSnapshots"))
+
+
+def test_general_snapshot_bundle_loads_once_on_later_navigation_and_ignores_old_route():
+    run_node(r'''
+let route="home",finish,loads=0;const location={hash:"#/home"},state={};
+const routeParts=()=>[route],renders=[];window.scrollTo=()=>{};
+const router=()=>{renders.push(route);};
+const loadAll=()=>{loads++;return new Promise(resolve=>{finish=()=>{loadAll.initialized=true;resolve();};});};
+(async()=>{
+  const first=routeFromNavigation();route="tasks";location.hash="#/tasks";
+  const second=routeFromNavigation();assert.equal(loads,1);assert.deepEqual(renders,[]);
+  route="day-timeline";location.hash="#/day-timeline";await routeFromNavigation();
+  assert.deepEqual(renders,["day-timeline"]);finish();await Promise.all([first,second]);
+  assert.deepEqual(renders,["day-timeline"],"old bundle responses cannot reset the current page");
+  route="tasks";location.hash="#/tasks";await routeFromNavigation();
+  assert.equal(loads,1);assert.deepEqual(renders,["day-timeline","tasks"]);
+})().catch(error=>{console.error(error);process.exitCode=1;});
+''', functions=("routeFromNavigation",))
+
+
+def test_device_day_polling_is_bounded_and_cannot_render_a_departed_page():
+    run_node(r'''
+let route="device-days",finish,reads=0,taskReads=0,renders=0;
+const location={hash:"#/device-days"},state={deviceDayUpdatedAt:Date.now()},document={hidden:false};
+const routeParts=()=>[route],router=()=>{renders++;};
+const loadDeviceDayArchives=()=>{reads++;return new Promise(resolve=>{finish=resolve;});};
+const refreshTaskSnapshots=()=>{taskReads++;};
+(async()=>{
+  await refreshPageSnapshots();assert.equal(reads,0,"recent directory reads are reused");
+  document.hidden=true;await refreshPageSnapshots(true);assert.equal(reads,0);
+  document.hidden=false;const current=refreshPageSnapshots(true);await refreshPageSnapshots(true);
+  assert.equal(reads,1,"concurrent polling shares the in-flight directory read");
+  route="day-timeline";location.hash="#/day-timeline";finish();await current;
+  assert.equal(renders,0);await refreshPageSnapshots();assert.equal(taskReads,0);
+  route="tasks";await refreshPageSnapshots();assert.equal(taskReads,1);
+})().catch(error=>{console.error(error);process.exitCode=1;});
+''', functions=("refreshPageSnapshots",))
+
+
+def test_timeline_progress_uses_each_stages_eligible_denominator():
+    run_node(TIMELINE_DOM + r'''
+(async()=>{
+  const rendering=window.VisionCortexDayTimeline.render(ctx,"2026-10-10");
+  const stages=Object.fromEntries(["retention","vision","stt","understanding","report"].map(stage=>[
+    stage,{completed:stage==="stt"?3:1,failed:0,running:0,pending:0,processing_total:stage==="stt"?3:2}
+  ]));
+  requests[0].resolve({...progress("2026-10-10"),retry_repair_html:"<p>bounded local repair owner</p>",days:{"2026-10-10":{
+    total:3,processing_total:2,missing_input_count:1,stages
+  }}});await tick();
+  const overview=pages[0]["[data-processing-overview]"].innerHTML;
+  assert.ok(overview.includes("<strong>3<small> / 3"));assert.ok(overview.includes('value="3" max="3"'));
+  assert.equal(overview.includes("<strong>3<small> / 2"),false);
+  assert.ok(overview.includes("bounded local repair owner"));
+  requests[1].resolve(emptyDay);await rendering;
+})().catch(error=>{console.error(error);process.exitCode=1;});
+''', timeline=True)
 
 
 @pytest.mark.parametrize("navigate_away", [False, True])

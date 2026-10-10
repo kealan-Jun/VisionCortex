@@ -25,6 +25,9 @@ CHECKS = {
     'database_lock': {'queue_write_verified', 'lock_owner_reconciled'},
     'vision_nms': {'vision_model_verified', 'nms_repair_verified'},
     'media_decode': {'source_decode_verified'},
+    'receipt_projection': {'bounded_projection_verified', 'queue_write_verified'},
+    'resource_coordination': {'resource_policy_verified', 'lease_ownership_verified'},
+    'storage_capacity': {'local_reserves_verified', 'queue_write_verified'},
 }
 
 
@@ -45,6 +48,15 @@ def failure_kind(result):
     error = result.get('error_type')
     if error == 'RuntimeError' and message == PROVIDER_BINDING_ERROR:
         return 'provider_binding'
+    if error == 'OverflowError' and message == 'string longer than INT_MAX bytes':
+        return 'receipt_projection'
+    if ((error == 'RuntimeError' and message == 'Resource lease was lost; output cannot be marked complete')
+            or (error == 'TimeoutError' and message in {
+                'Resource admission timed out: vision', 'Resource admission timed out: nas-io-read'})):
+        return 'resource_coordination'
+    if ((error == 'OperationalError' and message == 'database or disk is full')
+            or (error == 'OSError' and message in {'No space left on device', '[Errno 28] No space left on device'})):
+        return 'storage_capacity'
     if error in {'FileNotFoundError', 'PermissionError', 'OSError'}:
         return 'storage_access'
     if error == 'OperationalError' and 'database is locked' in message.lower():

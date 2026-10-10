@@ -5,7 +5,7 @@ from . import device_day_semantic_cache as cache
 from .device_day_contract import atomic_json, digest, read_json
 from .mllm_provider import vision_request_identity
 from .multimodal_usage import UsageLedger
-from .scene_transport import VERSION, compact, expand, project
+from .scene_transport import VERSION, compact, expand, prepare_frame_ledger, project
 
 
 def request_policy(config):
@@ -59,6 +59,7 @@ def window(config, analyzer, prompt, metadata, image_paths, request_path, result
     from contextlib import ExitStack
     from .runtime_control import CURRENT, check_yield, defer_yield, resource_slot, sync_files
     check_yield(checkpoint=False)
+    image_paths = prepare_frame_ledger(metadata, image_paths)
     legacy = cache.identity(config, prompt, metadata)
     policy = request_policy(config)
     semantic, _ = project(metadata)
@@ -102,7 +103,7 @@ def window(config, analyzer, prompt, metadata, image_paths, request_path, result
             reservation = None
         wire_receipt = wire_response = None
         if raw is None:
-            if CURRENT.get().source == 'device_day_backfill':
+            if CURRENT.get().source == 'device_day_backfill' or CURRENT.get().yield_signal is not None:
                 # Admission precedes the budget reservation. Nested adapter
                 # requests reuse this same-thread slot through receipt save.
                 unit.enter_context(resource_slot(config, 'cloud'))

@@ -23,7 +23,8 @@ def test_progress_distinguishes_missing_stage_expired_lease_and_running(tmp_path
     assert data['running'][0]['recording_id'] == '1'
     day = next(iter(data['days'].values()))
     assert day['total'] == 3
-    assert day['stages']['vision'] == {'completed':0,'queued':0,'running':1,'failed':0,'expired':1,'not_enqueued':1}
+    assert day['stages']['vision'] == {'completed':0,'queued':0,'running':1,'failed':0,'expired':1,'not_enqueued':1,
+                                     'missing_input_count':0,'processing_total':3}
     assert day['stages']['retention']['not_enqueued'] == 3
     assert not (root/'queue-retention.sqlite3').exists()
 

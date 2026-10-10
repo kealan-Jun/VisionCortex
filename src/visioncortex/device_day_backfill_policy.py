@@ -286,6 +286,18 @@ def _retry_budget(db, stage):
     return 'MAX(:attempts,COALESCE(q.retry_limit,0))' if 'retry_limit' in columns else ':attempts'
 
 
+def _repair_order(db, stage):
+    """Consume an exact audited retry before the remaining eligible history."""
+    columns = {row['name'] for row in db.execute(f'PRAGMA q_{stage}.table_info(recordings)')}
+    if not {'retry_limit', 'revision'} <= columns or not db.execute(
+            f"SELECT 1 FROM q_{stage}.sqlite_master WHERE name='retry_authorizations'").fetchone():
+        return ''
+    return ("CASE WHEN q.status='failed' AND q.retry_limit>:attempts AND q.attempts<q.retry_limit "
+            f"AND {_signature_matches('q', 'o', stage)} AND EXISTS(SELECT 1 FROM q_{stage}.retry_authorizations a "
+            "WHERE a.recording_id=q.recording_id AND a.revision=q.revision AND a.retry_limit=q.retry_limit) "
+            "THEN 0 ELSE 1 END,")
+
+
 def _provider_blocked(config, stage, db, attached, root, now):
     if stage not in {'stt', 'understanding'}:
         return False
@@ -393,7 +405,7 @@ def live_demand(config, stage, now=None):
 
 
 def historical_candidates(config, stage, *, limit=16, now=None, exclude=()):
-    """Return a bounded newest-first shortlist; execution verifies its artifacts.
+    """Return bounded eligible history, with audited repairs first.
 
     An unreadable policy observation raises instead of silently reporting an
     empty backlog. A stale monitor safely returns no candidates.
@@ -430,7 +442,8 @@ def historical_candidates(config, stage, *, limit=16, now=None, exclude=()):
             order = 'ASC' if fair else 'DESC'
             rows = db.execute(f"SELECT o.payload FROM observations o LEFT JOIN q_{stage}.recordings q "
                               "ON q.recording_id=o.id WHERE " + ' AND '.join(clauses) +
-                              f" ORDER BY json_extract(o.payload,'$.recording_start_us') {order},o.id LIMIT :limit",
+                              f" ORDER BY {_repair_order(db, stage)}"
+                              f"json_extract(o.payload,'$.recording_start_us') {order},o.id LIMIT :limit",
                               parameters)
             from .input_availability import configured_record
             return [configured_record(config, json.loads(row['payload'])) for row in rows]

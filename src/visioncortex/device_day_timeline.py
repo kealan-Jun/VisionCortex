@@ -309,4 +309,8 @@ def install_routes(app, settings_factory):
             previous = read_json(path)
             known = {edge['link_id']: edge for edge in previous.get('cross_view_links', [])}
             result['cross_view_links'] = [known.get(edge['link_id'], edge) for edge in result['cross_view_links']]
-        return result
+        # Encode large local timelines on this route's worker thread too.
+        # Returning a dict makes FastAPI walk every frame on the ASGI loop,
+        # delaying independent progress requests during that conversion.
+        from fastapi.responses import JSONResponse
+        return JSONResponse(result)

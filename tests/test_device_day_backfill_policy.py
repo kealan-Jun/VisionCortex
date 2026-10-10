@@ -556,6 +556,31 @@ def test_history_uses_current_signature_and_explicit_configured_role(local):
     assert selected[0]['configured_role'] == 'third_person'
 
 
+@pytest.mark.parametrize('authorization', ['current', 'old_revision', 'old_limit', 'absent'])
+def test_audited_repair_history_is_prioritized_only_for_exact_authorization(local, authorization):
+    local.config['device_day']['backfill'] = {'mode': 'fair'}
+    older, repaired = recording('older', age=500), recording('repaired', age=200)
+    local.observe(older, repaired)
+    local.complete(older, ('retention',))
+    local.complete(repaired, ('retention',))
+    local.queue('vision', older)
+    local.queue('vision', repaired, status='failed', attempts=3)
+    path = local.base / 'queue-vision.sqlite3'
+    local.write(path, "ALTER TABLE recordings ADD COLUMN retry_limit INTEGER DEFAULT 0")
+    local.write(path, "ALTER TABLE recordings ADD COLUMN revision TEXT DEFAULT 'current'")
+    local.write(path, "CREATE TABLE retry_authorizations(recording_id TEXT,revision TEXT,retry_limit INTEGER)")
+    local.write(path, "UPDATE recordings SET retry_limit=4 WHERE recording_id='repaired'")
+    if authorization != 'absent':
+        local.write(path, 'INSERT INTO retry_authorizations VALUES(?,?,?)',
+                    ('repaired', 'old' if authorization == 'old_revision' else 'current',
+                     3 if authorization == 'old_limit' else 4))
+    expected = ['repaired', 'older'] if authorization == 'current' else ['older', 'repaired']
+    assert historical_candidate_ids(local.config, 'vision', now=NOW) == expected
+    # Priority cannot bypass exhausted budgets, missing inputs or scope.
+    local.write(path, "UPDATE recordings SET attempts=4 WHERE recording_id='repaired'")
+    assert historical_candidate_ids(local.config, 'vision', now=NOW) == ['older']
+
+
 def test_downstream_waits_for_current_transitive_parents(local):
     row = recording('downstream', age=200, audio={'status': 'provided', 'source_signature': 'new-audio'})
     local.observe(row)
