@@ -1,0 +1,486 @@
+# Explicit hardware/analysis parameters only; no site paths or device identities.
+# Selecting this profile does not supply weights or configure a production deployment.
+extends: ./rtx4060-laptop-base.yaml
+runtime:
+  role: combined
+  resource_limits:
+    vision: 12
+    storage: 2
+    cpu: 6
+    cloud: 4
+    stt: 2
+  admission_timeout_seconds: 300
+  provider_circuit_enabled: true
+alignment:
+  allow_local_timeline_formal_evidence: false
+  allow_uncertain_segment_formal_evidence: false
+models:
+  confidence_by_role:
+    first_person: 0.225
+  iou: 0.7
+  class_names_by_role:
+    first_person:
+    - balance
+    - beaker
+    - gloved_hand
+    - lab_coat
+    - paper
+    - reagent_bottle
+    - sample_bottle
+    - sample_bottle_blue
+    - spatula
+    - tube
+    - tube_cap
+    - spearhead
+    - pipette
+    - container
+    - PPE_Storage
+    - hand
+    - reagent_bottle_open
+    - bottle_cap
+    - magnetic_stirrer
+    - tube_rack
+    - magnetic_stir_bar
+    - pipette_rack
+    - pipette_tip_box
+    third_person:
+    - balance
+    - beaker
+    - gloved_hand
+    - lab_coat
+    - paper
+    - reagent_bottle
+    - sample_bottle
+    - sample_bottle_blue
+    - spatula
+    - tube
+    - tube_cap
+    - spearhead
+    - pipette
+    - container
+    - PPE_Storage
+    - hand
+    - reagent_bottle_open
+    - bottle_cap
+    - magnetic_stirrer
+    - tube_rack
+    - magnetic_stir_bar
+    - pipette_rack
+    - pipette_tip_box
+  duplicate_suppression_iou_by_role:
+    third_person: 0.7
+  first_person: ./models/ClosedSetYOLO/first_person/best.pt
+  third_person: ./models/ClosedSetYOLO/third_person/best.pt
+  first_person_engine: ./Runtime/Engines/first_person.engine
+  third_person_engine: ./Runtime/Engines/third_person.engine
+  first_person_coarse_engine: ./Runtime/Engines/first_person-coarse416.engine
+  third_person_coarse_engine: ./Runtime/Engines/third_person-coarse416.engine
+  open_vocabulary_key_frame:
+    enabled: true
+    cuda_oom_fallback_cpu: true
+    model_path: ./models/Public/yolov8s-worldv2.pt
+    model_sha256: 9b2c17ab6124a913e9b3a5c170617920d91b0f01111a8479da69f00e2cf27792
+    model_download_url: https://github.com/ultralytics/assets/releases/download/v8.4.0/yolov8s-worldv2.pt
+    clip_model_path: ./models/Public/ViT-B-32.pt
+    clip_model_sha256: 40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af
+    clip_model_download_url: https://openaipublic.azureedge.net/clip/models/40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af/ViT-B-32.pt
+    device: 0
+    image_size: 1280
+    confidence: 0.03
+    iou: 0.5
+    max_actor_object_gap_norm: 0.02
+    manipulated_object_max_actor_gap_norm: 0.08
+    pipette_minimum_aspect_ratio: 1.7
+    pipette_center_must_overlap_actor: true
+    pipette_maximum_actor_iou: 0.65
+    minimum_manipulated_object_confidence:
+      balance: 0.15
+      pipette: 0.1
+      spearhead: 0.1
+      tube: 0.12
+    state_container_max_actor_gap_norm: 0.08
+    state_container_max_closure_gap_norm: 0.03
+    closure_max_actor_gap_norm: 0.01
+    closure_minimum_confidence: 0.12
+    grounded_actor_maximum_box_area_norm: 0.15
+    grounded_actor_confidence_ratio: 0.75
+    grounding_dino_fallback:
+      enabled: true
+      cuda_oom_fallback_cpu: true
+      model_path: ./models/Public/grounding-dino-base
+      model_repository: IDEA-Research/grounding-dino-base
+      model_revision: 12bdfa3120f3e7ec7b434d90674b3396eccf88eb
+      model_sha256: 5548f844c928c4b6f411fa8cbcc2bfa8dbbba437cb1d513975519f93c2a9ed21
+      device: cuda
+      box_threshold: 0.12
+      text_threshold: 0.12
+      maximum_box_area_norm: 0.5
+      maximum_class_box_area_norm:
+        balance: 0.4
+        pipette: 0.2
+        spearhead: 0.08
+        tube: 0.05
+        tube_rack: 0.15
+        paper: 0.12
+        bottle_cap: 0.08
+        tube_cap: 0.05
+      pipette_minimum_aspect_ratio: 1.4
+      temporal_rescue_enabled: true
+      temporal_rescue_max_actor_gap_norm: 0.02
+      temporal_rescue_sample_interval_ms: 500
+      temporal_rescue_max_frames_per_view: 12
+      prompt_map:
+        blue gloved hand: gloved_hand
+        digital weighing scale: balance
+        white handheld electronic pipette: pipette
+        pipette tip: spearhead
+        orange cap centrifuge tube: tube
+        centrifuge tube: tube
+        tube rack: tube_rack
+        white weighing paper: paper
+        laboratory beaker: beaker
+        glass reagent bottle: reagent_bottle
+        brown reagent bottle: reagent_bottle
+        brown bottle: reagent_bottle
+        sample bottle: sample_bottle
+        transparent laboratory container: container
+        closed bottle: container
+        capped bottle: container
+        red bottle cap: bottle_cap
+        blue bottle cap: bottle_cap
+        bottle cap: bottle_cap
+        orange centrifuge tube cap: tube_cap
+        centrifuge tube cap: tube_cap
+    opening_container_prompts:
+    - open glass jar
+    closing_container_prompts:
+    - closed bottle
+    - capped bottle
+    prompt_map:
+      gloved hand: gloved_hand
+      bare hand: hand
+      white handheld electronic pipette: pipette
+      electronic pipette in gloved hand: pipette
+      automatic micropipette: pipette
+      pipette tip held in gloved hand: spearhead
+      pipette tip: spearhead
+      weighing paper held in gloved hand: paper
+      white weighing paper: paper
+      centrifuge tube held in gloved hand: tube
+      centrifuge tube: tube
+      centrifuge tube rack held by hand: tube_rack
+      laboratory balance touched by hand: balance
+      laboratory beaker held by hand: beaker
+      glass reagent bottle held by hand: reagent_bottle
+      brown reagent bottle held by hand: reagent_bottle
+      sample bottle held by hand: sample_bottle
+      transparent laboratory container held by hand: container
+      glass jar: container
+      open glass jar: container
+      open vial: container
+      closed bottle: container
+      capped bottle: container
+      glass vial: container
+      laboratory vial: container
+      small bottle: container
+      red bottle cap: bottle_cap
+      bottle cap: bottle_cap
+  temporal_participant_segmentation:
+    enabled: true
+    required_for_final_key_material: true
+    backend: SAM2VideoPredictor
+    model: sam2.1_hiera_base_plus
+    model_config: configs/sam2.1/sam2.1_hiera_b+.yaml
+    checkpoint_path: ./models/Public/sam2.1_hiera_base_plus.pt
+    checkpoint_sha256: a2345aede8715ab1d5d31b4a509fb160c5a4af1970f199d9054ccfb746c004c5
+    checkpoint_download_url: https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_base_plus.pt
+    source_revision: 2b90b9f5ceec907a1c18123530e92e794ad901a4
+    device: cuda
+    vos_optimized: false
+    apply_postprocessing: false
+    offload_video_to_cpu: true
+    offload_state_to_cpu: false
+    maximum_frames_per_clip: 9
+    jpeg_quality: 95
+    minimum_presence_ratio: 0.34
+    minimum_presence_ratio_by_action:
+      liquid_movement: 0.55
+      container_state_change: 0.45
+      pipette_transfer_operation: 0.45
+      object_movement: 0.34
+      hand_object_contact: 0.34
+      device_panel_operation: 0.34
+    minimum_seed_box_iou: 0.35
+    maximum_seed_area_expansion_ratio: 1.35
+    enabled_actions:
+    - hand_object_contact
+    - object_movement
+    - liquid_movement
+    - container_state_change
+    - device_panel_operation
+    - pipette_transfer_operation
+  liquid_semantic_sidecar:
+    enabled: true
+    required_for_selected_actions: true
+    backend: LabPics-PSPNet-ResNet101
+    checkpoint_path: ./models/Public/labpics-semantic-materials.torch
+    checkpoint_sha256: 767bf7838ab89c4134628f189649c092a3af6dea00bfd19c69b93ab0c307a83f
+    source_archive_path: ./models/Public/LabPicsSemantic.zip
+    source_archive_url: https://zenodo.org/api/records/3697767/files/Semantic_Segmentation_Materials_In_VesselLabPics_PreTrained_WITH_WEIGHT.zip/content
+    source_archive_sha256: 1e9f3b66e8ef1e03b7549d7035afc41093c4755d3369e7fbc70cf0be6e1d9007
+    source_archive_member: logs/TrainedModelWeiht1m_steps_Semantic_TrainedWithLabPicsAndCOCO_AllSets.torch
+    source_record: https://zenodo.org/records/3697767
+    license: CC-BY-4.0
+    device: cuda
+    half: true
+    maximum_image_size: 640
+    mask_threshold: 0.5
+    enabled_actions:
+    - liquid_movement
+    - container_state_change
+    - pipette_transfer_operation
+key_materials:
+  selective_verification:
+    enabled: true
+    mode: ambiguous_or_high_risk
+    minimum_closed_set_confidence: 0.45
+    high_risk_actions:
+    - liquid_movement
+    - container_state_change
+    - pipette_transfer_operation
+    max_events_per_run: 120
+    max_views_per_event: 2
+    max_wall_seconds_per_run: 900
+performance:
+  profile: rtx3090ti-24gb-ubuntu-dynamic-multiview
+  tensor_rt: required
+  motion_probe_fps: 0.1
+  motion_probe_max_width: 416
+  motion_probe_keyframes_only: true
+  motion_probe_sparse_strategy: auto
+  motion_probe_run_yolo: true
+  coarse_reuse_motion_probe: true
+  motion_probe_all_views: false
+  motion_probe_first_person_views: 1
+  motion_probe_third_person_views: 0
+  motion_probe_camera_motion_compensation: true
+  motion_probe_affine_compensation_enabled: true
+  motion_probe_max_rotation_degrees: 8.0
+  motion_probe_max_scale_delta: 0.12
+  motion_probe_rolling_threshold_enabled: true
+  motion_probe_rolling_window_seconds: 600.0
+  motion_probe_legacy_raw_union_enabled: true
+  motion_probe_max_cluster_seconds: 300.0
+  motion_probe_camera_motion_min_response: 0.15
+  motion_probe_camera_motion_max_shift_ratio: 0.35
+  motion_probe_first_person_quality_fallback: true
+  motion_probe_first_person_raw_motion_weight: 0.25
+  coarse_detection_fps: 2.0
+  coarse_image_size: 416
+  coarse_keyframes_only: false
+  coarse_all_views: true
+  coarse_full_timeline_scan: false
+  coarse_shared_motion_probe_enabled: false
+  coarse_frame_index_enabled: false
+  coarse_coverage_gate_enabled: false
+  coarse_minimum_coverage_ratio: 0.98
+  coarse_maximum_gap_periods: 4.0
+  candidate_discovery_quality_gate_enabled: true
+  coarse_semantic_association_enabled: true
+  coarse_semantic_cluster_margin_seconds: 3.0
+  coarse_max_boundary_expansion_seconds: 15.0
+  coarse_spatial_relation_enabled: true
+  coarse_hand_object_gap_norm: 0.08
+  coarse_hand_object_approach_gap_norm: 0.16
+  coarse_hand_object_approach_delta_norm: 0.025
+  coarse_micro_action_guard_enabled: true
+  coarse_micro_action_min_confidence: 0.72
+  coarse_micro_action_window_seconds: 4.0
+  coarse_rolling_motion_threshold_enabled: true
+  coarse_rolling_motion_window_seconds: 600.0
+  coarse_tracker_motion_prediction_enabled: true
+  coarse_tracker_maximum_center_distance: 0.18
+  coarse_comprehensive_candidate_union: true
+  coarse_open_vocabulary_recall_enabled: true
+  coarse_open_vocabulary_motion_percentile: 90.0
+  coarse_open_vocabulary_frames_per_hour_per_view: 2
+  coarse_open_vocabulary_adaptive_selection_enabled: true
+  coarse_open_vocabulary_diversity_bucket_seconds: 600.0
+  coarse_open_vocabulary_max_frames_per_hour_per_view: 8
+  coarse_open_vocabulary_maximum_error_rate: 0.1
+  coarse_open_vocabulary_candidate_window_seconds: 4.0
+  coarse_open_vocabulary_max_actor_object_gap_norm: 0.08
+  detection_fps: 20.0
+  fine_initial_third_person_views: 0
+  fine_frame_index_enabled: true
+  fine_coverage_gate_enabled: true
+  fine_minimum_coverage_ratio: 0.98
+  fine_maximum_gap_periods: 4.0
+  fine_streaming_candidates_enabled: true
+  fine_state_max_entries: 4096
+  fine_instance_association_enabled: true
+  fine_instance_appearance_enabled: true
+  fine_instance_minimum_cosine_similarity: 0.25
+  fine_instance_cross_view_conflict_quarantine_enabled: true
+  fine_track_stitching_enabled: true
+  fine_track_stitch_max_gap_seconds: 2.5
+  fine_track_stitch_max_center_distance: 0.12
+  fine_contact_state_enabled: true
+  fine_affine_object_motion_enabled: true
+  fine_roi_open_vocabulary_recall_enabled: true
+  fine_roi_open_vocabulary_max_frames_per_window: 2
+  fine_roi_open_vocabulary_hand_padding_norm: 0.2
+  fine_roi_open_vocabulary_maximum_error_rate: 0.1
+  fine_tracker_motion_prediction_enabled: true
+  fine_tracker_maximum_center_distance: 0.18
+  audit_constrained_clustering_enabled: true
+  audit_local_alignment_enabled: true
+  audit_explainable_scoring_enabled: true
+  audit_formal_admission_status_enabled: true
+  audit_core_interval_enabled: true
+  audit_stable_event_ids_enabled: true
+  audit_sqlite_candidate_index_enabled: true
+  audit_max_cluster_span_seconds: 30.0
+  audit_core_start_quantile: 0.5
+  audit_core_end_quantile: 0.5
+  audit_independent_view_bonus: 0.04
+  audit_dual_role_bonus: 0.04
+  audit_maximum_independence_bonus: 0.12
+  audit_maximum_alignment_penalty: 0.08
+  audit_liquid_spatial_context_enabled: true
+  audit_liquid_context_hand_object_gap_norm: 0.08
+  audit_liquid_context_minimum_frames: 2
+  audit_liquid_sequence_formal_gate_enabled: true
+  action_state_observed_timestamps_enabled: true
+  fine_risk_window_expansion_enabled: true
+  fine_risk_extra_padding_seconds: 30.0
+  fine_risk_low_confidence_threshold: 0.7
+  fine_risk_conflict_gap_seconds: 15.0
+  fine_risk_action_types:
+  - liquid_movement
+  - container_state_change
+  - device_panel_operation
+  fine_low_alignment_extra_padding_enabled: true
+  fine_low_alignment_confidence_threshold: 0.8
+  fine_low_alignment_extra_padding_seconds: 30.0
+  auto_exhaustive_short_timeline_enabled: true
+  auto_exhaustive_short_timeline_seconds: 600
+  engine_batch_size: 4
+  batch_size: 16
+  coarse_batch_size: 16
+  motion_probe_batch_size: 16
+  fine_batch_size: 4
+  fine_active_decode_slots: 6
+  fine_inference_workers_per_role: 3
+  fine_first_person_decode_workers: 4
+  fine_third_person_decode_workers: 6
+  fine_decode_prefetch_frames: 48
+  fine_persistent_session_max_gap_seconds: null
+  fine_supplemental_view_batch_size: 3
+  motion_probe_indexed_segment_workers: 4
+  motion_probe_sequential_segment_workers: 6
+  shared_inference_enabled: true
+  shared_inference_contexts_per_pool: 3
+  coarse_inference_batch_wait_ms: 500
+  coarse_decode_lanes:
+  - cuda
+  coarse_cuda_max_concurrent_sources: 2
+  fine_decode_lanes:
+  - cuda
+  cuda_decode_process_limit: 6
+  cuda_decode_device: 0
+  ffmpeg_cuda_scale: false
+  source_workers: 12
+  decode_queue_depth: 64
+  cpu_decode_threads: 2
+  yolo_inference_workers: 3
+  materialization_workers: 3
+  key_material_frame_reader_max_open: 2
+  overlap_aligned_experiment_clips: false
+  aligned_experiment_clip_workers: 2
+  overlap_aligned_key_materials: true
+  aligned_key_material_workers: 2
+  derived_media_cache_enabled: true
+  io_workers: 6
+  max_gpu_memory_fraction: 0.9
+  concurrent_role_scanners: true
+  preflight_probe_workers: 16
+  source_stat_workers: 32
+  synchronized_segment_waves: false
+  fine_min_third_person_views: null
+archive:
+  include_empty_action_categories: false
+mllm:
+  candidate_review_stratified_queue_enabled: true
+  candidate_review_time_bucket_seconds: 1800
+  request_image_max_edge: 768
+  request_image_jpeg_quality: 82
+  timeout_seconds: 180
+  max_retries: 2
+  failure_circuit_breaker_threshold: 2
+  compact_aligned_temporal_actions:
+  - hand_object_contact
+  - object_movement
+  temporal_samples_per_view_by_action:
+    liquid_movement: 15
+  liquid_primary_samples: 15
+  liquid_context_samples: 3
+  max_images_per_event_by_action:
+    liquid_movement: 18
+segmentation:
+  movement_visual_verification:
+    workers: 2
+    frame_cache_size: 512
+  accepted_leading_context_enabled: true
+  accepted_leading_context_max_gap_seconds: 10.0
+  accepted_leading_context_max_extension_seconds: 90.0
+  semantic_review_requires_dual_role_movement_anchor: true
+  single_view_action_accept_confidence:
+    liquid_movement: 0.6
+continuity:
+  stable_identity_max_gap_seconds: 10.0
+resource_limits:
+  gpu_memory_normal_fraction: 0.75
+  gpu_memory_warning_fraction: 0.85
+  gpu_memory_contract_fraction: 0.9
+  system_memory_normal_fraction: 0.68
+  system_memory_warning_fraction: 0.8
+  system_memory_contract_fraction: 0.88
+  gpu_temperature_warning_c: 82
+validation:
+  acceptance_baseline: null
+  key_event_ground_truth: null
+  model_certification:
+    required_for_formal_production: false
+    path: ./Runtime/Model-Quality/production_model_certification.json
+    box_evaluation_reports: []
+    targets:
+      event_temporal_iou: 0.5
+      minimum_event_dataset_count: 5
+      minimum_event_ground_truth_count: 200
+      minimum_event_precision: 0.92
+      minimum_event_recall: 0.95
+      minimum_event_precision_ci_lower: 0.88
+      minimum_event_recall_ci_lower: 0.9
+      minimum_ground_truth_per_action: 20
+      minimum_per_action_precision: 0.9
+      minimum_per_action_recall: 0.9
+      minimum_box_dataset_count: 3
+      minimum_box_ground_truth_instances: 500
+      minimum_box_precision: 0.92
+      minimum_box_recall: 0.95
+      required_action_types:
+      - hand_object_contact
+      - object_movement
+      - liquid_movement
+      - container_state_change
+      - device_panel_operation
+      - pipette_transfer_operation
+collection_curation:
+  real_experiment_prefixes: []
+  hardware_test_prefixes: []
+  content_probe_max_seconds: 300
+  content_probe_max_views: 2
+  content_probe_receipt_dir: null
+project:
+  run_purpose: analysis

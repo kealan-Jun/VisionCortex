@@ -1,0 +1,8 @@
+{
+  "schema_version": "visioncortex-liquid-benchmark/1.0.0",
+  "benchmark_id": "liquid-state-golden-v1",
+  "created_at": "REPLACE_WITH_UTC_ISO8601",
+  "source_archive": "REPLACE_WITH_ARCHIVE_ID",
+  "media_policy": "references_only",
+  "samples": []
+}

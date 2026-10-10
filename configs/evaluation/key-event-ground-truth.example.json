@@ -1,0 +1,57 @@
+{
+  "schema_version": "visioncortex-key-event-ground-truth/1.0.0",
+  "ground_truth_id": "replace-with-reviewed-dataset-id",
+  "experiment_id": "replace-with-manifest-experiment-id",
+  "applicability": {
+    "experiment_ids": [
+      "replace-with-manifest-experiment-id"
+    ]
+  },
+  "authority": "human_reviewed",
+  "review_protocol": {
+    "annotator_count": 2,
+    "adjudicated": true,
+    "annotation_tool": "replace-with-tool-and-version",
+    "notes": "Labels use the aligned global timeline and are never used for inference."
+  },
+  "source_duration_us": 1200000000,
+  "labeled_windows": [
+    {
+      "start_seconds": 0.0,
+      "end_seconds": 600.0
+    }
+  ],
+  "object_aliases": {
+    "weighing-paper": "weighing_paper",
+    "pipette-tip": "pipette_tip"
+  },
+  "events": [
+    {
+      "event_id": "GT-000001",
+      "action_type": "hand_object_contact",
+      "start_us": 12000000,
+      "end_us": 14500000,
+      "peak_timestamp_us": 13250000,
+      "objects": {
+        "tool": "gloved_hand",
+        "target": "weighing_paper"
+      },
+      "decision": {
+        "status": "confirmed"
+      }
+    },
+    {
+      "event_id": "GT-000002",
+      "action_type": "liquid_transfer",
+      "start_us": 30000000,
+      "end_us": 38000000,
+      "objects": {
+        "tool": "pipette",
+        "target": "tube"
+      },
+      "decision": {
+        "status": "uncertain"
+      }
+    }
+  ]
+}

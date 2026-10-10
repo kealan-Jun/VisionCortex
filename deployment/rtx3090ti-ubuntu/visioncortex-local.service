@@ -1,0 +1,20 @@
+[Unit]
+Description=VisionCortex local no-NAS Web service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@PROJECT_ROOT@
+@ENVIRONMENT@
+ExecStart=/usr/bin/bash @RUNNER@
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=180
+KillMode=mixed
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
+
+[Install]
+WantedBy=default.target

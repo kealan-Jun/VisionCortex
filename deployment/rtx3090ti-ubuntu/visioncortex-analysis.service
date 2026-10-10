@@ -1,0 +1,23 @@
+[Unit]
+Description=VisionCortex local NAS capture monitor and analysis service
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# Render and verify this template with 09-Install-Analysis-Service.sh.
+WorkingDirectory=@PROJECT_ROOT@
+@ENVIRONMENT@
+# A fixed executable allows quoted/special characters in the script path.
+ExecStart=/usr/bin/bash @RUNNER@
+Restart=always
+RestartSec=5
+TimeoutStopSec=180
+KillMode=mixed
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
+
+[Install]
+WantedBy=default.target

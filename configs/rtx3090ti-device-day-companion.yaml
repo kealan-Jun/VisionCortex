@@ -1,0 +1,10 @@
+# UNCONFIGURED COMPATIBILITY TEMPLATE. Private site configuration and a verified handoff are required.
+extends: ./rtx3090ti-ubuntu-production.yaml
+project:
+  site_configuration_required: true
+device_day:
+  enabled: false
+  backfill:
+    enabled: false
+speech_recognition:
+  enabled: false

@@ -1,0 +1,18 @@
+{
+  "template_id": "VC-DEVICE-DAY-REPORT-V1",
+  "schema_version": "1.0.0",
+  "base_template_id": "VC-LAB-DAILY-REPORT-V2",
+  "sections_source": "base_template.sections",
+  "scope": "single_device_day_observations_and_interpretations",
+  "visual_policy": {
+    "action_keyframes": "selected_existing_five_class_events_only",
+    "scene_samples": "separately_labelled_context_never_action_keyframes",
+    "cross_view_verification": "not_established_by_device_day_archive"
+  },
+  "generation_policy": {
+    "layout_editable_by_model": false,
+    "additional_mllm_calls": false,
+    "additional_model_tokens": 0,
+    "logical_report_count": 1
+  }
+}

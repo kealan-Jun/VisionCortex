@@ -1,0 +1,68 @@
+name: visioncortex-inference
+x-service: &service
+  environment:
+    VISIONCORTEX_CONFIG: /run/config/pipeline.yaml
+    VISIONCORTEX_MACHINE_CONFIG: /run/config/machine.json
+    VISIONCORTEX_RUNTIME_ROLE: web
+    NVIDIA_DRIVER_CAPABILITIES: compute,utility
+  volumes:
+    - {type: bind, source: "${VISION_CONFIG_DIR:?Set VISION_CONFIG_DIR}", target: /run/config, read_only: true, bind: {create_host_path: false}}
+    - {type: bind, source: "${VISION_INPUT_ROOT:?Set VISION_INPUT_ROOT}", target: /inputs/video, read_only: true, bind: {create_host_path: false}}
+    - {type: bind, source: "${VISION_RUNTIME_ROOT:?Set VISION_RUNTIME_ROOT}", target: /runtime, bind: {create_host_path: false}}
+    - {type: bind, source: "${VISION_OUTPUT_ROOT:?Set VISION_OUTPUT_ROOT}", target: /outputs, bind: {create_host_path: false}}
+    - {type: bind, source: "${VISION_MODEL_ROOT:?Set VISION_MODEL_ROOT}", target: /models, read_only: true, bind: {create_host_path: false}}
+    - {type: bind, source: "${GPU_LOCK_DIR:?Set GPU_LOCK_DIR}", target: /gpu-locks, bind: {create_host_path: false}}
+  init: true
+  pids_limit: 512
+  stop_grace_period: 45s
+services:
+  api:
+    <<: *service
+    build:
+      context: ../..
+      dockerfile: deployment/inference/Dockerfile.api
+    ports: ["127.0.0.1:8001:8000"]
+    restart: unless-stopped
+    mem_limit: 2g
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+  worker:
+    <<: *service
+    build:
+      context: ../..
+      dockerfile: deployment/inference/Dockerfile
+      args:
+        RUNTIME_IMAGE: "${VISION_RUNTIME_IMAGE:?Set the validated GPU runtime image}"
+    environment:
+      VISIONCORTEX_CONFIG: /run/config/pipeline.yaml
+      VISIONCORTEX_MACHINE_CONFIG: /run/config/machine.json
+      VISIONCORTEX_RUNTIME_ROLE: worker
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      VISIONCORTEX_DRAIN_FILE: "/gpu-locks/${GPU_UUID}.vision.drain"
+    profiles: [gpu]
+    command:
+      - python
+      - deployment/inference/gpu_guard.py
+      - --gpu
+      - "$GPU_UUID"
+      - --lock-dir
+      - /gpu-locks
+      - --config
+      - /run/config/pipeline.yaml
+      - --
+      - python
+      - -m
+      - visioncortex.machine_worker
+      - --config
+      - /run/config/pipeline.yaml
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["$GPU_UUID"]
+              capabilities: [gpu]
+    restart: "no"

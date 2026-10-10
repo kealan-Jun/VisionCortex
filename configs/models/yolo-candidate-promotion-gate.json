@@ -1,0 +1,54 @@
+{
+  "schema_version": "visioncortex-yolo-promotion-gate/1",
+  "policy": "Public metrics may qualify a candidate for internal A/B but cannot independently enable production.",
+  "ontology": {
+    "required_class_count": 21,
+    "required_classes": [
+      "balance",
+      "beaker",
+      "gloved_hand",
+      "lab_coat",
+      "paper",
+      "reagent_bottle",
+      "sample_bottle",
+      "sample_bottle_blue",
+      "spatula",
+      "tube",
+      "tube_cap",
+      "spearhead",
+      "pipette",
+      "container",
+      "PPE_Storage",
+      "hand",
+      "reagent_bottle_open",
+      "bottle_cap",
+      "magnetic_stirrer",
+      "tube_rack",
+      "magnetic_stir_bar"
+    ]
+  },
+  "public_benchmark": {
+    "overall": {
+      "metrics/precision(B)": 0.85,
+      "metrics/recall(B)": 0.80,
+      "metrics/mAP50(B)": 0.85
+    },
+    "per_class": {
+      "hand": {
+        "precision": 0.85,
+        "recall": 0.80,
+        "map50": 0.80
+      },
+      "pipette": {
+        "precision": 0.85,
+        "recall": 0.80,
+        "map50": 0.80
+      }
+    }
+  },
+  "internal_real_six_view_ab": {
+    "required": true,
+    "minimum_precision": 0.95,
+    "minimum_recall": 0.95
+  }
+}

@@ -1,0 +1,35 @@
+# UNCONFIGURED DEPLOYMENT TEMPLATE: automatic collection, NAS and cloud calls are disabled.
+# Supply an explicit private site configuration before any production run.
+# Existing deployed paths and device rules belong to their frozen private configuration.
+extends: ./rtx3050-6gb-ubuntu20-base.yaml
+project:
+  run_purpose: analysis
+  site_configuration_required: true
+runtime:
+  local_only: true
+mllm:
+  enabled: false
+device_day:
+  enabled: false
+  delete_capture_sources: false
+  capture_video_link_cleanup:
+    enabled: false
+    native_links_verified: false
+    capture_readers_verified: false
+speech_recognition:
+  enabled: false
+  python_executable: null
+  model_directory: null
+collection_ingest:
+  enabled: false
+  camera_directories: []
+  additional_camera_directories: []
+  directory_camera_bindings: []
+  camera_group_map: {}
+  camera_role_map: {}
+storage:
+  sync_to_nas: false
+  run_output_mode: local
+  manifest_storage: local
+  require_nas_source_paths: false
+  web_upload_retention_mode: local_only

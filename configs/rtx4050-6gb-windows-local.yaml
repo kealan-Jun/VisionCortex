@@ -1,0 +1,84 @@
+# Relocatable local model-analysis profile. Cloud calls require explicit provider configuration.
+# This profile supplies no private site identity and performs no automatic NAS collection.
+extends: ./rtx3050-6gb-ubuntu20-base.yaml
+device_day:
+  enabled: false
+  delete_capture_sources: false
+project:
+  portable_desktop: true
+  output_root: ./Runtime/Archives/.VisionCortex-Run-Staging
+  run_purpose: analysis
+speech_recognition:
+  enabled: false
+  python_executable: null
+  model_directory: null
+models:
+  first_person: ./models/ClosedSetYOLO/first_person/best.pt
+  third_person: ./models/ClosedSetYOLO/third_person/best.pt
+  first_person_engine: ./Runtime/Engines/first_person.engine
+  third_person_engine: ./Runtime/Engines/third_person.engine
+  open_vocabulary_key_frame:
+    model_path: ./models/Public/yolov8s-worldv2.pt
+    clip_model_path: ./models/Public/ViT-B-32.pt
+    grounding_dino_fallback:
+      model_path: ./models/Public/grounding-dino-base
+      device: cuda
+      cuda_oom_fallback_cpu: true
+      temporal_rescue_device: cuda
+  temporal_participant_segmentation:
+    checkpoint_path: ./models/Public/sam2.1_hiera_base_plus.pt
+    offload_video_to_cpu: true
+    offload_state_to_cpu: true
+    apply_postprocessing: false
+    vos_optimized: false
+  liquid_semantic_sidecar:
+    checkpoint_path: ./models/Public/labpics-semantic-materials.torch
+    source_archive_path: ./models/Public/LabPicsSemantic.zip
+    device: cuda
+    cuda_oom_fallback_cpu: true
+    half: false
+performance:
+  profile: rtx4050-6gb-windows-local-full-chain
+  engine_batch_candidates:
+  - 16
+  - 8
+  - 4
+  - 2
+  - 1
+  engine_autotune_max_gpu_memory_fraction: 0.78
+  max_gpu_memory_fraction: 0.86
+  concurrent_role_scanners: false
+  release_auxiliary_models_after_event: true
+  release_auxiliary_models_between_stages: true
+  auxiliary_cpu_cache_min_available_gib: 8
+  source_workers: 6
+  decode_queue_depth: 64
+  fine_decode_prefetch_frames: 16
+  cpu_decode_threads: 4
+  materialization_workers: 1
+  io_workers: 4
+mllm:
+  enabled: false
+  workers: 4
+  group_workers: 4
+storage:
+  index_csv: ./Runtime/local-experiment-index.csv
+  device_registry_path: null
+  archive_root: ./Runtime/Archives
+  local_input_root: ./Runtime/Input-Manifests
+  local_runtime_root: ./Runtime
+  local_cache_root: ./Runtime/Cache
+  local_staging_root: ./Runtime/Archives/.VisionCortex-Run-Staging
+  sync_to_nas: false
+  run_output_mode: local
+  manifest_storage: local
+  require_nas_source_paths: false
+  web_upload_retention_mode: local_only
+collection_ingest:
+  enabled: false
+  mode: index_metadata
+  source_root: ./Runtime/Input-Manifests
+  snapshot_path: ./Runtime/collection-snapshot.json
+validation:
+  model_certification:
+    path: ./Runtime/Model-Quality/production_model_certification.json

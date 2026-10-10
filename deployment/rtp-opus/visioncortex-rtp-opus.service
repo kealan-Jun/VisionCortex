@@ -1,0 +1,19 @@
+[Unit]
+Description=VisionCortex RTP/Opus capture receiver
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@PROJECT_ROOT@
+@ENVIRONMENT@
+ExecStart=@PYTHON@ -m visioncortex.rtp_receiver --config @CONFIG@
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
+LimitNOFILE=4096
+
+[Install]
+WantedBy=default.target
