@@ -53,6 +53,7 @@ class ExecutionContext:
     priority: int = 1
     stop: threading.Event | CancellationSignal | None = None
     yield_signal: object | None = None
+    background_fair: bool = False
 
 
 CURRENT = ContextVar('visioncortex_execution', default=ExecutionContext())
@@ -123,6 +124,7 @@ def defer_yield():
 @contextmanager
 def execution_context(**kwargs):
     kwargs.setdefault('yield_signal', CURRENT.get().yield_signal)
+    kwargs.setdefault('background_fair', CURRENT.get().background_fair)
     token = CURRENT.set(ExecutionContext(**kwargs))
     try:
         check_cancelled()
@@ -162,7 +164,7 @@ class ResourceCoordinator:
 
     def try_claim(self, identifier, resource, units, capacity, context, *, now=None, queued_at=None):
         now = time.time() if now is None else now
-        if context.source == 'device_day_backfill':
+        if context.source == 'device_day_backfill' and not context.background_fair:
             return self._try_claim_idle(identifier, resource, units, capacity, context, now)
         # A live waiting request need not obtain the SQLite writer lock merely
         # to learn that all capacity is still occupied. Renew it only near its
@@ -262,7 +264,7 @@ class ResourceCoordinator:
                     admitted = False
                 if admitted:
                     break
-                if context.source == 'device_day_backfill':
+                if context.source == 'device_day_backfill' and not context.background_fair:
                     raise ExecutionYielded(f'Background resource is busy: {resource}', reason='resource_busy')
                 if time.monotonic() >= deadline:
                     raise TimeoutError(f'Resource admission timed out: {resource}')

@@ -9,6 +9,7 @@ import uuid
 
 from .device_day_contract import DEPENDENCIES, STAGES, atomic_json, digest, read_json
 from .device_day_inplace import enqueue, retention_policy
+from .device_day_retry import retry_limit
 from .device_day_schedule import in_processing_scope
 from .input_availability import configured_record
 from .sqlite_store import connection
@@ -47,7 +48,9 @@ class RetentionWorker:
         selected = 'recording_id IN (SELECT value FROM json_each(?))'
         with connection(runner.queues[self.stage].path, readonly=True) as db:
             states = {r['recording_id']: dict(r) for r in db.execute(
-                'SELECT recording_id,status,lease_until,attempts,updated_at FROM recordings WHERE '
+                'SELECT recording_id,status,lease_until,attempts,retry_limit,updated_at,'
+                "json_extract(payload,'$.source_signature') AS source_signature,"
+                "json_extract(payload,'$.audio.source_signature') AS audio_signature FROM recordings WHERE "
                 + selected, (ids,))}
         visual = set()
         if self.stage == 'retention':
@@ -69,10 +72,17 @@ class RetentionWorker:
             if ready is not None and rid not in ready:
                 continue
             state = states.get(rid, {})
-            if (state.get('status') == 'completed'
+            same_video = state.get('source_signature') == record.get('source_signature')
+            same_audio = state.get('audio_signature') == (record.get('audio') or {}).get('source_signature')
+            # Independent recorder audio may arrive after a no-audio receipt.
+            # Only changed source metadata reopens a completion; admission and
+            # execution still verify each source and preserve old receipts.
+            completed_current = state.get('status') == 'completed' and same_video and (
+                self.stage == 'vision' or same_audio)
+            if (completed_current
                     or state.get('status') == 'running' and (state.get('lease_until') or 0) >= current
                     or state.get('status') == 'failed' and (
-                        state.get('attempts', 0) >= maximum
+                        state.get('attempts', 0) >= retry_limit(state, maximum)
                         or current - state.get('updated_at', current) < self.failure_cooldown)
                     or self.deferred.get(rid, 0) > current):
                 continue
@@ -89,7 +99,10 @@ class RetentionWorker:
                 order = (-record['recording_start_us'], record['camera_key'])
             elif self.stage == 'stt':
                 audio = record.get('audio') or {}
-                if audio.get('status') != 'provided':
+                # No independent recorder audio is a runnable input, not a
+                # missing prerequisite. transcribe() probes the sealed video
+                # for an embedded track before it can publish no_audio.
+                if audio.get('status', 'not_provided') not in {'provided', 'no_input', 'not_provided'}:
                     continue
                 order = (-record['recording_start_us'], record['camera_key'])
             else:
@@ -253,8 +266,8 @@ def serve(config_path, stop, *, stage='retention'):
     from .device_day import DeviceDayRunner
     from .device_day_backfill import BackfillSupervisor, SUPPORTED_STAGES, options
     from .device_day_consumers import WorkerStatus
-    # Preserve the live-only admission lane. History uses a separate idle-only
-    # fallback and shares this runner's resident models, never its stage lock.
+    # Preserve the recent admission lane. History uses its own bounded
+    # scheduling policy and shares this runner's models, never its stage lock.
     worker = RetentionWorker(stage=stage, recent_seconds=14400 if stage in {'vision', 'understanding', 'report'} else None)
     runner, generation, roots, status_path, consumer = None, None, None, None, None
     backfill = BackfillSupervisor(stage, stop) if stage in SUPPORTED_STAGES else None
@@ -273,15 +286,21 @@ def serve(config_path, stop, *, stage='retention'):
                 roots = current_roots
                 policy = options(settings)
                 enabled = backfill is not None and policy['enabled'] and stage in policy['stages']
+                fair = enabled and policy.get('mode', 'idle') == 'fair'
                 key = digest(config)
                 if backfill is not None and (not enabled or generation != key):
                     backfill.request_yield()
                 if runner is None or generation != key:
-                    runner = DeviceDayRunner(config)
+                    if fair and stage == 'vision':
+                        from .device_day_fair_backend import create_backend
+                        runner = DeviceDayRunner(config, backend=create_backend(config))
+                    else:
+                        runner = DeviceDayRunner(config)
                     generation = key
                     if consumer is not None:
                         consumer.__exit__(None, None, None)
-                    worker.recent_seconds = settings.get('live_priority_seconds', 14400) if stage in {'vision', 'understanding', 'report'} else None
+                    recent_lane = stage in {'vision', 'understanding', 'report'} or fair
+                    worker.recent_seconds = settings.get('live_priority_seconds', 14400) if recent_lane else None
                     consumer = WorkerStatus(config, stage, recent_seconds=worker.recent_seconds,
                                             backfill_enabled=enabled).__enter__()
                 directory = {'retention': 'RetentionWorker', 'stt': 'SpeechWorker', 'vision': 'VisionWorker',
@@ -290,9 +309,14 @@ def serve(config_path, stop, *, stage='retention'):
                 atomic_json(status_path, {'status': 'running', 'updated_at': time.time(), 'stage': stage})
                 consumer.update(scope='recent' if worker.recent_seconds is not None else 'all',
                                 recording_id=None, backfill_status='checking_live')
+                # Poll the fair lane before a live tick can occupy this
+                # process for a full recording. History may spend a long time
+                # hashing or waiting for resources, so live admission continues
+                # through the same queue leases and bounded resource pools.
+                history = backfill.poll(runner, allow_start=True) if fair else None
+                history_running = fair and history and history.get('status') == 'running'
                 result = worker.tick(runner, stop)
-                history = None
-                if backfill is not None:
+                if backfill is not None and not fair:
                     allow_start = enabled and result.get('status') == 'waiting' and result.get('admitted', 0) == 0
                     history = backfill.poll(runner, allow_start=allow_start)
                 if enabled:
@@ -302,7 +326,9 @@ def serve(config_path, stop, *, stage='retention'):
                     consumer.update(backfill_status=(history.get('reason') or history['status']) if history else 'waiting_for_live')
                 status = {'status': 'running', 'updated_at': time.time(), 'stage': stage,
                           'last_result': result, 'backfill_result': history}
-                consumer.update(last_result=history or result)
+                consumer.update(scope='history' if history_running else (
+                                    'recent' if worker.recent_seconds is not None else 'all'),
+                                last_result=history or result)
                 if any(value and (value.get('result') or {}).get('status') == 'completed'
                        for value in (result, history)):
                     consumer.update(last_success_at=time.time())

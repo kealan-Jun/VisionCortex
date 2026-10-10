@@ -101,8 +101,8 @@ def test_waiting_counts_distinguish_failed_upstream_from_compute_backlog(tmp_pat
     retention.finish('r1','1',{'status':'completed'},1)
     result = snapshot({'storage':{'local_runtime_root':str(tmp_path)}})
     waiting = next(iter(result['waiting'].values()))['vision']
-    assert waiting == {'pending_validation':1,'upstream_pending':1}
-    assert next(iter(result['days'].values()))['stages']['vision']['queued'] == sum(waiting.values())
+    assert waiting == {'waiting_for_history_dispatch':1,'upstream_pending':1,'input_missing':1}
+    assert next(iter(result['days'].values()))['stages']['vision']['queued'] == sum(waiting.values()) - waiting['input_missing']
     assert next(iter(result['days'].values()))['stages']['vision']['input_missing'] == 1
 
 

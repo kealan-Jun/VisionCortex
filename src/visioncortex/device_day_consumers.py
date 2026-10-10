@@ -13,6 +13,7 @@ from .device_day_contract import DEPENDENCIES, STAGES, atomic_json
 from .device_day_night_schedule import paused_stages, stage_admitted
 from .device_day_schedule import in_processing_scope
 from .sqlite_store import connection
+from .device_day_retry import retry_limit
 
 
 VERSION = 'visioncortex-device-day-consumer/1'
@@ -139,8 +140,11 @@ def _local_rows(root):
             continue
         try:
             with connection(path, readonly=True, timeout=.25) as db:
+                columns = {row[1] for row in db.execute('PRAGMA table_info(recordings)')}
+                limit = 'retry_limit' if 'retry_limit' in columns else '0 AS retry_limit'
                 queues[stage] = {row['recording_id']: dict(row) for row in db.execute(
-                    'SELECT recording_id,payload,status,input_status,lease_until,attempts,updated_at FROM recordings')}
+                    'SELECT recording_id,payload,status,input_status,lease_until,attempts,updated_at,'
+                    + limit + ' FROM recordings')}
         except (OSError, sqlite3.Error):
             errors.append(f'{stage}_queue_unavailable')
     inputs = {}
@@ -190,7 +194,7 @@ def consumer_snapshot(config, *, now=None, proc_root=Path('/proc')):
                 input_ready = (available.get('signature') != record.get('source_signature')
                                or available.get('state', 'ready') == 'ready')
                 retry_ready = (row['status'] != 'failed' or
-                               row['attempts'] < (settings.get('failure_retry_limit') or 3)
+                               row['attempts'] < retry_limit(row, settings.get('failure_retry_limit') or 3)
                                and current - row['updated_at'] >= 60)
                 parents = DEPENDENCIES[stage]
                 # Inplace vision/STT can run before the archival queue finishes.

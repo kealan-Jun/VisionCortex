@@ -121,6 +121,7 @@ def snapshot(config):
     root = Path(config['storage']['local_runtime_root']) / 'device-day'
     now = time.time()
     days, jobs, errors, states, timing_rows = {}, [], [], {}, {}
+    queue_details, capture_times = {}, {}
     failures = {}
     component_samples = {}
     missing_inputs = {}
@@ -142,6 +143,8 @@ def snapshot(config):
                     continue
                 b = bucket(date_of(row['recording_start_us']))
                 source_signatures[row['recording_id']] = row.get('source_signature')
+                capture_times[row['recording_id']] = max(row.get('recording_start_us') or 0,
+                                                        row.get('recording_end_us') or 0)
                 b['recordings'].add(row['recording_id'])
                 b['cameras'].add(row['camera_key'])
         except (OSError, ValueError, KeyError):
@@ -152,10 +155,13 @@ def snapshot(config):
             continue
         try:
             with closing(sqlite3.connect(path.as_uri()+'?mode=ro', uri=True, timeout=2)) as db:
+                columns = {row[1] for row in db.execute('PRAGMA table_info(recordings)')}
+                limit_column = 'retry_limit' if 'retry_limit' in columns else '0 AS retry_limit'
                 rows = db.execute("SELECT recording_id,status,lease_until,queued_at,updated_at, "
                                   "json_extract(payload,'$.camera_key'),json_extract(payload,'$.recording_start_us'),"
-                                  "json_extract(payload,'$.recording_end_us'),wall_seconds,completed_at,result,json_extract(payload,'$.source_signature') FROM recordings")
-                for rid, status, lease, _queued, updated, camera, start, end, wall, completed_at, raw_result, signature in rows:
+                                  "json_extract(payload,'$.recording_end_us'),wall_seconds,completed_at,result,"
+                                  "json_extract(payload,'$.source_signature'),attempts,input_status," + limit_column + " FROM recordings")
+                for rid, status, lease, _queued, updated, camera, start, end, wall, completed_at, raw_result, signature, attempts, input_status, authorized_limit in rows:
                     if not start:
                         continue
                     day = date_of(start)
@@ -164,6 +170,8 @@ def snapshot(config):
                     b['cameras'].add(camera)
                     state = 'expired' if status == 'running' and (lease or 0) < now else status
                     source_signatures.setdefault(rid, signature)
+                    if status not in {'running', 'completed'} and input_status != 'ready':
+                        state = 'input_' + input_status
                     if (status not in {'running', 'completed'} and availability.get(rid, {}).get('state', 'ready') != 'ready'
                             and availability[rid].get('signature') == signature):
                         state = 'input_' + availability[rid]['state']
@@ -172,6 +180,9 @@ def snapshot(config):
                     counts = b['stages'][stage]
                     counts[state] = counts.get(state, 0)+1
                     states.setdefault(rid, {})[stage] = (state, day)
+                    queue_details[(rid, stage)] = {'attempts': attempts, 'retry_limit': authorized_limit,
+                                                   'updated_at': updated}
+                    capture_times.setdefault(rid, max(start or 0, end or 0))
                     try:
                         result = json.loads(raw_result or '{}')
                         if not isinstance(result, dict):
@@ -229,21 +240,47 @@ def snapshot(config):
     from .device_day_inplace import progress as input_progress
     lifecycle = input_progress(config)
     inplace_ids = {item['recording_id'] for item in lifecycle}
+    from .device_day_consumers import consumer_snapshot
+    from .device_day_retry import retry_limit
+    consumers = consumer_snapshot(config, now=now)
+    settings = config.get('device_day') or {}
+    cutoff = (now - settings.get('live_priority_seconds', 14400)) * 1_000_000
     waiting = {day: {s: {} for s in STAGES} for day in days}
     for identifier, row in states.items():
         for stage, (status, day) in row.items():
-            if status not in {'queued', 'expired', 'waiting_for_prerequisite'}:
+            if status not in {'queued', 'expired', 'waiting_for_prerequisite', 'failed',
+                              'input_missing', 'input_unavailable', 'needs_camera_role'}:
                 continue
             dependencies = () if identifier in inplace_ids and stage in {'vision', 'stt'} else DEPENDENCIES[stage]
             parents = [row.get(p, ('missing', day))[0] for p in dependencies]
+            details = queue_details.get((identifier, stage), {})
+            scope = 'recent' if capture_times.get(identifier, 0) >= cutoff else 'history'
+            coverage = consumers['stages'][stage]['scopes'][scope]['status']
+            live_hold = any(owner['owner_state'] == 'verified' and owner.get('backfill_status') == 'waiting_for_live'
+                            for owner in consumers['stages'][stage]['owners'])
+            storage_hold = any(owner['owner_state'] == 'verified' and (
+                owner.get('backfill_status') == 'waiting_for_storage'
+                or (owner.get('last_result') or {}).get('status') == 'waiting_for_storage')
+                for owner in consumers['stages'][stage]['owners'])
             reason = ('paused_by_user' if stage in paused else
+                      status if status in {'input_missing', 'input_unavailable'} else
+                      'retry_exhausted' if status == 'failed' and details.get('attempts', 0)
+                      >= retry_limit(details, settings.get('failure_retry_limit') or 3) else
+                      'failure_cooldown' if status == 'failed' and now - details.get('updated_at', 0) < 60 else
                       'prerequisite_not_verified' if status == 'waiting_for_prerequisite' else
                       'upstream_failed' if 'failed' in parents else
                       'upstream_pending' if any(p != 'completed' for p in parents) else
                       'provider_blocked' if stage in {'stt', 'understanding'} and provider.get('active')
                       and config.get('mllm', {}).get('provider') == 'aliyun' else
                       'night_window' if stage in {'understanding', 'report'} and not schedule['open'] else
-                      'lease_recovery' if status == 'expired' else 'pending_validation')
+                      'waiting_for_storage' if storage_hold else
+                      'camera_role_unconfigured' if status == 'needs_camera_role' else
+                      'lease_recovery' if status == 'expired' else
+                      'disabled' if settings.get('enabled') is False else
+                      'no_consumer' if coverage == 'no_consumer' else
+                      'consumer_evidence_unavailable' if coverage == 'evidence_unavailable' else
+                      'history_waiting_for_live' if scope == 'history' and live_hold else
+                      'waiting_for_history_dispatch' if scope == 'history' else 'waiting_for_dispatch')
             counts = waiting[day][stage]
             counts[reason] = counts.get(reason, 0) + 1
     cleanup = (config.get('device_day') or {}).get('capture_video_link_cleanup') or {}
@@ -268,8 +305,6 @@ def snapshot(config):
     lifecycle_html = '<ul>' + ''.join(f'<li>{escape(row["archive"])} · {escape(row["recording_id"])}：{escape(row["label"])}'
         + ('；外部采集保留期限未知' if row['retention_policy']['status'] == 'unknown' else '') + '</li>'
         for row in lifecycle if row['publication_status'] != 'completed') + '</ul>'
-    from .device_day_consumers import consumer_snapshot
-    consumers = consumer_snapshot(config, now=now)
     return {'consumers': consumers, 'consumer_html': render_consumers(consumers),
             'input_lifecycle': lifecycle, 'storage_maintenance': os.environ.get('VISIONCORTEX_STORAGE_MAINTENANCE', '0') == '1',
             'process_since_us': config.get('device_day', {}).get('process_since_us'),
@@ -292,7 +327,8 @@ def render_consumers(consumers):
               'evidence_unavailable': '状态暂不可核实'}
     holds = {'waiting_for_warm_model': '等待已有模型就绪', 'waiting_for_monitor': '等待采集监控恢复',
              'waiting_for_live': '优先处理最新任务', 'waiting_for_idle': '等待空闲',
-             'waiting_for_memory': '等待可用内存', 'waiting_for_provider': '等待云服务恢复',
+             'waiting_for_memory': '等待可用内存', 'waiting_for_storage': '等待本地存储达到留空要求',
+             'waiting_for_provider': '等待云服务恢复',
              'waiting_for_night_window': '等待运行时段', 'status_unavailable': '调度状态暂不可核实',
              'cold_warm_disabled_capacity': '等待可预留实时容量的模型池',
              'model_preparation_busy': '等待模型准备工位', 'model_preparation_cooldown': '模型准备失败，等待重试',
@@ -308,6 +344,10 @@ def render_consumers(consumers):
                            if owner['owner_state'] == 'verified' and owner.get('backfill_status') in holds}
                 if reasons:
                     waiting = '（' + '；'.join(sorted(reasons)) + '）'
+            elif any(owner['owner_state'] == 'verified' and
+                     (owner.get('last_result') or {}).get('status') == 'waiting_for_storage'
+                     for owner in item['owners']):
+                waiting = '（' + holds['waiting_for_storage'] + '）'
             rows.append('<tr><td>' + names[stage] + (' · 最新' if scope == 'recent' else ' · 历史') +
                         '</td><td>' + labels[count['status']] + waiting + '</td><td>' + str(count['locally_ready']) +
                         '</td><td>' + str(count['blocked']) + '</td></tr>')

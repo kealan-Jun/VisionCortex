@@ -246,7 +246,7 @@ def test_real_adapter_cold_background_never_deserializes_models(default_config, 
     assert not backend.background_vision_ready()
 
 
-@pytest.mark.parametrize('policy', [[], {'enabled': 'true'}, {'stages': ['report']},
+@pytest.mark.parametrize('policy', [[], {'enabled': 'true'}, {'stages': ['unknown']},
                                   {'stages': ['vision', 'vision']}, {'quantum_seconds': float('nan')}])
 def test_invalid_backfill_policy_fails_closed(policy):
     with pytest.raises(ValueError):

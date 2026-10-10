@@ -1,4 +1,4 @@
-"""Idle-only historical work using the existing live worker's model pool."""
+"""Bounded historical work using the existing live worker's model pool."""
 from contextlib import ExitStack
 from concurrent.futures import ThreadPoolExecutor
 import math
@@ -11,7 +11,7 @@ from .device_day_retention_worker import RetentionWorker
 from .runtime_control import ExecutionCancelled, ExecutionYielded, execution_context
 
 
-SUPPORTED_STAGES = ('vision', 'understanding')
+SUPPORTED_STAGES = ('retention', 'vision', 'stt', 'understanding', 'report')
 
 
 def options(settings):
@@ -29,9 +29,15 @@ def options(settings):
             or len(stages) != len(set(stages))):
         raise ValueError('device_day.backfill.stages must name supported live workers')
     result = {'enabled': enabled, 'stages': stages}
+    mode = policy.get('mode', 'idle')
+    if not isinstance(mode, str) or mode not in {'idle', 'fair'}:
+        raise ValueError('device_day.backfill.mode must be idle or fair')
+    result['mode'] = mode
     for name, default, minimum in (('idle_seconds', 15, 0), ('quantum_seconds', 30, 1),
                                    ('failure_cooldown_seconds', 60, 5),
-                                   ('monitor_max_age_seconds', 30, 1)):
+                                   ('monitor_max_age_seconds', 30, 1),
+                                   ('fair_interval_seconds', 60, 1),
+                                   ('fair_turn_timeout_seconds', 15, 1)):
         value = policy.get(name, default)
         if (type(value) not in (int, float) or not math.isfinite(value) or value < minimum):
             raise ValueError(f'device_day.backfill.{name} must be finite and >= {minimum}')
@@ -81,6 +87,7 @@ class BackfillWorker:
         self.idle_since = None
         self.deferred = {}
         self.admitter = RetentionWorker(stage=stage)
+        self.next_fair_at = 0.0
 
     def tick(self, runner, stop):
         from .device_day import exclusive
@@ -88,6 +95,9 @@ class BackfillWorker:
         from .device_day_night_schedule import paused_stages, stage_admitted
         from .device_day_provider_gate import ProviderGate
         policy = options(runner.settings)
+        fair = policy['mode'] == 'fair'
+        context = {'source': BACKFILL_SOURCE, 'priority': 2 if fair else 100,
+                   'background_fair': fair}
         if not policy['enabled'] or self.stage not in policy['stages']:
             return {'status': 'disabled'}
         if stop.is_set():
@@ -109,9 +119,11 @@ class BackfillWorker:
             self.idle_since = None
             return {'status': demand['status'], 'reasons': demand['reasons']}
         now = time.monotonic()
+        if fair and now < self.next_fair_at:
+            return {'status': 'waiting_for_fair_interval'}
         if self.idle_since is None:
             self.idle_since = now
-        if now - self.idle_since < policy['idle_seconds']:
+        if not fair and now - self.idle_since < policy['idle_seconds']:
             return {'status': 'waiting_for_idle'}
         with ExitStack() as locks:
             try:
@@ -119,15 +131,45 @@ class BackfillWorker:
                 # recording runs across processes/stages on this runtime root.
                 locks.enter_context(exclusive(runner.runtime_root / 'locks' / 'backfill.lock'))
             except BlockingIOError:
+                if fair:
+                    self.next_fair_at = now + 1
                 return {'status': 'history_running_elsewhere'}
             self.deferred = {rid: until for rid, until in self.deferred.items() if until > time.time()}
             rows = historical_candidates(runner.config, self.stage, limit=16, exclude=set(self.deferred))
             if not rows:
+                if fair:
+                    self.next_fair_at = now + policy['fair_interval_seconds']
                 result = {'status': 'waiting', 'admitted': 0}
                 if self.deferred:
                     result['reason'] = 'waiting_for_prerequisite_validation'
                 return result
-            if self.stage == 'vision' and hasattr(runner, '_backend'):
+            if fair:
+                from .device_day_contract import atomic_json, read_json
+                path = runner.runtime_root / 'backfill-fair.json'
+                previous = read_json(path) if path.is_file() else {}
+                stages = policy['stages']
+                last = previous.get('last_stage')
+                start = (stages.index(last) + 1) % len(stages) if last in stages else 0
+                rotation = stages[start:] + stages[:start]
+                paused = paused_stages(runner.config)
+                turn = next((stage for stage in rotation if stage not in paused and
+                    (stage == self.stage or historical_candidates(runner.config, stage, limit=1))), None)
+                if turn != self.stage:
+                    waiting = previous.get('waiting_since')
+                    stamp = time.time()
+                    if (previous.get('waiting_for') != turn or type(waiting) not in (int, float)
+                            or not math.isfinite(waiting) or waiting > stamp):
+                        waiting = stamp
+                        atomic_json(path, previous | {'waiting_for': turn, 'waiting_since': stamp})
+                    if stamp - waiting < policy['fair_turn_timeout_seconds']:
+                        self.next_fair_at = now + 1
+                        return {'status': 'waiting_for_history_turn', 'next_stage': turn}
+                    # A missing or busy stage must not strand every other
+                    # consumer. The global lock makes the bounded handoff atomic.
+                atomic_json(path, {'schema_version': 'device-day-fair-history/1',
+                                   'last_stage': self.stage, 'admitted_at': time.time()})
+                self.next_fair_at = now + policy['fair_interval_seconds']
+            if self.stage == 'vision' and not fair and hasattr(runner, '_backend'):
                 backend = runner._backend()
                 ready = getattr(backend, 'background_vision_ready', None)
                 if ready is not None and not ready():
@@ -136,7 +178,7 @@ class BackfillWorker:
                         return {'status': 'waiting_for_warm_model', 'reason': 'waiting_for_warm_model'}
                     signal = YieldSignal(runner.config, self.stage, stop, policy['quantum_seconds'])
                     try:
-                        with execution_context(source=BACKFILL_SOURCE, priority=100, yield_signal=signal):
+                        with execution_context(**context, yield_signal=signal):
                             prepared = prepare(signal)
                     except ExecutionYielded as exc:
                         self.idle_since = None
@@ -152,7 +194,7 @@ class BackfillWorker:
                 try:
                     # Receipt/media verification itself uses idle resources.
                     signal = YieldSignal(runner.config, self.stage, stop, policy['quantum_seconds'])
-                    with execution_context(source=BACKFILL_SOURCE, priority=100, yield_signal=signal):
+                    with execution_context(**context, yield_signal=signal):
                         if self.admitter.admit(runner, record):
                             admitted.add(record['recording_id'])
                         else:
@@ -182,8 +224,7 @@ class BackfillWorker:
                     return {'status': 'waiting', 'admitted': len(admitted)}
                 started = time.perf_counter()
                 try:
-                    with execution_context(job_id=record['recording_id'], source=BACKFILL_SOURCE,
-                                           priority=100, yield_signal=signal):
+                    with execution_context(job_id=record['recording_id'], **context, yield_signal=signal):
                         result = runner.process(record, stage=self.stage, retry=True)
                 except ExecutionYielded as exc:
                     result = {'status': 'paused_for_live', 'error_type': type(exc).__name__, 'reason': exc.reason}
@@ -241,6 +282,9 @@ class BackfillSupervisor:
         if generation != self.generation:
             self.worker = BackfillWorker(self.stage)
             self.generation = generation
+        policy = options(runner.settings)
+        if policy['mode'] == 'fair' and time.monotonic() < self.worker.next_fair_at:
+            return completed or {'status': 'waiting_for_fair_interval'}
         # Waiting admission is polled by the ordinary live loop. A completed
         # unit can submit the next one immediately, after that loop checks live.
         self.yield_stop.clear()
