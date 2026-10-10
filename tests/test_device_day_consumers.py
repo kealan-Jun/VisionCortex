@@ -56,6 +56,20 @@ def test_old_running_status_cannot_cover_history_and_live_owner_does_not_cover_i
     assert [row['owner_state'] for row in stage['owners']] == ['stale', 'verified']
 
 
+def test_disabled_observer_reports_separate_verified_consumers_and_keeps_pause_policy(tmp_path):
+    config = configuration(tmp_path)
+    config['device_day']['enabled'] = False
+    queued(config)
+    proc = tmp_path / 'proc'
+    owner(config, proc, stage='vision')
+    scopes = consumer_snapshot(config, now=NOW, proc_root=proc)['stages']['vision']['scopes']
+    assert scopes['recent']['status'] == scopes['history']['status'] == 'covered'
+    config['device_day']['paused_stages'] = ['vision']
+    assert consumer_snapshot(config, now=NOW, proc_root=proc)['stages']['vision']['scopes']['history']['status'] == 'paused_by_user'
+    config['device_day']['paused_stages'] = []
+    assert consumer_snapshot(config, now=NOW, proc_root=proc)['stages']['stt']['scopes']['history']['status'] == 'disabled'
+
+
 def test_pid_reuse_absent_process_missing_build_and_future_stamp_are_not_owners(tmp_path):
     config = configuration(tmp_path)
     queued(config)

@@ -214,7 +214,9 @@ def consumer_snapshot(config, *, now=None, proc_root=Path('/proc')):
         coverage = {}
         for scope, count in counts.items():
             covered = any(scope in owner['supported_scopes'] for owner in verified)
-            if not settings.get('enabled'):
+            # A Web/analysis observer may disable only its own monolithic
+            # dispatcher while separately supervised stage owners stay live.
+            if not settings.get('enabled') and not covered:
                 state = 'disabled'
             elif stage in paused:
                 state = 'paused_by_user'
