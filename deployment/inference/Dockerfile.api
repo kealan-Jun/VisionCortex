@@ -1,0 +1,11 @@
+# CPU control plane; does not require a pre-existing GPU runtime or AgentDesk.
+FROM python:3.12-slim-bookworm
+WORKDIR /service
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg libgl1 libglib2.0-0 && rm -rf /var/lib/apt/lists/*
+COPY deployment/inference/requirements-api.txt /tmp/requirements-api.txt
+RUN pip install --no-cache-dir -r /tmp/requirements-api.txt
+COPY . /service
+RUN pip install --no-deps /service && useradd --uid 10001 --create-home inference
+ENV HOME=/tmp VISIONCORTEX_DEFAULT_CONFIG=/service/configs/default.yaml
+USER inference
+CMD ["python", "-m", "uvicorn", "visioncortex.machine_api:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]

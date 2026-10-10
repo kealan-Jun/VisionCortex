@@ -1,0 +1,28 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.playwright-cli/
+.mypy_cache/
+.ruff_cache/
+.venv/
+dist/
+build/
+outputs/
+uploads/
+output/
+tmp/
+*.zip
+*.log
+*.engine
+*.onnx
+# Model weights and generated runtimes stay on the workstation. Git contains
+# code, pinned hashes and acquisition metadata only.
+*.pt
+*.safetensors
+*.pth
+.coverage
+.env
+configs/trust/.visioncortex-root-id
+# Windows-style runtime roots accidentally created by cross-platform tests.
+/[A-Za-z]:/

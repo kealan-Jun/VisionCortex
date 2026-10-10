@@ -1,0 +1,4 @@
+**
+!deployment/
+!deployment/rtx3090ti-ubuntu/
+!deployment/rtx3090ti-ubuntu/requirements-lock.txt

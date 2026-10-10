@@ -1,0 +1,15 @@
+{
+  "schema_version": "visioncortex-device-registry/1",
+  "registry_id": "example-site",
+  "devices": {
+    "wearable-01": {
+      "display_name": "Wearable camera 01",
+      "expected_role": "first_person"
+    },
+    "fixed-01": {
+      "display_name": "Fixed camera 01",
+      "expected_role": "third_person"
+    }
+  },
+  "experiment_role_overrides": {}
+}

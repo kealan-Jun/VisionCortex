@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="360" viewBox="0 0 1280 360" role="img" aria-labelledby="title description">
+  <title id="title">VisionCortex — multi-view wet-lab video, traceable evidence</title>
+  <desc id="description">A dark blue banner with the VisionCortex wordmark. Three abstract camera views converge on a shared timeline and connect to an evidence document.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#122b38"/>
+      <stop offset="1" stop-color="#091b29"/>
+    </linearGradient>
+    <linearGradient id="flow" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#4d9db5"/>
+      <stop offset="1" stop-color="#64d4bf"/>
+    </linearGradient>
+    <pattern id="grid" width="28" height="28" patternUnits="userSpaceOnUse">
+      <circle cx="1" cy="1" r="1" fill="#92b7c7" opacity=".12"/>
+    </pattern>
+  </defs>
+
+  <rect width="1280" height="360" rx="20" fill="url(#background)"/>
+  <rect x="710" y="28" width="542" height="304" fill="url(#grid)"/>
+  <path d="M712 44v272" stroke="#356073" stroke-opacity=".45"/>
+
+  <g font-family="Inter, Segoe UI, Arial, sans-serif">
+    <rect x="64" y="60" width="28" height="4" rx="2" fill="#64d4bf"/>
+    <text x="106" y="70" fill="#91b7c8" font-size="16" font-weight="600" letter-spacing="2.4">FROM VIDEO TO EVIDENCE</text>
+    <text x="60" y="158" fill="#f3f9fc" font-size="72" font-weight="700" letter-spacing="-2.6">VisionCortex</text>
+    <text x="64" y="208" fill="#c0d3de" font-size="24">Multi-view wet-lab video.</text>
+    <text x="64" y="243" fill="#c0d3de" font-size="24">Traceable evidence, connected in time.</text>
+
+    <g fill="#96b7c7" font-size="17">
+      <circle cx="68" cy="302" r="4" fill="#64d4bf"/>
+      <text x="84" y="308">Observe</text>
+      <path d="M188 294v17" stroke="#426374"/>
+      <circle cx="220" cy="302" r="4" fill="#64d4bf"/>
+      <text x="236" y="308">Align</text>
+      <path d="M310 294v17" stroke="#426374"/>
+      <circle cx="342" cy="302" r="4" fill="#64d4bf"/>
+      <text x="358" y="308">Review</text>
+    </g>
+  </g>
+
+  <!-- Three viewpoints converge on a common time axis. -->
+  <g fill="none" stroke="url(#flow)" stroke-width="2" stroke-linecap="round">
+    <path d="M852 93h30c57 0 29 87 86 87h22" opacity=".7"/>
+    <path d="M852 180h138"/>
+    <path d="M852 267h30c57 0 29-87 86-87h22" opacity=".7"/>
+    <path d="M1034 180h42"/>
+  </g>
+
+  <g stroke="#467489" stroke-width="1.5">
+    <rect x="756" y="60" width="96" height="66" rx="10" fill="#183746"/>
+    <rect x="756" y="147" width="96" height="66" rx="10" fill="#183746"/>
+    <rect x="756" y="234" width="96" height="66" rx="10" fill="#183746"/>
+  </g>
+  <g fill="none" stroke="#89c6d0" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M779 82h27v22h-27z M806 88l13-6v22l-13-6"/>
+    <path d="M779 169h27v22h-27z M806 175l13-6v22l-13-6"/>
+    <path d="M779 256h27v22h-27z M806 262l13-6v22l-13-6"/>
+  </g>
+  <g fill="#64d4bf">
+    <circle cx="838" cy="74" r="3"/>
+    <circle cx="838" cy="161" r="3"/>
+    <circle cx="838" cy="248" r="3"/>
+  </g>
+
+  <rect x="990" y="111" width="44" height="138" rx="12" fill="#153b48" stroke="#548e9b" stroke-width="1.5"/>
+  <path d="M1012 129v102" fill="none" stroke="#478292" stroke-width="2"/>
+  <g fill="#64d4bf" stroke="#153b48" stroke-width="4">
+    <circle cx="1012" cy="142" r="7"/>
+    <circle cx="1012" cy="180" r="7"/>
+    <circle cx="1012" cy="218" r="7"/>
+  </g>
+
+  <!-- The document represents inspectable evidence, rather than a quality score. -->
+  <rect x="1076" y="104" width="136" height="152" rx="14" fill="#193c49" stroke="#548e9b" stroke-width="1.5"/>
+  <path d="M1097 128h34 M1097 139h18" stroke="#a9d7db" stroke-width="3" stroke-linecap="round"/>
+  <g fill="#28576a">
+    <rect x="1097" y="160" width="31" height="30" rx="4"/>
+    <rect x="1133" y="160" width="31" height="30" rx="4"/>
+    <rect x="1169" y="160" width="22" height="30" rx="4"/>
+  </g>
+  <g fill="none" stroke="#7fc0cb" stroke-width="2" stroke-linecap="round">
+    <path d="M1103 182l8-10 11 10 M1139 182l9-13 10 13 M1175 182l5-8 5 8"/>
+    <path d="M1097 210h94 M1097 224h68 M1097 238h82" opacity=".7"/>
+  </g>
+  <g font-family="Inter, Segoe UI, Arial, sans-serif" fill="#96b7c7" font-size="16" text-anchor="middle">
+    <text x="1012" y="284">Timeline</text>
+    <text x="1144" y="284">Evidence</text>
+  </g>
+</svg>

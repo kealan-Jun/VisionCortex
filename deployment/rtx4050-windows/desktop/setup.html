@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>VisionCortex</title>
+  <link rel="stylesheet" href="setup.css">
+</head>
+<body>
+  <header><span class="mark">VC</span><strong>VisionCortex</strong><span class="edition">本地视频分析</span></header>
+  <main>
+    <section class="intro">
+      <p class="eyebrow">让实验过程成为可追溯的证据</p>
+      <h1>打开应用，<br>开始理解实验。</h1>
+      <p class="description">从多机位视频到关键动作、实验片段与报告，<br>在一个工作空间内完成。</p>
+      <div class="features"><span>多视角对齐</span><span>关键素材</span><span>实验报告</span></div>
+    </section>
+    <section class="card" aria-live="polite">
+      <span class="badge">RTX 4050 · 本机分析</span>
+      <h2 id="title">正在打开应用</h2>
+      <p id="message">正在准备 VisionCortex…</p>
+      <form id="storage-form" hidden>
+        <label for="storage-path">数据保存目录</label>
+        <input id="storage-path" autocomplete="off" spellcheck="false" required maxlength="240">
+        <div class="storage-actions"><button type="button" id="choose-storage" class="secondary">选择文件夹</button><button type="button" id="scan-storage" class="secondary">重新检测网络盘</button></div>
+        <label for="storage-candidates">已检测到的网络盘</label>
+        <select id="storage-candidates"><option value="">手动选择目录</option></select>
+        <p class="hint" id="storage-scan-note"></p>
+        <p class="hint">每个实验会在此目录的 Archives 中自动生成原片、实验片段、关键素材、日报、PDF 和 JSON 文件夹。处理中产出位于 Archives / Processing。</p>
+        <p class="hint">支持本地盘、已连接的网络盘和手动填写的 NAS 共享路径。选择 NAS 时，任务数据库与缓存保留本机。修改位置后已有文件保留原处。</p>
+        <label for="source-path">已有原视频目录（可选）</label>
+        <input id="source-path" autocomplete="off" spellcheck="false" maxlength="240" placeholder="留空时可在应用内选择文件上传">
+        <button type="button" id="choose-source" class="secondary">选择原视频目录</button>
+        <p class="hint">可选择本机或 NAS 上已有的视频及配套时间戳目录。新建实验时直接索引原文件，无需重复上传；请与产出目录分开放置，分析期间保持原文件可访问。</p>
+        <button type="submit" id="save-storage">检查目录并保存</button>
+      </form>
+      <p id="storage-current" class="hint" hidden></p>
+      <form id="key-form" hidden>
+        <div class="model-selectors">
+          <div><label for="provider">AI 服务厂商</label><select id="provider" required></select></div>
+          <div><label for="quality-mode">使用偏好</label><select id="quality-mode"><option value="quality">质量优先（推荐）</option><option value="balanced">速度与成本优先</option></select></div>
+        </div>
+        <label for="model-choice">图像理解模型</label>
+        <select id="model-choice"></select>
+        <input id="model" autocomplete="off" spellcheck="false" placeholder="填写控制台中的视觉模型或部署 ID" required maxlength="256" hidden>
+        <p id="model-reason" class="model-reason"></p>
+        <p id="catalog-note" class="catalog-note"></p>
+        <button id="model-doc" type="button" class="text-button" hidden>查看官方模型说明 ↗</button>
+        <details class="advanced"><summary>接口地址与协议</summary>
+          <label for="base-url">接口地址（Base URL）</label>
+          <input id="base-url" type="url" autocomplete="off" spellcheck="false" required maxlength="2048">
+          <label for="protocol">接口类型</label>
+          <select id="protocol"><option value="chat_completions">Chat Completions 兼容接口</option><option value="ark_responses">火山引擎 Responses</option></select>
+        </details>
+        <p class="endpoint" id="endpoint"></p>
+        <label for="api-key">API 密钥</label>
+        <input id="api-key" type="password" autocomplete="off" spellcheck="false" placeholder="输入所选厂商的 API 密钥" maxlength="4096">
+        <p class="hint">验证会联网发送两张随机测试图，产生少量 API 费用。通过后加密保存配置，分析使用同一厂商、接口和模型。</p>
+        <button type="submit" id="start">验证连接并打开应用 <span aria-hidden="true">↗</span></button>
+      </form>
+      <button id="continue" class="secondary" hidden>使用已验证配置打开应用</button>
+      <div id="progress"><div class="track"><span></span></div><p class="hint">首次准备需要一些时间，后续启动会复用已准备的模型。</p></div>
+      <div id="error-actions" hidden><button id="retry">重新尝试</button><button id="logs" class="secondary">打开诊断目录</button></div>
+      <p id="form-error" role="alert"></p>
+      <details id="verification-receipt" hidden><summary>上次连接验证回执</summary><p id="verification-detail"></p></details>
+      <footer>本地环境与模型随应用提供。AI 服务验证及分析调用需要联网。</footer>
+    </section>
+  </main>
+  <div class="bottom"><span>VisionCortex</span><span>从原始画面，到有据可查。</span></div>
+  <script src="setup.js"></script>
+</body>
+</html>

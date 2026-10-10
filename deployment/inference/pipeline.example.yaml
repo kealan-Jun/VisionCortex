@@ -1,0 +1,30 @@
+# Container-path template for API/queue checks. Worker/model execution is blocked
+# until a private deployment configuration explicitly replaces the template.
+runtime:
+  role: web
+  local_only: true
+project:
+  run_purpose: demo
+  site_configuration_required: true
+  output_root: /runtime/staging
+device_day:
+  enabled: false
+collection_ingest:
+  enabled: false
+mllm:
+  enabled: false
+storage:
+  index_csv: /runtime/unused-index.csv
+  device_registry_path: /runtime/device-registry.json
+  archive_root: /runtime/archive
+  local_input_root: /runtime/input-manifests
+  local_runtime_root: /runtime
+  local_cache_root: /runtime/cache
+  local_staging_root: /runtime/staging
+  sync_to_nas: false
+  web_upload_retention_mode: local_only
+models:
+  first_person: /models/first_person/best.pt
+  third_person: /models/third_person/best.pt
+  first_person_engine: /models/first_person/best.engine
+  third_person_engine: /models/third_person/best.engine

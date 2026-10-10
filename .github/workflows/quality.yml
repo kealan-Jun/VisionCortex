@@ -1,0 +1,216 @@
+name: VisionCortex quality gates
+
+on:
+  # Manual only: repository synchronization does not trigger CI.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repository-policy:
+    name: Repository and credential policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          lfs: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.11"
+      - name: Reject tracked runtime output and plaintext credential shapes
+        shell: bash
+        run: |
+          python - <<'PY'
+          from __future__ import annotations
+
+          import re
+          import subprocess
+          from pathlib import Path
+
+          tracked = subprocess.check_output(["git", "ls-files", "-z"]).decode().split("\0")
+          tracked = [item for item in tracked if item]
+          forbidden_roots = ("output/", "outputs/", "tmp/", ".playwright-cli/")
+          forbidden = [item for item in tracked if item.startswith(forbidden_roots)]
+          patterns = {
+              "volcengine_ark_key": re.compile(r"ark-[A-Za-z0-9-]{20,}"),
+              "openai_style_key": re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
+              "aws_access_key": re.compile(r"AKIA[0-9A-Z]{16}"),
+          }
+          text_suffixes = {
+              ".css", ".html", ".ini", ".js", ".json", ".md", ".ps1",
+              ".py", ".toml", ".ts", ".tsx", ".txt", ".yaml", ".yml",
+          }
+          findings: list[tuple[str, str]] = []
+          for name in tracked:
+              path = Path(name)
+              if path.suffix.casefold() not in text_suffixes:
+                  continue
+              try:
+                  content = path.read_text(encoding="utf-8")
+              except UnicodeDecodeError:
+                  continue
+              for label, pattern in patterns.items():
+                  if pattern.search(content):
+                      findings.append((name, label))
+          if forbidden:
+              print("Tracked runtime outputs are forbidden:")
+              print("\n".join(sorted(forbidden)))
+          if findings:
+              print("Potential plaintext credentials detected (values intentionally hidden):")
+              for name, label in sorted(findings):
+                  print(f"{name}: {label}")
+          if forbidden or findings:
+              raise SystemExit(1)
+          print(f"repository policy passed for {len(tracked)} tracked files")
+          PY
+
+  ubuntu-local-contracts:
+    name: Ubuntu local and no-NAS contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.11"
+      - name: Install static validation tools
+        run: python -m pip install --disable-pip-version-check ruff==0.12.0 PyYAML==6.0.2
+      - name: Lint and compile source and tests
+        run: |
+          ruff check src tests tools/doctor.py
+          python -m compileall -q src tests tools/doctor.py
+      - name: Validate Linux scripts and Web JavaScript
+        shell: bash
+        run: |
+          for script in deployment/rtx3090ti-ubuntu/*.sh; do
+            bash -n "$script"
+          done
+          node --check src/visioncortex/web/app.js
+      - name: Validate the local service cannot inherit NAS storage
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import yaml
+
+          root = Path.cwd()
+          profile = yaml.safe_load(
+              (root / "configs/rtx3090ti-ubuntu-local.yaml").read_text(
+                  encoding="utf-8"
+              )
+          )
+          storage = profile["storage"]
+          expected_root = (root / storage["local_runtime_root"]).resolve()
+          for key in (
+              "archive_root", "local_input_root", "local_runtime_root",
+              "local_cache_root", "local_staging_root",
+          ):
+              value = (root / storage[key]).resolve()
+              assert value == expected_root or expected_root in value.parents, key
+          assert storage["device_registry_path"] is None
+          assert (root / storage["index_csv"]).is_file()
+          assert profile["runtime"]["local_only"] is True
+          assert storage["sync_to_nas"] is False
+          assert storage["web_upload_retention_mode"] == "local_only"
+          assert profile["mllm"]["enabled"] is False
+          assert profile["collection_ingest"]["enabled"] is False
+
+          unit = (
+              root
+              / "deployment/rtx3090ti-ubuntu/visioncortex-local.service"
+          ).read_text(encoding="utf-8")
+          assert "Restart=on-failure" in unit
+          assert "WantedBy=default.target" in unit
+          assert "WorkingDirectory=@PROJECT_ROOT@" in unit
+          assert "@ENVIRONMENT@" in unit and "@RUNNER@" in unit
+          assert "UMask=0077" in unit
+          print("local no-NAS profile and service contract passed")
+          PY
+
+  python-quality:
+    name: Python package and tests (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: "3.11"
+          - os: ubuntu-latest
+            python: "3.12"
+          - os: windows-latest
+            python: "3.11"
+          - os: macos-latest
+            python: "3.11"
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - name: Validate desktop lifecycle and hardware watchdog contracts
+        run: |
+          node --check deployment/rtx4050-windows/desktop/controller.cjs
+          node --test tests/desktop_controller.test.cjs tests/desktop_main.test.cjs tests/desktop_connection.test.cjs tests/desktop_storage.test.cjs
+      - name: Install the project and test dependencies
+        run: python -m pip install --disable-pip-version-check -e ".[dev]"
+      - name: Compile and validate the installed dependency graph
+        run: |
+          python -m compileall -q src tests
+          python -m pip check
+      - name: Validate portable cache and native Windows startup
+        run: >-
+          python -m pytest tests/desktop/test_rtx4050_integrity.py
+          tests/test_windows_desktop_lifecycle.py tests/test_rtx4050_source_update.py
+      - name: Provision and verify the FFmpeg runtime dependency
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ($null -eq (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+            for ($attempt = 1; $attempt -le 3; $attempt++) {
+              choco install ffmpeg -y --no-progress
+              $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+              $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+              $env:Path = "$machinePath;$userPath"
+              if ($null -ne (Get-Command ffmpeg -ErrorAction SilentlyContinue)) { break }
+              if ($attempt -lt 3) { Start-Sleep -Seconds 10 }
+            }
+          }
+          if ($null -eq (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+            throw "FFmpeg installation failed after three attempts."
+          }
+          ffmpeg -version
+          ffprobe -version
+      - name: Provision the FFmpeg runtime dependency
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ffmpeg
+      - name: Provision the FFmpeg runtime dependency on macOS
+        if: runner.os == 'macOS'
+        shell: bash
+        run: brew install ffmpeg
+      - name: Verify the FFmpeg runtime dependency
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          ffmpeg -version
+          ffprobe -version
+      - name: Validate source frame provenance with the installed FFmpeg
+        run: python -m pytest tests/test_source_frames.py -o faulthandler_timeout=120
+      - name: Run the complete deterministic test suite
+        run: >-
+          python -m pytest
+          -o faulthandler_timeout=120
+          --cov=visioncortex
+          --cov-report=term:skip-covered
+          --cov-fail-under=66

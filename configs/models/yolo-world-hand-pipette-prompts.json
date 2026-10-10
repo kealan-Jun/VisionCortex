@@ -1,0 +1,9 @@
+{
+  "bare hand": "hand",
+  "gloved hand": "hand",
+  "laboratory hand": "hand",
+  "white handheld electronic pipette": "pipette",
+  "electronic pipette in gloved hand": "pipette",
+  "automatic micropipette": "pipette",
+  "laboratory pipette": "pipette"
+}

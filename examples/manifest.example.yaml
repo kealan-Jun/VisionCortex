@@ -1,0 +1,27 @@
+# Replace with your own media and clocks. This file does not include sample media.
+experiment_id: EXAMPLE-SESSION
+views:
+- view_id: fp01
+  role: first_person
+  video: ./data/session/fp01/video.mp4
+  timestamps_csv: ./data/session/fp01/clock.csv
+- view_id: tp01
+  role: third_person
+  video: ./data/session/tp01/video.mp4
+  timestamps_csv: ./data/session/tp01/clock.csv
+- view_id: fp02
+  role: first_person
+  video: ./data/session/fp02/video.mp4
+  timestamps_csv: ./data/session/fp02/clock.csv
+- view_id: fp03
+  role: first_person
+  video: ./data/session/fp03/video.mp4
+  timestamps_csv: ./data/session/fp03/clock.csv
+- view_id: tp02
+  role: third_person
+  video: ./data/session/tp02/video.mp4
+  timestamps_csv: ./data/session/tp02/clock.csv
+- view_id: tp03
+  role: third_person
+  video: ./data/session/tp03/video.mp4
+  timestamps_csv: ./data/session/tp03/clock.csv

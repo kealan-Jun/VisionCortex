@@ -1,0 +1,30 @@
+{
+  "schema_version": "visioncortex-project-annotation-ontology/1",
+  "display_language": "zh-CN",
+  "production_registry_changed": false,
+  "classes": [
+    {"id": 0, "name": "balance", "display_name": "电子天平"},
+    {"id": 1, "name": "beaker", "display_name": "烧杯"},
+    {"id": 2, "name": "gloved_hand", "display_name": "戴手套的手"},
+    {"id": 3, "name": "lab_coat", "display_name": "实验服"},
+    {"id": 4, "name": "paper", "display_name": "纸张", "description": "包括称量纸及可辨认的纸张或纸包"},
+    {"id": 5, "name": "reagent_bottle", "display_name": "试剂瓶（有盖）"},
+    {"id": 6, "name": "sample_bottle", "display_name": "样品瓶"},
+    {"id": 7, "name": "sample_bottle_blue", "display_name": "蓝盖样品瓶", "description": "蓝色瓶盖特征；不根据液体蓝色判断"},
+    {"id": 8, "name": "spatula", "display_name": "药匙"},
+    {"id": 9, "name": "tube", "display_name": "试管", "description": "包括离心管；逐根标注可见管体"},
+    {"id": 10, "name": "tube_cap", "display_name": "管盖"},
+    {"id": 11, "name": "spearhead", "display_name": "枪头", "description": "单支移液枪吸头，不是整盒或孔位"},
+    {"id": 12, "name": "pipette", "display_name": "移液枪"},
+    {"id": 13, "name": "container", "display_name": "通用容器", "description": "可辨认容器，但不足以确定更具体类别"},
+    {"id": 14, "name": "PPE_Storage", "display_name": "防护用品盒"},
+    {"id": 15, "name": "hand", "display_name": "裸手"},
+    {"id": 16, "name": "reagent_bottle_open", "display_name": "试剂瓶（开口）"},
+    {"id": 17, "name": "bottle_cap", "display_name": "瓶盖"},
+    {"id": 18, "name": "magnetic_stirrer", "display_name": "磁力搅拌器"},
+    {"id": 19, "name": "tube_rack", "display_name": "试管架"},
+    {"id": 20, "name": "magnetic_stir_bar", "display_name": "磁力搅拌子"},
+    {"id": 21, "name": "pipette_rack", "display_name": "移液枪架"},
+    {"id": 22, "name": "pipette_tip_box", "display_name": "枪头盒"}
+  ]
+}

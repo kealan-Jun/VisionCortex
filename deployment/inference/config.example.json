@@ -1,0 +1,14 @@
+{
+  "clients": [{
+    "client_id": "agentdesk",
+    "token_sha256": "REPLACE_WITH_SHA256_OF_RANDOM_SERVICE_CREDENTIAL",
+    "default_scope": "production-cameras",
+    "scopes": {
+      "production-cameras": [
+        "/inputs/video/camera-one",
+        "/inputs/video/camera-two"
+      ]
+    }
+  }],
+  "max_pending": 50
+}

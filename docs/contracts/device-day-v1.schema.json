@@ -1,0 +1,338 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:visioncortex:device-day:1",
+  "title": "VisionCortex frozen device/day total index v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "archive",
+    "recordings",
+    "segments",
+    "understandings",
+    "capture_deletion",
+    "evidence_status"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "visioncortex-device-day/1"
+    },
+    "archive": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}_[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
+    },
+    "capture_deletion": {
+      "const": "disabled_by_user"
+    },
+    "evidence_status": {
+      "const": "PARTIAL_EVIDENCE"
+    },
+    "recordings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "recording_id",
+          "stages"
+        ],
+        "properties": {
+          "capture_manifest": {
+            "$ref": "#/$defs/artifact"
+          },
+          "processing": {
+            "type": "object",
+            "properties": {
+              "audit_artifacts": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/$defs/backend_artifact"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "segments": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/segment"
+      }
+    },
+    "understandings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "segment_id",
+          "windows"
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "artifact": {
+      "type": "object",
+      "required": [
+        "path",
+        "size_bytes",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^(MetaVideo|ProcessedClips|MultimodalUnderstanding|LaboratoryDailyReport|Comment)/",
+          "not": {
+            "pattern": "(^|/)\\.\\.(/|$)|\\\\"
+          }
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "frame": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/artifact"
+        }
+      ],
+      "type": "object",
+      "required": [
+        "frame_id",
+        "local_ms"
+      ],
+      "properties": {
+        "frame_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "local_ms": {
+          "type": "number",
+          "minimum": 0
+        },
+        "understanding_text": {
+          "type": "string"
+        }
+      }
+    },
+    "segment": {
+      "type": "object",
+      "required": [
+        "segment_id",
+        "recording_id",
+        "activity",
+        "activity_label",
+        "start_ms",
+        "end_ms",
+        "start_us",
+        "end_us",
+        "source_ref",
+        "key_frames",
+        "json_path",
+        "evidence_status",
+        "physical_action_confirmed",
+        "scene_frames"
+      ],
+      "properties": {
+        "segment_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "recording_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "activity": {
+          "enum": [
+            "active",
+            "inactive"
+          ]
+        },
+        "activity_label": {
+          "enum": [
+            "有实验活动",
+            "无实验活动"
+          ]
+        },
+        "start_ms": {
+          "type": "number",
+          "minimum": 0
+        },
+        "end_ms": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "start_us": {
+          "type": "integer",
+          "exclusiveMinimum": 0
+        },
+        "end_us": {
+          "type": "integer",
+          "exclusiveMinimum": 0
+        },
+        "source_ref": {
+          "$ref": "#/$defs/artifact"
+        },
+        "video": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/artifact"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "key_frames": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/action_frame"
+          }
+        },
+        "json_path": {
+          "type": "string",
+          "pattern": "^ProcessedClips/Clips/"
+        },
+        "evidence_status": {
+          "const": "PARTIAL_EVIDENCE"
+        },
+        "physical_action_confirmed": {
+          "const": false
+        },
+        "scene_frames": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/scene_frame"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "activity": {
+                "const": "active"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "activity_label": {
+                "const": "有实验活动"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "activity": {
+                "const": "inactive"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "activity_label": {
+                "const": "无实验活动"
+              },
+              "key_frames": {
+                "maxItems": 0
+              }
+            }
+          }
+        }
+      ]
+    },
+    "scene_frame": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/frame"
+        }
+      ],
+      "type": "object",
+      "required": [
+        "frame_kind"
+      ],
+      "properties": {
+        "frame_kind": {
+          "const": "scene_sample"
+        }
+      }
+    },
+    "action_frame": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/frame"
+        }
+      ],
+      "type": "object",
+      "required": [
+        "frame_kind",
+        "event_id",
+        "action_type",
+        "selected_event_digest"
+      ],
+      "properties": {
+        "frame_kind": {
+          "const": "action_keyframe"
+        },
+        "event_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "action_type": {
+          "enum": [
+            "hand_object_contact",
+            "object_movement",
+            "liquid_movement",
+            "container_state_change",
+            "device_panel_operation"
+          ]
+        },
+        "selected_event_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "backend_artifact": {
+      "type": "object",
+      "required": [
+        "storage_root",
+        "path",
+        "sha256",
+        "size_bytes"
+      ],
+      "properties": {
+        "storage_root": {
+          "const": "local_cache_root"
+        },
+        "path": {
+          "type": "string",
+          "pattern": "^device-day-receipts/",
+          "not": {
+            "pattern": "(^|/)\\.\\.(/|$)|\\\\"
+          }
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}
