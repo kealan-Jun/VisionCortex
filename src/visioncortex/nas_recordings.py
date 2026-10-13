@@ -167,10 +167,19 @@ def _inspect(root: Path, video: Path, now: float, settle: float, allow_plain: bo
         ("capture-" if capture_name else "view-") + hashlib.sha256(camera_identity.encode()).hexdigest()[:12]
         if plain else str(merged.get("camera_key") or video.relative_to(root).parts[0])
     )
-    return {
+    from .capture_layout import METADATA_LAYOUT, metadata_location
+    location = metadata_location(video)
+    input_layout = {}
+    if location:
+        camera_key = str(merged.get('camera_key') or location['camera_key'])
+        from .device_day_contract import archive_name
+        if camera_key != location['camera_key'] or (start and archive_name(camera_key, start) != location['archive']):
+            issues.append('MetaData 目录与采集设备或日期不一致')
+        input_layout = {'input_layout': METADATA_LAYOUT}
+    return input_layout | {
         "recording_id": hashlib.sha256(relative.encode()).hexdigest()[:24],
         "camera_key": camera_key,
-        "camera_identity_source": "capture_filename" if capture_name else "relative_path" if plain else "recorder_metadata" if merged.get("camera_key") else "directory_layout",
+        "camera_identity_source": "device_day_metadata" if location else "capture_filename" if capture_name else "relative_path" if plain else "recorder_metadata" if merged.get("camera_key") else "directory_layout",
         "relative_path": relative,
         "video_path": str(video),
         "frames_path": str(clock),
@@ -411,14 +420,22 @@ def scan_recordings(config: dict[str, Any], *, on_record=None, skip_folders=()) 
     history_window_limited = False
     allow_plain = bool(settings.get("discover_plain_video_csv", False))
     # Bound discovery and exclude archives/caches at every depth.
-    cameras = _camera_directories(root, settings, allow_plain)
+    from .capture_layout import metadata_directories
+    archive_root = Path(config['storage']['archive_root']).resolve()
+    # Derived output siblings remain excluded even when source == archive.
+    cameras = [p for p in _camera_directories(root, settings, allow_plain)
+               if not p.resolve().is_relative_to(archive_root)]
+    cameras.extend(metadata_directories(config))
     monitored_camera_directories: list[str] = []
     for camera in cameras:
         if not camera.is_dir() or (camera != root and camera.is_symlink()) or camera.resolve() in excluded:
             continue
         monitored_camera_directories.append(
+            camera.parent.name[11:] if camera.name == 'MetaData' else
             "." if camera == root else camera.relative_to(root).as_posix()
         )
+        if str(camera) in skip_folders:
+            continue
         camera_recording_count = 0
         camera_recording_limit = int(settings.get("max_recordings_per_camera") or 0)
         def scan_error(exc: OSError) -> None:
@@ -427,7 +444,7 @@ def scan_recordings(config: dict[str, Any], *, on_record=None, skip_folders=()) 
         for folder, directories, files in os.walk(camera, followlinks=False, onerror=scan_error):
             current = Path(folder)
             depth = len(current.relative_to(camera).parts)
-            max_depth = min(8, int(settings.get("max_scan_depth", 6))) if allow_plain else 2
+            max_depth = min(8, int(settings.get("max_scan_depth", 6))) if allow_plain or camera.name == 'MetaData' else 2
             directories[:] = sorted(
                 (
                     name
@@ -488,6 +505,7 @@ def scan_recordings(config: dict[str, Any], *, on_record=None, skip_folders=()) 
                 break
         if truncated:
             break
+    monitored_camera_directories = list(dict.fromkeys(monitored_camera_directories))
     recordings.sort(key=lambda item: (item["recording_start_us"], item["relative_path"]), reverse=True)
     batches = _recording_batches(recordings, settings)
     for batch in batches:

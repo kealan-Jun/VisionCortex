@@ -1,7 +1,7 @@
 """Independent capture preprocessing and archive publication, with legacy routing.
 
 Only local receipt inspection occurs at scheduling time. Model outputs retain
-canonical MetaVideo references from their first execution; physical read paths
+canonical retained source references from their first execution; physical read paths
 are never part of a new stage's content identity.
 """
 from __future__ import annotations
@@ -15,7 +15,7 @@ from .device_day_contract import VERSION, digest, read_json, safe_child, validat
 from .device_day_activity import phase
 from .device_day_inputs import (
     InputChanged, binding, copy_sealed, durable_json, identity, input_path, input_context,
-    processing_input, seal_input, validate_after, verify_content,
+    processing_input, seal_input, validate_after, validate_snapshot, verify_content,
 )
 from .device_day_io import slot
 
@@ -164,6 +164,8 @@ def verified_archive(runner, record):
 
 
 def _archive(runner, record, layout):
+    from .capture_layout import METADATA_LAYOUT
+    direct = record.get('input_layout') == METADATA_LAYOUT
     state = read_json(marker(runner, record))
     urgent, _ = archive_priority(runner, record, state['created_at'])
     seals, sources = [], {}
@@ -174,6 +176,10 @@ def _archive(runner, record, layout):
             continue
         with slot(runner.config, copy=True, urgent=urgent), phase('input_validation_seconds'):
             seal = seal_input(runner, record, stage)
+            if direct:
+                # Here source and retained artifact are the same physical file.
+                # Keep the sealed inode/mtime identity gate as well as its hash.
+                validate_snapshot(seal)
             seals.append(seal)
             update_state(runner, record, input_ready={stage: 'ready'})
         with slot(runner.config, copy=True, urgent=urgent, whole_copy=True):
@@ -184,6 +190,9 @@ def _archive(runner, record, layout):
                 if key not in sources:
                     copy_sealed(runner.config, source, safe_child(layout.root, key), urgent=urgent)
                 sources[key] = source
+    if direct:
+        for seal in seals:
+            validate_snapshot(seal)
     audio = dict(seals[-1]['audio']) if len(seals) > 1 else dict(record.get('audio', {}))
     audio.pop('files', None)
     audio['artifacts'] = [s['retained'] | {'kind': s['kind']} for s in sources.values() if s['kind'].startswith('audio_')]

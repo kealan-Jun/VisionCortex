@@ -17,13 +17,15 @@ VERSION = "visioncortex-device-day/1"
 TIMEZONE = "Asia/Shanghai"
 CHUNK_SECONDS = 900
 DIRECTORIES = (
-    "MetaVideo",
+    "MetaData",
     "ProcessedClips",
     "MultimodalUnderstanding",
     "LaboratoryDailyReport",
     "Comment",
 )
 ACTIVITY_LABELS = {"active": "有实验活动", "inactive": "无实验活动"}
+RAW_DIRECTORIES = ('MetaData', 'MetaVideo')
+ARTIFACT_DIRECTORIES = (*RAW_DIRECTORIES, *DIRECTORIES[1:])
 ACTIVITY_FOLDERS = {"active": "ExperimentActivity", "inactive": "NoExperimentActivity"}
 PHYSICAL_ACTION_TYPES = frozenset({
     "hand_object_contact", "object_movement", "liquid_movement",
@@ -266,14 +268,23 @@ def verify_artifact(root: Path, reference: dict[str, Any]) -> bool:
 
 
 class DeviceDayLayout:
-    def __init__(self, archive_root: Path, camera_key: str, start_us: int, backend_root: Path | None = None):
+    def __init__(self, archive_root: Path, camera_key: str, start_us: int, backend_root: Path | None = None,
+                 *, raw_directory: str | None = None):
         self.name = archive_name(camera_key, start_us)
         self.root = safe_child(archive_root, self.name)
         self.raw, self.processed, self.understanding, self.reports, self.comments = (
             self.root / item for item in DIRECTORIES
         )
+        # Keep historical physical paths and immutable receipts in place.
+        if raw_directory is not None:
+            if raw_directory not in RAW_DIRECTORIES:
+                raise ValueError('Invalid raw capture directory')
+            self.raw = self.root / raw_directory
+        elif (self.root / 'MetaVideo').is_dir():
+            self.raw = self.root / 'MetaVideo'
         self.index = self.processed / "Index.json"
         self.backend_root = backend_root
+        self.recorder_owned_raw = raw_directory == 'MetaData'
 
     @property
     def receipts(self) -> Path:
@@ -287,6 +298,12 @@ class DeviceDayLayout:
         return artifact(self.backend_root, path) | {"storage_root": "local_cache_root"}
 
     def source_path(self, recording: dict, kind: str, source: Path) -> Path:
+        from .capture_layout import METADATA_LAYOUT, metadata_location
+        if recording.get('input_layout') == METADATA_LAYOUT:
+            location = metadata_location(source)
+            if location is None or location['root'].parent != self.root:
+                raise ValueError('Recorder source must remain in its own device/day MetaData')
+            return safe_child(self.root, source.relative_to(self.root).as_posix())
         def label(value):
             return datetime.fromtimestamp(value / 1e6, ZoneInfo(TIMEZONE)).strftime("%H-%M-%S")
         stem = f"{label(recording['recording_start_us'])}_{label(recording['recording_end_us'])}"
@@ -297,7 +314,10 @@ class DeviceDayLayout:
         return self.raw / "Metadata" / stem / ("Audio" if kind.startswith("audio_") else "Video") / media_sidecar_name(source)
 
     def create(self) -> None:
-        for name in DIRECTORIES:
+        if self.recorder_owned_raw and not self.raw.is_dir():
+            raise ValueError('Recorder-owned MetaData is unavailable')
+        names = DIRECTORIES[1:] if self.recorder_owned_raw else (self.raw.name, *DIRECTORIES[1:])
+        for name in names:
             safe_child(self.root, name).mkdir(parents=True, exist_ok=True)
 
     def relative(self, path: Path) -> str:

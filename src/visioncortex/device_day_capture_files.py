@@ -20,6 +20,11 @@ def retain_capture_files(runner, record):
     existing = {s["original_path"]: s["retained"] for s in receipt["sources"]}
     video = next(s["retained"] for s in receipt["sources"] if s["kind"] == "video")
     folder = layout.raw / "Metadata" / Path(video["path"]).stem
+    from .capture_layout import METADATA_LAYOUT
+    direct = record.get('input_layout') == METADATA_LAYOUT
+    if direct:
+        # Keep generated catalogs out of the recorder's incoming directory.
+        folder = layout.processed / 'CaptureMetadata' / record['recording_id']
     path = folder / "CaptureFiles.json"
     with exclusive(runner.runtime_root / "locks" / f"{record['recording_id']}.capture-files.lock"):
         files, excluded, pending, destinations = [], [], [], set()
@@ -37,6 +42,19 @@ def retain_capture_files(runner, record):
             if reference is None:
                 if time.time() - source.stat().st_mtime < runner.config["collection_ingest"].get("settle_seconds", 120):
                     pending.append({"original_name": relative.as_posix(), "reason": "waiting_for_file_stability"})
+                    continue
+                if direct:
+                    from .device_day_inputs import hash_content, identity
+                    from .device_day_io import slot
+                    before = identity(source)
+                    with slot(runner.config, copy=True):
+                        checksum = hash_content(source)
+                    if before != identity(source):
+                        pending.append({'original_name': relative.as_posix(), 'reason': 'capture_changed_during_verification'})
+                        continue
+                    reference = {'path': layout.relative(source), 'size_bytes': before[2], 'sha256': checksum}
+                    files.append({'original_name': relative.as_posix(), 'original_path': str(source),
+                                  'retained': reference})
                     continue
                 destination = folder / "Capture"
                 for part in relative.parts:

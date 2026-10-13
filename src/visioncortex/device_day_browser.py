@@ -5,7 +5,7 @@ import html
 from pathlib import Path
 from urllib.parse import quote
 
-from .device_day_contract import DIRECTORIES, read_json, safe_child
+from .device_day_contract import DIRECTORIES, RAW_DIRECTORIES, read_json, safe_child
 from .device_day_reports import clock
 
 
@@ -60,13 +60,18 @@ def render_archive(root: Path, data: dict) -> str:
     notes = ''.join(f'<li>{clock(row["start_us"])} · {html.escape(row["text"])}</li>' for row in comments)
     headings = ("原视频与原录音", "切分片段与帧索引", "多模态理解", "实验室日报", "comment 与录音识别")
     ids = ("media", "clips", "understanding", "report", "comment")
+    raw_names = {Path(source['retained']['path']).parts[0]
+                 for record in data.get('recordings', []) for source in record.get('sources', [])
+                 if source.get('retained', {}).get('path')}
+    raw_label = ' / '.join(raw for raw in RAW_DIRECTORIES if raw in raw_names) or DIRECTORIES[0]
+    displayed_directories = (raw_label, *DIRECTORIES[1:])
     content = [f'<ul>{"".join(sources) or "<li>等待原片留存。</li>"}</ul>',
                f'<p>{link(DIRECTORIES[1] + "/Index.json", "下载总索引 JSON")}</p>' + (''.join(cards) or '<p>等待 YOLO 处理产出。</p>'),
                f'<p>{link(DIRECTORIES[2] + "/UnderstandingReport.html", "查看按时间整理的理解报告")} · {link(DIRECTORIES[2] + "/Understanding.json", "理解 JSON")}</p>',
                f'<p>{link(DIRECTORIES[3] + "/LaboratoryDailyReport.html", "打开当天整合日报")} · {link(DIRECTORIES[3] + "/LaboratoryDailyReport.json", "日报 JSON")}</p>',
                f'<p><a href="/device-days/{quote(name)}/stt">查看录音播放器与 STT 识别文本</a></p><ul>{notes or "<li>当天尚无人的 comment。</li>"}</ul><p>{html.escape(protocol)}</p>']
     sections = ''.join(f'<section id="{anchor}"><h2>{html.escape(folder)}</h2><p>{heading}</p>{body}</section>'
-                       for anchor, folder, heading, body in zip(ids, DIRECTORIES, headings, content, strict=True))
+                       for anchor, folder, heading, body in zip(ids, displayed_directories, headings, content, strict=True))
     nav = ' · '.join(f'<a href="#{anchor}">{label}</a>' for anchor, label in zip(ids, headings, strict=True))
     return '<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' \
            '<title>设备日实验归档</title><style>body{font:16px/1.7 system-ui;max-width:1100px;margin:36px auto;padding:20px;color:#23303b}a{color:#006b9d}section{border-top:1px solid #ddd;margin:24px 0;padding:16px 0}article{background:#f6f8fa;padding:16px;margin:16px 0;border-radius:10px}h1{overflow-wrap:anywhere}figure{margin:0;max-width:320px}img{width:100%;border-radius:6px}.frames{display:flex;gap:16px;flex-wrap:wrap}summary{cursor:pointer}</style>' \

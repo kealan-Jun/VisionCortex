@@ -1,5 +1,6 @@
 """Explicit input-directory aliases; preserve the original recorder identity."""
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
+from glob import escape
 import hashlib
 import re
 
@@ -45,3 +46,59 @@ def bind_camera(settings, record):
 
 def camera_group(settings, camera):
     return (settings.get('camera_group_map') or {}).get(camera, '')
+
+
+METADATA_LAYOUT = 'visioncortex-recorder-metadata/1'
+
+
+def metadata_location(video):
+    """Identify a recorder-owned device/day without inferring its view role."""
+    from .device_day_contract import safe_child, validate_archive_name
+    video = Path(video)
+    for parent in video.parents:
+        if parent.name != 'MetaData':
+            continue
+        try:
+            name = validate_archive_name(parent.parent.name)
+        except ValueError:
+            continue
+        safe_child(parent.parent, video.relative_to(parent.parent).as_posix())
+        return {'archive': name, 'camera_key': name[11:], 'root': parent}
+    return None
+
+
+def metadata_directories(config):
+    """Join existing discovery with recorder-owned MetaData only; create nothing."""
+    from .device_day_contract import safe_child, validate_archive_name
+    settings = config['collection_ingest']
+    if not settings.get('discover_recorder_metadata', True):
+        return []
+    if not settings.get('source_root') or not config.get('storage', {}).get('archive_root'):
+        return []
+    source = Path(settings['source_root'])
+    archive = Path(config['storage']['archive_root'])
+    if not archive.is_relative_to(source) or not archive.is_dir() or archive.is_symlink():
+        return []
+    if archive != source:
+        safe_child(source, archive.relative_to(source).as_posix())
+    cameras = settings.get('camera_directories') or []
+    result = set()
+    dates = settings.get('metadata_capture_dates') or ([settings['capture_date']] if settings.get('capture_date') else [])
+    day_patterns = [escape(date) for date in dates] if dates else ['????-??-??']
+    camera_patterns = [escape(name) for name in cameras] if cameras else ['*']
+    patterns = [f'{day}_{camera}' for day in day_patterns for camera in camera_patterns]
+    for pattern in patterns:
+        for day in archive.glob(pattern):
+            try:
+                validate_archive_name(day.name)
+                date = day.name[:10]
+                if ((settings.get('capture_date') and date != settings['capture_date'])
+                        or (settings.get('capture_since_date') and date < settings['capture_since_date'])
+                        or (settings.get('metadata_capture_dates') and date not in settings['metadata_capture_dates'])):
+                    continue
+                raw = safe_child(archive, day.name + '/MetaData')
+                if raw.is_dir():
+                    result.add(raw)
+            except ValueError:
+                continue
+    return sorted(result, reverse=True)

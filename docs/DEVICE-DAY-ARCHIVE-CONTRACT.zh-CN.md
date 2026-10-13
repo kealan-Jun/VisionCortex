@@ -6,6 +6,54 @@
 
 ## 固定目录
 
+### 2026-10-13 采集端直写 MetaData（用户明确变更）
+
+新设备日的原始目录由 `MetaVideo` 改为 `MetaData`。采集端可以先创建日期、
+相机目录和 `MetaData`，随后按自己的采集格式写入视频、录音、CSV、就绪标记和
+其他配套文件；保留原文件名、相对层级和字节，不做 PascalCase 转换或重新拆分。
+VisionCortex 复用已存在目录，只补齐其余四个处理结果目录。
+
+```text
+<日期>_<相机>/
+├── MetaData/
+│   └── <原生采集分片目录，可省略>/
+│       ├── rgb.mp4、frames.csv、meta.json、recording_ready.json
+│       ├── audio.opus、audio_meta.json、audio_ready.json、audio_timing.csv
+│       └── 其他原始采集文件
+├── ProcessedClips/
+├── MultimodalUnderstanding/
+├── LaboratoryDailyReport/
+└── Comment/
+```
+
+既有带前缀的 `*_rgb.mp4` 及其配套 `*_meta.json`、`*_recording_ready.json` 等
+继续使用采集端约定；音频文件也可由元数据中的 `task_audio_*` 字段显式关联。
+保留既有视频封口、CSV 时钟、设备身份和稳定性门禁。录音有独立的就绪门禁；
+暂时写坏、锁定或尚未发布的录音元数据只使音频等待，不隐藏已就绪视频。
+目录或文件刚出现不代表输入已经完成。
+
+`collection_ingest.discover_recorder_metadata` 默认 true，但只有采集已显式启用才生效。
+`storage.archive_root` 必须位于配置的 `collection_ingest.source_root` 内（可相等），
+当前发现入口只额外遍历 `<日期>_<相机>/MetaData`，不扫描其他处理结果目录。
+沿用既有每相机监控、设备绑定和持久队列，不启动第二套监控或处理链。
+相机与目录日期必须匹配采集身份；未知视角仍需要显式绑定。当前/前一日监控、
+历史发现、日期限制与扫描上限继续适用。
+
+直写输入记录 `input_layout: visioncortex-recorder-metadata/1`。来源引用直接指向
+同设备同日 `MetaData` 内的原文件，retention 验证封存身份和内容，不再复制原文件。
+附属文件清单位于 `ProcessedClips/CaptureMetadata/<recording_id>/CaptureFiles.json`，
+不向采集目录写生成文件。录音晚到更新其独立输入和 STT，未变化视频复用已完成结果。
+该路径不进行采集原片软链接替换。
+
+旧采集根继续使用原流程，历史 `MetaVideo` 保留物理路径、旧回执和原有读取方式；
+不在代码升级时重命名、移动或重写历史媒体。历史设备日后来接入直写输入时可同时
+保留 `MetaVideo` 与 `MetaData`，各记录保留自己的来源引用。这是历史兼容状态，
+不是新设备日的第六个产出目录。v1 时间、活动、证据与恢复语义保持不变，Schema
+同时接受新旧原始路径。以下 `MetaVideo` 布局和软链接段落描述历史分离归档模式。
+
+上线时须核对监控和各阶段消费者的固定源码身份、私有配置以及历史回执恢复兼容，
+按交接流程让在途任务完成。源码同步本身不启用生产，也不重命名现场历史目录。
+
 ### 2026-09-17 内容查阅补充（用户明确授权）
 
 最外层 `<日期>_<设备>` 和五大目录不变。`Comment` 与

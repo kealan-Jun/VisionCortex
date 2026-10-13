@@ -12,7 +12,7 @@ import time
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
-from .device_day_contract import atomic_bytes, atomic_json, read_json, validate_archive_name
+from .device_day_contract import ARTIFACT_DIRECTORIES, atomic_bytes, atomic_json, read_json, validate_archive_name
 from .device_day_progress import snapshot
 from .report_brand import brand_logo_data_url
 
@@ -280,8 +280,7 @@ def render(data):
     def link(archive, path, label, fragment='', *, watch=False):
         # Restrict every link to the five existing archive directories.
         if (not path or '\\' in path or ':' in path or Path(path).is_absolute() or '..' in Path(path).parts
-                or Path(path).parts[0] not in {'MetaVideo', 'ProcessedClips', 'MultimodalUnderstanding',
-                                             'LaboratoryDailyReport', 'Comment'}):
+                or Path(path).parts[0] not in ARTIFACT_DIRECTORIES):
             return '<span>素材引用不可用</span>'
         href = quote(archive + '/' + path, safe='/') + fragment
         return (f'<a data-artifact {"data-watch class=play-button" if watch else ""} data-archive="{esc(archive)}" data-path="{esc(path)}" '
@@ -372,7 +371,7 @@ def render(data):
 <section><h2>每天处理到哪里了</h2><p>发布结果按原始分片去重；活动时长按同一天全部视角的采集时间合并，不重复相加，也不代表已确认的实验员工作时长。</p>
 <div class="table-wrap"><table><thead><tr><th>采集日期</th><th>采集量</th><th>已有预处理结果</th><th>检出活动</th><th>动作关键帧</th><th>录音 / 转写</th><th>多模态理解</th><th>YOLO 当前状态</th></tr></thead><tbody>{''.join(rows) or '<tr><td colspan="8">尚无可读取的采集数据</td></tr>'}</tbody></table></div></section>
 <p>下方活动入口来自当前发布索引中的模型筛选结果，供核查实际实验视频；未作人工确认，不能等同人工真值。无活动区间的抽样图片不计入动作关键帧。统计来源：各设备的 ProcessedClips/Index.json、采集清单及本地阶段队列。</p>
-<footer>五目录保持不变：MetaVideo / ProcessedClips / MultimodalUnderstanding / LaboratoryDailyReport / Comment。ExperimentActivity 为活动片段；NoExperimentActivity 为无活动／无关区间，引用原片对应时间。JSON 是可展开的溯源数据，直接阅读请选择 HTML 报告。</footer></main>
+<footer>五目录：MetaData（兼容历史 MetaVideo） / ProcessedClips / MultimodalUnderstanding / LaboratoryDailyReport / Comment。ExperimentActivity 为活动片段；NoExperimentActivity 为无活动／无关区间，引用原片对应时间。JSON 是可展开的溯源数据，直接阅读请选择 HTML 报告。</footer></main>
 <dialog id="Playback"><form method="dialog"><button aria-label="关闭播放器">关闭</button></form><h2 id="PlaybackTitle">实验视频</h2><div id="PlaybackBody"></div></dialog>
 <style>header{{padding:16px 24px}}header p{{margin:6px 0 12px}}h2{{margin-top:0}}.date-chip{{border:1px solid #b9d4d7;padding:6px 12px;border-radius:8px;text-decoration:none;background:#edf7f5}}.date-chip b{{display:block;font-size:12px}}.play-button{{display:inline-block;padding:8px 14px;background:#1e4a52;color:white;border-radius:6px;text-decoration:none;white-space:nowrap;margin-bottom:6px}}button{{cursor:pointer}}.nas-location input{{font:12px monospace;max-width:100%;width:420px;box-sizing:border-box;padding:8px}}td small,td input{{overflow-wrap:anywhere}}dialog{{border:1px solid #bfd3d6;border-radius:12px;width:min(1320px,94vw);max-height:90vh;box-sizing:border-box;color:#112d32}}dialog::backdrop{{background:#102e35b3}}dialog form{{float:right}}dialog video{{display:block;width:100%;max-height:65vh;background:#132328}}.view-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,310px),1fr));gap:16px}}.view-grid article{{min-width:0;border:1px solid #d5e3e6;padding:12px;border-radius:8px}}.view-grid h3{{overflow-wrap:anywhere}}.view-grid video{{aspect-ratio:1.6;max-height:45vh}}.playback-controls{{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin:14px 0}}.playback-controls input{{flex:1;min-width:150px}}section[id]{{scroll-margin-top:12px}}</style>
 <script>{Path(__file__).with_name('web').joinpath('archive-playback.js').read_text()}</script>
