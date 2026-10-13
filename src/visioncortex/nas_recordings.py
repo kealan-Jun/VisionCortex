@@ -173,7 +173,9 @@ def _inspect(root: Path, video: Path, now: float, settle: float, allow_plain: bo
     if location:
         camera_key = str(merged.get('camera_key') or location['camera_key'])
         from .device_day_contract import archive_name
-        if camera_key != location['camera_key'] or (start and archive_name(camera_key, start) != location['archive']):
+        wrong_camera = any(sidecar.get('camera_key') and str(sidecar['camera_key']) != location['camera_key']
+                           for sidecar in (metadata, ready))
+        if wrong_camera or (start and archive_name(camera_key, start) != location['archive']):
             issues.append('MetaData 目录与采集设备或日期不一致')
         input_layout = {'input_layout': METADATA_LAYOUT}
     return input_layout | {
@@ -214,17 +216,12 @@ def _inspect(root: Path, video: Path, now: float, settle: float, allow_plain: bo
 
 
 def _camera_directories(root: Path, settings: dict[str, Any], allow_plain: bool) -> list[Path]:
-    configured = settings.get("camera_directories") or []
+    from .capture_layout import configured_camera_names, discovery_mode
+    configured = configured_camera_names(settings)
+    if discovery_mode(settings) == 'metadata_only':
+        return []
     if configured:
-        if not isinstance(configured, list):
-            raise ValueError("采集相机目录配置无效")
-        cameras = []
-        for value in configured:
-            name = str(value or "")
-            if not name or Path(name).name != name or name in {".", ".."}:
-                raise ValueError("采集相机目录配置无效")
-            cameras.append(root / name)
-        return cameras
+        return [root / name for name in configured]
     if allow_plain:
         return [root]
     from .capture_layout import validate
@@ -420,7 +417,7 @@ def scan_recordings(config: dict[str, Any], *, on_record=None, skip_folders=()) 
     history_window_limited = False
     allow_plain = bool(settings.get("discover_plain_video_csv", False))
     # Bound discovery and exclude archives/caches at every depth.
-    from .capture_layout import metadata_directories
+    from .capture_layout import discovery_mode, metadata_directories
     archive_root = Path(config['storage']['archive_root']).resolve()
     # Derived output siblings remain excluded even when source == archive.
     cameras = [p for p in _camera_directories(root, settings, allow_plain)
@@ -511,7 +508,7 @@ def scan_recordings(config: dict[str, Any], *, on_record=None, skip_folders=()) 
     for batch in batches:
         batch["analysis_ready"] = batch["device_day_processable"] if (config.get("device_day") or {}).get("enabled") else batch["available"]
     return {
-        "mode": "directory_metadata", "recordings": recordings,
+        "mode": "directory_metadata", "discovery_mode": discovery_mode(settings), "recordings": recordings,
         "recording_count": len(recordings), "errors": errors, "truncated": truncated,
         "batches": batches,
         "camera_directories": monitored_camera_directories,

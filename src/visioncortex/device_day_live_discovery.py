@@ -5,6 +5,7 @@ import threading
 import time
 
 from .device_day_contract import atomic_json, digest
+from .capture_layout import discovery_mode
 
 
 def discovery_config(config):
@@ -13,10 +14,11 @@ def discovery_config(config):
     roles = {name for name, role in ingest.get('camera_role_map', {}).items()
              if role in {'first_person', 'third_person'}}
     roots = set(roles)
-    for rule in ingest.get('directory_camera_bindings') or []:
-        if rule['camera_key'] in roles:
-            roots.discard(rule['camera_key'])
-            roots.add(rule['directory_glob'].split('/')[0])
+    if discovery_mode(ingest) != 'metadata_only':
+        for rule in ingest.get('directory_camera_bindings') or []:
+            if rule['camera_key'] in roles:
+                roots.discard(rule['camera_key'])
+                roots.add(rule['directory_glob'].split('/')[0])
     if not roots or any(Path(name).name != name or name in {'.', '..'} for name in roots):
         raise ValueError('Live discovery requires configured camera directories')
     ingest.update(camera_directories=sorted(roots), additional_camera_directories=[], poll_seconds=5)

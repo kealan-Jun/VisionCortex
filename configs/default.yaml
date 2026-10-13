@@ -498,6 +498,8 @@ daily_report:
   additional_mllm_calls: false
 collection_ingest:
   # Used only when collection is explicitly enabled; keep public startup local.
+  # Switch after all producers write device/day MetaData directly.
+  discovery_mode: legacy_and_metadata
   discover_recorder_metadata: true
   enabled: false
   poll_seconds: 30

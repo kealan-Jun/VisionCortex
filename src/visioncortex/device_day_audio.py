@@ -22,7 +22,14 @@ def recorder_audio(video: Path, metadata: dict, ready: dict, now: float, settle:
         snapshots = [(kind, str(path), path.stat().st_size, path.stat().st_mtime_ns)
                      for kind, path in paths.items() if path.is_file()]
         exists = paths["audio"].is_file() and paths["audio"].stat().st_size > 0
-    except (OSError, ValueError) as error:
+        from .capture_layout import metadata_location
+        from .device_day_contract import archive_name
+        location = metadata_location(video)
+        wrong_camera = location and any(sidecar.get('camera_key')
+            and str(sidecar['camera_key']) != location['camera_key'] for sidecar in (meta, published))
+        audio_start = int(meta.get('first_audio_global_us') or 0) if location else 0
+        wrong_day = location and audio_start and archive_name(location['camera_key'], audio_start) != location['archive']
+    except (OSError, ValueError, TypeError, OverflowError) as error:
         # A locked/unavailable audio sidecar cannot invalidate a separately
         # finalized RGB recording. Fail closed for audio association only.
         issue = {"path": str(getattr(error, 'filename', None) or paths.get('metadata', video.parent)),
@@ -37,6 +44,10 @@ def recorder_audio(video: Path, metadata: dict, ready: dict, now: float, settle:
     stable = all(now - row[3] / 1e9 >= settle for row in snapshots)
     mismatches = [field for field in ("recording_session_id", "sender_id")
                   if len({str(d[field]) for d in (metadata, ready, meta, published) if d.get(field)}) > 1]
+    if wrong_camera:
+        mismatches.append('camera_key')
+    if wrong_day:
+        mismatches.append('capture_date')
     state = ("association_mismatch" if mismatches else "pending_publication" if exists and
              (published.get("ready") is not True or not stable) else "provided" if exists else
              "no_input" if (meta | published).get("quality_status") == "no_input" else "not_provided")

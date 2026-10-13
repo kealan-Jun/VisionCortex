@@ -10,6 +10,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .device_day_contract import digest
+from .capture_layout import configured_camera_names, discovery_mode, metadata_directories
 from .nas_recordings import _camera_directories, _recording_batches, _root, scan_recordings
 
 
@@ -113,7 +114,8 @@ class CameraMonitor:
                     self.sealed_folders = {p: deadline for p, deadline in self.sealed_folders.items()
                                            if deadline > time.monotonic()}
                     skipped = set(self.paused_folders) | set(self.sealed_folders)
-                if self.live_only:
+                only = discovery_mode(config['collection_ingest']) == 'metadata_only'
+                if self.live_only and not only:
                     # The existing parser also supports lab_video/YYYY-MM-DD-1
                     # and -3 directories. Exclude other days before traversal,
                     # not after their metadata has already been inspected.
@@ -122,7 +124,8 @@ class CameraMonitor:
                         skipped.update(str(p) for p in directory.iterdir()
                                        if not any(p.name == day or p.name.startswith(day + '-') for day in live_dates))
                 inventory = scan_recordings(config, on_record=forward, **({'skip_folders': skipped} if skipped else {}))
-                if self.live_only and inventory.get('camera_directory_count', 1) == 0 and not skipped:
+                awaiting_input = only and inventory.get('camera_directory_count', 1) == 0
+                if self.live_only and not only and inventory.get('camera_directory_count', 1) == 0 and not skipped:
                     raise FileNotFoundError('Configured camera has no available capture directory')
                 flush()
                 self.observe(self.settings, {'recordings': [], 'errors': inventory.get('errors', [])})
@@ -131,7 +134,8 @@ class CameraMonitor:
                     errors = errors or failure['errors']
                     truncated = truncated or failure['truncated']
                 state = {'camera_key': camera, 'mode': mode, 'status': 'watching', 'started_at': started,
-                         'completed_at': time.time(), 'errors': errors, 'truncated': truncated}
+                         'completed_at': time.time(), 'errors': errors, 'truncated': truncated,
+                         'awaiting_input': awaiting_input}
             except (OSError, ValueError, TypeError) as exc:
                 # dirty is acknowledged only after a successful write. Do not
                 # repeat a failing write inside the exception handler itself.
@@ -169,7 +173,6 @@ class CameraMonitor:
     def poll(self, *, include_recordings=True):
         root = _root(self.settings)
         cameras = _camera_directories(root, self.settings['collection_ingest'], False)
-        from .capture_layout import metadata_directories
         archive = self.settings.get('storage', {}).get('archive_root')
         cameras = {p for p in cameras if not archive or not p.resolve().is_relative_to(Path(archive).resolve())}
         probe = self.settings
@@ -178,6 +181,10 @@ class CameraMonitor:
             day = datetime.now(ZoneInfo('Asia/Shanghai')).date()
             probe['collection_ingest']['metadata_capture_dates'] = [day.isoformat(), (day - timedelta(days=1)).isoformat()]
         cameras.update(root / raw.parent.name[11:] for raw in metadata_directories(probe))
+        if discovery_mode(self.settings['collection_ingest']) == 'metadata_only':
+            # Logical lanes wait for producer-created directories without
+            # probing, listing or recreating the old camera input paths.
+            cameras.update(root / name for name in configured_camera_names(self.settings['collection_ingest']))
         cameras = sorted(cameras)
         from .device_day_schedule import processing_cutoff
         modes = ('live',) if self.live_only or processing_cutoff(self.settings.get('device_day', {})) else ('live', 'history')
@@ -220,7 +227,8 @@ class CameraMonitor:
         for state in states:
             if state['status'] == 'scanning' and time.time() - state['started_at'] > 120:
                 state['status'] = 'slow_or_unavailable'
-        return {'mode': 'directory_metadata', 'recordings': records if include_recordings else [], 'recording_count': len(records),
+        return {'mode': 'directory_metadata', 'discovery_mode': discovery_mode(self.settings['collection_ingest']),
+                'recordings': records if include_recordings else [], 'recording_count': len(records),
                 'batches': _recording_batches(records, self.settings['collection_ingest']) if include_recordings else [],
                 'errors': publication_errors + [error for state in states for error in state.get('errors', [])],
                 'truncated': any(state.get('truncated') for state in states),
