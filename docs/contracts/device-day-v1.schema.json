@@ -83,7 +83,7 @@
       "properties": {
         "path": {
           "type": "string",
-          "pattern": "^(MetaVideo|ProcessedClips|MultimodalUnderstanding|LaboratoryDailyReport|Comment)/",
+          "pattern": "^(MetaData|MetaVideo|ProcessedClips|MultimodalUnderstanding|LaboratoryDailyReport|Comment)/",
           "not": {
             "pattern": "(^|/)\\.\\.(/|$)|\\\\"
           }

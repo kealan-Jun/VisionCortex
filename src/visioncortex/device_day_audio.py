@@ -14,14 +14,19 @@ def recorder_audio(video: Path, metadata: dict, ready: dict, now: float, settle:
              "metadata": merged.get("task_audio_meta_file") or prefix + "audio_meta.json",
              "ready": merged.get("task_audio_ready_file") or prefix + "audio_ready.json",
              "timing": merged.get("task_audio_timing_file") or prefix + "audio_timing.csv"}
-    paths = {kind: _child(video.parent, name) for kind, name in names.items()}
+    paths = {}
     try:
+        paths = {kind: _child(video.parent, name) for kind, name in names.items()}
         meta = _json(paths["metadata"]) if paths["metadata"].is_file() else {}
         published = _json(paths["ready"]) if paths["ready"].is_file() else {}
-    except OSError as error:
+        snapshots = [(kind, str(path), path.stat().st_size, path.stat().st_mtime_ns)
+                     for kind, path in paths.items() if path.is_file()]
+        exists = paths["audio"].is_file() and paths["audio"].stat().st_size > 0
+    except (OSError, ValueError) as error:
         # A locked/unavailable audio sidecar cannot invalidate a separately
         # finalized RGB recording. Fail closed for audio association only.
-        issue = {"path": str(error.filename or paths["metadata"]), "errno": error.errno,
+        issue = {"path": str(getattr(error, 'filename', None) or paths.get('metadata', video.parent)),
+                 "errno": getattr(error, 'errno', None),
                  "reason": "audio_metadata_unreadable"}
         return {"status": "pending_publication", "files": [],
                 "source_signature": digest({"paths": {k: str(p) for k, p in paths.items()}, "issue": issue}),
@@ -29,10 +34,7 @@ def recorder_audio(video: Path, metadata: dict, ready: dict, now: float, settle:
                 "end_us": None, "duration_us": None, "association_issues": [issue],
                 "time_basis": "unknown", "transcription_status": "awaiting_audio",
                 "read_errors": [issue]}
-    snapshots = [(kind, str(path), path.stat().st_size, path.stat().st_mtime_ns)
-                 for kind, path in paths.items() if path.is_file()]
     stable = all(now - row[3] / 1e9 >= settle for row in snapshots)
-    exists = paths["audio"].is_file() and paths["audio"].stat().st_size > 0
     mismatches = [field for field in ("recording_session_id", "sender_id")
                   if len({str(d[field]) for d in (metadata, ready, meta, published) if d.get(field)}) > 1]
     state = ("association_mismatch" if mismatches else "pending_publication" if exists and

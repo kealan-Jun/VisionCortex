@@ -497,6 +497,8 @@ daily_report:
   generate_pdf: true
   additional_mllm_calls: false
 collection_ingest:
+  # Used only when collection is explicitly enabled; keep public startup local.
+  discover_recorder_metadata: true
   enabled: false
   poll_seconds: 30
   settle_seconds: 120

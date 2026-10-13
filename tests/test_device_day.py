@@ -100,7 +100,7 @@ def item_and_layout(config):
 
 
 def test_frozen_layout_and_deletion_suspension(device_config):
-    assert DIRECTORIES == ("MetaVideo", "ProcessedClips", "MultimodalUnderstanding", "LaboratoryDailyReport", "Comment")
+    assert DIRECTORIES == ("MetaData", "ProcessedClips", "MultimodalUnderstanding", "LaboratoryDailyReport", "Comment")
     schema = read_json(Path(__file__).parents[1] / "docs/contracts/device-day-v1.schema.json")
     assert schema["properties"]["schema_version"]["const"] == VERSION
     assert schema["properties"]["capture_deletion"]["const"] == "disabled_by_user"
@@ -941,7 +941,7 @@ def test_final_naming_migration_preserves_media_and_old_evidence(device_config):
     path = runner._receipt(layout, item, "retention")
     saved = read_json(path)
     for source in saved["sources"]:
-        source["retained"]["path"] = source["retained"]["path"].replace("MetaVideo/", "1. meta video/")
+        source["retained"]["path"] = source["retained"]["path"].replace("MetaData/", "1. meta video/")
     atomic_json(path, saved)
     migrated = migrate_names(runner, [item])
     assert migrated["status"] == "completed" and not migrated["capture_sources_changed"]

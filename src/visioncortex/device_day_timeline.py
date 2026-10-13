@@ -6,7 +6,7 @@ from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
-from .device_day_contract import DIRECTORIES, read_json, validate_archive_name, digest, safe_child
+from .device_day_contract import ARTIFACT_DIRECTORIES, DIRECTORIES, read_json, validate_archive_name, digest, safe_child
 
 
 def day_bounds(day):
@@ -22,7 +22,7 @@ def link(archive, reference):
     if not isinstance(value, str):
         return None
     parts = PurePosixPath(value).parts
-    if not parts or parts[0] not in DIRECTORIES or '..' in parts or '\\' in value:
+    if not parts or parts[0] not in ARTIFACT_DIRECTORIES or '..' in parts or '\\' in value:
         return None
     return f'/api/device-days/{quote(archive, safe="")}/files/{quote(value, safe="/")}'
 

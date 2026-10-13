@@ -422,7 +422,9 @@ class DeviceDayRunner:
                 or self._completed_stage_receipts.accepts(receipt, expected))
 
     def layout(self, recording):
-        return DeviceDayLayout(self.archive_root, recording["camera_key"], recording["recording_start_us"], self.backend_root)
+        from .capture_layout import METADATA_LAYOUT
+        return DeviceDayLayout(self.archive_root, recording["camera_key"], recording["recording_start_us"], self.backend_root,
+                               raw_directory='MetaData' if recording.get('input_layout') == METADATA_LAYOUT else None)
 
     def _receipt(self, layout, recording, stage):
         return layout.receipts / recording["recording_id"] / f"{stage}.json"

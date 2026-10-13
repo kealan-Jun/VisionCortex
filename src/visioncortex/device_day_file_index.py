@@ -6,7 +6,7 @@ from pathlib import Path, PurePosixPath
 import sys
 from zoneinfo import ZoneInfo
 
-from .device_day_contract import DIRECTORIES, atomic_json, read_json, safe_child, validate_archive_name
+from .device_day_contract import ARTIFACT_DIRECTORIES, atomic_json, read_json, safe_child, validate_archive_name
 from .device_day_schedule import in_processing_scope, processing_cutoff
 
 
@@ -49,7 +49,7 @@ def build_file_index(config, index, photos):
         path = PurePosixPath(value['path'])
         if not path.parts or path.is_absolute() or '..' in path.parts or '\\' in value['path']:
             return None
-        if base == 'device_day' and path.parts[0] not in DIRECTORIES:
+        if base == 'device_day' and path.parts[0] not in ARTIFACT_DIRECTORIES:
             return None
         return {k: value[k] for k in ('path', 'sha256', 'size_bytes') if k in value} | {'path_base': base}
     def time_text(value):

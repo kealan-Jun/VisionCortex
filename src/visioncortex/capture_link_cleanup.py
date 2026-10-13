@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 import uuid
 
-from .device_day_contract import DIRECTORIES, atomic_json, digest, file_hash, safe_child, verify_artifact
+from .device_day_contract import RAW_DIRECTORIES, atomic_json, digest, file_hash, safe_child, verify_artifact
 
 
 def replace_capture_video_with_link(archive, retention, vision, *, enabled=False, backend_root=None):
@@ -33,7 +33,7 @@ def replace_capture_video_with_link(archive, retention, vision, *, enabled=False
         raise ValueError('Source outside sealed capture root')
     if source.parent.resolve().is_relative_to(archive.resolve()) or source == target:
         raise ValueError('Archive is not a cleanup source')
-    if not target.resolve().is_relative_to((archive/DIRECTORIES[0]).resolve()):
+    if not any(target.resolve().is_relative_to((archive/name).resolve()) for name in RAW_DIRECTORIES):
         raise ValueError('Target must be the retained MetaVideo')
     if file_hash(target)!=main['sha256']:
         raise ValueError('Retained video mismatch')
@@ -61,7 +61,7 @@ def replace_capture_video_with_link(archive, retention, vision, *, enabled=False
         temporary.unlink(missing_ok=True)
     result = {'status':'linked','replaced':True,'original_path':str(source),'target':relative,
               'sha256':main['sha256'],'retention_digest':digest(retention)}
-    atomic_json(archive/DIRECTORIES[0]/'Metadata'/'Cleanup'/f"{record['recording_id']}.json",result)
+    atomic_json(archive/Path(main['retained']['path']).parts[0]/'Metadata'/'Cleanup'/f"{record['recording_id']}.json",result)
     return result
 
 
@@ -72,6 +72,9 @@ def submit_after_preprocessing(runner, layout, recording):
     Queue intent lives locally so a restart does not lose an unfinished cleanup.
     """
     settings = runner.settings.get('capture_video_link_cleanup') or {}
+    from .capture_layout import METADATA_LAYOUT
+    if recording.get('input_layout') == METADATA_LAYOUT:
+        return  # The single retained original is already the recorder input.
     if not settings.get('enabled'):
         return
     if not (settings.get('native_links_verified') and settings.get('capture_readers_verified')):

@@ -68,10 +68,13 @@ class CameraMonitor:
             config['collection_ingest']['capture_since_date'] = (
                 datetime.now(ZoneInfo('Asia/Shanghai')).date().isoformat() if mode == 'live'
                 else self.settings.get('device_day', {}).get('start_date'))
+            if mode == 'live':
+                config['collection_ingest']['metadata_capture_dates'] = [config['collection_ingest']['capture_since_date']]
             if self.live_only:
                 current_day = datetime.now(ZoneInfo('Asia/Shanghai')).date()
                 live_dates = {current_day.isoformat(), (current_day - timedelta(days=1)).isoformat()}
-                config['collection_ingest'].update(capture_date=None, capture_since_date=min(live_dates))
+                config['collection_ingest'].update(capture_date=None, capture_since_date=min(live_dates),
+                                                   metadata_capture_dates=sorted(live_dates))
             pending, last_emit = [], [0.0]
             def flush():
                 if pending:
@@ -115,9 +118,12 @@ class CameraMonitor:
                     # and -3 directories. Exclude other days before traversal,
                     # not after their metadata has already been inspected.
                     directory = _root(config) / camera
-                    skipped.update(str(p) for p in directory.iterdir()
-                                   if not any(p.name == day or p.name.startswith(day + '-') for day in live_dates))
+                    if directory.is_dir():
+                        skipped.update(str(p) for p in directory.iterdir()
+                                       if not any(p.name == day or p.name.startswith(day + '-') for day in live_dates))
                 inventory = scan_recordings(config, on_record=forward, **({'skip_folders': skipped} if skipped else {}))
+                if self.live_only and inventory.get('camera_directory_count', 1) == 0 and not skipped:
+                    raise FileNotFoundError('Configured camera has no available capture directory')
                 flush()
                 self.observe(self.settings, {'recordings': [], 'errors': inventory.get('errors', [])})
                 errors, truncated = inventory.get('errors', []), inventory.get('truncated', False)
@@ -163,6 +169,16 @@ class CameraMonitor:
     def poll(self, *, include_recordings=True):
         root = _root(self.settings)
         cameras = _camera_directories(root, self.settings['collection_ingest'], False)
+        from .capture_layout import metadata_directories
+        archive = self.settings.get('storage', {}).get('archive_root')
+        cameras = {p for p in cameras if not archive or not p.resolve().is_relative_to(Path(archive).resolve())}
+        probe = self.settings
+        if self.live_only:
+            probe = deepcopy(self.settings)
+            day = datetime.now(ZoneInfo('Asia/Shanghai')).date()
+            probe['collection_ingest']['metadata_capture_dates'] = [day.isoformat(), (day - timedelta(days=1)).isoformat()]
+        cameras.update(root / raw.parent.name[11:] for raw in metadata_directories(probe))
+        cameras = sorted(cameras)
         from .device_day_schedule import processing_cutoff
         modes = ('live',) if self.live_only or processing_cutoff(self.settings.get('device_day', {})) else ('live', 'history')
         for camera in cameras:

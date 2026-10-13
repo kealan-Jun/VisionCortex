@@ -10,7 +10,7 @@ from pathlib import Path
 import time
 
 from .device_day import exclusive, now
-from .device_day_contract import VERSION, atomic_json, digest, read_json, safe_child
+from .device_day_contract import RAW_DIRECTORIES, VERSION, atomic_json, digest, read_json, safe_child
 from .runtime_control import check_cancelled
 from .sqlite_store import connection
 
@@ -79,7 +79,7 @@ def verified_original(runner, record, receipt):
                 return False
         if (source['sha256'] != reference['sha256'] or source['size_bytes'] != reference['size_bytes']
                 or reference['path'] != layout.relative(layout.source_path(record, source['kind'], original))
-                or not reference['path'].startswith('MetaVideo/')):
+                or not reference['path'].startswith(tuple(name + '/' for name in RAW_DIRECTORIES))):
             return False
         if source['kind'] == 'video' and source['size_bytes'] != record['size_bytes']:
             return False

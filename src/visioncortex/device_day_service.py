@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
 from .device_day import DeviceDayRunner, append_comment
 from .device_day_contract import (
-    DIRECTORIES, VERSION, archive_name, atomic_json, read_json, safe_child, validate_archive_name,
+    ARTIFACT_DIRECTORIES, DIRECTORIES, VERSION, archive_name, atomic_json, read_json, safe_child, validate_archive_name,
 )
 
 
@@ -623,7 +623,7 @@ def install_routes(app, settings_factory, service):
         root = archive(name)
         try:
             from .artifact_reader import resolve
-            path = resolve(root, relative, directories=DIRECTORIES,
+            path = resolve(root, relative, directories=ARTIFACT_DIRECTORIES,
                            suffixes={".json", ".jsonl", ".html", ".jpg", ".png", ".mp4", ".opus", ".wav", ".m4a", ".mp3", ".flac", ".ogg", ".csv", ".txt", ".srt", ".vtt", ".log"})
         except (ValueError, OSError) as exc:
             from .artifact_reader import storage_status
@@ -645,7 +645,7 @@ def install_routes(app, settings_factory, service):
         root = archive(name)
         try:
             from .artifact_reader import resolve
-            resolve(root, relative, directories=DIRECTORIES, suffixes={'.mp4'})
+            resolve(root, relative, directories=ARTIFACT_DIRECTORIES, suffixes={'.mp4'})
         except (ValueError, OSError) as exc:
             from .artifact_reader import storage_status
             code, message = storage_status(exc)
