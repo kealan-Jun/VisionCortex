@@ -154,8 +154,8 @@ visioncortex dry-run --config configs/development-local.yaml --output outputs/dr
 ### NAS 自动采集：设备日五目录
 
 ```text
-<日期>_<设备>/
-├── MetaVideo/                  原视频、原录音与采集元数据
+<日期>_<相机>/
+├── MetaData/                   仅本相机的原生采集目录、原视频、原录音与元数据
 ├── ProcessedClips/             活动片段、动作关键帧与场景采样
 ├── MultimodalUnderstanding/    理解结果、画面引用与模型回执
 ├── LaboratoryDailyReport/      同一设备同一天的日报
@@ -164,6 +164,8 @@ visioncortex dry-run --config configs/development-local.yaml --output outputs/dr
 
 目录拼写与 v1 语义由[设备日归档契约](docs/DEVICE-DAY-ARCHIVE-CONTRACT.zh-CN.md)
 和 [JSON Schema](docs/contracts/device-day-v1.schema.json) 固定。
+历史 `MetaVideo` 保留读取能力。采集端完成切换后可启用 `metadata_only`，
+关闭旧相机目录的发现入口；已入队任务继续处理。
 `key_frames` 保留给五类物理动作的选定事件；无活动区间使用 `scene_frames`，
 不会以普通场景抽帧充当动作关键帧。录音及 STT 保留在实际设备、实际日期下。
 

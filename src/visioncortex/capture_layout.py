@@ -6,6 +6,8 @@ import re
 
 
 def validate(settings):
+    discovery_mode(settings)
+    configured_camera_names(settings)
     additional = settings.get('additional_camera_directories') or []
     if not isinstance(additional, list) or any(
             not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', name)
@@ -51,10 +53,30 @@ def camera_group(settings, camera):
 METADATA_LAYOUT = 'visioncortex-recorder-metadata/1'
 
 
+def discovery_mode(settings):
+    mode = settings.get('discovery_mode', 'legacy_and_metadata')
+    if not isinstance(mode, str) or mode not in {'legacy_and_metadata', 'metadata_only'}:
+        raise ValueError('Invalid collection_ingest.discovery_mode')
+    if mode == 'metadata_only' and not settings.get('discover_recorder_metadata', True):
+        raise ValueError('metadata_only requires discover_recorder_metadata')
+    return mode
+
+
+def configured_camera_names(settings):
+    values = settings.get('camera_directories') or []
+    if not isinstance(values, list):
+        raise ValueError('采集相机目录配置无效')
+    names = [str(value or '') for value in values]
+    if any(not name or Path(name).name != name or name in {'.', '..'} for name in names):
+        raise ValueError('采集相机目录配置无效')
+    return names
+
+
 def metadata_location(video):
     """Identify a recorder-owned device/day without inferring its view role."""
     from .device_day_contract import safe_child, validate_archive_name
     video = Path(video)
+    location = None
     for parent in video.parents:
         if parent.name != 'MetaData':
             continue
@@ -63,25 +85,36 @@ def metadata_location(video):
         except ValueError:
             continue
         safe_child(parent.parent, video.relative_to(parent.parent).as_posix())
-        return {'archive': name, 'camera_key': name[11:], 'root': parent}
-    return None
+        if location is not None:
+            raise ValueError('Nested MetaData device/day identities are ambiguous')
+        location = {'archive': name, 'camera_key': name[11:], 'root': parent}
+    return location
 
 
 def metadata_directories(config):
     """Join existing discovery with recorder-owned MetaData only; create nothing."""
     from .device_day_contract import safe_child, validate_archive_name
     settings = config['collection_ingest']
+    only = discovery_mode(settings) == 'metadata_only'
     if not settings.get('discover_recorder_metadata', True):
         return []
     if not settings.get('source_root') or not config.get('storage', {}).get('archive_root'):
+        if only:
+            raise ValueError('metadata_only requires source_root and archive_root')
         return []
     source = Path(settings['source_root'])
     archive = Path(config['storage']['archive_root'])
-    if not archive.is_relative_to(source) or not archive.is_dir() or archive.is_symlink():
+    if not archive.is_relative_to(source):
+        if only:
+            raise ValueError('metadata_only archive_root must be within source_root')
+        return []
+    if not archive.is_dir() or archive.is_symlink():
+        if only:
+            raise OSError('Recorder MetaData archive root is unavailable')
         return []
     if archive != source:
         safe_child(source, archive.relative_to(source).as_posix())
-    cameras = settings.get('camera_directories') or []
+    cameras = configured_camera_names(settings)
     result = set()
     dates = settings.get('metadata_capture_dates') or ([settings['capture_date']] if settings.get('capture_date') else [])
     day_patterns = [escape(date) for date in dates] if dates else ['????-??-??']
