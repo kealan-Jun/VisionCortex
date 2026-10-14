@@ -35,6 +35,15 @@ STAGES = ("retention", "vision", "stt", "understanding", "report")
 DEPENDENCIES = {name: EXECUTION_STAGES[name].parents for name in STAGES}
 
 
+def dependencies_for(settings, recording):
+    """Visual-only observations progress independently of speech readiness."""
+    dependencies = dict(DEPENDENCIES)
+    from .device_day_understanding import enabled
+    if recording and enabled(settings, recording):
+        dependencies['understanding'] = ('vision',)
+    return dependencies
+
+
 def digest(value: Any) -> str:
     result = hashlib.sha256()
     encoder = json.JSONEncoder(ensure_ascii=False, sort_keys=True,
@@ -198,6 +207,9 @@ def atomic_bytes(path: Path, value: bytes) -> None:
 
 
 def _atomic_blocks(path, blocks):
+    from .device_day_write_guard import guarded_atomic
+    if guarded_atomic(path, blocks):
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.partial")
     try:
@@ -314,11 +326,14 @@ class DeviceDayLayout:
         return self.raw / "Metadata" / stem / ("Audio" if kind.startswith("audio_") else "Video") / media_sidecar_name(source)
 
     def create(self) -> None:
+        from .device_day_write_guard import guarded_mkdir, verify_before_submission
+        verify_before_submission()
         if self.recorder_owned_raw and not self.raw.is_dir():
             raise ValueError('Recorder-owned MetaData is unavailable')
         names = DIRECTORIES[1:] if self.recorder_owned_raw else (self.raw.name, *DIRECTORIES[1:])
         for name in names:
-            safe_child(self.root, name).mkdir(parents=True, exist_ok=True)
+            guarded_mkdir(safe_child(self.root, name))
+        verify_before_submission()
 
     def relative(self, path: Path) -> str:
         value = path.relative_to(self.root).as_posix()

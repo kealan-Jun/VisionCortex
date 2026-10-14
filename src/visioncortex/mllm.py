@@ -720,11 +720,14 @@ class ArkAnalyzer:
             attempt_started = time.perf_counter()
             receipt: dict[str, Any] = {"attempt": attempt + 1, "status": "pending",
                                        "started_at": datetime.now(timezone.utc).isoformat(),
+                                       "request_submitted": False,
+                                       "response_complete": False,
                                        "retry_wait_seconds": 0.0}
             attempt_receipts.append(receipt)
             try:
                 from .provider_control import provider_request
                 with provider_request(self.runtime_config, 'understanding', self.config):
+                    receipt['request_submitted'] = True
                     if request.get("stream"):
                         # The read timeout bounds inactivity; the deadline also stops
                         # a provider that keeps sending data without finishing.
@@ -738,11 +741,22 @@ class ArkAnalyzer:
                                     _http_error_message(response, self.api_key),
                                     request=response.request, response=response)
                             payload = _read_streamed_chat(response, deadline=attempt_started + stream_budget)
+                        receipt['response_complete'] = True
                         receipt["transport"] = payload.get("visioncortex_transport", {"mode": "json"})
                         receipt["stream_total_timeout_seconds"] = stream_budget
                     else:
                         response = self.client.post(url, headers=headers, json=request)
+                        receipt['response_complete'] = True
                         if response.is_error:
+                            # Some providers report billable usage even with
+                            # an error response. Retain it as failed spend.
+                            try:
+                                error_payload = response.json()
+                                if isinstance(error_payload, dict):
+                                    receipt.update(request_id=error_payload.get('id'),
+                                        response_model=error_payload.get('model'), usage=_usage(error_payload))
+                            except (ValueError, TypeError):
+                                pass
                             body = response.text[:1000].replace(self.api_key, "[REDACTED]")
                             raise httpx.HTTPStatusError(
                                 f"{response.status_code} from multimodal API: {body}",
@@ -796,6 +810,17 @@ class ArkAnalyzer:
                 last_error = exc
                 receipt.update(status="failed", ended_at=datetime.now(timezone.utc).isoformat(), error_type=type(exc).__name__, latency_seconds=round(time.perf_counter() - attempt_started, 6))
                 receipt["http_status"] = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+                # A timeout/network loss after submission does not establish
+                # that the provider did not execute or bill the request.
+                # Only connection/pool failures are known to precede delivery.
+                ambiguous = (receipt['request_submitted'] and isinstance(exc, httpx.HTTPError)
+                    and not isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout))
+                    and (not isinstance(exc, httpx.HTTPStatusError) or exc.response.status_code in {408, 500, 502, 503, 504}))
+                ambiguous |= (receipt['request_submitted'] and not receipt['response_complete']
+                              and isinstance(exc, (ValueError, json.JSONDecodeError)))
+                if ambiguous:
+                    receipt['status'] = 'submitted_unknown'
+                    break
                 if isinstance(exc, (ValidationError, json.JSONDecodeError)) and response_kind:
                     # A format retry still uses every original image and the
                     # same strict validator. Report schema locations, never the
@@ -857,7 +882,7 @@ class ArkAnalyzer:
                 circuit_opened = self._failure_circuit_open
                 transport_failure_count = self._transport_failure_count
         return {
-            "status": "failed",
+            "status": "submitted_unknown" if any(r['status'] == 'submitted_unknown' for r in attempt_receipts) else "failed",
             "error": f"{type(last_error).__name__}: {last_error}".replace(self.api_key, "[REDACTED]"),
             "http_status": last_error.response.status_code if isinstance(last_error, httpx.HTTPStatusError) else None,
             "provider": self.config.get("provider", "volcengine"),

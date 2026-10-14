@@ -283,7 +283,9 @@ class DeviceDayRunner:
         self._prerequisite_checks = PrerequisiteChecks()
         from .device_day_queue import DeviceDayQueue
         self.queues = {stage: DeviceDayQueue(self.runtime_root / f"queue-{stage}.sqlite3",
-                                           latest_first=self.settings.get('latest_first', False)) for stage in STAGES}
+                                           latest_first=self.settings.get('latest_first', False),
+                                           scheduling=self.settings.get('scheduling') if stage == 'understanding' else None)
+                       for stage in STAGES}
         self.queue = self.queues["vision"]
 
     def _backend(self):
@@ -293,6 +295,14 @@ class DeviceDayRunner:
                     from .device_day_models import DeviceDayModels
                     self.backend = DeviceDayModels(self.config)
         return self.backend
+
+    def _context(self, layout, recording):
+        context = load_context(layout, recording)
+        from .application.field_event_consumer import context_events
+        incoming = context_events(self.config, recording)
+        if incoming['status'] == 'no_input':
+            return context
+        return context | {'events': incoming['events'], 'field_event_status': incoming['status']}
 
     def _hash(self, path):
         path = Path(path).resolve()
@@ -323,6 +333,14 @@ class DeviceDayRunner:
         from .device_day_steps import enabled as step_structure_enabled
         structured_steps = step_structure_enabled(self.settings, recording)
         if stage == 'understanding' and full_coverage:
+            # This executor sends video only. Late speech/comments belong to
+            # fusion/publication identity, never to its visual observation.
+            if isinstance(inputs, list):
+                inputs = [inputs[0], None]
+            if isinstance(inputs, dict) and 'vision' in inputs:
+                inputs = {'vision': inputs['vision']}
+            elif isinstance(inputs, list) and isinstance(inputs[0], dict) and 'vision' in inputs[0]:
+                inputs = [{'vision': inputs[0]['vision']}, None]
             sources.append(directory / 'device_day_understanding.py')
             if structured_steps:
                 sources.append(directory / 'device_day_steps.py')
@@ -358,7 +376,9 @@ class DeviceDayRunner:
         if stage == 'understanding' and full_coverage:
             stage_settings.update({k: self.settings.get(k) for k in (
                 'understanding_coverage_since_us', 'understanding_frames_per_request',
-                'understanding_window_seconds', 'inactive_sample_seconds')})
+                'understanding_window_seconds', 'inactive_sample_seconds',
+                'understanding_active_fps', 'understanding_event_fps', 'understanding_event_radius_ms',
+                'understanding_overlap_frames')})
             if structured_steps:
                 stage_settings['experiment_steps_since_us'] = self.settings['experiment_steps_since_us']
         if stage == "retention":
@@ -367,7 +387,8 @@ class DeviceDayRunner:
                     return [retention_identity(item) for item in value]
                 if isinstance(value, dict) and value.get("recording_id") == recording["recording_id"]:
                     return {k: v for k, v in value.items() if k not in {"processing_priority", "archive_date", "updated_at", "source_expires_at",
-                                                                                       "source_retention_status", "archive_urgent", "archive_aged", "archive_deadline"}}
+                                                                                       "source_retention_status", "archive_urgent", "archive_aged", "archive_deadline",
+                                                                                       "activity_kind", "estimated_processing_seconds"}}
                 return value
             inputs = retention_identity(inputs)
         from .device_day_inplace import marker
@@ -538,9 +559,20 @@ class DeviceDayRunner:
         return hold if matches else None
 
     def _observed_process(self, recording, *, stage, retry):
+        from .device_day_write_guard import storage_guard, NASUnavailable
+        try:
+            with storage_guard(self.config):
+                return self._guarded_process(recording, stage=stage, retry=retry)
+        except NASUnavailable as exc:
+            return {'recording_id': recording['recording_id'], 'status': 'waiting_for_storage',
+                    'reason': exc.reason, 'error_type': type(exc).__name__}
+
+    def _guarded_process(self, recording, *, stage, retry):
+        from .device_day_contract import dependencies_for
+        dependencies = dependencies_for(self.settings, recording)
         needed = set(STAGES) if stage == 'all' else {stage}
         for _ in STAGES:
-            needed.update(parent for name in list(needed) for parent in DEPENDENCIES[name])
+            needed.update(parent for name in list(needed) for parent in dependencies[name])
         held = [name for name in STAGES if name in needed and self._completion_hold(recording, name)]
         if held:
             return {'recording_id': recording['recording_id'], 'status': 'historical_completion_held',
@@ -580,6 +612,8 @@ class DeviceDayRunner:
             return {"recording_id": recording["recording_id"], "status": "running_elsewhere"}
 
     def _process(self, layout, recording, *, stage, retry):
+        from .device_day_contract import dependencies_for
+        dependencies = dependencies_for(self.settings, recording)
         from .stage_execution import StageExecutor
         from .runtime_control import ExecutionYielded
         executor = StageExecutor(self.config)
@@ -592,13 +626,13 @@ class DeviceDayRunner:
         publication_token = publication_journal.begin(recording)
         needed = set(STAGES) if stage == "all" else {stage}
         for _ in STAGES:
-            needed.update(parent for name in list(needed) for parent in DEPENDENCIES[name])
+            needed.update(parent for name in list(needed) for parent in dependencies[name])
         deferred_publication = (stage in {"retention", "stt"}
                                 and self.settings.get("defer_audio_day_publication", False))
         for current in STAGES:
             if current not in needed:
                 continue
-            context = load_context(layout, recording) if current == "understanding" else None
+            context = self._context(layout, recording) if current == "understanding" else None
             inputs = (recording if current == "retention" else visual_input(retention) if current == "vision" else retention if current == "stt"
                       else {"vision": vision, "stt": stt, "context": context} if current == "understanding"
                       else understanding)
@@ -652,6 +686,27 @@ class DeviceDayRunner:
                             "stage": current, "reason": exc.reason,
                             "error_type": type(exc).__name__, "message": str(exc)}
                 except Exception as exc:
+                    from .device_day_write_guard import NASUnavailable
+                    if isinstance(exc, NASUnavailable):
+                        return {'recording_id': recording['recording_id'], 'stage': current,
+                                'status': 'waiting_for_storage', 'reason': exc.reason,
+                                'error_type': type(exc).__name__}
+                    from .device_day_understanding import UnderstandingPlanPaused, UnderstandingCheckpointYield
+                    if isinstance(exc, (UnderstandingPlanPaused, UnderstandingCheckpointYield)):
+                        status = ('waiting_for_plan_review' if isinstance(exc, UnderstandingPlanPaused)
+                                  else 'scheduled_checkpoint')
+                        receipt = dict(getattr(exc, 'partial_receipt', None) or {}) | {'schema_version': VERSION, 'key': key, 'stage': current,
+                                   'status': status, 'recording_id': recording['recording_id'], 'at': now(),
+                                   'reason': exc.reason, 'plan_ref': exc.plan_ref}
+                        atomic_json(path, receipt)
+                        return receipt
+                    from .multimodal_usage import SubmittedUnknown
+                    if isinstance(exc, SubmittedUnknown):
+                        receipt = {'schema_version': VERSION, 'key': key, 'stage': current,
+                                   'status': 'submitted_unknown', 'recording_id': recording['recording_id'],
+                                   'at': now(), 'reason': exc.reason}
+                        atomic_json(path, receipt)
+                        return receipt
                     if current in {"understanding", "stt"}:
                         from .device_day_provider_gate import ProviderGate
                         ProviderGate(self.config).record_failure({"error": str(exc)})
@@ -706,6 +761,11 @@ class DeviceDayRunner:
                 "media_duration_seconds": vision.get("source_duration_ms", 0) / 1000 if vision and vision.get("source_duration_ms") is not None else None}
 
     def refresh_index(self, layout, *, recording_id=None):
+        from .device_day_write_guard import storage_guard
+        with storage_guard(self.config):
+            return self._guarded_refresh_index(layout, recording_id=recording_id)
+
+    def _guarded_refresh_index(self, layout, *, recording_id=None):
         from .device_day_reports import render_day
         from .runtime_control import check_yield
         check_yield(checkpoint=False)
@@ -744,13 +804,25 @@ class DeviceDayRunner:
                                 published_records.append(record)
                                 semantic = stages.get("understanding") or {}
                                 stt = stages.get("stt") or {}
-                                if (semantic.get("status") == "completed" and semantic.get("vision_key") == visual.get("key")
-                                        and stt.get("status") == "completed" and self._accepts_receipt(stt, self._key("stt", record, retained))):
+                                from .device_day_understanding import enabled as video_only_enabled
+                                speech_ready = (video_only_enabled(self.settings, record) or
+                                    stt.get('status') == 'completed' and self._accepts_receipt(stt, self._key('stt', record, retained)))
+                                partial = (video_only_enabled(self.settings, record)
+                                           and semantic.get('partial_observations') is True
+                                           and semantic.get('status') in {'scheduled_checkpoint', 'waiting_for_plan_review'})
+                                if partial:
+                                    from .device_day_verification import verify_artifact_cached
+                                    references = semantic.get('artifacts')
+                                    partial = (isinstance(references, list) and bool(references)
+                                               and all(verify_artifact_cached(layout.root, ref) for ref in references))
+                                if ((semantic.get("status") == "completed" or partial) and semantic.get("vision_key") == visual.get("key")
+                                        and speech_ready):
                                     if day_context is None:
                                         day_context = load_day_context(layout)
                                     context = recording_context(day_context, record, stt)
                                     if self._accepts_receipt(semantic, self._key("understanding", record, {"vision": visual, "stt": stt, "context": context})):
-                                        understandings.extend(semantic.get("understandings", []))
+                                        values = semantic.get("understandings", [])
+                                        understandings.extend((value | {'status': 'partial'} for value in values) if partial else values)
                                 # Only after every original receipt/key check:
                                 # publish a lighter derived view, preserving the
                                 # full authoritative receipt and semantic input.
@@ -809,6 +881,8 @@ class DeviceDayRunner:
                     from .device_day_night_schedule import paused_stages
                     if 'report' not in paused_stages(self.config):
                         render_day(layout, index)
+                        from .application.field_event_consumer import consume_device_index
+                        consume_device_index(self.config, index, layout.name)
                     return True
             except BlockingIOError:
                 # The owning process publishes the complete index from receipts.
@@ -939,7 +1013,7 @@ class DeviceDayRunner:
             if date and layout.name[:10] != date:
                 continue
             record = record | {"archive_date": layout.name[:10]}
-            context = (load_context(layout, record) if stage in {"understanding", "report"} and layout.root.is_dir()
+            context = (self._context(layout, record) if stage in {"understanding", "report"} and layout.root.is_dir()
                        else {"comments": [], "protocol": None})
             inputs = record
             if stage != "retention":

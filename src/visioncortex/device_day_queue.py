@@ -11,10 +11,12 @@ from pathlib import Path
 
 
 class DeviceDayQueue:
-    def __init__(self, path: Path, *, latest_first=False):
+    def __init__(self, path: Path, *, latest_first=False, scheduling=None):
         if not isinstance(latest_first, bool):
             raise ValueError('device_day.latest_first must be a boolean')
         self.latest_first = latest_first
+        from .device_day_cohort import scheduling_options
+        self.scheduling = scheduling_options({'scheduling': scheduling})
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
         with self.connect() as db:
@@ -38,6 +40,18 @@ class DeviceDayQueue:
                 db.execute("ALTER TABLE recordings ADD COLUMN started_at REAL")
             if "retry_limit" not in columns:
                 db.execute("ALTER TABLE recordings ADD COLUMN retry_limit INTEGER NOT NULL DEFAULT 0")
+            for name, kind in {'processing_cohort': 'TEXT', 'admission_reason': 'TEXT',
+                               'admitted_at': 'REAL', 'admission_signature': 'TEXT',
+                               'first_ready_at': 'REAL', 'last_dispatch_at': 'REAL', 'blocked_reason': 'TEXT'}.items():
+                if name not in columns:
+                    db.execute(f'ALTER TABLE recordings ADD COLUMN {name} {kind}')
+            db.execute('CREATE TABLE IF NOT EXISTS dispatch_costs ('
+                       'kind TEXT NOT NULL, identity TEXT NOT NULL, seconds REAL NOT NULL, '
+                       'PRIMARY KEY(kind,identity))')
+            db.execute('CREATE TABLE IF NOT EXISTS source_versions ('
+                       'recording_id TEXT NOT NULL, source_signature TEXT NOT NULL, revision TEXT NOT NULL, '
+                       'snapshot TEXT NOT NULL, superseded_at REAL NOT NULL, '
+                       'PRIMARY KEY(recording_id,source_signature,revision))')
             db.execute("""CREATE TABLE IF NOT EXISTS retry_authorizations (
                 recording_id TEXT NOT NULL, revision TEXT NOT NULL, repair_id TEXT NOT NULL,
                 authorized_at REAL NOT NULL, previous_attempts INTEGER NOT NULL,
@@ -54,6 +68,20 @@ class DeviceDayQueue:
         payload = json.dumps(recording, ensure_ascii=False)
         status = "queued" if recording.get("configured_role") in {"first_person", "third_person"} else "needs_camera_role"
         with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            old = db.execute("SELECT * FROM recordings WHERE recording_id=? AND "
+                             "json_extract(payload,'$.source_signature') IS NOT ? AND "
+                             "(status!='running' OR COALESCE(lease_until,0)<?)",
+                             (recording['recording_id'], recording.get('source_signature'), observed)).fetchone()
+            if old:
+                signature = json.loads(old['payload']).get('source_signature') or 'unknown'
+                db.execute('INSERT OR IGNORE INTO source_versions VALUES(?,?,?,?,?)',
+                           (old['recording_id'], signature, old['revision'], json.dumps(dict(old)), observed))
+            db.execute("UPDATE recordings SET processing_cohort=NULL,admission_reason=NULL,admitted_at=NULL,"
+                       "admission_signature=NULL,first_ready_at=NULL,last_dispatch_at=NULL,blocked_reason=NULL "
+                       "WHERE recording_id=? AND json_extract(payload,'$.source_signature') IS NOT ? "
+                       "AND (status!='running' OR COALESCE(lease_until,0)<?)",
+                       (recording['recording_id'], recording.get('source_signature'), observed))
             changed = db.execute("""INSERT INTO recordings(recording_id,revision,payload,status,queued_at,updated_at)
               VALUES(?,?,?,?,?,?) ON CONFLICT(recording_id) DO UPDATE SET
               revision=excluded.revision,payload=excluded.payload,status=excluded.status,
@@ -81,6 +109,54 @@ class DeviceDayQueue:
         with self.connect() as db:
             return [json.loads(row["payload"]) for row in db.execute(
                 "SELECT payload FROM recordings WHERE status != 'completed'")]
+
+    def grant_admission(self, recording, *, cohort='live', reason='recent_ready', at=None):
+        """Grant only after readiness checks; old rows remain unadmitted by migration."""
+        if cohort not in {'live', 'current_recovery', 'historical_backfill'} or not reason:
+            raise ValueError('Invalid processing cohort or admission reason')
+        signature = recording.get('source_signature')
+        if not isinstance(signature, str) or not signature:
+            raise ValueError('Admission requires an exact source signature')
+        current = time.time() if at is None else at
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            previous = db.execute('SELECT processing_cohort,admission_signature FROM recordings WHERE recording_id=?',
+                                  (recording['recording_id'],)).fetchone()
+            if (previous and previous['processing_cohort'] == 'historical_backfill'
+                    and previous['admission_signature'] == signature and cohort == 'live'):
+                # Seeing an authorized historical job in a recent worker does
+                # not promote its paid permission to the live cohort.
+                return False
+            return bool(db.execute("UPDATE recordings SET processing_cohort=?,admission_reason=?,"
+                "admitted_at=CASE WHEN admission_signature=? THEN COALESCE(admitted_at,?) ELSE ? END,"
+                "first_ready_at=CASE WHEN admission_signature=? THEN COALESCE(first_ready_at,?) ELSE ? END,"
+                "admission_signature=? WHERE recording_id=? AND "
+                "json_extract(payload,'$.source_signature')=?",
+                (cohort, reason, signature, current, current, signature, current, current,
+                 signature, recording['recording_id'], signature)).rowcount)
+
+    def admissions(self):
+        with self.connect() as db:
+            return {row['recording_id']: row['admission_signature'] for row in db.execute(
+                "SELECT recording_id,admission_signature FROM recordings WHERE "
+                "processing_cohort IN ('live','current_recovery') AND admitted_at IS NOT NULL "
+                "AND admission_signature=json_extract(payload,'$.source_signature')")}
+
+    def release_hold(self, recording_id, *, reason, evidence):
+        """An explicit source/review decision releases a hold, never a retry sweep."""
+        if not evidence:
+            raise ValueError('Hold release requires review evidence')
+        with self.connect() as db:
+            row = db.execute('SELECT revision FROM recordings WHERE recording_id=? AND blocked_reason=?',
+                             (recording_id, reason)).fetchone()
+            if row is None:
+                return False
+            db.execute("UPDATE recordings SET status='queued',blocked_reason=NULL WHERE recording_id=?",
+                       (recording_id,))
+            from .task_events import append
+            append(db, recording_id, 'hold_released', revision=row['revision'],
+                   data={'reason': reason, 'evidence': evidence})
+            return True
 
     def has_processing_work(self, max_attempts=0):
         """Keep expensive background audits behind ready stage work."""
@@ -118,6 +194,7 @@ class DeviceDayQueue:
             conditions = ["(r.status='queued' OR (r.status='running' AND COALESCE(r.lease_until,0)<?)"
                           + (" OR (r.status='failed' AND (? IS NULL OR r.attempts<MAX(?,r.retry_limit))))" if retry else ")")]
             conditions.append("r.input_status='ready'")
+            conditions.append('r.blocked_reason IS NULL')
             parameters = [current]
             if retry:
                 parameters.extend([max_attempts, max_attempts])
@@ -159,6 +236,22 @@ class DeviceDayQueue:
                              "THEN -COALESCE(json_extract(r.payload,'$.recording_start_us'),0) "
                              "ELSE COALESCE(json_extract(r.payload,'$.recording_start_us'),0) END,")
             ordering += "r.queued_at,r.recording_id"
+            if self.scheduling['enabled'] and self.path.stem != 'queue-retention':
+                # Resource seconds, rather than task counts, determine the
+                # next class/device. Waiting age is an independent escape.
+                shares = json.dumps(self.scheduling['resource_shares'])
+                db.execute('CREATE TEMP TABLE IF NOT EXISTS dispatch_shares (identity TEXT PRIMARY KEY, weight REAL)')
+                db.execute('DELETE FROM dispatch_shares')
+                db.execute('INSERT INTO dispatch_shares SELECT key,value FROM json_each(?)', (shares,))
+                age = self.scheduling['max_ready_wait_seconds']
+                ready = 'COALESCE(r.last_dispatch_at,r.first_ready_at,r.queued_at)'
+                category = "COALESCE(json_extract(r.payload,'$.activity_kind'),r.processing_cohort,'unresolved')"
+                ordering = (f'CASE WHEN {ready}<={current-age} THEN 0 ELSE 1 END,'
+                            f'CASE WHEN {ready}<={current-age} THEN {ready} ELSE 9e99 END,'
+                            f"COALESCE((SELECT seconds FROM dispatch_costs WHERE kind='class' AND identity={category}),0) / "
+                            f'COALESCE((SELECT weight FROM dispatch_shares WHERE identity={category}),1),'
+                            "COALESCE((SELECT seconds FROM dispatch_costs WHERE kind='camera' AND "
+                            "identity=json_extract(r.payload,'$.camera_key')),0)," + ordering)
             row = db.execute("SELECT r.* FROM recordings r WHERE " + " AND ".join(conditions)
                              + " ORDER BY " + ordering + " LIMIT 1", parameters).fetchone()
             if row is None:
@@ -170,8 +263,8 @@ class DeviceDayQueue:
                                "ON CONFLICT(camera_key) DO UPDATE SET last_claim=excluded.last_claim",
                                (camera, current))
             db.execute("""UPDATE recordings SET status='running',lease_owner=?,lease_until=?,
-              attempts=attempts+1,updated_at=?,started_at=? WHERE recording_id=?""",
-                       (owner, current + 90, current, current, row["recording_id"]))
+              attempts=attempts+1,updated_at=?,started_at=?,last_dispatch_at=? WHERE recording_id=?""",
+                       (owner, current + 90, current, current, current, row["recording_id"]))
             from .task_events import append
             append(db, row['recording_id'], 'running', revision=row['revision'], attempt=row['attempts']+1)
             return json.loads(row["payload"])
@@ -199,7 +292,26 @@ class DeviceDayQueue:
             stopped.set()
             thread.join(timeout=31)
 
+    def _account_dispatch(self, db, owner, recording_id, seconds):
+        row = db.execute('SELECT payload,processing_cohort FROM recordings WHERE recording_id=? AND lease_owner=?',
+                         (recording_id, owner)).fetchone()
+        if row and self.scheduling['enabled']:
+            record = json.loads(row['payload'])
+            for kind, identity in (('camera', record.get('camera_key') or 'unknown'),
+                                   ('class', record.get('activity_kind') or row['processing_cohort'] or 'unresolved')):
+                db.execute('INSERT INTO dispatch_costs VALUES(?,?,?) ON CONFLICT(kind,identity) '
+                           'DO UPDATE SET seconds=seconds+excluded.seconds', (kind, identity, max(0, seconds)))
+
     def finish(self, owner, recording_id, result, seconds):
+        if result.get('status') in {'waiting_for_plan_review', 'submitted_unknown'}:
+            with self.connect() as db:
+                db.execute('BEGIN IMMEDIATE')
+                self._account_dispatch(db, owner, recording_id, seconds)
+                reason = result.get('reason') or result['status']
+                db.execute("UPDATE recordings SET status='blocked',blocked_reason=?,result=?,"
+                           "lease_owner=NULL,lease_until=NULL,updated_at=? WHERE recording_id=? AND lease_owner=?",
+                           (reason, json.dumps(result, ensure_ascii=False), time.time(), recording_id, owner))
+            return
         if result.get('status') == 'waiting_for_prerequisite':
             with self.connect() as db:
                 db.execute('BEGIN IMMEDIATE')
@@ -214,10 +326,12 @@ class DeviceDayQueue:
                     append(db, recording_id, 'waiting_for_prerequisite', revision=row['revision'],
                            attempt=row['attempts'], data={'prerequisite_stage': result.get('prerequisite_stage')})
             return
-        if result.get("status") in {"running_elsewhere", "waiting_for_publication", "waiting_for_provider", "cancelled", "paused_for_live"}:
+        if result.get("status") in {"running_elsewhere", "waiting_for_publication", "waiting_for_provider", "waiting_for_storage", "cancelled", "paused_for_live", "scheduled_checkpoint"}:
             # Lock contention is not a model failure. Return the slice to
             # scheduling; completed model receipts remain available for reuse.
             with self.connect() as db:
+                db.execute('BEGIN IMMEDIATE')
+                self._account_dispatch(db, owner, recording_id, seconds)
                 db.execute("""UPDATE recordings SET status='queued',result=?,
                   attempts=MAX(0,attempts-1),lease_owner=NULL,lease_until=NULL,
                   updated_at=? WHERE recording_id=? AND lease_owner=?""",
@@ -227,6 +341,7 @@ class DeviceDayQueue:
         status = "completed" if completed else "failed"
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
+            self._account_dispatch(db, owner, recording_id, seconds)
             row = db.execute('SELECT revision,attempts,payload FROM recordings WHERE recording_id=? AND lease_owner=?', (recording_id, owner)).fetchone()
             db.execute("""UPDATE recordings SET status=?,result=?,completed_at=?,wall_seconds=?,
               lease_owner=NULL,lease_until=NULL,updated_at=? WHERE recording_id=? AND lease_owner=?""",
@@ -326,6 +441,12 @@ class DeviceDayQueue:
               FROM recordings WHERE (status='queued' AND input_status='ready') OR (status='running' AND COALESCE(lease_until,0)<?)""",
                                 (current,)).fetchone()
             oldest = queued["oldest"]
+            blockers = {row['reason']: row['n'] for row in db.execute(
+                'SELECT blocked_reason AS reason,count(*) AS n FROM recordings WHERE blocked_reason IS NOT NULL GROUP BY blocked_reason')}
+            ready_at = db.execute("SELECT MIN(first_ready_at) FROM recordings WHERE status!='completed'").fetchone()[0]
+            work = db.execute("SELECT SUM(json_extract(payload,'$.estimated_processing_seconds')),"
+                              "SUM(json_extract(payload,'$.estimated_processing_seconds') IS NULL) "
+                              "FROM recordings WHERE status='queued' AND input_status='ready' AND blocked_reason IS NULL").fetchone()
             completed = db.execute("SELECT result,wall_seconds FROM recordings WHERE status='completed' ORDER BY completed_at DESC LIMIT 100").fetchall()
         known = [(json.loads(r["result"] or "{}").get("media_duration_seconds"), r["wall_seconds"]) for r in completed]
         measured = [(float(media), float(wall)) for media, wall in known if media is not None and wall and wall > 0]
@@ -337,6 +458,11 @@ class DeviceDayQueue:
                 "queued_media_seconds": queued["media_seconds"] if not queued["unknown"] else None,
                 "queued_media_duration_unknown_count": queued["unknown"],
                 "oldest_wait_seconds": max(0, time.time() - oldest) if oldest else 0,
+                "oldest_ready_wait_seconds": max(0, current-ready_at) if ready_at else None,
+                "blocked_reasons": blockers,
+                "estimated_ready_service_seconds": work[0] if not work[1] else None,
+                "overload_status": ('UNKNOWN_COST' if work[1] else 'OVERLOADED' if (work[0] or 0) >
+                                    self.scheduling['capacity_horizon_seconds'] else 'WITHIN_HORIZON'),
                 "backlog_warning": bool(oldest and time.time() - oldest > 900),
                 "completed_sample_count": len(completed), "measured_media_sample_count": len(measured),
                 "media_seconds_per_worker_second": sum(m for m, _ in measured) / sum(w for _, w in measured) if measured else None,

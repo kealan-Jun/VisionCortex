@@ -86,7 +86,7 @@ class BackfillWorker:
         self.stage = stage
         self.idle_since = None
         self.deferred = {}
-        self.admitter = RetentionWorker(stage=stage)
+        self.admitter = RetentionWorker(stage=stage, admission_cohort='historical_backfill')
         self.next_fair_at = 0.0
 
     def tick(self, runner, stop):

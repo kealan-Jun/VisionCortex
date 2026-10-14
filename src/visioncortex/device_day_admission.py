@@ -8,6 +8,9 @@ from .device_day_contract import STAGES
 
 
 def validate(settings):
+    from .device_day_cohort import scheduling_options, recovery_entries
+    scheduling_options(settings)
+    recovery_entries(settings)
     limits = settings.get('stage_worker_limits', {})
     if (not isinstance(limits, dict) or set(limits) - set(STAGES)
             or any(type(value) is not int or value < 1 for value in limits.values())):

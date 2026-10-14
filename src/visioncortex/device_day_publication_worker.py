@@ -7,6 +7,9 @@ from .device_day_contract import atomic_json, digest
 
 
 class PublicationReplay:
+    def __init__(self, *, field_fetch=None):
+        self.field_fetch = field_fetch
+
     def tick(self, runner):
         from .device_day import exclusive
         from .publication_journal import PublicationJournal, reconcile
@@ -20,7 +23,21 @@ class PublicationReplay:
             # receipt/artifact, prefers recent records and bounds each round.
             published = reconcile(runner)
             pending = PublicationJournal(runner.runtime_root).pending(1, since_us=processing_cutoff(runner.settings))
-            return {'status': 'completed', 'published': published, 'pending_publications': bool(pending)}
+            field_settings = runner.settings.get('field_recognition') or {}
+            field_result = {'status': 'no_input', 'consumer_wired': False, 'model_invoked': False}
+            if field_settings.get('enabled', False):
+                from .application.field_event_consumer import FieldEventConsumer
+                options = {'fetch_json': self.field_fetch} if self.field_fetch is not None else {}
+                try:
+                    consumer = FieldEventConsumer(runner.runtime_root, field_settings,
+                                                  timezone=runner.settings.get('timezone', 'Asia/Shanghai'), **options)
+                    field_result = consumer.tick()
+                except (OSError, ValueError, KeyError, TypeError) as exc:
+                    field_result = {'status': 'blocked', 'error_type': type(exc).__name__,
+                                    'reason': getattr(exc, 'reason', 'field_event_consumer_unavailable'),
+                                    'consumer_wired': True, 'model_invoked': False, 'business_accepted': False}
+            return {'status': 'completed', 'published': published, 'pending_publications': bool(pending),
+                    'field_events': field_result}
 
 
 def serve(config_path, stop):

@@ -17,7 +17,8 @@ def source(tmp_path, seconds=5):
 
 
 def test_active_submits_every_frame_in_order_across_bounded_windows(tmp_path):
-    groups = list(frame_windows(source(tmp_path), 1250, 3150, True, {'understanding_frames_per_request': 4}))
+    groups = list(frame_windows(source(tmp_path), 1250, 3150, True,
+        {'understanding_frames_per_request': 4, 'understanding_active_fps': 10, 'understanding_overlap_frames': 0}))
     frames = [f for _, _, rows in groups for f in rows]
     assert [f[0] for f in frames] == list(range(13,32))
     assert all(len(rows) <= 4 for _, _, rows in groups)
@@ -27,7 +28,7 @@ def test_active_submits_every_frame_in_order_across_bounded_windows(tmp_path):
 
 def test_inactive_sampling_covers_start_to_end_without_total_frame_cap(tmp_path):
     groups = list(frame_windows(source(tmp_path, 15), 0, 15000, False,
-        {'understanding_frames_per_request': 4, 'inactive_sample_seconds': 1}))
+        {'understanding_frames_per_request': 4, 'inactive_sample_seconds': 1, 'understanding_overlap_frames': 0}))
     frames = [f for _, _, rows in groups for f in rows]
     assert len(frames) > 8
     assert frames[0][0] == 0 and frames[-1][0] == 149
@@ -36,5 +37,5 @@ def test_inactive_sampling_covers_start_to_end_without_total_frame_cap(tmp_path)
 
 
 def test_absent_media_is_not_reported_as_full_coverage(tmp_path):
-    with pytest.raises(ValueError, match='opened'):
+    with pytest.raises(ValueError, match='opened|native source PTS unavailable'):
         list(frame_windows(tmp_path/'missing.mp4', 0, 1000, True, {}))

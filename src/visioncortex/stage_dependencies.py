@@ -15,7 +15,7 @@ DEVICE_SOURCES = {
                'grouping', 'action_state_machine', 'action_semantics', 'archive', 'open_vocabulary_runtime', 'source_frames', 'media_time'],
     'stt': ['device_day_stt', 'speech', 'speech_worker', 'speech_qwen'],
     'understanding': ['device_day_models', 'device_day_audit', 'device_day_semantic_cache', 'scene_requests', 'scene_transport',
-                      'mllm', 'mllm_provider', 'video_io', 'media_time'],
+                      'mllm', 'mllm_provider', 'video_io', 'media_time', 'device_day_coverage'],
     'report': ['device_day_reports', 'daily_reports', 'report_presentations'],
 }
 CONTROL_MODULES = frozenset({
@@ -23,6 +23,10 @@ CONTROL_MODULES = frozenset({
     'receipt_projection', 'publication_journal', 'provider_control', 'build_identity', 'owned_subprocess',
     'runtime_services', 'task_events', 'input_availability', 'submission', 'knowledge', 'knowledge_api',
     'stage_execution', 'stage_dependencies', 'artifact_reader', 'timeline_invalidation', 'multimodal_usage',
+    'device_day_cohort', 'pricing_table', 'usage_reconciliation',
+    'device_day_activity', 'device_day_queue', 'device_day_retention_worker', 'device_day_admission',
+    'device_day_progress', 'device_day_overview', 'device_day_publication_worker',
+    'device_day_write_guard',
 })
 
 
@@ -38,6 +42,12 @@ def _changed_stages(paths):
                       'training': set(), 'training_runtime': set(), 'web_api': set()}
     for package in packages:
         changed.update(package_stages.get(package, DEVICE_SOURCES))
+    # Context delivery and deterministic person projections do not execute a
+    # visual model. Explicit identities keep their late revisions report-only.
+    context_files = {'evidence/field_events.py', 'evidence/person_day.py', 'evidence/device_events.py',
+                     'application/field_event_consumer.py'}
+    if python_paths and python_paths <= context_files:
+        changed = {'report'}
     if 'analysis/windows.py' in python_paths:
         changed.add('understanding')
     known = CONTROL_MODULES | {name for items in DEVICE_SOURCES.values() for name in items} | {'api', 'cli'}

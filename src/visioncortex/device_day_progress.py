@@ -185,12 +185,13 @@ def snapshot(config):
                 columns = {row[1] for row in db.execute('PRAGMA table_info(recordings)')}
                 limit_column = 'retry_limit' if 'retry_limit' in columns else '0 AS retry_limit'
                 started_column = 'started_at' if 'started_at' in columns else 'NULL AS started_at'
+                admission_column = 'processing_cohort' if 'processing_cohort' in columns else 'NULL AS processing_cohort'
                 rows = db.execute("SELECT recording_id,status,lease_until,queued_at,updated_at, "
                                   "json_extract(payload,'$.camera_key'),json_extract(payload,'$.recording_start_us'),"
                                   "json_extract(payload,'$.recording_end_us'),wall_seconds,completed_at,result,"
                                   "json_extract(payload,'$.source_signature'),attempts,input_status," + limit_column +
-                                  ',' + started_column + " FROM recordings")
-                for rid, status, lease, queued, updated, camera, start, end, wall, completed_at, raw_result, signature, attempts, input_status, authorized_limit, started_at in rows:
+                                  ',' + started_column + ',' + admission_column + " FROM recordings")
+                for rid, status, lease, queued, updated, camera, start, end, wall, completed_at, raw_result, signature, attempts, input_status, authorized_limit, started_at, cohort in rows:
                     if not start:
                         continue
                     day = date_of(start)
@@ -218,6 +219,7 @@ def snapshot(config):
                             result = {}
                     except (ValueError, TypeError):
                         result = {}
+                    queue_details[(rid, stage)].update(processing_cohort=cohort, reason=result.get('reason'))
                     if signature == source_signatures[rid]:
                         lifecycle = lifecycle_records.setdefault(rid, {
                             'recording_id': rid, 'archive': day + '_' + str(camera),
@@ -306,12 +308,14 @@ def snapshot(config):
     for identifier, row in states.items():
         for stage, (status, day) in row.items():
             if status not in {'queued', 'expired', 'waiting_for_prerequisite', 'failed',
-                              'input_missing', 'input_unavailable', 'needs_camera_role'}:
+                              'input_missing', 'input_unavailable', 'needs_camera_role', 'blocked'}:
                 continue
             dependencies = () if settings.get('inplace_preprocessing') and stage in {'vision', 'stt'} else DEPENDENCIES[stage]
             parents = [row.get(p, ('missing', day))[0] for p in dependencies]
             details = queue_details.get((identifier, stage), {})
             scope = 'recent' if capture_times.get(identifier, 0) >= cutoff else 'history'
+            if details.get('processing_cohort') in {'live', 'current_recovery'}:
+                scope = 'recent'
             coverage = consumers['stages'][stage]['scopes'][scope]['status']
             live_hold = any(owner['owner_state'] == 'verified' and owner.get('backfill_status') == 'waiting_for_live'
                             for owner in consumers['stages'][stage]['owners'])
@@ -320,6 +324,7 @@ def snapshot(config):
                 or (owner.get('last_result') or {}).get('status') == 'waiting_for_storage')
                 for owner in consumers['stages'][stage]['owners'])
             reason = ('paused_by_user' if stage in paused else
+                      (details.get('reason') or 'blocked') if status == 'blocked' else
                       status if status in {'input_missing', 'input_unavailable'} else
                       'retry_exhausted' if status == 'failed' and details.get('attempts', 0)
                       >= retry_limit(details, settings.get('failure_retry_limit') or 3) else
