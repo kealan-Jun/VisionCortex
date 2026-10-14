@@ -2,12 +2,13 @@
 
 import json
 import math
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit
 from urllib.request import ProxyHandler, Request, build_opener
 
-from ..device_day_contract import atomic_json, digest, file_hash
+from ..device_day_contract import atomic_bytes, atomic_json, digest, file_hash
 from ..evidence.field_events import FieldEventInbox
 from ..evidence.person_day import person_days
 from ..local_storage import require_local_path
@@ -20,7 +21,13 @@ class PersonDayCapacityExceeded(OSError):
 
 def encoded_size(value):
     return sum(len(piece.encode('utf-8')) for piece in json.JSONEncoder(
-        ensure_ascii=False, indent=2, allow_nan=False).iterencode(value)) + 1
+        ensure_ascii=False, separators=(',', ':'), allow_nan=False).iterencode(value)) + 1
+
+
+def publish_person_json(path, value):
+    # Same facts and content identity, without repeated presentation whitespace.
+    # Capacity checks use exactly this wire encoding before allocating it.
+    atomic_bytes(path, (json.dumps(value, ensure_ascii=False, separators=(',', ':'), allow_nan=False) + '\n').encode('utf-8'))
 
 
 def validate_settings(settings):
@@ -135,13 +142,13 @@ class FieldEventConsumer:
         for directory, version, latest, content in plans:
             directory.mkdir(mode=0o700, exist_ok=True)
             if not version.exists():
-                atomic_json(version, content)
+                publish_person_json(version, content)
                 version.chmod(0o600)
             if json.loads(version.read_text()) != content:
                 raise ValueError('Personnel publication verification failed')
-            atomic_json(latest, content)
+            publish_person_json(latest, content)
             latest.chmod(0o600)
-        atomic_json(root / 'Manifest.json', manifest)
+        publish_person_json(root / 'Manifest.json', manifest)
         (root / 'Manifest.json').chmod(0o600)
         if json.loads((root / 'Manifest.json').read_text()) != manifest:
             raise ValueError('Personnel publication manifest verification failed')
@@ -253,3 +260,81 @@ def consume_device_index(config, index, archive_id):
     return {'status': 'projected', 'events': result, 'publication': consumer.publish(),
             'model_invoked': False, 'validation_basis': 'caller_verified_device_index',
             'business_accepted': False}
+
+
+def archive_person_history(config, runtime_root, destination):
+    """Explicit verified history offload; preserve latest, inbox and path mapping.
+
+    The caller supplies its authorized archive destination and storage checks.
+    Local/no-NAS callers cannot implicitly inherit a network archive. The same
+    publication lock excludes an active writer; only superseded JSON revisions
+    are eligible. No live database, media or current pointer is relocated.
+    """
+    from ..device_day import exclusive
+    from ..device_day_write_guard import storage_guard
+    runtime = require_local_path(Path(runtime_root))
+    root = runtime / 'PersonDay'
+    destination = Path(destination) / digest({'runtime_root': str(runtime)})[:24]
+    with exclusive(runtime / 'locks' / 'person-day-publication.lock'), storage_guard(config):
+        manifest = json.loads((root / 'Manifest.json').read_text())
+        current = {output['revision_path'] for output in manifest['outputs']}
+        receipt_path = root / 'HistoryArchives.json'
+        receipt = json.loads(receipt_path.read_text()) if receipt_path.is_file() else {
+            'schema_version': 'person-day-history-archives/1', 'entries': {}}
+        moved, reclaimed = 0, 0
+        for path in sorted(root.glob('*/Revision*.json')):
+            relative = path.relative_to(root).as_posix()
+            if relative in current:
+                continue
+            require_local_path(path)
+            initial = path.stat()
+            data = json.loads(path.read_text())
+            if (data.get('schema_version') != 'person-day-publication/1'
+                    or data.get('content_revision') != digest({k: v for k, v in data.items() if k != 'content_revision'})):
+                raise ValueError('Person history revision content identity is invalid')
+            checksum = file_hash(path)
+            target = destination / relative
+            if target.exists():
+                if file_hash(target) != checksum:
+                    raise ValueError('Person history archive collision; original retained')
+            else:
+                atomic_bytes(target, path.read_bytes())
+            if file_hash(target) != checksum or file_hash(path) != checksum or any(getattr(path.stat(), k) != getattr(initial, k)
+                    for k in ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns')):
+                raise ValueError('Person history archive verification failed; original retained')
+            receipt['entries'][relative] = {'archive_path': str(target), 'sha256': checksum,
+                'size_bytes': initial.st_size, 'content_revision': data['content_revision'],
+                'generation': data['generation'], 'original_relative_path': relative}
+            # Durable verified mapping precedes reclaim, including crash recovery.
+            atomic_json(receipt_path, receipt)
+            if json.loads(receipt_path.read_text()) != receipt:
+                raise ValueError('Person history archive mapping verification failed')
+            from ..device_day_write_guard import CURRENT
+            CURRENT.get().validate()
+            path.unlink()
+            descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            moved += 1
+            reclaimed += initial.st_size
+        return {'archived_revisions': moved, 'reclaimed_bytes': reclaimed,
+                'history_mapping': str(receipt_path), 'latest_preserved': True, 'inbox_unchanged': True}
+
+
+def read_person_revision(config, runtime_root, relative):
+    """Read an original revision identity from SSD or its verified archive map."""
+    from ..device_day_contract import safe_child
+    root = require_local_path(Path(runtime_root)) / 'PersonDay'
+    path = safe_child(root, relative)
+    if path.is_file():
+        return json.loads(path.read_text())
+    reference = json.loads((root / 'HistoryArchives.json').read_text())['entries'][relative]
+    from ..device_day_write_guard import storage_guard, CURRENT
+    with storage_guard(config):
+        target = Path(reference['archive_path'])
+        CURRENT.get().mount_for(target)
+        if target.stat().st_size != reference['size_bytes'] or file_hash(target) != reference['sha256']:
+            raise ValueError('Archived person revision integrity check failed')
+        return json.loads(target.read_text())

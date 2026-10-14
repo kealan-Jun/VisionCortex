@@ -142,15 +142,19 @@ class DeviceDayQueue:
                 "processing_cohort IN ('live','current_recovery') AND admitted_at IS NOT NULL "
                 "AND admission_signature=json_extract(payload,'$.source_signature')")}
 
-    def release_hold(self, recording_id, *, reason, evidence):
+    def release_hold(self, recording_id, *, reason, evidence, expected_revision=None, source_signature=None):
         """An explicit source/review decision releases a hold, never a retry sweep."""
         if not evidence:
             raise ValueError('Hold release requires review evidence')
         with self.connect() as db:
-            row = db.execute('SELECT revision FROM recordings WHERE recording_id=? AND blocked_reason=?',
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT revision,payload FROM recordings WHERE recording_id=? AND blocked_reason=?',
                              (recording_id, reason)).fetchone()
             if row is None:
                 return False
+            if reason == 'anomalous_inactive_request_plan' and (
+                    expected_revision != row['revision'] or source_signature != json.loads(row['payload']).get('source_signature')):
+                raise ValueError('Plan hold release requires the exact reviewed revision and source')
             db.execute("UPDATE recordings SET status='queued',blocked_reason=NULL WHERE recording_id=?",
                        (recording_id,))
             from .task_events import append
@@ -443,6 +447,7 @@ class DeviceDayQueue:
             oldest = queued["oldest"]
             blockers = {row['reason']: row['n'] for row in db.execute(
                 'SELECT blocked_reason AS reason,count(*) AS n FROM recordings WHERE blocked_reason IS NOT NULL GROUP BY blocked_reason')}
+            plan_reviews = db.execute("SELECT MIN(COALESCE(first_ready_at,queued_at)),SUM(?-COALESCE(first_ready_at,queued_at)>900) FROM recordings WHERE blocked_reason='anomalous_inactive_request_plan'", (current,)).fetchone()
             ready_at = db.execute("SELECT MIN(first_ready_at) FROM recordings WHERE status!='completed'").fetchone()[0]
             work = db.execute("SELECT SUM(json_extract(payload,'$.estimated_processing_seconds')),"
                               "SUM(json_extract(payload,'$.estimated_processing_seconds') IS NULL) "
@@ -460,6 +465,8 @@ class DeviceDayQueue:
                 "oldest_wait_seconds": max(0, time.time() - oldest) if oldest else 0,
                 "oldest_ready_wait_seconds": max(0, current-ready_at) if ready_at else None,
                 "blocked_reasons": blockers,
+                "oldest_plan_review_wait_seconds": max(0, current-plan_reviews[0]) if plan_reviews[0] is not None else None,
+                "overdue_plan_review_count": plan_reviews[1] or 0,
                 "estimated_ready_service_seconds": work[0] if not work[1] else None,
                 "overload_status": ('UNKNOWN_COST' if work[1] else 'OVERLOADED' if (work[0] or 0) >
                                     self.scheduling['capacity_horizon_seconds'] else 'WITHIN_HORIZON'),

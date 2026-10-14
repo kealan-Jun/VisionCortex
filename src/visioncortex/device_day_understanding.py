@@ -3,7 +3,7 @@ import math
 from fractions import Fraction
 
 from .device_day_contract import artifact, atomic_bytes, atomic_json, digest, media_interval_name, media_time_name, safe_child
-from .device_day_coverage import frame_coverage, limits, manifest, request_plan, shadow_episodes
+from .device_day_coverage import apply_plan_reviews, frame_coverage, limits, manifest, request_plan, shadow_episodes
 from .media_time import capture_us
 
 
@@ -32,7 +32,7 @@ class UnderstandingCheckpointYield(Exception):
         self.partial_receipt = partial_receipt
 
 
-def frame_windows(source, start, end, active, settings, *, required_times=(), details=None):
+def frame_windows(source, start, end, active, settings, *, required_times=(), details=None, pixels=True):
     """Select on native decoded-frame PTS; split capacity without dropping a tail.
 
     Decoding starts at the source origin so its frame ordinal joins the native
@@ -64,12 +64,13 @@ def frame_windows(source, start, end, active, settings, *, required_times=(), de
             raise ValueError('Required action frame is outside the source interval')
         mandatory.add(min(within, key=lambda row: abs(row[1] - stamp))[0])
     details = details if details is not None else {}
-    capture = cv2.VideoCapture(str(source), cv2.CAP_FFMPEG, [
+    capture = (cv2.VideoCapture(str(source), cv2.CAP_FFMPEG, [
         cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000, cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000])
-    if not capture.isOpened():
+        if pixels else None)
+    if pixels and not capture.isOpened():
         capture.release()
         raise ValueError('Understanding source could not be opened')
-    expected = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+    expected = int(capture.get(cv2.CAP_PROP_FRAME_COUNT)) if pixels else len(native)
     previous_time, ordinal, left, next_sample, next_event = -1.0, 0, start, start, start
     pending, last = [], None
     initial = trace.stat
@@ -83,7 +84,7 @@ def frame_windows(source, start, end, active, settings, *, required_times=(), de
         return [row for row in rows[-count:] if stamp - row[1] < window_ms] if count else []
     try:
         while True:
-            ok, frame = capture.read()
+            ok, frame = capture.read() if pixels else (ordinal in native, None)
             if not ok:
                 if expected > 0 and ordinal < expected:
                     raise ValueError('Video decoder ended before the declared frame count')
@@ -104,7 +105,7 @@ def frame_windows(source, start, end, active, settings, *, required_times=(), de
                 yield left, stamp, pending
                 pending = overlap(pending, stamp)
                 left = pending[0][1] if pending else stamp
-            width = min(768, frame.shape[1])
+            width = min(768, frame.shape[1]) if pixels else None
             reasons = []
             if stamp >= next_sample:
                 reasons.append('experiment_baseline' if active else 'scene_interval_sample')
@@ -116,7 +117,7 @@ def frame_windows(source, start, end, active, settings, *, required_times=(), de
                 reasons.append('required_action_frame')
             if last is None:
                 reasons.append('segment_start_boundary')
-            item = (ordinal - 1, stamp, cv2.resize(frame, (width, round(frame.shape[0]*width/frame.shape[1]))))
+            item = (ordinal - 1, stamp, cv2.resize(frame, (width, round(frame.shape[0]*width/frame.shape[1]))) if pixels else None)
             last = item
             details[item[0]] = {'source_pts': pts, 'source_time_base': trace.time_base,
                                 'selection_reasons': reasons}
@@ -141,7 +142,8 @@ def frame_windows(source, start, end, active, settings, *, required_times=(), de
         elif last is None:
             raise ValueError('Understanding interval has no decoded frames')
     finally:
-        capture.release()
+        if capture is not None:
+            capture.release()
 
 
 def understand(backend, layout, recording, vision, context, key):
@@ -151,12 +153,14 @@ def understand(backend, layout, recording, vision, context, key):
     from . import scene_requests
     from . import device_day_steps
     from .device_day_activity import phase
+    from .device_day_window_inputs import selections, saved_metadata, decode_selected
     structured_steps = device_day_steps.enabled(backend.settings, recording)
     prompt = SCENE_PROMPT + '\n本任务只理解视频画面，不提供或引用录音转写。coverage给出实际输入覆盖；每帧文字简短，重复场景可简述。'
     if structured_steps:
         prompt = device_day_steps.PROMPT
     with phase('visual_request_planning_seconds'):
-        plan = request_plan(vision['segments'], context, backend.settings)
+        plan = apply_plan_reviews(request_plan(vision['segments'], context, backend.settings),
+                                  backend.settings, recording, vision['key'])
         audit = manifest(recording, vision, plan, shadow_episodes(vision['segments'], context))
         audit_path = layout.understanding/'RequestPlans'/recording['recording_id']/key/'SamplingCoverage.json'
         atomic_json(audit_path, audit)
@@ -195,40 +199,56 @@ def understand(backend, layout, recording, vision, context, key):
             from .device_day_content_paths import analysis_folder
             folder = analysis_folder(layout, segment, key)
             results = []
-            frame_details = {}
             previously_selected = set()
-            frames_iter = frame_windows(source, segment['start_ms'], segment['end_ms'], active, backend.settings,
-                required_times=[f['local_ms'] for f in segment.get('key_frames', [])], details=frame_details)
+            selected_windows = selections(source, segment, backend.settings, recording, vision['key'],
+                folder/'SelectedWindows.json')
+            artifacts.append(artifact(layout.root, folder/'SelectedWindows.json'))
+            frames_iter = iter(selected_windows)
             try:
-                for left, right, frames in frames_iter:
+                for window_index, selected in enumerate(frames_iter):
+                    review = next(row.get('review') for row in plan['segments'] if row['segment_id'] == segment['segment_id'])
+                    if review and window_index >= review['maximum_requests']:
+                        audit.update(status='bounded_review_limit_exhausted')
+                        atomic_json(audit_path, audit)
+                        raise UnderstandingPlanPaused(audit_ref, partial_receipt(segment, results))
+                    left, right = selected['start_ms'], selected['end_ms']
+                    directory = folder / media_interval_name(left, right)
+                    request_path, result_path = directory/'Input.json', directory/'Result.json'
+                    metadata = saved_metadata(layout, request_path, prompt, segment, selected, clock,
+                        previously_selected, recording['recording_id'])
                     if quantum and new_requests >= quantum:
                         audit.update(status='scheduled_checkpoint', actual_request_coverage='validated_selected_frames_only')
                         atomic_json(audit_path, audit)
                         raise UnderstandingCheckpointYield(audit_ref, new_requests, partial_receipt(segment, results))
-                    directory = folder / media_interval_name(left, right)
-                    images = []
-                    for ordinal, stamp, frame in frames:
-                        path = directory / 'SceneFrames' / f'{media_time_name(stamp)}.jpg'
-                        ok, data = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
-                        if not ok:
-                            raise ValueError('Understanding frame encoding failed')
-                        atomic_bytes(path, data.tobytes())
-                        ref = artifact(layout.root, path)
-                        selection = dict(frame_details[ordinal])
-                        selection['selection_reasons'] = [*selection['selection_reasons'],
-                            *(['window_overlap_context'] if ordinal in previously_selected else [])]
-                        previously_selected.add(ordinal)
-                        images.append({**ref, 'frame_id': 'frame-' + digest([recording['recording_id'], ref['sha256'], stamp])[:24],
-                            'frame_kind': 'scene_sample', 'local_ms': stamp, 'capture_us': capture_us(clock, stamp),
-                            'source_frame_index': ordinal, 'source_path': layout.relative(source),
-                            'source_time_basis': 'native_pts_joined_by_sequential_decoded_frame_ordinal',
-                            **selection})
-                    coverage = frame_coverage(images, left, right, active, backend.settings)
-                    metadata = {'schema_version': 'visioncortex-device-day/1', 'segment_id': segment['segment_id'],
-                        'activity': segment['activity'], 'start_ms': left, 'end_ms': right, 'frames': images,
-                        'comments': [], 'protocol': None, 'source_ref': segment['source_ref'],
-                        'content_source': 'video_only', 'coverage': coverage, 'physical_action_confirmed': False}
-                    request_path, result_path = directory/'Input.json', directory/'Result.json'
+                    if metadata is None:
+                        images = []
+                        frame_details = {f['source_frame_index']: f for f in selected['frames']}
+                        for ordinal, stamp, frame, pixel_hash in decode_selected(source, selected):
+                            path = directory / 'SceneFrames' / f'{media_time_name(stamp)}.jpg'
+                            ok, data = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                            if not ok:
+                                raise ValueError('Understanding frame encoding failed')
+                            atomic_bytes(path, data.tobytes())
+                            ref = artifact(layout.root, path)
+                            selection = dict(frame_details[ordinal])
+                            selection['selection_reasons'] = [*selection['selection_reasons'],
+                                *(['window_overlap_context'] if ordinal in previously_selected else [])]
+                            previously_selected.add(ordinal)
+                            images.append({**ref, 'frame_id': 'frame-' + digest([recording['recording_id'], ref['sha256'], stamp])[:24],
+                                'frame_kind': 'scene_sample', 'local_ms': stamp, 'capture_us': capture_us(clock, stamp),
+                                'source_frame_index': ordinal, 'source_path': layout.relative(source),
+                                'source_time_basis': 'exact_native_decoder_pts',
+                                **selection, 'decoded_pixels_sha256': pixel_hash,
+                                'pixel_time_binding': 'exact_decoder_pts_before_scale', 'native_pts_to_pixels_verified': True})
+                        coverage = frame_coverage(images, left, right, active, backend.settings)
+                        metadata = {'schema_version': 'visioncortex-device-day/1', 'segment_id': segment['segment_id'],
+                            'activity': segment['activity'], 'start_ms': left, 'end_ms': right, 'frames': images,
+                            'comments': [], 'protocol': None, 'source_ref': segment['source_ref'],
+                            'content_source': 'video_only', 'coverage': coverage, 'physical_action_confirmed': False}
+                    else:
+                        images = metadata['frames']
+                        coverage = metadata['coverage']
+                        previously_selected.update(f['source_frame_index'] for f in images)
                     request = {'request_key': scene_requests.request_key(backend.config, prompt, metadata),
                         'segment_id': segment['segment_id'], 'source_ref': segment['source_ref'],
                         'selected_frames': [{k: f[k] for k in ('frame_id', 'local_ms', 'source_pts', 'source_time_base', 'selection_reasons')}
@@ -266,7 +286,8 @@ def understand(backend, layout, recording, vision, context, key):
                     artifacts.extend(artifact(layout.root, p) for p in (request_path, result_path))
                     artifacts.extend({k: f[k] for k in ('path', 'size_bytes', 'sha256')} for f in images)
             finally:
-                frames_iter.close()
+                if hasattr(frames_iter, 'close'):
+                    frames_iter.close()
             meanings.append({'segment_id': segment['segment_id'], 'activity': segment['activity'],
                 'mode': 'event_preserving_native_pts_sampling' if active else 'interval_sampling', 'status': 'completed',
                 'content_source': 'video_only', 'evidence_status': 'PARTIAL_EVIDENCE',

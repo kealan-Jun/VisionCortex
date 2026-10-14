@@ -46,9 +46,9 @@
 | `understanding_inactive_window_limit` | `12` | 无保护信号的长 inactive 异常计划检查阈值 |
 | `understanding_requests_per_turn` | `1` | 每轮新增、已保存请求的工作量；`0` 表示不按请求数让出本轮 |
 
-基础采样、事件邻域、动作必选帧和边界帧各自保留选帧理由；不会只取准备列表的前 48 帧，也不会把整段实验均匀稀释到 48 帧。时间来自现有 `SourceFrameTrace` 的 native PTS 元数据，连续解码序号负责图像与时间的连接。缺少或歧义的 native 身份会失败关闭；独立的解码 packet 与像素时间一致性仍未验证，覆盖回执明确保留 `native_pts_to_pixels_verified: false`。
+基础采样、事件邻域、动作必选帧和边界帧各自保留选帧理由；不会只取准备列表的前 48 帧，也不会把整段实验均匀稀释到 48 帧。选帧时间来自现有 `SourceFrameTrace` 的 native PTS 元数据。新窗口先持久保存 `SelectedWindows.json`；仅对尚无可验证图片的窗口进行有界 seek，以 native PTS 选择解码输出，并核对解码日志的 time base、PTS 序列及输出尺寸。新图片保留解码像素摘要和 `exact_decoder_pts_before_scale` 依据；历史回执的原时间依据保持不变。缺少或歧义的 native 身份会失败关闭。PTS/像素连接成立不代表模型关注了每帧，也不代表动作语义通过。
 
-完成每个请求后先持久保存输入、结果和覆盖回执。达到本轮工作量且仍有下一窗时，阶段返回 `scheduled_checkpoint`，队列重新调度；缓存命中不消耗新增请求份额。此前付费响应可继续复用。该状态不是模型失败，也不是整段已完成。
+完成每个请求后先持久保存输入、结果和覆盖回执。达到本轮工作量且仍有下一窗时，阶段返回 `scheduled_checkpoint`，队列重新调度；缓存命中不消耗新增请求份额。恢复在打开解码器前验证保存的选帧、图片哈希、时间映射及实际请求输入，再查询模型结果。全部命中时不解码、编码或写图片；尚未完成窗口仍计入有界解码工作（含 seek 前滚）。同一来源的新解码/缩放 recipe 可能产生不同图片和请求键，不能把旧结果改贴成新 recipe 的结果。此前付费响应按其原精确输入复用。该状态不是模型失败，也不是整段已完成。
 
 这些开关不替换 `mllm` 的模型、厂商、端点、并发与提交尝试设置，也不改变相机角色、源目录或来源哈希。改变视觉采样或输出契约必须形成新执行身份，不能给旧结果重贴身份。已验证的历史完成回执应按其原始执行绑定读取。
 
@@ -60,7 +60,11 @@
 
 无保护信号的长 inactive 计划超过阈值时，暂停该来源区间的付费提交。所有区间均暂停时不初始化请求分析器；混合录像先处理可执行区间并优先保留实验窗口，保存可校验的 partial 回执，然后仍返回 `waiting_for_plan_review`。原任务、来源、时间范围和计划保留；不会把整条录像发布成 completed，也不会通过失败重试循环持续付费。等待、遮挡及动作保护区间继续保守处理，不能按一个 inactive 标签吞掉。
 
-人工处置先复核连续原片及所有拟过滤类别，明确所需证据或经审核的有界执行策略，再处理对应队列暂停。`DeviceDayQueue.release_hold(recording_id, reason=..., evidence=...)` 要求匹配暂停原因并记录审查依据；它只解除队列暂停，执行器仍会重新检查计划。相同未解决计划会再次暂停。当前没有面向普通用户的一键稳定过滤或人工标注放行界面；不可用批量归零重试代替审核。
+人工处置先复核连续原片及所有拟过滤类别，明确所需证据或经审核的有界执行策略，再处理对应队列暂停。`DeviceDayQueue.release_hold(recording_id, reason=..., evidence=..., expected_revision=..., source_signature=...)` 对异常计划要求匹配当前 revision 和来源签名，并记录审查依据。先提供执行器能够消费的决定，再解除该条暂停；不能仅调用 release_hold 后让同一计划反复暂停。队列快照显示 `oldest_plan_review_wait_seconds` 和 `overdue_plan_review_count`，900 秒审查目标只用于暴露积压，不是自动删除、撤销资格或付费放行。当前没有面向普通用户的一键稳定过滤或人工标注放行界面；不可用批量归零重试代替审核。
+
+`device_day.understanding_plan_reviews` 可引用一个经审核的本地不可变 JSON（绝对 `path` 和文件 `sha256`，最大 1 MiB）。schema 为 `visioncortex-plan-reviews/1`，`entries` 每项包含 `recording_id`、`source_signature`、`vision_key`、`segment_id`、`plan_identity`、`action: execute_bounded`、`paid_authorized: true`、`maximum_requests`、`reviewed_by` 和 `evidence`。`plan_identity` 是当前计划行的 `segment_id/source_ref/start_ms/end_ms/estimated_requests_upper_bound` 加 `policy` 的规范 digest。额度必须涵盖该完整计划且不超过 10000 窗；执行还逐窗检查该额度，超出时保存 partial 并停止新提交，不稀释或裁掉尾段。
+
+这项决定只解决精确来源与计划的异常暂停，不替代 cohort/history 付费授权、先决条件、来源校验或 submitted_unknown 账本检查。未提供实际授权时只保留待审计划；不得自动生成 `paid_authorized: true` 的现场决定。真实晚到保护信号可重新规划相应区间，稳定过滤继续保持影子。
 
 ## Coverage Manifest 与费用回执
 
@@ -88,7 +92,11 @@ VisionCortex 继续负责视频与处理，FieldRecognition 继续生产照片/O
 
 人员输出位于本地 `device-day/PersonDay/`，保留版本、来源引用、未知和冲突。佩戴者与操作人分别呈现；有效绑定采用 `[valid_from, valid_to)`，唯一有效关系仍标为 inferred，不把固定相机永久等同一个人。缺时钟或换人边界不确定时保留 unknown/conflict；动作不会仅按时间接近合并或按 SOP 补齐。
 
-这些输出是确定性事件视图，人员归属正确率和全天完整性仍为 `NOT_PROVEN` / `PARTIAL_EVIDENCE`。JSON/HTML、事件适配器或服务心跳不代表已生产 PDF、全文实验员总结或现场全天业务验收。需另核验真实生产方 outbox、消费者实际进程配置、OCR/绑定进入日报、音视频完整覆盖及人工复核。
+这些输出是确定性事件视图，人员归属正确率和全天完整性仍为 `NOT_PROVEN` / `PARTIAL_EVIDENCE`。人员事件保留完整原始索引/窗口输入引用；视图中的采集覆盖只携带状态、时钟摘要和原诊断引用，模型窗口的图片身份与时间只出现一次。完整 CV 诊断、时钟 points 和选帧验证账本仍在原索引/Input.json，不复制到每个事件和每个修订中。投影 recipe 版本参与事件修订身份，不能复用旧修订键改变事件内容。
+
+达到既定本地容量时，显式调用 `archive_person_history(config, runtime_root, destination)` 提供获授权的历史归档根和存储检查。它持有人员发布锁，仅复制已被替代的 `Revision*.json`，验证内容、源稳定性和完整 SHA256，持久保存 `HistoryArchives.json` 的原路径映射后才回收本地旧版本。当前 Manifest 所指版本、Latest、inbox/游标和活动 SQLite 不迁移。`read_person_revision(config, runtime_root, relative)` 按原身份读取本地或已校验归档；NAS 不可用或摘要变化时失败关闭。默认本地/no-NAS 流程不会继承 NAS 目标；不得扩大容量或丢弃历史来伪造发布成功。
+
+JSON/HTML、事件适配器或服务心跳不代表已生产 PDF、全文实验员总结或现场全天业务验收。需另核验真实生产方 outbox、消费者实际进程配置、OCR/绑定进入日报、音视频完整覆盖及人工复核。
 
 ## 部署、兼容迁移与回退
 
