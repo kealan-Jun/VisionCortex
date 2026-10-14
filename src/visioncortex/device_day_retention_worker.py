@@ -18,10 +18,11 @@ from .sqlite_store import connection
 class RetentionWorker:
     """One claim per tick; local discovery only, existing execution validates NAS."""
 
-    def __init__(self, *, stage='retention', failure_cooldown=60, recent_seconds=None):
+    def __init__(self, *, stage='retention', failure_cooldown=60, recent_seconds=None, admission_cohort='live'):
         if stage not in STAGES:
             raise ValueError('Unknown device/day stage')
         self.stage = stage
+        self.admission_cohort = admission_cohort
         self.recent_seconds = recent_seconds
         self.failure_cooldown = max(5, float(failure_cooldown))
         self.deferred = {}
@@ -31,6 +32,12 @@ class RetentionWorker:
         if not path.is_file():
             return []
         current = time.time()
+        queue = runner.queues.get(self.stage)
+        admissions = queue.admissions() if queue is not None else {}
+        from .device_day_cohort import recovery_entries
+        restored = {rid: entry['source_signature'] for (stage, rid), entry in
+                    recovery_entries(runner.settings).items() if stage == self.stage}
+        preserved = admissions | restored
         with connection(path, readonly=True) as db:
             if self.recent_seconds is None:
                 rows = db.execute('SELECT payload FROM observations')
@@ -39,8 +46,9 @@ class RetentionWorker:
                 # every poll. Captures overlapping the window remain eligible.
                 rows = db.execute("SELECT payload FROM observations WHERE "
                     "MAX(COALESCE(json_extract(payload,'$.recording_start_us'),0),"
-                    "COALESCE(json_extract(payload,'$.recording_end_us'),0))>=?",
-                    ((current - self.recent_seconds) * 1_000_000,))
+                    "COALESCE(json_extract(payload,'$.recording_end_us'),0))>=? OR "
+                    "json_extract(payload,'$.recording_id') IN (SELECT key FROM json_each(?))",
+                    ((current - self.recent_seconds) * 1_000_000, json.dumps(preserved)))
             records = [json.loads(row[0]) for row in rows]
         if not records:
             return []
@@ -48,7 +56,9 @@ class RetentionWorker:
         selected = 'recording_id IN (SELECT value FROM json_each(?))'
         with connection(runner.queues[self.stage].path, readonly=True) as db:
             states = {r['recording_id']: dict(r) for r in db.execute(
-                'SELECT recording_id,status,lease_until,attempts,retry_limit,updated_at,'
+                'SELECT recording_id,status,lease_until,attempts,retry_limit,updated_at,blocked_reason,'
+                'first_ready_at,last_dispatch_at,queued_at,processing_cohort,'
+                "json_extract(payload,'$.activity_kind') AS activity_kind,"
                 "json_extract(payload,'$.source_signature') AS source_signature,"
                 "json_extract(payload,'$.audio.source_signature') AS audio_signature FROM recordings WHERE "
                 + selected, (ids,))}
@@ -59,12 +69,16 @@ class RetentionWorker:
                     "WHERE status='completed' AND " + selected, (ids,))}
         ready = None
         if self.stage in {'understanding', 'report'}:
-            for parent in self.parents():
+            requirements = {r['recording_id']: self.parents(runner, r) for r in records}
+            completed_parents = {}
+            for parent in set(p for needed in requirements.values() for p in needed):
                 with connection(runner.queues[parent].path, readonly=True) as db:
                     completed = {r[0] for r in db.execute(
                         "SELECT recording_id FROM recordings WHERE status='completed' AND "
                         + selected, (ids,))}
-                ready = completed if ready is None else ready & completed
+                completed_parents[parent] = completed
+            ready = {rid for rid, needed in requirements.items()
+                     if all(rid in completed_parents[p] for p in needed)}
         maximum = runner.settings.get('failure_retry_limit') or 3
         candidates = []
         for record in records:
@@ -72,6 +86,11 @@ class RetentionWorker:
             if ready is not None and rid not in ready:
                 continue
             state = states.get(rid, {})
+            if state.get('blocked_reason'):
+                continue
+            if (state.get('processing_cohort') == 'historical_backfill' and self.admission_cohort == 'live'
+                    and restored.get(rid) != record.get('source_signature')):
+                continue
             same_video = state.get('source_signature') == record.get('source_signature')
             same_audio = state.get('audio_signature') == (record.get('audio') or {}).get('source_signature')
             # Independent recorder audio may arrive after a no-audio receipt.
@@ -89,7 +108,8 @@ class RetentionWorker:
             if not in_processing_scope(runner.settings, record):
                 continue
             if self.recent_seconds is not None and max(record.get('recording_start_us', 0),
-                    record.get('recording_end_us', 0)) < (current - self.recent_seconds) * 1_000_000:
+                    record.get('recording_end_us', 0)) < (current - self.recent_seconds) * 1_000_000 and (
+                        preserved.get(rid) != record.get('source_signature')):
                 continue
             record = configured_record(runner.config, record)
             if (not record.get('processable', record.get('available'))
@@ -115,6 +135,22 @@ class RetentionWorker:
             candidates.append((order, record))
         # A camera contributes its newest ready slice; queue.claim retains
         # camera fairness and all running leases, including the main service's.
+        scheduling = runner.queues[self.stage].scheduling
+        if scheduling['enabled']:
+            with connection(runner.queues[self.stage].path, readonly=True) as db:
+                costs = {(r['kind'], r['identity']): r['seconds'] for r in db.execute('SELECT * FROM dispatch_costs')}
+            def fair_order(item):
+                order, record = item
+                state = states.get(record['recording_id'], {})
+                ready = state.get('last_dispatch_at') or state.get('first_ready_at') or state.get('queued_at') or current
+                aged = current-ready >= scheduling['max_ready_wait_seconds']
+                category = state.get('activity_kind') or state.get('processing_cohort') or 'unresolved'
+                cost = costs.get(('class', category), 0) / scheduling['resource_shares'].get(category, 1)
+                return (not aged, ready if aged else float('inf'), cost,
+                        costs.get(('camera', record['camera_key']), 0), order)
+            # Do not collapse one camera to its newest item before the durable
+            # scheduler can see older admitted checkpoints.
+            return [record for _, record in sorted(candidates, key=fair_order)[:limit]]
         chosen, cameras = [], set()
         for _, record in sorted(candidates, key=lambda item: item[0]):
             if record['camera_key'] in cameras:
@@ -125,10 +161,12 @@ class RetentionWorker:
                 break
         return chosen
 
-    def parents(self):
-        needed = set(DEPENDENCIES[self.stage])
+    def parents(self, runner=None, recording=None):
+        from .device_day_contract import dependencies_for
+        dependencies = dependencies_for(runner.settings, recording) if runner is not None else DEPENDENCIES
+        needed = set(dependencies[self.stage])
         for _ in STAGES:
-            needed.update(parent for stage in tuple(needed) for parent in DEPENDENCIES[stage])
+            needed.update(parent for stage in tuple(needed) for parent in dependencies[stage])
         return [stage for stage in STAGES if stage in needed]
 
     def admit(self, runner, record):
@@ -136,7 +174,10 @@ class RetentionWorker:
         from .device_day_inplace import active, receipt
         native = active(runner, record)
         if self.stage not in {'understanding', 'report'} and native:
-            return enqueue(runner, record, self.stage)
+            admitted = enqueue(runner, record, self.stage)
+            if admitted:
+                self.save_admission(runner, record)
+            return admitted
         if runner._completion_hold(record, self.stage):
             return False
         # The publication receipt belongs to the native inplace executor.
@@ -145,10 +186,10 @@ class RetentionWorker:
             return False
         layout = runner.layout(record)
         record = record | {'archive_date': layout.name[:10]}
-        context = (load_context(layout, record) if self.stage in {'understanding', 'report'}
+        context = (getattr(runner, '_context', load_context)(layout, record) if self.stage in {'understanding', 'report'}
                    else {'comments': [], 'protocol': None})
         prerequisites = {}
-        for parent in self.parents():
+        for parent in self.parents(runner, record):
             retained = prerequisites.get('retention')
             inputs = (record if parent == 'retention' else visual_input(retained) if parent == 'vision'
                       else retained if parent == 'stt' else
@@ -165,19 +206,36 @@ class RetentionWorker:
         # This is the ordinary single-record scheduling recipe. process()
         # rechecks publication, identities and all artifact bytes after claim;
         # it never runs a missing parent model for a single-stage request.
+        from .device_day_contract import dependencies_for
+        dependencies = dependencies_for(runner.settings, record)
         inputs = (record if self.stage == 'retention' else
-                  {parent: prerequisites[parent] for parent in DEPENDENCIES[self.stage]})
+                  {parent: prerequisites[parent] for parent in dependencies[self.stage]})
         if self.stage == 'vision':
             inputs = visual_input(inputs['retention'])
+        if self.stage == 'understanding':
+            visual = prerequisites.get('vision') or {}
+            record = record | {'activity_kind': 'experiment_candidate' if any(
+                s.get('activity') == 'active' for s in visual.get('segments', [])) else 'unresolved'}
         revision = runner._key(self.stage, record, [inputs, context if self.stage == 'understanding' else None])
         runner.queues[self.stage].enqueue(record, revision)
         runner.queues[self.stage].resume_prerequisite(record['recording_id'], revision)
+        self.save_admission(runner, record)
         return True
+
+    def save_admission(self, runner, record):
+        from .device_day_cohort import recovery_entries
+        entry = recovery_entries(runner.settings).get((self.stage, record['recording_id']))
+        restored = entry and entry['source_signature'] == record['source_signature']
+        runner.queues[self.stage].grant_admission(record,
+            cohort='current_recovery' if restored else self.admission_cohort,
+            reason=entry['admission_reason'] if restored else 'ready_in_current_worker_scope')
 
     def tick(self, runner, stop):
         from .device_day import exclusive
         from .device_day_night_schedule import paused_stages, stage_admitted
         from .runtime_control import ExecutionCancelled, ExecutionYielded, execution_context
+        from .multimodal_usage import SubmittedUnknown
+        from .device_day_write_guard import NASUnavailable
         if self.stage in paused_stages(runner.config):
             return {'status': 'paused_by_user'}
         from .device_day_admission import admission_status
@@ -261,13 +319,19 @@ class RetentionWorker:
                 except ExecutionCancelled as exc:
                     result = {'status': 'cancelled', 'recording_id': record['recording_id'],
                               'error_type': type(exc).__name__, 'message': str(exc)[:1000]}
+                except SubmittedUnknown as exc:
+                    result = {'status': 'submitted_unknown', 'recording_id': record['recording_id'],
+                              'reason': exc.reason, 'error_type': type(exc).__name__}
+                except NASUnavailable as exc:
+                    result = {'status': 'waiting_for_storage', 'recording_id': record['recording_id'],
+                              'reason': exc.reason, 'error_type': type(exc).__name__}
                 except Exception as exc:
                     result = {'status': 'failed', 'recording_id': record['recording_id'],
                               'error_type': type(exc).__name__, 'message': str(exc)[:1000]}
                 seconds = time.perf_counter() - started
                 queue.finish(owner, record['recording_id'], result, seconds)
                 if result.get('status') != 'completed' and not (
-                        self.stage in {'vision', 'understanding'} and result.get('status') == 'paused_for_live'):
+                        self.stage in {'vision', 'understanding'} and result.get('status') in {'paused_for_live', 'scheduled_checkpoint'}):
                     self.deferred[record['recording_id']] = time.time() + self.failure_cooldown
                 return {'status': 'processed', 'recording_id': record['recording_id'],
                         'wall_seconds': seconds, 'result': result}

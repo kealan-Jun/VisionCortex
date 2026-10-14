@@ -88,6 +88,8 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
     validate_device_day_config(config)
     from .device_day_inplace import validate_settings
     validate_settings(config.get('device_day') or {})
+    from .application.field_event_consumer import validate_settings as validate_field_events
+    validate_field_events((config.get('device_day') or {}).get('field_recognition') or {})
     camera_jobs = (config.get('device_day') or {}).get('vision_jobs_per_camera', 1)
     if isinstance(camera_jobs, bool) or not isinstance(camera_jobs, int) or camera_jobs < 1:
         raise ValueError('device_day.vision_jobs_per_camera must be a positive integer')

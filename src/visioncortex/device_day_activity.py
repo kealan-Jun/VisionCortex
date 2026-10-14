@@ -38,6 +38,8 @@ PHASES = {
  'fine_activity_audit_seconds': '实验活动与连续性复核',
  'materialization_seconds': '切分视频与提取素材',
  'audit_publication_seconds': '发布预处理结果',
+ 'visual_request_planning_seconds': '检查视觉请求计划、保护信号与覆盖缺口',
+ 'visual_request_work_seconds': '复用或提交有界视觉请求并持久化回执',
 }
 
 

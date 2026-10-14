@@ -1,7 +1,5 @@
 """Deterministic request-ledger and stage-continuity checks; no model startup."""
-import ast
 import hashlib
-import json
 from copy import deepcopy
 from pathlib import Path
 
@@ -222,37 +220,33 @@ def test_window_validation_receipt_and_model_share_the_unique_ledger(scene):
     assert raw['status'] == 'completed'
 
 
-def test_unique_window_retains_existing_paid_cache_identity(scene, monkeypatch):
+def test_unique_window_retains_existing_paid_cache_identity(scene):
     from test_scene_requests import Analyzer, run
-
-    from visioncortex import scene_requests
-    from visioncortex.device_day_cache_identity import _normalized
+    from visioncortex import device_day_semantic_cache as cache
+    from visioncortex.device_day_contract import atomic_json, digest
     from visioncortex.device_day_models import SCENE_PROMPT
-    from visioncortex.device_day_semantic_cache import identity
-    config, metadata, paths, _ = scene
+
+    config, metadata, paths, folder = scene
+    config['mllm'].update(compact_scene_metadata=False, max_output_tokens=4096)
     old_metadata = deepcopy(metadata)
-    old_identity = identity(config, SCENE_PROMPT, metadata)
+    old_identity = cache.identity(config, SCENE_PROMPT, old_metadata)
     analyzer = Analyzer()
-    # Reconstruct only the prior reader statement boundary. Its complete AST
-    # must match the fixed pre-repair owner, rather than assume cache parity.
-    source = Path(scene_requests.__file__).read_text()
-    node = next(n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef) and n.name == 'window')
-    node.body = [n for n in node.body if not (isinstance(n, ast.Assign) and isinstance(n.value, ast.Call)
-                and isinstance(n.value.func, ast.Name) and n.value.func.id == 'prepare_frame_ledger')]
-    paid_guard = ast.parse("CURRENT.get().source == 'device_day_backfill' or CURRENT.get().yield_signal is not None").body[0].value
-    guards = [n for n in ast.walk(node) if isinstance(n, ast.If) and ast.dump(n.test) == ast.dump(paid_guard)]
-    assert len(guards) == 1
-    guards[0].test = guards[0].test.values[0]
-    assert hashlib.sha256(json.dumps(_normalized(node), sort_keys=True).encode()).hexdigest() == 'd6c88e0bdca370143a98bb9d9d6b5c1b8e35a891ec3466b7f9a986906972cf8e'
-    namespace = dict(vars(scene_requests))
-    exec(compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])), '<prior-window-reader>', 'exec'), namespace)  # noqa: S102 - pinned, locally owned AST above
-    with monkeypatch.context() as previous:
-        previous.setattr(scene_requests, 'window', namespace['window'])
-        assert run(scene, analyzer)[2] is False
-    assert metadata == old_metadata and identity(config, SCENE_PROMPT, metadata) == old_identity
+    # Freeze the historical receipt shape, not the current function's AST.
+    # This is one synthetic saved response, never a historical paid API call.
+    raw = analyzer._call(SCENE_PROMPT, old_metadata, paths)
+    raw.update(model=config['mllm']['model'], provider=config['mllm']['provider'],
+               api_protocol=config['mllm']['api_protocol'],
+               request_image_transport={'maximum_edge_pixels': config['mllm']['request_image_max_edge'],
+                                        'jpeg_quality': config['mllm']['request_image_jpeg_quality'],
+                                        'source_artifacts_mutated': False})
+    legacy_key = digest([old_metadata, SCENE_PROMPT])
+    atomic_json(folder/'Input.json', {'input_key': legacy_key, 'prompt': SCENE_PROMPT, 'metadata': old_metadata})
+    atomic_json(folder/'Result.json', {'input_key': legacy_key, 'model_result': raw})
+    cache.save(config, old_identity, raw, provenance={'actual_call': False, 'source': 'synthetic_legacy_receipt_fixture'})
     assert prepare_frame_ledger(metadata, paths) is paths
+    assert metadata == old_metadata and cache.identity(config, SCENE_PROMPT, metadata) == old_identity
     assert run(scene, analyzer)[2] is True
-    assert analyzer.calls == 1
+    assert analyzer.calls == 1, 'reuse cannot submit another model request'
 
 
 def test_changed_understanding_owner_keeps_full_cv_scan_identity(default_config, tmp_path, monkeypatch):

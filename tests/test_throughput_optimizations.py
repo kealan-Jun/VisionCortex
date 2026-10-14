@@ -110,7 +110,7 @@ def test_mllm_transport_failure_circuit_skips_later_calls(
     second = analyzer._call("system", {"event": 2}, [])
     third = analyzer._call("system", {"event": 3}, [])
 
-    assert first["status"] == second["status"] == "failed"
+    assert first["status"] == second["status"] == "submitted_unknown"
     assert second["failure_circuit_open"] is True
     assert second["request_image_transport"] == {
         "maximum_edge_pixels": 0,

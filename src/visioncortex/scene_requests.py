@@ -4,13 +4,25 @@ from pathlib import Path
 from . import device_day_semantic_cache as cache
 from .device_day_contract import atomic_json, digest, read_json
 from .mllm_provider import vision_request_identity
-from .multimodal_usage import UsageLedger
+from .multimodal_usage import SubmittedUnknown, UsageLedger
 from .scene_transport import VERSION, compact, expand, prepare_frame_ledger, project
 
 
 def request_policy(config):
     return {'generation': vision_request_identity(config['mllm']),
             'scene_transport': VERSION if config['mllm'].get('compact_scene_metadata', False) else 'original'}
+
+
+def request_identity(config, prompt, metadata):
+    semantic, _ = project(metadata)
+    return cache.identity(config, prompt, metadata) | {
+        'schema_version': 'visioncortex-scene-response/2',
+        'request_policy': request_policy(config), 'semantic_metadata': semantic}
+
+
+def request_key(config, prompt, metadata):
+    """The same exact input identity used by caches and the paid-call ledger."""
+    return digest(request_identity(config, prompt, metadata))
 
 
 def _legacy_policy_known(config, raw):
@@ -55,20 +67,25 @@ def _legacy_candidate(config, legacy, prompt, semantic, request_path):
 
 
 def window(config, analyzer, prompt, metadata, image_paths, request_path, result_path, validator):
+    from .device_day_write_guard import storage_guard
+    with storage_guard(config):
+        return _window(config, analyzer, prompt, metadata, image_paths, request_path, result_path, validator)
+
+
+def _window(config, analyzer, prompt, metadata, image_paths, request_path, result_path, validator):
     from .device_day import exclusive
     from contextlib import ExitStack
     from .runtime_control import CURRENT, check_yield, defer_yield, resource_slot, sync_files
     check_yield(checkpoint=False)
     image_paths = prepare_frame_ledger(metadata, image_paths)
     legacy = cache.identity(config, prompt, metadata)
-    policy = request_policy(config)
-    semantic, _ = project(metadata)
-    identity = legacy | {'schema_version': 'visioncortex-scene-response/2',
-                         'request_policy': policy, 'semantic_metadata': semantic}
+    identity = request_identity(config, prompt, metadata)
+    policy, semantic = identity['request_policy'], identity['semantic_metadata']
+    paid_key = digest(identity)
     input_key = digest([metadata, prompt])
     # Independent callers/queue retries cannot both miss and pay for this
     # exact window. The existing stage handles lock contention as queued work.
-    lock = Path(config['storage']['local_runtime_root'])/'device-day'/'locks'/f'scene-{digest(identity)}.lock'
+    lock = Path(config['storage']['local_runtime_root'])/'device-day'/'locks'/f'scene-{paid_key}.lock'
     with exclusive(lock), ExitStack() as unit:
         candidates = []
         local_candidate = None
@@ -102,6 +119,13 @@ def window(config, analyzer, prompt, metadata, image_paths, request_path, result
         if raw is not local_candidate:
             reservation = None
         wire_receipt = wire_response = None
+        ledger = None
+        if raw is None:
+            ledger = UsageLedger(config)
+            recovered = ledger.recover(paid_key)
+            if recovered:
+                reservation, raw = recovered
+                reused = True
         if raw is None:
             if CURRENT.get().source == 'device_day_backfill' or CURRENT.get().yield_signal is not None:
                 # Admission precedes the budget reservation. Nested adapter
@@ -111,7 +135,7 @@ def window(config, analyzer, prompt, metadata, image_paths, request_path, result
             wire_metadata, wire_images = metadata, image_paths
             if config['mllm'].get('compact_scene_metadata', False):
                 wire_metadata, wire_images, wire_receipt = compact(metadata, image_paths)
-            ledger = UsageLedger(config)
+            ledger = ledger or UsageLedger(config)
             if result_path.is_file():
                 previous = {'input': read_json(request_path) if request_path.is_file() else None,
                             'result': read_json(result_path)}
@@ -120,8 +144,14 @@ def window(config, analyzer, prompt, metadata, image_paths, request_path, result
             # stays pending if the process dies before a receipt is available.
             atomic_json(request_path, {'input_key': input_key, 'prompt': prompt, 'metadata': metadata,
                                       'request_policy': policy, 'scene_input_transport': wire_receipt})
-            reservation = ledger.reserve(digest(identity))
-            wire_response = analyzer._call(prompt, wire_metadata, wire_images, max_images=len(wire_images))
+            from .device_day_write_guard import verify_before_submission
+            verify_before_submission()
+            reservation = ledger.reserve(paid_key)
+            try:
+                wire_response = analyzer._call(prompt, wire_metadata, wire_images, max_images=len(wire_images))
+            except BaseException:
+                ledger.submitted_unknown(reservation)
+                raise
             raw = wire_response
             if wire_receipt and raw.get('status') == 'completed':
                 try:
@@ -129,6 +159,9 @@ def window(config, analyzer, prompt, metadata, image_paths, request_path, result
                 except (ValueError, KeyError, TypeError) as exc:
                     raw = {**raw, 'status': 'failed', 'error': 'Invalid compact frame references',
                            'validation_error_type': type(exc).__name__}
+            # This bounded SSD receipt survives NAS loss after a paid response.
+            # A restart replays publication rather than submitting again.
+            ledger.received(reservation, raw)
         # Preserve failed attempts, billed usage and previous successful
         # receipts before replacing the current window pointer.
         if reused and result_path.is_file():
@@ -144,10 +177,14 @@ def window(config, analyzer, prompt, metadata, image_paths, request_path, result
         # Publish the paid response first. A restart can finish its pending
         # ledger reservation from this durable receipt without paying again.
         if reservation:
-            UsageLedger(config).finish(reservation, raw)
+            ledger = ledger or UsageLedger(config)
+            ledger.finish(reservation, raw)
+            ledger.published(reservation)
         if raw.get('status') != 'completed':
             from .device_day_provider_gate import ProviderGate
             ProviderGate(config).record_failure(raw)
+            if raw.get('status') == 'submitted_unknown':
+                raise SubmittedUnknown('submitted_unknown: received an unresolved external request outcome; reconcile before retry')
             raise ValueError('Multimodal window failed; validated preceding windows remain reusable')
         parsed = parsed if parsed is not None else validator(raw)
         # Also migrate validated legacy/local results into the stronger cache

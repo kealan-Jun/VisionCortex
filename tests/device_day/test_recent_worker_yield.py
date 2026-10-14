@@ -79,7 +79,7 @@ def test_recent_paid_window_finishes_cache_and_usage_before_handover_then_reuses
     assert state(queue)['status'] == 'completed'
 
 
-def test_recent_failed_paid_attempt_internal_retry_is_sealed_before_yield(scene, monkeypatch):  # noqa: F811
+def test_recent_unknown_paid_attempt_is_sealed_and_blocks_automatic_retry(scene, monkeypatch):  # noqa: F811
     config, _, _, folder = scene
     config['runtime']['resource_limits'] = {'cloud': 1}
     stop = Event()
@@ -89,36 +89,28 @@ def test_recent_failed_paid_attempt_internal_retry_is_sealed_before_yield(scene,
     monkeypatch.setattr('visioncortex.mllm.time.sleep', lambda seconds: None)
     requests = []
     def handler(request):
-        import json
         requests.append(request)
-        assert len(coordinator.snapshot()) == 1, 'internal retry reuses only this thread cloud lease'
+        assert len(coordinator.snapshot()) == 1, 'the request holds this thread cloud lease'
         assert CURRENT.get().stop is None and CURRENT.get().yield_signal is None
-        if len(requests) == 1:
-            stop.set()
-            raise httpx.ReadError('synthetic transport failure', request=request)
-        body = json.loads(request.content)
-        supplied = json.loads(body['messages'][1]['content'][0]['text'])
-        payload = {'id': 'offline-request', 'choices': [{'message': {'content': json.dumps(response(supplied))},
-                   'finish_reason': 'stop'}], 'usage': {'prompt_tokens': 10, 'completion_tokens': 20, 'total_tokens': 30}}
-        return httpx.Response(200, json=payload)
+        stop.set()
+        raise httpx.ReadError('synthetic transport failure', request=request)
     analyzer = ArkAnalyzer(config)
     analyzer.client.close()
     analyzer.client = httpx.Client(transport=httpx.MockTransport(handler))
     worker, runner, queue = worker_for(config, 'understanding', lambda *a, **kw: run(scene, analyzer))
     result = worker.tick(runner, stop)
-    assert result['result']['status'] == 'paused_for_live'
+    assert result['result']['status'] == 'submitted_unknown'
     raw = read_json(folder / 'Result.json')['model_result']
-    assert raw['attempts'] == 2 and raw['attempt_receipts'][0]['status'] == 'failed'
+    assert raw['attempts'] == 1 and raw['attempt_receipts'][0]['status'] == 'submitted_unknown'
     assert raw['usage']['unknown_attempt_count'] == 1, 'unknown billed attempt usage cannot become zero'
+    assert raw['usage']['total_tokens'] is None
     assert UsageLedger(config).summary(today())['pending_calls'] == 0
-    assert state(queue)['status'] == 'queued' and state(queue)['attempts'] == 0
+    assert UsageLedger(config).summary(today())['submitted_unknown_calls'] == 1
+    assert state(queue)['status'] == 'blocked' and state(queue)['attempts'] == 1
     assert coordinator.snapshot() == []
     stop.clear()
-    # Exercise the same owner again, returning normal stage completion after
-    # validating/reusing the failed+successful attempt receipt from its cache.
-    runner.process = lambda *a, **kw: (run(scene, analyzer), {'status': 'completed'})[1]
-    assert worker.tick(runner, stop)['result']['status'] == 'completed'
-    assert len(requests) == 2, 'restart must reuse the entire saved attempt chain without a new request'
+    assert worker.tick(runner, stop)['status'] == 'waiting'
+    assert len(requests) == 1, 'an expired process lease cannot prove the provider did not execute'
     analyzer.close()
 
 
