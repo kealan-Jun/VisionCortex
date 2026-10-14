@@ -118,6 +118,10 @@ def test_publication_tick_invokes_consumer_and_late_events_publish_without_model
     replies = [page([event(wearer="a")]), page([event("late", 2, wearer="a", when="2026-10-14T01:00:00Z")], after=1)]
     calls = []
     def fetch(url, timeout):
+        from urllib.parse import urlsplit, parse_qs
+        parsed = urlsplit(url)
+        assert parsed.path == '/api/events/feed'
+        assert parse_qs(parsed.query)['camera_id'] == ['camera-1']
         calls.append(url)
         return replies.pop(0)
     runner = SimpleNamespace(runtime_root=tmp_path, config={"device_day": {}},

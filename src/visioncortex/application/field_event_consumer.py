@@ -162,7 +162,7 @@ class FieldEventConsumer:
                               'limit': self.settings.get('page_size', 100)}
                     if cursor['source_instance']:
                         params['source_instance'] = cursor['source_instance']
-                    page = self.fetch(endpoint + '/api/events?' + urlencode(params), self.settings.get('timeout_seconds', 5))
+                    page = self.fetch(endpoint + '/api/events/feed?' + urlencode(params), self.settings.get('timeout_seconds', 5))
                     result = self.inbox.ingest(endpoint, camera, page, tenant=self.settings.get('tenant'))
                     inserted += result['inserted']
                     pages += 1
