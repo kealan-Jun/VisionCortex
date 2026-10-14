@@ -84,7 +84,7 @@ python -m visioncortex.multimodal_usage --config /path/to/private-profile.yaml -
 
 VisionCortex 继续负责视频与处理，FieldRecognition 继续生产照片/OCR/设备及人员事件。消费开关是 `device_day.field_recognition.enabled`，默认关闭；启用还须明确 `endpoint` 服务 origin 和互不重复的 `camera_ids`，可配置 `tenant`、`pages_per_tick`（默认 `2`）、`page_size`（默认 `100`）和 `timeout_seconds`（默认 `5`，最大 `30`）。不要把凭据写进 URL。
 
-`PublicationReplay.tick` 在实际启用配置下调用 `/api/events` 消费者；本地 `device-day/field-events.sqlite3` 将事件、去重和游标一致提交。来源实例变化、重复投递、确认丢失、更正和撤回保留可恢复身份。设备日索引经过现有回执和产物门禁后，可投影视频/语音事件进入同一 inbox。消费者未启用、未收到和摄像机未配置各有状态，不能当作已取得现场事件。
+`PublicationReplay.tick` 在实际启用配置下调用 `/api/events/feed` 消费者；既有 `/api/events` 继续用于浏览器 SSE 通知。本地 `device-day/field-events.sqlite3` 将事件、去重和游标一致提交。来源实例变化、重复投递、确认丢失、更正和撤回保留可恢复身份。设备日索引经过现有回执和产物门禁后，可投影视频/语音事件进入同一 inbox。消费者未启用、未收到和摄像机未配置各有状态，不能当作已取得现场事件。
 
 人员输出位于本地 `device-day/PersonDay/`，保留版本、来源引用、未知和冲突。佩戴者与操作人分别呈现；有效绑定采用 `[valid_from, valid_to)`，唯一有效关系仍标为 inferred，不把固定相机永久等同一个人。缺时钟或换人边界不确定时保留 unknown/conflict；动作不会仅按时间接近合并或按 SOP 补齐。
 
