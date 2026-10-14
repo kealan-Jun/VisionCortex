@@ -1,10 +1,60 @@
 """Conservative request planning and inspectable coverage, never human truth."""
 import math
+import hashlib
+import json
+from pathlib import Path
 
 from .device_day_contract import digest
 
 POLICY = 'visioncortex-visual-request-plan/1'
 MANIFEST = 'visioncortex-sampling-coverage/1'
+
+
+def apply_plan_reviews(plan, settings, recording, vision_key):
+    """An exact bounded decision resolves a hold without asserting stability."""
+    for hold in plan['holds']:
+        hold.update(required_action='review_continuous_source_or_authorize_bounded_processing',
+                    review_target_seconds=900, automatic_paid_retry=False)
+    reference = settings.get('understanding_plan_reviews')
+    if reference is None:
+        return plan
+    if (not isinstance(reference, dict) or set(reference) != {'path', 'sha256'}
+            or not isinstance(reference['path'], str) or not Path(reference['path']).is_absolute()):
+        raise ValueError('Plan reviews require an absolute local path and sha256')
+    from .local_storage import require_local_path
+    path = require_local_path(Path(reference['path']))
+    if path.stat().st_size > 1024 * 1024:
+        raise ValueError('Plan review manifest exceeds 1 MiB')
+    data = path.read_bytes()
+    if hashlib.sha256(data).hexdigest() != reference['sha256']:
+        raise ValueError('Plan review manifest checksum mismatch')
+    manifest = json.loads(data)
+    if manifest.get('schema_version') != 'visioncortex-plan-reviews/1':
+        raise ValueError('Invalid plan review manifest schema')
+    reviewed = set()
+    plan['review_manifest'] = reference
+    for review in manifest.get('entries', []):
+        identity = (review.get('recording_id'), review.get('segment_id'))
+        if identity in reviewed:
+            raise ValueError('Duplicate plan review decision')
+        reviewed.add(identity)
+        if review.get('recording_id') != recording['recording_id']:
+            continue
+        if review.get('source_signature') != recording.get('source_signature') or review.get('vision_key') != vision_key:
+            raise ValueError('Plan review source or visual identity changed')
+        row = next((r for r in plan['segments'] if r['segment_id'] == review.get('segment_id')), None)
+        if row is None or review.get('plan_identity') != digest({k: row[k] for k in (
+                'segment_id', 'source_ref', 'start_ms', 'end_ms', 'estimated_requests_upper_bound')} | {'policy': plan['policy_version']}):
+            raise ValueError('Plan review does not bind the current exact interval and plan')
+        if (review.get('action') != 'execute_bounded' or review.get('paid_authorized') is not True
+                or type(review.get('maximum_requests')) is not int
+                or not row['estimated_requests_upper_bound'] <= review['maximum_requests'] <= 10000
+                or not all(isinstance(review.get(k), str) and review[k] for k in ('reviewed_by', 'evidence'))):
+            raise ValueError('Plan review requires explicit bounded authorization and review evidence')
+        row.update(status='reviewed_bounded_execution', review=review)
+        plan['holds'] = [h for h in plan['holds'] if h['segment_id'] != row['segment_id']]
+    plan['status'] = 'held_for_plan_review' if plan['holds'] else 'planned'
+    return plan
 
 
 def limits(settings):
@@ -180,6 +230,7 @@ def frame_coverage(images, left, right, active, settings):
             'event_sample_fps': bound['event_fps'] if active else None,
             'overlap_frames_reserved': bound['overlap_frames'], 'all_decoded_frames_submitted': False,
             'native_pts_verified': all(f.get('source_pts') is not None for f in images),
-            'native_pts_to_pixels_verified': False,
-            'pixel_time_binding': 'sequential_decoder_ordinal_join; independent_packet_concordance_unverified',
+            'native_pts_to_pixels_verified': all(f.get('native_pts_to_pixels_verified') is True for f in images),
+            'pixel_time_binding': ('exact_decoder_pts_before_scale' if all(f.get('native_pts_to_pixels_verified') is True for f in images)
+                                   else 'sequential_decoder_ordinal_join; independent_packet_concordance_unverified'),
             'model_attention_to_every_frame_verified': False, 'necessary_region_visibility': 'NOT_PROVEN'}

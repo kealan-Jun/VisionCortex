@@ -263,3 +263,130 @@ def test_long_inactive_tail_cannot_block_active_windows_and_the_recording_stays_
     with pytest.raises(UnderstandingPlanPaused):
         understand(backend, layout, recording, vision, {}, 'a'*64)
     assert len(calls) == (1 if active_seconds == 5 else 2)  # Valid active receipts remain reusable.
+
+
+def test_checkpoint_resume_reuses_images_before_decoder_encoder_and_publication(fake_understanding, monkeypatch, record_property):
+    import cv2
+    from visioncortex import device_day_understanding as execution, device_day_window_inputs as inputs
+    backend, layout, recording, _, calls = fake_understanding
+    row = segment(activity='active', end=15000)
+    row['source_ref'] = artifact(layout.root, source(layout.root, 15))
+    vision = {'key': 'vision-fixture', 'segments': [row]}
+    counts = {'decode': 0, 'encode': 0, 'image_write': 0}
+    decode, encode, write = inputs.decode_selected, cv2.imencode, execution.atomic_bytes
+    def counted_decode(*args):
+        frames = decode(*args)
+        counts['decode'] += frames.decoded_frames
+        return frames
+    def counted_encode(*args):
+        counts['encode'] += 1
+        return encode(*args)
+    def counted_write(*args):
+        counts['image_write'] += 1
+        return write(*args)
+    monkeypatch.setattr(inputs, 'decode_selected', counted_decode)
+    monkeypatch.setattr(cv2, 'imencode', counted_encode)
+    monkeypatch.setattr(execution, 'atomic_bytes', counted_write)
+    # Count the old decoder too: the pre-fix implementation has no inputs port.
+    capture = cv2.VideoCapture
+    class CountedCapture:
+        def __init__(self, *args):
+            self.delegate = capture(*args)
+        def read(self):
+            result = self.delegate.read()
+            counts['decode'] += int(result[0])
+            return result
+        def __getattr__(self, name):
+            return getattr(self.delegate, name)
+    monkeypatch.setattr(cv2, 'VideoCapture', CountedCapture)
+    with pytest.raises(UnderstandingCheckpointYield):
+        understand(backend, layout, recording, vision, {}, 'a'*64)
+    first = dict(counts)
+    final = understand(backend, layout, recording, vision, {}, 'a'*64)
+    resume = {name: counts[name] - first[name] for name in counts}
+    uncached_frames = sum(len(w['source_frames']) for w in final['understandings'][0]['windows']
+                          if not w['response_cache_reused'])
+    assert resume['encode'] == resume['image_write'] == uncached_frames
+    assert uncached_frames <= resume['decode'] < 150  # Includes measured seek preroll, no source-origin replay.
+    before = dict(counts)
+    understand(backend, layout, recording, vision, {}, 'a'*64)
+    fully_cached = {name: counts[name] - before[name] for name in counts}
+    assert fully_cached == dict.fromkeys(counts, 0)
+    # A changed stage folder also preserves exact original window inputs.
+    understand(backend, layout, recording, vision, {}, 'b'*64)
+    across_stage = {name: counts[name] - before[name] for name in counts}
+    assert across_stage == dict.fromkeys(counts, 0)
+    assert len(calls) == 2
+    record_property('io_counts', {'first': first, 'resume': resume, 'fully_cached': fully_cached,
+                                 'across_stage': across_stage, 'fake_model_calls': len(calls), 'real_model_calls': 0})
+
+
+def test_source_bound_bounded_review_resolves_the_plan_without_claiming_filter_quality(fake_understanding, tmp_path):
+    import hashlib
+    import json
+    from visioncortex.device_day_contract import digest
+    backend, layout, recording, _, calls = fake_understanding
+    row = segment(end=15000)
+    row['source_ref'] = artifact(layout.root, source(layout.root, 15))
+    backend.settings.update(understanding_inactive_window_limit=1, understanding_window_seconds=10)
+    recording['source_signature'] = 'source-fixture'
+    plan = request_plan([row], {}, backend.settings)
+    assert plan['holds']
+    estimate = plan['segments'][0]
+    review = {'recording_id': recording['recording_id'], 'source_signature': recording['source_signature'],
+              'segment_id': row['segment_id'], 'vision_key': 'vision-fixture',
+              'plan_identity': digest({k: estimate[k] for k in ('segment_id', 'source_ref', 'start_ms', 'end_ms',
+                  'estimated_requests_upper_bound')} | {'policy': plan['policy_version']}),
+              'action': 'execute_bounded', 'paid_authorized': True, 'maximum_requests': estimate['estimated_requests_upper_bound'],
+              'reviewed_by': 'synthetic authorization fixture', 'evidence': 'mock only; no production approval'}
+    path = tmp_path/'review.json'
+    def save():
+        path.write_text(json.dumps({'schema_version': 'visioncortex-plan-reviews/1', 'entries': [review]}))
+        backend.settings['understanding_plan_reviews'] = {'path': str(path), 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
+    save()
+    vision = {'key': 'vision-fixture', 'segments': [row]}
+    with pytest.raises(UnderstandingCheckpointYield):
+        understand(backend, layout, recording, vision, {}, 'a'*64)
+    final = understand(backend, layout, recording, vision, {}, 'a'*64)
+    assert final['understandings'][0]['status'] == 'completed' and len(calls) == 2
+    audit = read_json(layout.root/final['sampling_coverage_manifest'])
+    assert audit['request_plan']['holds'] == []
+    assert audit['human_semantic_recall'] == 'NOT_PROVEN'
+    assert all(e['paid_filter_applied'] is False for e in audit['shadow_episodes'])
+    review['source_signature'] = 'different-source'
+    save()
+    with pytest.raises(ValueError, match='identity changed'):
+        understand(backend, layout, recording, vision, {}, 'a'*64)
+    assert len(calls) == 2
+
+
+def test_window_pixels_match_independent_sequential_decode_with_vfr_b_frames_and_nonzero_origin(tmp_path):
+    import cv2
+    import subprocess
+    from visioncortex.device_day_window_inputs import selections, decode_selected
+    from visioncortex.video_io import _ffmpeg_passthrough_arguments
+    video = tmp_path/'variable.mp4'
+    subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=s=96x64:r=30:d=2',
+        '-vf', 'select=not(eq(mod(n\\,5)\\,1)),setpts=PTS+4/TB', *_ffmpeg_passthrough_arguments(),
+        '-c:v', 'libx264', '-bf', '3', str(video)], check=True, capture_output=True)
+    row = segment(activity='active', start=375, end=1400)
+    row['source_ref'] = artifact(tmp_path, video)
+    windows = selections(video, row, {}, {'recording_id': 'record-fixture', 'source_signature': 'fixture'},
+                         'visual-fixture', tmp_path/'selections.json')
+    reader = cv2.VideoCapture(str(video))
+    originals = []
+    try:
+        while True:
+            ok, pixels = reader.read()
+            if not ok:
+                break
+            originals.append(pixels)
+    finally:
+        reader.release()
+    for window in windows:
+        frames = decode_selected(video, window)
+        assert frames.decoded_frames >= len(frames)
+        for ordinal, _stamp, pixels, _ in frames:
+            assert np.array_equal(pixels, originals[ordinal])
+    assert all(f['source_pts'] * float(__import__('fractions').Fraction(f['source_time_base'])) >= 4
+               for w in windows for f in w['frames'])

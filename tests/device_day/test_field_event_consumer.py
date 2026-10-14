@@ -369,3 +369,56 @@ def test_one_camera_source_failure_does_not_block_other_committed_personnel_even
     assert manifest["generation"] == 1
     latest = next((tmp_path / "PersonDay").glob("*/Latest.json"))
     assert json.loads(latest.read_text())["reports"][0]["person_id"] == "a"
+
+
+def test_person_coverage_references_complete_cv_diagnostics_without_copying_their_payload():
+    import json
+    from visioncortex.evidence.device_events import device_index_events
+    from visioncortex.device_day_contract import VERSION, digest
+    source = {'status': 'completed', 'source_duration_ms': 900000, 'clock_mapping': {'basis': 'native', 'points': [[1, 2]] * 20000},
+              'scan_reports': [{'large_diagnostics': 'x' * 1024 * 1024}], 'batches': ['full original scan payload']}
+    index = {'schema_version': VERSION, 'archive': '2026-10-14_fixture-camera',
+             'recordings': [{'recording_id': 'source-fixture', 'start_us': 1791936000000000,
+                             'end_us': 1791936900000000, 'processing': source}],
+             'segments': [], 'understandings': []}
+    events, revision = device_index_events(index, index['archive'])
+    coverage = next(e for e in events if e['type'] == 'recording_coverage')
+    assert source['scan_reports'] == index['recordings'][0]['processing']['scan_reports']
+    assert set(coverage['payload']['processing']) == {'status', 'source_duration_ms', 'clock_mapping'}
+    assert 'scan_reports' not in coverage['payload']['processing']
+    assert 'points' not in coverage['payload']['processing']['clock_mapping']
+    assert len(json.dumps(events)) < 10000
+    original_revision = digest({k: index.get(k) for k in ('schema_version', 'archive', 'recordings',
+                              'segments', 'understandings', 'cross_view_links', 'aligned_experiments')})
+    assert coverage['payload']['processing_diagnostics_ref']['index_revision'] == original_revision
+    assert coverage['evidence_refs'][0]['index_revision'] == original_revision
+    assert revision != original_revision and coverage['revision'] == revision
+
+
+def test_verified_person_history_offload_preserves_latest_and_readable_revision_identity(tmp_path):
+    from pathlib import Path
+    import json
+    from visioncortex.application.field_event_consumer import archive_person_history, read_person_revision
+    from visioncortex.device_day_contract import atomic_json, digest
+    runtime = tmp_path/'runtime'
+    root = runtime/'PersonDay'
+    directory = root/'tenant'
+    history = {'schema_version': 'person-day-publication/1', 'generation': 1, 'reports': [], 'unassociated': []}
+    history['content_revision'] = digest(history)
+    current = history | {'generation': 2}
+    current['content_revision'] = digest({k:v for k,v in current.items() if k!='content_revision'})
+    atomic_json(directory/'Revision1.json', history)
+    atomic_json(directory/'Revision2.json', current)
+    atomic_json(directory/'Latest.json', current)
+    atomic_json(root/'Manifest.json', {'outputs':[{'revision_path':'tenant/Revision2.json'}]})
+    latest_bytes = (directory/'Latest.json').read_bytes()
+    config = {'runtime':{'local_only':True}}
+    report = archive_person_history(config, runtime, tmp_path/'archive')
+    assert report['archived_revisions']==1 and not (directory/'Revision1.json').exists()
+    assert (directory/'Latest.json').read_bytes()==latest_bytes and (directory/'Revision2.json').exists()
+    assert read_person_revision(config, runtime, 'tenant/Revision1.json')==history
+    receipt = json.loads((root/'HistoryArchives.json').read_text())
+    target = Path(receipt['entries']['tenant/Revision1.json']['archive_path'])
+    target.write_text('modified archive')
+    with pytest.raises(ValueError, match='integrity'):
+        read_person_revision(config, runtime, 'tenant/Revision1.json')
