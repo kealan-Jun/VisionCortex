@@ -5,6 +5,7 @@ import re
 from copy import deepcopy
 
 VERSION = 'visioncortex-scene-wire/1'
+DAY_CONTEXT_VERSION = 'visioncortex-day-context-wire/1'
 STORAGE_FIELDS = frozenset({'path', 'source_path', 'size_bytes', 'sha256'})
 FRAME_LEDGER_VERSION = 'visioncortex-scene-frame-ledger/2'
 _FRAME_IDENTITY = ('sha256', 'size_bytes', 'local_ms', 'source_path')
@@ -102,12 +103,33 @@ def compact(metadata, image_paths):
     if [label for label, _ in image_paths] != expected:
         raise ValueError('Scene image labels/order differ from the supplied frame ledger')
     reverse = {full: short for short, full in mapping.items()}
+    day_aliases = None
+    if metadata.get('schema_version') == 'visioncortex-day-context-input/1':
+        ids = dict.fromkeys(identifier for row in wire['evidence']
+                            for identifier in ([row['evidence_id']] if 'evidence_id' in row else row['evidence_refs']))
+        day_aliases = {f'e{i+1}': identifier for i, identifier in enumerate(ids)}
+        day_reverse = {full: short for short, full in day_aliases.items()}
+        for row in wire['evidence']:
+            # Storage provenance stays in Input.json, rather than consuming
+            # model context repeatedly. Observations, clocks and limits stay.
+            row.pop('source', None)
+            if 'evidence_id' in row:
+                row['evidence_id'] = day_reverse[row['evidence_id']]
+            if 'evidence_refs' in row:
+                row['evidence_refs'] = [day_reverse[r] for r in row['evidence_refs']]
+            person = row.get('experimenter')
+            if person:
+                row['experimenter'] = {k: v for k, v in person.items() if k != '绑定记录'}
+                row['experimenter']['绑定区间'] = [{k: b.get(k) for k in ('姓名', '生效时间', '结束时间', '身份依据')}
+                                                for b in person.get('绑定记录', [])]
     def size(value):
         return len(json.dumps(value, ensure_ascii=False, separators=(',', ':')))
     receipt = {'version': VERSION, 'frame_aliases': mapping,
                'metadata_characters_before': size(metadata), 'metadata_characters_after': size(wire),
                'image_count': len(image_paths), 'images_changed': False,
                'timestamps_changed': False, 'quality_equivalence': 'NOT_PROVEN'}
+    if day_aliases is not None:
+        receipt.update(day_context_version=DAY_CONTEXT_VERSION, day_evidence_aliases=day_aliases)
     return wire, [(reverse[label], path) for label, path in image_paths], receipt
 
 
@@ -123,5 +145,12 @@ def expand(result, receipt):
     for field in ('steps', 'experiment_steps', 'work_activities'):
         for step in value.get(field, []):
             step['frame_ids'] = [original(identifier) for identifier in step['frame_ids']]
+    if 'day_evidence_aliases' in receipt:
+        aliases = receipt['day_evidence_aliases']
+        for finding in value.get('findings', []):
+            refs = finding.get('evidence_refs')
+            if not isinstance(refs, list) or any(not isinstance(r, str) or r not in aliases for r in refs):
+                raise ValueError('Model invented a day context source reference')
+            finding['evidence_refs'] = [aliases[r] for r in refs]
     value['scene_input_transport'] = receipt
     return value

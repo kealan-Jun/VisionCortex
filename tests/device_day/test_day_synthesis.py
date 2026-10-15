@@ -66,6 +66,26 @@ def test_all_cameras_keep_their_own_sources_and_cannot_substitute_another_day():
         evidence_bundle(first, [other])
 
 
+def test_day_wire_preserves_content_and_clock_but_keeps_paths_in_source_receipt():
+    from visioncortex.scene_transport import compact, expand
+    bundle = evidence_bundle(index())
+    metadata = {'schema_version': 'visioncortex-day-context-input/1', 'source_ref': {'sha256': 'a'*64},
+                'frames': [], 'evidence': bundle['evidence']}
+    before = copy.deepcopy(metadata)
+    wire, images, receipt = compact(metadata, [])
+    assert metadata == before and images == []
+    assert all('source' not in row for row in wire['evidence'])
+    assert wire['evidence'][1]['payload']['record_scope'] == 'test_only'
+    assert wire['evidence'][-1]['time_alignment'] == 'NOT_PROVEN'
+    refs = [r['evidence_id'] for r in wire['evidence']]
+    raw = {'findings': [finding(refs, 'contextual_inference')]}
+    expanded = expand(raw, receipt)
+    assert expanded['findings'][0]['evidence_refs'] == [r['evidence_id'] for r in bundle['evidence']]
+    raw['findings'][0]['evidence_refs'] = ['invented']
+    with pytest.raises(ValueError, match='invented'):
+        expand(raw, receipt)
+
+
 def test_separate_model_pass_and_single_day_file_check_input_and_receipts(tmp_path, monkeypatch):
     from visioncortex import scene_requests
     from visioncortex.device_day_contract import artifact, digest

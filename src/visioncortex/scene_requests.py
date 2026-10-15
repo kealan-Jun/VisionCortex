@@ -15,9 +15,14 @@ def request_policy(config):
 
 def request_identity(config, prompt, metadata):
     semantic, _ = project(metadata)
+    policy = request_policy(config)
+    if (config['mllm'].get('compact_scene_metadata', False)
+            and metadata.get('schema_version') == 'visioncortex-day-context-input/1'):
+        from .scene_transport import DAY_CONTEXT_VERSION
+        policy['day_context_transport'] = DAY_CONTEXT_VERSION
     return cache.identity(config, prompt, metadata) | {
         'schema_version': 'visioncortex-scene-response/2',
-        'request_policy': request_policy(config), 'semantic_metadata': semantic}
+        'request_policy': policy, 'semantic_metadata': semantic}
 
 
 def request_key(config, prompt, metadata):

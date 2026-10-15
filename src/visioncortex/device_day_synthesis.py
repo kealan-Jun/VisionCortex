@@ -23,7 +23,8 @@ PROMPT = '''你在整理实验室全天记录，输入是有来源的片段模�
 只返回JSON：{"findings":[{"title":"具体过程标题","text":"结合前后证据的中文理解",
 "category":"experiment/support/uncertainty","basis":"source_observation/contextual_inference",
 "evidence_refs":["输入来源ID"],"uncertainties":["尚不能确认的内容"]}]}。
-每条理解必须引用输入中的来源，具体步骤按发生顺序描述。简明组织过程，最多16条，每条约180字；不输出其他字段。'''
+每条理解必须引用输入中的来源，具体步骤按发生顺序描述。简明组织过程，最多16条，每条约120字，
+每条引用最多6个直接相关来源，不罗列全日所有编号；直接输出JSON，不展开逐条推理过程。'''
 
 
 def _device_bundle(index):
