@@ -718,5 +718,5 @@ def install_routes(app, settings_factory, service):
             sections.append(f'<section>{player}{download}{paragraphs}</section>')
         return '<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' \
                '<title>录音识别</title><style>body{font:16px/1.8 system-ui;max-width:1000px;margin:40px auto;padding:20px}section{border-top:1px solid #ccc;padding-top:20px}audio{width:100%}</style>' \
-               f'<a href="/device-days">返回设备日归档</a><h1>{html.escape(name)} 录音识别</h1><p>STT自动识别，未经人工复核；不能仅据录音确认实验动作。时间对齐依据保留在识别来源中。</p>' \
+               f'<a href="/device-days">返回设备日归档</a><h1>{html.escape(name)} 录音识别</h1><p>STT自动识别；语句与实验动作分别记录。时间对齐依据保留在识别来源中。</p>' \
                + (''.join(sections) or '<p>尚无识别文本；可在总索引中查看无录音、排队或失败状态。</p>') + '</html>'

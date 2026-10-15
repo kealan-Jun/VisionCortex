@@ -93,7 +93,7 @@ def build_file_index(config, index, photos):
                 text=comment['text'], audio=reference(comment.get('audio_ref')) or audio_ref,
                 audio_start_seconds=comment.get('audio_start_seconds'), audio_end_seconds=comment.get('audio_end_seconds'),
                 transcript_file=reference(comment.get('transcript_path')), model=comment.get('model'),
-                time_basis=comment.get('time_basis'), accuracy='NOT_PROVEN', human_reviewed=False,
+                time_basis=comment.get('time_basis'), accuracy='NOT_PROVEN', processing_method='automatic_stt',
                 physical_action_confirmed=False))
     meanings = {m['segment_id']: m for m in index.get('understandings', [])}
     for segment in index.get('segments', []):

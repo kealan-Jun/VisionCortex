@@ -11,8 +11,8 @@ from .device_day_contract import artifact, atomic_bytes, atomic_json, digest, me
 def transcript_text(recording, source, comments, outcome):
     def clock(value):
         return datetime.fromtimestamp(value / 1e6, ZoneInfo('Asia/Shanghai')).isoformat(timespec='milliseconds')
-    status = {'transcribed': '已生成机器转写，未经人工复核。',
-              'no_speech': '语音活动检测未检测到语音，未生成转写；请回听原录音确认。',
+    status = {'transcribed': '已自动生成语音转写。',
+              'no_speech': '语音活动检测未检测到语音，未生成转写；原录音仍保留。',
               'no_transcript': '识别模型未返回文字；这不证明原录音没有语音。'}[outcome]
     lines = [f"录音：{recording['recording_id']}", f"原录音：{source['path']}",
              f'识别状态：{outcome}；{status}', '时间：Asia/Shanghai，依据采集音频时钟；精确对齐未经验证。', '']

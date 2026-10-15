@@ -87,7 +87,7 @@ def render_day(layout, index):
         for comment in transcription.get("comments") or []:
             if comment["start_us"] < segment["end_us"] and comment["end_us"] > segment["start_us"]:
                 paragraphs.append(f'<p><strong>{clock(comment["start_us"])} 录音识别</strong> {text(comment["text"])} '
-                                  f'{material_link(comment["transcript_path"], "STT溯源")} <small>机器识别，未经人工复核</small></p>')
+                                  f'{material_link(comment["transcript_path"], "STT溯源")} <small>自动语音识别</small></p>')
         for window in (understanding or {}).get("windows", []):
             check_yield(checkpoint=False)
             if window.get("input"):
