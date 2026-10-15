@@ -5,7 +5,7 @@ import re
 from copy import deepcopy
 
 VERSION = 'visioncortex-scene-wire/1'
-DAY_CONTEXT_VERSION = 'visioncortex-day-context-wire/1'
+DAY_CONTEXT_VERSION = 'visioncortex-day-context-wire/2'
 STORAGE_FIELDS = frozenset({'path', 'source_path', 'size_bytes', 'sha256'})
 FRAME_LEDGER_VERSION = 'visioncortex-scene-frame-ledger/2'
 _FRAME_IDENTITY = ('sha256', 'size_bytes', 'local_ms', 'source_path')
@@ -97,6 +97,32 @@ def project(metadata, *, aliases=False):
     return value, mapping
 
 
+def _day_completeness(value):
+    """Keep gap times and counts in the wire; identities remain on disk."""
+    from .device_day_narrative import timestamp
+    if not isinstance(value, dict):
+        return value
+    result = {}
+    for key, item in value.items():
+        if isinstance(item, dict):
+            result[key] = _day_completeness(item)
+        elif key in {'missing_or_partial_segments', 'unprocessed_recordings', 'unresolved_index_records'}:
+            intervals = sorted((r['start_us'], r['end_us']) for r in item
+                               if isinstance(r.get('start_us'), (int, float))
+                               and isinstance(r.get('end_us'), (int, float)) and r['start_us'] < r['end_us'])
+            merged = []
+            for left, right in intervals:
+                if merged and left <= merged[-1][1]:
+                    merged[-1][1] = max(merged[-1][1], right)
+                else:
+                    merged.append([left, right])
+            result[key] = {'record_count': len(item), 'untimed_record_count': len(item)-len(intervals),
+                           'ranges': [{'start': timestamp(a), 'end': timestamp(b)} for a, b in merged]}
+        else:
+            result[key] = item
+    return result
+
+
 def compact(metadata, image_paths):
     wire, mapping = project(metadata, aliases=True)
     expected = [f['frame_id'] for f in metadata['frames']]
@@ -105,6 +131,8 @@ def compact(metadata, image_paths):
     reverse = {full: short for short, full in mapping.items()}
     day_aliases = None
     if metadata.get('schema_version') == 'visioncortex-day-context-input/1':
+        from .device_day_narrative import timestamp
+        wire['completeness'] = _day_completeness(wire.get('completeness', {}))
         ids = dict.fromkeys(identifier for row in wire['evidence']
                             for identifier in ([row['evidence_id']] if 'evidence_id' in row else row['evidence_refs']))
         day_aliases = {f'e{i+1}': identifier for i, identifier in enumerate(ids)}
@@ -113,6 +141,15 @@ def compact(metadata, image_paths):
             # Storage provenance stays in Input.json, rather than consuming
             # model context repeatedly. Observations, clocks and limits stay.
             row.pop('source', None)
+            if row.get('start') and row.get('end'):
+                row.pop('start_us', None)
+                row.pop('end_us', None)
+            for field in ('experiment_steps', 'work_activities'):
+                for step in row.get(field, []):
+                    for prefix in ('start', 'end'):
+                        if step.get(prefix+'_us') is not None:
+                            step[prefix] = timestamp(step.pop(prefix+'_us'))
+                            step.pop(prefix+'_ms', None)
             if 'evidence_id' in row:
                 row['evidence_id'] = day_reverse[row['evidence_id']]
             if 'evidence_refs' in row:
