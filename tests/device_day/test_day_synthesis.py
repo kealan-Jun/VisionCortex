@@ -141,13 +141,32 @@ def test_separate_model_pass_and_single_day_file_check_input_and_receipts(tmp_pa
     assert current_synthesis(layout, source) == synthesis
     changed = copy.deepcopy(source)
     changed['context']['protocol'] = {'text': '新增方案，不能当作执行事实'}
-    assert current_synthesis(layout, changed)['status'] == 'stale_inputs_changed'
+    updating = current_synthesis(layout, changed)
+    assert updating['status'] == 'updating_for_new_inputs'
+    assert updating['findings'] == synthesis['findings']
+    assert updating['input_digest'] == synthesis['input_digest']
+    assert updating['current_input_digest'] == digest(evidence_bundle(changed))
+    assert updating['input_coverage']['clip_ranges'][0]['status'] == 'partial'
+    # Recover the last successful conclusion even if an older publisher replaces
+    # the canonical view with a pending marker. No new model call is implicit.
+    from visioncortex.device_day_reports import preserve_prior_synthesis
+    preserve_prior_synthesis(layout, {'status': 'pending'})
+    atomic_json(layout.reports/'LaboratoryDailyReport.json', {'全天综合理解': {'status': 'pending'}})
+    changed['understandings'][0]['status'] = 'completed'
+    recovered = current_synthesis(layout, changed)
+    assert recovered['findings'] == synthesis['findings']
+    assert recovered['current_coverage']['completed_clips'] == 1
+    assert recovered['input_coverage']['completed_clips'] == 0
+    assert len(calls) == 1
+    another_camera = copy.deepcopy(changed)
+    another_camera['archive'] = '2026-09-16_camera-2'
+    assert current_synthesis(layout, another_camera)['status'] == 'stale_inputs_changed'
     last = synthesis['model_receipts'][-1]['result']
     path = layout.root/last['path']
     atomic_json(path, {'model_result': {'status': 'completed', 'findings': []}})
     assert artifact(layout.root, path) != last
     with pytest.raises(ValueError, match='identity changed'):
-        current_synthesis(layout, source)
+        current_synthesis(layout, changed)
 
 
 def test_output_upgrade_uses_matching_adapter_preserves_success_and_cannot_bypass_unknown(tmp_path, monkeypatch):
