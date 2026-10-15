@@ -29,7 +29,7 @@ WAIT_LABELS = {'paused_by_user': '按用户要求暂停',
                'failure_cooldown': '失败后等待冷却', 'input_missing': '输入缺失，待归档原件核验',
                'waiting_for_storage': '等待本地存储达到留空要求',
                'submitted_unknown': '已提交请求结果未知，等待回执核对',
-               'anomalous_inactive_request_plan': '重复视觉请求计划异常，等待复核；保留来源与时间记录',
+               'anomalous_inactive_request_plan': '重复视觉请求计划异常；保留来源、时间记录与诊断',
                'blocked': '任务阻塞，等待明确处置依据',
                'input_unavailable': '输入暂不可用', 'camera_role_unconfigured': '尚未配置机位角色', 'disabled': '未启用'}
 

@@ -175,7 +175,7 @@ def publish_transcript(config, archive, record, context=None):
         'recording_id': record['recording_id'], 'start_us': record['start_us'], 'end_us': record['end_us'],
         'audio': record.get('audio'), 'status': stt.get('status'), 'outcome': stt.get('outcome'),
         'content_source': 'machine_transcribed_speech', 'model_invocation': stt.get('model_invocation'),
-        'human_reviewed': False, 'accuracy': 'NOT_PROVEN', 'sentences': stt.get('comments') or [],
+        'processing_method': 'automatic_stt', 'accuracy': 'NOT_PROVEN', 'sentences': stt.get('comments') or [],
         'execution_windows': stt.get('chunks') or [], 'original_transcript': stt.get('transcript_file')}
     from .device_day_narrative import experimenter, timestamp
     value['录音时间线'] = [{'开始时间': timestamp(s['start_us']), '结束时间': timestamp(s['end_us']),
@@ -184,7 +184,7 @@ def publish_transcript(config, archive, record, context=None):
     _write(safe_child(root, relative + '/Transcript.json'), value)
     lines = [f"设备：{common['device']}  日期：{common['date']}",
              f"录音识别状态：{value['status']} / {value['outcome']}",
-             '机器转写，未经人工复核。识别为空不证明录音没有语音。', '']
+             '自动语音转写。识别为空不证明录音没有语音。', '']
     for row in value['sentences']:
         stamp = datetime.fromtimestamp(row['start_us']/1e6, ZoneInfo('Asia/Shanghai')).isoformat(timespec='milliseconds')
         lines.append(f"[{stamp}] {row['text']}")

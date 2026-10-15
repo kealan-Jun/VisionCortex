@@ -40,10 +40,17 @@ def experimenter(context, camera, start, end):
     people = {r['人员ID'] for r in bindings}
     resolved = len(people) == 1 and bool(covering)
     selected = covering[0] if resolved else {}
-    return {'姓名': selected.get('姓名') or ('姓名未提供' if resolved else '身份待确认'),
-            '人员ID': selected.get('人员ID'), '状态': '有效设备绑定' if resolved else '绑定缺失、冲突或覆盖部分时段',
-            '绑定记录': bindings, '物理操作者已确认': False,
-            '说明': '按设备和有效时间引用 FieldRecognition 绑定；不将佩戴者自动等同画面中所有操作人。'}
+    unresolved = ('绑定冲突' if len(people) > 1 else '绑定仅覆盖部分时段' if bindings else '未找到有效绑定')
+    return {'姓名': selected.get('姓名') or ('姓名未提供' if resolved else '未关联实验员'),
+            '人员ID': selected.get('人员ID'), '状态': '有效设备绑定' if resolved else unresolved,
+            '关联方式': 'FieldRecognition设备自动绑定', '绑定记录': bindings,
+            '说明': '按同设备有效时间自动关联实验员，无需再次人工确认；绑定不覆盖的时段不归给该人员。'}
+
+
+def recognition_payload(payload):
+    """Source workflow annotations stay in evidence, not an approval task."""
+    return {key: value for key, value in (payload or {}).items()
+            if key not in {'review_status', 'human_reviewed'}}
 
 
 def segment_record(segment, meaning, recording, context=None, *, segments=None):
@@ -94,9 +101,9 @@ def segment_record(segment, meaning, recording, context=None, *, segments=None):
         '内容状态': (meaning or {}).get('status', 'pending'),
         '实验步骤': steps, '非实验工作': work, '分窗口观察': observations,
         '录音记录': [{'开始时间': timestamp(s['start_us']), '结束时间': timestamp(s['end_us']),
-                      '原话': s.get('text'), '转写来源': s.get('transcript_path'), '人工复核': False} for s in speech],
+                      '原话': s.get('text'), '转写来源': s.get('transcript_path'), '识别方式': '自动转写'} for s in speech],
         '仪器与现场记录': [{'记录时间': timestamp(e['start_us']), '类型': e['type'],
-            '仪器': e.get('instrument_id'), '识别内容': e.get('payload', {}),
+            '仪器': e.get('instrument_id'), '识别内容': recognition_payload(e.get('payload')),
             '原始照片与媒体': e.get('media'), '来源': e.get('evidence_refs'),
             '时钟': e.get('clock'), '关联依据': '同设备与时间重叠，尚未证明属于同一步操作'} for e in events],
         '实验方案': context.get('protocol'),
@@ -106,7 +113,7 @@ def segment_record(segment, meaning, recording, context=None, *, segments=None):
                  '原视频开始毫秒': segment['start_ms'], '原视频结束毫秒': segment['end_ms'],
                  '片段索引': segment.get('json_path'), '执行记录': receipts,
                  '原录音': recording.get('audio'), '片段编号': segment['segment_id']},
-        '质量说明': '机器观察，未经人工复核；抽样覆盖不证明完整动作召回。'}
+        '质量说明': '自动模型记录，保留可见依据与不确定性；抽样覆盖不证明完整动作召回。'}
 
 
 def day_record(index):
@@ -133,10 +140,10 @@ def day_record(index):
         '录音时间线': [{'开始时间': timestamp(s['start_us']), '结束时间': timestamp(s['end_us']),
                          '实验员': experimenter(index.get('context'), r['camera_key'], s['start_us'], s['end_us']),
                          '原话': s.get('text'), '转写来源': s.get('transcript_path'),
-                         '原录音': r.get('audio'), '人工复核': False}
+                         '原录音': r.get('audio'), '识别方式': '自动转写'}
                         for r in recordings.values() for s in ((r.get('transcription') or {}).get('comments') or [])],
         '现场事件时间线': [{'记录时间': timestamp(e['start_us']), '类型': e['type'],
-                             '设备': e.get('capture_device_id'), '内容': e.get('payload'),
+                             '设备': e.get('capture_device_id'), '内容': recognition_payload(e.get('payload')),
                              '照片与媒体': e.get('media'), '来源': e.get('evidence_refs'), '时钟': e.get('clock')}
                             for e in (index.get('context') or {}).get('events', [])],
         '实验方案': (index.get('context') or {}).get('protocol'),

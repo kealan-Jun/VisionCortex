@@ -164,8 +164,35 @@ def test_experimenter_name_follows_binding_handover_and_never_crosses_devices():
     def us(stamp):
         return round(datetime.fromisoformat('2026-09-16T'+stamp+'+08:00').timestamp()*1e6)
     context = {'events': [first, second]}
-    assert experimenter(context, 'camera-1', us('11:00:00'), us('12:00:00'))['姓名'] == '实验员甲'
+    bound = experimenter(context, 'camera-1', us('11:00:00'), us('12:00:00'))
+    assert bound['姓名'] == '实验员甲'
+    assert bound['关联方式'] == 'FieldRecognition设备自动绑定'
+    assert '物理操作者已确认' not in bound
     assert experimenter(context, 'camera-1', us('12:00:00'), us('13:00:00'))['姓名'] == '实验员乙'
     assert experimenter(context, 'camera-1', us('11:59:00'), us('12:01:00'))['人员ID'] is None
     assert experimenter(context, 'camera-2', us('11:00:00'), us('12:00:00'))['人员ID'] is None
+    assert experimenter(context, 'camera-2', us('11:00:00'), us('12:00:00'))['状态'] == '未找到有效绑定'
     assert experimenter(context, 'camera-1', us('12:00:00'), us('12:00:00'))['姓名'] == '实验员乙'
+
+
+def test_automatic_readable_records_preserve_uncertainty_without_manual_review_tasks():
+    segment, recording, meaning = fixtures()
+    recording['transcription'] = {'comments': [{'start_us': 2000000, 'end_us': 3000000,
+        'text': '换一个', 'transcript_path': 'Comment/Transcript.json'}]}
+    context = {'events': [{'type': 'ocr_observation', 'capture_device_id': 'camera-1',
+        'start_us': 2000000, 'end_us': 3000000,
+        'payload': {'normalized_values': [{'value': None, 'unit': None}],
+                    'record_scope': 'test_only', 'review_status': 'unreviewed'}}]}
+    original = copy.deepcopy((recording, context))
+    clip = segment_record(segment, meaning, recording, context)
+    day = day_record({'archive': '2026-09-16_camera-1', 'recordings': [recording],
+        'segments': [segment], 'understandings': [meaning | {'segment_id': segment['segment_id']}], 'context': context})
+    for speech in (clip['录音记录'][0], day['录音时间线'][0]):
+        assert speech['原话'] == '换一个'
+        assert speech['识别方式'] == '自动转写'
+        assert '人工复核' not in speech
+    for payload in (clip['仪器与现场记录'][0]['识别内容'], day['现场事件时间线'][0]['内容']):
+        assert payload['record_scope'] == 'test_only'
+        assert payload['normalized_values'] == [{'value': None, 'unit': None}]
+        assert 'review_status' not in payload
+    assert (recording, context) == original

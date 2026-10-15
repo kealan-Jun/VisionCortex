@@ -96,7 +96,7 @@ VisionCortex 继续负责视频与处理，FieldRecognition 继续生产照片/O
 
 达到既定本地容量时，显式调用 `archive_person_history(config, runtime_root, destination)` 提供获授权的历史归档根和存储检查。它持有人员发布锁，仅复制已被替代的 `Revision*.json`，验证内容、源稳定性和完整 SHA256，持久保存 `HistoryArchives.json` 的原路径映射后才回收本地旧版本。当前 Manifest 所指版本、Latest、inbox/游标和活动 SQLite 不迁移。`read_person_revision(config, runtime_root, relative)` 按原身份读取本地或已校验归档；NAS 不可用或摘要变化时失败关闭。默认本地/no-NAS 流程不会继承 NAS 目标；不得扩大容量或丢弃历史来伪造发布成功。
 
-JSON/HTML、事件适配器或服务心跳不代表已生产 PDF、全文实验员总结或现场全天业务验收。需另核验真实生产方 outbox、消费者实际进程配置、OCR/绑定进入日报、音视频完整覆盖及人工复核。
+JSON/HTML、事件适配器或服务心跳不代表已生产 PDF、全文实验员总结或现场全天业务验收。需另核验真实生产方 outbox、消费者实际进程配置、OCR/绑定进入日报、音视频完整覆盖及自动校验结果。日常采集、识别和日报无需人工确认或复核。
 
 ## 部署、兼容迁移与回退
 
@@ -184,7 +184,7 @@ python -m visioncortex.device_day_synthesis --config /path/to/private-profile.ya
 
 阶段性预览须明确加 `--allow-partial`；这不代表完整全天录制或处理完成。单设备来源包括所有已保存视频窗口的摘要与步骤、独立语音句段、完整 OCR/绑定载荷、protocol 和未处理清单。没有对应视频的语音/OCR仍进入日报。长输入按有界批次整理后继续综合，不能截掉当天尾部。每层精确输入、实际模型回执和用量保存在 `LaboratoryDailyReport/Analysis/DayContext/`；最后结果引用原始证据 ID，可回到片段及源媒体。中间层摘要存在信息损失风险，原始证据仍可查，语义质量须另行复核。
 
-综合理解区分 `source_observation` 与 `contextual_inference`。后者至少引用两条来源，例如前段拿样品瓶、后段出现天平读数，可形成待复核的过程解释；读数与动作的归属及完成状态仍取决于实际证据。测试数据、OCR 空值、未知单位、缺口和人员冲突必须保留。来源新增或修订时，旧综合理解标记 `stale_inputs_changed`，已完成的纯视频调用不因上下文更新重新付费。
+综合理解区分 `source_observation` 与 `contextual_inference`。后者至少引用两条来源，例如前段拿样品瓶、后段出现天平读数，可自动形成标明依据和不确定性的过程解释；读数与动作的归属及完成状态仍取决于实际证据。测试数据、OCR 空值、未知单位、缺口和人员冲突必须保留，不转换成人工审批任务。来源新增或修订时，旧综合理解标记 `stale_inputs_changed`，已完成的纯视频调用不因上下文更新重新付费。
 
 日报生成遇到明确截断时，可显式设置 `--retry-output-tokens 32768`：已成功的原输出额度继续按精确原请求复用；明确截断的部分和新的上层综合使用提高后的有界额度与对应分析器，各自绑定真实生成策略和用量。不会把未知提交当作失败重做；原额度仍有未确认请求时拒绝升级。已完成的日报在后续证据使其过时时保留到 `LaboratoryDailyReport/History/`，普通进度更新不大量复制未完成日报。
 
@@ -196,6 +196,8 @@ python -m visioncortex.device_day_synthesis --config /path/to/private-profile.ya
 
 该开关不重新调用视频模型；晚到上下文可创建新的留存修订。原片保留位置和可读媒体解析需随归档保留。测试入口新增 `tests/device_day/test_readable_all_day.py`；实际模型语义质量与全天覆盖仍需分别验收。
 
-日报和可读片段中的 `实验员`、录音的逐句 `实验员`，按同设备、完整有效时间区间的 FieldRecognition 佩戴者绑定显示姓名、人员 ID、绑定生效/结束时间和来源。跨换人边界、缺失或冲突显示身份待确认；姓名未提供时保留人员 ID，操作人和佩戴者不自动混同。日汇总列出已关联姓名，不能据此把整日未绑定区间全部归给该人。
+日报和可读片段中的 `实验员`、录音的逐句 `实验员`，按同设备、完整有效时间区间的 FieldRecognition 绑定自动显示姓名、人员 ID、绑定生效/结束时间和来源，无需再次人工确认。跨换人边界、缺失或冲突分别记录绑定覆盖不足、未找到有效绑定或绑定冲突；姓名未提供时保留人员 ID。日汇总列出已自动关联姓名，不能据此把整日未绑定区间全部归给该人。
+
+可读录音标明自动转写，不设置“人工复核”步骤；可读OCR保留值、单位、测试范围和来源，来源中的历史审核注记保留在原始证据中。可读片段、日报及转写入口不以“未经人工复核”作为处理状态。模型不确定、读数为空、输入缺失、时间精度不足与机器校验失败仍按实际状态记录，不能改写成成功或删除来源。原始模型输入、响应和历史执行回执保持字节不变。
 
 理解 worker 的实际领取并发取 `understanding_workers`、`stage_worker_limits.understanding` 和 `runtime.resource_limits.cloud` 的最小值。单条录像内部按窗口顺序保存；不同录像独立并发，使用复制后的执行上下文和原有持久队列租约。关闭时等待已领取调用保存，不取消已发送请求。历史理解还须在 `backfill.stages` 中启用 `understanding`，并满足历史准入与来源验证；仅提高云端上限不会自动启动历史处理。回归入口为 `tests/device_day/test_understanding_concurrency.py`。

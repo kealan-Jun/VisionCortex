@@ -249,7 +249,7 @@ def _synthesize(config, layout, index, analyzer, *, context_indexes, retry_outpu
                 'input_digest': key, 'findings': collected, 'evidence': bundle['evidence'],
                 'context_archives': sorted({i['archive'] for i in [index, *context_indexes]}),
                 'completeness': bundle['completeness'], 'model_receipts': receipts,
-                'human_reviewed': False, 'physical_action_confirmed': False}
+                'processing_method': 'automatic_day_synthesis', 'physical_action_confirmed': False}
         if not collected:
             raise ValueError('Intermediate day synthesis omitted all findings')
         rows = collected
@@ -277,7 +277,8 @@ def current_synthesis(layout, index):
                 raise ValueError('Saved day synthesis response is not completed')
         if not value.get('model_receipts') or result['model_result'].get('findings') != value.get('findings'):
             raise ValueError('Saved day synthesis differs from its model response')
-        return value
+        return {key: item for key, item in value.items() if key != 'human_reviewed'} | {
+            'processing_method': 'automatic_day_synthesis'}
     return {'status': 'pending' if not value else 'stale_inputs_changed',
             '说明': '等待模型结合当前全天证据综合理解；已有片段理解继续保留。'}
 
