@@ -98,6 +98,14 @@ class UsageLedger:
                              'ORDER BY saved DESC LIMIT 1', (input_key,)).fetchone()
             return (row['reservation_id'], json.loads(row['payload'])) if row else None
 
+    def unresolved(self, input_key):
+        """A larger output allowance must not bypass an unknown old attempt."""
+        if not self.path.is_file():
+            return False
+        with connection(self.path, readonly=True) as db:
+            return db.execute('SELECT 1 FROM calls WHERE input_key=? AND '
+                '(ended IS NULL OR status=?) LIMIT 1', (input_key, 'submitted_unknown')).fetchone() is not None
+
     def published(self, identifier):
         # Only the temporary recovery payload is reclaimed. Calls and attempt
         # receipts remain in the accounting history.

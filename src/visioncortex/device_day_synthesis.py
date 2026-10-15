@@ -163,8 +163,24 @@ def _batches(rows, maximum=48000, *, measure=None):
     return batches
 
 
-def synthesize(config, layout, index, analyzer, *, context_indexes=()):
+def synthesize(config, layout, index, analyzer, *, context_indexes=(), retry_output_tokens=None, analyzer_factory=None):
     """Explicit paid operation; same-input retries reuse the existing ledger."""
+    if retry_output_tokens is not None and (type(retry_output_tokens) is not int
+            or not int(config.get('mllm', {}).get('max_output_tokens', 4096)) < retry_output_tokens <= 65536):
+        raise ValueError('Explicit day synthesis output allowance must increase the base limit and remain bounded')
+    from contextlib import ExitStack
+    with ExitStack() as resources:
+        expanded = None
+        if retry_output_tokens is not None:
+            from .mllm import ArkAnalyzer
+            expanded_config = config | {'mllm': config['mllm'] | {'max_output_tokens': retry_output_tokens}}
+            expanded = (analyzer_factory or ArkAnalyzer)(expanded_config)
+            resources.callback(expanded.close)
+        return _synthesize(config, layout, index, analyzer, context_indexes=context_indexes,
+                           retry_output_tokens=retry_output_tokens, expanded_analyzer=expanded)
+
+
+def _synthesize(config, layout, index, analyzer, *, context_indexes, retry_output_tokens, expanded_analyzer):
     from .scene_requests import window
     context_indexes = list(context_indexes)
     bundle = evidence_bundle(index, context_indexes)
@@ -194,7 +210,30 @@ def synthesize(config, layout, index, analyzer, *, context_indexes=()):
                          {ref for r in batch for ref in r['evidence_refs']})
             available.add(bundle['coverage_evidence_id'])
             metadata['coverage_evidence_id'] = bundle['coverage_evidence_id']
-            raw, findings, reused = window(config, analyzer, PROMPT, metadata, [],
+            request_config = config
+            input_path, result_path = directory/'Input.json', directory/'Result.json'
+            increase = retry_output_tokens is not None and level > 0
+            if retry_output_tokens is not None and input_path.is_file() and result_path.is_file():
+                from .scene_requests import request_identity
+                previous, received = read_json(input_path), read_json(result_path)
+                paired_input = (previous.get('prompt') == PROMPT and previous.get('metadata') == metadata
+                    and previous.get('input_key') == received.get('input_key') == digest([metadata, PROMPT]))
+                paired = paired_input and received.get('request_policy') == request_identity(config, PROMPT, metadata)['request_policy']
+                raw_previous = received.get('model_result') or {}
+                if paired and raw_previous.get('status') == 'completed':
+                    increase = False  # Keep the successful original generation policy, without repaying.
+                elif paired and raw_previous.get('status') == 'failed' and '截断' in str(raw_previous.get('error', '')):
+                    increase = True
+                expanded_config = config | {'mllm': config['mllm'] | {'max_output_tokens': retry_output_tokens}}
+                if paired_input and received.get('request_policy') == request_identity(expanded_config, PROMPT, metadata)['request_policy']:
+                    increase = True
+            if increase:
+                from .multimodal_usage import UsageLedger, SubmittedUnknown
+                from .scene_requests import request_key
+                if UsageLedger(config, readonly=True).unresolved(request_key(config, PROMPT, metadata)):
+                    raise SubmittedUnknown('submitted_unknown: reconcile the original allowance before changing output limits')
+                request_config = config | {'mllm': config['mllm'] | {'max_output_tokens': retry_output_tokens}}
+            raw, findings, reused = window(request_config, expanded_analyzer if increase else analyzer, PROMPT, metadata, [],
                 directory/'Input.json', directory/'Result.json', lambda raw: validate_findings(raw, available))
             receipt = {'input': artifact(layout.root, directory/'Input.json'),
                 'result': artifact(layout.root, directory/'Result.json'), 'response_cache_reused': reused,
@@ -259,6 +298,7 @@ def main():
     parser.add_argument('--archive', required=True)
     parser.add_argument('--context-archive', action='append', default=[])
     parser.add_argument('--allow-partial', action='store_true')
+    parser.add_argument('--retry-output-tokens', type=int)
     args = parser.parse_args()
     config = load_config(Path(args.config))
     root = Path(config['storage']['archive_root'])
@@ -277,7 +317,8 @@ def main():
     with storage_guard(config):
         analyzer = ArkAnalyzer(config)
         try:
-            result = synthesize(config, layout, index, analyzer, context_indexes=others)
+            result = synthesize(config, layout, index, analyzer, context_indexes=others,
+                                retry_output_tokens=args.retry_output_tokens)
         finally:
             analyzer.close()
         path = layout.reports/'LaboratoryDailyReport.json'
