@@ -5,6 +5,7 @@ synthesis, its exact inputs, paid-call receipts and completeness limits.
 Rendering never invokes this paid pass implicitly.
 """
 import json
+from datetime import datetime, timezone
 from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
@@ -249,6 +250,8 @@ def _synthesize(config, layout, index, analyzer, *, context_indexes, retry_outpu
                 'input_digest': key, 'findings': collected, 'evidence': bundle['evidence'],
                 'context_archives': sorted({i['archive'] for i in [index, *context_indexes]}),
                 'completeness': bundle['completeness'], 'model_receipts': receipts,
+                'generated_at': datetime.now(timezone.utc).isoformat(),
+                'input_coverage': synthesis_coverage(index),
                 'processing_method': 'automatic_day_synthesis', 'physical_action_confirmed': False}
         if not collected:
             raise ValueError('Intermediate day synthesis omitted all findings')
@@ -256,10 +259,57 @@ def _synthesize(config, layout, index, analyzer, *, context_indexes, retry_outpu
     raise ValueError('Day synthesis exceeds bounded hierarchy; saved requests remain reusable')
 
 
+def synthesis_coverage(index):
+    """Describe a publication snapshot without changing paid request identity."""
+    meanings = {row['segment_id']: row for row in index.get('understandings', [])}
+    ranges = [{'start': timestamp(row['start_us']), 'end': timestamp(row['end_us']),
+               'status': meanings.get(row['segment_id'], {}).get('status', 'pending')}
+              for row in sorted(index.get('segments', []), key=lambda row: row['start_us'])]
+    return {'archive': index['archive'], 'selected_clips_expected': index.get('selected_clip_count', len(ranges)),
+            'completed_clips': sum(row['status'] == 'completed' for row in ranges),
+            'clip_ranges': ranges,
+            'pending_value_analysis_intervals': len(index.get('pending_value_review_intervals', [])),
+            'whole_day_capture_proven': False}
+
+
+def _verify_saved_synthesis(layout, value, archive):
+    """An older conclusion still needs the same successful immutable receipts."""
+    if value.get('context_archives') == [archive]:
+        bundle = {'schema_version': 'visioncortex-day-context/1', 'archive': archive,
+                  'timezone': 'Asia/Shanghai', 'evidence': value['evidence'],
+                  'completeness': value['completeness'],
+                  'coverage_evidence_id': 'coverage-' + digest(value['completeness'])[:24]}
+        if digest(bundle) != value['input_digest']:
+            raise ValueError('Saved day synthesis evidence identity changed')
+    receipts = value.get('model_receipts') or []
+    for ref in receipts:
+        if not all(verify_artifact(layout.root, ref[name]) for name in ('input', 'result')):
+            raise ValueError('Saved day synthesis receipt identity changed')
+        metadata = read_json(safe_child(layout.root, ref['input']['path']))['metadata']
+        if metadata.get('archive') != archive or metadata.get('source_ref', {}).get('sha256') != value['input_digest']:
+            raise ValueError('Saved day synthesis receipt scope changed')
+        result = read_json(safe_child(layout.root, ref['result']['path']))
+        if result.get('model_result', {}).get('status') != 'completed':
+            raise ValueError('Saved day synthesis response is not completed')
+    if not receipts or result['model_result'].get('findings') != value.get('findings'):
+        raise ValueError('Saved day synthesis differs from its model response')
+    validate_findings(result['model_result'], {row['evidence_id'] for row in value['evidence']})
+
+
 def current_synthesis(layout, index):
-    """Render the saved synthesis only for its exact current evidence bundle."""
+    """Keep verified as-of conclusions visible while newer clips are synthesized."""
     path = layout.reports/'LaboratoryDailyReport.json'
     value = read_json(path).get('全天综合理解') if path.is_file() else None
+    if not (value or {}).get('input_digest'):
+        # Older publishers may replace the current view with a pending marker.
+        # Their preserved snapshots remain receipts, not a second daily report.
+        history = sorted((layout.reports/'History').glob('Report*.json'),
+                         key=lambda item: item.stat().st_mtime_ns, reverse=True)
+        for previous in history[:64]:
+            candidate = read_json(previous).get('全天综合理解') or {}
+            if candidate.get('input_digest') and candidate.get('context_archives') == [index['archive']]:
+                value = candidate
+                break
     others = []
     for name in (value or {}).get('context_archives', []):
         if name != index['archive']:
@@ -267,18 +317,18 @@ def current_synthesis(layout, index):
             if not other.is_file():
                 return {'status': 'stale_inputs_changed', '说明': '全天上下文来源暂不可读，需要核验后重新综合。'}
             others.append(read_json(other))
-    if value and isinstance(value.get('input_digest'), str) and value['input_digest'] == digest(evidence_bundle(index, others)):
-        for ref in value.get('model_receipts', []):
-            # Readable prose must still have its original successful response.
-            if not all(verify_artifact(layout.root, ref[name]) for name in ('input', 'result')):
-                raise ValueError('Saved day synthesis receipt identity changed')
-            result = read_json(safe_child(layout.root, ref['result']['path']))
-            if result.get('model_result', {}).get('status') != 'completed':
-                raise ValueError('Saved day synthesis response is not completed')
-        if not value.get('model_receipts') or result['model_result'].get('findings') != value.get('findings'):
-            raise ValueError('Saved day synthesis differs from its model response')
-        return {key: item for key, item in value.items() if key != 'human_reviewed'} | {
-            'processing_method': 'automatic_day_synthesis'}
+    if value and isinstance(value.get('input_digest'), str):
+        _verify_saved_synthesis(layout, value, index['archive'])
+        current_digest = digest(evidence_bundle(index, others))
+        saved = {key: item for key, item in value.items()
+                 if key not in ('human_reviewed', 'current_input_digest', 'current_coverage', '说明')}
+        saved.update(status='completed_for_available_inputs', processing_method='automatic_day_synthesis')
+        if value['input_digest'] == current_digest:
+            return saved
+        if value.get('context_archives') == [index['archive']]:
+            return saved | {'status': 'updating_for_new_inputs', 'current_input_digest': current_digest,
+                'current_coverage': synthesis_coverage(index),
+                '说明': '新增片段正在补入综合；以下保留上一轮已完成结论，其覆盖范围见input_coverage，新增范围见current_coverage。'}
     return {'status': 'pending' if not value else 'stale_inputs_changed',
             '说明': '等待模型结合当前全天证据综合理解；已有片段理解继续保留。'}
 

@@ -156,8 +156,10 @@ def render_day(layout, index):
                          for s in index["segments"]))
     overview = f'<p>{len(index["recordings"])} 个采集分片；{len(index["segments"])} 个分析区间；{pending} 个分片仍有阶段待完成。</p><p>{text(readable["覆盖说明"])}</p>'
     overview += '<article><h3>模型全天综合理解</h3>'
-    if synthesis.get('status') == 'completed_for_available_inputs':
-        overview += '<p>模型结合当前已保存全天证据综合理解；完整性和未处理范围见理解文件。</p>'
+    if synthesis.get('status') in {'completed_for_available_inputs', 'updating_for_new_inputs'}:
+        overview += '<p>' + text(synthesis.get('说明', '模型结合当前已保存全天证据综合理解；完整性和未处理范围见理解文件。')) + '</p>'
+        if synthesis.get('generated_at'):
+            overview += '<p>最近综合时间：' + text(synthesis['generated_at']) + '</p>'
         for finding in synthesis['findings']:
             overview += f'<p><strong>{text(finding["title"])}</strong> {text(finding["text"])}</p>'
             overview += '<small>' + text('；'.join(finding['uncertainties'])) + '</small>'
