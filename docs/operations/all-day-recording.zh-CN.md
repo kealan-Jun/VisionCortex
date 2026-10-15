@@ -114,17 +114,26 @@ JSON/HTML、事件适配器或服务心跳不代表已生产 PDF、全文实验�
 
 ```mermaid
 flowchart TD
-    A[设备与采集时间] --> B[原视频与元数据]
-    A --> C[原录音与逐句转写时间]
-    A --> D[FieldRecognition 照片 OCR 绑定与读数时间]
+    subgraph VisionCortex
+        B[原视频与采集时间]
+        C[原录音与逐句转写时间]
+        P[Comment 中的 protocol 与备注]
+    end
+    D[FieldRecognition 照片 OCR 人员绑定与读数时间]
     B --> E[有界时序理解与实际模型回执]
     E --> F[实验操作步骤]
     E --> G[非实验工作]
     E --> H[静止或可见性不足]
-    C --> I[可读时间线与日报]
-    D --> I
-    F --> I
-    G --> I
+    F --> M[MultimodalUnderstanding 每个时间片段的理解]
+    G --> M
+    H --> M
+    C --> M
+    D --> M
+    M --> S[模型结合整天上下文综合理解]
+    C --> S
+    D --> S
+    P --> S
+    S --> I[LaboratoryDailyReport 全天综合理解就是日报]
     H --> J{处理视频留存判断}
     J -->|活动 等待 语音 读数 或不确定| K[保留视频与前后上下文]
     J -->|完整窗口均可见静止且无保护信号| L[省略处理副本 写留存说明]
