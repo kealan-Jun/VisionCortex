@@ -120,7 +120,7 @@ def expand(result, receipt):
         return mapping[identifier]
     for row in value.get('frame_observations', []):
         row['frame_id'] = original(row['frame_id'])
-    for field in ('steps', 'experiment_steps'):
+    for field in ('steps', 'experiment_steps', 'work_activities'):
         for step in value.get(field, []):
             step['frame_ids'] = [original(identifier) for identifier in step['frame_ids']]
     value['scene_input_transport'] = receipt

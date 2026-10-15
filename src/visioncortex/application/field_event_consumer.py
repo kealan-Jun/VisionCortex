@@ -236,6 +236,11 @@ def context_events(config, recording):
                            'instrument_id': event.get('instrument_id'), 'wearer_id': event.get('wearer_id'),
                            'operator_id': event.get('operator_id'), 'associations': event.get('associations'),
                            'clock': event.get('clock'), 'physical_action_verified': False})
+            # Readings and original media are evidence, not just opaque event IDs.
+            # Keep recognition/review status and units exactly as received.
+            events[-1].update(payload=event.get('payload', {}), media=event.get('media', []),
+                              capture_device_id=camera, source_instance=event.get('source_instance'),
+                              occurred_start=event.get('occurred_start'), occurred_end=event.get('occurred_end'))
     events.sort(key=lambda event: (event['start_us'], event['event_id'], event['revision']))
     return {'status': 'available', 'events': events, 'unknown_time_events': unknown_time,
             'source': 'field_recognition', 'association_basis': 'actual_interval_overlap',

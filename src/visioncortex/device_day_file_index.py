@@ -318,6 +318,8 @@ class FileIndexPublisher:
                         source = index
                         operation = 'partial_understandings'
                         index = with_partial_understandings(self.config, index)
+                        from .device_day_narrative import attach_context
+                        index = attach_context(self.config, index)
                         operation = 'readable_content'
                         index['readable_content'] = publish_content(self.config, index)
                         if index.get('recordings'):

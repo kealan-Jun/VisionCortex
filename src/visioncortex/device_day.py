@@ -373,6 +373,10 @@ class DeviceDayRunner:
         semantic_keys = {"vision": ("chunk_seconds", "inactive_frames"),
                          "understanding": ("inactive_frames", "active_frames_per_window", "active_window_seconds")}
         stage_settings.update({k: self.settings.get(k) for k in semantic_keys.get(stage, ())})
+        if stage == 'report':
+            stage_settings['derived_video_retention'] = self.settings.get('derived_video_retention', False)
+            if self.settings.get('derived_video_retention', False):
+                stage_settings['context_digest'] = digest(self._context(self.layout(recording), recording))
         if stage == 'understanding' and full_coverage:
             stage_settings.update({k: self.settings.get(k) for k in (
                 'understanding_coverage_since_us', 'understanding_frames_per_request',
@@ -670,8 +674,23 @@ class DeviceDayRunner:
                         receipt = executor.run('stt', self._backend().transcribe, layout, retention, key)
                     else:
                         # A day report is an aggregate; it is re-rendered under the day lock.
+                        materials = {}
+                        if self.settings.get('derived_video_retention', False):
+                            from .application.retained_video import materialize
+                            from .device_day_inputs import source_path
+                            meanings = {u['segment_id']: u for u in understanding.get('understandings', [])}
+                            context = self._context(layout, recording)
+                            record_view = recording | {'audio': retention.get('audio'), 'transcription': stt,
+                                'camera_key': recording['camera_key']}
+                            for segment in vision['segments']:
+                                materials[segment['segment_id']] = materialize(layout,
+                                    source_path(layout, {'retained': segment['source_ref']}), segment,
+                                    meanings.get(segment['segment_id']), record_view, context,
+                                    segments=vision['segments'])
                         self.refresh_index(layout, recording_id=recording["recording_id"])
-                        receipt = {"artifacts": [], "report": layout.relative(layout.reports / "LaboratoryDailyReport.html")}
+                        receipt = {"artifacts": [m['video'] for m in materials.values() if m.get('video')],
+                                   'retained_videos': materials,
+                                   "report": layout.relative(layout.reports / "LaboratoryDailyReport.html")}
                     receipt.update(schema_version=VERSION, key=key, stage=current, status="completed",
                                    recording_id=recording["recording_id"], completed_at=now(),
                                    wall_seconds=round(time.perf_counter() - started, 6))
@@ -788,6 +807,7 @@ class DeviceDayRunner:
                             record = retained.get("recording") or {}
                             visual = stages.get("vision") or {}
                             recordings.append({"recording_id": identifier, "start_us": record.get("recording_start_us"),
+                                               'camera_key': record.get('camera_key'),
                                                "end_us": record.get("recording_end_us"),
                                                "capture_complete": record.get("capture_complete"), "capture_issues": record.get("issues", []),
                                                "audio": retained.get("audio", {"status": "not_provided", "artifacts": []}),
@@ -828,6 +848,13 @@ class DeviceDayRunner:
                                 # full authoritative receipt and semantic input.
                                 from .device_day_audit import compact_index_visual
                                 index_visual = compact_index_visual(layout, visual, recording_id=identifier)
+                                report = stages.get('report') or {}
+                                if report.get('status') == 'completed' and self._accepts_receipt(report,
+                                        self._key('report', record, semantic)):
+                                    for segment in index_visual['segments']:
+                                        material = report.get('retained_videos', {}).get(segment['segment_id'])
+                                        if material:
+                                            segment.update(video=material.get('video'), derived_video_disposition=material)
                                 segments.extend(index_visual["segments"])
                                 recordings[-1]['processing'] = {k: index_visual.get(k) for k in (
                                     "status", "source_duration_ms", "batches", "scan_reports", "audit_artifacts", "clock_mapping")}
@@ -849,6 +876,8 @@ class DeviceDayRunner:
                     index = {"schema_version": VERSION, "archive": layout.name, "updated_at": now(),
                              "recordings": recordings, "segments": segments, "understandings": understandings,
                              "capture_deletion": "disabled_by_user", "evidence_status": "PARTIAL_EVIDENCE"}
+                    from .device_day_narrative import attach_context
+                    index = attach_context(self.config, index)
                     cached_path = self.runtime_root / 'DayTimeline' / f'{layout.name[:10]}.json'
                     if cached_path.is_file():
                         try:

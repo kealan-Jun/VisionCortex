@@ -195,7 +195,8 @@ def understand(backend, layout, recording, vision, context, key):
     try:
         for segment in runnable:
             active = segment['activity'] == 'active'
-            source = safe_child(layout.root, segment['source_ref']['path'])
+            from .device_day_inputs import source_path
+            source = source_path(layout, {'retained': segment['source_ref']})
             from .device_day_content_paths import analysis_folder
             folder = analysis_folder(layout, segment, key)
             results = []
@@ -258,7 +259,7 @@ def understand(backend, layout, recording, vision, context, key):
                     audit['requests'].append(request)
                     atomic_json(audit_path, audit)
                     def validate(raw):
-                        return (device_day_steps.validate(raw, images, left, right, recording['recording_start_us'], clock)
+                        return (device_day_steps.validate(raw, images, left, right, recording['recording_start_us'], clock, require_all_day=True)
                                 if structured_steps else validate_understanding(raw, images, [], left, right, recording['recording_start_us'], clock))
                     request['status'] = 'submission_or_cache_lookup_started'
                     atomic_json(audit_path, audit)
