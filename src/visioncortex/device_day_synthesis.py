@@ -245,7 +245,7 @@ def main():
     parser.add_argument('--context-archive', action='append', default=[])
     parser.add_argument('--allow-partial', action='store_true')
     args = parser.parse_args()
-    config = load_config(args.config)
+    config = load_config(Path(args.config))
     root = Path(config['storage']['archive_root'])
     index = read_json(safe_child(root, args.archive + '/ProcessedClips/Index.json'))
     from datetime import datetime
