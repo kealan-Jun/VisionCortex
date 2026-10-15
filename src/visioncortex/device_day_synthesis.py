@@ -251,7 +251,7 @@ def main():
     from pathlib import Path
     from .config import load_config
     from .device_day_contract import DeviceDayLayout, atomic_json
-    from .device_day_reports import render_day
+    from .device_day_reports import render_day, preserve_prior_synthesis
     from .device_day_write_guard import storage_guard
     from .mllm import ArkAnalyzer
     parser = argparse.ArgumentParser(description='Explicit source-cited whole-day model synthesis')
@@ -282,6 +282,7 @@ def main():
             analyzer.close()
         path = layout.reports/'LaboratoryDailyReport.json'
         previous = read_json(path) if path.is_file() else {}
+        preserve_prior_synthesis(layout, result)
         atomic_json(path, previous | {'全天综合理解': result})
         render_day(layout, index)
 

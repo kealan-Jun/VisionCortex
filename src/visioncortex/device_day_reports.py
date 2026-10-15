@@ -39,6 +39,17 @@ def template_contract(identifier):
     return template, contract
 
 
+def preserve_prior_synthesis(layout, replacement):
+    """Keep a completed contextual report when later inputs make it stale."""
+    path = layout.reports/'LaboratoryDailyReport.json'
+    if not path.is_file():
+        return
+    previous = read_json(path)
+    prior = previous.get('全天综合理解') or {}
+    if prior.get('status') == 'completed_for_available_inputs' and prior != replacement:
+        atomic_json(layout.reports/'History'/('Report'+digest(previous)+'.json'), previous)
+
+
 def render_page(title, template, contract, contents, *, scope_label='单设备观察记录'):
     from .report_brand import BRAND_COLORS, brand_logo_data_url
     color = BRAND_COLORS
@@ -53,6 +64,7 @@ def render_day(layout, index):
     readable = day_record(index)
     from .device_day_synthesis import current_synthesis
     synthesis = current_synthesis(layout, index)
+    preserve_prior_synthesis(layout, synthesis)
     day_scope = '跨设备全天上下文' if len(synthesis.get('context_archives', [])) > 1 else '单设备全天上下文'
     from .runtime_control import check_yield, defer_yield
     check_yield(checkpoint=False)
