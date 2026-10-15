@@ -1,8 +1,8 @@
 """A separate, source-cited day model pass over saved observations.
 
-Video windows remain immutable observations. Context synthesis has its own
-exact inputs, paid-call receipts and completeness limits, in the existing day
-understanding file. Rendering never invokes this paid pass implicitly.
+Video windows remain immutable observations. The daily report owns contextual
+synthesis, its exact inputs, paid-call receipts and completeness limits.
+Rendering never invokes this paid pass implicitly.
 """
 import json
 from copy import deepcopy
@@ -110,14 +110,20 @@ def evidence_bundle(index, context_indexes=()):
             raise ValueError('Conflicting device-day context revisions')
         indexes[other['archive']] = other
     bundles = [_device_bundle(row) for _, row in sorted(indexes.items())]
-    if len(bundles) == 1:
-        return bundles[0]
-    return {'schema_version': 'visioncortex-laboratory-day-context/1', 'date': index['archive'][:10],
+    bundle = bundles[0] if len(bundles) == 1 else {
+        'schema_version': 'visioncortex-laboratory-day-context/1', 'date': index['archive'][:10],
         'timezone': 'Asia/Shanghai', 'archives': sorted(indexes),
         'evidence': sorted([e for b in bundles for e in b['evidence']],
                            key=lambda e: (e.get('start_us') or 0, e['evidence_id'])),
         'completeness': {b['archive']: b['completeness'] for b in bundles},
         'cross_device_note': '独立设备与时钟来源；时间接近不能自动确认同一人、同一动作或同一次实验。'}
+    coverage_id = 'coverage-' + digest(bundle['completeness'])[:24]
+    bundle['coverage_evidence_id'] = coverage_id
+    bundle['evidence'].append({'evidence_id': coverage_id, 'kind': 'coverage',
+        'completeness': bundle['completeness'], 'source': {'archives': sorted(indexes),
+        'files': [name+'/ProcessedClips/Index.json' for name in sorted(indexes)],
+        'scope': 'saved_index_metadata_not_physical_observation'}})
+    return bundle
 
 
 def validate_findings(raw, evidence_ids):
@@ -140,11 +146,11 @@ def validate_findings(raw, evidence_ids):
     return findings
 
 
-def _batches(rows, maximum=48000):
+def _batches(rows, maximum=48000, *, measure=None):
     """Bound each model request; never truncate the end of a day."""
     batches, batch, size = [], [], 0
     for row in rows:
-        width = len(json.dumps(row, ensure_ascii=False, separators=(',', ':')))
+        width = (measure(row) if measure else len(json.dumps(row, ensure_ascii=False, separators=(',', ':'))))
         if width > maximum:
             raise ValueError('A day evidence item exceeds the bounded model context; split it explicitly')
         if batch and size + width > maximum:
@@ -165,10 +171,17 @@ def synthesize(config, layout, index, analyzer, *, context_indexes=()):
     if not bundle['evidence']:
         raise ValueError('No saved evidence for day synthesis')
     key = digest(bundle)
-    folder = layout.understanding/'Analysis'/'DayContext'/key
+    folder = layout.reports/'Analysis'/'DayContext'/key
     rows, receipts = bundle['evidence'], []
     for level in range(8):
-        batches = _batches(rows)
+        from .scene_transport import compact
+        def width(row):
+            if not config.get('mllm', {}).get('compact_scene_metadata', False):
+                return len(json.dumps(row, ensure_ascii=False, separators=(',', ':')))
+            _, _, receipt = compact({'schema_version': 'visioncortex-day-context-input/1', 'frames': [],
+                'evidence': [row], 'coverage_evidence_id': bundle['coverage_evidence_id']}, [])
+            return receipt['metadata_characters_after']
+        batches = _batches(rows, 24000, measure=width)
         collected = []
         def one(number, batch):
             metadata = {'schema_version': 'visioncortex-day-context-input/1', 'activity': 'all_day_context',
@@ -179,6 +192,8 @@ def synthesize(config, layout, index, analyzer, *, context_indexes=()):
             directory = folder/f'Level{level}'/f'Part{number:04d}'
             available = ({r['evidence_id'] for r in batch} if level == 0 else
                          {ref for r in batch for ref in r['evidence_refs']})
+            available.add(bundle['coverage_evidence_id'])
+            metadata['coverage_evidence_id'] = bundle['coverage_evidence_id']
             raw, findings, reused = window(config, analyzer, PROMPT, metadata, [],
                 directory/'Input.json', directory/'Result.json', lambda raw: validate_findings(raw, available))
             receipt = {'input': artifact(layout.root, directory/'Input.json'),
@@ -207,7 +222,7 @@ def synthesize(config, layout, index, analyzer, *, context_indexes=()):
 
 def current_synthesis(layout, index):
     """Render the saved synthesis only for its exact current evidence bundle."""
-    path = layout.understanding/'Understanding.json'
+    path = layout.reports/'LaboratoryDailyReport.json'
     value = read_json(path).get('全天综合理解') if path.is_file() else None
     others = []
     for name in (value or {}).get('context_archives', []):
@@ -265,7 +280,7 @@ def main():
             result = synthesize(config, layout, index, analyzer, context_indexes=others)
         finally:
             analyzer.close()
-        path = layout.understanding/'Understanding.json'
+        path = layout.reports/'LaboratoryDailyReport.json'
         previous = read_json(path) if path.is_file() else {}
         atomic_json(path, previous | {'全天综合理解': result})
         render_day(layout, index)

@@ -53,7 +53,6 @@ def render_day(layout, index):
     readable = day_record(index)
     from .device_day_synthesis import current_synthesis
     synthesis = current_synthesis(layout, index)
-    readable['全天综合理解'] = synthesis
     from .runtime_control import check_yield, defer_yield
     check_yield(checkpoint=False)
     by_segment = {item["segment_id"]: item for item in index["understandings"]}
@@ -190,6 +189,7 @@ def render_day(layout, index):
     with defer_yield():
         atomic_bytes(layout.reports / "LaboratoryDailyReport.html", render_page(f"{layout.name} 实验室日报", day_template, day_contract, daily_contents).encode())
         atomic_json(layout.reports / "LaboratoryDailyReport.json", {
+            '全天综合理解': synthesis,
             '全天记录': readable,
             "schema_version": VERSION, "archive": layout.name, "logical_report_count": 1, **day_contract,
             "evidence_status": "PARTIAL_EVIDENCE", "entries": daily_entries,
@@ -197,6 +197,5 @@ def render_day(layout, index):
             "sections": day_template["sections"], "input_index_digest": digest(index)})
         atomic_bytes(layout.understanding / "UnderstandingReport.html", render_page(f"{layout.name} 多模态理解报告", semantic_template, semantic_contract, semantic_contents).encode())
         atomic_json(layout.understanding / "Understanding.json", {"schema_version": VERSION, "archive": layout.name,
-                    '全天综合理解': synthesis, '按时间片段理解': readable['全天时间线'],
                     **semantic_contract, "understandings": index["understandings"], "sections": semantic_template["sections"],
                     "additional_mllm_calls": False, "additional_model_tokens": 0})
