@@ -195,7 +195,7 @@ def understand(backend, layout, recording, vision, context, key):
     try:
         for segment in runnable:
             active = segment['activity'] == 'active'
-            from .device_day_inputs import source_path
+            from .device_day_inputs import source_path, source_relative
             source = source_path(layout, {'retained': segment['source_ref']})
             from .device_day_content_paths import analysis_folder
             folder = analysis_folder(layout, segment, key)
@@ -237,7 +237,7 @@ def understand(backend, layout, recording, vision, context, key):
                             previously_selected.add(ordinal)
                             images.append({**ref, 'frame_id': 'frame-' + digest([recording['recording_id'], ref['sha256'], stamp])[:24],
                                 'frame_kind': 'scene_sample', 'local_ms': stamp, 'capture_us': capture_us(clock, stamp),
-                                'source_frame_index': ordinal, 'source_path': layout.relative(source),
+                                'source_frame_index': ordinal, 'source_path': source_relative(layout, source),
                                 'source_time_basis': 'exact_native_decoder_pts',
                                 **selection, 'decoded_pixels_sha256': pixel_hash,
                                 'pixel_time_binding': 'exact_decoder_pts_before_scale', 'native_pts_to_pixels_verified': True})

@@ -184,6 +184,22 @@ def test_900_second_inactive_entry_records_hold_before_decoder_or_paid_transport
     assert audit['capture_coverage'] == vision['media_coverage']
 
 
+def test_sealed_external_original_keeps_logical_frame_source_without_copying(fake_understanding, tmp_path):
+    backend, layout, recording, _, calls = fake_understanding
+    backend.settings['understanding_requests_per_turn'] = 0
+    original_root = tmp_path/'OriginalArchive'
+    original_root.mkdir()
+    video = source(original_root, 2)
+    ref = artifact(original_root, video)
+    layout.capture_sources = {ref['path']: video}
+    row = segment(activity='active', end=1900)
+    row['source_ref'] = ref
+    result = understand(backend, layout, recording, {'key': 'external-source', 'segments': [row]}, {}, 'a'*64)
+    frames = result['understandings'][0]['windows'][0]['source_frames']
+    assert calls and all(f['source_path'] == ref['path'] for f in frames)
+    assert video.is_file() and not (layout.root/ref['path']).exists()
+
+
 def test_saved_request_quantum_resumes_without_rebilling_and_records_actual_pts(fake_understanding, tmp_path):
     from visioncortex import scene_requests
     from visioncortex.multimodal_usage import UsageLedger
