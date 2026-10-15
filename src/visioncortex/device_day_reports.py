@@ -97,7 +97,7 @@ def render_day(layout, index):
                         paragraphs.append(f'<p><strong>{clock(comment["start_us"])} comment</strong> {text(comment["text"])}</p>')
                 protocol = metadata.get("protocol")
                 if protocol:
-                    paragraphs.append(f'<p><strong>protocol</strong> {text(protocol.get("text", ""))}</p>')
+                    paragraphs.append(f'<p><strong>补充参考材料</strong> {text(protocol.get("text", ""))}</p>')
                 context_rows.append('<li>' + text(label) + ' · ' + material_link(window["input"], "本次 comment、protocol、原片和采样来源") + '</li>')
             if window.get("model_receipt"):
                 result = read_json(safe_child(layout.root, window["model_receipt"])).get("model_result", {})

@@ -106,7 +106,6 @@ def segment_record(segment, meaning, recording, context=None, *, segments=None):
             '仪器': e.get('instrument_id'), '识别内容': recognition_payload(e.get('payload')),
             '原始照片与媒体': e.get('media'), '来源': e.get('evidence_refs'),
             '时钟': e.get('clock'), '关联依据': '同设备与时间重叠，尚未证明属于同一步操作'} for e in events],
-        '实验方案': context.get('protocol'),
         '留存判断': {'决定': decision, '保护原因': protected, '原视频允许删除': False,
                      '边界说明': '动作前后上下文、实验等待、读数、录音和不可见区间需保留；静止候选须连续复核'},
         '溯源': {'原视频': segment['source_ref'], '保留视频': segment.get('video'),
@@ -146,7 +145,6 @@ def day_record(index):
                              '设备': e.get('capture_device_id'), '内容': recognition_payload(e.get('payload')),
                              '照片与媒体': e.get('media'), '来源': e.get('evidence_refs'), '时钟': e.get('clock')}
                             for e in (index.get('context') or {}).get('events', [])],
-        '实验方案': (index.get('context') or {}).get('protocol'),
         '现场事件接收状态': (index.get('context') or {}).get('field_event_status', 'not_received'),
         '人员关联': '设备视图；需有效人员绑定才能组成实验员全天记录',
         '覆盖说明': '仅列已索引来源；日期不表示完整24小时，片段也不表示独立实验次数。'}

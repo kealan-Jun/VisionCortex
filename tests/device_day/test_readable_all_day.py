@@ -196,3 +196,5 @@ def test_automatic_readable_records_preserve_uncertainty_without_manual_review_t
         assert payload['normalized_values'] == [{'value': None, 'unit': None}]
         assert 'review_status' not in payload
     assert (recording, context) == original
+    assert '实验方案' not in clip
+    assert '实验方案' not in day
