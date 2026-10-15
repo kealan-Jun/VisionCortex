@@ -140,3 +140,5 @@ flowchart TD
 该开关不重新调用视频模型；晚到上下文可创建新的留存修订。原片保留位置和可读媒体解析需随归档保留。测试入口新增 `tests/device_day/test_readable_all_day.py`；实际模型语义质量与全天覆盖仍需分别验收。
 
 日报和可读片段中的 `实验员`、录音的逐句 `实验员`，按同设备、完整有效时间区间的 FieldRecognition 佩戴者绑定显示姓名、人员 ID、绑定生效/结束时间和来源。跨换人边界、缺失或冲突显示身份待确认；姓名未提供时保留人员 ID，操作人和佩戴者不自动混同。日汇总列出已关联姓名，不能据此把整日未绑定区间全部归给该人。
+
+理解 worker 的实际领取并发取 `understanding_workers`、`stage_worker_limits.understanding` 和 `runtime.resource_limits.cloud` 的最小值。单条录像内部按窗口顺序保存；不同录像独立并发，使用复制后的执行上下文和原有持久队列租约。关闭时等待已领取调用保存，不取消已发送请求。历史理解还须在 `backfill.stages` 中启用 `understanding`，并满足历史准入与来源验证；仅提高云端上限不会自动启动历史处理。回归入口为 `tests/device_day/test_understanding_concurrency.py`。
