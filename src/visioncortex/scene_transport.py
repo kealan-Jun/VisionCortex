@@ -106,7 +106,8 @@ def _day_completeness(value):
     for key, item in value.items():
         if isinstance(item, dict):
             result[key] = _day_completeness(item)
-        elif key in {'missing_or_partial_segments', 'unprocessed_recordings', 'unresolved_index_records'}:
+        elif key in {'missing_or_partial_segments', 'unprocessed_recordings', 'unresolved_index_records',
+                     'pending_value_review_intervals'}:
             intervals = sorted((r['start_us'], r['end_us']) for r in item
                                if isinstance(r.get('start_us'), (int, float))
                                and isinstance(r.get('end_us'), (int, float)) and r['start_us'] < r['end_us'])
