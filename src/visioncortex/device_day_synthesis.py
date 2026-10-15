@@ -88,6 +88,12 @@ def _device_bundle(index):
         'indexed_recordings': len(records), 'video_window_count': sum(r['kind'] == 'video' for r in rows),
         'field_event_status': context.get('field_event_status', 'not_received'),
         'whole_day_capture_proven': False, 'semantic_accuracy': 'NOT_PROVEN'}
+    if index.get('processing_scope') == 'selected_processed_clips_only':
+        completeness.update(processing_scope=index['processing_scope'],
+            selected_clips_expected=index.get('selected_clip_count'),
+            pending_value_review_intervals=[{k: row.get(k) for k in
+                ('start_us', 'end_us', 'status', 'no_value_proven', 'original_available')}
+                for row in index.get('pending_value_review_intervals', [])])
     return {'schema_version': 'visioncortex-day-context/1', 'archive': index['archive'],
             'timezone': 'Asia/Shanghai', 'evidence': rows, 'completeness': completeness}
 
@@ -302,7 +308,7 @@ def main():
     all_indexes = [index, *others]
     incomplete = any(_device_bundle(i)['completeness']['missing_or_partial_segments']
                      or _device_bundle(i)['completeness']['unprocessed_recordings']
-                     or i.get('unresolved_index_records') for i in all_indexes)
+                     or i.get('unresolved_index_records') or i.get('pending_value_review_intervals') for i in all_indexes)
     if incomplete and not args.allow_partial:
         parser.error('Incomplete day inputs; --allow-partial explicitly permits a labelled interim synthesis')
     with storage_guard(config):

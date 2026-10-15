@@ -49,6 +49,24 @@ def test_contextual_claim_requires_actual_multiple_sources():
     assert validate_findings({'status': 'completed', 'findings': [finding(['a', 'b'], 'contextual_inference')]}, {'a', 'b'})
 
 
+def test_missing_processed_video_is_pending_value_review_never_no_value():
+    from visioncortex.scene_transport import _day_completeness
+    source = index()
+    source.update(processing_scope='selected_processed_clips_only', selected_clip_count=2,
+        pending_value_review_intervals=[{'start_us': 9000000, 'end_us': 12000000,
+            'status': 'pending_value_review_missing_processed_video', 'original_available': True,
+            'no_value_proven': False, 'historical_folder': '/private/source'}])
+    completeness = evidence_bundle(source)['completeness']
+    assert completeness['selected_clips_expected'] == 2
+    pending = completeness['pending_value_review_intervals'][0]
+    assert pending['no_value_proven'] is False
+    assert pending['status'] == 'pending_value_review_missing_processed_video'
+    assert 'historical_folder' not in pending
+    compact = _day_completeness(completeness)
+    assert compact['pending_value_review_intervals']['record_count'] == 1
+    assert len(compact['pending_value_review_intervals']['ranges']) == 1
+
+
 def test_completed_daily_report_is_recoverable_when_later_inputs_arrive(tmp_path):
     from visioncortex.device_day_reports import preserve_prior_synthesis
     from visioncortex.device_day_contract import read_json
