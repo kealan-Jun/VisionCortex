@@ -23,6 +23,7 @@ class RuntimeOptions(BaseModel):
     model_config = ConfigDict(extra='forbid')
     role: Literal['combined', 'web', 'worker'] = 'combined'
     resource_limits: dict[str, StrictInt] = Field(default_factory=dict)
+    resource_coordinator_root: str | None = None
     admission_timeout_seconds: float = Field(default=300, gt=0, le=3600, allow_inf_nan=False)
     local_only: StrictBool = False
     provider_circuit_enabled: StrictBool = False
@@ -37,6 +38,13 @@ def validate(config):
         raise ValueError('Runtime resource limits must be integers in [1,256]')
     if any(key not in {'vision', 'storage', 'cpu', 'cloud', 'stt'} for key in options.resource_limits):
         raise ValueError('Unknown runtime resource class')
+    if options.resource_coordinator_root is not None:
+        from pathlib import Path
+        from .local_storage import require_local_path
+        coordinator = Path(options.resource_coordinator_root)
+        if not coordinator.is_absolute():
+            raise ValueError('Resource coordinator root must be absolute and local')
+        require_local_path(coordinator)
     if options.local_only:
         import os
         from pathlib import Path, PureWindowsPath
@@ -45,6 +53,8 @@ def validate(config):
         if PureWindowsPath(raw_root).drive.startswith('\\\\'):
             raise ValueError('Local-only runtime root must not point to a mounted share')
         root = Path(os.path.abspath(storage['local_runtime_root']))
+        if options.resource_coordinator_root and not Path(options.resource_coordinator_root).resolve().is_relative_to(root.resolve()):
+            raise ValueError('Local-only resource coordinator must remain under local_runtime_root')
         if storage.get('sync_to_nas') or config.get('device_day', {}).get('enabled') or config.get('collection_ingest', {}).get('enabled'):
             raise ValueError('Local-only runtime cannot enable NAS producers')
         for name in ('archive_root', 'cache_root', 'staging_root', 'input_root',

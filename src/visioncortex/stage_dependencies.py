@@ -16,7 +16,8 @@ DEVICE_SOURCES = {
     'stt': ['device_day_stt', 'speech', 'speech_worker', 'speech_qwen'],
     'understanding': ['device_day_models', 'device_day_audit', 'device_day_semantic_cache', 'scene_requests', 'scene_transport',
                       'mllm', 'mllm_provider', 'video_io', 'media_time', 'device_day_coverage', 'device_day_window_inputs'],
-    'report': ['device_day_reports', 'daily_reports', 'report_presentations', 'device_day_narrative', 'device_day_content', 'device_day_file_index'],
+    'report': ['device_day_reports', 'daily_reports', 'report_presentations', 'device_day_narrative',
+               'device_day_synthesis', 'device_day_content', 'device_day_file_index'],
 }
 CONTROL_MODULES = frozenset({
     'runtime_control', 'runtime_options', 'runtime_process', 'sqlite_store', 'observed_inventory',

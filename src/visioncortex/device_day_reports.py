@@ -51,6 +51,9 @@ def render_page(title, template, contract, contents):
 def render_day(layout, index):
     from .device_day_narrative import day_record
     readable = day_record(index)
+    from .device_day_synthesis import current_synthesis
+    synthesis = current_synthesis(layout, index)
+    readable['全天综合理解'] = synthesis
     from .runtime_control import check_yield, defer_yield
     check_yield(checkpoint=False)
     by_segment = {item["segment_id"]: item for item in index["understandings"]}
@@ -140,6 +143,15 @@ def render_day(layout, index):
                          or by_segment[s["segment_id"]].get('status') == 'partial')
                          for s in index["segments"]))
     overview = f'<p>{len(index["recordings"])} 个采集分片；{len(index["segments"])} 个分析区间；{pending} 个分片仍有阶段待完成。</p><p>{text(readable["覆盖说明"])}</p>'
+    overview += '<article><h3>模型全天综合理解</h3>'
+    if synthesis.get('status') == 'completed_for_available_inputs':
+        overview += '<p>模型结合当前已保存全天证据综合理解；完整性和未处理范围见理解文件。</p>'
+        for finding in synthesis['findings']:
+            overview += f'<p><strong>{text(finding["title"])}</strong> {text(finding["text"])}</p>'
+            overview += '<small>' + text('；'.join(finding['uncertainties'])) + '</small>'
+    else:
+        overview += '<p>' + text(synthesis['说明']) + '</p>'
+    overview += '</article>'
     overview += '<details><summary>全天录音时间线（包括没有对应视频的语音）</summary>' + ''.join(
         f'<p><strong>{text(s["开始时间"])}</strong> {text(s["原话"])}</p>' for s in readable['录音时间线']) + '</details>'
     overview += '<details><summary>全天现场事件时间线</summary>' + ''.join(
@@ -185,5 +197,6 @@ def render_day(layout, index):
             "sections": day_template["sections"], "input_index_digest": digest(index)})
         atomic_bytes(layout.understanding / "UnderstandingReport.html", render_page(f"{layout.name} 多模态理解报告", semantic_template, semantic_contract, semantic_contents).encode())
         atomic_json(layout.understanding / "Understanding.json", {"schema_version": VERSION, "archive": layout.name,
+                    '全天综合理解': synthesis, '按时间片段理解': readable['全天时间线'],
                     **semantic_contract, "understandings": index["understandings"], "sections": semantic_template["sections"],
                     "additional_mllm_calls": False, "additional_model_tokens": 0})
