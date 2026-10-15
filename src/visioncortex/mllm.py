@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .activity_review import ActivityAssessment
 from .mllm_provider import build_vision_request
+from .provider_control import ProviderUnavailable
 from .provider_credentials import model_api_key
 from .speech_semantics import (bind_speech_result, compact_speech_label,
                                compact_speech_metadata, expand_speech_references, prompt_with_speech)
@@ -807,7 +808,7 @@ class ArkAnalyzer:
                         self._transport_failure_count = 0
                     result = json.loads(json.dumps(result, ensure_ascii=False).replace(self.api_key, "[REDACTED]"))
                     return normalize_uncalibrated_hand_identity(result)
-            except ExecutionCancelled as exc:
+            except (ExecutionCancelled, ProviderUnavailable) as exc:
                 # Resource admission can yield before any HTTP submission.
                 # Expose only a proven negative; after any prior submission
                 # the caller must retain its unresolved-outcome protection.
