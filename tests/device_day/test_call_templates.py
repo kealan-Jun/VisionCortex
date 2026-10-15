@@ -4,13 +4,13 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from visioncortex.device_day_call_templates import CLIP_UNDERSTANDING, DAY_SYNTHESIS, identify
+from visioncortex.device_day_call_templates import CLIP_UNDERSTANDING, CLIP_VALIDATION_REPAIR, DAY_SYNTHESIS, identify
 from visioncortex.device_day_contract import atomic_json, read_json
 from visioncortex.scene_requests import request_key, window
 from visioncortex.stage_dependencies import impact
 
 
-@pytest.mark.parametrize('template', [CLIP_UNDERSTANDING, DAY_SYNTHESIS])
+@pytest.mark.parametrize('template', [CLIP_UNDERSTANDING, DAY_SYNTHESIS, CLIP_VALIDATION_REPAIR])
 def test_dates_and_devices_share_template_but_keep_distinct_evidence(default_config, tmp_path, template):
     config = deepcopy(default_config)
     config['storage'].update(local_runtime_root=str(tmp_path/'runtime'), local_cache_root=str(tmp_path/'cache'))

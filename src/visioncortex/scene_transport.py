@@ -94,6 +94,20 @@ def project(metadata, *, aliases=False):
     # Keep any semantic extensions to the source reference, omitting only
     # filesystem placement and integrity fields which remain in Input.json.
     value['source_ref'] = {k: v for k, v in value.get('source_ref', {}).items() if k not in STORAGE_FIELDS}
+    # A validation correction carries the rejected response as untrusted data.
+    # Its frame labels must use the same wire aliases as the actual images.
+    previous = (value.get('validation_repair') or {}).get('previous_observations')
+    if reverse and isinstance(previous, dict):
+        observations = previous.get('frame_observations')
+        for observation in observations if isinstance(observations, list) else []:
+            if isinstance(observation, dict) and isinstance(observation.get('frame_id'), str):
+                observation['frame_id'] = reverse.get(observation['frame_id'], observation['frame_id'])
+        for field in ('experiment_steps', 'work_activities'):
+            steps = previous.get(field)
+            for step in steps if isinstance(steps, list) else []:
+                if isinstance(step, dict) and isinstance(step.get('frame_ids'), list):
+                    step['frame_ids'] = [reverse.get(identifier, identifier) if isinstance(identifier, str) else identifier
+                                         for identifier in step['frame_ids']]
     return value, mapping
 
 

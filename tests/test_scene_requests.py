@@ -344,7 +344,7 @@ def test_exact_received_response_survives_parser_revision_without_rebilling(scen
 
 
 @pytest.mark.parametrize('problem', ['missing', 'duplicate', 'invented', 'out_of_window'])
-def test_completed_but_invalid_response_is_never_reused(scene, problem):
+def test_received_invalid_response_stays_rejected_without_implicit_rebilling(scene, problem):
     config, metadata, _, _ = scene
     bad = response(metadata)
     if problem == 'missing':
@@ -359,6 +359,12 @@ def test_completed_but_invalid_response_is_never_reused(scene, problem):
     with pytest.raises(ValueError):
         run(scene, Analyzer([bad]))
     good = Analyzer()
+    with pytest.raises(ValueError):
+        run(scene, good)
+    assert good.calls == 0 and UsageLedger(config).summary(today())['calls'] == 1
+    # A deliberate policy change is a separately identified request, rather
+    # than an automatic repeat of the same received response.
+    config['mllm']['max_output_tokens'] = 16384
     assert run(scene, good)[2] is False and good.calls == 1
     assert UsageLedger(config).summary(today())['calls'] == 2
 
