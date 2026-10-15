@@ -6,6 +6,8 @@ understanding file. Rendering never invokes this paid pass implicitly.
 """
 import json
 from copy import deepcopy
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 
 from .device_day_contract import artifact, digest, read_json, safe_child, verify_artifact
 from .device_day_narrative import experimenter, timestamp
@@ -163,7 +165,7 @@ def synthesize(config, layout, index, analyzer, *, context_indexes=()):
     for level in range(8):
         batches = _batches(rows)
         collected = []
-        for number, batch in enumerate(batches):
+        def one(number, batch):
             metadata = {'schema_version': 'visioncortex-day-context-input/1', 'activity': 'all_day_context',
                 'source_ref': {'sha256': key}, 'start_ms': 0, 'end_ms': 86400000,
                 'frames': [], 'comments': [], 'protocol': None, 'archive': index['archive'],
@@ -174,9 +176,16 @@ def synthesize(config, layout, index, analyzer, *, context_indexes=()):
                          {ref for r in batch for ref in r['evidence_refs']})
             raw, findings, reused = window(config, analyzer, PROMPT, metadata, [],
                 directory/'Input.json', directory/'Result.json', lambda raw: validate_findings(raw, available))
-            receipts.append({'input': artifact(layout.root, directory/'Input.json'),
+            receipt = {'input': artifact(layout.root, directory/'Input.json'),
                 'result': artifact(layout.root, directory/'Result.json'), 'response_cache_reused': reused,
-                'usage': raw.get('usage')})
+                'usage': raw.get('usage')}
+            return findings, receipt
+        workers = min(len(batches), 4, max(1, int(config.get('mllm', {}).get('group_workers', 2))))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(copy_context().run, one, number, batch) for number, batch in enumerate(batches)]
+            results = [future.result() for future in futures]
+        for findings, receipt in results:
+            receipts.append(receipt)
             collected.extend(findings)
         if len(batches) == 1:
             return {'schema_version': 'visioncortex-day-synthesis/1', 'status': 'completed_for_available_inputs',
