@@ -135,6 +135,63 @@ def test_real_adapter_pre_submission_yield_is_requeueable_and_never_paid(scene, 
     assert read_json(folder/'Admission.json')['receipt']['status'] == 'not_submitted'
 
 
+def test_provider_circuit_before_http_does_not_consume_recovery_capacity(scene, monkeypatch):
+    from contextlib import contextmanager
+    config, _, _, folder = scene
+    config['mllm']['enabled'] = True
+    config['mllm']['local_receipt_total_bytes'] = 2*1024*1024
+    monkeypatch.setattr('visioncortex.mllm.model_api_key', lambda *args, **kwargs: 'synthetic-only')
+    @contextmanager
+    def blocked(*args, **kwargs):
+        raise ProviderUnavailable('Synthetic circuit open')
+        yield
+    monkeypatch.setattr('visioncortex.provider_control.provider_request', blocked)
+    analyzer = ArkAnalyzer(config)
+    analyzer.client.close()
+    analyzer.client = httpx.Client(transport=httpx.MockTransport(
+        lambda request: pytest.fail('Provider gate must prevent all HTTP submissions')))
+    try:
+        for _ in range(3):
+            with pytest.raises(ProviderUnavailable, match='circuit open'):
+                run(scene, analyzer)
+    finally:
+        analyzer.close()
+    stats = UsageLedger(config).summary(today())
+    assert stats['pending_calls'] == stats['submitted_unknown_calls'] == 0
+    assert stats['attempts_or_reservations'] == 0
+    assert read_json(folder/'Admission.json')['receipt']['exception_type'] == 'ProviderUnavailable'
+
+
+def test_later_circuit_cannot_erase_a_previous_http_attempt(scene, monkeypatch):
+    from contextlib import contextmanager
+    config, _, _, folder = scene
+    config['mllm'].update(enabled=True, max_retries=2)
+    monkeypatch.setattr('visioncortex.mllm.model_api_key', lambda *args, **kwargs: 'synthetic-only')
+    monkeypatch.setattr('visioncortex.mllm.time.sleep', lambda seconds: None)
+    entries, requests = [], []
+    @contextmanager
+    def later_block(*args, **kwargs):
+        entries.append(True)
+        if len(entries) > 1:
+            raise ProviderUnavailable('Synthetic circuit open after an attempt')
+        yield
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(429, json={'error': 'synthetic rate limit'})
+    monkeypatch.setattr('visioncortex.provider_control.provider_request', later_block)
+    analyzer = ArkAnalyzer(config)
+    analyzer.client.close()
+    analyzer.client = httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(ProviderUnavailable):
+            run(scene, analyzer)
+    finally:
+        analyzer.close()
+    assert len(requests) == 1
+    assert UsageLedger(config).summary(today())['submitted_unknown_calls'] == 1
+    assert not (folder/'Admission.json').exists()
+
+
 def test_live_arrival_preserves_paid_window_and_usage_before_yield(scene):
     from visioncortex.runtime_control import ExecutionYielded, ResourceCoordinator, execution_context, resource_slot
     config, _, _, folder = scene

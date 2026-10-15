@@ -193,7 +193,8 @@ def _window(config, analyzer, prompt, metadata, image_paths, request_path, resul
             except BaseException as exc:
                 if getattr(exc, 'external_submission_started', None) is False:
                     not_submitted = {'status': 'not_submitted', 'attempts': 0,
-                        'reason': 'provider_admission_yielded_before_http_submission',
+                        'reason': 'provider_admission_prevented_http_submission',
+                        'exception_type': type(exc).__name__,
                         'usage': dict.fromkeys(('input_tokens', 'output_tokens', 'total_tokens', 'cached_input_tokens'), 0)}
                     ledger.received(reservation, not_submitted)
                     atomic_json(result_path.parent/'Admission.json', {
