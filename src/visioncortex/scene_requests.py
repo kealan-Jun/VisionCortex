@@ -2,6 +2,7 @@
 from pathlib import Path
 
 from . import device_day_semantic_cache as cache
+from .device_day_call_templates import identify as identify_template
 from .device_day_contract import atomic_json, digest, read_json
 from .mllm_provider import vision_request_identity
 from .multimodal_usage import SubmittedUnknown, UsageLedger
@@ -115,6 +116,10 @@ def _window(config, analyzer, prompt, metadata, image_paths, request_path, resul
     policy, semantic = identity['request_policy'], identity['semantic_metadata']
     paid_key = digest(identity)
     input_key = digest([metadata, prompt])
+    # The key already binds exact prompt bytes and the effective request policy.
+    # This explicit label adds provenance without rebilling identical inputs.
+    template = identify_template(prompt)
+    template_receipt = {'call_template': template} if template else {}
     # Independent callers/queue retries cannot both miss and pay for this
     # exact window. The existing stage handles lock contention as queued work.
     lock = Path(config['storage']['local_runtime_root'])/'device-day'/'locks'/f'scene-{paid_key}.lock'
@@ -178,7 +183,8 @@ def _window(config, analyzer, prompt, metadata, image_paths, request_path, resul
             # Input provenance exists before any paid call; the usage ledger
             # stays pending if the process dies before a receipt is available.
             atomic_json(request_path, {'input_key': input_key, 'prompt': prompt, 'metadata': metadata,
-                                      'request_policy': policy, 'scene_input_transport': wire_receipt})
+                                      'request_policy': policy, 'scene_input_transport': wire_receipt,
+                                      **template_receipt})
             from .device_day_write_guard import verify_before_submission
             verify_before_submission()
             reservation = ledger.reserve(paid_key)
@@ -214,10 +220,12 @@ def _window(config, analyzer, prompt, metadata, image_paths, request_path, resul
                         'result': read_json(result_path)}
             atomic_json(result_path.parent/'History'/f'{digest(previous)}.json', previous)
         atomic_json(request_path, {'input_key': input_key, 'prompt': prompt, 'metadata': metadata,
-                                  'request_policy': policy, 'scene_input_transport': raw.get('scene_input_transport')})
+                                  'request_policy': policy, 'scene_input_transport': raw.get('scene_input_transport'),
+                                  **template_receipt})
         atomic_json(result_path, {'input_key': input_key, 'request_policy': policy, 'model_result': raw,
                                  'response_cache_reused': reused,
                                  'usage_reservation': reservation,
+                                 **template_receipt,
                                  **({'wire_response': wire_response} if wire_receipt else {})})
         # Publish the paid response first. A restart can finish its pending
         # ledger reservation from this durable receipt without paying again.
