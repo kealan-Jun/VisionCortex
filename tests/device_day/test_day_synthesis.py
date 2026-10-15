@@ -130,3 +130,45 @@ def test_separate_model_pass_and_single_day_file_check_input_and_receipts(tmp_pa
     assert artifact(layout.root, path) != last
     with pytest.raises(ValueError, match='identity changed'):
         current_synthesis(layout, source)
+
+
+def test_output_upgrade_uses_matching_adapter_preserves_success_and_cannot_bypass_unknown(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from visioncortex import scene_requests
+    from visioncortex.device_day_contract import digest, read_json
+    from visioncortex.multimodal_usage import UsageLedger, SubmittedUnknown
+    cfg = {'mllm': {'provider': 'aliyun', 'model': 'synthetic', 'base_url': 'https://example.test/v1',
+        'api_protocol': 'chat_completions', 'max_output_tokens': 16384},
+        'storage': {'local_runtime_root': str(tmp_path/'Runtime'), 'local_cache_root': str(tmp_path/'Cache')}}
+    layout = DeviceDayLayout(tmp_path/'Archive', 'camera-1', 1789488000000000)
+    budgets, paths = [], []
+    def analyzer(budget):
+        return SimpleNamespace(budget=budget, close=lambda: None)
+    def window(config, adapter, prompt, metadata, images, request, result, validator):
+        assert adapter.budget == config['mllm']['max_output_tokens']
+        budgets.append(adapter.budget)
+        policy = scene_requests.request_identity(config, prompt, metadata)['request_policy']
+        key = digest([metadata, prompt])
+        raw = {'status': 'completed', 'findings': [finding([r['evidence_id'] for r in metadata['evidence']])]}
+        atomic_json(request, {'prompt': prompt, 'metadata': metadata, 'input_key': key})
+        atomic_json(result, {'model_result': raw, 'input_key': key, 'request_policy': policy})
+        paths[:] = [request, result]
+        return raw, validator(raw), False
+    monkeypatch.setattr(scene_requests, 'window', window)
+    options = {'retry_output_tokens': 32768, 'analyzer_factory': lambda c: analyzer(c['mllm']['max_output_tokens'])}
+    for _ in range(2):
+        synthesize(cfg, layout, index(), analyzer(16384), **options)
+    assert budgets == [16384, 16384]
+    failed = read_json(paths[1])
+    failed['model_result'] = {'status': 'failed', 'error': '模型响应被截断'}
+    atomic_json(paths[1], failed)
+    request = read_json(paths[0])
+    ledger = UsageLedger(cfg)
+    reservation = ledger.reserve(scene_requests.request_key(cfg, request['prompt'], request['metadata']))
+    with pytest.raises(SubmittedUnknown):
+        synthesize(cfg, layout, index(), analyzer(16384), **options)
+    assert budgets == [16384, 16384]
+    ledger.finish(reservation, {'status': 'failed', 'attempts': 0, 'usage': {'total_tokens': 0}})
+    synthesize(cfg, layout, index(), analyzer(16384), **options)
+    synthesize(cfg, layout, index(), analyzer(16384), **options)
+    assert budgets == [16384, 16384, 32768, 32768]
