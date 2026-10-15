@@ -85,6 +85,10 @@ def _device_bundle(index):
             {'file': 'Comment/Protocol.json'})
     rows.sort(key=lambda r: (r.get('start_us') or 0, r['evidence_id']))
     completeness = {'missing_or_partial_segments': missing,
+        'unprocessed_recordings': [{'recording_id': r['recording_id'], 'start_us': r.get('start_us'),
+                                   'end_us': r.get('end_us')}
+                                  for r in records.values() if r.get('source_original')
+                                  and r['recording_id'] not in {s['recording_id'] for s in index.get('segments', [])}],
         'unresolved_index_records': [{'recording_id': r.get('recording_id'),
                                      'start_us': r.get('start_us'), 'end_us': r.get('end_us')}
                                     for r in index.get('unresolved_index_records', [])],
@@ -250,6 +254,7 @@ def main():
     others = [read_json(safe_child(root, name + '/ProcessedClips/Index.json')) for name in args.context_archive]
     all_indexes = [index, *others]
     incomplete = any(_device_bundle(i)['completeness']['missing_or_partial_segments']
+                     or _device_bundle(i)['completeness']['unprocessed_recordings']
                      or i.get('unresolved_index_records') for i in all_indexes)
     if incomplete and not args.allow_partial:
         parser.error('Incomplete day inputs; --allow-partial explicitly permits a labelled interim synthesis')
