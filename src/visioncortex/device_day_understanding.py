@@ -176,7 +176,7 @@ def understand(backend, layout, recording, vision, context, key):
     if held_segments:
         audit['status'] = 'partial_with_segment_holds'
         atomic_json(audit_path, audit)
-    analyzer = ArkAnalyzer(backend.config)
+    analyzer = getattr(backend, 'analyzer_factory', ArkAnalyzer)(backend.config)
     clock = vision.get('clock_mapping') or {'origin_us': recording['recording_start_us']}
     artifacts, meanings = [], []
     new_requests = 0

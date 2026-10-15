@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from contextlib import ExitStack, nullcontext
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 import json
 from pathlib import Path
 import time
@@ -15,8 +17,18 @@ from .input_availability import configured_record
 from .sqlite_store import connection
 
 
+def understanding_capacity(config, settings):
+    """Honor both the stage setting and the shared provider admission ceiling."""
+    values = [settings.get('understanding_workers', 1),
+              (settings.get('stage_worker_limits') or {}).get('understanding', 64),
+              ((config.get('runtime') or {}).get('resource_limits') or {}).get('cloud', 4)]
+    if any(type(value) is not int or not 1 <= value <= 64 for value in values):
+        raise ValueError('Understanding worker limits must be integers between 1 and 64')
+    return min(values)
+
+
 class RetentionWorker:
-    """One claim per tick; local discovery only, existing execution validates NAS."""
+    """Bounded concurrent claims; existing execution still validates every input."""
 
     def __init__(self, *, stage='retention', failure_cooldown=60, recent_seconds=None, admission_cohort='live'):
         if stage not in STAGES:
@@ -230,12 +242,56 @@ class RetentionWorker:
             cohort='current_recovery' if restored else self.admission_cohort,
             reason=entry['admission_reason'] if restored else 'ready_in_current_worker_scope')
 
-    def tick(self, runner, stop):
-        from .device_day import exclusive
-        from .device_day_night_schedule import paused_stages, stage_admitted
+    def _execute_claimed(self, runner, record, owner, stop):
         from .runtime_control import ExecutionCancelled, ExecutionYielded, execution_context
         from .multimodal_usage import SubmittedUnknown
         from .device_day_write_guard import NASUnavailable
+        queue = runner.queues[self.stage]
+        started = time.perf_counter()
+        try:
+            # Archive copies retain their finish-before-handover
+            # semantics. Incremental work observes shutdown only at a
+            # reusable unit boundary, without cancelling an issued call.
+            incremental = self.stage in {'vision', 'understanding'}
+            context = (execution_context(job_id=record['recording_id'], source='nas', priority=3,
+                                         stop=None, yield_signal=stop)
+                       if incremental else nullcontext())
+            with context:
+                if self.stage == 'vision':
+                    from .device_day_io import live_vision_lane
+                    with live_vision_lane():
+                        result = runner.process(record, stage=self.stage, retry=True)
+                else:
+                    result = runner.process(record, stage=self.stage, retry=True)
+            if incremental and result.get('status') == 'paused_for_live' and stop.is_set():
+                result = result | {'reason': 'stopping'}
+        except ExecutionYielded as exc:
+            result = {'status': 'paused_for_live', 'recording_id': record['recording_id'],
+                      'error_type': type(exc).__name__,
+                      'reason': 'stopping' if stop.is_set() else exc.reason}
+        except ExecutionCancelled as exc:
+            result = {'status': 'cancelled', 'recording_id': record['recording_id'],
+                      'error_type': type(exc).__name__, 'message': str(exc)[:1000]}
+        except SubmittedUnknown as exc:
+            result = {'status': 'submitted_unknown', 'recording_id': record['recording_id'],
+                      'reason': exc.reason, 'error_type': type(exc).__name__}
+        except NASUnavailable as exc:
+            result = {'status': 'waiting_for_storage', 'recording_id': record['recording_id'],
+                      'reason': exc.reason, 'error_type': type(exc).__name__}
+        except Exception as exc:
+            result = {'status': 'failed', 'recording_id': record['recording_id'],
+                      'error_type': type(exc).__name__, 'message': str(exc)[:1000]}
+        seconds = time.perf_counter() - started
+        queue.finish(owner, record['recording_id'], result, seconds)
+        if result.get('status') != 'completed' and not (
+                self.stage in {'vision', 'understanding'} and result.get('status') in {'paused_for_live', 'scheduled_checkpoint'}):
+            self.deferred[record['recording_id']] = time.time() + self.failure_cooldown
+        return {'status': 'processed', 'recording_id': record['recording_id'],
+                'wall_seconds': seconds, 'result': result}
+
+    def tick(self, runner, stop):
+        from .device_day import exclusive
+        from .device_day_night_schedule import paused_stages, stage_admitted
         if self.stage in paused_stages(runner.config):
             return {'status': 'paused_by_user'}
         from .device_day_admission import admission_status
@@ -288,53 +344,28 @@ class RetentionWorker:
             if self.stage == 'vision':
                 vision_capacity = ((runner.config.get('runtime') or {}).get('resource_limits') or {}).get('vision', 12)
                 camera_limit = min(vision_capacity, runner.settings.get('vision_jobs_per_camera', 1) + 1)
+            jobs = understanding_capacity(runner.config, runner.settings) if self.stage == 'understanding' else 1
             with queue.heartbeat(owner):
-                record = queue.claim(owner, retry=True, allowed=admitted, camera_serial=True,
-                                     camera_limit=camera_limit,
-                                     max_attempts=runner.settings.get('failure_retry_limit') or 3)
-                if record is None:
+                records = []
+                for _ in range(jobs):
+                    if stop.is_set():
+                        break
+                    record = queue.claim(owner, retry=True, allowed=admitted, camera_serial=True,
+                                         camera_limit=camera_limit,
+                                         max_attempts=runner.settings.get('failure_retry_limit') or 3)
+                    if record is None:
+                        break
+                    records.append(record)
+                if not records:
                     return {'status': 'waiting', 'admitted': len(admitted)}
-                started = time.perf_counter()
-                try:
-                    # Archive copies retain their finish-before-handover
-                    # semantics. Incremental work observes shutdown only at a
-                    # reusable unit boundary, without cancelling an issued call.
-                    incremental = self.stage in {'vision', 'understanding'}
-                    context = (execution_context(job_id=record['recording_id'], source='nas', priority=3,
-                                                 stop=None, yield_signal=stop)
-                               if incremental else nullcontext())
-                    with context:
-                        if self.stage == 'vision':
-                            from .device_day_io import live_vision_lane
-                            with live_vision_lane():
-                                result = runner.process(record, stage=self.stage, retry=True)
-                        else:
-                            result = runner.process(record, stage=self.stage, retry=True)
-                    if incremental and result.get('status') == 'paused_for_live' and stop.is_set():
-                        result = result | {'reason': 'stopping'}
-                except ExecutionYielded as exc:
-                    result = {'status': 'paused_for_live', 'recording_id': record['recording_id'],
-                              'error_type': type(exc).__name__,
-                              'reason': 'stopping' if stop.is_set() else exc.reason}
-                except ExecutionCancelled as exc:
-                    result = {'status': 'cancelled', 'recording_id': record['recording_id'],
-                              'error_type': type(exc).__name__, 'message': str(exc)[:1000]}
-                except SubmittedUnknown as exc:
-                    result = {'status': 'submitted_unknown', 'recording_id': record['recording_id'],
-                              'reason': exc.reason, 'error_type': type(exc).__name__}
-                except NASUnavailable as exc:
-                    result = {'status': 'waiting_for_storage', 'recording_id': record['recording_id'],
-                              'reason': exc.reason, 'error_type': type(exc).__name__}
-                except Exception as exc:
-                    result = {'status': 'failed', 'recording_id': record['recording_id'],
-                              'error_type': type(exc).__name__, 'message': str(exc)[:1000]}
-                seconds = time.perf_counter() - started
-                queue.finish(owner, record['recording_id'], result, seconds)
-                if result.get('status') != 'completed' and not (
-                        self.stage in {'vision', 'understanding'} and result.get('status') in {'paused_for_live', 'scheduled_checkpoint'}):
-                    self.deferred[record['recording_id']] = time.time() + self.failure_cooldown
-                return {'status': 'processed', 'recording_id': record['recording_id'],
-                        'wall_seconds': seconds, 'result': result}
+                if len(records) == 1:
+                    return self._execute_claimed(runner, records[0], owner, stop)
+                with ThreadPoolExecutor(max_workers=jobs, thread_name_prefix='device-understanding') as pool:
+                    futures = [pool.submit(copy_context().run, self._execute_claimed, runner, record, owner, stop)
+                               for record in records]
+                    results = [future.result() for future in futures]
+                return {'status': 'processed', 'concurrency': jobs, 'results': results}
+
 
 
 def serve(config_path, stop, *, stage='retention'):
