@@ -39,13 +39,13 @@ def template_contract(identifier):
     return template, contract
 
 
-def render_page(title, template, contract, contents):
+def render_page(title, template, contract, contents, *, scope_label='单设备观察记录'):
     from .report_brand import BRAND_COLORS, brand_logo_data_url
     color = BRAND_COLORS
     sections = ''.join(f'<section id="{section["id"]}"><h2>{text(section["title"])}</h2>{contents[section["id"]]}</section>' for section in template["sections"])
     return f'''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{text(title)}</title>
 <style>body{{background:{color['background']};color:{color['text']};font:16px/1.7 system-ui;margin:0}}main{{max-width:1100px;margin:32px auto;padding:0 20px}}header,section{{background:{color['surface']};border:1px solid {color['border']};border-radius:16px;padding:24px;margin-bottom:20px}}header{{border-top:8px solid {color['brand']}}}header img{{width:56px;float:left;margin-right:16px}}h1{{font-size:26px;overflow-wrap:anywhere}}h2,h3,a{{color:{color['brand']}}}article{{border-top:1px solid {color['border']};margin-top:20px;padding-top:12px}}.frames{{display:flex;gap:16px;flex-wrap:wrap}}figure{{margin:0;max-width:280px}}figure img{{width:100%;border-radius:8px}}figcaption,small,.uncertain{{font-size:13px;color:{color['text_muted']}}}table{{border-collapse:collapse;width:100%}}td,th{{padding:8px;border-bottom:1px solid {color['border']};text-align:left}}@media print{{body{{background:white}}section{{break-inside:avoid}}}}</style>
-<main><header><img src="{brand_logo_data_url()}" alt="VisionCortex"><h1>{text(title)}</h1><p>单设备观察记录 · PARTIAL_EVIDENCE</p></header>{sections}<footer>{text(contract['template_id'])} · 模板 SHA-256：{text(contract['template_sha256'])}<p>报告整理复用已落盘理解，新增模型调用 0，新增 Token 0。</p></footer></main></html>'''
+<main><header><img src="{brand_logo_data_url()}" alt="VisionCortex"><h1>{text(title)}</h1><p>{text(scope_label)} · PARTIAL_EVIDENCE</p></header>{sections}<footer>{text(contract['template_id'])} · 模板 SHA-256：{text(contract['template_sha256'])}<p>本次页面排版不新增模型调用；片段理解与全天综合的实际调用及用量见各自回执。</p></footer></main></html>'''
 
 
 def render_day(layout, index):
@@ -53,6 +53,7 @@ def render_day(layout, index):
     readable = day_record(index)
     from .device_day_synthesis import current_synthesis
     synthesis = current_synthesis(layout, index)
+    day_scope = '跨设备全天上下文' if len(synthesis.get('context_archives', [])) > 1 else '单设备全天上下文'
     from .runtime_control import check_yield, defer_yield
     check_yield(checkpoint=False)
     by_segment = {item["segment_id"]: item for item in index["understandings"]}
@@ -176,6 +177,12 @@ def render_day(layout, index):
         readable_html.append(''.join(body))
     uncertainties = '<ul>' + ''.join(uncertainty_rows) + '</ul><p>单设备筛选不等于跨视角物理动作验收；稀疏抽帧不证明完整观察了相邻采样之间的过程。</p>'
     cost = f'<p>理解结果对应的已知用量：输入 {provider_usage["input_tokens"]}，输出 {provider_usage["output_tokens"]}，合计 {provider_usage["total_tokens"]} Token。{usage_unknown} 个窗口用量未完整提供。复用响应的用量属于原执行记录，不代表本轮新增消耗。</p><table><tr><th>时段</th><th>模型</th><th>结果来源</th><th>耗时与 Token</th></tr>' + ''.join(execution_rows) + '</table>'
+    if synthesis.get('model_receipts'):
+        receipts = synthesis['model_receipts']
+        actual = [r for r in receipts if not r.get('response_cache_reused')]
+        known = sum((r.get('usage') or {}).get('total_tokens') or 0 for r in actual)
+        missing = sum((r.get('usage') or {}).get('total_tokens') is None for r in actual)
+        cost += f'<p>全天综合单独记录：{len(receipts)} 个回执，本轮新增 {len(actual)} 次调用，已知新增 {known} Token，{missing} 项用量未知。失败尝试和未确认结果另保留在实际用量账本。</p>'
     day_template, day_contract = template_contract("VC-DEVICE-DAY-REPORT-V1")
     daily_contents = {"daily_overview": overview, "experiment_briefs": ''.join(readable_html) + '<details><summary>逐片段画面、模型执行与来源</summary>' + ''.join(briefs) + '</details>',
                       "attention_and_handoff": uncertainties, "cost_and_timing": cost}
@@ -187,7 +194,7 @@ def render_day(layout, index):
     # atomic writer retains its old file until replacement; the journal covers
     # process death between files. Arrivals yield before this commit group.
     with defer_yield():
-        atomic_bytes(layout.reports / "LaboratoryDailyReport.html", render_page(f"{layout.name} 实验室日报", day_template, day_contract, daily_contents).encode())
+        atomic_bytes(layout.reports / "LaboratoryDailyReport.html", render_page(f"{layout.name} 实验室日报", day_template, day_contract, daily_contents, scope_label=day_scope).encode())
         atomic_json(layout.reports / "LaboratoryDailyReport.json", {
             '全天综合理解': synthesis,
             '全天记录': readable,
