@@ -133,14 +133,22 @@ def compact(metadata, image_paths):
     if metadata.get('schema_version') == 'visioncortex-day-context-input/1':
         from .device_day_narrative import timestamp
         wire['completeness'] = _day_completeness(wire.get('completeness', {}))
+        coverage_id = wire.get('coverage_evidence_id')
         ids = dict.fromkeys(identifier for row in wire['evidence']
                             for identifier in ([row['evidence_id']] if 'evidence_id' in row else row['evidence_refs']))
+        ids.pop(coverage_id, None)
         day_aliases = {f'e{i+1}': identifier for i, identifier in enumerate(ids)}
+        if coverage_id:
+            day_aliases['coverage'] = coverage_id
+            wire['coverage_evidence_id'] = 'coverage'
+            wire['citation_rule'] = 'evidence_refs只引用evidence_id或coverage；覆盖缺口引用coverage，不引用相机名或completeness路径。'
         day_reverse = {full: short for short, full in day_aliases.items()}
         for row in wire['evidence']:
             # Storage provenance stays in Input.json, rather than consuming
             # model context repeatedly. Observations, clocks and limits stay.
             row.pop('source', None)
+            if row.get('kind') == 'coverage':
+                row['completeness'] = _day_completeness(row['completeness'])
             if row.get('start') and row.get('end'):
                 row.pop('start_us', None)
                 row.pop('end_us', None)
@@ -156,9 +164,7 @@ def compact(metadata, image_paths):
                 row['evidence_refs'] = [day_reverse[r] for r in row['evidence_refs']]
             person = row.get('experimenter')
             if person:
-                row['experimenter'] = {k: v for k, v in person.items() if k != '绑定记录'}
-                row['experimenter']['绑定区间'] = [{k: b.get(k) for k in ('姓名', '生效时间', '结束时间', '身份依据')}
-                                                for b in person.get('绑定记录', [])]
+                row['experimenter'] = {k: v for k, v in person.items() if k not in ('绑定记录', '说明')}
     def size(value):
         return len(json.dumps(value, ensure_ascii=False, separators=(',', ':')))
     receipt = {'version': VERSION, 'frame_aliases': mapping,

@@ -137,7 +137,7 @@ flowchart TD
 
 ### 片段理解与全天模型综合理解
 
-每个短片段继续保留独立理解。现有 `MultimodalUnderstanding/Understanding.json` 同时容纳 `全天综合理解` 与 `按时间片段理解`，不另建第二份全天理解入口。日报展示已保存的综合结果。全天综合是独立模型处理，不能用逐片段列表拼接冒充模型综合。
+原录音和实际转写属于 VisionCortex。视频、语音与 FieldRecognition 的 OCR、照片及人员绑定按设备和时间关联，各短片段继续在 `MultimodalUnderstanding/<时间段>/Understanding.json` 保留独立理解。在此基础上，模型结合整天上下文生成日报；`LaboratoryDailyReport/LaboratoryDailyReport.json` 的 `全天综合理解` 是唯一全天综合入口，同目录 HTML 用于阅读，不另外生成一份全天理解文件。日报不是逐片段标题的拼接。
 
 显式执行入口如下，使用已选厂商和同一用量账本、请求互斥及未知提交保护。普通报告渲染不会隐式触发付费。`--context-archive` 可以重复，加入同日其他设备的证据；保留各设备、时钟和人员绑定，不因时间接近认定同一物理动作。
 
@@ -146,7 +146,7 @@ python -m visioncortex.device_day_synthesis --config /path/to/private-profile.ya
   --archive YYYY-MM-DD_camera-id --context-archive YYYY-MM-DD_other-camera-id
 ```
 
-阶段性预览须明确加 `--allow-partial`；这不代表完整全天录制或处理完成。单设备来源包括所有已保存视频窗口的摘要与步骤、独立语音句段、完整 OCR/绑定载荷、protocol 和未处理清单。长输入按有界批次整理后继续综合，不能截掉当天尾部。每层都有精确输入、实际模型回执和用量；最后结果引用原始证据 ID，可回到片段及源媒体。中间层摘要存在信息损失风险，原始证据仍可查，语义质量须另行复核。
+阶段性预览须明确加 `--allow-partial`；这不代表完整全天录制或处理完成。单设备来源包括所有已保存视频窗口的摘要与步骤、独立语音句段、完整 OCR/绑定载荷、protocol 和未处理清单。没有对应视频的语音/OCR仍进入日报。长输入按有界批次整理后继续综合，不能截掉当天尾部。每层精确输入、实际模型回执和用量保存在 `LaboratoryDailyReport/Analysis/DayContext/`；最后结果引用原始证据 ID，可回到片段及源媒体。中间层摘要存在信息损失风险，原始证据仍可查，语义质量须另行复核。
 
 综合理解区分 `source_observation` 与 `contextual_inference`。后者至少引用两条来源，例如前段拿样品瓶、后段出现天平读数，可形成待复核的过程解释；读数与动作的归属及完成状态仍取决于实际证据。测试数据、OCR 空值、未知单位、缺口和人员冲突必须保留。来源新增或修订时，旧综合理解标记 `stale_inputs_changed`，已完成的纯视频调用不因上下文更新重新付费。
 

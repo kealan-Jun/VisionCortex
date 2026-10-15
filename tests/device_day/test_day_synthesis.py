@@ -33,11 +33,11 @@ def test_bundle_keeps_independent_streams_and_source_limits():
     before = copy.deepcopy(source)
     bundle = evidence_bundle(source)
     assert source == before
-    assert {r['kind'] for r in bundle['evidence']} == {'video', 'speech', 'field'}
+    assert {r['kind'] for r in bundle['evidence']} == {'video', 'speech', 'field', 'coverage'}
     assert bundle['evidence'][0]['source']['model_receipt'] == 'Result.json'
     assert bundle['evidence'][1]['payload']['record_scope'] == 'test_only'
     assert bundle['completeness']['missing_or_partial_segments'][0]['status'] == 'partial'
-    assert bundle['evidence'][-1]['time_alignment'] == 'NOT_PROVEN'
+    assert next(r for r in bundle['evidence'] if r['kind'] == 'speech')['time_alignment'] == 'NOT_PROVEN'
     assert not bundle['completeness']['whole_day_capture_proven']
 
 
@@ -59,8 +59,8 @@ def test_all_cameras_keep_their_own_sources_and_cannot_substitute_another_day():
     other = copy.deepcopy(first)
     other['archive'] = '2026-09-16_camera-2'
     bundle = evidence_bundle(first, [other])
-    assert {r['device'] for r in bundle['evidence']} == {'camera-1', 'camera-2'}
-    assert len(bundle['evidence']) == 6
+    assert {r['device'] for r in bundle['evidence'] if 'device' in r} == {'camera-1', 'camera-2'}
+    assert len(bundle['evidence']) == 7
     other['archive'] = '2026-09-17_camera-2'
     with pytest.raises(ValueError, match='another date'):
         evidence_bundle(first, [other])
@@ -76,7 +76,7 @@ def test_day_wire_preserves_content_and_clock_but_keeps_paths_in_source_receipt(
     assert metadata == before and images == []
     assert all('source' not in row for row in wire['evidence'])
     assert wire['evidence'][1]['payload']['record_scope'] == 'test_only'
-    assert wire['evidence'][-1]['time_alignment'] == 'NOT_PROVEN'
+    assert next(r for r in wire['evidence'] if r['kind'] == 'speech')['time_alignment'] == 'NOT_PROVEN'
     refs = [r['evidence_id'] for r in wire['evidence']]
     raw = {'findings': [finding(refs, 'contextual_inference')]}
     expanded = expand(raw, receipt)
@@ -103,9 +103,9 @@ def test_separate_model_pass_and_single_day_file_check_input_and_receipts(tmp_pa
     monkeypatch.setattr(scene_requests, 'window', window)
     synthesis = synthesize({}, layout, source, object())
     assert len(calls) == 1
-    assert len(calls[0]['evidence']) == 3
+    assert len(calls[0]['evidence']) == 4
     assert synthesis['input_digest'] == digest(evidence_bundle(source))
-    atomic_json(layout.understanding/'Understanding.json', {'全天综合理解': synthesis})
+    atomic_json(layout.reports/'LaboratoryDailyReport.json', {'全天综合理解': synthesis})
     assert current_synthesis(layout, source) == synthesis
     changed = copy.deepcopy(source)
     changed['context']['protocol'] = {'text': '新增方案，不能当作执行事实'}
