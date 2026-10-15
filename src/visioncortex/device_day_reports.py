@@ -49,6 +49,8 @@ def render_page(title, template, contract, contents):
 
 
 def render_day(layout, index):
+    from .device_day_narrative import day_record
+    readable = day_record(index)
     from .runtime_control import check_yield, defer_yield
     check_yield(checkpoint=False)
     by_segment = {item["segment_id"]: item for item in index["understandings"]}
@@ -137,11 +139,34 @@ def render_day(layout, index):
                   or any(s["recording_id"] == record["recording_id"] and (s["segment_id"] not in by_segment
                          or by_segment[s["segment_id"]].get('status') == 'partial')
                          for s in index["segments"]))
-    overview = f'<p>{len(index["recordings"])} 个采集分片；{len(index["segments"])} 个保留区间；{pending} 个分片仍有阶段待完成。</p><p>有实验活动 {sum(s["activity"] == "active" for s in index["segments"])} 段，无活动／无关区间 {sum(s["activity"] == "inactive" for s in index["segments"])} 段。未通过活动筛选不证明人员没有其他行为。</p>'
+    overview = f'<p>{len(index["recordings"])} 个采集分片；{len(index["segments"])} 个分析区间；{pending} 个分片仍有阶段待完成。</p><p>{text(readable["覆盖说明"])}</p>'
+    overview += '<details><summary>全天录音时间线（包括没有对应视频的语音）</summary>' + ''.join(
+        f'<p><strong>{text(s["开始时间"])}</strong> {text(s["原话"])}</p>' for s in readable['录音时间线']) + '</details>'
+    overview += '<details><summary>全天现场事件时间线</summary>' + ''.join(
+        f'<p>{text(e["记录时间"])} · {text(e["类型"])} · 详见日报 JSON 的现场事件时间线及原始结果。</p>'
+        for e in readable['现场事件时间线']) + '</details>'
+    readable_html = []
+    for row in readable['全天时间线']:
+        body = [f'<article><h3>{text(row["开始时间"])} — {text(row["结束时间"])}</h3>'
+                f'<p><strong>实验员：{text(row["实验员"]["姓名"])}</strong> · {text(row["实验员"]["状态"])}</p>']
+        for field in ('实验步骤', '非实验工作'):
+            for step in row[field]:
+                body.append(f'<p><strong>{text(field)} · {text(step["动作"])}</strong> {text(step["内容"])} '
+                            f'<small>{text(step["开始时间"])}；操作前：{text(step["操作前"])}；操作后：{text(step["操作后"])}</small></p>')
+        if not row['实验步骤'] and not row['非实验工作']:
+            body.extend(f'<p>{text(w["内容"])}</p>' for w in row['分窗口观察'])
+        for reading in row['仪器与现场记录']:
+            import json
+            body.append(f'<p><strong>{text(reading["记录时间"])} 现场记录</strong> '
+                        f'{text(json.dumps(reading["识别内容"], ensure_ascii=False))}<small>{text(reading["关联依据"])}</small></p>')
+        for speech in row['录音记录']:
+            body.append(f'<p><strong>{text(speech["开始时间"])} 录音识别</strong> {text(speech["原话"])}</p>')
+        body.append(f'<p><small>留存：{text(row["留存判断"]["决定"])}；{text(row["质量说明"])}</small></p></article>')
+        readable_html.append(''.join(body))
     uncertainties = '<ul>' + ''.join(uncertainty_rows) + '</ul><p>单设备筛选不等于跨视角物理动作验收；稀疏抽帧不证明完整观察了相邻采样之间的过程。</p>'
     cost = f'<p>理解结果对应的已知用量：输入 {provider_usage["input_tokens"]}，输出 {provider_usage["output_tokens"]}，合计 {provider_usage["total_tokens"]} Token。{usage_unknown} 个窗口用量未完整提供。复用响应的用量属于原执行记录，不代表本轮新增消耗。</p><table><tr><th>时段</th><th>模型</th><th>结果来源</th><th>耗时与 Token</th></tr>' + ''.join(execution_rows) + '</table>'
     day_template, day_contract = template_contract("VC-DEVICE-DAY-REPORT-V1")
-    daily_contents = {"daily_overview": overview, "experiment_briefs": ''.join(briefs) or '<p>等待片段产出。</p>',
+    daily_contents = {"daily_overview": overview, "experiment_briefs": ''.join(readable_html) + '<details><summary>逐片段画面、模型执行与来源</summary>' + ''.join(briefs) + '</details>',
                       "attention_and_handoff": uncertainties, "cost_and_timing": cost}
     semantic_template, semantic_contract = template_contract("VC-DEVICE-UNDERSTANDING-REPORT-V1")
     semantic_contents = {"coverage": overview, "timeline": ''.join(sections) or '<p>等待理解产出。</p>',
@@ -153,6 +178,7 @@ def render_day(layout, index):
     with defer_yield():
         atomic_bytes(layout.reports / "LaboratoryDailyReport.html", render_page(f"{layout.name} 实验室日报", day_template, day_contract, daily_contents).encode())
         atomic_json(layout.reports / "LaboratoryDailyReport.json", {
+            '全天记录': readable,
             "schema_version": VERSION, "archive": layout.name, "logical_report_count": 1, **day_contract,
             "evidence_status": "PARTIAL_EVIDENCE", "entries": daily_entries,
             "additional_mllm_calls": False, "additional_model_tokens": 0,

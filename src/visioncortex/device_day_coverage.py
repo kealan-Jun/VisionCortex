@@ -84,7 +84,8 @@ def limits(settings):
 def value_assessment(segment, segments, context):
     """Keep activity semantics and visibility independent; protect known signals."""
     protection = []
-    if segment['activity'] == 'active':
+    experiment_candidate = segment['activity'] == 'active' and segment.get('activity_origin') != 'whole_recording_unclassified'
+    if experiment_candidate:
         protection.append('experiment_candidate')
     if segment.get('key_frames'):
         protection.append('selected_action_frames')
@@ -95,8 +96,10 @@ def value_assessment(segment, segments, context):
         protection.append('experiment_context')
     # An inactive gap between two experiment candidates is not an established
     # idle episode. Preserve it as possible experimental waiting.
-    if (any(s['activity'] == 'active' and s['end_ms'] <= segment['start_ms'] for s in segments)
-            and any(s['activity'] == 'active' and s['start_ms'] >= segment['end_ms'] for s in segments)):
+    if (any(s['activity'] == 'active' and s.get('activity_origin') != 'whole_recording_unclassified'
+            and s['end_ms'] <= segment['start_ms'] for s in segments)
+            and any(s['activity'] == 'active' and s.get('activity_origin') != 'whole_recording_unclassified'
+                    and s['start_ms'] >= segment['end_ms'] for s in segments)):
         protection.append('between_experiment_candidates')
         semantic = 'experiment_waiting'
     for field in ('comments', 'events', 'ocr_events', 'bindings', 'audio_events'):
@@ -115,7 +118,7 @@ def value_assessment(segment, segments, context):
                    else 'unknown')
     if observation in {'occluded_or_dark', 'occluded', 'blurred', 'source_gap', 'time_uncertain'}:
         protection.append('observability_requires_review')
-    return {'activity_semantics': semantic if segment['activity'] != 'active' else 'experiment_candidate',
+    return {'activity_semantics': 'experiment_candidate' if experiment_candidate else semantic,
             'observability': observation, 'protection_signals': sorted(set(protection)),
             'audio_observability': segment.get('audio_status', 'unknown'),
             'human_quality_validation': 'NOT_PROVEN'}

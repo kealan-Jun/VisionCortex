@@ -58,6 +58,10 @@ def content_revision(config, index):
     root = Path(config['storage']['archive_root']) / index['archive']
     paths.extend(root/'MultimodalUnderstanding'/time_folder(s['start_us'], s['end_us'])/'Analysis/StepReview.json'
                  for s in index.get('segments', []))
+    paths.extend(root/'Comment'/name for name in ('Protocol.json', 'Comment.jsonl'))
+    runtime = config['storage'].get('local_runtime_root')
+    if runtime:
+        paths.extend(Path(runtime)/'device-day'/name for name in ('field-events.sqlite3', 'field-events.sqlite3-wal'))
     if receipts:
         paths.extend(receipts / r['recording_id'] / 'understanding.json' for r in index.get('recordings', []))
     return tuple((str(p), p.stat().st_mtime_ns, p.stat().st_size) for p in paths if p.is_file())
@@ -159,7 +163,7 @@ def with_partial_understandings(config, index):
     return value
 
 
-def publish_transcript(config, archive, record):
+def publish_transcript(config, archive, record, context=None):
     """Publish one completed recording without walking or rewriting the day."""
     root = Path(config['storage']['archive_root']) / archive
     common = {'archive': archive, 'device': archive[11:], 'date': archive[:10],
@@ -173,6 +177,10 @@ def publish_transcript(config, archive, record):
         'content_source': 'machine_transcribed_speech', 'model_invocation': stt.get('model_invocation'),
         'human_reviewed': False, 'accuracy': 'NOT_PROVEN', 'sentences': stt.get('comments') or [],
         'execution_windows': stt.get('chunks') or [], 'original_transcript': stt.get('transcript_file')}
+    from .device_day_narrative import experimenter, timestamp
+    value['录音时间线'] = [{'开始时间': timestamp(s['start_us']), '结束时间': timestamp(s['end_us']),
+        '原话': s.get('text'), '实验员': experimenter(context, common['device'], s['start_us'], s['end_us']),
+        '转写来源': s.get('transcript_path')} for s in value['sentences']]
     _write(safe_child(root, relative + '/Transcript.json'), value)
     lines = [f"设备：{common['device']}  日期：{common['date']}",
              f"录音识别状态：{value['status']} / {value['outcome']}",
@@ -202,7 +210,7 @@ def publish_content(config, index):
         records[record['recording_id']] = record
         if not record.get('start_us') or not record.get('end_us'):
             continue
-        audio_entries.append(publish_transcript(config, index['archive'], record))
+        audio_entries.append(publish_transcript(config, index['archive'], record, index.get('context')))
     meanings = {u['segment_id']: u for u in index.get('understandings', [])}
     for segment in index.get('segments', []):
         if segment['recording_id'] not in records:
@@ -210,7 +218,7 @@ def publish_content(config, index):
         from .device_day_steps import readable_meaning
         meaning, experiment_steps, step_status = readable_meaning(meanings.get(segment['segment_id']))
         relative = 'MultimodalUnderstanding/' + time_folder(segment['start_us'], segment['end_us'])
-        record = records[segment['recording_id']]
+        record = records[segment['recording_id']] | {'camera_key': index['archive'][11:]}
         stage = (record.get('stages') or {}).get('understanding') or {}
         value = {**common, 'schema_version': 'visioncortex-readable-understanding/1',
             'recording_id': segment['recording_id'], 'segment_id': segment['segment_id'],
@@ -222,6 +230,15 @@ def publish_content(config, index):
             'experiment_steps': experiment_steps, 'step_understanding_status': step_status,
             'step_accuracy': 'NOT_PROVEN',
             'transcript_content': next((a['content'] for a in audio_entries if a['recording_id'] == segment['recording_id']), None)}
+        from .device_day_narrative import segment_record
+        value = {'内容记录': segment_record(segment, meaning, record, index.get('context'),
+                  segments=[s for s in index['segments'] if s['recording_id'] == segment['recording_id']]), **value}
+        from .media.retained_intervals import disposition, publish_disposition
+        decision = disposition(segment, meaning, record, index.get('context'),
+                    segments=[s for s in index['segments'] if s['recording_id'] == segment['recording_id']])
+        value['处理视频留存'] = segment.get('derived_video_disposition') or publish_disposition(
+            root/'ProcessedClips'/time_folder(segment['start_us'], segment['end_us'])/digest(decision)[:24],
+            decision, video_present=bool(segment.get('video')))
         _write(safe_child(root, relative + '/Understanding.json'), value)
         visual_entries.append({k: value[k] for k in ('recording_id', 'segment_id', 'start_us', 'end_us', 'activity', 'status')} |
                               {'content': relative + '/Understanding.json'})
