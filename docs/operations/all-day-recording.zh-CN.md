@@ -200,4 +200,6 @@ python -m visioncortex.device_day_synthesis --config /path/to/private-profile.ya
 
 可读录音标明自动转写，不设置“人工复核”步骤；可读OCR保留值、单位、测试范围和来源，来源中的历史审核注记保留在原始证据中。可读片段、日报及转写入口不以“未经人工复核”作为处理状态。模型不确定、读数为空、输入缺失、时间精度不足与机器校验失败仍按实际状态记录，不能改写成成功或删除来源。原始模型输入、响应和历史执行回执保持字节不变。
 
+面向实验员的 `protocol` 指模型对实际实验动作的步骤级理解，位于片段 JSON 的 `/内容记录/实验步骤`，在日报对应 `/全天记录/全天时间线/<片段下标>/实验步骤`。每一步保留时间、动作、对象、前后状态、可见依据与结果，不以缺少预设方案表示 protocol 缺失。历史 `context.protocol` 和已有输入回执继续兼容读取，属于补充参考材料，不改写原始请求或作为实际动作结论。
+
 理解 worker 的实际领取并发取 `understanding_workers`、`stage_worker_limits.understanding` 和 `runtime.resource_limits.cloud` 的最小值。单条录像内部按窗口顺序保存；不同录像独立并发，使用复制后的执行上下文和原有持久队列租约。关闭时等待已领取调用保存，不取消已发送请求。历史理解还须在 `backfill.stages` 中启用 `understanding`，并满足历史准入与来源验证；仅提高云端上限不会自动启动历史处理。回归入口为 `tests/device_day/test_understanding_concurrency.py`。
