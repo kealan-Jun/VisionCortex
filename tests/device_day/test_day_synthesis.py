@@ -49,6 +49,20 @@ def test_contextual_claim_requires_actual_multiple_sources():
     assert validate_findings({'status': 'completed', 'findings': [finding(['a', 'b'], 'contextual_inference')]}, {'a', 'b'})
 
 
+def test_completed_daily_report_is_recoverable_when_later_inputs_arrive(tmp_path):
+    from visioncortex.device_day_reports import preserve_prior_synthesis
+    from visioncortex.device_day_contract import read_json
+    layout = DeviceDayLayout(tmp_path, 'camera-1', 1789488000000000)
+    previous = {'全天综合理解': {'status': 'completed_for_available_inputs', 'findings': [finding(['a'])]},
+                '全天记录': {'说明': '先前已保存的版本'}}
+    atomic_json(layout.reports/'LaboratoryDailyReport.json', previous)
+    preserve_prior_synthesis(layout, previous['全天综合理解'])
+    assert not list((layout.reports/'History').glob('*.json'))
+    preserve_prior_synthesis(layout, {'status': 'stale_inputs_changed'})
+    saved = list((layout.reports/'History').glob('*.json'))
+    assert len(saved) == 1 and read_json(saved[0]) == previous
+
+
 def test_bounded_hierarchy_never_drops_day_tail():
     rows = [{'text': 'a'*40}, {'text': 'b'*40}, {'text': 'c'*40}]
     assert [r for batch in _batches(rows, 80) for r in batch] == rows
