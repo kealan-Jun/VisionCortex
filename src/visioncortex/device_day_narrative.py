@@ -26,7 +26,7 @@ def experimenter(context, camera, start, end):
             continue
         left = round(left.timestamp() * 1e6)
         right = round(right.timestamp() * 1e6) if right else None
-        if left >= end or right is not None and right <= start:
+        if (left > start if start == end else left >= end) or right is not None and right <= start:
             continue
         name = payload.get('wearer_name')
         if not name and event.get('operator_id') in (None, event['wearer_id']):

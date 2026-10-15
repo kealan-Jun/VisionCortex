@@ -299,9 +299,12 @@ def resource_slot(config, resource, *, units=1):
     if capacity is None:
         yield
         return
-    root = Path(config['storage']['local_runtime_root'])
+    root = Path(settings.get('resource_coordinator_root') or config['storage']['local_runtime_root'])
     if not root.is_absolute() or str(root).startswith(('//', '\\\\')):
         raise ValueError('Resource coordinator requires an absolute local runtime root')
+    if settings.get('resource_coordinator_root'):
+        from .local_storage import require_local_path
+        root = require_local_path(root)
     owned = _OWNED_RESOURCES.get()
     key = (threading.get_ident(), str(root.resolve()), resource)
     if key in owned:

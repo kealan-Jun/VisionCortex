@@ -66,6 +66,33 @@ def _legacy_candidate(config, legacy, prompt, semantic, request_path):
     return None
 
 
+def _exact_sibling_candidate(config, identity, prompt, request_path):
+    """Reuse a received response across parser revisions, never relabel inputs.
+
+    A conservative parser fix may make a previously rejected response usable.
+    It must not resubmit an identical paid request merely because its output
+    directory has a new execution identity. The original receipt stays intact.
+    """
+    def stage_key(value):
+        return len(value) == 64 and all(c in '0123456789abcdef' for c in value)
+    if not stage_key(request_path.parent.parent.name):
+        return None
+    for path in sorted(request_path.parent.parent.parent.glob(f'*/{request_path.parent.name}/Input.json')):
+        result_path = path.with_name('Result.json')
+        if path == request_path or not stage_key(path.parent.parent.name) or not result_path.is_file():
+            continue
+        previous, result = read_json(path), read_json(result_path)
+        metadata = previous.get('metadata')
+        if (previous.get('prompt') != prompt or not isinstance(metadata, dict)
+                or previous.get('input_key') != result.get('input_key')
+                or previous.get('input_key') != digest([metadata, prompt])
+                or result.get('request_policy') != identity['request_policy']):
+            continue
+        if request_identity(config, prompt, metadata) == identity:
+            return result.get('model_result')
+    return None
+
+
 def window(config, analyzer, prompt, metadata, image_paths, request_path, result_path, validator):
     from .device_day_write_guard import storage_guard
     with storage_guard(config):
@@ -101,6 +128,9 @@ def _window(config, analyzer, prompt, metadata, image_paths, request_path, resul
         saved = cache.load(config, identity)
         if saved:
             candidates.append(saved)
+        sibling = _exact_sibling_candidate(config, identity, prompt, request_path)
+        if sibling:
+            candidates.append(sibling)
         if not candidates:
             old = _legacy_candidate(config, legacy, prompt, semantic, request_path)
             if old:
@@ -149,8 +179,18 @@ def _window(config, analyzer, prompt, metadata, image_paths, request_path, resul
             reservation = ledger.reserve(paid_key)
             try:
                 wire_response = analyzer._call(prompt, wire_metadata, wire_images, max_images=len(wire_images))
-            except BaseException:
-                ledger.submitted_unknown(reservation)
+            except BaseException as exc:
+                if getattr(exc, 'external_submission_started', None) is False:
+                    not_submitted = {'status': 'not_submitted', 'attempts': 0,
+                        'reason': 'provider_admission_yielded_before_http_submission',
+                        'usage': dict.fromkeys(('input_tokens', 'output_tokens', 'total_tokens', 'cached_input_tokens'), 0)}
+                    ledger.received(reservation, not_submitted)
+                    atomic_json(result_path.parent/'Admission.json', {
+                        'input_key': input_key, 'usage_reservation': reservation, 'receipt': not_submitted})
+                    ledger.finish(reservation, not_submitted)
+                    ledger.published(reservation)
+                else:
+                    ledger.submitted_unknown(reservation)
                 raise
             raw = wire_response
             if wire_receipt and raw.get('status') == 'completed':

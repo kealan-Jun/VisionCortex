@@ -724,6 +724,7 @@ class ArkAnalyzer:
                                        "response_complete": False,
                                        "retry_wait_seconds": 0.0}
             attempt_receipts.append(receipt)
+            from .runtime_control import ExecutionCancelled
             try:
                 from .provider_control import provider_request
                 with provider_request(self.runtime_config, 'understanding', self.config):
@@ -806,6 +807,13 @@ class ArkAnalyzer:
                         self._transport_failure_count = 0
                     result = json.loads(json.dumps(result, ensure_ascii=False).replace(self.api_key, "[REDACTED]"))
                     return normalize_uncalibrated_hand_identity(result)
+            except ExecutionCancelled as exc:
+                # Resource admission can yield before any HTTP submission.
+                # Expose only a proven negative; after any prior submission
+                # the caller must retain its unresolved-outcome protection.
+                if not any(item['request_submitted'] for item in attempt_receipts):
+                    exc.external_submission_started = False
+                raise
             except (httpx.HTTPError, ValueError, json.JSONDecodeError) as exc:
                 last_error = exc
                 receipt.update(status="failed", ended_at=datetime.now(timezone.utc).isoformat(), error_type=type(exc).__name__, latency_seconds=round(time.perf_counter() - attempt_started, 6))

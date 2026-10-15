@@ -85,8 +85,15 @@ def validate(payload, images, start_ms, end_ms, origin_us, clock, *, require_all
     work = parsed.pop('work_activities', [])
     if parsed['activity_observed'] == 'inactive' and steps:
         raise ValueError('Inactive scene cannot contain experiment steps')
+    normalization = None
     if parsed.get('activity_kind') == 'static' and (steps or work or parsed['observability'] != 'clear'):
-        raise ValueError('Static samples require clear images and no observed operations')
+        # Keep the paid raw response intact. Conflicting labels cannot authorize
+        # omission, but valid observations need not be discarded and billed again.
+        normalization = {'model_activity_kind': 'static', 'effective_activity_kind': 'uncertain',
+                         'reason': '静止标签与动作或可见性冲突，保守按不确定保留',
+                         'raw_response_unchanged': True}
+        parsed['activity_kind'] = 'uncertain'
+        parsed['uncertainties'].append(normalization['reason'])
     if any(s['comment_ids'] for s in [*steps, *work]):
         raise ValueError('Video-only steps cannot cite speech')
     base = dict(parsed, steps=[{k: s[k] for k in SceneStep.model_fields} for s in [*steps, *work]])
@@ -97,6 +104,8 @@ def validate(payload, images, start_ms, end_ms, origin_us, clock, *, require_all
     if model is AllDayUnderstanding:
         validated.update(activity_kind=parsed['activity_kind'], observability=parsed['observability'],
                          work_activities=work, understanding_schema='visioncortex-all-day-understanding/1')
+    if normalization:
+        validated['conservative_normalization'] = normalization
     return {**validated, 'experiment_steps': steps, 'step_schema': 'visioncortex-experiment-step/1',
             'content_source': 'video_only', 'human_reviewed': False, 'accuracy': 'NOT_PROVEN'}
 

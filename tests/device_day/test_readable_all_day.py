@@ -40,8 +40,13 @@ def test_non_experiment_work_is_structured_even_when_cv_reports_inactive():
     assert parsed['steps'][0]['description'] == '实验员操作键盘'
     wrong = model('static')
     wrong['work_activities'] = model()['work_activities']
-    with pytest.raises(ValueError):
-        validate(wrong, [], 0, 1000, 1000000, {'origin_us': 1000000})
+    original = copy.deepcopy(wrong)
+    conservative = validate(wrong, [{'frame_id': 'a', 'local_ms': 0}, {'frame_id': 'b', 'local_ms': 1000}],
+                            0, 1000, 1000000, {'origin_us': 1000000})
+    assert conservative['activity_kind'] == 'uncertain'
+    assert conservative['work_activities']
+    assert conservative['conservative_normalization']['raw_response_unchanged']
+    assert wrong == original
 
 
 def test_compact_transport_restores_non_experiment_frame_references():
@@ -163,3 +168,4 @@ def test_experimenter_name_follows_binding_handover_and_never_crosses_devices():
     assert experimenter(context, 'camera-1', us('12:00:00'), us('13:00:00'))['姓名'] == '实验员乙'
     assert experimenter(context, 'camera-1', us('11:59:00'), us('12:01:00'))['人员ID'] is None
     assert experimenter(context, 'camera-2', us('11:00:00'), us('12:00:00'))['人员ID'] is None
+    assert experimenter(context, 'camera-1', us('12:00:00'), us('12:00:00'))['姓名'] == '实验员乙'

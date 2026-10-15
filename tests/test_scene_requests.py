@@ -88,6 +88,53 @@ def test_backfill_resource_wait_creates_no_usage_reservation(scene):
     assert UsageLedger(config).summary(today())['calls'] == 0
 
 
+def test_separate_job_ledger_shares_provider_admission_before_reservation(scene, tmp_path):
+    from visioncortex.runtime_control import ResourceCoordinator, execution_context, resource_slot
+    config, _, _, _ = scene
+    shared = tmp_path/'shared-coordinator'
+    config['runtime'].update(resource_coordinator_root=str(shared), resource_limits={'cloud': 1})
+    provider = deepcopy(config)
+    provider['storage']['local_runtime_root'] = str(tmp_path/'other-runtime')
+    coordinator = ResourceCoordinator(shared/'state/resources.sqlite3')
+    class NestedProvider(Analyzer):
+        def _call(self, *args, **kwargs):
+            with resource_slot(provider, 'cloud'):
+                return super()._call(*args, **kwargs)
+    analyzer = NestedProvider()
+    with coordinator.acquire('cloud', capacity=1):
+        with execution_context(source='device_day_backfill'), pytest.raises(Exception, match='busy'):
+            run(scene, analyzer)
+    assert UsageLedger(config).summary(today())['calls'] == 0
+    with execution_context(source='device_day_backfill'):
+        run(scene, analyzer)
+    assert analyzer.calls == 1
+    assert coordinator.snapshot() == []
+    assert not (tmp_path/'other-runtime/state/MultimodalUsage.sqlite3').exists()
+
+
+def test_real_adapter_pre_submission_yield_is_requeueable_and_never_paid(scene, monkeypatch):
+    from contextlib import contextmanager
+    from visioncortex.runtime_control import ExecutionYielded
+    config, _, _, folder = scene
+    config['mllm']['enabled'] = True
+    monkeypatch.setattr('visioncortex.mllm.model_api_key', lambda *args, **kwargs: 'synthetic-only')
+    @contextmanager
+    def busy(*args, **kwargs):
+        raise ExecutionYielded('Synthetic provider admission is busy', reason='resource_busy')
+        yield
+    monkeypatch.setattr('visioncortex.provider_control.provider_request', busy)
+    analyzer = ArkAnalyzer(config)
+    try:
+        with pytest.raises(ExecutionYielded):
+            run(scene, analyzer)
+    finally:
+        analyzer.close()
+    stats = UsageLedger(config).summary(today())
+    assert stats['pending_calls'] == 0 and stats['submitted_unknown_calls'] == 0
+    assert stats['attempts_or_reservations'] == 0
+    assert read_json(folder/'Admission.json')['receipt']['status'] == 'not_submitted'
+
+
 def test_live_arrival_preserves_paid_window_and_usage_before_yield(scene):
     from visioncortex.runtime_control import ExecutionYielded, ResourceCoordinator, execution_context, resource_slot
     config, _, _, folder = scene
@@ -217,6 +264,26 @@ def test_restart_reuses_successful_windows_and_retries_only_failed_window(scene)
     stats = UsageLedger(config).summary(today())
     assert stats['calls'] == 3 and stats['attempts_or_reservations'] == 4
     assert stats['known_tokens']['total_tokens'] == 75 and stats['unknown_attempts'] == 1
+
+
+def test_exact_received_response_survives_parser_revision_without_rebilling(scene):
+    config, metadata, paths, folder = scene
+    old_folder = folder/('a'*64)/'00-01_00-02'
+    new_folder = folder/('b'*64)/'00-01_00-02'
+    old_scene = config, metadata, paths, old_folder
+    analyzer = Analyzer()
+    run(old_scene, analyzer)
+    # A received result may have been rejected by the old parser and therefore
+    # not have a response-cache entry. Its exact original receipt still exists.
+    from visioncortex import device_day_semantic_cache as cache
+    identity = scene_requests.request_identity(config, SCENE_PROMPT, metadata)
+    cache.reject(config, identity)
+    original = (old_folder/'Result.json').read_bytes()
+    before = UsageLedger(config).summary(today())
+    _, _, reused = run((config, metadata, paths, new_folder), analyzer)
+    assert reused and analyzer.calls == 1
+    assert UsageLedger(config).summary(today()) == before
+    assert (old_folder/'Result.json').read_bytes() == original
 
 
 @pytest.mark.parametrize('problem', ['missing', 'duplicate', 'invented', 'out_of_window'])
