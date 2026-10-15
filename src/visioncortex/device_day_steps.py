@@ -1,7 +1,8 @@
 """Video-only operation descriptions, distinct from static scene observations."""
+from copy import deepcopy
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from .device_day_call_templates import CLIP_UNDERSTANDING
 from .device_day_models import FrameObservation, SceneStep, validate_understanding
@@ -27,7 +28,18 @@ class StepUnderstanding(BaseModel):
 
 
 class WorkActivity(ExperimentStep):
+    objects: list[str]
     category: Literal['computer', 'phone', 'organizing', 'cleaning', 'walking', 'waiting', 'other']
+
+    @model_validator(mode='after')
+    def require_target_for_object_work(self):
+        if not self.objects and self.category not in {'walking', 'waiting'}:
+            raise ValueError('Object-directed work requires a visible object')
+        return self
+
+
+class InvalidStepUnderstanding(ValueError):
+    """A received model response failed its structure or evidence contract."""
 
 
 class AllDayUnderstanding(StepUnderstanding):
@@ -46,12 +58,28 @@ def enabled(settings, recording):
 
 def validate(payload, images, start_ms, end_ms, origin_us, clock, *, require_all_day=False):
     model = AllDayUnderstanding if require_all_day or any(k in payload for k in AllDayUnderstanding.model_fields.keys() - StepUnderstanding.model_fields.keys()) else StepUnderstanding
-    fields = {k: payload[k] for k in model.model_fields if k in payload}
-    parsed = model.model_validate(fields).model_dump(mode='json')
+    fields = {k: deepcopy(payload[k]) for k in model.model_fields if k in payload}
+    adjustments = []
+    work_candidates = fields.get('work_activities', [])
+    for number, step in enumerate(work_candidates if isinstance(work_candidates, list) else []):
+        if not isinstance(step, dict):
+            continue
+        missing = [key for key in ('basis', 'outcome') if key not in step]
+        if missing:
+            if 'basis' in missing:
+                step['basis'] = 'uncertain'
+            step['outcome'] = 'incomplete_or_uncertain'
+            adjustments.append({'collection': 'work_activities', 'index': number, 'missing_fields': missing,
+                'reason': '非实验活动缺少判断依据或结果状态，保守记为未确认，不补造已完成结论',
+                'raw_response_unchanged': True})
+    try:
+        parsed = model.model_validate(fields).model_dump(mode='json')
+    except ValidationError as exc:
+        raise InvalidStepUnderstanding(str(exc)) from exc
     steps = parsed.pop('experiment_steps')
     work = parsed.pop('work_activities', [])
     if parsed['activity_observed'] == 'inactive' and steps:
-        raise ValueError('Inactive scene cannot contain experiment steps')
+        raise InvalidStepUnderstanding('Inactive scene cannot contain experiment steps')
     normalization = None
     if parsed.get('activity_kind') == 'static' and (steps or work or parsed['observability'] != 'clear'):
         # Keep the paid raw response intact. Conflicting labels cannot authorize
@@ -62,9 +90,29 @@ def validate(payload, images, start_ms, end_ms, origin_us, clock, *, require_all
         parsed['activity_kind'] = 'uncertain'
         parsed['uncertainties'].append(normalization['reason'])
     if any(s['comment_ids'] for s in [*steps, *work]):
-        raise ValueError('Video-only steps cannot cite speech')
+        raise InvalidStepUnderstanding('Video-only steps cannot cite speech')
+    frames = {frame['frame_id']: frame for frame in images}
+    for collection, rows in [('experiment_steps', steps), ('work_activities', work)]:
+        for number, step in enumerate(rows):
+            # Unknown references and wholly unsupported intervals remain errors.
+            # Do not stretch action times to accommodate unrelated context frames.
+            if not set(step['frame_ids']) <= frames.keys():
+                continue
+            inside = [identifier for identifier in step['frame_ids']
+                      if step['start_ms']-1 <= frames[identifier]['local_ms'] <= step['end_ms']+1]
+            outside = [identifier for identifier in step['frame_ids'] if identifier not in inside]
+            if inside and outside:
+                step.update(frame_ids=inside, basis='uncertain', outcome='incomplete_or_uncertain')
+                adjustments.append({'collection': collection, 'index': number,
+                    'discarded_out_of_interval_frame_ids': outside, 'accepted_frame_ids': inside,
+                    'action_times_unchanged': True, 'raw_response_unchanged': True,
+                    'reason': '剔除动作时间外的上下文引用；剩余画面不足以确认完整动作及结果，保守记为未确认'})
+    parsed['uncertainties'].extend(row['reason'] for row in adjustments)
     base = dict(parsed, steps=[{k: s[k] for k in SceneStep.model_fields} for s in [*steps, *work]])
-    validated = validate_understanding(base, images, [], start_ms, end_ms, origin_us, clock)
+    try:
+        validated = validate_understanding(base, images, [], start_ms, end_ms, origin_us, clock)
+    except (ValueError, KeyError, TypeError) as exc:
+        raise InvalidStepUnderstanding(str(exc)) from exc
     for step, normalized in zip([*steps, *work], validated['steps'], strict=True):
         step.update(normalized)
         step.update(start_us=capture_us(clock, step['start_ms']), end_us=capture_us(clock, step['end_ms']))
@@ -73,8 +121,58 @@ def validate(payload, images, start_ms, end_ms, origin_us, clock, *, require_all
                          work_activities=work, understanding_schema='visioncortex-all-day-understanding/1')
     if normalization:
         validated['conservative_normalization'] = normalization
+    if adjustments:
+        validated['step_normalizations'] = adjustments
     return {**validated, 'experiment_steps': steps, 'step_schema': 'visioncortex-experiment-step/1',
             'content_source': 'video_only', 'human_reviewed': False, 'accuracy': 'NOT_PROVEN'}
+
+
+def repair_window(config, analyzer, root, metadata, image_paths, request_path, result_path, origin_us, clock):
+    """One fixed-template correction of a known received invalid response.
+
+    The original prompt and paid key stay unchanged. Unknown submissions and
+    provider/IO errors cannot enter this path. Every correction has its own exact
+    identity, input, response and accounting; retries reuse that same unit.
+    """
+    from . import scene_requests
+    from .device_day_call_templates import CLIP_VALIDATION_REPAIR
+    from .device_day_contract import artifact, atomic_json, digest, read_json, verify_artifact
+
+    original_input, original_result = read_json(request_path), read_json(result_path)
+    raw = original_result.get('model_result') or {}
+    if (original_input.get('prompt') != PROMPT or original_input.get('metadata') != metadata
+            or original_input.get('input_key') != digest([metadata, PROMPT])
+            or original_result.get('input_key') != original_input['input_key']
+            or raw.get('status') != 'completed'
+            or not all(verify_artifact(root, frame) for frame in metadata['frames'])):
+        raise ValueError('Correction requires intact original video input and a received response')
+    def validator(value):
+        return validate(value, metadata['frames'], metadata['start_ms'], metadata['end_ms'],
+                        origin_us, clock, require_all_day=True)
+    try:
+        validator(raw)
+    except InvalidStepUnderstanding as exc:
+        problem = str(exc)[:1000]
+    else:
+        raise ValueError('Valid observations do not require a paid correction')
+    parent_key = scene_requests.request_key(config, PROMPT, metadata)
+    context = {'schema_version': 'visioncortex-step-validation-repair/1',
+        'parent_request_key': parent_key, 'parent_response_digest': digest(raw), 'validation_error': problem,
+        'previous_observations': {key: raw[key] for key in AllDayUnderstanding.model_fields if key in raw}}
+    correction_metadata = metadata | {'validation_repair': context}
+    folder = request_path.parent/'ValidationRepair'/digest([parent_key, digest(raw), CLIP_VALIDATION_REPAIR.receipt()])
+    source = {'original_input': artifact(root, request_path), 'original_result': artifact(root, result_path),
+              'validation_error': problem, 'maximum_corrections': 1, 'originals_unchanged': True}
+    pointer = folder/'RepairSource.json'
+    if pointer.is_file() and read_json(pointer) != source:
+        atomic_json(folder/'History'/('Source'+digest(read_json(pointer))+'.json'), read_json(pointer))
+    atomic_json(pointer, source)
+    repaired_raw, parsed, reused = scene_requests.window(config, analyzer, CLIP_VALIDATION_REPAIR.prompt,
+        correction_metadata, image_paths, folder/'Input.json', folder/'Result.json', validator)
+    parsed['validation_repair'] = {'parent_request_key': parent_key, 'parent_response_digest': digest(raw),
+        'source': artifact(root, pointer), 'maximum_corrections': 1, 'originals_unchanged': True,
+        'original_additional_usage': scene_requests.additional_usage(raw, original_result.get('response_cache_reused', False))}
+    return repaired_raw, parsed, reused, folder/'Input.json', folder/'Result.json'
 
 
 def reviewed_window(root, segment, clock):

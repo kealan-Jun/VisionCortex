@@ -2,7 +2,7 @@
 import math
 from fractions import Fraction
 
-from .device_day_contract import artifact, atomic_bytes, atomic_json, digest, media_interval_name, media_time_name, safe_child
+from .device_day_contract import artifact, atomic_bytes, atomic_json, digest, media_interval_name, media_time_name, read_json, safe_child
 from .device_day_coverage import apply_plan_reviews, frame_coverage, limits, manifest, request_plan, shadow_episodes
 from .media_time import capture_us
 
@@ -265,8 +265,22 @@ def understand(backend, layout, recording, vision, context, key):
                     atomic_json(audit_path, audit)
                     try:
                         with phase('visual_request_work_seconds'):
-                            raw, parsed, reused = scene_requests.window(backend.config, analyzer, prompt, metadata,
-                                [(f['frame_id'], safe_child(layout.root, f['path'])) for f in images], request_path, result_path, validate)
+                            image_paths = [(f['frame_id'], safe_child(layout.root, f['path'])) for f in images]
+                            try:
+                                raw, parsed, reused = scene_requests.window(backend.config, analyzer, prompt, metadata,
+                                    image_paths, request_path, result_path, validate)
+                            except device_day_steps.InvalidStepUnderstanding:
+                                if not structured_steps:
+                                    raise
+                                original_paths = (request_path, result_path)
+                                original = read_json(result_path)
+                                raw, parsed, reused, request_path, result_path = device_day_steps.repair_window(
+                                    backend.config, analyzer, layout.root, metadata, image_paths,
+                                    request_path, result_path, recording['recording_start_us'], clock)
+                                new_requests += int(not original.get('response_cache_reused', False))
+                                artifacts.extend(artifact(layout.root, path) for path in original_paths)
+                                request.update(input=layout.relative(request_path), model_receipt=layout.relative(result_path),
+                                    validation_repair=parsed['validation_repair'])
                     except Exception as exc:
                         from .multimodal_usage import SubmittedUnknown
                         request['status'] = ('submitted_unknown' if isinstance(exc, SubmittedUnknown) else

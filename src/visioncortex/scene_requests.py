@@ -146,15 +146,22 @@ def _window(config, analyzer, prompt, metadata, image_paths, request_path, resul
             if old:
                 candidates.append(old)
         raw = parsed = None
+        invalid_received = None
         for candidate in candidates:
             if candidate.get('status') != 'completed':
                 continue
             try:
                 parsed = validator(candidate)
             except (ValueError, KeyError, TypeError):
+                invalid_received = candidate
                 continue
             raw = candidate
             break
+        if raw is None and invalid_received is not None:
+            # A received response is an accounted paid unit even when its
+            # application contract fails. Publish/revalidate it below; only an
+            # explicit correction with its own identity may make another call.
+            raw = invalid_received
         reused = raw is not None
         if raw is not local_candidate:
             reservation = None
