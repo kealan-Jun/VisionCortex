@@ -6,7 +6,7 @@ import pytest
 
 from visioncortex import machine_admission
 from visioncortex.application import runtime_host
-from visioncortex.run_queue import DurableRunQueue
+from visioncortex.run_queue import DurableRunQueue, QueuedRunJob
 from visioncortex.runtime_control import ExecutionContext, ResourceCoordinator
 from visioncortex.runtime_options import validate
 from repo_paths import ROOT
@@ -70,6 +70,26 @@ def test_oom_hold_only_pauses_machine_claims(tmp_path):
     assert json.loads(hold.read_text())['reason'] == 'GPU_OUT_OF_MEMORY'
 
 
+def test_execution_uses_only_explicitly_reverified_same_connection(monkeypatch, tmp_path):
+    config, _ = configured(tmp_path)
+    from visioncortex import ai_settings
+    sealed = {'mllm': {'credential_ref': 'original', 'provider': 'aliyun', 'model': 'pinned'}}
+    calls = []
+    def refreshed(settings):
+        calls.append(settings['mllm'].copy())
+        return settings['mllm'] | {'credential_ref': 'same-key-new-verification'}
+    monkeypatch.setattr(ai_settings, 'reverified_job_mllm', refreshed)
+    result = machine_admission.execution_settings(sealed, config['runtime'])
+    assert calls == [sealed['mllm']]
+    assert result['mllm']['model'] == 'pinned'
+    assert sealed['mllm']['credential_ref'] == 'original'
+    def refuse(_settings):
+        raise ValueError('connection or key differs')
+    monkeypatch.setattr(ai_settings, 'reverified_job_mllm', refuse)
+    with pytest.raises(ValueError, match='connection or key differs'):
+        machine_admission.execution_settings(sealed, config['runtime'])
+
+
 def test_admission_preserves_queued_and_historical_failed_tasks(monkeypatch, tmp_path):
     config, _ = configured(tmp_path)
     store = DurableRunQueue(tmp_path / 'queue.sqlite3')
@@ -93,6 +113,24 @@ def test_admission_preserves_queued_and_historical_failed_tasks(monkeypatch, tmp
 def test_machine_policy_requires_shared_coordinator(tmp_path):
     with pytest.raises(ValueError, match='shared coordinator'):
         validate({'runtime': {'machine_admission': {'gpu_uuid': 'GPU-test'}}})
+
+
+def test_execution_receipt_keeps_each_attempt(tmp_path):
+    config, _ = configured(tmp_path)
+    payload = {'settings': {'mllm': {}}, 'manifest': {'experiment_id': 'test'},
+               'nas_root': str(tmp_path / 'staging')}
+    first = QueuedRunJob('owned-run', 'run', payload, 1, 1, False)
+    second = QueuedRunJob('owned-run', 'run', payload, 1, 2, True)
+    machine_admission.record_execution(first, config)
+    machine_admission.record_execution(second, config)
+    directory = tmp_path / 'staging/JSON-Config-Files'
+    old = json.loads((directory / 'MachineExecutionAttempt1.json').read_text())
+    current = json.loads((directory / 'MachineExecution.json').read_text())
+    assert old['attempt'] == 1
+    assert current['attempt'] == 2
+    assert current['reclaimed'] is True
+    assert current['manifest_sha256'] == old['manifest_sha256']
+    assert current['run_id'] == old['run_id'] == 'owned-run'
 
 
 def test_unreadable_published_release_cannot_complete(monkeypatch, tmp_path):

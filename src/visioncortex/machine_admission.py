@@ -110,6 +110,11 @@ def execution_settings(sealed_settings, runtime):
         performance[name] = min(int(performance.get(name, ceiling)), ceiling)
     performance['concurrent_role_scanners'] = False
     mllm = settings.setdefault('mllm', {})
+    if mllm.get('credential_ref'):
+        from .ai_settings import reverified_job_mllm
+        # Only an actually reverified revision with the same connection AND key
+        # may replace stale transport metadata. No provider/model rotation.
+        mllm = settings['mllm'] = reverified_job_mllm(settings)
     for name in ('workers', 'group_workers'):
         mllm[name] = min(int(mllm.get(name, 1)), 1)
     return settings
@@ -121,14 +126,17 @@ def record_execution(job, settings):
     from .build_identity import identity
     def digest(value):
         return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()
-    atomic_json(Path(job.payload['nas_root']) / 'JSON-Config-Files/MachineExecution.json', {
+    receipt = {
         'schema_version': 'visioncortex-machine-execution/1', 'run_id': job.run_id,
         'attempt': job.attempts, 'reclaimed': job.reclaimed, 'build': identity(),
         'accepted_settings_sha256': digest(job.payload['settings']),
         'effective_settings_sha256': digest(settings),
         'manifest_sha256': digest(job.payload['manifest']),
         'resource_policy': settings['runtime'], 'created_at': time.time(),
-    })
+    }
+    directory = Path(job.payload['nas_root']) / 'JSON-Config-Files'
+    atomic_json(directory / f'MachineExecutionAttempt{job.attempts}.json', receipt)
+    atomic_json(directory / 'MachineExecution.json', receipt)
 
 
 def hold_after_failure(config, error):
