@@ -84,6 +84,19 @@ def test_explicit_paid_history_uses_only_source_bound_admitted_work(tmp_path):
     assert worker.candidates(runner) == []
 
 
+def test_execution_revision_keeps_the_previous_attempts_and_failure(tmp_path):
+    queue = DeviceDayQueue(tmp_path / 'queue-understanding.sqlite3')
+    source = record('revision', 1)
+    queue.enqueue(source, 'old-recipe')
+    queue.claim('owner')
+    queue.finish('owner', source['recording_id'], {'status': 'failed', 'reason': 'saved-failure'}, 1)
+    queue.enqueue(source, 'new-recipe')
+    with queue.connect() as db:
+        old = json.loads(db.execute('SELECT snapshot FROM source_versions').fetchone()[0])
+    assert old['revision'] == 'old-recipe' and old['attempts'] == 1
+    assert json.loads(old['result'])['reason'] == 'saved-failure'
+
+
 def test_cost_shares_devices_and_age_rotate_checkpoint_work(tmp_path,monkeypatch):
     clock=[1000.]
     monkeypatch.setattr('visioncortex.device_day_queue.time.time',lambda:clock[0])

@@ -1082,7 +1082,7 @@ class DeviceDayRunner:
                 if waiting and not self._prerequisite_checks.ready(
                         record['recording_id'], previous_revision, prerequisite_checks):
                     continue
-                inputs = {p: prerequisites[p] for p in DEPENDENCIES[stage]}
+                inputs = {p: prerequisites[p] for p in record_dependencies[stage]}
             if stage == "vision":
                 inputs = visual_input(inputs["retention"])
             revision = self._key(stage, record, [inputs, context if stage == "understanding" else None])
