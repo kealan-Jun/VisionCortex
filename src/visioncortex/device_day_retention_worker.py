@@ -32,7 +32,7 @@ def concurrent_paid_history(settings, stage):
     authorized = policy.get('paid_history_authorized', False)
     if type(authorized) is not bool:
         raise ValueError('backfill.paid_history_authorized must be a boolean')
-    return (stage == 'understanding' and authorized and policy.get('enabled') is True
+    return (stage in {'understanding', 'report'} and authorized and policy.get('enabled') is True
             and stage in policy.get('stages', []))
 
 
@@ -57,10 +57,24 @@ class RetentionWorker:
         authorized_history = concurrent_paid_history(runner.settings, self.stage)
         admissions = queue.admissions(include_history=True) if queue is not None and authorized_history else (
             queue.admissions() if queue is not None else {})
+        # Ready paid history joins the same bounded pool as live work. Its
+        # admission must not wait for the global preprocessing backfill lock.
+        # The read-only selector checks source versions, parent completions,
+        # monitor freshness, cooldowns and the existing retry budget; admit()
+        # still verifies the actual receipts and artifact bytes below.
+        eligible_history = {}
+        if authorized_history and self.recent_seconds is not None:
+            from .device_day_backfill_policy import historical_candidates
+            try:
+                eligible_history = {r['recording_id']: r['source_signature'] for r in historical_candidates(
+                    runner.config, self.stage, limit=min(128, limit * 4),
+                    exclude={rid for rid, until in self.deferred.items() if until > current})}
+            except (OSError, ValueError, KeyError, TypeError):
+                pass  # Unavailable history observations cannot admit new work.
         from .device_day_cohort import recovery_entries
         restored = {rid: entry['source_signature'] for (stage, rid), entry in
                     recovery_entries(runner.settings).items() if stage == self.stage}
-        preserved = admissions | restored
+        preserved = admissions | restored | eligible_history
         with connection(path, readonly=True) as db:
             if self.recent_seconds is None:
                 rows = db.execute('SELECT payload FROM observations')
@@ -113,7 +127,7 @@ class RetentionWorker:
                 continue
             if (state.get('processing_cohort') == 'historical_backfill' and self.admission_cohort == 'live'
                     and restored.get(rid) != record.get('source_signature')
-                    and not (authorized_history and admissions.get(rid) == record.get('source_signature'))):
+                    and not (authorized_history and (admissions | eligible_history).get(rid) == record.get('source_signature'))):
                 continue
             same_video = state.get('source_signature') == record.get('source_signature')
             same_audio = state.get('audio_signature') == (record.get('audio') or {}).get('source_signature')
@@ -250,8 +264,13 @@ class RetentionWorker:
         from .device_day_cohort import recovery_entries
         entry = recovery_entries(runner.settings).get((self.stage, record['recording_id']))
         restored = entry and entry['source_signature'] == record['source_signature']
+        cohort = self.admission_cohort
+        if (cohort == 'live' and concurrent_paid_history(runner.settings, self.stage)
+                and max(record.get('recording_start_us', 0), record.get('recording_end_us', 0))
+                < (time.time() - runner.settings.get('live_priority_seconds', 14400)) * 1_000_000):
+            cohort = 'historical_backfill'
         runner.queues[self.stage].grant_admission(record,
-            cohort='current_recovery' if restored else self.admission_cohort,
+            cohort='current_recovery' if restored else cohort,
             reason=entry['admission_reason'] if restored else 'ready_in_current_worker_scope')
 
     def _execute_claimed(self, runner, record, owner, stop):

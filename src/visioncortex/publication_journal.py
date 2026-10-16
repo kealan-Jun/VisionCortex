@@ -1,5 +1,6 @@
 """Persist unfinished publication before modifying receipts; replay without CV."""
 import json
+from copy import deepcopy
 from contextlib import ExitStack
 from pathlib import Path
 import uuid
@@ -44,6 +45,66 @@ class PublicationJournal:
                 db.execute('INSERT INTO dirty VALUES(?,?,?)', (identifier, token, row['record']))
 
 
+def revalidate_remounted_seals(runner, record):
+    """Recover only a mount device-number change, with stable verified bytes.
+
+    Called under every recording stage lock by replay. Model receipts and
+    content bindings remain untouched; the old input seals stay in history.
+    Inode, size, timestamps, resolved path and content must all still match.
+    This never authorizes a replacement file or a source-signature change.
+    """
+    from .device_day_contract import digest, read_json
+    from .device_day_inputs import binding, durable_json, identity, input_path, verify_content
+    from .device_day_io import slot
+    from .device_day_write_guard import storage_guard
+    updates = []
+    with storage_guard(runner.config), slot(runner.config):
+        for stage in ('vision', 'stt'):
+            path = input_path(runner, record, stage)
+            if not path.is_file():
+                continue
+            saved = read_json(path)
+            expected_signature = (record.get('audio', {}).get('source_signature')
+                                  if stage == 'stt' else record['source_signature'])
+            if saved.get('source_signature') != expected_signature:
+                raise ValueError('Remount recovery source signature differs')
+            fields = ('recording_id', 'camera_key', 'configured_role', 'recording_start_us', 'recording_end_us')
+            if any(saved.get('recording', {}).get(k) != record.get(k) for k in fields):
+                raise ValueError('Remount recovery device/day identity differs')
+            updated, changed = deepcopy(saved), False
+            snapshots = []
+            for source in updated['sources']:
+                original = Path(source['original_path'])
+                if not original.exists():
+                    continue  # Normal publication verifies the surviving archive.
+                observed = identity(original)
+                if (observed[1:] != source['identity'][1:]
+                        or str(original.resolve()) != source.get('resolved_path', str(original.resolve()))):
+                    raise ValueError('Remount recovery refuses a changed capture')
+                snapshots.append((original, observed))
+                if observed != source['identity']:
+                    if not verify_content(original, source):
+                        raise ValueError('Remount recovery content differs from seal')
+                    source['identity'] = observed
+                    changed = True
+            if changed:
+                if binding(updated) != binding(saved):
+                    raise ValueError('Remount recovery changed content binding')
+                updates.append((path, saved, updated, snapshots))
+        # Validate the complete set before publishing any new seal. A crash
+        # between independent seals is safe: each has unchanged content binding.
+        for path, saved, _updated, snapshots in updates:
+            if read_json(path) != saved or any(identity(p) != stamp for p, stamp in snapshots):
+                raise ValueError('Capture or input seal changed during remount recovery')
+        for path, saved, updated, _snapshots in updates:
+            previous = digest(saved)
+            durable_json(path.parent / 'history' / f'{path.stem}-{previous}.json', saved)
+            updated['mount_revalidation'] = {'previous_seal_digest': previous, 'verified_at': time.time(),
+                'content_binding_unchanged': True, 'model_invoked': False}
+            durable_json(path, updated)
+    return len(updates)
+
+
 def reconcile(runner):
     from .device_day import exclusive
     from .device_day_contract import STAGES
@@ -60,8 +121,11 @@ def reconcile(runner):
                     locks.enter_context(exclusive(runner.runtime_root / 'locks' /
                         f"{record['recording_id']}.{stage}.lock"))
                 from .device_day_inplace import active, publish
-                done = (publish(runner, record) if active(runner, record) else
-                        runner.refresh_index(runner.layout(record), recording_id=record['recording_id']))
+                if active(runner, record):
+                    revalidate_remounted_seals(runner, record)
+                    done = publish(runner, record)
+                else:
+                    done = runner.refresh_index(runner.layout(record), recording_id=record['recording_id'])
                 if done:
                     journal.complete(record['recording_id'], token)
                     completed += 1
