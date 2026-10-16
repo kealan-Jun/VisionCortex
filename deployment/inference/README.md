@@ -3,6 +3,49 @@
 受认证的机器接口复用持久任务队列、输入封存和正式发布流程，支持 Web 与 GPU worker 分离部署。
 服务地址、调用方身份、来源范围和存储根由私有站点配置提供。
 
+## 复用现有自动处理服务
+
+已有设备日自动处理的站点，应在私有机器配置中设置 `native_device_day`：
+
+```json
+{
+  "native_device_day": {
+    "runtime_root": "/native-runtime",
+    "archive_root": "/native-archive",
+    "input_roots": {"/inputs/camera-a": "configured-camera-a"}
+  }
+}
+```
+
+原有 `clients`、scope、凭据和幂等配置继续保留。将原生本地运行根的
+`device-day` 目录和已核验的原生归档根只读映射到这两个位置；不复制活动
+SQLite，也不在 NAS 上运行队列。`input_roots` 显式对应已有输入别名和相机身份，
+不能根据调用方自报的机位名称猜测归属。
+
+启用后，同一 `POST /api/runs/from-paths` 接受一路或多路实际相机，无需凑齐两种
+视角。按相机、原分片和 CSV 匹配自动发现拥有者已登记的任务；尚未发现时保持
+准备状态，已有任务继续由原生阶段队列领取和续租。机器队列仅持久记录关联、
+等待发布和完成状态，不调用模型、不重复 STT、不重试原生失败、不增加 GPU
+任务，也不向原生归档写第二份结果。原生自动调度的容量及处理时间策略继续生效。
+
+完成需要原生视觉、理解及报告完成、选中分片的理解已发布、源版本匹配且素材与来源
+引用可读取。缺片、失败和版本变化明确回传；单路观察仍标记
+`PARTIAL_EVIDENCE` / `physical_action_confirmed=false`，这不妨碍已完成的观察任务
+正常交付。结果查询只包含本任务选中的分片，不把整天其他录像的内容混入结果。
+视频任务不额外等待未提供的录音；显式提交录音时才额外要求其原生 STT 完成。
+
+`GET /api/health` 返回 `workflow=device_day`、`minimum_camera_count=1` 和
+`additional_gpu_jobs=0`，供调用方识别契约。归档接口返回原生设备日的录制、分段、
+理解及来源引用；事件接口以 `kind=device_observation` 返回原生观察，不能伪装为
+旧版已确证物理动作。证据接口保留源视频、CSV、原始局部时间和采集时间；
+`/api/archives/{archive}/recordings/{recording_id}/files/{relative}` 支持鉴权和 Range，
+只允许读取选中分片的已验证素材。整日报告的路径仅作来源定位，需使用原有
+设备日读取入口的相机/日期授权，不经此分片接口泄露整日内容。
+
+AgentDesk 应按健康接口的 workflow 复用已有设备日结果读取与回放适配，不能
+继续用旧版双视角实验的 readiness / evidence-index-v3 判定阻挡这些结果。
+未配置 `native_device_day` 时保留原双视角机器接口及封存任务执行方式。
+
 ## 启动入口
 
 API：

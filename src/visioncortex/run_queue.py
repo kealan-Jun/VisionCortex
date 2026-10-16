@@ -152,6 +152,7 @@ class DurableRunQueue:
         *,
         lease_seconds: float,
         now: float | None = None,
+        kind: str | None = None,
     ) -> QueuedRunJob | None:
         claimed_at = time.time() if now is None else float(now)
         with self._connect() as connection:
@@ -172,12 +173,13 @@ class DurableRunQueue:
                 """
                 SELECT sequence, run_id, kind, payload_json, status, attempts
                 FROM run_jobs
-                WHERE status = 'queued'
-                   OR (status = 'running' AND COALESCE(lease_expires_at, 0) <= ?)
+                WHERE (status = 'queued'
+                   OR (status = 'running' AND COALESCE(lease_expires_at, 0) <= ?))
+                   AND (? IS NULL OR kind = ?)
                 ORDER BY sequence
                 LIMIT 1
                 """,
-                (claimed_at,),
+                (claimed_at, kind, kind),
             ).fetchone()
             if row is None:
                 connection.rollback()

@@ -428,6 +428,12 @@ def _dispatch_persisted_job(job: QueuedRunJob) -> None:
 
 
 def _dispatch_job_in_context(job: QueuedRunJob) -> None:
+    if job.kind == 'native_device_day':
+        from .native_machine import execute
+        # Native workers own resource budgets, inference and phase leases.
+        # This machine job only waits for their source-bound publications.
+        execute(job, _settings(), _queue_stop)
+        return
     payload = job.payload
     # Keep queued model/input settings immutable. Admission is a live worker
     # policy so jobs submitted before the split cannot bypass shared limits.
@@ -502,12 +508,11 @@ def _queue_worker_loop(store: DurableRunQueue) -> None:
         if drain_requested():
             return
         from ..machine_admission import may_claim
-        if not may_claim(_settings()):
-            _queue_stop.wait(_QUEUE_POLL_SECONDS)
-            continue
+        admitted = may_claim(_settings())
         job = store.claim_next(
             _queue_worker_id,
             lease_seconds=_QUEUE_LEASE_SECONDS,
+            **({} if admitted else {'kind': 'native_device_day'}),
         )
         if job is None:
             _queue_wakeup.wait(_QUEUE_POLL_SECONDS)
