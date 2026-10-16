@@ -44,6 +44,11 @@ def dependencies_for(settings, recording):
     return dependencies
 
 
+def dependency_graph(settings, recording):
+    """Compatibility entry point for historical stage dependency callers."""
+    return dependencies_for(settings, recording)
+
+
 def digest(value: Any) -> str:
     result = hashlib.sha256()
     encoder = json.JSONEncoder(ensure_ascii=False, sort_keys=True,

@@ -49,6 +49,19 @@ def test_real_receipts_feed_understanding_then_incremental_report_without_parent
     assert models.vision_calls == models.semantic_calls == 1
 
 
+def test_native_video_only_recording_reaches_understanding_and_report(device_config):  # noqa: F811
+    device_config['device_day']['understanding_coverage_since_us'] = 1
+    runner, item, layout, models = prepared(device_config)
+    worker = RetentionWorker(stage='understanding')
+    assert worker.admit(runner, item)
+    result = worker.tick(runner, threading.Event())
+    assert result['result']['status'] == 'completed', result
+    report = RetentionWorker(stage='report').tick(runner, threading.Event())
+    assert report['result']['status'] == 'completed', report
+    assert (layout.reports / 'LaboratoryDailyReport.html').is_file()
+    assert models.vision_calls == models.semantic_calls == 1
+
+
 @pytest.mark.parametrize('damage', ['publication', 'artifact', 'parent_key'])
 def test_downstream_rejects_unpublished_or_invalid_parent_without_queue_or_model(device_config, damage):  # noqa: F811
     runner, item, layout, models = prepared(device_config)

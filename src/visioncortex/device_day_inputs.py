@@ -36,7 +36,7 @@ def remember_content(path, checksum):
             _CONTENT.popitem(last=False)
 
 
-def hash_content(path):
+def hash_content(path, *, expected=None):
     from .runtime_control import check_yield
     # Single-flight hashing shares video/embedded-audio validation, including
     # when both independent stages seal the same source concurrently.
@@ -45,8 +45,11 @@ def hash_content(path):
         prefix = (str(path), tuple(before))
         with _CONTENT_LOCK:
             known = next((key[2] for key in reversed(_CONTENT) if key[:2] == prefix), None)
-        if known is not None:
+        if known is not None and (expected is None or known == expected):
             return known
+        # NAS publication can leave an earlier process-local hash under the
+        # same stat tuple. A conflicting sealed reference requires a fresh
+        # stable byte read; never replace the reference or accept a mismatch.
         checksum = hashlib.sha256()
         with path.open('rb') as handle:
             for block in iter(lambda: handle.read(8 * 1024 * 1024), b''):
@@ -60,7 +63,8 @@ def hash_content(path):
 
 
 def verify_content(path, reference):
-    return identity(path)[2] == reference['size_bytes'] and hash_content(path) == reference['sha256']
+    return (identity(path)[2] == reference['size_bytes']
+            and hash_content(path, expected=reference['sha256']) == reference['sha256'])
 
 
 def identity(path):

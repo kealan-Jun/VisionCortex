@@ -1686,16 +1686,13 @@ class RoleScanner:
                         raise RuntimeError(
                             "TensorRT inference returned fewer predictions than source frames"
                         )
-                    for packet, prediction in zip(
-                        sub_batch, predictions[: len(sub_batch)], strict=True
+                    from .detection_inference import prediction_arrays
+                    arrays = prediction_arrays(predictions[:len(sub_batch)])
+                    for packet, prediction, (xyxy, confidences, classes) in zip(
+                        sub_batch, predictions[: len(sub_batch)], arrays, strict=True
                     ):
                         boxes: list[BoxEvidence] = []
                         if prediction.boxes is not None:
-                            xyxy = np.clip(prediction.boxes.xyxyn.detach().cpu().numpy(), 0.0, 1.0)
-                            confidences = prediction.boxes.conf.detach().cpu().numpy()
-                            classes = (
-                                prediction.boxes.cls.detach().cpu().numpy().astype(int)
-                            )
                             for coords, confidence, class_id in zip(
                                 xyxy, confidences, classes, strict=True
                             ):

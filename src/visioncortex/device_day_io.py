@@ -15,16 +15,26 @@ _LIVE_VISION = ContextVar('device_day_live_vision_lane', default=False)
 
 @contextmanager
 def live_vision_lane():
-    """One extra live decoder alongside the existing shared I/O budget.
+    """Bounded live decoders alongside the existing shared I/O budget.
 
-    Only the independent single-job worker opts in. All processes share its
-    capacity-one lease; archive/STT work still uses the ordinary total budget.
+    Only the independent continuous worker opts in. All processes share its
+    configured lease cap; archive/STT work retains the ordinary total budget.
     """
     token = _LIVE_VISION.set(True)
     try:
         yield
     finally:
         _LIVE_VISION.reset(token)
+
+
+def live_vision_capacity(config):
+    settings = config.get('device_day') or {}
+    requested = settings.get('live_vision_jobs', 1)
+    if isinstance(requested, bool) or not isinstance(requested, int) or not 1 <= requested <= 4:
+        raise ValueError('device_day.live_vision_jobs must be an integer in [1,4]')
+    capacity = ((config.get('runtime') or {}).get('resource_limits') or {}).get('vision', 12)
+    limit = settings.get('stage_worker_limits', {}).get('vision', requested)
+    return min(requested, capacity, limit)
 
 
 @contextmanager
@@ -50,7 +60,7 @@ def slot(config, *, copy=False, urgent=False, whole_copy=False):
             # with archival and every other reader below.
             stack.enter_context(coordinator.acquire(
                 'nas-live-vision' if live else 'nas-copy' if whole_copy else 'nas-io',
-                capacity=1 if live else capacity,
+                capacity=live_vision_capacity(config) if live else capacity,
                 timeout=settings.get('nas_io_timeout_seconds', 3600), context=context, queued_at=queued_at))
         token = _COPY_QUEUED_AT.set(queued_at) if whole_copy else None
         try:

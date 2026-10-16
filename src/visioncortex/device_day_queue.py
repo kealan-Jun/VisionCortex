@@ -135,12 +135,15 @@ class DeviceDayQueue:
                 (cohort, reason, signature, current, current, signature, current, current,
                  signature, recording['recording_id'], signature)).rowcount)
 
-    def admissions(self):
+    def admissions(self, *, include_history=False):
+        if type(include_history) is not bool:
+            raise ValueError('Historical admission selection must be a boolean')
         with self.connect() as db:
             return {row['recording_id']: row['admission_signature'] for row in db.execute(
                 "SELECT recording_id,admission_signature FROM recordings WHERE "
-                "processing_cohort IN ('live','current_recovery') AND admitted_at IS NOT NULL "
-                "AND admission_signature=json_extract(payload,'$.source_signature')")}
+                "(processing_cohort IN ('live','current_recovery') OR (? AND processing_cohort='historical_backfill')) "
+                "AND admitted_at IS NOT NULL AND admission_signature=json_extract(payload,'$.source_signature')",
+                (include_history,))}
 
     def release_hold(self, recording_id, *, reason, evidence, expected_revision=None, source_signature=None):
         """An explicit source/review decision releases a hold, never a retry sweep."""
@@ -186,9 +189,11 @@ class DeviceDayQueue:
             ).rowcount == 1
 
     def claim(self, owner, *, retry=False, date=None, exclude=(), allowed=None, camera_serial=False,
-              camera_limit=1, max_attempts=None):
+              camera_limit=1, max_attempts=None, latest_over_camera=False):
         if isinstance(camera_limit, bool) or not isinstance(camera_limit, int) or camera_limit < 1:
             raise ValueError('Camera concurrency must be a positive integer')
+        if type(latest_over_camera) is not bool or latest_over_camera and not self.latest_first:
+            raise ValueError('Time-first camera admission requires latest_first')
         current = time.time()
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -230,7 +235,7 @@ class DeviceDayQueue:
                     ordering = ("CASE WHEN json_extract(r.payload,'$.archive_urgent') THEN 0 "
                                 "WHEN json_extract(r.payload,'$.archive_aged') THEN 1 ELSE 2 END,"
                                 "COALESCE(json_extract(r.payload,'$.archive_deadline'),9e99),r.queued_at," + ordering)
-            if camera_serial:
+            if camera_serial and not latest_over_camera:
                 ordering += ("COALESCE((SELECT last_claim FROM camera_dispatch "
                              "WHERE camera_key=json_extract(r.payload,'$.camera_key')),0),")
             if self.latest_first:
@@ -239,6 +244,12 @@ class DeviceDayQueue:
                 ordering += ("CASE WHEN COALESCE(json_extract(r.payload,'$.processing_priority'),0)<0 "
                              "THEN -COALESCE(json_extract(r.payload,'$.recording_start_us'),0) "
                              "ELSE COALESCE(json_extract(r.payload,'$.recording_start_us'),0) END,")
+            if camera_serial and latest_over_camera:
+                # Scoped CV explicitly prefers physical time. Camera rotation
+                # breaks equal-time ties, while occupied camera slots remain
+                # excluded above and every original lease is preserved.
+                ordering += ("COALESCE((SELECT last_claim FROM camera_dispatch "
+                             "WHERE camera_key=json_extract(r.payload,'$.camera_key')),0),")
             ordering += "r.queued_at,r.recording_id"
             if self.scheduling['enabled'] and self.path.stem != 'queue-retention':
                 # Resource seconds, rather than task counts, determine the

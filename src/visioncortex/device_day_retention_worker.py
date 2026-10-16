@@ -27,6 +27,15 @@ def understanding_capacity(config, settings):
     return min(values)
 
 
+def concurrent_paid_history(settings, stage):
+    policy = settings.get('backfill') or {}
+    authorized = policy.get('paid_history_authorized', False)
+    if type(authorized) is not bool:
+        raise ValueError('backfill.paid_history_authorized must be a boolean')
+    return (stage == 'understanding' and authorized and policy.get('enabled') is True
+            and stage in policy.get('stages', []))
+
+
 class RetentionWorker:
     """Bounded concurrent claims; existing execution still validates every input."""
 
@@ -45,7 +54,9 @@ class RetentionWorker:
             return []
         current = time.time()
         queue = runner.queues.get(self.stage)
-        admissions = queue.admissions() if queue is not None else {}
+        authorized_history = concurrent_paid_history(runner.settings, self.stage)
+        admissions = queue.admissions(include_history=True) if queue is not None and authorized_history else (
+            queue.admissions() if queue is not None else {})
         from .device_day_cohort import recovery_entries
         restored = {rid: entry['source_signature'] for (stage, rid), entry in
                     recovery_entries(runner.settings).items() if stage == self.stage}
@@ -101,7 +112,8 @@ class RetentionWorker:
             if state.get('blocked_reason'):
                 continue
             if (state.get('processing_cohort') == 'historical_backfill' and self.admission_cohort == 'live'
-                    and restored.get(rid) != record.get('source_signature')):
+                    and restored.get(rid) != record.get('source_signature')
+                    and not (authorized_history and admissions.get(rid) == record.get('source_signature'))):
                 continue
             same_video = state.get('source_signature') == record.get('source_signature')
             same_audio = state.get('audio_signature') == (record.get('audio') or {}).get('source_signature')
@@ -253,7 +265,15 @@ class RetentionWorker:
             # semantics. Incremental work observes shutdown only at a
             # reusable unit boundary, without cancelling an issued call.
             incremental = self.stage in {'vision', 'understanding'}
-            context = (execution_context(job_id=record['recording_id'], source='nas', priority=3,
+            historical = False
+            if concurrent_paid_history(runner.settings, self.stage):
+                with queue.connect() as db:
+                    row = db.execute('SELECT processing_cohort FROM recordings WHERE recording_id=?',
+                                     (record['recording_id'],)).fetchone()
+                    historical = bool(row and row['processing_cohort'] == 'historical_backfill')
+            context = (execution_context(job_id=record['recording_id'],
+                                         source='device_day_backfill' if historical else 'nas',
+                                         priority=20 if historical else 3, background_fair=historical,
                                          stop=None, yield_signal=stop)
                        if incremental else nullcontext())
             with context:
@@ -345,6 +365,11 @@ class RetentionWorker:
                 vision_capacity = ((runner.config.get('runtime') or {}).get('resource_limits') or {}).get('vision', 12)
                 camera_limit = min(vision_capacity, runner.settings.get('vision_jobs_per_camera', 1) + 1)
             jobs = understanding_capacity(runner.config, runner.settings) if self.stage == 'understanding' else 1
+            if self.stage == 'vision':
+                from .device_day_io import live_vision_capacity
+                jobs = live_vision_capacity(runner.config)
+                if jobs > 1:
+                    camera_limit = 1
             with queue.heartbeat(owner):
                 records = []
                 for _ in range(jobs):
@@ -360,11 +385,13 @@ class RetentionWorker:
                     return {'status': 'waiting', 'admitted': len(admitted)}
                 if len(records) == 1:
                     return self._execute_claimed(runner, records[0], owner, stop)
-                with ThreadPoolExecutor(max_workers=jobs, thread_name_prefix='device-understanding') as pool:
+                with ThreadPoolExecutor(max_workers=jobs, thread_name_prefix='device-' + self.stage) as pool:
                     futures = [pool.submit(copy_context().run, self._execute_claimed, runner, record, owner, stop)
                                for record in records]
                     results = [future.result() for future in futures]
-                return {'status': 'processed', 'concurrency': jobs, 'results': results}
+                return {'status': 'processed', 'concurrency': jobs, 'results': results,
+                        'result': {'status': 'completed' if all(r['result'].get('status') == 'completed'
+                                                               for r in results) else 'partial'}}
 
 
 
@@ -379,6 +406,8 @@ def serve(config_path, stop, *, stage='retention'):
     worker = RetentionWorker(stage=stage, recent_seconds=14400 if stage in {'vision', 'understanding', 'report'} else None)
     runner, generation, roots, status_path, consumer = None, None, None, None, None
     backfill = BackfillSupervisor(stage, stop) if stage in SUPPORTED_STAGES else None
+    from .device_day_synthesis_worker import DaySynthesisSupervisor
+    synthesis = DaySynthesisSupervisor(stop) if stage == 'report' else None
     try:
         while not stop.is_set():
             delay = 5
@@ -424,6 +453,7 @@ def serve(config_path, stop, *, stage='retention'):
                 history = backfill.poll(runner, allow_start=True) if fair else None
                 history_running = fair and history and history.get('status') == 'running'
                 result = worker.tick(runner, stop)
+                day_result = synthesis.poll(config) if synthesis is not None else None
                 if backfill is not None and not fair:
                     allow_start = enabled and result.get('status') == 'waiting' and result.get('admitted', 0) == 0
                     history = backfill.poll(runner, allow_start=allow_start)
@@ -433,7 +463,7 @@ def serve(config_path, stop, *, stage='retention'):
                         delay = 0
                     consumer.update(backfill_status=(history.get('reason') or history['status']) if history else 'waiting_for_live')
                 status = {'status': 'running', 'updated_at': time.time(), 'stage': stage,
-                          'last_result': result, 'backfill_result': history}
+                          'last_result': result, 'backfill_result': history, 'day_synthesis': day_result}
                 consumer.update(scope='history' if history_running else (
                                     'recent' if worker.recent_seconds is not None else 'all'),
                                 last_result=history or result)
@@ -451,6 +481,8 @@ def serve(config_path, stop, *, stage='retention'):
                 atomic_json(status_path, status)
             stop.wait(delay)
     finally:
+        if synthesis is not None:
+            synthesis.close()
         if backfill is not None:
             backfill.close()
         if consumer is not None:

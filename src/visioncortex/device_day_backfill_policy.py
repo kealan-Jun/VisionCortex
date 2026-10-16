@@ -256,7 +256,8 @@ def _record_conditions(config, attached):
     if 'availability' in attached:
         clauses.append("NOT EXISTS(SELECT 1 FROM availability.inputs a WHERE a.id=o.id "
                        "AND a.signature IS json_extract(o.payload,'$.source_signature') AND a.state!='ready')")
-    return clauses, {'roles': json.dumps(role_map), 'scope': cutoff}
+    return clauses, {'roles': json.dumps(role_map), 'scope': cutoff,
+                     'visual_cutoff': (config.get('device_day') or {}).get('understanding_coverage_since_us')}
 
 
 def _eligible_conditions(stage, *, historical=False, retry_budget=':attempts'):
@@ -274,8 +275,12 @@ def _eligible_conditions(stage, *, historical=False, retry_budget=':attempts'):
     # full original copy. Downstream still needs every current transitive parent.
     if stage in {'understanding', 'report'}:
         for parent in _parents(stage):
-            clauses.append(f"EXISTS(SELECT 1 FROM q_{parent}.recordings p WHERE p.recording_id=o.id "
-                           f"AND p.status='completed' AND {_signature_matches('p', 'o', parent)})")
+            condition = (f"EXISTS(SELECT 1 FROM q_{parent}.recordings p WHERE p.recording_id=o.id "
+                         f"AND p.status='completed' AND {_signature_matches('p', 'o', parent)})")
+            if parent == 'stt':
+                condition = ("(" + condition + " OR (:visual_cutoff IS NOT NULL AND "
+                             "json_extract(o.payload,'$.recording_start_us')>=:visual_cutoff))")
+            clauses.append(condition)
     return clauses
 
 

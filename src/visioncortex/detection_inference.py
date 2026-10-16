@@ -9,7 +9,42 @@ import logging
 from pathlib import Path
 import threading
 
+import numpy as np
+
 from .schemas import ViewRole
+
+
+def prediction_arrays(predictions):
+    """Transfer one detection batch, retaining the established box port.
+
+    Tensor-backed predictions share a single device-to-host synchronization.
+    Optional/test adapters exposing only detach/cpu/numpy keep their old port.
+    No coordinates, thresholds or prediction ordering change.
+    """
+    boxes = [prediction.boxes for prediction in predictions]
+    values = [(box.xyxyn, box.conf, box.cls) if box is not None else None for box in boxes]
+    try:
+        import torch
+    except ImportError:
+        torch = None
+    if torch is not None and all(value is None or all(isinstance(t, torch.Tensor) for t in value)
+                                 for value in values):
+        lengths = [len(value[0]) if value is not None else 0 for value in values]
+        tensors = [torch.cat((value[0], value[1].reshape(-1, 1), value[2].reshape(-1, 1)), dim=1)
+                   for value in values if value is not None and len(value[0])]
+        combined = (torch.cat(tensors, dim=0).detach().cpu().numpy() if tensors
+                    else np.empty((0, 6), dtype=np.float32))
+        offset = 0
+        result = []
+        for length in lengths:
+            rows = combined[offset:offset + length]
+            result.append((np.clip(rows[:, :4], 0.0, 1.0), rows[:, 4], rows[:, 5].astype(int)))
+            offset += length
+        return result
+    return [(np.clip(value[0].detach().cpu().numpy(), 0.0, 1.0),
+             value[1].detach().cpu().numpy(), value[2].detach().cpu().numpy().astype(int))
+            if value is not None else (np.empty((0, 4)), np.empty(0), np.empty(0, dtype=int))
+            for value in values]
 
 
 def predict_complete_batch(model, *, source, options):
