@@ -14,12 +14,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from .device_day import exclusive
 from .application.contracts import ApplicationError
 from .schemas import RunManifest
+from .application.native_machine import NativeDeviceDayConfig, NativePathManifest
 from .sqlite_store import connection
 from .storage import safe_archive_name
 
@@ -42,6 +43,7 @@ class MachineConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     clients: list[Principal] = Field(min_length=1)
     max_pending: int = Field(default=50, ge=5, le=1000)
+    native_device_day: NativeDeviceDayConfig | None = None
 
 
 class Submissions:
@@ -188,7 +190,10 @@ def create_app(config=None, native=None):
     settings = native.settings()
     from .build_identity import identity
 
-    revision = checksum({"settings": settings, "build": identity()})
+    revision_fields = {"settings": settings, "build": identity()}
+    if config.native_device_day:
+        revision_fields['native_device_day'] = config.native_device_day.model_dump(mode='json')
+    revision = checksum(revision_fields)
     stop = threading.Event()
     submissions = None
 
@@ -207,9 +212,18 @@ def create_app(config=None, native=None):
             if row["revision"] != revision:
                 submissions.mark(row["run_id"], "failed", "CONFIGURATION_CHANGED")
                 return
-            manifest = RunManifest.model_validate(json.loads(row["payload"]))
+            manifest_class = NativePathManifest if config.native_device_day else RunManifest
+            manifest = manifest_class.model_validate(json.loads(row["payload"]))
             validate_paths(manifest, roots_for(row["client"], row["scope"]))
             manifest = manifest.model_copy(update={"experiment_id": row["archive"]})
+            if config.native_device_day:
+                from .application.native_machine import enqueue
+                try:
+                    enqueue(native, manifest, config.native_device_day, row['run_id'], row['archive'])
+                except LookupError:
+                    return  # The automatic discovery owner has not admitted it yet.
+                submissions.mark(row['run_id'], 'queued')
+                return
             from .storage import initialize_nas_archive
 
             destination = initialize_nas_archive(settings, row["archive"])
@@ -330,10 +344,19 @@ def create_app(config=None, native=None):
 
     @app.get("/api/health")
     def health():
-        return {"api_ready": True, "queue_persistence": "sqlite", "role": "machine-api"}
+        response = {"api_ready": True, "queue_persistence": "sqlite", "role": "machine-api"}
+        if config.native_device_day:
+            response.update(workflow='device_day', minimum_camera_count=1,
+                            execution_owner='native_device_day_queues', additional_gpu_jobs=0)
+        return response
 
     @app.post("/api/runs/from-paths", status_code=202)
-    def submit(payload: RunManifest, request: Request):
+    def submit(payload: NativePathManifest, request: Request):
+        if not config.native_device_day:
+            try:
+                RunManifest.model_validate(payload.model_dump(mode='json'))
+            except ValueError:
+                raise HTTPException(422, 'MULTIVIEW_INPUT_REQUIRED') from None
         key = request.headers.get("Idempotency-Key") or payload.experiment_id
         if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,240}", key):
             raise HTTPException(422, "IDEMPOTENCY_KEY_INVALID")
@@ -363,17 +386,42 @@ def create_app(config=None, native=None):
     def archive_allowed(request, archive):
         row = owned(request, archive=archive)
         validate_paths(
-            RunManifest.model_validate(json.loads(row["payload"])),
+            NativePathManifest.model_validate(json.loads(row["payload"])),
             roots_for(row["client"], row["scope"]),
         )
         status = native.queue.load_run(row["run_id"]) or {}
         if status.get("state") != "completed":
             raise HTTPException(409, "RESULT_NOT_READY")
+        return row
+
+    def native_result(request, archive):
+        row = archive_allowed(request, archive)
+        if config.native_device_day is None:
+            return None
+        from .application.native_machine import result
+        try:
+            return result(native, config.native_device_day, row['run_id'])
+        except (ValueError, OSError, RuntimeError):
+            raise HTTPException(409, 'NATIVE_RESULT_NOT_READY') from None
 
     @app.get("/api/archives/{archive}")
     def archive_detail(archive: str, request: Request):
-        archive_allowed(request, archive)
+        data = native_result(request, archive)
+        if data is not None:
+            return {'name': archive, **data}
         return native.archive_detail(archive, section="all", cursor=None, limit=24)
+
+    @app.get('/api/archives/{archive}/recordings/{recording_id}/files/{relative:path}')
+    def native_file(archive: str, recording_id: str, relative: str, request: Request):
+        data = native_result(request, archive)
+        if data is None:
+            raise HTTPException(404, 'NATIVE_RESULT_NOT_FOUND')
+        from .application.native_machine import file_path
+        try:
+            path = file_path(data, config.native_device_day, recording_id, relative)
+        except (OSError, ValueError):
+            raise HTTPException(404, 'EVIDENCE_NOT_FOUND') from None
+        return FileResponse(path, headers={'Cache-Control': 'private, no-store'})
 
     @app.get("/api/key-events")
     def events(
@@ -383,7 +431,21 @@ def create_app(config=None, native=None):
         cursor: str | None = None,
         limit: int = 20,
     ):
-        archive_allowed(request, archive)
+        data = native_result(request, archive)
+        if data is not None:
+            if not 1 <= limit <= 100 or q is not None and len(q) > 200 or cursor is not None:
+                raise HTTPException(422, 'QUERY_INVALID')
+            # Native scene samples are observations, never invented physical
+            # key events. Keep their existing segment/material identities.
+            items = []
+            for day in data['device_days']:
+                for meaning in day['understandings']:
+                    if q and q.casefold() not in json.dumps(meaning, ensure_ascii=False).casefold():
+                        continue
+                    items.append({'kind': 'device_observation', 'archive_name': archive,
+                        'native_archive': day['request']['archive'], **meaning})
+            return {'workflow': 'device_day', 'items': items[:limit], 'next_cursor': None,
+                    'evidence_classification': 'PARTIAL_EVIDENCE'}
         if not 1 <= limit <= 100 or q is not None and len(q) > 200:
             raise HTTPException(422, "QUERY_INVALID")
         return native.search_key_events(
@@ -392,12 +454,29 @@ def create_app(config=None, native=None):
 
     @app.get("/api/key-events/{uid}")
     def event(uid: str, archive: str, request: Request):
-        archive_allowed(request, archive)
+        data = native_result(request, archive)
+        if data is not None:
+            for day in data['device_days']:
+                for item in day['understandings']:
+                    if item['segment_id'] == uid:
+                        return {'workflow': 'device_day', 'native_archive': day['request']['archive'], **item}
+            raise HTTPException(404, 'EVENT_NOT_FOUND')
         return native.indexed_key_event(uid, archive=archive)
 
     @app.get("/api/evidence/{uid:path}")
     def evidence(uid: str, archive: str, request: Request):
-        archive_allowed(request, archive)
+        data = native_result(request, archive)
+        if data is not None:
+            from .application.native_machine import evidence as native_evidence
+            item = native_evidence(data, uid)
+            if item is None:
+                raise HTTPException(404, 'EVIDENCE_NOT_FOUND')
+            from urllib.parse import quote
+            day = next(d for d in data['device_days'] if d['request']['archive'] == item['native_archive'])
+            item.update(archive_name=archive,
+                        artifact_url=f'/api/archives/{quote(archive)}/recordings/'
+                        +day['request']['recording_id']+'/files/'+quote(item['artifact']['path'], safe='/'))
+            return item
         return native.indexed_evidence(uid, archive=archive)
 
     return app
