@@ -35,6 +35,12 @@ def validate_settings(settings):
         raise ValueError('device_day.field_recognition must be an object')
     if type(settings.get('enabled', False)) is not bool:
         raise ValueError('Field event enabled must be boolean')
+    archive = settings.get('archive_context_enabled', False)
+    if type(archive) is not bool:
+        raise ValueError('Field archive context enabled must be boolean')
+    if archive and (settings.get('enabled') or not isinstance(settings.get('archive_root'), str)
+                    or not Path(settings['archive_root']).is_absolute()):
+        raise ValueError('Field archive context requires an explicit root and independent feed disabled')
     if not settings.get('enabled', False):
         return
     endpoint = settings.get('endpoint')
@@ -197,6 +203,10 @@ class FieldEventConsumer:
 def context_events(config, recording):
     """Read only actual overlapping events; no media or nearest-time association."""
     settings = (config.get('device_day') or {}).get('field_recognition') or {}
+    if settings.get('archive_context_enabled', False):
+        validate_settings(settings)
+        from .field_archive_context import context_events as archived_context
+        return archived_context(config, recording)
     if not settings.get('enabled', False):
         return {'status': 'no_input', 'events': [], 'source': 'field_recognition'}
     validate_settings(settings)
