@@ -605,7 +605,8 @@ def _stop_queue_worker() -> None:
     _queue_stop.set()
     _queue_wakeup.set()
     if _queue_thread is not None:
-        _queue_thread.join(timeout=5.0)
+        machine = bool((_settings().get('runtime') or {}).get('machine_admission'))
+        _queue_thread.join(timeout=30.0 if machine else 5.0)
         if _queue_thread.is_alive():
             return
     _queue_thread = None
