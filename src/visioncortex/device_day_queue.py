@@ -70,9 +70,9 @@ class DeviceDayQueue:
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             old = db.execute("SELECT * FROM recordings WHERE recording_id=? AND "
-                             "json_extract(payload,'$.source_signature') IS NOT ? AND "
+                             "(json_extract(payload,'$.source_signature') IS NOT ? OR revision!=?) AND "
                              "(status!='running' OR COALESCE(lease_until,0)<?)",
-                             (recording['recording_id'], recording.get('source_signature'), observed)).fetchone()
+                             (recording['recording_id'], recording.get('source_signature'), revision, observed)).fetchone()
             if old:
                 signature = json.loads(old['payload']).get('source_signature') or 'unknown'
                 db.execute('INSERT OR IGNORE INTO source_versions VALUES(?,?,?,?,?)',
