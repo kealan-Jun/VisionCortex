@@ -4,11 +4,14 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 from pathlib import Path
+import re
 import sqlite3
 import subprocess
 import time
 import shutil
+import uuid
 
 import psutil
 
@@ -124,6 +127,7 @@ def record_execution(job, settings):
     if policy(settings) is None:
         return
     from .build_identity import identity
+    recovery = prepare_run_owner(job, settings)
     def digest(value):
         return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()
     receipt = {
@@ -133,10 +137,58 @@ def record_execution(job, settings):
         'effective_settings_sha256': digest(settings),
         'manifest_sha256': digest(job.payload['manifest']),
         'resource_policy': settings['runtime'], 'created_at': time.time(),
+        'run_lock_recovery': recovery,
     }
     directory = Path(job.payload['nas_root']) / 'JSON-Config-Files'
     atomic_json(directory / f'MachineExecutionAttempt{job.attempts}.json', receipt)
     atomic_json(directory / 'MachineExecution.json', receipt)
+
+
+def current_process_owner():
+    return {'pid': os.getpid(), 'process_created_at': psutil.Process().create_time(),
+            'host_id': hashlib.sha256(Path('/etc/machine-id').read_bytes()).hexdigest()}
+
+
+def owner_alive(owner):
+    try:
+        process = psutil.Process(owner['pid'])
+        return (process.status() != psutil.STATUS_ZOMBIE
+                and abs(process.create_time() - owner['process_created_at']) < .01)
+    except psutil.NoSuchProcess:
+        return False
+
+
+def prepare_run_owner(job, settings):
+    """Recover only this local queue's same-host, provably dead run lock."""
+    if not re.fullmatch(r'[A-Za-z0-9_-]{1,120}', job.run_id):
+        raise ValueError('Unsafe machine run identity')
+    root = Path(job.payload['nas_root'])
+    local = Path(settings['storage']['local_runtime_root']) / 'state/MachineRunOwners' / (job.run_id + '.json')
+    current = current_process_owner()
+    lock = root / 'run.lock'
+    recovery = None
+    if lock.exists() or lock.is_symlink():
+        if lock.is_symlink() or not lock.is_file() or not local.is_file():
+            raise RuntimeError('Run lock has no verified local owner; recovery refused')
+        previous = json.loads(local.read_text())
+        before = lock.stat()
+        contents = json.loads(lock.read_text())
+        if (previous.get('host_id') != current['host_id']
+                or previous.get('run_id') != job.run_id
+                or previous.get('nas_root') != str(root)
+                or contents.get('pid') != previous.get('pid')
+                or owner_alive(previous)):
+            raise RuntimeError('Run lock owner is live or does not match this local task')
+        after = lock.stat()
+        if (before.st_ino, before.st_size, before.st_mtime_ns) != (after.st_ino, after.st_size, after.st_mtime_ns):
+            raise RuntimeError('Run lock changed during recovery')
+        relative = 'JSON-Config-Files/RecoveredRunLock' + uuid.uuid4().hex + '.json'
+        os.replace(lock, root / relative)
+        recovery = {'previous_pid': previous['pid'], 'retained_lock': relative,
+                    'reason': 'verified_same_host_process_terminated'}
+    atomic_json(local, current | {'run_id': job.run_id, 'nas_root': str(root),
+                                 'attempt': job.attempts, 'recorded_at': time.time()})
+    return recovery
 
 
 def hold_after_failure(config, error):

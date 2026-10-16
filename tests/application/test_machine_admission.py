@@ -133,6 +133,34 @@ def test_execution_receipt_keeps_each_attempt(tmp_path):
     assert current['run_id'] == old['run_id'] == 'owned-run'
 
 
+@pytest.mark.parametrize('case', ['dead', 'live', 'foreign', 'missing'])
+def test_restart_recovers_only_owned_dead_process_locks(monkeypatch, tmp_path, case):
+    config, _ = configured(tmp_path)
+    root = tmp_path / 'staging'
+    (root / 'JSON-Config-Files').mkdir(parents=True)
+    payload = {'nas_root': str(root)}
+    job = QueuedRunJob('owned-run', 'run', payload, 1, 2, True)
+    owner = {'pid': 12345, 'process_created_at': 123, 'host_id': 'local'}
+    monkeypatch.setattr(machine_admission, 'current_process_owner', lambda: owner | {'pid': 54321})
+    monkeypatch.setattr(machine_admission, 'owner_alive', lambda _owner: case == 'live')
+    local = tmp_path / 'machine/state/MachineRunOwners/owned-run.json'
+    local.parent.mkdir(parents=True)
+    if case != 'missing':
+        local.write_text(json.dumps(owner | {'run_id': job.run_id, 'nas_root': str(root),
+                                            'host_id': 'foreign' if case == 'foreign' else 'local'}))
+    lock = root / 'run.lock'
+    lock.write_text(json.dumps({'pid': 12345, 'started_at': 'original'}))
+    if case == 'dead':
+        recovered = machine_admission.prepare_run_owner(job, config)
+        assert not lock.exists()
+        assert json.loads((root / recovered['retained_lock']).read_text())['pid'] == 12345
+        assert json.loads(local.read_text())['pid'] == 54321
+    else:
+        with pytest.raises(RuntimeError, match='owner'):
+            machine_admission.prepare_run_owner(job, config)
+        assert lock.exists()
+
+
 def test_unreadable_published_release_cannot_complete(monkeypatch, tmp_path):
     config, _ = configured(tmp_path)
     root = tmp_path / 'published'
