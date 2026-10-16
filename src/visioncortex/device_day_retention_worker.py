@@ -36,6 +36,14 @@ def concurrent_paid_history(settings, stage):
             and stage in policy.get('stages', []))
 
 
+def admitted_history_in_pool(settings, stage):
+    """Keep verified older admissions in latest-first primary processing too."""
+    if stage in {'understanding', 'report'}:
+        return concurrent_paid_history(settings, stage)
+    policy = settings.get('backfill') or {}
+    return policy.get('enabled') is True and stage in policy.get('stages', [])
+
+
 class RetentionWorker:
     """Bounded concurrent claims; existing execution still validates every input."""
 
@@ -55,7 +63,8 @@ class RetentionWorker:
         current = time.time()
         queue = runner.queues.get(self.stage)
         authorized_history = concurrent_paid_history(runner.settings, self.stage)
-        admissions = queue.admissions(include_history=True) if queue is not None and authorized_history else (
+        include_history = admitted_history_in_pool(runner.settings, self.stage)
+        admissions = queue.admissions(include_history=True) if queue is not None and include_history else (
             queue.admissions() if queue is not None else {})
         # Ready paid history joins the same bounded pool as live work. Its
         # admission must not wait for the global preprocessing backfill lock.
@@ -127,7 +136,7 @@ class RetentionWorker:
                 continue
             if (state.get('processing_cohort') == 'historical_backfill' and self.admission_cohort == 'live'
                     and restored.get(rid) != record.get('source_signature')
-                    and not (authorized_history and (admissions | eligible_history).get(rid) == record.get('source_signature'))):
+                    and not (include_history and (admissions | eligible_history).get(rid) == record.get('source_signature'))):
                 continue
             same_video = state.get('source_signature') == record.get('source_signature')
             same_audio = state.get('audio_signature') == (record.get('audio') or {}).get('source_signature')
@@ -265,7 +274,7 @@ class RetentionWorker:
         entry = recovery_entries(runner.settings).get((self.stage, record['recording_id']))
         restored = entry and entry['source_signature'] == record['source_signature']
         cohort = self.admission_cohort
-        if (cohort == 'live' and concurrent_paid_history(runner.settings, self.stage)
+        if (cohort == 'live' and admitted_history_in_pool(runner.settings, self.stage)
                 and max(record.get('recording_start_us', 0), record.get('recording_end_us', 0))
                 < (time.time() - runner.settings.get('live_priority_seconds', 14400)) * 1_000_000):
             cohort = 'historical_backfill'
@@ -285,7 +294,7 @@ class RetentionWorker:
             # reusable unit boundary, without cancelling an issued call.
             incremental = self.stage in {'vision', 'understanding'}
             historical = False
-            if concurrent_paid_history(runner.settings, self.stage):
+            if admitted_history_in_pool(runner.settings, self.stage):
                 with queue.connect() as db:
                     row = db.execute('SELECT processing_cohort FROM recordings WHERE recording_id=?',
                                      (record['recording_id'],)).fetchone()
