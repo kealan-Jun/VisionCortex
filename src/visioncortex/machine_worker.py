@@ -45,7 +45,13 @@ def validate_gpu_guard():
         expected = lock_path.stat()
         if (inherited.st_dev, inherited.st_ino) != (expected.st_dev, expected.st_ino):
             raise ValueError("GPU guard FD does not match its lock file")
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        mode_path = lock_path.with_suffix(".mode")
+        if mode_path.is_symlink():
+            raise ValueError("Invalid GPU mode file")
+        mode = mode_path.read_text().strip() if mode_path.exists() else "scheduled"
+        if mode not in {"scheduled", "concurrent"} or mode != (_guard_environment("GPU_GUARD_MODE") or "scheduled"):
+            raise ValueError("GPU guard mode does not match the host")
+        fcntl.flock(fd, (fcntl.LOCK_SH if mode == "concurrent" else fcntl.LOCK_EX) | fcntl.LOCK_NB)
     except (OSError, ValueError) as exc:
         raise RuntimeError("Start through deployment/inference/gpu_guard.py") from exc
 

@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 
 
-def verify_idle_gpu(gpu):
+def verify_gpu(gpu):
     result = subprocess.run(
         ["nvidia-smi", "--query-gpu=uuid", "--format=csv,noheader"],
         capture_output=True,
@@ -22,6 +22,10 @@ def verify_idle_gpu(gpu):
     )
     if gpu not in result.stdout.splitlines():
         raise RuntimeError("Configured GPU UUID is not present")
+
+
+def verify_idle_gpu(gpu):
+    verify_gpu(gpu)
     result = subprocess.run(
         ["nvidia-smi", "--query-compute-apps=gpu_uuid", "--format=csv,noheader"],
         capture_output=True,
@@ -35,7 +39,7 @@ def verify_idle_gpu(gpu):
         )
 
 
-def run_guard(command, gpu, lock_dir, *, check_gpu=verify_idle_gpu):
+def run_guard(command, gpu, lock_dir, *, check_gpu=verify_idle_gpu, check_shared_gpu=verify_gpu):
     if os.name != "posix":
         raise RuntimeError("Use Linux/WSL2 for the GPU service launcher")
     import fcntl
@@ -49,19 +53,27 @@ def run_guard(command, gpu, lock_dir, *, check_gpu=verify_idle_gpu):
     proc = None
     previous = {}
     try:
+        mode_path = root / (gpu + ".mode")
+        if mode_path.is_symlink():
+            raise ValueError("GPU mode must be a native file")
+        mode = mode_path.read_text().strip() if mode_path.exists() else "scheduled"
+        if mode not in {"scheduled", "concurrent"}:
+            raise ValueError("Unknown GPU mode")
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd, (fcntl.LOCK_SH if mode == "concurrent" else fcntl.LOCK_EX) | fcntl.LOCK_NB)
         except BlockingIOError:
             return 75
-        check_gpu(gpu)
+        (check_shared_gpu if mode == "concurrent" else check_gpu)(gpu)
         env = os.environ | {
             "CUDA_VISIBLE_DEVICES": gpu,
             "VISIONCORTEX_GPU_UUID": gpu,
             "VISIONCORTEX_GPU_GUARD_FD": str(fd),
             "VISIONCORTEX_GPU_LOCK_PATH": str(lock_path),
+            "VISIONCORTEX_GPU_GUARD_MODE": mode,
             "REALITYLOOP_GPU_UUID": gpu,
             "REALITYLOOP_GPU_GUARD_FD": str(fd),
             "REALITYLOOP_GPU_LOCK_PATH": str(lock_path),
+            "REALITYLOOP_GPU_GUARD_MODE": mode,
         }
         proc = subprocess.Popen(
             command, env=env, pass_fds=(fd,), start_new_session=True
