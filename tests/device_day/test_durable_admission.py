@@ -58,6 +58,32 @@ def test_unknown_external_result_is_held_across_lease_and_revision(tmp_path):
     assert queue.claim('reviewed')['recording_id']=='unit'
 
 
+def test_explicit_paid_history_uses_only_source_bound_admitted_work(tmp_path):
+    source = record('historical', int((time.time() - 24 * 3600) * 1e6))
+    root = tmp_path / 'device-day'
+    queues = {stage: DeviceDayQueue(root / f'queue-{stage}.sqlite3')
+              for stage in ('retention', 'vision', 'stt', 'understanding')}
+    observe(root, {'recordings': [source]})
+    for stage, queue in queues.items():
+        queue.enqueue(source, 'v')
+        if stage != 'understanding':
+            queue.claim('parent')
+            queue.finish('parent', source['recording_id'], {'status': 'completed'}, 1)
+    queue = queues['understanding']
+    queue.grant_admission(source, cohort='historical_backfill')
+    assert queue.admissions() == {}
+    assert queue.admissions(include_history=True) == {source['recording_id']: source['source_signature']}
+    settings = {'understanding_coverage_since_us': 1,
+                'backfill': {'enabled': True, 'stages': ['understanding'], 'paid_history_authorized': False}}
+    runner = SimpleNamespace(runtime_root=root, queues=queues, settings=settings, config={'collection_ingest': {}})
+    worker = RetentionWorker(stage='understanding', recent_seconds=14400)
+    assert worker.candidates(runner) == []
+    settings['backfill']['paid_history_authorized'] = True
+    assert [row['recording_id'] for row in worker.candidates(runner)] == [source['recording_id']]
+    observe(root, {'recordings': [source | {'source_signature': 'changed'}]})
+    assert worker.candidates(runner) == []
+
+
 def test_cost_shares_devices_and_age_rotate_checkpoint_work(tmp_path,monkeypatch):
     clock=[1000.]
     monkeypatch.setattr('visioncortex.device_day_queue.time.time',lambda:clock[0])

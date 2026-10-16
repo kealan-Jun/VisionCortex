@@ -175,6 +175,8 @@ flowchart TD
 
 原录音和实际转写属于 VisionCortex。视频、语音与 FieldRecognition 的 OCR、照片及人员绑定按设备和时间关联，各短片段继续在 `MultimodalUnderstanding/<时间段>/Understanding.json` 保留独立理解。在此基础上，模型结合整天上下文生成日报；`LaboratoryDailyReport/LaboratoryDailyReport.json` 的 `全天综合理解` 是唯一全天综合入口，同目录 HTML 用于阅读，不另外生成一份全天理解文件。日报不是逐片段标题的拼接。
 
+生产自动处理可启用 `device_day.day_synthesis.enabled: true`。现有 report 消费者使用独立后台线程，按单台相机、单个日期综合已保存的片段、录音和现场事件；不同日期或设备不会混入同一份日报。`minimum_update_seconds` 默认 60、最小 60 秒，同一输入复用回执，更新期间保留上次已经核验的综合结论。`retry_output_tokens` 仅在已有验证支持更高输出上限时配置。未知提交继续等待原回执，不自动重复付费；服务退出等待已发出的有界综合请求保存回执。普通排版仍不调用模型。
+
 显式执行入口如下，使用已选厂商和同一用量账本、请求互斥及未知提交保护。普通报告渲染不会隐式触发付费。`--context-archive` 可以重复，加入同日其他设备的证据；保留各设备、时钟和人员绑定，不因时间接近认定同一物理动作。
 
 ```bash
@@ -203,3 +205,5 @@ python -m visioncortex.device_day_synthesis --config /path/to/private-profile.ya
 面向实验员的 `protocol` 指模型对实际实验动作的步骤级理解，位于片段 JSON 的 `/内容记录/实验步骤`，在日报对应 `/全天记录/全天时间线/<片段下标>/实验步骤`。每一步保留时间、动作、对象、前后状态、可见依据与结果，不以缺少预设方案表示 protocol 缺失。历史 `context.protocol` 和已有输入回执继续兼容读取，属于补充参考材料，不改写原始请求或作为实际动作结论。
 
 理解 worker 的实际领取并发取 `understanding_workers`、`stage_worker_limits.understanding` 和 `runtime.resource_limits.cloud` 的最小值。单条录像内部按窗口顺序保存；不同录像独立并发，使用复制后的执行上下文和原有持久队列租约。关闭时等待已领取调用保存，不取消已发送请求。历史理解还须在 `backfill.stages` 中启用 `understanding`，并满足历史准入与来源验证；仅提高云端上限不会自动启动历史处理。回归入口为 `tests/device_day/test_understanding_concurrency.py`。
+
+生产站点明确授权历史付费处理后，可设置 `device_day.backfill.paid_history_authorized: true`，并在启用的 `backfill.stages` 中包含 `understanding`。该设置仅让已由历史调度核验并持久准入、来源签名仍匹配的任务使用现有理解并发池；不会把未准入旧队列提升为实时任务。并发仍受 `understanding_workers`、阶段上限和共享云端容量共同约束，历史队列的来源分类和原付费回执保持不变。

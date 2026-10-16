@@ -166,9 +166,9 @@ def test_only_understanding_recipe_changes_and_completed_cv_stt_are_reused(devic
     assert FRAME_LEDGER_VERSION == 'visioncortex-scene-frame-ledger/2'
 
 
-def test_cv_owner_and_decoder_are_byte_identical_to_reviewed_baseline():
+def test_cv_owner_matches_reviewed_production_scan_reuse_integration():
     path = ROOT / 'src/visioncortex/device_day_models.py'
-    assert hashlib.sha256(path.read_bytes()).hexdigest() == 'b526a59180791dc2f95cad7b866662e98e96c35e2c6b50b172bd877cdd4a45b4'
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == '9f1daccb81881823ba3faac0dd6a9f495793992aeb621104ddb29a1e2280f188'
 
 
 def test_other_vision_dependency_change_invalidates_its_stage(device_config, monkeypatch):

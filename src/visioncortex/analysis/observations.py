@@ -212,6 +212,7 @@ def _frame_observations(
                         "hand_track_id": hand.track_id,
                         "object_track_id": obj.track_id,
                         "object_instance": _instance_evidence(obj),
+                        "hand_instance": _instance_evidence(hand),
                         "interaction_state": interaction_receipt,
                     },
                     instance_key=_instance_key(obj),
@@ -231,6 +232,7 @@ def _frame_observations(
                             "hand_track_id": hand.track_id,
                             "object_track_id": obj.track_id,
                             "object_instance": _instance_evidence(obj),
+                            "hand_instance": _instance_evidence(hand),
                             "interaction_state": interaction_receipt,
                         },
                         instance_key=_instance_key(obj, prefix="device"),
@@ -256,6 +258,7 @@ def _frame_observations(
                             "hand_track_id": hand.track_id,
                             "object_track_id": obj.track_id,
                             "object_instance": _instance_evidence(obj),
+                            "hand_instance": _instance_evidence(hand),
                             "interaction_state": interaction_receipt,
                         },
                         instance_key=(
@@ -615,6 +618,65 @@ def _observation_instance_signature(
         "median_area_norm": (round(float(median(areas)), 8) if areas else None),
         "appearance_signature": appearance_signature,
     }
+
+
+def interaction_temporal_support(candidate, config, action_type=None):
+    """Distinguish an observed interaction from persistent detector co-occurrence.
+
+    A cap visible in every frame is a state cue, not a state change. Two
+    overlapping boxes are not an operation, regardless of persistence bonuses.
+    Unstructured historical candidates remain readable; native candidates carry
+    the interaction receipts needed by this gate. No complete lifecycle is
+    required for ongoing contact, so an observed approach still retains recall.
+    """
+    action = (action_type or candidate.action_type).value
+    if action not in {"hand_object_contact", "container_state_change", "device_panel_operation"}:
+        return {"status": "not_applicable", "supported": True}
+    rows = candidate.evidence
+    structured = any("interaction_state" in row or "state_cue" in row for row in rows)
+    if not structured:
+        return {"status": "legacy_unstructured", "supported": None}
+    transitions = [row for row in rows
+                   if row.get("state_before") not in {None, "", "unknown"}
+                   and row.get("state_after") not in {None, "", "unknown"}
+                   and row["state_before"] != row["state_after"]]
+    if action == "container_state_change":
+        supported = bool(transitions)
+        basis = "observed_known_state_transition" if supported else "visible_state_without_change"
+    else:
+        approach = any((row.get("interaction_state") or {}).get("approach_confirmed") is True for row in rows)
+        receipt = (getattr(candidate, 'provenance', None) or {}).get("interaction_state") or {}
+        release = (receipt.get("release_observed") is True
+                   and not receipt.get("release_inferred_from_next_observation_gap", False))
+        # Relative hand/object displacement rejects camera translation and
+        # static overlapping false positives. Keep track pairs separate and
+        # require repeated positions; a single detector outlier cannot suffice.
+        pairs = {}
+        for row in rows:
+            hand, obj = row.get("hand_instance") or {}, row.get("object_instance") or {}
+            h, o = hand.get("center_norm"), obj.get("center_norm")
+            if not (isinstance(h, list) and isinstance(o, list) and len(h) == len(o) == 2):
+                continue
+            if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in [*h, *o]):
+                continue
+            token = (row.get("hand_track_id"), row.get("object_track_id"))
+            pairs.setdefault(token, []).append((h[0] - o[0], h[1] - o[1]))
+        displacement = 0.0
+        for points in pairs.values():
+            if len(points) < max(3, int(config["segmentation"]["min_event_observations"])):
+                continue
+            spreads = []
+            for axis in (0, 1):
+                values = sorted(p[axis] for p in points)
+                trim = len(values) // 10
+                spreads.append(values[-1 - trim] - values[trim])
+            displacement = max(displacement, math.hypot(*spreads))
+        moving = displacement >= float(config["segmentation"].get("movement_window_threshold_norm", .01))
+        supported = approach or release or moving
+        basis = "observed_interaction_transition" if supported else "static_or_unverified_box_overlap"
+    return {"schema_version": "visioncortex-interaction-temporal-support/1",
+            "status": "supported" if supported else "pending_review", "supported": supported,
+            "basis": basis, "physical_action_confirmed": False}
 
 
 def _observation_state_uncertainty(

@@ -4,9 +4,9 @@ import sqlite3
 
 
 @contextmanager
-def connection(path, *, timeout=30.0, readonly=False):
-    target = path.absolute().as_uri() + '?mode=ro' if readonly else str(path)
-    db = sqlite3.connect(target, uri=readonly, timeout=timeout)
+def connection(path, *, timeout=30.0, readonly=False, must_exist=False):
+    target = path.absolute().as_uri() + ('?mode=ro' if readonly else '?mode=rw') if readonly or must_exist else str(path)
+    db = sqlite3.connect(target, uri=readonly or must_exist, timeout=timeout)
     try:
         db.row_factory = sqlite3.Row
         db.execute(f'PRAGMA busy_timeout={int(timeout * 1000)}')

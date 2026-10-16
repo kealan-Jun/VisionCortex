@@ -196,7 +196,8 @@ def consumer_snapshot(config, *, now=None, proc_root=Path('/proc')):
                 retry_ready = (row['status'] != 'failed' or
                                row['attempts'] < retry_limit(row, settings.get('failure_retry_limit') or 3)
                                and current - row['updated_at'] >= 60)
-                parents = DEPENDENCIES[stage]
+                from .device_day_contract import dependency_graph
+                parents = dependency_graph(settings, record)[stage]
                 # Inplace vision/STT can run before the archival queue finishes.
                 if settings.get('inplace_preprocessing') and stage in {'vision', 'stt'}:
                     parents = ()

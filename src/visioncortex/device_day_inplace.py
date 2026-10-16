@@ -272,7 +272,12 @@ def execute(runner, layout, record, *, stage, retry):
                         validate_segment(segment)
                     result |= {'vision_input_digest': digest(visual_input(value))}
                 result |= {'input_binding': binding(seal), 'input_binding_version': 1}
-        if result.get('status') != 'completed' or result.get('key') != key:
+        # A reviewed checkpoint remains evidence of its original execution.
+        # The fresh source/artifact checks above permit reuse, not relabelling
+        # a detector or transcription result as a new build's invocation.
+        checkpoint = (stage != 'retention' and result.get('status') == 'completed'
+                      and runner._completed_stage_receipts.accepts(result, key))
+        if not checkpoint and (result.get('status') != 'completed' or result.get('key') != key):
             import os
             from .device_day_inputs import sync_directory
             references = [(layout.root, r) for r in result.get('artifacts', [])]
@@ -370,7 +375,9 @@ def _publish(runner, record):
                 if p.exists() and (identity(p) != source['identity'] or
                                    str(p.resolve()) != source.get('resolved_path', str(p.resolve()))):
                     raise InputChanged('Capture was replaced after preprocessing')
-        if visual.get('retention_digest') != digest(archived):
+        checkpoint = runner._completed_stage_receipts.accepts(
+            visual, runner._key('vision', record, visual_input(archived)))
+        if visual.get('retention_digest') != digest(archived) and not checkpoint:
             visual = visual | {'retention_digest': digest(archived)}
             durable_json(runner._receipt(layout, record, 'vision'), visual)
         stt = receipt(runner, record, 'stt')

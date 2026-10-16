@@ -29,6 +29,7 @@ from .observations import (
     HAND_CLASSES,
     TRANSFER_TOOL_CLASSES,
     _box_distance,
+    interaction_temporal_support,
 )
 
 
@@ -626,7 +627,14 @@ def audit_candidates(
                 and not liquid_sequence_observed
             ):
                 formal_status = "provisional"
+        temporal_support = {item.candidate_id: interaction_temporal_support(item, config)
+                            for item in cluster}
+        temporal_hold = all(item['supported'] is False for item in temporal_support.values())
+        if formal_status == "formal" and temporal_hold:
+            formal_status = "provisional"
         uncertainty: list[str] = []
+        if temporal_hold:
+            uncertainty.append("仅有静态目标共现或可见状态，没有观察到该操作所需的时间变化；保留候选待复核")
         if not both_roles:
             uncertainty.append("该动作没有同时获得第一与第三人称支持")
         if semantic_context_candidate is not None:
@@ -660,6 +668,7 @@ def audit_candidates(
         else:
             reason = "候选缺少足够的跨视角或持续强物理证据"
         observability: dict[str, Any] = {
+            "interaction_temporal_support": temporal_support,
             "alignment_association": {
                 "schema_version": "visioncortex-alignment-association/1",
                 "base_tolerance_ms": tolerance,

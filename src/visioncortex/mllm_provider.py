@@ -58,7 +58,7 @@ def build_vision_request(settings: dict[str, Any], system_prompt: str, content: 
     base = str(settings["base_url"]).rstrip("/")
     tokens = int(settings.get("max_output_tokens", 4096))
     quality = settings.get("quality_mode") == "quality"
-    required_thinking = settings.get("provider") == "zhipu" and str(settings["model"]).lower().startswith("glm-5.3-flash")
+    required_thinking = settings.get("provider") in {"zhipu", "nianfeng"} and str(settings["model"]).lower().startswith("glm-5.3-flash")
     thinking = "enabled" if quality or required_thinking else "disabled"
     if quality or required_thinking:
         tokens = max(tokens, 8192)
@@ -88,6 +88,6 @@ def build_vision_request(settings: dict[str, Any], system_prompt: str, content: 
         request["enable_thinking"] = quality
         if quality:
             request.update(stream=True, stream_options={"include_usage": True})
-    elif settings.get("provider") == "zhipu":
+    elif settings.get("provider") == "zhipu" or required_thinking:
         request["thinking"] = {"type": thinking}
     return base + "/chat/completions", request

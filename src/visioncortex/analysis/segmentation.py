@@ -24,7 +24,7 @@ from ..schemas import (
     ViewRole,
     event_is_formal,
 )
-from .observations import _ACTIVITY_PHYSICAL_TYPES, HAND_CLASSES, NON_ACTION_CLASSES
+from .observations import _ACTIVITY_PHYSICAL_TYPES, HAND_CLASSES, NON_ACTION_CLASSES, interaction_temporal_support
 
 
 def _split_rich_repeated_primary_sequences(
@@ -1192,6 +1192,12 @@ def activity_seed_intervals(events, coarse_candidates, scan_windows, config):
     for event in events:
         if event.action_type.value not in _ACTIVITY_PHYSICAL_TYPES:
             continue
+        support = [interaction_temporal_support(c, config, event.action_type) for c in event.candidates]
+        if support and all(item['supported'] is False for item in support):
+            decisions.append({"event_id": event.event_id, "basis": "static_or_unverified_interaction_cannot_seed_activity",
+                              "activity_seed_eligible": False, "temporal_support": support,
+                              "scope": "single_device_activity_screening", "physical_action_confirmed": False})
+            continue
         evidence = [row for candidate in event.candidates for row in candidate.evidence]
         transition = any(
             row.get("interaction_state", {}).get("approach_confirmed")
@@ -1292,6 +1298,9 @@ def build_activity_intervals(events, coarse_candidates, scan_windows, config):
             event.action_type.value not in _ACTIVITY_PHYSICAL_TYPES
             or event.confidence < float(cfg["rejected_boundary_context_min_confidence"])
         ):
+            continue
+        support = [interaction_temporal_support(c, config, event.action_type) for c in event.candidates]
+        if support and all(item['supported'] is False for item in support):
             continue
         objects = _activity_objects(event.candidates)
         evidence = [row for candidate in event.candidates for row in candidate.evidence]

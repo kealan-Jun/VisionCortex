@@ -628,6 +628,8 @@ class DeviceDayRunner:
         from .publication_journal import PublicationJournal
         publication_journal = PublicationJournal(self.runtime_root)
         publication_token = publication_journal.begin(recording)
+        from .device_day_contract import dependencies_for
+        dependencies = dependencies_for(self.settings, recording)
         needed = set(STAGES) if stage == "all" else {stage}
         for _ in STAGES:
             needed.update(parent for name in list(needed) for parent in dependencies[name])
@@ -979,7 +981,10 @@ class DeviceDayRunner:
                     versions = {row["recording_id"]: (row["revision"], row["completed_at"])
                                 for row in db.execute("SELECT recording_id,revision,completed_at FROM recordings WHERE status='completed'")}
                     parent_versions[parent] = versions
-                    ready.intersection_update(versions)
+        from .device_day_contract import dependencies_for
+        if self.settings.get('camera_lanes'):
+            ready = {rid for rid, record in durable.items()
+                     if all(rid in parent_versions[parent] for parent in dependencies_for(self.settings, record)[stage])}
         from .device_day_schedule import scheduling_record
         records = sorted((scheduling_record(
                             r,
@@ -1046,9 +1051,10 @@ class DeviceDayRunner:
                        else {"comments": [], "protocol": None})
             inputs = record
             if stage != "retention":
-                needed = set(DEPENDENCIES[stage])
+                record_dependencies = dependencies_for(self.settings, record)
+                needed = set(record_dependencies[stage])
                 for _ in STAGES:
-                    needed.update(p for name in list(needed) for p in DEPENDENCIES[name])
+                    needed.update(p for name in list(needed) for p in record_dependencies[name])
                 prerequisites = {}
                 prerequisite_checks = []
                 valid = True

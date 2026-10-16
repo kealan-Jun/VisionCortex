@@ -397,6 +397,9 @@ class DeviceDayModels:
         directory = Path(self.config["storage"]["local_cache_root"]) / "device-day-scans" / digest(identity)
         manifest = directory / "scan-receipt.json"
         started = time.perf_counter()
+        reviewed = self._reviewed_scan(identity)
+        if reviewed is not None:
+            return {view.view_id: reviewed['_ledger']}, reviewed['_directory'], reviewed['_timing']
         if manifest.is_file():
             saved = read_json(manifest)
             if digest(saved.get("identity")) == digest(identity) and saved.get("status") == "completed" and saved.get("artifacts"):
@@ -413,6 +416,54 @@ class DeviceDayModels:
                                "artifacts": [artifact(directory, p) for p in sorted(directory.glob("*.json*"))
                                              if p != manifest]})
         return result, directory, {"reused": False, "current_wall_seconds": elapsed, "original_wall_seconds": elapsed}
+
+    def _reviewed_scan(self, identity):
+        """Reuse sealed detector bytes through an explicit reviewed binding.
+
+        This does not alias execution identities: the new activity audit has
+        its own key. Sampling, media, detector, configuration and scan code
+        must match exactly; only named, hash-bound consumer edits may differ.
+        Unknown revisions or missing/tampered evidence fail closed.
+        """
+        spec = (self.config.get('device_day') or {}).get('verified_scan_reuse')
+        if not spec:
+            return None
+        path = Path(spec['path'])
+        if path.stat().st_size > 8 * 1024 * 1024 or file_hash(path) != spec['sha256']:
+            raise ValueError('Reviewed scan binding failed verification')
+        proof = read_json(path)
+        if proof.get('schema_version') != 'visioncortex-verified-scan-reuse/1':
+            raise ValueError('Unknown reviewed scan binding schema')
+        entry = proof.get('entries', {}).get(digest(identity))
+        if entry is None:
+            return None
+        root = Path(self.config['storage']['local_cache_root'])
+        directory = safe_child(root, entry['directory'])
+        if directory.parent != root / 'device-day-scans':
+            raise ValueError('Reviewed scan binding is outside the scan cache')
+        manifest = directory / 'scan-receipt.json'
+        if file_hash(manifest) != entry['manifest_sha256']:
+            raise ValueError('Reviewed scan receipt changed')
+        saved = read_json(manifest)
+        original = saved.get('identity') or {}
+        if saved.get('status') != 'completed' or digest(original) != directory.name:
+            raise ValueError('Reviewed detector evidence is not sealed')
+        changes = entry.get('reviewed_consumer_changes', proof.get('reviewed_consumer_changes', {}))
+        before, after = original.get('recursive_sources', {}), identity.get('recursive_sources', {})
+        actual = {name: {'from': before.get(name), 'to': after.get(name)}
+                  for name in before.keys() | after.keys() if before.get(name) != after.get(name)}
+        if actual != changes or not actual:
+            raise ValueError('Scan source changes are outside the reviewed consumer binding')
+        if (digest({k: v for k, v in original.items() if k != 'recursive_sources'})
+                != digest({k: v for k, v in identity.items() if k != 'recursive_sources'})):
+            raise ValueError('Reviewed scan inputs or detector execution changed')
+        if not saved.get('artifacts') or not all(verify_artifact(directory, item) for item in saved['artifacts']):
+            raise ValueError('Reviewed detector artifacts changed')
+        return {'_ledger': safe_child(directory, saved['ledger']), '_directory': directory,
+                '_timing': {'reused': True, 'reviewed_detector_evidence': True,
+                            'reviewed_binding_sha256': spec['sha256'],
+                            'original_scan_identity': digest(original), 'current_wall_seconds': 0,
+                            'original_wall_seconds': saved['wall_seconds']}}
 
     def _scan_artifacts(self, layout, directory):
         manifest_path = directory / "scan-receipt.json"

@@ -264,7 +264,12 @@ def read_timestamp_csv_bounded(
             return [points[int(index)] for index in indices]
 
     endpoints = read_timestamp_csv_endpoints(path, fps)
-    with path.open("rb") as handle:
+    # Dense clock mappings request thousands of nearby byte offsets. A bounded
+    # read-ahead buffer lets seek reuse those bytes instead of issuing one SMB
+    # read per sample. Keep the offsets, RGB selection and endpoints exact.
+    # Sparse requests retain the small buffer and their bounded I/O footprint.
+    read_buffer = 1024 * 1024 if sample_count >= 32 else -1
+    with path.open("rb", buffering=read_buffer) as handle:
         header_bytes = handle.readline()
         header_text = header_bytes.decode("utf-8-sig", errors="replace").strip("\r\n")
         try:

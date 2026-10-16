@@ -635,6 +635,7 @@ class ArkAnalyzer:
         image_paths: Sequence[tuple[str, Path]],
         *,
         max_images: int | None = None,
+        max_attempts: int | None = None,
         response_kind: Literal["event", "group", "speech", "operations"] | None = None,
     ) -> dict[str, Any]:
         if not self.enabled:
@@ -717,7 +718,12 @@ class ArkAnalyzer:
             summary["scope"] = "all_transport_attempts; unknown usage is not zero"
             return summary
 
-        for attempt in range(int(self.config["max_retries"])):
+        attempt_limit = int(self.config['max_retries'])
+        if max_attempts is not None:
+            if type(max_attempts) is not int or not 1 <= max_attempts <= attempt_limit:
+                raise ValueError('Invalid reserved transport attempt allowance')
+            attempt_limit = max_attempts
+        for attempt in range(attempt_limit):
             attempt_started = time.perf_counter()
             receipt: dict[str, Any] = {"attempt": attempt + 1, "status": "pending",
                                        "started_at": datetime.now(timezone.utc).isoformat(),
@@ -848,14 +854,26 @@ class ArkAnalyzer:
                         self.config, system_prompt,
                         content + [{"type": "input_text", "text": json.dumps(feedback, ensure_ascii=False)}],
                     )
-                    receipt["format_correction_requested"] = attempt + 1 < int(self.config["max_retries"])
+                    receipt["format_correction_requested"] = attempt + 1 < attempt_limit
                 if (
                     isinstance(exc, httpx.HTTPStatusError)
                     and 400 <= exc.response.status_code < 500
                     and exc.response.status_code not in {408, 409, 429}
                 ):
                     break
-                if attempt + 1 < int(self.config["max_retries"]):
+                not_submitted = isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout))
+                if not_submitted:
+                    receipt.update(submission_status='not_submitted', usage={
+                        'input_tokens': 0, 'output_tokens': 0, 'total_tokens': 0,
+                        'cached_input_tokens': 0, 'server_reported': False})
+                elif (receipt.get('usage') or {}).get('total_tokens') is None:
+                    # A gateway/read failure can follow a billable submission.
+                    # Stop before another transport attempt; retain uncertainty
+                    # for the durable request ledger and independent queues.
+                    receipt['automatic_retry_blocked'] = 'unresolved_submission_or_billing'
+                    receipt['status'] = 'submitted_unknown'
+                    break
+                if attempt + 1 < attempt_limit:
                     retry_after = None
                     if isinstance(exc, httpx.HTTPStatusError):
                         try:
