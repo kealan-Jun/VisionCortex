@@ -84,6 +84,18 @@ Web 与 worker 按配置的角色运行；认证、监听地址及跨机访问�
 monitor、用户暂停、处理时段和内容验证失败仍会阻止不安全执行。
 历史和实时消费者并行轮询，通过共享资源容量与独占任务租约协调；历史执行不会关闭实时准入。
 
+独立 `device_day_live_discovery` 同时发布自身状态和本地
+`state/nas-recording-monitor.json`。历史调度继续验证实际相机线程、扫描完整性和时间新鲜度；
+独立发现服务停止或退化时关闭历史准入，不能以手工写入 watching 状态恢复队列。
+
+FieldRecognition 尚未部署事件 feed 时，可显式设置
+`device_day.field_recognition.archive_context_enabled: true`、实际归档的绝对
+`archive_root`，并保持该节的 `enabled: false`。此模式直接读取正式
+`<日期>_<相机>/DailyReport/DailyReport.json` 及其绑定、识别结果，保留文件摘要与 JSON 定位，
+按相机和有效时段自动关联。不会启动或修改 FieldRecognition 服务，也不把空读数改成数值。
+绑定最多延续至其结束时间、有效期或北京时间午夜；归档缺失作为数据缺口记录。
+该模式与事件 feed 互斥。相应 NAS 归档须另经站点挂载身份检查，并以只读方式提供给消费者。
+
 无独立录音的分片同样进入 STT 阶段，实际探测视频内嵌音轨后才记录 `no_audio`；
 未发布录音或关联错误继续等待。录音晚到只重入受影响阶段，旧回执保留在历史中。
 

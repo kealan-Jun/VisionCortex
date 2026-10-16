@@ -58,6 +58,9 @@ class DaySynthesisWorker:
                     index = read_json(layout.index)
                     if index.get('archive') != layout.name:
                         raise ValueError('Day index crossed a camera/date boundary')
+                    if (config.get('device_day', {}).get('field_recognition') or {}).get('archive_context_enabled'):
+                        from .device_day_narrative import attach_context
+                        index = attach_context(config, index)
                     bundle = evidence_bundle(index)
                     if not any(row['kind'] in {'video', 'speech', 'field'} for row in bundle['evidence']):
                         continue
@@ -93,7 +96,11 @@ class DaySynthesisWorker:
                             atomic_json(path, old | {'全天综合理解': result})
                             # A new clip may have arrived during the request.
                             # Rendering retains the verified as-of conclusion.
-                            render_day(layout, read_json(layout.index))
+                            latest = read_json(layout.index)
+                            if (config.get('device_day', {}).get('field_recognition') or {}).get('archive_context_enabled'):
+                                latest = attach_context(config, latest)
+                                atomic_json(layout.index, latest)
+                            render_day(layout, latest)
                         state['days'][layout.name] |= {'status': 'completed_for_available_inputs',
                             'generated_at': result.get('generated_at'), 'finished_at': time.time()}
                         atomic_json(state_path, state)

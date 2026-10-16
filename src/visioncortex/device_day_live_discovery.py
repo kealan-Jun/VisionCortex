@@ -1,11 +1,22 @@
 """Independent today/yesterday metadata discovery; no model or dispatcher startup."""
 from copy import deepcopy
+from datetime import datetime, timezone
 from pathlib import Path
 import threading
 import time
 
 from .device_day_contract import atomic_json, digest
 from .capture_layout import discovery_mode
+
+
+def publish_status(root, status):
+    """The independent monitor owns the scheduling snapshot it actually saw."""
+    atomic_json(root / 'LiveDiscovery' / 'Service.json', status)
+    observed = datetime.fromtimestamp(status['updated_at'], timezone.utc).isoformat()
+    atomic_json(root.parent / 'state' / 'nas-recording-monitor.json', status | {
+        'monitor_source': 'independent_live_discovery',
+        'monitor': {'status': status['status'], 'poll_seconds': status.get('poll_seconds', 5),
+                    'observed_at': observed}})
 
 
 def discovery_config(config):
@@ -35,7 +46,6 @@ def serve(config_path, stop):
     root = Path(settings['storage']['local_runtime_root']) / 'device-day'
     fixed_roots = {k: settings['storage'].get(k) for k in ('local_runtime_root', 'local_cache_root', 'archive_root')}
     fixed_source = settings['collection_ingest']['source_root']
-    state_path = root / 'LiveDiscovery' / 'Service.json'
     service = DeviceDayService(lambda: settings, threading.Lock())
     # Only its standard observation writer is used; start/dispatch is never called.
     lane_stop = threading.Event()
@@ -68,12 +78,12 @@ def serve(config_path, stop):
                 except Exception as exc:
                     status = {'status': 'retrying', 'updated_at': time.time(), 'error_type': type(exc).__name__,
                               'scope': 'current_and_previous_beijing_date_metadata_only'}
-                atomic_json(state_path, status)
+                publish_status(root, status)
                 stop.wait(5)
         finally:
             drain()
-            atomic_json(state_path, {'status': 'stopped', 'updated_at': time.time(),
-                                     'scope': 'current_and_previous_beijing_date_metadata_only'})
+            publish_status(root, {'status': 'stopped', 'updated_at': time.time(),
+                                 'scope': 'current_and_previous_beijing_date_metadata_only'})
 
 
 def main(argv=None):

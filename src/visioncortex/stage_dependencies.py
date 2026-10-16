@@ -47,7 +47,7 @@ def _changed_stages(paths):
         changed.update(package_stages.get(package, DEVICE_SOURCES))
     # Context delivery and deterministic person projections do not execute a
     # visual model. Explicit identities keep their late revisions report-only.
-    context_files = {'evidence/field_events.py', 'evidence/person_day.py', 'evidence/device_events.py',
+    context_files = {'application/field_archive_context.py', 'evidence/field_events.py', 'evidence/person_day.py', 'evidence/device_events.py',
                      'application/field_event_consumer.py'}
     if python_paths and python_paths <= context_files:
         changed = {'report'}
