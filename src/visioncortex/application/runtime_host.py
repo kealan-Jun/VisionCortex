@@ -421,8 +421,9 @@ def _renew_queue_lease(
 
 def _dispatch_persisted_job(job: QueuedRunJob) -> None:
     from ..runtime_control import execution_context
-
-    with execution_context(job_id=job.run_id, source="offline", stop=_queue_stop):
+    machine = bool((_settings().get('runtime') or {}).get('machine_admission'))
+    with execution_context(job_id=job.run_id, source="machine" if machine else "offline",
+                           priority=5 if machine else 1, stop=_queue_stop):
         _dispatch_job_in_context(job)
 
 
@@ -430,11 +431,12 @@ def _dispatch_job_in_context(job: QueuedRunJob) -> None:
     payload = job.payload
     # Keep queued model/input settings immutable. Admission is a live worker
     # policy so jobs submitted before the split cannot bypass shared limits.
-    settings = copy.deepcopy(payload["settings"]) | {
-        "runtime": _settings().get("runtime", {})
-    }
+    from ..machine_admission import execution_settings, record_execution
+    settings = execution_settings(payload["settings"], _settings().get("runtime", {}))
     if job.reclaimed and job.kind != "stage_refresh":
         settings.setdefault("project", {})["resume_stages"] = True
+    if job.kind == 'run':
+        record_execution(job, settings)
     if job.kind == "stage_refresh":
         from ..stage_refresh import refresh
 
@@ -499,6 +501,10 @@ def _queue_worker_loop(store: DurableRunQueue) -> None:
 
         if drain_requested():
             return
+        from ..machine_admission import may_claim
+        if not may_claim(_settings()):
+            _queue_stop.wait(_QUEUE_POLL_SECONDS)
+            continue
         job = store.claim_next(
             _queue_worker_id,
             lease_seconds=_QUEUE_LEASE_SECONDS,
@@ -535,6 +541,8 @@ def _queue_worker_loop(store: DurableRunQueue) -> None:
             latest = store.load_run(job.run_id) or {}
             final_state = str(latest.get("state") or "")
             final_error = latest.get("error")
+            from ..machine_admission import hold_after_failure
+            hold_after_failure(_settings(), final_error)
             if (
                 _queue_stop.is_set()
                 and final_state == "failed"
@@ -558,6 +566,8 @@ def _queue_worker_loop(store: DurableRunQueue) -> None:
             store.release_for_shutdown(job.run_id, _queue_worker_id)
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
+            from ..machine_admission import hold_after_failure
+            hold_after_failure(_settings(), error)
             _update(job.run_id, state="failed", progress=1.0, error=error)
             store.finish(
                 job.run_id,
@@ -1135,6 +1145,12 @@ def _execute_now(
             completed_root = formal_fixed_root
         elif ingest is not None:
             _append_web_end_to_end_metrics([completed_root], ingest, completed=True)
+        if (settings.get('runtime') or {}).get('machine_admission'):
+            from ..storage import verify_current_release
+            verified = verify_current_release(completed_root)
+            if verified.get('passed') is not True:
+                raise RuntimeError('Machine result publication is not readable and complete: '
+                                   + ', '.join(verified.get('failures') or []))
         _update(
             run_id,
             state="completed",

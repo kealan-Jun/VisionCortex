@@ -128,6 +128,39 @@ analysis.authorizationEnv 的值是完整 Bearer 认证值。
 
 ## 单 GPU 与回滚
 
+主动任务与原生 NAS Worker 并行时，部署者可明确设置 GPU 锁目录中
+`<GPU UUID>.mode` 为 `concurrent`。启动器与 Worker 验证模式并保持共享锁，
+缺省仍为 `scheduled` 排他锁。共享锁不代表显存充足，不修改模式来抢占现有服务。
+
+主动任务专用配置可以设置以下策略，API 配置和封存输入保持原有身份：
+
+```yaml
+runtime:
+  role: worker
+  resource_coordinator_root: /absolute/local/native-runtime
+  resource_limits: {vision: 4, storage: 2, cpu: 6, cloud: 4, stt: 2}
+  machine_admission:
+    gpu_uuid: GPU-actual-UUID
+    gpu_budget_mib: 8192
+    gpu_reserve_mib: 6144
+    max_gpu_used_fraction: 0.75
+    minimum_available_ram_mib: 8192
+    inference_batch_size: 4
+    cache_limit_bytes: 2147483648
+```
+
+容量必须与原生 `state/resources.sqlite3` 一致。任务队列仍使用主动服务自己的
+`storage.local_runtime_root/state/web_run_queue.sqlite3`，全队列同时只领取一个任务。
+准入先读取现有原生账本、整卡显存、系统内存和本地空间；无法核验时保持排队，
+不创建另一份资源账本。2 GiB 缓存上限及系统盘 50 GiB、数据盘 80 GiB 空余量
+是领取前的保护条件，不是任意长任务的磁盘或显存硬配额。
+
+该策略收紧 batch、扫描线程和单任务云端并发，保留封存的输入、模型和厂商。
+`MachineExecution.json` 保存任务编号、尝试次数、封存与执行配置摘要及真实源码身份。
+正式发布后重新校验当前 release 和来源完整性，读取失败不标记任务完成。
+CUDA OOM 留下本地 `state/MachineAdmissionHold.json`，只暂停新的主动任务领取；
+部署者核对预算后移除该 hold。历史失败任务不自动重试，原生 NAS 服务继续运行。
+
 可由部署方的独立 GPU 调度器切换需要共享显卡的任务。调度器需遵守共同的锁和排空协议，
 其来源、部署配置和运行证据由站点单独维护。
 worker 响应 `VISIONCORTEX_DRAIN_FILE`：处理完当前任务后不再领取新任务并退出。
