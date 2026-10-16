@@ -3,6 +3,7 @@ import json
 import hashlib
 from decimal import Decimal
 import io
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import time
@@ -10,8 +11,22 @@ from .sqlite_store import connection
 
 
 _CHUNK_BYTES = 256 * 1024
-_MAX_RECEIPT_BYTES = 64 * 1024 * 1024
-_MAX_JSON_EVENTS = 2_000_000
+
+
+def configured_limit(name, default, maximum):
+    """Explicit bounded site opt-in; default deployments keep their old cap."""
+    value = os.environ.get(name)
+    try:
+        result = default if value is None else int(value)
+    except (ValueError, TypeError) as exc:
+        raise ValueError(f'{name} must be a bounded positive integer') from exc
+    if not 1 <= result <= maximum:
+        raise ValueError(f'{name} must be between 1 and {maximum}')
+    return result
+
+
+_MAX_RECEIPT_BYTES = configured_limit('VISIONCORTEX_RECEIPT_PROJECTION_MAX_BYTES', 64 * 1024 * 1024, 256 * 1024 * 1024)
+_MAX_JSON_EVENTS = configured_limit('VISIONCORTEX_RECEIPT_PROJECTION_MAX_JSON_EVENTS', 2_000_000, 8_000_000)
 _MAX_JSON_DEPTH = 128
 
 

@@ -124,6 +124,8 @@ def test_deferred_day_keeps_published_index_and_journal_but_other_day_progresses
     journal.begin(base | {'recording_id': 'good'})
     runner = SimpleNamespace(runtime_root=root, backend_root=tmp_path, settings={}, _index_locks={},
                              layout=lambda record: layout if record['recording_id'] == 'bad' else None)
+    runner.config = {'runtime': {'local_only': True}}
+    runner._guarded_refresh_index = lambda target, **kw: DeviceDayRunner._guarded_refresh_index(runner, target, **kw)
     runner.refresh_index = lambda target, **kw: (DeviceDayRunner.refresh_index(runner, target, **kw)
                                                 if target is not None else True)
     monkeypatch.setattr(module, '_MAX_RECEIPT_BYTES', 512)

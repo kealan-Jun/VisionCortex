@@ -207,3 +207,7 @@ python -m visioncortex.device_day_synthesis --config /path/to/private-profile.ya
 理解 worker 的实际领取并发取 `understanding_workers`、`stage_worker_limits.understanding` 和 `runtime.resource_limits.cloud` 的最小值。单条录像内部按窗口顺序保存；不同录像独立并发，使用复制后的执行上下文和原有持久队列租约。关闭时等待已领取调用保存，不取消已发送请求。历史理解还须在 `backfill.stages` 中启用 `understanding`，并满足历史准入与来源验证；仅提高云端上限不会自动启动历史处理。回归入口为 `tests/device_day/test_understanding_concurrency.py`。
 
 生产站点明确授权历史付费处理后，可设置 `device_day.backfill.paid_history_authorized: true`，并在启用的 `backfill.stages` 中包含 `understanding`。该设置仅让已由历史调度核验并持久准入、来源签名仍匹配的任务使用现有理解并发池；不会把未准入旧队列提升为实时任务。并发仍受 `understanding_workers`、阶段上限和共享云端容量共同约束，历史队列的来源分类和原付费回执保持不变。
+
+启用相应历史阶段后，归档、视觉和转写主消费者也继续选择已核验、持久准入且来源签名仍匹配的历史任务。
+`latest_first` 保持最新片段优先，已准入任务不会仅因超过四小时而退出优先消费者；较早的未准入任务仍走
+独立历史准入。该行为不改变历史来源分类、不重置失败预算，也不自动开启历史模型付费。
