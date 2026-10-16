@@ -45,6 +45,20 @@ def admitted_history_in_pool(settings, stage):
     return policy.get('enabled') is True and stage in policy.get('stages', [])
 
 
+def foreground_history_config(config):
+    """Use the catalog's newest-first order only for foreground selection.
+
+    The existing idle selector orders newest first before its bounded LIMIT.
+    This copied query configuration never reaches execution or the independent
+    fair backfill lane; permission, input, lease and provider checks still run.
+    """
+    settings = config.get('device_day') or {}
+    if not settings.get('latest_first', False):
+        return config
+    policy = settings.get('backfill') or {}
+    return config | {'device_day': settings | {'backfill': policy | {'mode': 'idle'}}}
+
+
 class DeferredPrimaryPublicationRunner(DeviceDayRunner):
     """Keep native primary queue completion independent of whole-day rendering.
 
@@ -93,7 +107,7 @@ class RetentionWorker:
             from .device_day_backfill_policy import historical_candidates
             try:
                 eligible_history = {r['recording_id']: r['source_signature'] for r in historical_candidates(
-                    runner.config, self.stage, limit=min(128, limit * 4),
+                    foreground_history_config(runner.config), self.stage, limit=min(128, limit * 4),
                     exclude={rid for rid, until in self.deferred.items() if until > current})}
             except (OSError, ValueError, KeyError, TypeError):
                 pass  # Unavailable history observations cannot admit new work.
