@@ -15,6 +15,7 @@ from .device_day_retry import retry_limit
 from .device_day_schedule import in_processing_scope
 from .input_availability import configured_record
 from .sqlite_store import connection
+from .device_day import DeviceDayRunner
 
 
 def understanding_capacity(config, settings):
@@ -42,6 +43,22 @@ def admitted_history_in_pool(settings, stage):
         return concurrent_paid_history(settings, stage)
     policy = settings.get('backfill') or {}
     return policy.get('enabled') is True and stage in policy.get('stages', [])
+
+
+class DeferredPrimaryPublicationRunner(DeviceDayRunner):
+    """Keep native primary queue completion independent of whole-day rendering.
+
+    Native execute() has already saved the stage receipt and dirty journal.
+    Returning False leaves formal publication pending; the standard replay
+    still verifies source/artifacts and owns the completed publication receipt.
+    CLI, legacy stages and multimodal/report publication retain the base path.
+    """
+    def refresh_index(self, layout, *, recording_id=None):
+        from .device_day_activity import current_stage
+        if (recording_id is not None and current_stage() in {'retention', 'vision', 'stt'}
+                and (layout.receipts / recording_id / 'input-state.json').is_file()):
+            return False
+        return super().refresh_index(layout, recording_id=recording_id)
 
 
 class RetentionWorker:
@@ -177,8 +194,10 @@ class RetentionWorker:
                 deadline = policy['deadline']
                 urgent = policy['cleanup_risk'] or (deadline is not None and
                             current >= deadline - policy['safety_margin_seconds'])
+                age_order = (-record['recording_start_us'], rid not in visual) if runner.settings.get('latest_first') else (
+                    rid not in visual, -record['recording_start_us'])
                 order = (not urgent, deadline if deadline is not None else float('inf'),
-                         rid not in visual, -record['recording_start_us'], record['camera_key'])
+                         *age_order, record['camera_key'])
             candidates.append((order, record))
         # A camera contributes its newest ready slice; queue.claim retains
         # camera fairness and all running leases, including the main service's.
@@ -444,6 +463,9 @@ def serve(config_path, stop, *, stage='retention'):
                 settings = config.get('device_day') or {}
                 if not settings.get('enabled') or not settings.get('inplace_preprocessing') or not settings.get('latest_first'):
                     raise ValueError('Continuous stages require enabled inplace latest-first processing')
+                defer_publication = settings.get('defer_primary_publication', False)
+                if type(defer_publication) is not bool:
+                    raise ValueError('device_day.defer_primary_publication must be a boolean')
                 current_roots = {key: config['storage'].get(key) for key in
                                  ('local_runtime_root', 'local_cache_root', 'archive_root')}
                 if roots is not None and roots != current_roots:
@@ -456,11 +478,13 @@ def serve(config_path, stop, *, stage='retention'):
                 if backfill is not None and (not enabled or generation != key):
                     backfill.request_yield()
                 if runner is None or generation != key:
+                    runner_type = (DeferredPrimaryPublicationRunner if defer_publication and stage in {
+                        'retention', 'vision', 'stt'} else DeviceDayRunner)
                     if fair and stage == 'vision':
                         from .device_day_fair_backend import create_backend
-                        runner = DeviceDayRunner(config, backend=create_backend(config))
+                        runner = runner_type(config, backend=create_backend(config))
                     else:
-                        runner = DeviceDayRunner(config)
+                        runner = runner_type(config)
                     generation = key
                     if consumer is not None:
                         consumer.__exit__(None, None, None)

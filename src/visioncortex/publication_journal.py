@@ -27,13 +27,16 @@ class PublicationJournal:
         with connection(self.path) as db:
             db.execute('DELETE FROM dirty WHERE id=? AND token=?', (identifier, token))
 
-    def pending(self, limit=32, *, since_us=None, prefer_since_us=None):
+    def pending(self, limit=32, *, since_us=None, prefer_since_us=None, latest_first=False):
+        if type(latest_first) is not bool:
+            raise ValueError('Publication latest_first must be a boolean')
+        time_order = "COALESCE(json_extract(record,'$.recording_start_us'),0) DESC," if latest_first else ''
         with connection(self.path, readonly=True) as db:
             return [(row['token'], json.loads(row['record'])) for row in db.execute(
                 "SELECT * FROM dirty WHERE ? IS NULL OR MAX(COALESCE(json_extract(record,'$.recording_start_us'),0),"
                 "COALESCE(json_extract(record,'$.recording_end_us'),0))>=? ORDER BY "
                 "CASE WHEN ? IS NOT NULL AND COALESCE(json_extract(record,'$.recording_start_us'),0)>=? "
-                "THEN 0 ELSE 1 END,rowid LIMIT ?",
+                "THEN 0 ELSE 1 END," + time_order + "rowid LIMIT ?",
                 (since_us, since_us, prefer_since_us, prefer_since_us, limit))]
 
     def defer(self, identifier, token):
@@ -112,7 +115,8 @@ def reconcile(runner):
     from .device_day_schedule import processing_cutoff
     completed = 0
     recent = round((time.time() - runner.settings.get('live_priority_seconds', 14400)) * 1e6)
-    for token, record in journal.pending(since_us=processing_cutoff(runner.settings), prefer_since_us=recent):
+    for token, record in journal.pending(since_us=processing_cutoff(runner.settings), prefer_since_us=recent,
+                                        latest_first=runner.settings.get('latest_first', False)):
         try:
             # Never acknowledge an in-flight stage before its receipt exists.
             # A crash between receipt and index publication must remain replayable.
