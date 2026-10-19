@@ -1,5 +1,6 @@
 """Small file-only time index inside the existing Comment directory."""
 from collections import OrderedDict
+from contextlib import contextmanager
 from datetime import datetime
 from itertools import chain
 from pathlib import Path, PurePosixPath
@@ -12,6 +13,36 @@ from .device_day_schedule import in_processing_scope, processing_cutoff
 
 _SOURCE_INDEX_CACHE_DAYS = 4
 _SOURCE_INDEX_CACHE_BYTES = 128 * 1024 * 1024
+
+_READABLE_OMIT = {
+    ('recordings', None, 'processing', name) for name in ('batches', 'scan_reports', 'audit_artifacts')
+} | {('segments', None, 'activity_audit')}
+
+
+@contextmanager
+def _index_reader(config, path, mode):
+    from .device_day_io import pace_copy
+    from .local_storage import require_local_path
+    require_local_path(Path(config['storage']['local_runtime_root']) / 'state').mkdir(parents=True, exist_ok=True)
+    # The publication caller already owns its shared NAS slot. Pace reads
+    # without recursively acquiring that same finite-capacity resource.
+    with path.open(mode) as handle:
+        class Reader:
+            def read(self, size):
+                block = handle.read(size)
+                if block:
+                    pace_copy(config, len(block))
+                return block
+        yield Reader()
+
+
+def _read_source_index(config, path):
+    from .receipt_projection import projected_json
+    value = projected_json(path, omit=_READABLE_OMIT,
+                           opener=lambda mode: _index_reader(config, path, mode))
+    for key in ('recordings', 'segments', 'understandings'):
+        value.setdefault(key, [])
+    return value
 
 
 def _source_index_size(value, limit):
@@ -298,8 +329,7 @@ class FileIndexPublisher:
                         identity = (stat.st_mtime_ns, stat.st_size)
                         index = self._cached_source(name, identity)
                         if index is None:
-                            from .device_day_content import readable_source_index
-                            index = readable_source_index(read_json(path))
+                            index = _read_source_index(self.config, path)
                             self._remember_source(name, identity, index)
                     if content_enabled:
                         from .device_day_content import content_revision
@@ -309,7 +339,7 @@ class FileIndexPublisher:
                     if self.versions.get(name) == version:
                         result['unchanged'] += 1
                         continue
-                    index = index or read_json(path)
+                    index = index or _read_source_index(self.config, path)
                     before = index.get('time_index')
                     if content_enabled:
                         from .device_day_content import publish_content, with_partial_understandings
@@ -338,13 +368,11 @@ class FileIndexPublisher:
                     publish_file_index(self.config, index, photos)
                     if before != index['time_index']:
                         operation = 'source_index_pointer'
-                        if content_enabled:
-                            # The cache deliberately omits dense CV evidence.
-                            # Under the same day lock, change only this pointer
-                            # in a fresh canonical index, never save the cache.
-                            original = read_json(path)
-                            original['time_index'] = index['time_index']
-                        atomic_json(path, original if content_enabled else index)
+                        from .receipt_projection import replace_json_field
+                        # Preserve dense canonical evidence while replacing
+                        # only the pointer. Never hydrate the full day here.
+                        replace_json_field(path, 'time_index', index['time_index'],
+                            opener=lambda mode: _index_reader(self.config, path, mode))
                     stat = path.stat()
                     self.versions[name] = (stat.st_mtime_ns, stat.st_size, photo_version)
                     if content_enabled:
