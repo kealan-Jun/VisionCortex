@@ -3,6 +3,7 @@
 import json
 import sqlite3
 import time
+from contextlib import ExitStack
 from pathlib import Path
 from .sqlite_store import connection
 
@@ -21,6 +22,116 @@ def configured_record(config, record):
         record.get("camera_key")
     )
     return record | {"configured_role": role} if role else record
+
+
+def revalidate_input_seals(runner, record):
+    """Rebind filesystem identities only after proving every original byte.
+
+    Explicit recovery operation, never admission or automatic retry. Preserve
+    content bindings, old seals and model receipts across a verified remount.
+    Different content, timestamps, source versions or live owners fail closed.
+    """
+    from .device_day import exclusive
+    from .device_day_contract import STAGES, atomic_bytes, digest, read_json, safe_child
+    from .device_day_inputs import binding, durable_json, identity, sync_directory, validate_snapshot, verify_content
+    from .device_day_write_guard import storage_guard
+    from .nas_recordings import _inspect
+
+    fields = ('recording_id', 'source_signature', 'camera_key', 'configured_role', 'video_path',
+              'frames_path', 'size_bytes', 'recording_session_id', 'recording_start_us', 'recording_end_us')
+    rid = record['recording_id']
+    root = Path(runner.config['collection_ingest']['source_root'])
+    video = Path(record['video_path'])
+
+    def inspect():
+        fresh = configured_record(runner.config, _inspect(
+            root, video, time.time(), runner.config['collection_ingest'].get('settle_seconds', 120),
+            bool(runner.config['collection_ingest'].get('discover_plain_video_csv', False))))
+        if (not fresh.get('processable', fresh.get('available'))
+                or any(fresh.get(field) != record.get(field) for field in fields)
+                or fresh.get('audio', {}) != record.get('audio', {})):
+            raise ValueError('Current input does not match the sealed recording')
+
+    with storage_guard(runner.config), ExitStack() as locks:
+        for stage in ('all', 'retention', 'vision', 'stt', 'input-vision', 'input-stt', 'publication'):
+            locks.enter_context(exclusive(runner.runtime_root / 'locks' / f'{rid}.{stage}.lock'))
+        for stage in STAGES:
+            queue = runner.runtime_root / f'queue-{stage}.sqlite3'
+            if queue.is_file():
+                with connection(queue, readonly=True) as db:
+                    row = db.execute('SELECT status FROM recordings WHERE recording_id=?', (rid,)).fetchone()
+                    if row and row['status'] == 'running':
+                        raise ValueError('Input revalidation requires reconciled stage owners')
+        if video.is_symlink() or not video.resolve().is_relative_to(root.resolve()):
+            raise ValueError('Input revalidation source escaped configured capture root')
+        inspect()
+        layout, updates = runner.layout(record), []
+        for stage in ('vision', 'stt'):
+            path = runner._receipt(layout, record, 'input-' + stage)
+            if not path.is_file():
+                continue
+            if path.is_symlink() or path.stat().st_size > 4 * 1024 * 1024:
+                raise ValueError('Input seal is not a bounded regular receipt')
+            original = path.read_bytes()
+            saved = json.loads(original)
+            expected = (record.get('audio', {}).get('source_signature') if stage == 'stt'
+                        else record['source_signature'])
+            if (saved.get('stage') != 'input-' + stage or saved.get('status') != 'ready'
+                    or saved.get('source_signature') != expected
+                    or any(saved.get('recording', {}).get(field) != record.get(field) for field in fields)
+                    or not 1 <= len(saved.get('sources', [])) <= 32):
+                raise ValueError('Input seal does not match the current recording')
+            updated = json.loads(original)
+            for source in updated['sources']:
+                physical = Path(source['original_path'])
+                prefix = video.name[:-len('rgb.mp4')] if video.name.endswith('rgb.mp4') else ''
+                allowed = ({('video', str(video)), ('clock', record['frames_path'])}
+                           | {('sidecar', str(video.with_name(prefix + suffix)))
+                              for suffix in ('meta.json', 'recording_ready.json', 'calibration.json')}
+                           | {('audio_' + item['kind'], item['path'])
+                              for item in record.get('audio', {}).get('files', [])})
+                if (physical.is_symlink() or physical.parent != video.parent
+                        or (source['kind'], str(physical)) not in allowed
+                        or not physical.resolve().is_relative_to(video.parent.resolve())
+                        or source['retained']['path'] != layout.relative(layout.source_path(record, source['kind'], physical))
+                        or source['sha256'] != source['retained']['sha256']
+                        or source['size_bytes'] != source['retained']['size_bytes']):
+                    raise ValueError('Input seal source identity is inconsistent')
+                current = identity(physical)
+                if (current[2:4] != source['identity'][2:4] or current[2] != source['size_bytes']
+                        or not verify_content(physical, source)):
+                    raise ValueError('Original content differs from its input seal')
+                source['identity'], source['resolved_path'] = current, str(physical.resolve())
+            validate_snapshot(updated, hashes=True)
+            if binding(updated) != binding(saved):
+                raise ValueError('Input revalidation changed the content binding')
+            updates.append((path, original, saved, updated))
+        # Verify the complete set before publishing either independent seal.
+        inspect()
+        for path, original, _saved, updated in updates:
+            if path.read_bytes() != original:
+                raise ValueError('Input seal changed during revalidation')
+            validate_snapshot(updated)
+        changed = []
+        for path, original, saved, updated in updates:
+            if saved == updated:
+                continue
+            history = path.parent / 'history' / f'{path.stem}-before-revalidation-{digest(saved)}.json'
+            if history.exists():
+                if read_json(history) != saved:
+                    raise ValueError('Input seal recovery history collision')
+            else:
+                atomic_bytes(history, original)
+                sync_directory(history.parent)
+            proof = {'schema_version': 'visioncortex-input-revalidation/1', 'recording_id': rid,
+                     'stage': path.stem, 'verified_at': time.time(), 'previous_seal_sha256': digest(saved),
+                     'revalidated_seal_sha256': digest(updated), 'content_binding': binding(saved),
+                     'complete_stable_bytes_verified': True, 'model_invoked': False, 'capture_modified': False}
+            durable_json(safe_child(runner.runtime_root, f'InputRevalidation/{rid}/{path.stem}-{digest(saved)}.json'), proof)
+            durable_json(path, updated)
+            changed.append(path.stem)
+        return {'status': 'verified', 'recording_id': rid, 'changed_seals': changed,
+                'verified_seals': len(updates), 'model_invoked': False, 'capture_modified': False}
 
 
 class Availability:
