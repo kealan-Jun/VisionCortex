@@ -340,8 +340,9 @@ class FileIndexPublisher:
                         from .device_day_content_paths import migrate_display_layout, publish_selected_videos
                         from .device_day_timeline import day_bounds
                         day_start, _ = day_bounds(name[:10])
+                        backend = self.config['storage'].get('local_cache_root')
                         migration_layout = DeviceDayLayout(Path(self.config['storage']['archive_root']),
-                            name[11:], day_start, Path(self.config['storage']['local_cache_root']))
+                            name[11:], day_start, Path(backend) if backend else None)
                         # Nonblocking stage locks let active producers finish.
                         # The existing index lock owns this publication/move.
                         with ExitStack() as producer_locks:

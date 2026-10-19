@@ -34,7 +34,7 @@ def test_explicit_archives_filter_precedes_archive_reads_and_default_retains_his
 
 
 def test_partial_windows_restore_after_external_report_and_understanding_overwrite(device_config):  # noqa: F811
-    from visioncortex.device_day_content import time_folder
+    from visioncortex.device_day_content_paths import understanding_relative
     from visioncortex.device_day_reports import render_day
     capture(device_config)
     record, layout = item_and_layout(device_config)
@@ -61,7 +61,7 @@ def test_partial_windows_restore_after_external_report_and_understanding_overwri
     publisher = FileIndexPublisher(device_config)
     assert publisher.tick(archives=[layout.name])['published'] == 1
     report = layout.reports/'LaboratoryDailyReport.json'
-    readable = layout.understanding/time_folder(segment['start_us'], segment['end_us'])/'Understanding.json'
+    readable = layout.root/understanding_relative(segment)/'Understanding.json'
     assert read_json(report)['entries'][0]['understanding_status'] == 'partial'
     assert read_json(readable)['understanding']['status'] == 'partial'
     assert publisher.tick(archives=[layout.name])['unchanged'] == 1

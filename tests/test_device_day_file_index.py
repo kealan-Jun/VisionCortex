@@ -225,7 +225,8 @@ def test_failed_first_retention_without_clock_does_not_block_time_index(tmp_path
 
     monkeypatch.setattr(device_day_reports, 'render_day', render)
     result = FileIndexPublisher(cfg).tick()
-    assert result == {'status': 'completed', 'published': 1, 'unchanged': 0, 'busy': 0, 'errors': []}
+    assert result == {'status': 'completed', 'published': 1, 'unchanged': 0, 'busy': 0, 'errors': [],
+                      'layout_migrated': 0, 'selected_videos_published': 0}
     assert reports == ([] if paused else [ARCHIVE])
     assert read_json(path)['recordings'][0] == failed  # Never invent the missing capture clock.
     assert read_json(path.parent.parent/'Comment/TimeIndex.json')['archive'] == ARCHIVE
