@@ -23,11 +23,11 @@ def test_relocation_keeps_old_receipt_valid_and_only_one_visible_entry(device_co
     assert len(result) == 1 and not (layout.comments/'Stt').exists()
     assert verify_artifact(layout.root, ref)
     new = safe_child(layout.root, ref['path'])
-    assert 'Recognition/version' in str(new)
+    assert 'Comment/.Evidence/Recognition/' in str(new) and new.parent.name == 'version'
     assert new.read_text() == '原始机器转写\n'
     assert migrate_stt(runner, layout) == []
     mapped = public_references({'transcript_file': ref}, read_json(layout.comments/'LegacyPaths.json')['aliases'])
-    assert Path(mapped['transcript_file']['path']).parts[1].startswith('10-00-00.')
+    assert Path(mapped['transcript_file']['path']).parts[1] == '.Evidence'
     assert verify_artifact(layout.root, mapped['transcript_file'])
 
 
@@ -53,7 +53,7 @@ def test_understanding_relocation_preserves_results_and_historical_segment_times
     assert len(result) == 1 and not (layout.understanding/'ClipUnderstanding').exists()
     assert verify_artifact(layout.root, ref)
     mapped = public_references({'model_receipt': ref['path']}, aliases(layout.root))
-    assert '/10-00-01.' in mapped['model_receipt']
+    assert '/.Evidence/' in mapped['model_receipt']
     assert '/Analysis/segment-test/version/window/Result.json' in mapped['model_receipt']
     assert migrate_understanding(runner, layout) == []
 

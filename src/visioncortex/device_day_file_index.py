@@ -248,10 +248,10 @@ class FileIndexPublisher:
         self.source_index_bytes += size
 
     def _output_revision(self, name, index):
-        from .device_day_content import time_folder
         root = safe_child(Path(self.config['storage']['archive_root']), name)
         paths = [root/'LaboratoryDailyReport'/f'LaboratoryDailyReport.{suffix}' for suffix in ('json', 'html')]
-        paths.extend(root/'MultimodalUnderstanding'/time_folder(s['start_us'], s['end_us'])/'Understanding.json'
+        from .device_day_content_paths import understanding_relative
+        paths.extend(root/understanding_relative(s)/'Understanding.json'
                      for s in index.get('segments', []) if s.get('start_us') and s.get('end_us'))
         result = []
         for path in paths:
@@ -336,6 +336,21 @@ class FileIndexPublisher:
                             index = _read_source_index(self.config, path)
                             self._remember_source(name, identity, index)
                     if content_enabled:
+                        from contextlib import ExitStack
+                        from .device_day_content_paths import migrate_display_layout
+                        from .device_day_timeline import day_bounds
+                        day_start, _ = day_bounds(name[:10])
+                        migration_layout = DeviceDayLayout(Path(self.config['storage']['archive_root']),
+                            name[11:], day_start, Path(self.config['storage']['local_cache_root']))
+                        # Nonblocking stage locks let active producers finish.
+                        # The existing index lock owns this publication/move.
+                        with ExitStack() as producer_locks:
+                            for record in sorted(index.get('recordings', []), key=lambda r: r['recording_id']):
+                                for stage in ('all', 'retention', 'vision', 'stt', 'understanding', 'report'):
+                                    producer_locks.enter_context(exclusive(self.runtime/'locks'/f'{record["recording_id"]}.{stage}.lock'))
+                            operation = 'frozen_layout_migration'
+                            migration = migrate_display_layout(None, migration_layout)
+                            result['layout_migrated'] = result.get('layout_migrated', 0) + len(migration['moved'])
                         from .device_day_content import content_revision
                         operation = 'content_revision'
                         content_version = content_revision(self.config, index)

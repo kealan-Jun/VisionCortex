@@ -863,6 +863,7 @@ class DeviceDayRunner:
                     from .device_day_content_paths import aliases, public_references
                     mapping = aliases(layout.root)
                     understandings = public_references(understandings, mapping)
+                    segments = public_references(segments, mapping)
                     for row in recordings:
                         check_yield(checkpoint=False)
                         row['transcription'] = public_references(row.get('transcription'), mapping)

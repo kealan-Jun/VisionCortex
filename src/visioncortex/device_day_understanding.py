@@ -162,7 +162,9 @@ def understand(backend, layout, recording, vision, context, key):
         plan = apply_plan_reviews(request_plan(vision['segments'], context, backend.settings),
                                   backend.settings, recording, vision['key'])
         audit = manifest(recording, vision, plan, shadow_episodes(vision['segments'], context))
-        audit_path = layout.understanding/'RequestPlans'/recording['recording_id']/key/'SamplingCoverage.json'
+        from .device_day_content_paths import private_folder
+        audit_path = private_folder(layout, 'MultimodalUnderstanding', 'RequestPlans',
+                                    recording['recording_id'], key) / 'SamplingCoverage.json'
         atomic_json(audit_path, audit)
     audit_ref = layout.relative(audit_path)
     held_segments = {hold['segment_id'] for hold in plan['holds']}
