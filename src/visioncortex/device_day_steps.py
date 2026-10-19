@@ -180,7 +180,9 @@ def reviewed_window(root, segment, clock):
     from .device_day_content import time_folder
     from .device_day_contract import read_json, safe_child
     from .device_day_verification import verify_artifact_cached
-    path = root/'MultimodalUnderstanding'/time_folder(segment['start_us'], segment['end_us'])/'Analysis/StepReview.json'
+    path = root/'MultimodalUnderstanding/.Evidence/Analysis'/segment['segment_id']/'StepReview.json'
+    if not path.is_file():
+        path = safe_child(root, 'MultimodalUnderstanding/' + time_folder(segment['start_us'], segment['end_us']) + '/Analysis/StepReview.json')
     if not path.is_file():
         return None
     manifest = read_json(path)

@@ -6,6 +6,57 @@
 
 ## 固定目录
 
+### 2026-10-19 冻结展示结构与视频筛选（用户再次确认）
+
+本节是新产出的固定展示契约，优先于下文历史布局描述。用户明确要求后续数据结构
+不能改变；性能优化、重构、模型或厂商切换都不得改变目录、命名、内容归属或留存规则。
+只有用户后续明确要求变更，才能修改本契约。机器可读契约为 Python 包中的
+`templates/VC-DEVICE-DAY-LAYOUT-V1.json`，发布端和确定性检查共同执行它。
+
+```text
+<日期>_<设备名>_<相机编号>/
+├── MetaData/                              # 采集端原生目录与文件，内容不改动
+├── ProcessedClips/
+│   ├── Index.json                         # 全部区间、筛选决定、理由、来源和文件引用
+│   └── Clips/
+│       └── <开始>_<结束>_<活动类型>_<短片段ID>/
+│           ├── ExperimentActivity.mp4     # 有价值的实验片段
+│           ├── ExperimentActivity.json
+│           ├── NoExperimentActivity.mp4   # 有价值的非实验片段，按所属类型二选一
+│           ├── NoExperimentActivity.json
+│           ├── Retention.json               # 留存决定、实际视频状态、理由及来源
+│           ├── KeyFrames/<五类动作>/<视频时间>.jpg
+│           └── SceneFrames/<视频时间>.jpg
+├── MultimodalUnderstanding/
+│   ├── Index.json
+│   └── <与 Clips 完全相同的片段目录名>/
+│       └── Understanding.json              # 直接读取步骤、对象、前后状态及可见依据
+├── LaboratoryDailyReport/
+│   ├── LaboratoryDailyReport.html
+│   └── LaboratoryDailyReport.json
+└── Comment/
+    ├── Index.json
+    ├── Comment.jsonl                      # 有备注时产生
+    ├── Protocol.json                      # 有提供时产生
+    └── <原录音开始>_<结束>/
+        ├── Transcript.json
+        └── Transcript.txt
+```
+
+历史原片目录保留 `MetaVideo`；新采集保留现有 `MetaData`，不生成第二份原片目录。
+活动类型是 `ExperimentActivity` 或 `NoExperimentActivity`。同一片段的相机、设备、
+时间和 ID 必须一致；非活动区间没有动作关键帧，场景采样仍是 `SceneFrames`。
+
+这里是视频筛选，只另存有价值的片段。有价值既包括实验操作，也包括非实验工作、
+读数、实验等待及必要上下文。不能因 CV 未检出实验就省略有价值视频；普通静止、
+重复或无关区间可不另存视频，但索引保留判断依据和原片位置。不确定或尚未处理完成
+必须保留实际状态，不能把缺失视频标成已留存，也不能用抽样静止声称连续无活动。
+
+打开对应片段即可直接看到视频、图片和理解报告，不再经过 `RequestPlans`、录制编号、
+执行哈希、版本或模型窗口的层层目录。技术证据放在各所属目录的隐藏 `.Evidence` 区，
+编号和版本只承担后台追溯。现有不可变执行证据按稳定完整字节校验迁移，并保留旧路径
+映射、可恢复记录及历史读取能力；原始音视频不因展示整理而移动或删除。
+
 ### 2026-10-13 采集端直写 MetaData（用户明确变更）
 
 新设备日的原始目录由 `MetaVideo` 改为 `MetaData`。采集端可以先创建日期、

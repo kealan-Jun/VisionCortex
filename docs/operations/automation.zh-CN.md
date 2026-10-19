@@ -35,6 +35,16 @@ bash VisionCortexAutomation-Candidate/install.sh --setup
 
 ### 处理停滞与恢复
 
+设备视角可通过目录身份或已核对的物理相机身份登记。采集主机或目录改名时，站点可配置
+`collection_ingest.camera_hardware_bindings`，每项包含 `vendor`、`serial_number` 和
+`camera_key`；后者引用既有 `camera_role_map` 中的视角配置。只匹配录像元数据中相机实际
+报告的厂商和序列号，不使用主机名、型号或配置序列号代替物理身份。新目录和归档中的
+相机名称保持原样，记录继承视角的绑定和元数据摘要。缺少或冲突的绑定继续等待登记。
+
+独立的 MetaData 发现服务检查今天和昨天所有生产者已创建的设备日目录，包含未登记
+视角的设备。它将记录保存到本地清单，并通过 `unconfigured_camera_directories` 和
+`camera_role_unconfigured` 告警暴露缺口；未完成视角绑定的录像不调用模型。
+
 `/health/automation` 的 `processing_health` 与设备日页面分别显示心跳和处理进度。
 进度按本地队列区分可执行元数据、输入缺失标记、当前清单未观察到、来源版本不一致、
 前置阶段未完成、重试退避和请求结果待核对；这些分类不会删除任务或接受未经验证的媒体。

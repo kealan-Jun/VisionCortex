@@ -47,7 +47,7 @@ def preserve_prior_synthesis(layout, replacement):
     previous = read_json(path)
     prior = previous.get('全天综合理解') or {}
     if prior.get('status') == 'completed_for_available_inputs' and prior != replacement:
-        atomic_json(layout.reports/'History'/('Report'+digest(previous)+'.json'), previous)
+        atomic_json(layout.reports/'.Evidence/History'/('Report'+digest(previous)+'.json'), previous)
 
 
 def render_page(title, template, contract, contents, *, scope_label='单设备观察记录'):

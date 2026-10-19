@@ -149,7 +149,7 @@ def test_report_stage_publishes_retained_media_without_modifying_original(device
     result = runner.process(record)
     assert result['status'] == 'completed'
     index = read_json(layout.index)
-    assert index['segments'][0]['video']['path'].endswith('Activity.mp4')
+    assert index['segments'][0]['video']['path'].endswith('NoExperimentActivity.mp4')
     assert index['segments'][0]['derived_video_disposition']['original_video_unchanged']
 
 
