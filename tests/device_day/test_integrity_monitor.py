@@ -169,6 +169,7 @@ def test_granted_retry_failure_alerts_even_with_a_new_error_and_nas_offline(moni
                  {'status': 'failed', 'error_type': 'RuntimeError'}, 0)
     def offline(_):
         raise OSError('owned fixture storage outage')
+    verify_storage = device_day_recovery_worker.verify_storage
     monkeypatch.setattr(device_day_recovery_worker, 'verify_storage', offline)
     for _ in range(3):
         assert IntegrityMonitor(config, runner).tick()['status'] == 'storage_unavailable'
@@ -182,6 +183,10 @@ def test_granted_retry_failure_alerts_even_with_a_new_error_and_nas_offline(moni
         db.execute("UPDATE recordings SET status='completed'")
     for _ in range(2):
         monitor.tick()
+    with connection(monitor.path, readonly=True) as db:
+        assert db.execute('SELECT state FROM alerts WHERE key=?', (key,)).fetchone()[0] == 'active'
+    monkeypatch.setattr(device_day_recovery_worker, 'verify_storage', verify_storage)
+    assert tick_selected(monitor)['status'] == 'verified'
     with connection(monitor.path, readonly=True) as db:
         assert db.execute('SELECT state FROM alerts WHERE key=?', (key,)).fetchone()[0] == 'resolved'
     assert backend.vision_calls == backend.semantic_calls == 0
