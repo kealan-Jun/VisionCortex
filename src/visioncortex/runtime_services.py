@@ -226,18 +226,42 @@ def serve_integrity(config_path, stop):
             publish(status='stopped', phase='stopped')
 
 
+def serve_progress(config_path, stop, *, interval=5):
+    """Publish local queue observations when inference owners run separately."""
+    from .config import load_config
+    from .device_day import exclusive
+    from .local_storage import require_local_path
+    config = load_config(Path(config_path))
+    root = require_local_path(Path(config['storage']['local_runtime_root'])) / 'device-day'
+
+    class Control:
+        def poll(self, timeout=None):
+            return stop.is_set() if timeout is None else stop.wait(timeout)
+
+        def close(self):
+            pass
+
+    with exclusive(root / 'locks' / 'progress-publisher.lock'):
+        _publish_progress(config, Control(), interval)
+
+
 def main(argv=None):
     import argparse
     import signal
-    parser = argparse.ArgumentParser(description='Independent model-free input integrity service')
-    parser.add_argument('--input-integrity', action='store_true', required=True)
+    parser = argparse.ArgumentParser(description='Independent model-free operational services')
+    modes = parser.add_mutually_exclusive_group(required=True)
+    modes.add_argument('--input-integrity', action='store_true')
+    modes.add_argument('--progress', action='store_true')
     parser.add_argument('--config', type=Path, required=True)
     args = parser.parse_args(argv)
     stop = threading.Event()
     for name in (signal.SIGTERM, signal.SIGINT):
         signal.signal(name, lambda *_: stop.set())
     logging.basicConfig(level=logging.INFO)
-    serve_integrity(args.config, stop)
+    if args.progress:
+        serve_progress(args.config, stop)
+    else:
+        serve_integrity(args.config, stop)
 
 
 if __name__ == '__main__':
