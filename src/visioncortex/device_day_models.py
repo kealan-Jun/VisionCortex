@@ -558,8 +558,12 @@ class DeviceDayModels:
         from .schemas import FrameEvidence
         from .source_frames import read_evidence_frame
         evidence = FrameEvidence.model_validate(choice["frame_evidence"])
-        evidence, relocation = relocate_evidence(view, evidence)
-        image, proof = read_evidence_frame(view, info, evidence)
+        # The decoder records physical source paths. Keep the configured view
+        # for archive references, and pass its canonical path to both native
+        # frame readers, including deployments using the original input port.
+        read_view = view.model_copy(update={'video': view.video.resolve()})
+        evidence, relocation = relocate_evidence(read_view, evidence)
+        image, proof = read_evidence_frame(read_view, info, evidence)
         if relocation:
             proof["source_relocation"] = relocation
         if image is None or proof.get("status") != "verified":
