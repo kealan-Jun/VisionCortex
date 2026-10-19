@@ -132,6 +132,44 @@ def test_changed_source_bytes_cannot_authorize_a_retry(monitor_case):
     assert backend.vision_calls == 0
 
 
+def test_granted_retry_failure_alerts_even_with_a_new_error_and_nas_offline(monitor_case, monkeypatch):
+    from visioncortex import device_day_recovery_worker
+    config, record, layout, backend, runner, monitor = monitor_case
+    queue = runner.queues['retention']
+    with queue.connect() as db:
+        db.execute("UPDATE recordings SET status='failed',attempts=3,result=?",
+                   (json.dumps({'error_type': 'InputChanged'}),))
+    assert tick_selected(monitor)['status'] == 'retry_authorized'
+    assert queue.claim('retry-owner', retry=True, max_attempts=3)
+    queue.finish('retry-owner', record['recording_id'],
+                 {'status': 'failed', 'error_type': 'RuntimeError'}, 0)
+    def offline(_):
+        raise OSError('owned fixture storage outage')
+    monkeypatch.setattr(device_day_recovery_worker, 'verify_storage', offline)
+    for _ in range(3):
+        assert IntegrityMonitor(config, runner).tick()['status'] == 'storage_unavailable'
+    key = 'retention_recovery:' + record['recording_id']
+    with connection(monitor.path, readonly=True) as db:
+        alert = db.execute('SELECT * FROM alerts WHERE key=?', (key,)).fetchone()
+        assert alert['state'] == 'active' and alert['reason'] == 'recovery_attempt_failed'
+        assert db.execute("SELECT COUNT(*) FROM events WHERE key=? AND transition='raised'", (key,)).fetchone()[0] == 1
+    with queue.connect() as db:
+        assert db.execute('SELECT attempts,retry_limit FROM recordings').fetchone()[:] == (4, 4)
+        db.execute("UPDATE recordings SET status='completed'")
+    for _ in range(2):
+        monitor.tick()
+    with connection(monitor.path, readonly=True) as db:
+        assert db.execute('SELECT state FROM alerts WHERE key=?', (key,)).fetchone()[0] == 'resolved'
+    assert backend.vision_calls == backend.semantic_calls == 0
+
+
+def test_retry_authorization_is_not_rendered_as_a_completed_recovery():
+    from visioncortex.device_day_progress import render_integrity
+    html = render_integrity({'status': 'running', 'available': True, 'events': [
+        {'transition': 'recovered', 'key': 'retention_failed:owned', 'reason': 'retry_authorized'}]})
+    assert '恢复重试已授权' in html and '完成自动恢复' not in html
+
+
 def test_changed_archive_blocks_retry_even_if_original_is_valid(monitor_case):
     config, record, layout, backend, runner, monitor = monitor_case
     path = runner._receipt(layout, record, 'retention')

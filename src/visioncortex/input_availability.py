@@ -514,6 +514,30 @@ class IntegrityMonitor:
                 db.execute('INSERT OR REPLACE INTO cursors VALUES(?,?)', (lane, position))
         return None
 
+    def _observe_recovery_outcomes(self):
+        """A granted retry is not a successful recovery; observe its owner."""
+        for stage in ('retention', 'vision', 'stt'):
+            queue = self.root / f'queue-{stage}.sqlite3'
+            if not queue.is_file():
+                continue
+            lane = stage + '_recovery'
+            with self._db(readonly=True) as db:
+                cursor = db.execute('SELECT position FROM cursors WHERE lane=?', (lane,)).fetchone()
+            with connection(queue, readonly=True) as db:
+                if not db.execute("SELECT 1 FROM sqlite_master WHERE name='input_recovery_grants'").fetchone():
+                    continue
+                rows = list(db.execute('SELECT r.rowid AS scan_id,r.recording_id,r.status,r.attempts,r.retry_limit '
+                    'FROM recordings r WHERE r.rowid>? AND EXISTS(SELECT 1 FROM input_recovery_grants g '
+                    'WHERE g.recording_id=r.recording_id AND g.revision=r.revision) '
+                    'ORDER BY r.rowid LIMIT ?', (cursor[0] if cursor else 0, self.options['batch_size'])))
+            for row in rows:
+                if row['status'] == 'failed' and row['retry_limit'] > 0 and row['attempts'] >= row['retry_limit']:
+                    self._alert(lane, row['recording_id'], 'recovery_attempt_failed')
+                elif row['status'] == 'completed':
+                    self._alert(lane, row['recording_id'], None)
+            with self._db() as db:
+                db.execute('INSERT OR REPLACE INTO cursors VALUES(?,?)', (lane, rows[-1]['scan_id'] if rows else 0))
+
     def _archive(self, record, verify):
         from .device_day_contract import VERSION, digest, read_json, safe_child
         from .device_day_inputs import copy_sealed
@@ -671,6 +695,8 @@ class IntegrityMonitor:
             return {'status': 'disabled'}
         check_cancelled(stop)
         with exclusive(self.root / 'locks/input-integrity-monitor.lock'):
+            # Local queue observations continue even when NAS is unavailable.
+            self._observe_recovery_outcomes()
             try:
                 verify_storage(self.config)
                 with storage_guard(self.config):
@@ -721,7 +747,8 @@ class IntegrityMonitor:
                            (lane, row['recording_id'], fingerprint, time.time() + interval, time.time(), json.dumps(result)))
                 if result['status'] in {'restored', 'retry_authorized'}:
                     db.execute('INSERT INTO events(at,key,transition,reason) VALUES(?,?,?,?)',
-                               (time.time(), lane + ':' + row['recording_id'], 'recovered', result['status']))
+                               (time.time(), lane + ':' + row['recording_id'],
+                                'authorized' if result['status'] == 'retry_authorized' else 'recovered', result['status']))
             return result
 
 

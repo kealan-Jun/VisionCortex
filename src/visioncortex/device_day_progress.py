@@ -338,6 +338,7 @@ def render_integrity(state):
                'archive_missing_source_unverified': '归档缺失且原件尚未核验',
                'integrity_verification_unavailable': '存储或校验暂不可用',
                'recovery_retry_exhausted': '同一修复已重试，需进一步排查',
+               'recovery_attempt_failed': '恢复重试执行失败，已保留失败并停止追加重试',
                'verification_budget_exceeded': '本条校验量超过配置上限',
                'input_changed_during_verification': '校验期间文件发生变化',
                'input_recovery_state_changed': '恢复前队列状态已变化'}
@@ -352,9 +353,11 @@ def render_integrity(state):
                 'disabled': '校验未启用', 'yielded_to_foreground': '为前台任务让出资源',
                 'storage_unavailable': '等待存储恢复'}
     last = outcomes.get((service.get('last_result') or {}).get('status'), '尚无检查结果')
-    transitions = {'raised': '新增异常', 'changed': '异常变化', 'resolved': '异常解除', 'recovered': '完成自动恢复'}
+    transitions = {'raised': '新增异常', 'changed': '异常变化', 'resolved': '异常解除',
+                   'recovered': '完成归档恢复', 'authorized': '恢复重试已授权'}
     event_reasons = reasons | {'restored': '归档文件已补回', 'retry_authorized': '已授权一次恢复重试'}
-    events = ''.join('<li>' + escape(transitions.get(event['transition'], event['transition'])) + ' · '
+    events = ''.join('<li>' + escape('恢复重试已授权' if event['reason'] == 'retry_authorized' else
+                                     transitions.get(event['transition'], event['transition'])) + ' · '
                      + escape(event['key']) + '：' + escape(event_reasons.get(event['reason'], event['reason']))
                      + '</li>' for event in state.get('events', []))
     coverage = state.get('coverage') or {}
