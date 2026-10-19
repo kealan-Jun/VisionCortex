@@ -7,8 +7,9 @@ from .device_day_contract import atomic_json, digest
 
 
 class PublicationReplay:
-    def __init__(self, *, field_fetch=None):
+    def __init__(self, *, field_fetch=None, stop=None):
         self.field_fetch = field_fetch
+        self.stop = stop
 
     def tick(self, runner):
         from .device_day import exclusive
@@ -21,8 +22,10 @@ class PublicationReplay:
                 return {'status': 'running_elsewhere', 'published': 0}
             # The standard replay owns per-record stage locks, validates every
             # receipt/artifact, prefers recent records and bounds each round.
-            published = reconcile(runner)
+            published = reconcile(runner, stop=self.stop) if self.stop is not None else reconcile(runner)
             pending = PublicationJournal(runner.runtime_root).pending(1, since_us=processing_cutoff(runner.settings))
+            if self.stop is not None and self.stop.is_set():
+                return {'status': 'stopping', 'published': published, 'pending_publications': bool(pending)}
             field_settings = runner.settings.get('field_recognition') or {}
             field_result = {'status': 'no_input', 'consumer_wired': False, 'model_invoked': False}
             if field_settings.get('enabled', False):
@@ -44,7 +47,7 @@ def serve(config_path, stop):
     from .ai_settings import apply_active
     from .config import load_config
     from .device_day import DeviceDayRunner
-    replay = PublicationReplay()
+    replay = PublicationReplay(stop=stop)
     runner, generation, roots, state_path = None, None, None, None
     while not stop.is_set():
         started = time.time()

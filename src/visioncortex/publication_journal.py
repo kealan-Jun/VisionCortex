@@ -121,7 +121,7 @@ def revalidate_remounted_seals(runner, record):
     return len(updates)
 
 
-def reconcile(runner):
+def reconcile(runner, *, stop=None):
     from .device_day import exclusive
     from .device_day_contract import STAGES
     journal = PublicationJournal(runner.runtime_root)
@@ -130,6 +130,8 @@ def reconcile(runner):
     recent = round((time.time() - runner.settings.get('live_priority_seconds', 14400)) * 1e6)
     for token, record in journal.pending(since_us=processing_cutoff(runner.settings), prefer_since_us=recent,
                                         latest_first=runner.settings.get('latest_first', False), ready_only=True):
+        if stop is not None and stop.is_set():
+            break  # Finish one atomic recording, then preserve the remaining journal.
         try:
             # Never acknowledge an in-flight stage before its receipt exists.
             # A crash between receipt and index publication must remain replayable.
