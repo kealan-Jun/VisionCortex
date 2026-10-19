@@ -62,6 +62,27 @@ def test_bad_or_replaced_source_cannot_publish_a_partial_pointer(tmp_path):
     assert not list(tmp_path.glob('*.partial'))
 
 
+def test_projection_limit_is_reported_as_an_error_instead_of_a_busy_producer(tmp_path, monkeypatch):
+    from test_device_day_file_index import config
+    from test_device_day_time_lookup import ARCHIVE, BASE, index
+    from visioncortex import receipt_projection
+    from visioncortex.device_day_contract import atomic_json
+    from visioncortex.device_day_file_index import FileIndexPublisher
+    from visioncortex.observed_inventory import observe
+    cfg = config(tmp_path)
+    path = Path(cfg['storage']['archive_root']) / ARCHIVE / 'ProcessedClips/Index.json'
+    atomic_json(path, index())
+    before = path.read_bytes()
+    observe(Path(cfg['storage']['local_runtime_root']) / 'device-day', {'recordings': [
+        {'recording_id': 'slice', 'camera_key': ARCHIVE[11:], 'recording_start_us': BASE}]})
+    monkeypatch.setattr(receipt_projection, '_MAX_STREAM_BYTES', 1)
+    publisher = FileIndexPublisher(cfg)
+    result = publisher.tick()
+    assert result['status'] == 'partial' and result['busy'] == result['published'] == 0
+    assert result['errors'][0]['reason'] == 'readable_projection_limit'
+    assert not publisher.versions and path.read_bytes() == before
+
+
 @pytest.mark.skipif(sys.platform != 'linux', reason='Linux address-space regression guard')
 def test_dense_source_projection_and_pointer_write_fit_a_small_process(tmp_path):
     source = tmp_path / 'Index.json'

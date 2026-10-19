@@ -268,11 +268,15 @@ class FileIndexPublisher:
         from .device_day import exclusive
         from .device_day_contract import archive_name, DeviceDayLayout, VERSION
         from .observed_inventory import read_inventory
+        from .receipt_projection import ProjectionDeferred
         result = {'status': 'completed', 'published': 0, 'unchanged': 0, 'busy': 0, 'errors': []}
 
         def failed(name, operation, exc):
             result['status'] = 'partial'
             result['errors'].append({'archive': name, 'operation': operation, 'error_type': type(exc).__name__})
+            if isinstance(exc, ProjectionDeferred):
+                result['errors'][-1].update(reason='readable_projection_limit', metric=exc.metric,
+                                           observed=exc.observed, limit=exc.limit)
             logging.getLogger(__name__).warning('File time index unavailable for %s during %s: %s',
                                                name, operation, type(exc).__name__)
         names = {archive_name(r['camera_key'], r['recording_start_us'])
@@ -383,6 +387,8 @@ class FileIndexPublisher:
                         source['time_index'] = index['time_index']
                         self._remember_source(name, (stat.st_mtime_ns, stat.st_size), source)
                     result['published'] += 1
+            except ProjectionDeferred as exc:
+                failed(name, operation, exc)
             except BlockingIOError:
                 result['busy'] += 1
                 continue  # Producer still publishing; retry without dropping references.
