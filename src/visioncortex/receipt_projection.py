@@ -34,6 +34,132 @@ _MAX_STREAM_EVENTS = 64_000_000
 _MAX_SPOOL_BYTES = 2 * 1024 * 1024 * 1024
 
 
+def projected_json(path, *, omit=(), max_resident_bytes=128 * 1024**2, opener=None):
+    """Project while parsing, before dense omitted values become Python trees.
+
+    Paths are tuples of dictionary keys; None denotes an array item. Unknown
+    fields are retained, including literal dots and keys named ``item``.
+    """
+    from ijson.common import ObjectBuilder
+    path = Path(path)
+    before = _json_file_generation(path)
+    if before[2] > _MAX_STREAM_BYTES:
+        raise ProjectionDeferred('stream_bytes', before[2], _MAX_STREAM_BYTES)
+    builder, stack, memory = ObjectBuilder(), [], 0
+    omitted = set(omit)
+    with (opener or path.open)('rb') as handle:
+        for count, (event, value) in enumerate(_json_events(handle, streaming=True)):
+            if count % 4096 == 0:
+                from .runtime_control import check_yield
+                check_yield(checkpoint=False)
+            parent = stack[-1] if stack else None
+            child = (() if parent is None else parent['path'] +
+                     ((parent['key'],) if parent['map'] else (None,)))
+            if event == 'map_key':
+                parent['key'] = value
+                keep = not parent['omit'] and parent['path'] + (value,) not in omitted
+            elif event in {'start_map', 'start_array'}:
+                skip = bool(parent and parent['omit']) or child in omitted
+                stack.append({'path': child, 'map': event == 'start_map', 'key': None, 'omit': skip})
+                keep = not skip
+            elif event in {'end_map', 'end_array'}:
+                keep = not stack.pop()['omit']
+            else:
+                keep = not (parent and parent['omit']) and child not in omitted
+            if keep:
+                # Account for values, keys, container allocation and entries;
+                # no whole-result serialization or second copy is required.
+                memory += 2 * (sys.getsizeof(value) + (64 if event in {'map_key', 'start_map', 'start_array'} else 16))
+                if memory > max_resident_bytes:
+                    raise ProjectionDeferred('projected_resident_bytes', memory, max_resident_bytes)
+                builder.event(event, value)
+    if _json_file_generation(path) != before:
+        raise ValueError('JSON source changed during projection')
+    if not isinstance(builder.value, dict):
+        raise ValueError('JSON projection requires an object')
+    return builder.value
+
+
+def _json_file_generation(path):
+    info = path.stat()
+    if path.is_symlink():
+        raise ValueError('JSON source must not be a symlink')
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+
+def replace_json_field(path, field, value, *, opener=None):
+    """Atomically replace one top-level field, preserving all other JSON values.
+
+    Stream both input and output; authoritative diagnostics are never hydrated
+    or replaced with their reduced readable projection. The caller owns the
+    archive lock and verified storage guard, as for ordinary index writes.
+    """
+    from .device_day_contract import _atomic_blocks
+    path = Path(path)
+    before = _json_file_generation(path)
+    if before[2] > _MAX_STREAM_BYTES:
+        raise ProjectionDeferred('stream_bytes', before[2], _MAX_STREAM_BYTES)
+    replacement = json.dumps(field, ensure_ascii=False) + ':' + json.dumps(value, ensure_ascii=False, allow_nan=False)
+
+    def fragments():
+        frames, depth, skipping = [], 0, False
+        with (opener or path.open)('rb') as handle:
+            for count, (event, item) in enumerate(_json_events(handle, streaming=True)):
+                if count % 4096 == 0:
+                    from .runtime_control import check_yield
+                    check_yield(checkpoint=False)
+                if event == 'map_key' and depth == 1 and item == field:
+                    skipping = True
+                    continue
+                old_depth = depth
+                if event in {'start_map', 'start_array'}:
+                    depth += 1
+                elif event in {'end_map', 'end_array'}:
+                    depth -= 1
+                if skipping:
+                    if depth == 1 and event != 'map_key':
+                        skipping = False
+                    continue
+                if event == 'map_key':
+                    frame = frames[-1]
+                    yield (',' if frame[1] else '') + json.dumps(item, ensure_ascii=False) + ':'
+                    frame[1] += 1
+                elif event in {'end_map', 'end_array'}:
+                    frame = frames.pop()
+                    if not frames:
+                        if event != 'end_map':
+                            raise ValueError('JSON field replacement requires an object')
+                        yield (',' if frame[1] else '') + replacement
+                    yield '}' if event == 'end_map' else ']'
+                else:
+                    if frames and frames[-1][0] == 'array':
+                        yield ',' if frames[-1][1] else ''
+                        frames[-1][1] += 1
+                    if event in {'start_map', 'start_array'}:
+                        if not frames and event != 'start_map':
+                            raise ValueError('JSON field replacement requires an object')
+                        frames.append(['map' if event == 'start_map' else 'array', 0])
+                        yield '{' if event == 'start_map' else '['
+                    else:
+                        if old_depth == 0:
+                            raise ValueError('JSON field replacement requires an object')
+                        yield json.dumps(item, ensure_ascii=False, allow_nan=False, separators=(',', ':'))
+        if _json_file_generation(path) != before:
+            raise ValueError('JSON source changed during field replacement')
+
+    def blocks():
+        buffer = bytearray()
+        for fragment in fragments():
+            buffer.extend(fragment.encode('utf-8'))
+            if len(buffer) >= _CHUNK_BYTES:
+                yield bytes(buffer)
+                buffer.clear()
+        if buffer:
+            yield bytes(buffer)
+        yield b'\n'
+    _atomic_blocks(path, blocks())
+
+
 def artifact_manifest(path, *, max_references=20000, opener=None):
     """Read bounded references without loading frame/model evidence.
 
