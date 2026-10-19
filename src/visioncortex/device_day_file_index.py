@@ -337,7 +337,7 @@ class FileIndexPublisher:
                             self._remember_source(name, identity, index)
                     if content_enabled:
                         from contextlib import ExitStack
-                        from .device_day_content_paths import migrate_display_layout
+                        from .device_day_content_paths import migrate_display_layout, publish_selected_videos
                         from .device_day_timeline import day_bounds
                         day_start, _ = day_bounds(name[:10])
                         migration_layout = DeviceDayLayout(Path(self.config['storage']['archive_root']),
@@ -351,6 +351,8 @@ class FileIndexPublisher:
                             operation = 'frozen_layout_migration'
                             migration = migrate_display_layout(None, migration_layout)
                             result['layout_migrated'] = result.get('layout_migrated', 0) + len(migration['moved'])
+                            published_videos = publish_selected_videos(migration_layout, index.get('segments', []))
+                            result['selected_videos_published'] = result.get('selected_videos_published', 0) + len(published_videos)
                         from .device_day_content import content_revision
                         operation = 'content_revision'
                         content_version = content_revision(self.config, index)
