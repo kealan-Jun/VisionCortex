@@ -88,6 +88,10 @@ def test_receipts_are_released_between_nas_reads_and_output_rows(tmp_path,monkey
 def test_full_rebuild_failure_keeps_previous_generation_and_cleans_spool(tmp_path,monkeypatch,failure):
     layout,projection=fixture(tmp_path)
     before=projection.records(layout,['retention'])
+    # A changed inode generation needs revalidation. Unchanged verified
+    # receipts now deliberately skip NAS reads and SQLite replacement.
+    for source in layout.receipts.glob('*/retention.json'):
+        source.write_text(source.read_text() + ' ')
     original=Path.open
     def read(path, *args, **kwargs):
         if path.parent.name=='b':

@@ -51,7 +51,12 @@ def test_real_queue_refund_retains_repair_priority_and_failure_audit(tmp_path, m
     assert historical_candidate_ids(state.config, 'vision', now=NOW, limit=1) == ['repaired']
     assert (receipt.read_bytes(), receipt.stat().st_mtime_ns) == receipt_before
     # The same grant does not prioritize an actual failed fourth attempt.
-    queue.claim('next-owner', retry=True, allowed=['repaired'], max_attempts=3)
+    with queue.connect() as db:
+        saved = json.loads(db.execute("SELECT result FROM recordings WHERE recording_id='repaired'").fetchone()[0])
+    if saved.get('retry_at'):
+        assert queue.claim('too-early', retry=True, allowed=['repaired'], max_attempts=3) is None
+        monkeypatch.setattr('visioncortex.device_day_queue.time.time', lambda: saved['retry_at'] + 1)
+    assert queue.claim('next-owner', retry=True, allowed=['repaired'], max_attempts=3)
     queue.finish('next-owner', 'repaired', {'status': 'failed'}, 1)
     assert historical_candidate_ids(state.config, 'vision', now=NOW) == ['older']
 
