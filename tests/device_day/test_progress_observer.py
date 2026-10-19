@@ -54,6 +54,39 @@ def test_observer_publishes_actual_snapshot_without_inplace_package_or_nas_scan(
     assert control.closed
 
 
+def test_standalone_progress_owner_is_exclusive_and_publishes_fresh_state(tmp_path, monkeypatch):
+    import threading
+    import pytest
+    from visioncortex import config as configuration, runtime_services
+
+    config = observer_config(tmp_path)
+    queue = DeviceDayQueue(tmp_path / 'device-day/queue-vision.sqlite3')
+    queue.enqueue(recording('standalone'), 'v1')
+    monkeypatch.setattr(configuration, 'load_config', lambda path: config)
+    stop = threading.Event()
+    original = runtime_services._publish_progress
+
+    def publish(selected, control, interval):
+        with pytest.raises(BlockingIOError):
+            runtime_services.serve_progress(tmp_path / 'profile.yaml', stop)
+        from visioncortex import device_day_progress
+        real_snapshot = device_day_progress.snapshot
+
+        def once(selected):
+            value = real_snapshot(selected)
+            stop.set()
+            return value
+
+        monkeypatch.setattr(device_day_progress, 'snapshot', once)
+        original(selected, control, interval)
+
+    monkeypatch.setattr(runtime_services, '_publish_progress', publish)
+    runtime_services.serve_progress(tmp_path / 'profile.yaml', stop)
+    result = read_json(tmp_path / 'device-day/ProgressSnapshot.json')
+    assert result['snapshot_producer_pid'] > 0
+    assert next(iter(result['days'].values()))['stages']['vision']['queued'] == 1
+
+
 def test_completed_queue_is_a_hint_and_cannot_claim_verified_publication(tmp_path, monkeypatch):
     queue = DeviceDayQueue(tmp_path / 'device-day/queue-vision.sqlite3')
     queue.enqueue(recording('complete'), 'v1')

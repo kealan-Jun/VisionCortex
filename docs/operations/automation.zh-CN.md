@@ -52,6 +52,16 @@ bash VisionCortexAutomation-Candidate/install.sh --setup
 状态汇总，不能用作处理积压指标；消费者表仅展示本地可运行数量和运行中任务。
 `workload_complete=false` 表示本地状态读取不全，不能把缺失统计视为零任务。
 
+阶段由独立常驻进程托管时，另行托管本地进度发布入口：
+
+```bash
+python -m visioncortex.runtime_services --progress --config <站点配置>
+```
+
+该进程每 5 秒读取本地目录与队列状态，更新 `ProgressSnapshot.json`，不扫描 NAS 媒体或
+启动模型。单实例锁防止多个独立发布进程竞争；主机服务管理器负责退出后的重启。
+核对快照的 `observed_at` 与 `snapshot_producer_pid`，不能以进程在线代替快照新鲜度。
+
 默认有可处理积压且 1800 秒没有新增阶段完成时报告 `no_completed_progress`；可用
 `device_day.progress_stall_seconds` 调整，最小 60 秒。等待和长任务均保留实际状态，告警
 不代表原片丢失，也不代表模型质量已经验证。
