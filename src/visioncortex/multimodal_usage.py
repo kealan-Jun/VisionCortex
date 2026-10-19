@@ -71,9 +71,11 @@ class UsageLedger:
         capacity = self.settings.get('local_receipt_total_bytes', 64*1024*1024)
         unknown = db.execute("SELECT COUNT(*) FROM calls WHERE status='submitted_unknown' "
                              "OR ended IS NULL").fetchone()[0]
+        reconcile = db.execute("SELECT COUNT(*) FROM calls c WHERE c.status='submitted_unknown' OR "
+            "(c.ended IS NULL AND NOT EXISTS(SELECT 1 FROM request_claims q WHERE q.reservation_id=c.id))").fetchone()[0]
         return {'payload_bytes': occupied, 'active_reservations': outstanding,
                 'reserved_bytes': outstanding * maximum, 'capacity_bytes': capacity,
-                'max_response_bytes': maximum, 'unresolved_requests': unknown,
+                'max_response_bytes': maximum, 'unresolved_requests': unknown, 'reconciliation_requests': reconcile,
                 'admission_available': occupied + (outstanding + 1) * maximum <= capacity}
 
     def recovery_status(self):
@@ -86,7 +88,7 @@ class UsageLedger:
                 return {'status': 'legacy_ledger', 'admission_available': None}
             result = self._capacity(db)
         return result | {'status': 'available' if result['admission_available'] else 'local_receipt_capacity',
-                         'unknown_outcomes_require_reconciliation': bool(result['unresolved_requests'])}
+                         'unknown_outcomes_require_reconciliation': bool(result['reconciliation_requests'])}
 
     def reserve(self, input_key):
         today = datetime.now(ZoneInfo('Asia/Shanghai')).date().isoformat()

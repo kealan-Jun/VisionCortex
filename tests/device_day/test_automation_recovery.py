@@ -76,6 +76,14 @@ def test_known_unknown_exception_frees_only_payload_reservation(default_config, 
         ledger.reserve('ambiguous')
 
 
+def test_active_requests_are_not_reported_as_reconciliation_failures(default_config, tmp_path):
+    ledger = UsageLedger(config(default_config, tmp_path))
+    ledger.reserve('in-flight')
+    assert ledger.recovery_status()['unresolved_requests'] == 1
+    assert ledger.recovery_status()['reconciliation_requests'] == 0
+    assert not ledger.recovery_status()['unknown_outcomes_require_reconciliation']
+
+
 def test_protocol_failures_open_shared_transport_circuit(tmp_path):
     binding = {'provider': 'synthetic', 'base_url': 'https://example.test/v1'}
     circuit = Circuit(tmp_path, binding, 'understanding')

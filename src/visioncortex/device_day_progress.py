@@ -213,7 +213,7 @@ def processing_health(config, *, now=None):
     try:
         from .multimodal_usage import UsageLedger
         recovery = UsageLedger(config, readonly=True).recovery_status()
-        if recovery.get('unresolved_requests'):
+        if recovery.get('unknown_outcomes_require_reconciliation'):
             alerts.append({'stage': 'understanding', 'reason': 'awaiting_request_reconciliation'})
         if recovery.get('admission_available') is False:
             alerts.append({'stage': 'understanding', 'reason': 'local_receipt_capacity'})
