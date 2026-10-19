@@ -438,3 +438,16 @@ def test_paced_reader_preserves_bytes_and_avoids_per_megabyte_admission(tmp_path
         assert stream.read(0) == b'' and admissions == []
         assert stream.read(17) + stream.read(1024**2) + stream.read() == payload
         assert stream.read(1) == b''
+
+
+def test_completed_alert_priority_wraps_before_full_archive_sweep(monitor_case):
+    config, record, layout, backend, runner, monitor = monitor_case
+    monitor._alert('retention_failed', record['recording_id'], 'recovery_retry_exhausted')
+    with monitor._db() as db:
+        db.execute("INSERT OR REPLACE INTO cursors VALUES('_closure_cursor','zzzz')")
+    assert tick_selected(monitor)['status'] == 'verified'
+    with monitor._db(readonly=True) as db:
+        assert db.execute("SELECT COUNT(*) FROM checks WHERE lane='retention_closure'").fetchone()[0] == 1
+        assert db.execute("SELECT state FROM alerts WHERE key=?",
+                          ('retention_failed:' + record['recording_id'],)).fetchone()[0] == 'resolved'
+    assert backend.vision_calls == backend.semantic_calls == 0
