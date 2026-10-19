@@ -583,8 +583,8 @@ class IntegrityMonitor:
             for row in rows:
                 if row['status'] == 'failed' and row['retry_limit'] > 0 and row['attempts'] >= row['retry_limit']:
                     self._alert(lane, row['recording_id'], 'recovery_attempt_failed')
-                elif row['status'] == 'completed':
-                    self._alert(lane, row['recording_id'], None)
+                # Completions enter the priority byte-verification lane. A
+                # queue transition alone cannot close an archive alert.
             with self._db() as db:
                 db.execute('INSERT OR REPLACE INTO cursors VALUES(?,?)', (lane, rows[-1]['scan_id'] if rows else 0))
 
