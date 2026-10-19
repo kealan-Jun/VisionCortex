@@ -38,6 +38,20 @@ bash VisionCortexAutomation-Candidate/install.sh --setup
 `/health/automation` 的 `processing_health` 与设备日页面分别显示心跳和处理进度。
 进度按本地队列区分可执行元数据、输入缺失标记、当前清单未观察到、来源版本不一致、
 前置阶段未完成、重试退避和请求结果待核对；这些分类不会删除任务或接受未经验证的媒体。
+`stages.<stage>.workload` 按阶段任务统计，不能将跨阶段数量相加当作独立分片数：
+
+- `processing_backlog` 是本系统待处理任务，不含运行中、输入等待、按计划等待及范围外任务。
+- `waiting_for_input` 单列输入缺失、输入尚未就绪，以及同来源版本的前序输入等待；不计处理积压。
+- `system_attention` 是处理积压中待排查的子集，包含存储访问故障、清单未观察到、来源版本不一致、
+  请求结果待核对和失败预算耗尽等；这些问题仍须本系统排查。
+- `running`、`scheduled_wait`、`completed`、`outside_processing_scope` 分别保留实际状态。
+
+缺失标记只表示当前采集路径未找到输入，不能据此确认原片丢失或将责任归给输入方；
+`input_loss_evidence` 为 `NOT_PROVEN`。实际原片和归档原件的核验仍由输入恢复流程负责。
+已完成任务不会因采集路径缺失而降为待处理。旧消费者接口的 `pending` / `blocked` 是原始未完成
+状态汇总，不能用作处理积压指标；消费者表仅展示本地可运行数量和运行中任务。
+`workload_complete=false` 表示本地状态读取不全，不能把缺失统计视为零任务。
+
 默认有可处理积压且 1800 秒没有新增阶段完成时报告 `no_completed_progress`；可用
 `device_day.progress_stall_seconds` 调整，最小 60 秒。等待和长任务均保留实际状态，告警
 不代表原片丢失，也不代表模型质量已经验证。

@@ -121,6 +121,24 @@ class ProgressPoller:
 STAGES = ('retention', 'vision', 'stt', 'understanding', 'report')
 
 
+def _workload_counts(categories):
+    """Input dependencies are not processing backlog; access faults still are."""
+    result = dict.fromkeys(('completed', 'running', 'processing_backlog', 'system_attention',
+                            'waiting_for_input', 'scheduled_wait', 'outside_processing_scope'), 0)
+    attention = {'inventory_unobserved', 'source_version_mismatch', 'input_unavailable',
+                 'awaiting_request_reconciliation', 'blocked', 'camera_role_unconfigured',
+                 'input_not_processable', 'retry_exhausted'}
+    for category, count in categories.items():
+        group = ('waiting_for_input' if category in {'input_missing', 'input_waiting', 'upstream_input_waiting'} else
+                 'scheduled_wait' if category in {'paused_by_user', 'waiting_for_night_window'} else
+                 category if category in {'completed', 'running', 'outside_processing_scope'} else
+                 'processing_backlog')
+        result[group] += count
+        if category in attention:
+            result['system_attention'] += count
+    return result
+
+
 def processing_health(config, *, now=None):
     """Observe progress and useful backlog separately from process liveness.
 
@@ -133,7 +151,15 @@ def processing_health(config, *, now=None):
     threshold = settings.get('progress_stall_seconds', 1800)
     if type(threshold) not in (int, float) or not math.isfinite(threshold) or threshold < 60:
         raise ValueError('device_day.progress_stall_seconds must be finite and >= 60')
-    queues, errors, inventory = {}, [], None
+    queues, errors, inventory, availability = {}, [], None, {}
+    availability_path = root / 'InputAvailability.sqlite3'
+    if availability_path.is_file():
+        try:
+            from .sqlite_store import connection
+            with connection(availability_path, readonly=True, timeout=.25) as db:
+                availability = {row['id']: dict(row) for row in db.execute('SELECT id,signature,state FROM inputs')}
+        except (OSError, sqlite3.Error):
+            errors.append('input_availability_unavailable')
     inventory_path = root / 'observed-inventory.sqlite3'
     if inventory_path.is_file():
         try:
@@ -165,6 +191,31 @@ def processing_health(config, *, now=None):
     from .device_day_contract import dependencies_for
     from .device_day_night_schedule import paused_stages, stage_admitted
     from .device_day_retry import retry_limit
+
+    def input_state(rid, row):
+        observed = availability.get(rid, {})
+        if observed.get('signature') == row['signature'] and observed.get('state', 'ready') != 'ready':
+            return observed['state']
+        return row['input_status']
+
+    def upstream_input_waiting(rid, row, parents, seen=()):
+        for parent in parents:
+            if parent in seen:
+                continue
+            prior = queues[parent].get(rid)
+            if not prior or prior['status'] == 'completed' or prior['signature'] != row['signature']:
+                continue
+            if prior['status'] == 'running' and (prior['lease_until'] or 0) >= current:
+                continue
+            if input_state(rid, prior) in {'missing', 'waiting'}:
+                return True
+            dependencies = dependencies_for(settings, {'recording_start_us': prior['capture_us'] or 0})[parent]
+            if settings.get('inplace_preprocessing') and parent in {'vision', 'stt'}:
+                dependencies = ()
+            if upstream_input_waiting(rid, prior, dependencies, (*seen, parent)):
+                return True
+        return False
+
     stages, alerts = {}, []
     for stage, rows in queues.items():
         counts, ready_since, completed = {}, [], []
@@ -181,13 +232,14 @@ def processing_health(config, *, now=None):
                 'completed' if status == 'completed' else
                 'outside_processing_scope' if cutoff and (row['capture_us'] or 0) < cutoff else
                 'running' if status == 'running' and (row['lease_until'] or 0) >= current else
-                'input_' + row['input_status'] if row['input_status'] != 'ready' else
+                'input_' + input_state(rid, row) if input_state(rid, row) != 'ready' else
                 'inventory_unobserved' if inventory is not None and rid not in inventory else
                 'source_version_mismatch' if inventory is not None and inventory.get(rid) != row['signature'] else
                 'awaiting_request_reconciliation' if row['reason'] == 'submitted_unknown' else
                 'blocked' if status == 'blocked' else
                 'camera_role_unconfigured' if row['role'] not in {'first_person', 'third_person'} else
                 'input_not_processable' if not (row['processable'] if row['processable'] is not None else row['available']) else
+                'upstream_input_waiting' if upstream_input_waiting(rid, row, parents) else
                 'waiting_for_prerequisite' if status == 'waiting_for_prerequisite' or any(
                     queues[parent].get(rid, {}).get('status') != 'completed' for parent in parents) else
                 'retry_exhausted' if status == 'failed' and row['attempts'] >= retry_limit(
@@ -202,10 +254,13 @@ def processing_health(config, *, now=None):
         last_completed = max(completed, default=None)
         anchor = max(last_completed or 0, min(ready_since)) if ready_since else None
         stalled = anchor is not None and current - anchor >= threshold
+        workload = _workload_counts(counts)
         state = ('evidence_unavailable' if f'{stage}_queue_unavailable' in errors else
                  'no_completed_progress' if stalled else 'working' if ready_since else
-                 'blocked' if any(k != 'completed' for k in counts) else 'idle')
-        stages[stage] = {'status': state, 'categories': counts, 'last_completed_at': last_completed,
+                 'blocked' if workload['processing_backlog'] else
+                 'waiting_for_input' if workload['waiting_for_input'] else
+                 'scheduled_wait' if workload['scheduled_wait'] else 'idle')
+        stages[stage] = {'status': state, 'categories': counts, 'workload': workload, 'last_completed_at': last_completed,
                          'seconds_without_completion': max(0, current - anchor) if anchor is not None else None}
         if stalled:
             alerts.append({'stage': stage, 'reason': 'no_completed_progress'})
@@ -221,6 +276,7 @@ def processing_health(config, *, now=None):
         errors.append('request_recovery_status_unavailable')
     return {'status': 'attention_required' if alerts else 'evidence_unavailable' if errors else 'observing',
             'observed_at': current, 'stall_threshold_seconds': threshold, 'stages': stages,
+            'workload_unit': 'stage_tasks', 'workload_complete': not errors, 'input_loss_evidence': 'NOT_PROVEN',
             'request_recovery': recovery, 'alerts': alerts, 'errors': errors, 'local_metadata_only': True,
             'readiness_boundary': 'receipt_and_media_validation_required'}
 
@@ -231,20 +287,31 @@ def render_processing_health(health):
               'local_receipt_capacity': '本地响应恢复额度已满'}
     rows = ''.join(f'<li>{escape(item["stage"])}：{labels.get(item["reason"], escape(item["reason"]))}</li>'
                    for item in health['alerts'])
-    categories = {'locally_ready': '本地元数据就绪', 'running': '租约有效', 'input_missing': '输入缺失标记',
+    categories = {'locally_ready': '本地元数据就绪', 'running': '租约有效', 'input_missing': '输入待核对',
+                  'input_waiting': '等待输入就绪', 'upstream_input_waiting': '前序等待输入',
                   'inventory_unobserved': '当前清单未观察到', 'source_version_mismatch': '来源版本待核对',
                   'awaiting_request_reconciliation': '请求结果待核对', 'waiting_for_prerequisite': '等待前置阶段',
                   'retry_backoff': '重试退避', 'retry_exhausted': '失败预算耗尽', 'blocked': '待处理阻塞',
                   'input_unavailable': '输入不可访问', 'camera_role_unconfigured': '机位待绑定',
                   'input_not_processable': '输入尚不可处理', 'paused_by_user': '已暂停',
                   'waiting_for_night_window': '等待处理时间窗', 'outside_processing_scope': '处理范围外'}
-    counts = ''.join('<li>' + escape(stage) + '：' + '；'.join(
-        f'{categories.get(key, escape(key))} {count}' for key, count in state['categories'].items()
-        if key != 'completed') + '</li>' for stage, state in health['stages'].items()
-        if any(key != 'completed' for key in state['categories']))
+    counts = []
+    for stage, state in health['stages'].items():
+        workload = state.get('workload') or _workload_counts(state['categories'])
+        if not any(key != 'completed' for key in state['categories']):
+            continue
+        details = '；'.join(f'{categories.get(key, escape(key))} {count}'
+                           for key, count in state['categories'].items() if key != 'completed')
+        counts.append(f'<li>{escape(stage)}：本系统待处理 {workload["processing_backlog"]}'
+                      f'（其中待排查 {workload["system_attention"]}）；运行中 {workload["running"]}；'
+                      f'输入等待 {workload["waiting_for_input"]}（不计处理积压）；'
+                      f'按计划等待 {workload["scheduled_wait"]}<small>{details}</small></li>')
     errors = '<p>部分本地状态不可读，进度核验不完整。</p>' if health['errors'] else ''
     return ('<details open><summary>处理进度核验</summary><p>服务心跳与处理进度分别核验；'
-            '队列就绪状态仍须通过原文件与回执校验。</p>' + errors + '<ul>' + rows + '</ul><ul>' + counts + '</ul></details>')
+            '输入等待单列，不计处理积压。访问故障、来源版本和处理失败仍属本系统待排查。'
+            '缺失标记不代表已确认原片丢失或责任归属；队列就绪状态仍须通过原文件与回执校验。'
+            '以下按阶段任务计数，同一分片可涉及多个阶段。</p>' + errors + '<ul>' + rows + '</ul><ul>'
+            + ''.join(counts) + '</ul></details>')
 
 
 def queue_lifecycle(records, *, limit=100):
@@ -631,11 +698,12 @@ def render_consumers(consumers):
                 waiting = '（' + holds['waiting_for_storage'] + '）'
             rows.append('<tr><td>' + names[stage] + (' · 最新' if scope == 'recent' else ' · 历史') +
                         '</td><td>' + labels[count['status']] + waiting + '</td><td>' + str(count['locally_ready']) +
-                        '</td><td>' + str(count['blocked']) + '</td></tr>')
-    return ('<details><summary>自动处理消费者与积压</summary><p>可运行数量依据本地元数据；执行前仍须核验回执和原文件。'
+                        '</td><td>' + str(count.get('running', 0)) + '</td></tr>')
+    return ('<details><summary>自动处理消费者</summary><p>可运行数量依据本地元数据；执行前仍须核验回执和原文件。'
+            '输入等待、系统待排查和处理积压见处理进度核验。'
             '未提供新版本身份心跳的旧服务，消费者状态暂不可核实。</p>'
             '<div class="table-wrap"><table><thead><tr><th>处理范围</th><th>消费者状态</th><th>待核验可运行</th>'
-            '<th>等待输入或前序</th></tr></thead><tbody>' + ''.join(rows) + '</tbody></table></div></details>')
+            '<th>运行中</th></tr></thead><tbody>' + ''.join(rows) + '</tbody></table></div></details>')
 
 
 def render_diagnostics(failures, timings):
