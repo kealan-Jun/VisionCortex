@@ -329,6 +329,7 @@ class FileIndexPublisher:
                     version = (stat.st_mtime_ns, stat.st_size, photo_version)
                     content_enabled = self.config.get('device_day', {}).get('readable_content_enabled', False)
                     index = None
+                    layout_changed = False
                     if content_enabled:
                         identity = (stat.st_mtime_ns, stat.st_size)
                         index = self._cached_source(name, identity)
@@ -350,15 +351,21 @@ class FileIndexPublisher:
                                 for stage in ('all', 'retention', 'vision', 'stt', 'understanding', 'report'):
                                     producer_locks.enter_context(exclusive(self.runtime/'locks'/f'{record["recording_id"]}.{stage}.lock'))
                             operation = 'frozen_layout_migration'
-                            migration = migrate_display_layout(None, migration_layout)
+                            migration = migrate_display_layout(None, migration_layout, bounded_batch=True)
                             result['layout_migrated'] = result.get('layout_migrated', 0) + len(migration['moved'])
-                            published_videos = publish_selected_videos(migration_layout, index.get('segments', []))
+                            video_progress = {}
+                            published_videos = publish_selected_videos(migration_layout, index.get('segments', []),
+                                bounded_batch=True, progress=video_progress)
                             result['selected_videos_published'] = result.get('selected_videos_published', 0) + len(published_videos)
+                            layout_changed = bool(migration['moved'] or published_videos)
+                            if migration['pending'] or video_progress['pending']:
+                                result['status'] = 'partial'
+                                result['layout_pending'] = True
                         from .device_day_content import content_revision
                         operation = 'content_revision'
                         content_version = content_revision(self.config, index)
                         version += (content_version, self._output_revision(name, index))
-                    if self.versions.get(name) == version:
+                    if self.versions.get(name) == version and not result.get('layout_pending') and not layout_changed:
                         result['unchanged'] += 1
                         continue
                     index = index or _read_source_index(self.config, path)
