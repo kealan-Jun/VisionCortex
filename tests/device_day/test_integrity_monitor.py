@@ -88,6 +88,30 @@ def test_archive_conflict_is_preserved_alerts_deduplicate_and_resolve(monitor_ca
     assert any(e['transition'] == 'resolved' for e in state['events'])
 
 
+def test_completed_new_recipe_closes_both_alerts_after_full_artifact_verification(monitor_case):
+    config, record, _, backend, runner, monitor = monitor_case
+    assert runner.process(record, stage='vision')['status'] == 'completed'
+    enqueue(runner, record, 'vision')
+    queue = runner.queues['vision']
+    assert queue.claim('fixture')
+    queue.finish('fixture', record['recording_id'], {'status': 'completed'}, 1)
+    monitor._alert('vision_failed', record['recording_id'], 'execution_recipe_changed')
+    monitor._alert('vision_recovery', record['recording_id'], 'recovery_attempt_failed')
+    calls = backend.vision_calls
+    assert monitor.tick()['status'] == 'verified'
+    assert integrity_status(config)['active_alert_count'] == 0
+    assert backend.vision_calls == calls
+
+
+def test_completed_queue_does_not_clear_alert_when_owned_archive_is_corrupt(monitor_case):
+    config, record, layout, _, runner, monitor = monitor_case
+    monitor._alert('retention_recovery', record['recording_id'], 'recovery_attempt_failed')
+    saved = read_json(runner._receipt(layout, record, 'retention'))
+    (layout.root / saved['artifacts'][0]['path']).write_bytes(b'corrupt owned fixture')
+    assert monitor.tick()['reason'] == 'archive_content_conflict'
+    assert any(a['reason'] == 'recovery_attempt_failed' for a in integrity_status(config)['alerts'])
+
+
 def test_remounted_identity_gets_only_one_retry_without_erasing_failure(monitor_case):
     config, record, layout, backend, runner, monitor = monitor_case
     video = Path(record['video_path'])
