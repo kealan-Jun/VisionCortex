@@ -248,3 +248,7 @@ visioncortex hash-web-password
 查询参数。若通过 Nginx/Caddy 等受控反向代理提供 TLS，可设置
 `VISIONCORTEX_WEB_REQUIRE_HTTPS=true` 强制拒绝非 HTTPS 请求；当前安装器显示的
 `http://192.168.x.x` 仅适用于受信任、隔离的内网，不能作为公网入口。
+
+2026-10-19 展示整理每次最多复制核验 512 MiB、20000 个内部文件；已筛选视频的
+直接发布另限 512 MiB。超限保留原目录和回执并报告失败，不清理原件，不重新调用模型。
+路径兼容映射也保存在所属目录的 `.Evidence/LegacyPaths.json`；旧映射保留可恢复副本。

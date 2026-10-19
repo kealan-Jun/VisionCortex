@@ -26,7 +26,7 @@ def test_relocation_keeps_old_receipt_valid_and_only_one_visible_entry(device_co
     assert 'Comment/.Evidence/Recognition/' in str(new) and new.parent.name == 'version'
     assert new.read_text() == '原始机器转写\n'
     assert migrate_stt(runner, layout) == []
-    mapped = public_references({'transcript_file': ref}, read_json(layout.comments/'LegacyPaths.json')['aliases'])
+    mapped = public_references({'transcript_file': ref}, read_json(layout.comments/'.Evidence/LegacyPaths.json')['aliases'])
     assert Path(mapped['transcript_file']['path']).parts[1] == '.Evidence'
     assert verify_artifact(layout.root, mapped['transcript_file'])
 
