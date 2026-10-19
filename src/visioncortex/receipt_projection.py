@@ -34,6 +34,75 @@ _MAX_STREAM_EVENTS = 64_000_000
 _MAX_SPOOL_BYTES = 2 * 1024 * 1024 * 1024
 
 
+def artifact_manifest(path, *, max_references=20000, opener=None):
+    """Read bounded references without loading frame/model evidence.
+
+    This checks shape and stable generation, not execution acceptance; the
+    ordinary receipt owner still owns publication acceptance.
+    """
+    import ijson
+    from ijson.common import ObjectBuilder
+    path = Path(path)
+    before = path.stat()
+    if path.is_symlink() or before.st_size > _MAX_STREAM_BYTES:
+        raise ValueError('Unbounded or linked artifact receipt')
+    fields, references, builder, collecting, depth, events = {}, [], None, None, 0, 0
+    reference_events, reference_bytes = 0, 0
+
+    def parse_events(handle):
+        try:
+            yield from ijson.parse(handle, buf_size=1024 * 1024)
+        except ijson.JSONError as exc:
+            raise ValueError('Invalid artifact receipt JSON') from exc
+
+    with (opener or path.open)('rb') as handle:
+        for prefix, event, value in parse_events(handle):
+            events += 1
+            if events % 4096 == 0:
+                from .runtime_control import check_yield
+                check_yield(checkpoint=False)
+            if events > _MAX_STREAM_EVENTS:
+                raise ValueError('Artifact receipt event limit exceeded')
+            if event in {'start_map', 'start_array'}:
+                depth += 1
+            elif event in {'end_map', 'end_array'}:
+                depth -= 1
+            if depth > _MAX_JSON_DEPTH:
+                raise ValueError('Artifact receipt depth limit exceeded')
+            if prefix in {'status', 'stage', 'recording_id', 'key'} and event == 'string':
+                fields[prefix] = value
+            if builder is None and prefix in {'artifacts.item', 'audit_artifacts.item'}:
+                if event != 'start_map' or len(references) >= max_references:
+                    raise ValueError('Invalid or excessive artifact references')
+                builder, collecting = ObjectBuilder(), prefix
+                reference_events = 0
+            if builder is not None:
+                reference_events += 1
+                if reference_events > 256:
+                    raise ValueError('Artifact reference complexity limit exceeded')
+                if isinstance(value, str) and len(value) > 8192:
+                    raise ValueError('Artifact reference value limit exceeded')
+                builder.event(event, value)
+                if prefix == collecting and event == 'end_map':
+                    reference = builder.value
+                    if (not {'path', 'size_bytes', 'sha256'} <= reference.keys()
+                            or not isinstance(reference['path'], str)
+                            or type(reference['size_bytes']) is not int or reference['size_bytes'] < 0
+                            or not isinstance(reference['sha256'], str) or len(reference['sha256']) != 64
+                            or any(c not in '0123456789abcdef' for c in reference['sha256'])):
+                        raise ValueError('Invalid artifact content identity')
+                    references.append((collecting.split('.')[0], reference))
+                    reference_bytes += len(json.dumps(reference, default=str).encode())
+                    if reference_bytes > 32 * 1024**2:
+                        raise ValueError('Artifact reference memory limit exceeded')
+                    builder, collecting = None, None
+    after = path.stat()
+    if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+            after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+        raise ValueError('Artifact receipt changed during verification')
+    return fields, references
+
+
 class ProjectionDeferred(BlockingIOError):
     """Keep the old published index and journal pending; never trim evidence."""
 

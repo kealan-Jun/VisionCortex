@@ -274,17 +274,26 @@ def processing_health(config, *, now=None):
             alerts.append({'stage': 'understanding', 'reason': 'local_receipt_capacity'})
     except (OSError, sqlite3.Error, ValueError):
         errors.append('request_recovery_status_unavailable')
+    from .input_availability import integrity_status
+    integrity = integrity_status(config, now=current)
+    if integrity['active_alert_count']:
+        alerts.append({'stage': 'archive', 'reason': 'archive_integrity_alerts'})
+    if integrity['status'] not in {'not_configured', 'running', 'disabled'}:
+        alerts.append({'stage': 'archive', 'reason': 'integrity_service_unavailable'})
     return {'status': 'attention_required' if alerts else 'evidence_unavailable' if errors else 'observing',
             'observed_at': current, 'stall_threshold_seconds': threshold, 'stages': stages,
             'workload_unit': 'stage_tasks', 'workload_complete': not errors, 'input_loss_evidence': 'NOT_PROVEN',
-            'request_recovery': recovery, 'alerts': alerts, 'errors': errors, 'local_metadata_only': True,
+            'request_recovery': recovery, 'input_integrity': integrity,
+            'alerts': alerts, 'errors': errors, 'local_metadata_only': True,
             'readiness_boundary': 'receipt_and_media_validation_required'}
 
 
 def render_processing_health(health):
     labels = {'no_completed_progress': '长时间没有新增完成任务',
               'awaiting_request_reconciliation': '已提交请求结果待核对',
-              'local_receipt_capacity': '本地响应恢复额度已满'}
+              'local_receipt_capacity': '本地响应恢复额度已满',
+              'archive_integrity_alerts': '输入或归档校验有待处理异常',
+              'integrity_service_unavailable': '自动校验服务未就绪或心跳过期'}
     rows = ''.join(f'<li>{escape(item["stage"])}：{labels.get(item["reason"], escape(item["reason"]))}</li>'
                    for item in health['alerts'])
     categories = {'locally_ready': '本地元数据就绪', 'running': '租约有效', 'input_missing': '输入待核对',
@@ -311,7 +320,56 @@ def render_processing_health(health):
             '输入等待单列，不计处理积压。访问故障、来源版本和处理失败仍属本系统待排查。'
             '缺失标记不代表已确认原片丢失或责任归属；队列就绪状态仍须通过原文件与回执校验。'
             '以下按阶段任务计数，同一分片可涉及多个阶段。</p>' + errors + '<ul>' + rows + '</ul><ul>'
-            + ''.join(counts) + '</ul></details>')
+            + ''.join(counts) + '</ul>' + render_integrity(health.get('input_integrity', {})) + '</details>')
+
+
+def render_integrity(state):
+    if not state or state.get('status') == 'not_configured':
+        return ''
+    reasons = {'archive_content_conflict': '归档内容与回执哈希冲突',
+               'derived_content_conflict': '派生产物与回执哈希冲突',
+               'derived_artifact_missing': '派生产物缺失', 'published_index_missing': '已发布索引缺失，等待重放',
+               'archive_receipt_missing': '归档回执缺失', 'archive_receipt_invalid': '归档回执结构待核对',
+               'archive_receipt_unverified': '归档来源身份待核对', 'archive_source_binding_changed': '归档路径绑定待核对',
+               'completed_receipt_missing': '已完成阶段回执缺失', 'completed_receipt_unverified': '已完成回执身份待核对',
+               'recorder_input_missing': '采集原件缺失，未重建采集目录',
+               'input_revalidation_rejected': '原件内容或来源身份未通过重验',
+               'input_seal_unavailable': '缺少可核验的输入封存',
+               'archive_missing_source_unverified': '归档缺失且原件尚未核验',
+               'integrity_verification_unavailable': '存储或校验暂不可用',
+               'recovery_retry_exhausted': '同一修复已重试，需进一步排查',
+               'verification_budget_exceeded': '本条校验量超过配置上限',
+               'input_changed_during_verification': '校验期间文件发生变化',
+               'input_recovery_state_changed': '恢复前队列状态已变化'}
+    reasons['storage_identity_unverified'] = '存储挂载或卷身份未通过核验'
+    reasons['execution_recipe_changed'] = '执行配方已变化，须走正常准入'
+    rows = ''.join('<li>' + escape(item['stage']) + ' · ' + escape(item['id']) + '：'
+                   + escape(reasons.get(item['reason'], item['reason'])) + '</li>' for item in state.get('alerts', []))
+    count = state.get('active_alert_count', 0)
+    service = state.get('service') or {}
+    outcomes = {'verified': '最近分片核验通过', 'restored': '归档文件已补回', 'retry_authorized': '已授权一次恢复重试',
+                'attention_required': '发现待处理异常', 'idle': '等待下次检查', 'busy': '等待运行任务释放校验锁',
+                'disabled': '校验未启用', 'yielded_to_foreground': '为前台任务让出资源',
+                'storage_unavailable': '等待存储恢复'}
+    last = outcomes.get((service.get('last_result') or {}).get('status'), '尚无检查结果')
+    transitions = {'raised': '新增异常', 'changed': '异常变化', 'resolved': '异常解除', 'recovered': '完成自动恢复'}
+    event_reasons = reasons | {'restored': '归档文件已补回', 'retry_authorized': '已授权一次恢复重试'}
+    events = ''.join('<li>' + escape(transitions.get(event['transition'], event['transition'])) + ' · '
+                     + escape(event['key']) + '：' + escape(event_reasons.get(event['reason'], event['reason']))
+                     + '</li>' for event in state.get('events', []))
+    coverage = state.get('coverage') or {}
+    coverage_text = ('<p>完成归档队列记录 ' + str(coverage['completed_queue_records']) + '；当前有效校验 '
+                     + str(coverage['verified_current']) + '；尚未核验或已变化 ' + str(coverage['unverified_or_changed'])
+                     + '；超过复查时间 ' + str(coverage['overdue_current']) + '。</p>' if coverage else '')
+    return ('<section class="integrity-status" aria-live="polite"><h3>自动校验与归档完整性</h3>'
+            '<p' + (' role="alert"' if count or not state.get('available') else '') + '>'
+            + ('校验服务运行中' if state.get('available') and state.get('status') == 'running' else
+               '校验未启用' if state.get('status') == 'disabled' else '校验服务状态待检查')
+            + f'；待处理异常 {count} 条。最近检查：' + escape(last) + '。</p><ul>' + rows + '</ul>'
+            + coverage_text
+            + '<details><summary>最近告警与恢复事件</summary><ul>' + events + '</ul></details>'
+            '<p>异常跨重启保留；重复异常不反复通知，变化和恢复会记入事件。校验按分片轮转，'
+            '服务在线或单条通过不代表全部历史归档已完成检查。</p></section>')
 
 
 def queue_lifecycle(records, *, limit=100):
