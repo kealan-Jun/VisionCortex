@@ -69,7 +69,9 @@ class ProgressPoller:
             from .device_day_consumers import consumer_snapshot
             consumers = consumer_snapshot(config)
             repair = retry_observation(config)
+            health = processing_health(config)
             self.consumer_state = {'consumers': consumers, 'consumer_html': render_consumers(consumers),
+                                   'processing_health': health, 'processing_health_html': render_processing_health(health),
                                    'retry_repair': repair, 'retry_repair_html': render_retry_observation(repair)}
             return cached | self.consumer_state
         # Only the publisher writes the shared file. A slow HTTP fallback must
@@ -117,6 +119,132 @@ class ProgressPoller:
             raise
 
 STAGES = ('retention', 'vision', 'stt', 'understanding', 'report')
+
+
+def processing_health(config, *, now=None):
+    """Observe progress and useful backlog separately from process liveness.
+
+    Only local catalogs are read. Missing observations are not proof that media
+    was deleted, and runnable metadata never accepts a receipt or model result.
+    """
+    current = time.time() if now is None else now
+    root = Path(config['storage']['local_runtime_root']) / 'device-day'
+    settings = config.get('device_day') or {}
+    threshold = settings.get('progress_stall_seconds', 1800)
+    if type(threshold) not in (int, float) or not math.isfinite(threshold) or threshold < 60:
+        raise ValueError('device_day.progress_stall_seconds must be finite and >= 60')
+    queues, errors, inventory = {}, [], None
+    inventory_path = root / 'observed-inventory.sqlite3'
+    if inventory_path.is_file():
+        try:
+            from .sqlite_store import connection
+            with connection(inventory_path, readonly=True, timeout=.25) as db:
+                inventory = {row[0]: row[1] for row in db.execute(
+                    "SELECT id,json_extract(payload,'$.source_signature') FROM observations")}
+        except (OSError, sqlite3.Error):
+            errors.append('current_inventory_unavailable')
+    for stage in STAGES:
+        path = root / f'queue-{stage}.sqlite3'
+        queues[stage] = {}
+        if not path.is_file():
+            continue
+        try:
+            from .sqlite_store import connection
+            with connection(path, readonly=True, timeout=.25) as db:
+                for row in db.execute("SELECT recording_id,status,input_status,lease_until,queued_at,updated_at,"
+                    "completed_at,attempts,retry_limit,json_extract(payload,'$.source_signature') AS signature,"
+                    "json_extract(payload,'$.configured_role') AS role,"
+                    "json_extract(payload,'$.processable') AS processable,"
+                    "json_extract(payload,'$.available') AS available,"
+                    "json_extract(payload,'$.recording_start_us') AS capture_us,"
+                    "json_extract(result,'$.status') AS result_status,json_extract(result,'$.reason') AS reason,"
+                    "json_extract(result,'$.retry_at') AS retry_at FROM recordings"):
+                    queues[stage][row['recording_id']] = dict(row)
+        except (OSError, sqlite3.Error):
+            errors.append(f'{stage}_queue_unavailable')
+    from .device_day_contract import dependencies_for
+    from .device_day_night_schedule import paused_stages, stage_admitted
+    from .device_day_retry import retry_limit
+    stages, alerts = {}, []
+    for stage, rows in queues.items():
+        counts, ready_since, completed = {}, [], []
+        for rid, row in rows.items():
+            status = row['status']
+            if row['completed_at'] and status == 'completed':
+                completed.append(row['completed_at'])
+            record = {'recording_start_us': row['capture_us'] or 0}
+            cutoff = settings.get('process_since_us')
+            parents = dependencies_for(settings, record)[stage]
+            if settings.get('inplace_preprocessing') and stage in {'vision', 'stt'}:
+                parents = ()
+            category = (
+                'completed' if status == 'completed' else
+                'outside_processing_scope' if cutoff and (row['capture_us'] or 0) < cutoff else
+                'running' if status == 'running' and (row['lease_until'] or 0) >= current else
+                'input_' + row['input_status'] if row['input_status'] != 'ready' else
+                'inventory_unobserved' if inventory is not None and rid not in inventory else
+                'source_version_mismatch' if inventory is not None and inventory.get(rid) != row['signature'] else
+                'awaiting_request_reconciliation' if row['reason'] == 'submitted_unknown' else
+                'blocked' if status == 'blocked' else
+                'camera_role_unconfigured' if row['role'] not in {'first_person', 'third_person'} else
+                'input_not_processable' if not (row['processable'] if row['processable'] is not None else row['available']) else
+                'waiting_for_prerequisite' if status == 'waiting_for_prerequisite' or any(
+                    queues[parent].get(rid, {}).get('status') != 'completed' for parent in parents) else
+                'retry_exhausted' if status == 'failed' and row['attempts'] >= retry_limit(
+                    row, settings.get('failure_retry_limit') or 3) else
+                'retry_backoff' if (row['retry_at'] or 0) > current else
+                'paused_by_user' if stage in paused_stages(config) else
+                'waiting_for_night_window' if not stage_admitted(config, stage) else
+                'locally_ready')
+            counts[category] = counts.get(category, 0) + 1
+            if category in {'locally_ready', 'running', 'retry_backoff'}:
+                ready_since.append(row['queued_at'])
+        last_completed = max(completed, default=None)
+        anchor = max(last_completed or 0, min(ready_since)) if ready_since else None
+        stalled = anchor is not None and current - anchor >= threshold
+        state = ('evidence_unavailable' if f'{stage}_queue_unavailable' in errors else
+                 'no_completed_progress' if stalled else 'working' if ready_since else
+                 'blocked' if any(k != 'completed' for k in counts) else 'idle')
+        stages[stage] = {'status': state, 'categories': counts, 'last_completed_at': last_completed,
+                         'seconds_without_completion': max(0, current - anchor) if anchor is not None else None}
+        if stalled:
+            alerts.append({'stage': stage, 'reason': 'no_completed_progress'})
+    recovery = {}
+    try:
+        from .multimodal_usage import UsageLedger
+        recovery = UsageLedger(config, readonly=True).recovery_status()
+        if recovery.get('unresolved_requests'):
+            alerts.append({'stage': 'understanding', 'reason': 'awaiting_request_reconciliation'})
+        if recovery.get('admission_available') is False:
+            alerts.append({'stage': 'understanding', 'reason': 'local_receipt_capacity'})
+    except (OSError, sqlite3.Error, ValueError):
+        errors.append('request_recovery_status_unavailable')
+    return {'status': 'attention_required' if alerts else 'evidence_unavailable' if errors else 'observing',
+            'observed_at': current, 'stall_threshold_seconds': threshold, 'stages': stages,
+            'request_recovery': recovery, 'alerts': alerts, 'errors': errors, 'local_metadata_only': True,
+            'readiness_boundary': 'receipt_and_media_validation_required'}
+
+
+def render_processing_health(health):
+    labels = {'no_completed_progress': '长时间没有新增完成任务',
+              'awaiting_request_reconciliation': '已提交请求结果待核对',
+              'local_receipt_capacity': '本地响应恢复额度已满'}
+    rows = ''.join(f'<li>{escape(item["stage"])}：{labels.get(item["reason"], escape(item["reason"]))}</li>'
+                   for item in health['alerts'])
+    categories = {'locally_ready': '本地元数据就绪', 'running': '租约有效', 'input_missing': '输入缺失标记',
+                  'inventory_unobserved': '当前清单未观察到', 'source_version_mismatch': '来源版本待核对',
+                  'awaiting_request_reconciliation': '请求结果待核对', 'waiting_for_prerequisite': '等待前置阶段',
+                  'retry_backoff': '重试退避', 'retry_exhausted': '失败预算耗尽', 'blocked': '待处理阻塞',
+                  'input_unavailable': '输入不可访问', 'camera_role_unconfigured': '机位待绑定',
+                  'input_not_processable': '输入尚不可处理', 'paused_by_user': '已暂停',
+                  'waiting_for_night_window': '等待处理时间窗', 'outside_processing_scope': '处理范围外'}
+    counts = ''.join('<li>' + escape(stage) + '：' + '；'.join(
+        f'{categories.get(key, escape(key))} {count}' for key, count in state['categories'].items()
+        if key != 'completed') + '</li>' for stage, state in health['stages'].items()
+        if any(key != 'completed' for key in state['categories']))
+    errors = '<p>部分本地状态不可读，进度核验不完整。</p>' if health['errors'] else ''
+    return ('<details open><summary>处理进度核验</summary><p>服务心跳与处理进度分别核验；'
+            '队列就绪状态仍须通过原文件与回执校验。</p>' + errors + '<ul>' + rows + '</ul><ul>' + counts + '</ul></details>')
 
 
 def queue_lifecycle(records, *, limit=100):
@@ -367,7 +495,9 @@ def snapshot(config):
     lifecycle_html = '<ul>' + ''.join(f'<li>{escape(row["archive"])} · {escape(row["recording_id"])}：{escape(row["label"])}'
         + ('；外部采集保留期限未知' if row['retention_policy']['status'] == 'unknown' else '') + '</li>'
         for row in lifecycle if row['publication_status'] != 'completed') + '</ul>'
+    health = processing_health(config, now=now)
     return {'consumers': consumers, 'consumer_html': render_consumers(consumers),
+            'processing_health': health, 'processing_health_html': render_processing_health(health),
             'retry_repair': repair, 'retry_repair_html': render_retry_observation(repair),
             'input_lifecycle': lifecycle, 'input_lifecycle_observation': lifecycle_observation,
             'storage_maintenance': os.environ.get('VISIONCORTEX_STORAGE_MAINTENANCE', '0') == '1',

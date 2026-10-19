@@ -253,8 +253,10 @@ def automation_readiness() -> JSONResponse:
         ),
         monitor_metadata=monitor_metadata,
     )
+    from ..device_day_progress import processing_health
     return JSONResponse(
-        result | {"build": identity()}, headers={"Cache-Control": "no-store"}
+        result | {"build": identity(), "processing_health": processing_health(settings)},
+        headers={"Cache-Control": "no-store"}
     )
 
 

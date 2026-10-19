@@ -15,35 +15,48 @@ class PublicationJournal:
         with connection(self.path) as db:
             db.executescript('''PRAGMA journal_mode=WAL;
                 CREATE TABLE IF NOT EXISTS dirty(id TEXT PRIMARY KEY, token TEXT NOT NULL, record TEXT NOT NULL);''')
+            # Additive and separate: old workers can still INSERT INTO dirty.
+            db.execute('CREATE TABLE IF NOT EXISTS retries(id TEXT PRIMARY KEY,token TEXT NOT NULL,'
+                       'attempts INTEGER NOT NULL,next_attempt_at REAL NOT NULL,reason TEXT NOT NULL)')
 
     def begin(self, record):
         token = uuid.uuid4().hex
         with connection(self.path) as db:
             db.execute('INSERT OR REPLACE INTO dirty VALUES(?,?,?)',
                        (record['recording_id'], token, json.dumps(record)))
+            db.execute('DELETE FROM retries WHERE id=?', (record['recording_id'],))
         return token
 
     def complete(self, identifier, token):
         with connection(self.path) as db:
             db.execute('DELETE FROM dirty WHERE id=? AND token=?', (identifier, token))
+            db.execute('DELETE FROM retries WHERE id=? AND token=?', (identifier, token))
 
-    def pending(self, limit=32, *, since_us=None, prefer_since_us=None, latest_first=False):
+    def pending(self, limit=32, *, since_us=None, prefer_since_us=None, latest_first=False, ready_only=False):
         if type(latest_first) is not bool:
             raise ValueError('Publication latest_first must be a boolean')
         time_order = "COALESCE(json_extract(record,'$.recording_start_us'),0) DESC," if latest_first else ''
         with connection(self.path, readonly=True) as db:
             return [(row['token'], json.loads(row['record'])) for row in db.execute(
-                "SELECT * FROM dirty WHERE ? IS NULL OR MAX(COALESCE(json_extract(record,'$.recording_start_us'),0),"
-                "COALESCE(json_extract(record,'$.recording_end_us'),0))>=? ORDER BY "
+                "SELECT * FROM dirty WHERE (? IS NULL OR MAX(COALESCE(json_extract(record,'$.recording_start_us'),0),"
+                "COALESCE(json_extract(record,'$.recording_end_us'),0))>=?) "
+                "AND (?=0 OR NOT EXISTS(SELECT 1 FROM retries r WHERE r.id=dirty.id AND r.token=dirty.token "
+                "AND r.next_attempt_at>?)) ORDER BY "
                 "CASE WHEN ? IS NOT NULL AND COALESCE(json_extract(record,'$.recording_start_us'),0)>=? "
                 "THEN 0 ELSE 1 END," + time_order + "rowid LIMIT ?",
-                (since_us, since_us, prefer_since_us, prefer_since_us, limit))]
+                (since_us, since_us, ready_only, time.time(), prefer_since_us, prefer_since_us, limit))]
 
-    def defer(self, identifier, token):
+    def defer(self, identifier, token, *, reason='not_ready', now=None):
         with connection(self.path) as db:
             db.execute('BEGIN IMMEDIATE')
             row = db.execute('SELECT record FROM dirty WHERE id=? AND token=?', (identifier, token)).fetchone()
             if row:
+                previous = db.execute('SELECT attempts FROM retries WHERE id=? AND token=?',
+                                      (identifier, token)).fetchone()
+                attempts = previous[0] + 1 if previous else 1
+                delay = min(3600, (5 if reason == 'lock_busy' else 30) * 2 ** min(attempts - 1, 8))
+                db.execute('INSERT OR REPLACE INTO retries VALUES(?,?,?,?,?)',
+                           (identifier, token, attempts, (time.time() if now is None else now) + delay, reason))
                 db.execute('DELETE FROM dirty WHERE id=? AND token=?', (identifier, token))
                 db.execute('INSERT INTO dirty VALUES(?,?,?)', (identifier, token, row['record']))
 
@@ -116,7 +129,7 @@ def reconcile(runner):
     completed = 0
     recent = round((time.time() - runner.settings.get('live_priority_seconds', 14400)) * 1e6)
     for token, record in journal.pending(since_us=processing_cutoff(runner.settings), prefer_since_us=recent,
-                                        latest_first=runner.settings.get('latest_first', False)):
+                                        latest_first=runner.settings.get('latest_first', False), ready_only=True):
         try:
             # Never acknowledge an in-flight stage before its receipt exists.
             # A crash between receipt and index publication must remain replayable.
@@ -142,5 +155,6 @@ def reconcile(runner):
                 import logging
                 logging.getLogger(__name__).warning('Publication replay deferred %s: %s',
                                                     record['recording_id'], type(exc).__name__)
-            journal.defer(record['recording_id'], token)
+            journal.defer(record['recording_id'], token,
+                          reason='lock_busy' if isinstance(exc, BlockingIOError) else type(exc).__name__)
     return completed

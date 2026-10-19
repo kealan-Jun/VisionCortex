@@ -207,6 +207,8 @@ class DeviceDayQueue:
             parameters = [current]
             if retry:
                 parameters.extend([max_attempts, max_attempts])
+            conditions.append("COALESCE(json_extract(r.result,'$.retry_at'),0)<=?")
+            parameters.append(current)
             if exclude:
                 conditions.append("r.recording_id NOT IN (SELECT value FROM json_each(?))")
                 parameters.append(json.dumps(list(exclude)))
@@ -347,6 +349,17 @@ class DeviceDayQueue:
             with self.connect() as db:
                 db.execute('BEGIN IMMEDIATE')
                 self._account_dispatch(db, owner, recording_id, seconds)
+                if result['status'] in {'waiting_for_provider', 'waiting_for_publication', 'waiting_for_storage', 'running_elsewhere'}:
+                    previous = db.execute('SELECT result FROM recordings WHERE recording_id=? AND lease_owner=?',
+                                          (recording_id, owner)).fetchone()
+                    old = json.loads(previous[0] or '{}') if previous else {}
+                    count = min(16, old.get('wait_count', 0) + 1) if old.get('status') == result['status'] else 1
+                    reason = result.get('reason') or result['status']
+                    if result.get('error_type') == 'ReceiptCapacityUnavailable' or str(result.get('message', '')).startswith('Local paid-response receipt recovery capacity exhausted'):
+                        reason = 'local_receipt_capacity'
+                    base = 5 if result['status'] == 'running_elsewhere' else 30
+                    result = result | {'reason': reason, 'wait_count': count,
+                                       'retry_at': time.time() + min(900, base * 2 ** min(count - 1, 5))}
                 db.execute("""UPDATE recordings SET status='queued',result=?,
                   attempts=MAX(0,attempts-1),lease_owner=NULL,lease_until=NULL,
                   updated_at=? WHERE recording_id=? AND lease_owner=?""",
