@@ -369,7 +369,7 @@ def render(data):
 <div id="Operations"></div>
 <section><h2>当前运行情况</h2>{render_service_status(data.get('processing_services'))}<p>原片、YOLO 按新分片持续处理。{night}无新增采集的日期不会被当作“无实验活动”。</p>{cloud}
 <ul>{running or '<li>当前没有有效运行任务，具体等待原因见各日期的阶段状态。</li>'}</ul>
-{progress.get('consumer_html', '')}{progress.get('latency_html', '')}
+{progress.get('processing_health_html', '')}{progress.get('consumer_html', '')}{progress.get('latency_html', '')}
 <p>采集端原视频软链接替换：{'已启用' if progress['capture_link_cleanup']['enabled'] else '尚未启用，原片可能仍有两份'}。</p>{'<details class="error"><summary>查看索引与队列读取异常（正在后台核对恢复）</summary><ul>'+errors+'</ul></details>' if errors else ''}</section>
 <section><h2>每天处理到哪里了</h2><p>发布结果按原始分片去重；活动时长按同一天全部视角的采集时间合并，不重复相加，也不代表已确认的实验员工作时长。</p>
 <div class="table-wrap"><table><thead><tr><th>采集日期</th><th>采集量</th><th>已有预处理结果</th><th>检出活动</th><th>动作关键帧</th><th>录音 / 转写</th><th>多模态理解</th><th>YOLO 当前状态</th></tr></thead><tbody>{''.join(rows) or '<tr><td colspan="8">尚无可读取的采集数据</td></tr>'}</tbody></table></div></section>

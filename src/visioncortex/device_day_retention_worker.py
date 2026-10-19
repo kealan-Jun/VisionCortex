@@ -135,6 +135,7 @@ class RetentionWorker:
             states = {r['recording_id']: dict(r) for r in db.execute(
                 'SELECT recording_id,status,lease_until,attempts,retry_limit,updated_at,blocked_reason,'
                 'first_ready_at,last_dispatch_at,queued_at,processing_cohort,'
+                "json_extract(result,'$.retry_at') AS retry_at,"
                 "json_extract(payload,'$.activity_kind') AS activity_kind,"
                 "json_extract(payload,'$.source_signature') AS source_signature,"
                 "json_extract(payload,'$.audio.source_signature') AS audio_signature FROM recordings WHERE "
@@ -163,6 +164,8 @@ class RetentionWorker:
             if ready is not None and rid not in ready:
                 continue
             state = states.get(rid, {})
+            if (state.get('retry_at') or 0) > current:
+                continue
             if state.get('blocked_reason'):
                 continue
             if (state.get('processing_cohort') == 'historical_backfill' and self.admission_cohort == 'live'
@@ -252,6 +255,14 @@ class RetentionWorker:
     def admit(self, runner, record):
         from .device_day import load_context, visual_input
         from .device_day_inplace import active, receipt
+        # Durable waits apply to both foreground and historical admitters,
+        # before rereading or hashing any parent artifacts on the NAS.
+        with connection(runner.queues[self.stage].path, readonly=True) as db:
+            waiting = db.execute("SELECT json_extract(result,'$.retry_at') FROM recordings "
+                                 "WHERE recording_id=? AND json_extract(payload,'$.source_signature') IS ?",
+                                 (record['recording_id'], record.get('source_signature'))).fetchone()
+        if waiting and (waiting[0] or 0) > time.time():
+            return False
         native = active(runner, record)
         if self.stage not in {'understanding', 'report'} and native:
             admitted = enqueue(runner, record, self.stage)
@@ -469,6 +480,7 @@ def serve(config_path, stop, *, stage='retention'):
     backfill = BackfillSupervisor(stage, stop) if stage in SUPPORTED_STAGES else None
     from .device_day_synthesis_worker import DaySynthesisSupervisor
     synthesis = DaySynthesisSupervisor(stop) if stage == 'report' else None
+    synthesis_not_before = 0
     try:
         while not stop.is_set():
             delay = 5
@@ -519,12 +531,20 @@ def serve(config_path, stop, *, stage='retention'):
                 history = backfill.poll(runner, allow_start=True) if fair else None
                 history_running = fair and history and history.get('status') == 'running'
                 result = worker.tick(runner, stop)
-                day_result = synthesis.poll(config) if synthesis is not None else None
+                day_result = None
+                if synthesis is not None:
+                    day_result = (synthesis.poll(config) if time.time() >= synthesis_not_before else
+                                  {'status': 'retry_backoff', 'retry_at': synthesis_not_before})
+                    if day_result.get('status') in {'failed', 'resource_wait', 'waiting_for_provider_receipt', 'waiting'}:
+                        # The supervisor may already have one bounded unit in
+                        # flight. Avoid polling/resubmitting empty or failing
+                        # whole-day scans continuously while stage work runs.
+                        synthesis_not_before = time.time() + 60
                 if backfill is not None and not fair:
                     allow_start = enabled and result.get('status') == 'waiting' and result.get('admitted', 0) == 0
                     history = backfill.poll(runner, allow_start=allow_start)
                 if enabled:
-                    delay = 1
+                    delay = 5 if result.get('status') == 'waiting' and not result.get('admitted') else 1
                     if history and history.get('status') == 'processed':
                         delay = 0
                     consumer.update(backfill_status=(history.get('reason') or history['status']) if history else 'waiting_for_live')
@@ -533,8 +553,9 @@ def serve(config_path, stop, *, stage='retention'):
                 consumer.update(scope='history' if history_running else (
                                     'recent' if worker.recent_seconds is not None else 'all'),
                                 last_result=history or result)
-                if any(value and (value.get('result') or {}).get('status') == 'completed'
-                       for value in (result, history)):
+                if any(value and ((value.get('result') or {}).get('status') == 'completed'
+                       or any((item.get('result') or {}).get('status') == 'completed'
+                              for item in value.get('results', []))) for value in (result, history)):
                     consumer.update(last_success_at=time.time())
             except Exception as exc:
                 if backfill is not None:

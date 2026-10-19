@@ -15,6 +15,11 @@ class SubmittedUnknown(ProviderUnavailable):
     reason = 'submitted_unknown'
 
 
+class ReceiptCapacityUnavailable(ProviderUnavailable):
+    """Local recovery storage admission, independent of provider availability."""
+    reason = 'local_receipt_capacity'
+
+
 def validate(settings):
     for name in ('scene_daily_attempt_limit', 'scene_daily_token_limit', 'local_receipt_max_bytes', 'local_receipt_total_bytes'):
         value = settings.get(name)
@@ -53,6 +58,36 @@ class UsageLedger:
                   input_key TEXT NOT NULL, payload TEXT NOT NULL, saved REAL NOT NULL);
                 CREATE INDEX IF NOT EXISTS receipts_by_input ON local_receipts(input_key);''')
 
+    def _capacity(self, db):
+        occupied = db.execute('SELECT COALESCE(SUM(length(CAST(payload AS BLOB))),0) '
+                              'FROM local_receipts').fetchone()[0]
+        # Claims protect request identity indefinitely. Only calls which can
+        # still deliver a response reserve payload bytes. A durably recorded
+        # unknown outcome keeps its claim, without occupying an empty buffer.
+        outstanding = db.execute("SELECT COUNT(*) FROM request_claims q JOIN calls c "
+            "ON c.id=q.reservation_id WHERE c.ended IS NULL AND c.status='pending' "
+            "AND NOT EXISTS(SELECT 1 FROM local_receipts r WHERE r.reservation_id=c.id)").fetchone()[0]
+        maximum = self.settings.get('local_receipt_max_bytes', 2*1024*1024)
+        capacity = self.settings.get('local_receipt_total_bytes', 64*1024*1024)
+        unknown = db.execute("SELECT COUNT(*) FROM calls WHERE status='submitted_unknown' "
+                             "OR ended IS NULL").fetchone()[0]
+        return {'payload_bytes': occupied, 'active_reservations': outstanding,
+                'reserved_bytes': outstanding * maximum, 'capacity_bytes': capacity,
+                'max_response_bytes': maximum, 'unresolved_requests': unknown,
+                'admission_available': occupied + (outstanding + 1) * maximum <= capacity}
+
+    def recovery_status(self):
+        """Read local admission and reconciliation evidence without changing it."""
+        if not self.path.is_file():
+            return {'status': 'not_initialized', 'unresolved_requests': 0}
+        with connection(self.path, readonly=True) as db:
+            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if not {'calls', 'request_claims', 'local_receipts'} <= tables:
+                return {'status': 'legacy_ledger', 'admission_available': None}
+            result = self._capacity(db)
+        return result | {'status': 'available' if result['admission_available'] else 'local_receipt_capacity',
+                         'unknown_outcomes_require_reconciliation': bool(result['unresolved_requests'])}
+
     def reserve(self, input_key):
         today = datetime.now(ZoneInfo('Asia/Shanghai')).date().isoformat()
         attempts = max(1, int(self.settings.get('max_retries', 1)))
@@ -67,12 +102,8 @@ class UsageLedger:
             claim = db.execute('SELECT reservation_id FROM request_claims WHERE input_key=?', (input_key,)).fetchone()
             if unresolved or claim:
                 raise SubmittedUnknown('submitted_unknown: reconcile the existing request receipt before another submission')
-            maximum = self.settings.get('local_receipt_max_bytes', 2*1024*1024)
-            capacity = self.settings.get('local_receipt_total_bytes', 64*1024*1024)
-            occupied = db.execute('SELECT COALESCE(SUM(length(CAST(payload AS BLOB))),0) FROM local_receipts').fetchone()[0]
-            outstanding = db.execute('SELECT COUNT(*) FROM request_claims').fetchone()[0]
-            if occupied + (outstanding+1)*maximum > capacity:
-                raise ProviderUnavailable('Local paid-response receipt recovery capacity exhausted; work remains queued')
+            if not self._capacity(db)['admission_available']:
+                raise ReceiptCapacityUnavailable('Local paid-response receipt recovery capacity exhausted; work remains queued')
             used = db.execute('SELECT COALESCE(SUM(COALESCE(attempts,reserved_attempts)),0), '
                 'COALESCE(SUM(total_tokens),0), COALESCE(SUM(COALESCE(unknown_attempts,reserved_attempts)),0) '
                 'FROM calls WHERE day=?', (today,)).fetchone()
@@ -120,6 +151,7 @@ class UsageLedger:
         """Persist the transport result on SSD before archive publication."""
         payload = json.dumps(result, ensure_ascii=False, separators=(',', ':'))
         if len(payload.encode('utf-8')) > self.settings.get('local_receipt_max_bytes', 2*1024*1024):
+            self.submitted_unknown(identifier)
             raise SubmittedUnknown('submitted_unknown: paid-response receipt exceeds the declared local recovery bound')
         with connection(self.path) as db:
             row = db.execute('SELECT input_key FROM calls WHERE id=?', (identifier,)).fetchone()

@@ -32,7 +32,8 @@ def classify(error):
         return 'credential_unavailable', 900
     if status == 429:
         return 'rate_limited', 60
-    if status in {500, 502, 503, 504} or any(name in type(error).__name__.lower() for name in ('timeout', 'connecterror', 'networkerror')):
+    if status in {500, 502, 503, 504} or any(name in type(error).__name__.lower() for name in
+            ('timeout', 'connecterror', 'networkerror', 'protocolerror', 'readerror', 'writeerror')):
         return 'transport_unavailable', 30
     return None
 
