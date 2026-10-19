@@ -927,7 +927,7 @@ class DeviceDayModels:
                                 continue
                             selected_frames = self._action_frame(
                                 layout, view, info, choice,
-                                folder / "KeyFrames" / "".join(word.capitalize() for word in event["action_type"].split("_")) / event["event_id"])
+                                folder / "KeyFrames" / "".join(word.capitalize() for word in event["action_type"].split("_")))
                             if any(not left <= f["local_ms"] < right for f in selected_frames):
                                 raise ValueError("Verified action frame lies outside its activity interval")
                             for frame in selected_frames:

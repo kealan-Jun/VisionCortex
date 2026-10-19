@@ -185,7 +185,7 @@ def _synthesize(config, layout, index, analyzer, *, context_indexes, retry_outpu
     if not bundle['evidence']:
         raise ValueError('No saved evidence for day synthesis')
     key = digest(bundle)
-    folder = layout.reports/'Analysis'/'DayContext'/key
+    folder = layout.reports/'.Evidence/Analysis'/'DayContext'/key
     rows, receipts = bundle['evidence'], []
     for level in range(8):
         from .scene_transport import compact

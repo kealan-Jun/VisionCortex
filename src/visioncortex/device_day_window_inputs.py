@@ -60,7 +60,17 @@ def saved_metadata(layout, path, prompt, segment, selected, clock, previously_se
         # Exact input reuse across sibling stage revisions, never a day-wide
         # search or an execution-key alias. Original images stay in place and
         # every native selection and image hash must still match below.
-        for sibling in sorted(path.parent.parent.parent.glob(f'*/{path.parent.name}/Input.json')):
+        from .device_day_content import time_folder
+        from .device_day_contract import safe_child
+        bases = {path.parent.parent.parent,
+                 safe_child(layout.root, 'MultimodalUnderstanding/'
+                            + time_folder(segment['start_us'], segment['end_us'])
+                            + '/Analysis/' + segment['segment_id']),
+                 safe_child(layout.root, 'MultimodalUnderstanding/ClipUnderstanding/' + segment['segment_id'])}
+        candidates = sorted({p for base in bases for p in base.glob(f'*/{path.parent.name}/Input.json')})
+        if len(candidates) > 64:
+            raise ValueError('Too many historical versions for exact input reuse')
+        for sibling in candidates:
             if sibling == path or not sibling.is_file():
                 continue
             previous = saved_metadata(layout, sibling, prompt, segment, selected, clock,

@@ -417,6 +417,68 @@ def test_metadata_only_discovery_uses_device_identity_not_legacy_lab_root():
     assert discovery_config(source)['collection_ingest']['camera_directories'] == ['a_cam01', 'lab-video-1']
 
 
+def test_live_metadata_discovers_unregistered_cameras_in_bounded_dates(config, monkeypatch):
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    from visioncortex.device_day_live_discovery import live_config
+    today = datetime.now(ZoneInfo('Asia/Shanghai')).date()
+    for offset, camera in enumerate(('new_cam01', 'late_cam02', 'old_cam03')):
+        day = today - timedelta(days=offset)
+        start = int(datetime.combine(day, datetime.min.time(), ZoneInfo('Asia/Shanghai')).timestamp() * 1e6)
+        incoming(config, camera=camera, start=start)
+    config['collection_ingest'].update(discovery_mode='metadata_only', camera_directories=['a_cam01'])
+    before = deepcopy(config)
+    old = Path(config['storage']['archive_root']) / archive_name('old_cam03', start) / 'MetaData'
+    is_dir = Path.is_dir
+    def checked(path):
+        assert path != old, 'Older metadata must not be probed'
+        return is_dir(path)
+    monkeypatch.setattr(Path, 'is_dir', checked)
+    current = live_config(config)
+    assert set(current['collection_ingest']['camera_directories']) == {
+        'a_cam01', 'b_cam02', 'new_cam01', 'late_cam02'}
+    assert current['collection_ingest']['camera_role_map'] == before['collection_ingest']['camera_role_map']
+    assert config == before
+
+
+def test_unregistered_metadata_is_persisted_and_alerted_without_model_execution(config):
+    from visioncortex.device_day_live_discovery import discovery_status, live_config
+    from visioncortex.device_day_service import DeviceDayService
+    from visioncortex.observed_inventory import read_inventory
+    incoming(config, camera='new_cam01', start=int((time.time() - 10) * 1e6))
+    config['collection_ingest'].update(discovery_mode='metadata_only', camera_role_map={})
+    current = live_config(config)
+    stop, observed = threading.Event(), threading.Event()
+    service = DeviceDayService(lambda: current, threading.Lock())
+    def observe(settings, snapshot):
+        service.observe(settings, snapshot)
+        if snapshot['recordings']:
+            observed.set()
+    monitor = CameraMonitor(current, stop, observe, live_only=True)
+    try:
+        monitor.poll(include_recordings=False)
+        assert observed.wait(5)
+        status = discovery_status(current, monitor.poll(include_recordings=False))
+        assert status['status'] == 'degraded'
+        assert status['unconfigured_camera_directories'] == ['new_cam01']
+        assert status['alerts'][0]['type'] == 'camera_role_unconfigured'
+        root = Path(config['storage']['local_runtime_root']) / 'device-day'
+        record, = read_inventory(root)['recordings']
+        assert record['camera_key'] == 'new_cam01' and not record.get('configured_role')
+        models = FakeModels()
+        assert DeviceDayRunner(current, models).process(record)['status'] == 'needs_camera_role'
+        assert models.vision_calls == models.semantic_calls == 0
+        assert not (Path(config['storage']['archive_root']) / archive_name('new_cam01', record['recording_start_us']) / 'ProcessedClips').exists()
+        # Explicit registration resolves the alert; discovery never guesses it.
+        current['collection_ingest']['camera_role_map']['new_cam01'] = 'third_person'
+        status = discovery_status(current, monitor.poll(include_recordings=False))
+        assert status['unconfigured_camera_directories'] == [] and status['alerts'] == []
+    finally:
+        stop.set()
+        for thread in monitor.threads.values():
+            thread.join(5)
+
+
 @pytest.mark.parametrize('update', [
     {'discovery_mode': 'typo'},
     {'discovery_mode': 'metadata_only', 'discover_recorder_metadata': False},

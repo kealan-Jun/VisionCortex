@@ -1,6 +1,67 @@
 """Explicit legacy path aliases for the user-authorized content reorganization."""
 import json
+import hashlib
+from datetime import datetime
 from functools import lru_cache
+from pathlib import Path, PurePosixPath
+import re
+from zoneinfo import ZoneInfo
+
+
+LAYOUT_VERSION = 'visioncortex-frozen-archive-layout/1'
+FROZEN_LAYOUT_SHA256 = '1eb20d4f5058058cbd13693180f8fcad26c1c71c8d414eb85d158f9e25cbf1ec'
+_TIME_DIRECTORY = re.compile(r'^\d{2}-\d{2}-\d{2}(?:\.\d{6})?_\d{2}-\d{2}-\d{2}(?:\.\d{6})?$')
+
+
+@lru_cache(maxsize=1)
+def layout_contract():
+    path = Path(__file__).with_name('templates') / 'VC-DEVICE-DAY-LAYOUT-V1.json'
+    content = path.read_bytes()
+    if hashlib.sha256(content).hexdigest() != FROZEN_LAYOUT_SHA256:
+        raise ValueError('Frozen archive layout changed without an authorized contract update')
+    return json.loads(content)
+
+
+def clip_name(segment):
+    """One visible name shared by CV media and its readable understanding."""
+    activity = layout_contract()['activities'].get(segment.get('activity'))
+    if not activity:
+        raise ValueError('Unknown frozen archive activity')
+    relative = segment.get('json_path')
+    if relative:
+        parts = PurePosixPath(relative).parts
+        if (len(parts) != 4 or parts[:2] != ('ProcessedClips', 'Clips')
+                or parts[3] != activity + '.json'
+                or not re.fullmatch(r'\d{2}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_'
+                                    + activity + r'_[A-Za-z0-9_-]{1,64}', parts[2])):
+            raise ValueError('Clip index violates the frozen public layout')
+        return parts[2]
+    identifier = segment['segment_id'].removeprefix('segment-')[-8:]
+    if not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', identifier):
+        raise ValueError('Invalid clip identity')
+    def label(value):
+        return datetime.fromtimestamp(value / 1e6, ZoneInfo('Asia/Shanghai')).strftime('%H-%M-%S')
+    return f"{label(segment['start_us'])}_{label(segment['end_us'])}_{activity}_{identifier}"
+
+
+def understanding_relative(segment):
+    return layout_contract()['understanding_container'] + '/' + clip_name(segment)
+
+
+def private_folder(layout, directory, kind, *parts):
+    from .device_day_contract import safe_child
+    if directory not in {'ProcessedClips', 'MultimodalUnderstanding', 'LaboratoryDailyReport', 'Comment'}:
+        raise ValueError('Evidence has no owning archive directory')
+    return safe_child(layout.root, '/'.join((directory, layout_contract()['private_evidence_directory'], kind, *parts)))
+
+
+def legacy_reference(relative):
+    parts = relative.split('/')
+    return len(parts) > 1 and (
+        (parts[0] in {'Comment', 'MultimodalUnderstanding', 'ProcessedClips'} and bool(_TIME_DIRECTORY.fullmatch(parts[1])))
+        or relative.startswith(('Comment/Stt/', 'MultimodalUnderstanding/ClipUnderstanding/',
+                                'MultimodalUnderstanding/RequestPlans/', 'LaboratoryDailyReport/History/',
+                                'LaboratoryDailyReport/Analysis/')))
 
 
 @lru_cache(maxsize=128)
@@ -11,7 +72,7 @@ def _read(path, modified, size):
 
 def aliases(root):
     result = {}
-    for directory in ('Comment', 'MultimodalUnderstanding'):
+    for directory in ('Comment', 'MultimodalUnderstanding', 'ProcessedClips', 'LaboratoryDailyReport'):
         path = root / directory / 'LegacyPaths.json'
         try:
             stat = path.stat()
@@ -22,14 +83,24 @@ def aliases(root):
 
 
 def relocated(relative, mapping):
-    for old, new in mapping.items():
-        if relative == old or relative.startswith(old + '/'):
-            prefix = old.split('/')[0] + '/'
-            if (prefix not in ('Comment/', 'MultimodalUnderstanding/') or not isinstance(new, str)
-                    or not new.startswith(prefix) or new.startswith(('Comment/Stt/', 'MultimodalUnderstanding/ClipUnderstanding/'))):
-                raise ValueError('Invalid legacy content destination')
-            return new + relative[len(old):]
-    return relative
+    visited = set()
+    for _ in range(32):
+        if relative in visited:
+            raise ValueError('Cyclic legacy content destination')
+        visited.add(relative)
+        matches = [old for old in mapping if relative == old or relative.startswith(old + '/')]
+        if not matches:
+            return relative
+        old = max(matches, key=len)
+        new = mapping[old]
+        prefix = old.split('/')[0] + '/'
+        if (prefix not in ('Comment/', 'MultimodalUnderstanding/', 'ProcessedClips/', 'LaboratoryDailyReport/')
+                or not isinstance(new, str) or not new.startswith(prefix)
+                or new.startswith(('Comment/Stt/', 'MultimodalUnderstanding/ClipUnderstanding/'))
+                or any(part in {'', '.', '..'} for part in new.split('/')) or '\\' in new or ':' in new):
+            raise ValueError('Invalid legacy content destination')
+        relative = new + relative[len(old):]
+    raise ValueError('Legacy content destination chain exceeds limit')
 
 
 def public_references(value, mapping):
@@ -37,17 +108,96 @@ def public_references(value, mapping):
         return [public_references(item, mapping) for item in value]
     if isinstance(value, dict):
         return {key: public_references(item, mapping) for key, item in value.items()}
-    if isinstance(value, str) and value.startswith(('Comment/Stt/', 'MultimodalUnderstanding/ClipUnderstanding/')):
+    if isinstance(value, str) and value.startswith(('Comment/', 'MultimodalUnderstanding/', 'ProcessedClips/', 'LaboratoryDailyReport/')):
         return relocated(value, mapping)
     return value
 
 
 def analysis_folder(layout, segment, key):
-    from .device_day_content import time_folder
-    from .device_day_contract import safe_child
-    relative = ('MultimodalUnderstanding/' + time_folder(segment['start_us'], segment['end_us'])
-                + '/Analysis/' + segment['segment_id'] + '/' + key)
-    return safe_child(layout.root, relative)
+    return private_folder(layout, 'MultimodalUnderstanding', 'Analysis', segment['segment_id'], key)
+
+
+def migrate_display_layout(runner, layout, *, max_bytes=134217728, max_files=20000):
+    """Copy/verify owned display internals before publishing legacy aliases.
+
+    The caller drains producers and owns the day index lock. Originals are
+    retained in hidden recoverable copies; capture directories are excluded.
+    Preflight bounds apply to the entire batch before any mutation.
+    """
+    from .device_day import copy_verified
+    from .device_day_contract import atomic_json, digest, file_hash
+    plans = []
+    for directory, names in {
+            'MultimodalUnderstanding': ('RequestPlans', 'ClipUnderstanding'),
+            'LaboratoryDailyReport': ('Analysis', 'History'),
+            'Comment': ('Stt',)}.items():
+        for name in names:
+            source = layout.root / directory / name
+            if source.is_dir():
+                kind = {'ClipUnderstanding': 'Analysis', 'Stt': 'Recognition'}.get(name, name)
+                plans.append((source, private_folder(layout, directory, kind)))
+    for directory in ('ProcessedClips', 'MultimodalUnderstanding'):
+        parent = layout.root / directory
+        if parent.is_dir():
+            for source in sorted(parent.iterdir()):
+                if source.is_dir() and _TIME_DIRECTORY.fullmatch(source.name):
+                    plans.append((source, private_folder(layout, directory, 'LegacyPresentation', source.name)))
+    parent = layout.root / 'Comment'
+    if parent.is_dir():
+        for folder in sorted(parent.iterdir()):
+            source = folder / 'Recognition'
+            if _TIME_DIRECTORY.fullmatch(folder.name) and source.is_dir():
+                plans.append((source, private_folder(layout, 'Comment', 'Recognition', folder.name)))
+    total, count, batches = 0, 0, []
+    for source, destination in plans:
+        if source.is_symlink():
+            raise ValueError('Display migration refuses a symlink')
+        files = []
+        for path in sorted(source.rglob('*')):
+            if path.is_symlink():
+                raise ValueError('Display migration refuses a symlink')
+            if path.is_file():
+                stat = path.stat()
+                total += stat.st_size
+                count += 1
+                if total > max_bytes or count > max_files:
+                    raise ValueError('Display migration exceeds its bounded batch')
+                files.append((path, (stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)))
+        batches.append((source, destination, files))
+    entries = []
+    for source, destination, files in batches:
+        old, new = layout.relative(source), layout.relative(destination)
+        copied = []
+        for path, before in files:
+            target = destination / path.relative_to(source)
+            reference = copy_verified(path, target)
+            copied.append({'from': layout.relative(path), 'to': layout.relative(target), **reference})
+            stat = path.stat()
+            if (stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns) != before:
+                raise ValueError('Display source changed during migration')
+        # Recheck the complete source set, including files copied first.
+        if [p for p in sorted(source.rglob('*')) if p.is_file()] != [p for p, _ in files]:
+            raise ValueError('Display source membership changed during migration')
+        for (path, before), reference in zip(files, copied, strict=True):
+            stat = path.stat()
+            if ((stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns) != before
+                    or file_hash(path) != reference['sha256']):
+                raise ValueError('Display source changed before alias publication')
+        directory = old.split('/')[0]
+        mapping = {k: v for k, v in aliases(layout.root).items() if k.startswith(directory + '/')}
+        mapping[old] = new
+        atomic_json(layout.root/directory/'LegacyPaths.json', {'schema_version': 'visioncortex-content-aliases/1',
+                                                              'aliases': mapping})
+        backup = private_folder(layout, directory, 'LegacyCopies', digest([old, new])[:24])
+        if backup.exists():
+            raise ValueError('Display migration backup exists; preserve both copies')
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        source.rename(backup)
+        entry = {'from': old, 'to': new, 'backup': layout.relative(backup), 'files': copied,
+                 'original_media_changed': False, 'new_model_calls': 0}
+        atomic_json(backup/'DisplayMigration.json', entry)
+        entries.append(entry)
+    return {'layout_version': LAYOUT_VERSION, 'moved': entries, 'verified_bytes': total, 'files': count}
 
 
 def migrate_understanding(runner, layout):
@@ -116,7 +266,6 @@ def migrate_stt(runner, layout):
     the time folder and a backend migration journal; never rerun recognition.
     """
     from .device_day import copy_verified, exclusive
-    from .device_day_content import time_folder
     from .device_day_contract import atomic_json, digest, read_json
     source = layout.comments / 'Stt'
     if not source.is_dir():
@@ -132,7 +281,7 @@ def migrate_stt(runner, layout):
             if runner.layout(record).name != layout.name or record['recording_id'] != folder.name:
                 raise ValueError('Legacy STT recording does not match its device/day')
             with exclusive(runner.runtime_root/'locks'/f'{folder.name}.stt.lock'):
-                relative = 'Comment/' + time_folder(record['recording_start_us'], record['recording_end_us']) + '/Recognition'
+                relative = 'Comment/.Evidence/Recognition/' + folder.name
                 destination = layout.root / relative
                 copied = []
                 for path in sorted(folder.rglob('*')):

@@ -40,8 +40,12 @@ def window_files(config, index):
         key = stage.get('key')
         if not isinstance(key, str) or len(key) != 64 or any(c not in '0123456789abcdef' for c in key):
             continue
-        folder = safe_child(root, 'MultimodalUnderstanding/' + time_folder(segment['start_us'], segment['end_us'])
-                            + f'/Analysis/{segment["segment_id"]}/{key}')
+        from .device_day_content_paths import analysis_folder
+        from types import SimpleNamespace
+        folder = analysis_folder(SimpleNamespace(root=root), segment, key)
+        if not folder.is_dir():
+            folder = safe_child(root, 'MultimodalUnderstanding/' + time_folder(segment['start_us'], segment['end_us'])
+                                + f'/Analysis/{segment["segment_id"]}/{key}')
         if not folder.is_dir():
             folder = safe_child(root, f'MultimodalUnderstanding/ClipUnderstanding/{segment["segment_id"]}/{key}')
         for path in sorted(folder.glob('*/Result.json')):
@@ -56,8 +60,9 @@ def content_revision(config, index):
     receipts = Path(backend) / 'device-day-receipts' / index['archive'] if backend else None
     paths = [p for _, _, request, result in window_files(config, index) for p in (request, result)]
     root = Path(config['storage']['archive_root']) / index['archive']
-    paths.extend(root/'MultimodalUnderstanding'/time_folder(s['start_us'], s['end_us'])/'Analysis/StepReview.json'
-                 for s in index.get('segments', []))
+    for segment in index.get('segments', []):
+        paths.extend((root/'MultimodalUnderstanding/.Evidence/Analysis'/segment['segment_id']/'StepReview.json',
+                      root/'MultimodalUnderstanding'/time_folder(segment['start_us'], segment['end_us'])/'Analysis/StepReview.json'))
     paths.extend(root/'Comment'/name for name in ('Protocol.json', 'Comment.jsonl'))
     runtime = config['storage'].get('local_runtime_root')
     if runtime:
@@ -95,6 +100,7 @@ def with_partial_understandings(config, index):
     from .device_day_content_paths import aliases, public_references
     mapping = aliases(root)
     value['understandings'] = public_references(value['understandings'], mapping)
+    value['segments'] = public_references(value['segments'], mapping)
     for row in value['recordings']:
         row['transcription'] = public_references(row.get('transcription'), mapping)
     records = {r['recording_id']: r for r in index.get('recordings', [])}
@@ -217,7 +223,10 @@ def publish_content(config, index):
             continue
         from .device_day_steps import readable_meaning
         meaning, experiment_steps, step_status = readable_meaning(meanings.get(segment['segment_id']))
-        relative = 'MultimodalUnderstanding/' + time_folder(segment['start_us'], segment['end_us'])
+        from .device_day_content_paths import LAYOUT_VERSION, clip_name, understanding_relative
+        if segment.get('camera_key', index['archive'][11:]) != index['archive'][11:]:
+            raise ValueError('Understanding belongs to another device/camera')
+        relative = understanding_relative(segment)
         record = records[segment['recording_id']] | {'camera_key': index['archive'][11:]}
         stage = (record.get('stages') or {}).get('understanding') or {}
         value = {**common, 'schema_version': 'visioncortex-readable-understanding/1',
@@ -233,15 +242,29 @@ def publish_content(config, index):
         from .device_day_narrative import segment_record
         value = {'内容记录': segment_record(segment, meaning, record, index.get('context'),
                   segments=[s for s in index['segments'] if s['recording_id'] == segment['recording_id']]), **value}
-        from .media.retained_intervals import disposition, publish_disposition
+        from .media.retained_intervals import disposition
         decision = disposition(segment, meaning, record, index.get('context'),
                     segments=[s for s in index['segments'] if s['recording_id'] == segment['recording_id']])
-        value['处理视频留存'] = segment.get('derived_video_disposition') or publish_disposition(
-            root/'ProcessedClips'/time_folder(segment['start_us'], segment['end_us'])/digest(decision)[:24],
-            decision, video_present=bool(segment.get('video')))
+        video = segment.get('video')
+        video_path = safe_child(root, video['path']) if video else None
+        present = bool(video_path and video_path.is_file()
+                       and video_path.stat().st_size == video.get('size_bytes'))
+        value['video_status'] = ('available' if present else 'missing' if video else
+                                 'omitted_by_selection' if decision['decision'] == 'omit_static_derivative' else 'pending_retention')
+        value['处理视频留存'] = {**(segment.get('derived_video_disposition') or decision),
+                                'derived_video_present': present, 'status': value['video_status']}
+        value['layout_version'] = LAYOUT_VERSION
         _write(safe_child(root, relative + '/Understanding.json'), value)
+        retention = {**common, 'schema_version': 'visioncortex-readable-retention/1',
+            'recording_id': segment['recording_id'], 'segment_id': segment['segment_id'],
+            'start_us': segment['start_us'], 'end_us': segment['end_us'],
+            'source_ref': segment['source_ref'], 'video': video,
+            'folder_retained': True, 'no_value_proven': bool(decision.get('continuous_inactivity_proven')),
+            'selection_status': 'pending_value_review' if not meaning else value['处理视频留存']['decision'],
+            **value['处理视频留存']}
+        _write(safe_child(root, 'ProcessedClips/Clips/' + clip_name(segment) + '/Retention.json'), retention)
         visual_entries.append({k: value[k] for k in ('recording_id', 'segment_id', 'start_us', 'end_us', 'activity', 'status')} |
-                              {'content': relative + '/Understanding.json'})
+                              {'content': relative + '/Understanding.json', 'video_status': value['video_status']})
     for directory, entries in [('Comment', audio_entries), ('MultimodalUnderstanding', visual_entries)]:
         _write(root / directory / 'Index.json', {**common, 'schema_version': 'visioncortex-readable-content-index/1',
             'entries': sorted(entries, key=lambda r: r['start_us'])})
