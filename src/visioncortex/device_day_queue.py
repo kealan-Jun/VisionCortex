@@ -337,7 +337,9 @@ class DeviceDayQueue:
                 return 'queue_changed'
             row = dict(row)
             failure = json.loads(row['result'] or '{}')
-            if (row['status'] != 'failed' or row['input_status'] != 'ready' or row['lease_owner']
+            verified_wait = (row['input_status'] == 'waiting'
+                             and proof.get('verified_wait_reason') == 'content_identity_conflict')
+            if (row['status'] != 'failed' or (row['input_status'] != 'ready' and not verified_wait) or row['lease_owner']
                     or row['lease_until'] or row['blocked_reason'] or failure.get('error_type') != 'InputChanged'):
                 return 'not_source_failure'
             db.execute('CREATE TABLE IF NOT EXISTS input_recovery_grants('
@@ -347,10 +349,11 @@ class DeviceDayQueue:
                           (row['recording_id'], row['revision'], repair_id)).fetchone():
                 return 'repair_already_authorized'
             if row['retry_limit'] > row['attempts']:
+                db.execute("UPDATE recordings SET input_status='ready' WHERE recording_id=?", (row['recording_id'],))
                 return 'retry_already_available'
             db.execute('INSERT INTO input_recovery_grants VALUES(?,?,?,?,?,?)',
                        (row['recording_id'], row['revision'], repair_id, json.dumps(proof), row['result'], time.time()))
-            db.execute('UPDATE recordings SET retry_limit=?,updated_at=? WHERE recording_id=?',
+            db.execute("UPDATE recordings SET input_status='ready',retry_limit=?,updated_at=? WHERE recording_id=?",
                        (row['attempts'] + 1, time.time(), row['recording_id']))
             from .task_events import append
             append(db, row['recording_id'], 'input_recovery_authorized', revision=row['revision'],
