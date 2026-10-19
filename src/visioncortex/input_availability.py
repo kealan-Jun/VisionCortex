@@ -472,9 +472,59 @@ class IntegrityMonitor:
             level = logging.INFO if transition == 'resolved' else logging.WARNING
             logging.getLogger(__name__).log(level, 'Input integrity alert %s: %s %s', transition, key, reason)
 
+    def _completed_alert_candidate(self):
+        """Verify recovered alerts promptly instead of waiting for a full sweep."""
+        from .device_day_contract import digest
+        from .device_day_schedule import in_processing_scope
+        with self._db(readonly=True) as db:
+            cursor = db.execute("SELECT position FROM cursors WHERE lane='_closure_cursor'").fetchone()
+            ids = [r[0] for r in db.execute("SELECT DISTINCT id FROM alerts WHERE state='active' "
+                "AND stage IN ('retention','vision','stt') AND (key GLOB '*_failed:*' OR key GLOB '*_recovery:*') "
+                "AND id>? ORDER BY id LIMIT ?",
+                (str(cursor[0]) if cursor else '', self.options['batch_size']))]
+        for rid in ids:
+            rows = {}
+            for stage in ('retention', 'vision', 'stt'):
+                path = self.root / f'queue-{stage}.sqlite3'
+                if path.is_file():
+                    with connection(path, readonly=True) as db:
+                        row = db.execute('SELECT * FROM recordings WHERE recording_id=?', (rid,)).fetchone()
+                        if row:
+                            rows[stage] = dict(row)
+            retained = rows.get('retention')
+            if not retained or retained['status'] != 'completed':
+                continue
+            if not in_processing_scope(self.config.get('device_day') or {}, json.loads(retained['payload'])):
+                continue
+            with self._db(readonly=True) as db:
+                active = {r[0] for r in db.execute("SELECT stage FROM alerts WHERE id=? AND state='active'", (rid,))}
+                previous = db.execute("SELECT fingerprint,next_check FROM checks WHERE lane='retention_closure' AND id=?",
+                                      (rid,)).fetchone()
+            if not any(rows.get(stage, {}).get('status') == 'completed' for stage in active):
+                continue
+            # Running owners refresh leases frequently. Only a new source,
+            # recipe, terminal state or completion should bypass the cooldown.
+            fingerprint = digest(['completed-alert-verification/1', [
+                [stage, item['revision'], item['status'],
+                 item['updated_at'] if item['status'] == 'completed' else None,
+                 json.loads(item['payload']).get('source_signature'),
+                 json.loads(item['payload']).get('audio', {}).get('source_signature')]
+                for stage, item in rows.items()]])
+            if previous and previous['fingerprint'] == fingerprint and previous['next_check'] > time.time():
+                continue
+            with self._db() as db:
+                db.execute("INSERT OR REPLACE INTO cursors VALUES('_closure_cursor',?)", (rid,))
+            return 'retention_closure', 'retention', retained, fingerprint
+        with self._db() as db:
+            db.execute("INSERT OR REPLACE INTO cursors VALUES('_closure_cursor',?)", (ids[-1] if ids else '',))
+        return None
+
     def _select(self):
         from .device_day_contract import digest
         from .device_day_schedule import in_processing_scope
+        recovered = self._completed_alert_candidate()
+        if recovered:
+            return recovered
         with self._db(readonly=True) as db:
             cursors = dict(db.execute('SELECT lane,position FROM cursors'))
         start = cursors.get('_lane', 0) % len(self.LANES)
@@ -731,8 +781,9 @@ class IntegrityMonitor:
             interval = (self.options['verification_interval_seconds'] if result['status'] == 'verified'
                         else self.options['retry_seconds'])
             if result['status'] != 'busy':
-                self._alert(lane, row['recording_id'], reason)
-            if lane == 'retention_completed' and result['status'] in {'verified', 'restored'}:
+                self._alert('retention_completed' if lane == 'retention_closure' else lane,
+                            row['recording_id'], reason)
+            if lane in {'retention_completed', 'retention_closure'} and result['status'] in {'verified', 'restored'}:
                 signature = json.loads(row['payload'])['source_signature']
                 for primary in ('retention', 'vision', 'stt'):
                     with self.runner.queues[primary].connect() as db:
@@ -741,6 +792,7 @@ class IntegrityMonitor:
                                                (row['recording_id'], signature)).fetchone()
                     if completed:
                         self._alert(primary + '_failed', row['recording_id'], None)
+                        self._alert(primary + '_recovery', row['recording_id'], None)
             result.update(queue_revision=row['revision'], queue_updated_at=row['updated_at'])
             with self._db() as db:
                 db.execute('INSERT OR REPLACE INTO checks VALUES(?,?,?,?,?,?)',
