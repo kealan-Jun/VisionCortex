@@ -335,7 +335,12 @@ def relocate_evidence(view, evidence):
     """Keep the original ledger, rebind its native-frame read with byte proof."""
     seal = _ACTIVE_INPUT.get()
     frame = evidence.source_frame
-    if not seal or frame is None or frame.source_path == view.video:
+    if not seal or frame is None:
+        return evidence, None
+    # Native ledgers use resolved paths, while a view may retain its configured
+    # NAS alias. An identical physical path needs no source relocation; leave
+    # its recorded stat/PTS/pixel identity intact for read_evidence_frame.
+    if frame.source_path.resolve() == view.video.resolve():
         return evidence, None
     source = next(s for s in seal['sources'] if s['kind'] == 'video')
     if (str(frame.source_path) != source.get('resolved_path', source['original_path'])
