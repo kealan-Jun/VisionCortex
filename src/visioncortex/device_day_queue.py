@@ -319,6 +319,44 @@ class DeviceDayQueue:
                 db.execute('INSERT INTO dispatch_costs VALUES(?,?,?) ON CONFLICT(kind,identity) '
                            'DO UPDATE SET seconds=seconds+excluded.seconds', (kind, identity, max(0, seconds)))
 
+    def authorize_input_recovery(self, expected, repair_id, proof):
+        """CAS one bounded retry per verified source generation; keep failures."""
+        from .device_day_contract import digest
+        if (not isinstance(repair_id, str) or len(repair_id) != 64
+                or any(c not in '0123456789abcdef' for c in repair_id)
+                or proof.get('status') != 'verified' or not proof.get('verified_seals')
+                or proof.get('recording_id') != expected['recording_id']
+                or proof.get('current_queue_revision') != expected['revision']
+                or proof.get('model_invoked') is not False or proof.get('capture_modified') is not False
+                or not proof.get('source_generation')):
+            raise ValueError('Input recovery needs verified exact-source evidence')
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT * FROM recordings WHERE recording_id=?', (expected['recording_id'],)).fetchone()
+            if row is None or dict(row) != expected:
+                return 'queue_changed'
+            row = dict(row)
+            failure = json.loads(row['result'] or '{}')
+            if (row['status'] != 'failed' or row['input_status'] != 'ready' or row['lease_owner']
+                    or row['lease_until'] or row['blocked_reason'] or failure.get('error_type') != 'InputChanged'):
+                return 'not_source_failure'
+            db.execute('CREATE TABLE IF NOT EXISTS input_recovery_grants('
+                       'recording_id TEXT,revision TEXT,repair_id TEXT,proof TEXT,previous_failure TEXT,'
+                       'authorized_at REAL,PRIMARY KEY(recording_id,revision,repair_id))')
+            if db.execute('SELECT 1 FROM input_recovery_grants WHERE recording_id=? AND revision=? AND repair_id=?',
+                          (row['recording_id'], row['revision'], repair_id)).fetchone():
+                return 'repair_already_authorized'
+            if row['retry_limit'] > row['attempts']:
+                return 'retry_already_available'
+            db.execute('INSERT INTO input_recovery_grants VALUES(?,?,?,?,?,?)',
+                       (row['recording_id'], row['revision'], repair_id, json.dumps(proof), row['result'], time.time()))
+            db.execute('UPDATE recordings SET retry_limit=?,updated_at=? WHERE recording_id=?',
+                       (row['attempts'] + 1, time.time(), row['recording_id']))
+            from .task_events import append
+            append(db, row['recording_id'], 'input_recovery_authorized', revision=row['revision'],
+                   attempt=row['attempts'], data={'repair_id': repair_id, 'proof_sha256': digest(proof), 'budget': 1})
+        return 'retry_authorized'
+
     def finish(self, owner, recording_id, result, seconds):
         if result.get('status') in {'waiting_for_plan_review', 'submitted_unknown'}:
             with self.connect() as db:

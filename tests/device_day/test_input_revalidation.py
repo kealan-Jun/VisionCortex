@@ -28,6 +28,7 @@ def sealed(tmp_path, monkeypatch):
     layout = DeviceDayLayout(tmp_path / 'archives', 'camera', record['recording_start_us'], tmp_path / 'receipts')
     runtime = tmp_path / 'runtime'
     runner = SimpleNamespace(config={'runtime': {'local_only': True},
+                                    'storage': {'local_runtime_root': str(runtime)},
                                     'collection_ingest': {'source_root': str(source.parent)}},
                              runtime_root=runtime, layout=lambda _: layout,
                              _receipt=lambda layout, record, stage: layout.receipts / record['recording_id'] / (stage + '.json'))
