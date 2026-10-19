@@ -310,7 +310,12 @@ class Reconciler:
                 )
                 fresh = configured_record(self.config, fresh)
                 if fresh.get("processable"):
-                    availability.mark(fresh, "ready", reason="capture_reinspected")
+                    previous = states.get(fresh['recording_id'], {})
+                    conflict = (previous.get('signature') == fresh.get('source_signature')
+                                and previous.get('state') == 'waiting'
+                                and previous.get('reason') == 'content_identity_conflict')
+                    if not conflict:
+                        availability.mark(fresh, "ready", reason="capture_reinspected")
                     from .observed_inventory import observe
 
                     observe(self.root, {"recordings": [fresh]})
@@ -339,7 +344,11 @@ class Reconciler:
             record = json.loads(row["payload"])
             if not in_processing_scope(self.config.get('device_day', {}), record):
                 continue
-            if states.get(record["recording_id"], {}).get("state", "ready") != "ready":
+            previous = states.get(record['recording_id'], {})
+            if (previous.get('signature') == record.get('source_signature')
+                    and previous.get('reason') == 'content_identity_conflict'):
+                continue
+            if previous.get('state', 'ready') != 'ready':
                 availability.mark(
                     record, "ready", reason="verified_retention_completed"
                 )
@@ -375,19 +384,24 @@ class _PacedInput:
 
     @contextmanager
     def open(self, mode):
+        import io
         from .device_day_io import pace_copy, slot
         config = self.config
         with self.path.open(mode) as handle:
-            class Reader:
-                def read(self, size):
-                    if size == 0:
-                        return b''
+            class Reader(io.RawIOBase):
+                def readable(self):
+                    return True
+
+                def readinto(self, buffer):
                     with slot(config, copy=True):
-                        block = handle.read(size)
-                    if block:
-                        pace_copy(config, len(block))
-                    return block
-            yield Reader()
+                        size = handle.readinto(buffer)
+                    if size:
+                        pace_copy(config, size)
+                    return size
+            # Hashers and JSON parsers consume small blocks. Reserve/pin NAS
+            # access in bounded 8 MiB reads without lowering the aggregate cap.
+            with io.BufferedReader(Reader(), buffer_size=8 * 1024**2) as reader:
+                yield reader
 
 
 class _IntegrityBytes:
@@ -729,6 +743,7 @@ class IntegrityMonitor:
                     raise IntegrityIssue('recovery_retry_exhausted')
                 if grant not in {'retry_authorized', 'retry_already_available'}:
                     raise IntegrityIssue('input_recovery_state_changed')
+                Availability(self.root).mark(record, 'ready', reason='verified_input_seals')
         else:
             artifacts, restored = self._archive(record, verify)
             artifacts += self._derived(record, verify)

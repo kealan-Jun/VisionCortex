@@ -243,3 +243,25 @@ def test_input_initialization_retries_only_busy_errors(monkeypatch, tmp_path):
     monkeypatch.setattr(module, "connection", invalid_database)
     with pytest.raises(sqlite3.OperationalError, match="invalid database"):
         Availability(tmp_path)
+
+
+def test_content_conflict_wait_requires_new_source_or_byte_proof(tmp_path, monkeypatch):
+    reconciler, record, source, video = reconciler_fixture(tmp_path)
+    availability = Availability(reconciler.root)
+    availability.mark(record, 'waiting', reason='content_identity_conflict')
+    fresh = [record.copy()]
+    monkeypatch.setattr('visioncortex.nas_recordings._inspect', lambda *args: fresh[0].copy())
+    reconciler.tick()
+    assert availability.states()['r']['state'] == 'waiting'
+    q = DeviceDayQueue(reconciler.root / 'queue-retention.sqlite3')
+    with q.connect() as db:
+        db.execute("UPDATE recordings SET status='completed'")
+    reconciler.tick()
+    assert availability.states()['r']['state'] == 'waiting'
+    with q.connect() as db:
+        db.execute("UPDATE recordings SET status='failed'")
+    fresh[0]['source_signature'] = 'new-source-version'
+    reconciler.cursor = ''
+    reconciler.tick()
+    assert availability.states()['r']['state'] == 'ready'
+    assert availability.states()['r']['signature'] == 'new-source-version'

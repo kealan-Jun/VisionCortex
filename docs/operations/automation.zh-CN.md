@@ -46,6 +46,10 @@ bash VisionCortexAutomation-Candidate/install.sh --setup
   请求结果待核对和失败预算耗尽等；这些问题仍须本系统排查。
 - `running`、`scheduled_wait`、`completed`、`outside_processing_scope` 分别保留实际状态。
 
+经完整字节证据确认的 `content_identity_conflict` 保持输入等待；仅元数据可读或队列完成不能解除。
+新来源版本或完整封存校验可恢复；失败预算只约束相同来源，旧失败记录继续保留。
+校验读取使用 8 MiB 有界缓冲，继续受共享 NAS 槽和站点整体复制带宽上限约束。
+
 缺失标记只表示当前采集路径未找到输入，不能据此确认原片丢失或将责任归给输入方；
 `input_loss_evidence` 为 `NOT_PROVEN`。实际原片和归档原件的核验仍由输入恢复流程负责。
 已完成任务不会因采集路径缺失而降为待处理。旧消费者接口的 `pending` / `blocked` 是原始未完成
