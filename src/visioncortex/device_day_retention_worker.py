@@ -181,7 +181,8 @@ class RetentionWorker:
                 self.stage == 'vision' or same_audio)
             if (completed_current
                     or state.get('status') == 'running' and (state.get('lease_until') or 0) >= current
-                    or state.get('status') == 'failed' and (
+                    or state.get('status') == 'failed' and same_video and (
+                        self.stage == 'vision' or same_audio) and (
                         state.get('attempts', 0) >= retry_limit(state, maximum)
                         or current - state.get('updated_at', current) < self.failure_cooldown)
                     or self.deferred.get(rid, 0) > current):

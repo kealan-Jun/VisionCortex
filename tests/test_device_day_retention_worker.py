@@ -546,3 +546,25 @@ def test_unrestricted_primary_candidates_keep_historical_scope(tmp_path, monkeyp
     row = record('history', 1_000_000, audio={'status': 'provided'})
     runner = setup(tmp_path, monkeypatch, [row])
     assert [candidate['recording_id'] for candidate in RetentionWorker(stage=stage).candidates(runner)] == ['history']
+
+
+@pytest.mark.parametrize('stage,change,expected', [
+    ('retention', 'video', True), ('retention', 'audio', True),
+    ('vision', 'video', True), ('vision', 'audio', False),
+    ('stt', 'video', True), ('stt', 'audio', True),
+])
+def test_failed_budget_only_blocks_same_source_version(tmp_path, monkeypatch, stage, change, expected):
+    original = record('changed', 1_000_000, audio={'source_signature': 'old-audio'})
+    runner = setup(tmp_path, monkeypatch, [original])
+    queue = runner.queues[stage]
+    queue.enqueue(original, 'old-recipe')
+    with queue.connect() as db:
+        db.execute("UPDATE recordings SET status='failed',attempts=4,retry_limit=4")
+    assert RetentionWorker(stage=stage).candidates(runner) == []
+    fresh = original | ({'source_signature': 'new-video'} if change == 'video' else
+                        {'audio': {'source_signature': 'new-audio'}})
+    observe(runner.runtime_root, {'recordings': [fresh]})
+    assert bool(RetentionWorker(stage=stage).candidates(runner)) is expected
+    with queue.connect() as db:
+        row = db.execute('SELECT status,attempts,retry_limit,revision FROM recordings').fetchone()
+        assert tuple(row) == ('failed', 4, 4, 'old-recipe')
