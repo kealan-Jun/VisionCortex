@@ -152,3 +152,53 @@ def test_selected_video_projection_refuses_missing_corrupt_or_over_budget_bytes(
     old.write_bytes(b'bad')
     assert publish_selected_videos(layout, [segment]) == []
     assert not (layout.processed/'Clips').exists()
+
+
+def test_large_history_migrates_in_bounded_complete_child_folders(tmp_path):
+    layout = DeviceDayLayout(tmp_path, 'camera_cam01', 1792376825000000)
+    originals = []
+    for name in ['one', 'two']:
+        p = layout.understanding/'RequestPlans'/name/'Input.json'
+        p.parent.mkdir(parents=True)
+        p.write_bytes(b'old')
+        originals.append(artifact(layout.root, p))
+    first = migrate_display_layout(None, layout, max_bytes=4, bounded_batch=True)
+    assert first['pending'] and first['verified_bytes'] == 3 and len(first['moved']) == 1
+    assert all(verify_artifact(layout.root, ref) for ref in originals)
+    second = migrate_display_layout(None, layout, max_bytes=4, bounded_batch=True)
+    assert not second['pending'] and len(second['moved']) == 1
+    assert not (layout.understanding/'RequestPlans').exists()
+    assert all(verify_artifact(layout.root, ref) for ref in originals)
+
+
+def test_single_large_artifact_has_separate_hard_bound_and_preserves_bytes(tmp_path):
+    layout = DeviceDayLayout(tmp_path, 'camera_cam01', 1792376825000000)
+    old = layout.understanding/'RequestPlans'/'recording'/'Input.json'
+    old.parent.mkdir(parents=True)
+    old.write_bytes(b'large')
+    ref = artifact(layout.root, old)
+    deferred = migrate_display_layout(None, layout, max_bytes=2, bounded_batch=True, max_single_artifact_bytes=4)
+    assert deferred['pending'] and not deferred['moved'] and old.read_bytes() == b'large'
+    result = migrate_display_layout(None, layout, max_bytes=2, bounded_batch=True, max_single_artifact_bytes=8)
+    assert not result['pending'] and result['verified_bytes'] == 5
+    assert verify_artifact(layout.root, ref)
+
+
+def test_selected_video_batches_resume_without_republishing_prior_copies(tmp_path):
+    _, index = fixture(tmp_path)
+    layout = DeviceDayLayout(tmp_path, 'camera_cam01', 1792376825000000)
+    segments = []
+    for number in [1, 2]:
+        segment = deepcopy(index['segments'][0])
+        segment.update(segment_id='segment-'+str(number), json_path=None)
+        old = layout.processed/'10-27-05_10-29-05'/str(number)/'Activity.mp4'
+        old.parent.mkdir(parents=True)
+        old.write_bytes(b'old')
+        segment['video'] = artifact(layout.root, old)
+        segments.append(segment)
+    progress = {}
+    first = publish_selected_videos(layout, segments, max_bytes=4, bounded_batch=True, progress=progress)
+    assert len(first) == 1 and progress['pending'] == 1
+    second = publish_selected_videos(layout, segments, max_bytes=4, bounded_batch=True, progress=progress)
+    assert len(second) == 1 and progress['pending'] == 0
+    assert publish_selected_videos(layout, segments, max_bytes=4, bounded_batch=True, progress=progress) == []
