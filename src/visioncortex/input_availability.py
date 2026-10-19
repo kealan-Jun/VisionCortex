@@ -18,10 +18,67 @@ def configured_record(config, record):
     record = bind_camera(config.get('collection_ingest', {}), record)
     if record.get('camera_binding_status') == 'needs_directory_binding':
         return record
-    role = config.get("collection_ingest", {}).get("camera_role_map", {}).get(
+    settings = config.get("collection_ingest", {})
+    role = settings.get("camera_role_map", {}).get(
         record.get("camera_key")
     )
-    return record | {"configured_role": role} if role else record
+    if role in {'first_person', 'third_person'}:
+        return record | {"configured_role": role}
+    return hardware_bound_record(config, record)
+
+
+def hardware_bound_record(config, record):
+    """Carry an explicit existing view role across a recorder/host rename.
+
+    Only a reported physical serial and vendor can match a site binding. Paths,
+    prefixes, configured serials and device models never substitute for it.
+    """
+    settings = config.get('collection_ingest', {})
+    bindings = settings.get('camera_hardware_bindings') or []
+    if not bindings:
+        return record
+    root = Path(settings['source_root'])
+    video = Path(record['video_path'])
+    if video.is_symlink() or not video.resolve().is_relative_to(root.resolve()):
+        raise ValueError('Hardware identity source escaped capture root')
+    prefix = video.name[:-len('rgb.mp4')] if video.name.endswith('rgb.mp4') else None
+    metadata = video.with_name(prefix + 'meta.json') if prefix is not None else video.with_suffix('.json')
+    if not metadata.is_file():
+        return record
+    if metadata.is_symlink() or metadata.stat().st_size > 2 * 1024 * 1024:
+        raise ValueError('Hardware identity requires bounded recorder metadata')
+    before = metadata.stat()
+    content = metadata.read_bytes()
+    after = metadata.stat()
+    if (before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+            after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+        raise ValueError('Hardware metadata changed while resolving view role')
+    data = json.loads(content)
+    if data.get('camera_key') and data['camera_key'] != record['camera_key']:
+        raise ValueError('Hardware metadata camera identity mismatch')
+    announce = data.get('camera_announce_raw') or {}
+    if isinstance(announce, str):
+        announce = json.loads(announce)
+    device = announce.get('device') or {}
+    serial, vendor = device.get('serial_number'), device.get('vendor')
+    if not isinstance(serial, str) or not serial.strip() or not isinstance(vendor, str) or not vendor.strip():
+        return record
+    configured = device.get('configured_serial_number')
+    if configured and configured != serial:
+        return record | {'configured_role': None, 'camera_binding_status': 'hardware_identity_conflict'}
+    matches = [rule for rule in bindings
+               if rule.get('vendor') == vendor and rule.get('serial_number') == serial]
+    cameras = {rule.get('camera_key') for rule in matches}
+    roles = {settings.get('camera_role_map', {}).get(camera) for camera in cameras}
+    if not matches:
+        return record
+    if len(cameras) != 1 or len(roles) != 1 or not roles <= {'first_person', 'third_person'}:
+        return record | {'configured_role': None, 'camera_binding_status': 'hardware_identity_conflict'}
+    import hashlib
+    return record | {'configured_role': roles.pop(), 'camera_binding_status': 'configured_hardware_serial',
+                     'camera_role_binding': {'vendor': vendor, 'serial_number': serial,
+                                             'configured_camera_key': cameras.pop(),
+                                             'metadata_sha256': hashlib.sha256(content).hexdigest()}}
 
 
 def revalidate_input_seals(runner, record):
