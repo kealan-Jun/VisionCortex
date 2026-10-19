@@ -206,3 +206,35 @@ def verify_and_activate(connection: dict, api_key: str, settings: dict) -> dict:
             "verification": receipt,
             "applies_to": "new_tasks_only",
         }
+
+
+def reverify_saved_connection(reference: str) -> dict:
+    """Explicitly refresh proof for an unchanged saved credential identity.
+
+    Do not rotate its key/reference, alter a bound execution configuration or
+    select a different active provider. Historical verification stays private
+    and immutable; replacing proof requires a real successful challenge.
+    """
+    from .device_day_contract import digest
+    with settings_lock():
+        original = read_revision(reference)
+        with tempfile.TemporaryDirectory(prefix='.probe-', dir=settings_directory()) as work:
+            receipt = verify_connection(original['connection'], original['api_key'], Path(work))
+        if not verification_matches(original['connection'], receipt):
+            return {'refreshed': False, 'verification': receipt}
+        if read_revision(reference) != original:
+            raise ValueError('Saved connection changed during verification')
+        root = settings_directory()
+        history = root / 'verification-history' / f'{reference}-{digest(original["verification"])}.json'
+        if history.exists():
+            if read_private(history) != original['verification']:
+                raise ValueError('Saved verification history collision')
+        else:
+            write_private(history, original['verification'])
+        # Only this explicit proof refresh mutates an existing revision. The
+        # provider, endpoint, model, secret and reference remain byte-identical
+        # values; queued source/model identities therefore do not change.
+        write_private(root / 'credentials' / f'{reference}.json',
+                      {**original, 'verification': receipt})
+        return {'refreshed': True, 'verification': receipt,
+                'credential_identity_changed': False, 'active_provider_changed': False}

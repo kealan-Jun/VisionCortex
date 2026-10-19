@@ -143,6 +143,12 @@ python -m visioncortex.runtime_services --input-integrity --config <站点配置
 
 ## 3090 Ti 局域网服务器
 
+保存连接的厂商、地址、模型、密钥和版本引用保持原有身份。代码更新使连接验证回执失效时，
+管理员可显式调用 `ai_settings.reverify_saved_connection(reference)`：使用该连接已保存的密钥
+完成真实多图验证，成功后仅刷新验证元数据，并在私有 `verification-history` 保留原回执。
+该操作不会切换当前厂商、创建新密钥或改变已有任务的配置/执行键；验证失败或期间连接变化时，
+保留原记录并拒绝刷新。不得直接改写回执哈希来绕过验证。
+
 正式使用时，Windows、macOS、Linux 用户都不需要安装本项目，也不需要配置
 CUDA、TensorRT 或模型。管理员只在 Ubuntu 3090 Ti 主机完成一次安装，然后运行：
 
