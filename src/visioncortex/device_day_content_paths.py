@@ -133,7 +133,8 @@ def analysis_folder(layout, segment, key):
     return private_folder(layout, 'MultimodalUnderstanding', 'Analysis', segment['segment_id'], key)
 
 
-def publish_selected_videos(layout, segments, *, max_bytes=536870912):
+def publish_selected_videos(layout, segments, *, max_bytes=536870912, bounded_batch=False,
+                            max_single_artifact_bytes=8589934592, progress=None):
     """Expose already selected historical bytes in the frozen clip directory.
 
     No extraction or selection change. Old receipts retain exact bytes through
@@ -144,16 +145,28 @@ def publish_selected_videos(layout, segments, *, max_bytes=536870912):
     from .device_day_verification import verify_artifact_cached
     pending = []
     for segment in segments:
+        if segment.get('camera_key', layout.name[11:]) != layout.name[11:]:
+            raise ValueError('Selected video belongs to another device/camera')
         video = segment.get('video')
         if not video:
             continue
         target = 'ProcessedClips/Clips/' + clip_name(segment) + '/' + layout_contract()['activities'][segment['activity']] + '.mp4'
-        if video['path'] != target:
+        if video['path'] != target and safe_child(layout.root, video['path']) != safe_child(layout.root, target):
             pending.append((video, target))
-    if sum(video['size_bytes'] for video, _ in pending) > max_bytes:
+    if not bounded_batch and sum(video['size_bytes'] for video, _ in pending) > max_bytes:
         raise ValueError('Selected video publication exceeds its bounded batch')
-    moved = []
-    for video, relative in pending:
+    moved, used = [], 0
+    if progress is not None:
+        progress['pending'] = 0
+    for position, (video, relative) in enumerate(pending):
+        source = safe_child(layout.root, video['path'])
+        if not source.is_file() or source.stat().st_size != video['size_bytes']:
+            continue
+        if bounded_batch and used + video['size_bytes'] > max_bytes and (
+                used or video['size_bytes'] > max_single_artifact_bytes):
+            if progress is not None:
+                progress['pending'] = len(pending) - position
+            break
         if not verify_artifact_cached(layout.root, video):
             continue
         source = safe_child(layout.root, video['path'])
@@ -166,10 +179,12 @@ def publish_selected_videos(layout, segments, *, max_bytes=536870912):
         mapping[video['path']] = relative
         _publish_aliases(layout, 'ProcessedClips', mapping)
         moved.append(reference)
+        used += video['size_bytes']
     return moved
 
 
-def migrate_display_layout(runner, layout, *, max_bytes=536870912, max_files=20000):
+def migrate_display_layout(runner, layout, *, max_bytes=536870912, max_files=20000,
+                           bounded_batch=False, max_single_artifact_bytes=8589934592):
     """Copy/verify owned display internals before publishing legacy aliases.
 
     The caller drains producers and owns the day index lock. Originals are
@@ -200,35 +215,61 @@ def migrate_display_layout(runner, layout, *, max_bytes=536870912, max_files=200
             source = folder / 'Recognition'
             if _TIME_DIRECTORY.fullmatch(folder.name) and source.is_dir():
                 plans.append((source, private_folder(layout, 'Comment', 'Recognition', folder.name)))
-    total, count, batches = 0, 0, []
-    for source, destination in plans:
+    def units(source, destination):
         if source.is_symlink():
             raise ValueError('Display migration refuses a symlink')
-        files = []
-        for path in sorted(source.rglob('*')):
+        files, amount = [], 0
+        paths = (source,) if source.is_file() else source.rglob('*')
+        for path in paths:
             if path.is_symlink():
                 raise ValueError('Display migration refuses a symlink')
             if path.is_file():
                 stat = path.stat()
-                total += stat.st_size
-                count += 1
-                if total > max_bytes or count > max_files:
-                    raise ValueError('Display migration exceeds its bounded batch')
                 files.append((path, (stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)))
-        batches.append((source, destination, files))
+                amount += stat.st_size
+                if not bounded_batch and (amount > max_bytes or len(files) > max_files):
+                    raise ValueError('Display migration exceeds its bounded batch')
+                if bounded_batch and source.is_dir() and (amount > max_bytes or len(files) > max_files):
+                    break
+        else:
+            files.sort(key=lambda item: item[0])
+            yield source, destination, files, amount
+            return
+        # Oversized containers are split at their own child boundaries. Keep
+        # prefix aliases for whole recording/window folders whenever possible.
+        files.clear()
+        for child in source.iterdir():
+            yield from units(child, destination/child.name)
+
+    total, count, batches, cleanup, pending = 0, 0, [], set(), False
+    for original, destination in plans:
+        for source, target, files, amount in units(original, destination):
+            exceeds = total + amount > max_bytes or count + len(files) > max_files
+            if exceeds:
+                if not bounded_batch:
+                    raise ValueError('Display migration exceeds its bounded batch')
+                if count or not source.is_file() or amount > max_single_artifact_bytes:
+                    pending = True
+                    break
+            total += amount
+            count += len(files)
+            batches.append((source, target, files))
+            cleanup.update(p for p in source.parents if p == original or p.is_relative_to(original))
+        if pending:
+            break
     entries = []
     for source, destination, files in batches:
         old, new = layout.relative(source), layout.relative(destination)
-        copied = []
+        copied, single_file = [], source.is_file()
         for path, before in files:
-            target = destination / path.relative_to(source)
+            target = destination if single_file else destination / path.relative_to(source)
             reference = copy_verified(path, target)
             copied.append({'from': layout.relative(path), 'to': layout.relative(target), **reference})
             stat = path.stat()
             if (stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns) != before:
                 raise ValueError('Display source changed during migration')
         # Recheck the complete source set, including files copied first.
-        if [p for p in sorted(source.rglob('*')) if p.is_file()] != [p for p, _ in files]:
+        if ([source] if single_file else [p for p in sorted(source.rglob('*')) if p.is_file()]) != [p for p, _ in files]:
             raise ValueError('Display source membership changed during migration')
         for (path, before), reference in zip(files, copied, strict=True):
             stat = path.stat()
@@ -240,18 +281,26 @@ def migrate_display_layout(runner, layout, *, max_bytes=536870912, max_files=200
         mapping[old] = new
         _publish_aliases(layout, directory, mapping)
         backup = private_folder(layout, directory, 'LegacyCopies', digest([old, new])[:24])
-        if backup.exists():
+        if backup.exists() and (not single_file or not backup.is_dir() or any(backup.iterdir())):
             raise ValueError('Display migration backup exists; preserve both copies')
         backup.parent.mkdir(parents=True, exist_ok=True)
-        source.rename(backup)
+        if single_file:
+            backup.mkdir(exist_ok=True)
+            source.rename(backup/source.name)
+        else:
+            source.rename(backup)
         entry = {'from': old, 'to': new, 'backup': layout.relative(backup), 'files': copied,
                  'original_media_changed': False, 'new_model_calls': 0}
         atomic_json(backup/'DisplayMigration.json', entry)
         entries.append(entry)
+    for directory in sorted(cleanup, key=lambda p: len(p.parts), reverse=True):
+        if directory.is_dir() and not directory.is_symlink() and not any(directory.iterdir()):
+            directory.rmdir()
     for directory in ('ProcessedClips', 'MultimodalUnderstanding', 'LaboratoryDailyReport', 'Comment'):
         if (layout.root/directory/'LegacyPaths.json').is_file():
             _publish_aliases(layout, directory, {k: v for k, v in aliases(layout.root).items() if k.startswith(directory + '/')})
-    return {'layout_version': LAYOUT_VERSION, 'moved': entries, 'verified_bytes': total, 'files': count}
+    return {'layout_version': LAYOUT_VERSION, 'moved': entries, 'verified_bytes': total, 'files': count,
+            'pending': pending}
 
 
 def migrate_understanding(runner, layout):
