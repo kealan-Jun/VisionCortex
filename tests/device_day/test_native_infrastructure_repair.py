@@ -8,7 +8,8 @@ import pytest
 from test_device_day import FakeModels, capture, device_config, item_and_layout  # noqa: F401
 from visioncortex.device_day import DeviceDayRunner
 from visioncortex.device_day_inplace import enqueue
-from visioncortex.device_day_retry_worker import NativeInfrastructureVerifier, RetryRepair, verify_proof
+from visioncortex.device_day_retry_worker import RetryRepair, verify_proof
+from visioncortex.runtime_services import NativeInfrastructureVerifier
 from visioncortex.observed_inventory import observe
 
 

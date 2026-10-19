@@ -72,7 +72,7 @@ python -m visioncortex.runtime_services --progress --config <站点配置>
 `mllm.local_receipt_total_bytes` 约束。账单和结果核对仍需对应厂商回执，不能靠清空记录恢复。
 
 通用重试服务可显式选用当前原生验证端口
-`visioncortex.device_day_retry_worker:native_verifier`。该端口支持数据库锁、存储访问、
+`visioncortex.runtime_services:native_verifier`。该端口支持数据库锁、存储访问、
 本地容量及理解阶段连接绑定修复；它重新核验当前目录、原始文件的稳定完整字节、
 已有封存、前序回执和上下文，再由队列 CAS 授予一次有限预算。旧执行版本不匹配时
 拒绝授予；模型、质量、解码及请求结果未知的问题继续使用各自的证据门禁。
