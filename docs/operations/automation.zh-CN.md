@@ -58,6 +58,17 @@ bash VisionCortexAutomation-Candidate/install.sh --setup
 每轮临时缓存最多 2 GiB，超限保留旧发布版本。
 使用前核对站点磁盘余量；此选项不会放宽输入、来源、产物或模型结果的验证。
 
+独立的可读文件发布可使用标准入口：
+
+```bash
+python -m visioncortex.device_day_publication_worker --config <站点配置> --readable
+```
+
+该入口复用文件索引发布服务，保留设备日轮转状态和实际构建身份，不启动模型。
+标准发布重放在收到停止请求后完成当前分片，剩余条目保留在持久日志中。
+一次性格式迁移核验结束后应停用临时迁移常驻扫描，保留游标和修订记录；
+日常发现、阶段准入和恢复继续由对应的正式消费者负责。
+
 
 ## 3090 Ti 局域网服务器
 
