@@ -61,7 +61,7 @@ def legacy_reference(relative):
         (parts[0] in {'Comment', 'MultimodalUnderstanding', 'ProcessedClips'} and bool(_TIME_DIRECTORY.fullmatch(parts[1])))
         or relative.startswith(('Comment/Stt/', 'MultimodalUnderstanding/ClipUnderstanding/',
                                 'MultimodalUnderstanding/RequestPlans/', 'LaboratoryDailyReport/History/',
-                                'LaboratoryDailyReport/Analysis/')))
+                                'LaboratoryDailyReport/Analysis/', 'ProcessedClips/.Evidence/LegacyPresentation/')))
 
 
 @lru_cache(maxsize=128)
@@ -73,13 +73,29 @@ def _read(path, modified, size):
 def aliases(root):
     result = {}
     for directory in ('Comment', 'MultimodalUnderstanding', 'ProcessedClips', 'LaboratoryDailyReport'):
-        path = root / directory / 'LegacyPaths.json'
-        try:
-            stat = path.stat()
-        except FileNotFoundError:
-            continue
-        result.update(_read(str(path), stat.st_mtime_ns, stat.st_size))
+        for path in (root/directory/'LegacyPaths.json', root/directory/'.Evidence/LegacyPaths.json'):
+            try:
+                stat = path.stat()
+            except FileNotFoundError:
+                continue
+            result.update(_read(str(path), stat.st_mtime_ns, stat.st_size))
     return result
+
+
+def _publish_aliases(layout, directory, mapping):
+    from .device_day import copy_verified
+    from .device_day_contract import atomic_json, file_hash
+    legacy = layout.root/directory/'LegacyPaths.json'
+    atomic_json(private_folder(layout, directory, 'LegacyPaths.json'), {
+        'schema_version': 'visioncortex-content-aliases/1', 'aliases': mapping})
+    if legacy.is_file():
+        checksum = file_hash(legacy)
+        backup = private_folder(layout, directory, 'LegacyAliasCopies', checksum + '.json')
+        copy_verified(legacy, backup)
+        if file_hash(legacy) != checksum:
+            raise ValueError('Legacy alias file changed during migration')
+        # Preserve its original bytes before removing it from the reading area.
+        legacy.unlink()
 
 
 def relocated(relative, mapping):
@@ -117,7 +133,43 @@ def analysis_folder(layout, segment, key):
     return private_folder(layout, 'MultimodalUnderstanding', 'Analysis', segment['segment_id'], key)
 
 
-def migrate_display_layout(runner, layout, *, max_bytes=134217728, max_files=20000):
+def publish_selected_videos(layout, segments, *, max_bytes=536870912):
+    """Expose already selected historical bytes in the frozen clip directory.
+
+    No extraction or selection change. Old receipts retain exact bytes through
+    an explicit alias; missing or damaged media cannot be called retained.
+    """
+    from .device_day import copy_verified
+    from .device_day_contract import artifact, safe_child
+    from .device_day_verification import verify_artifact_cached
+    pending = []
+    for segment in segments:
+        video = segment.get('video')
+        if not video:
+            continue
+        target = 'ProcessedClips/Clips/' + clip_name(segment) + '/' + layout_contract()['activities'][segment['activity']] + '.mp4'
+        if video['path'] != target:
+            pending.append((video, target))
+    if sum(video['size_bytes'] for video, _ in pending) > max_bytes:
+        raise ValueError('Selected video publication exceeds its bounded batch')
+    moved = []
+    for video, relative in pending:
+        if not verify_artifact_cached(layout.root, video):
+            continue
+        source = safe_child(layout.root, video['path'])
+        target = safe_child(layout.root, relative)
+        copy_verified(source, target)
+        reference = artifact(layout.root, target)
+        if any(reference[key] != video[key] for key in ('size_bytes', 'sha256')):
+            raise ValueError('Selected video changed during publication')
+        mapping = {k: v for k, v in aliases(layout.root).items() if k.startswith('ProcessedClips/')}
+        mapping[video['path']] = relative
+        _publish_aliases(layout, 'ProcessedClips', mapping)
+        moved.append(reference)
+    return moved
+
+
+def migrate_display_layout(runner, layout, *, max_bytes=536870912, max_files=20000):
     """Copy/verify owned display internals before publishing legacy aliases.
 
     The caller drains producers and owns the day index lock. Originals are
@@ -186,8 +238,7 @@ def migrate_display_layout(runner, layout, *, max_bytes=134217728, max_files=200
         directory = old.split('/')[0]
         mapping = {k: v for k, v in aliases(layout.root).items() if k.startswith(directory + '/')}
         mapping[old] = new
-        atomic_json(layout.root/directory/'LegacyPaths.json', {'schema_version': 'visioncortex-content-aliases/1',
-                                                              'aliases': mapping})
+        _publish_aliases(layout, directory, mapping)
         backup = private_folder(layout, directory, 'LegacyCopies', digest([old, new])[:24])
         if backup.exists():
             raise ValueError('Display migration backup exists; preserve both copies')
@@ -197,6 +248,9 @@ def migrate_display_layout(runner, layout, *, max_bytes=134217728, max_files=200
                  'original_media_changed': False, 'new_model_calls': 0}
         atomic_json(backup/'DisplayMigration.json', entry)
         entries.append(entry)
+    for directory in ('ProcessedClips', 'MultimodalUnderstanding', 'LaboratoryDailyReport', 'Comment'):
+        if (layout.root/directory/'LegacyPaths.json').is_file():
+            _publish_aliases(layout, directory, {k: v for k, v in aliases(layout.root).items() if k.startswith(directory + '/')})
     return {'layout_version': LAYOUT_VERSION, 'moved': entries, 'verified_bytes': total, 'files': count}
 
 
@@ -243,8 +297,7 @@ def migrate_understanding(runner, layout):
                         copied.append({'path': target.relative_to(layout.root).as_posix(), **copy_verified(path, target)})
                 old, relative = layout.relative(folder), layout.relative(destination)
                 mapping[old] = relative
-                atomic_json(layout.understanding/'LegacyPaths.json', {'schema_version': 'visioncortex-content-aliases/1',
-                            'aliases': mapping})
+                _publish_aliases(layout, 'MultimodalUnderstanding', mapping)
                 entry = {'recording_id': rid, 'segment_id': folder.name, 'from': old, 'to': relative,
                          'files': copied, 'original_media_changed': False, 'new_model_calls': 0}
                 journal = layout.receipts/rid/'history'/('content-relocation-'+digest(entry))
@@ -292,8 +345,7 @@ def migrate_stt(runner, layout):
                         copied.append({'path': target.relative_to(layout.root).as_posix(), **copy_verified(path, target)})
                 old = 'Comment/Stt/' + folder.name
                 mapping[old] = relative
-                atomic_json(layout.comments/'LegacyPaths.json', {'schema_version': 'visioncortex-content-aliases/1',
-                            'aliases': mapping})
+                _publish_aliases(layout, 'Comment', mapping)
                 entry = {'recording_id': folder.name, 'from': old, 'to': relative, 'files': copied,
                          'original_media_changed': False, 'new_model_calls': 0}
                 journal = layout.receipts/folder.name/'history'/('content-relocation-'+digest(entry))

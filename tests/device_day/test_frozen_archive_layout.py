@@ -6,7 +6,7 @@ import pytest
 
 from visioncortex.device_day_content import publish_content
 from visioncortex.device_day_content_paths import (
-    LAYOUT_VERSION, analysis_folder, clip_name, layout_contract, migrate_display_layout,
+    LAYOUT_VERSION, analysis_folder, clip_name, layout_contract, migrate_display_layout, publish_selected_videos,
 )
 from visioncortex.device_day_contract import DeviceDayLayout, artifact, atomic_json, read_json, safe_child, verify_artifact
 
@@ -118,3 +118,37 @@ def test_bounded_relocation_keeps_original_evidence_and_old_receipts_valid(tmp_p
     backup = layout.root/result['moved'][0]['backup']/'recording'/('a' * 64)/'SamplingCoverage.json'
     assert backup.read_bytes() == original
     assert migrate_display_layout(None, layout)['moved'] == []
+
+
+def test_historical_selected_video_is_visible_in_clip_directory_without_reencoding(tmp_path):
+    _, index = fixture(tmp_path)
+    layout = DeviceDayLayout(tmp_path, 'camera_cam01', 1792376825000000)
+    segment = index['segments'][0]
+    old = layout.processed/'10-27-05.000000_10-29-05.000000'/'decision'/'Activity.mp4'
+    old.parent.mkdir(parents=True)
+    old.write_bytes(b'previously-selected-video')
+    segment['video'] = artifact(layout.root, old)
+    reference = deepcopy(segment['video'])
+    migrate_display_layout(None, layout)
+    result = publish_selected_videos(layout, [segment])
+    target = layout.processed/'Clips'/clip_name(segment)/'NoExperimentActivity.mp4'
+    assert target.read_bytes() == b'previously-selected-video'
+    assert result[0]['path'] == target.relative_to(layout.root).as_posix()
+    assert safe_child(layout.root, reference['path']) == target
+    assert verify_artifact(layout.root, reference)
+    assert segment['video'] == reference
+
+
+def test_selected_video_projection_refuses_missing_corrupt_or_over_budget_bytes(tmp_path):
+    _, index = fixture(tmp_path)
+    layout = DeviceDayLayout(tmp_path, 'camera_cam01', 1792376825000000)
+    segment = index['segments'][0]
+    old = layout.processed/'10-27-05_10-29-05'/'Activity.mp4'
+    old.parent.mkdir(parents=True)
+    old.write_bytes(b'good')
+    segment['video'] = artifact(layout.root, old)
+    with pytest.raises(ValueError, match='bounded batch'):
+        publish_selected_videos(layout, [segment], max_bytes=1)
+    old.write_bytes(b'bad')
+    assert publish_selected_videos(layout, [segment]) == []
+    assert not (layout.processed/'Clips').exists()
