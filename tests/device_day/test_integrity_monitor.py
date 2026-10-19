@@ -400,3 +400,41 @@ def test_independent_service_heartbeat_and_shutdown_without_models(device_config
         process.communicate(timeout=10)
     assert process.returncode == 0
     assert integrity_status(config)['available'] is False
+
+
+def test_full_seal_verification_clears_content_conflict_wait(monitor_case):
+    from visioncortex.input_availability import Availability
+    config, record, layout, backend, runner, monitor = monitor_case
+    availability = Availability(runner.runtime_root)
+    availability.mark(record, 'waiting', reason='content_identity_conflict')
+    with runner.queues['retention'].connect() as db:
+        db.execute("UPDATE recordings SET status='failed',attempts=3,result=?",
+                   (json.dumps({'error_type': 'InputChanged'}),))
+    assert tick_selected(monitor)['status'] == 'retry_authorized'
+    assert availability.states()[record['recording_id']]['state'] == 'ready'
+    assert backend.vision_calls == backend.semantic_calls == 0
+
+
+def test_paced_reader_preserves_bytes_and_avoids_per_megabyte_admission(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+    import hashlib
+    from visioncortex import device_day_io
+    from visioncortex.device_day_contract import file_hash
+    from visioncortex.input_availability import _PacedInput
+    payload = bytes(range(251)) * (17 * 1024**2 // 251 + 1)
+    path = tmp_path / 'owned-bounded-bytes.bin'
+    path.write_bytes(payload)
+    admissions, paced = [], []
+    @contextmanager
+    def slot(*args, **kwargs):
+        admissions.append(True)
+        yield
+    monkeypatch.setattr(device_day_io, 'slot', slot)
+    monkeypatch.setattr(device_day_io, 'pace_copy', lambda config, size: paced.append(size))
+    assert file_hash(_PacedInput({}, path)) == hashlib.sha256(payload).hexdigest()
+    assert sum(paced) == len(payload) and len(admissions) < 8
+    admissions.clear()
+    with _PacedInput({}, path).open('rb') as stream:
+        assert stream.read(0) == b'' and admissions == []
+        assert stream.read(17) + stream.read(1024**2) + stream.read() == payload
+        assert stream.read(1) == b''
