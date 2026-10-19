@@ -494,7 +494,7 @@ class IntegrityMonitor:
             cursor = db.execute("SELECT position FROM cursors WHERE lane='_closure_cursor'").fetchone()
             ids = [r[0] for r in db.execute("SELECT DISTINCT id FROM alerts WHERE state='active' "
                 "AND stage IN ('retention','vision','stt') AND (key GLOB '*_failed:*' OR key GLOB '*_recovery:*') "
-                "AND id>? ORDER BY id LIMIT ?",
+                "ORDER BY (id<=?),id LIMIT ?",
                 (str(cursor[0]) if cursor else '', self.options['batch_size']))]
         for rid in ids:
             rows = {}
