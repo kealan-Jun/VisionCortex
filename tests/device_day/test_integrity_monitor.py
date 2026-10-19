@@ -410,7 +410,12 @@ def test_full_seal_verification_clears_content_conflict_wait(monitor_case):
     with runner.queues['retention'].connect() as db:
         db.execute("UPDATE recordings SET status='failed',attempts=3,result=?",
                    (json.dumps({'error_type': 'InputChanged'}),))
+    runner.queues['retention'].sync_availability(availability.states())
+    with runner.queues['retention'].connect() as db:
+        assert db.execute('SELECT input_status FROM recordings').fetchone()[0] == 'waiting'
     assert tick_selected(monitor)['status'] == 'retry_authorized'
+    with runner.queues['retention'].connect() as db:
+        assert tuple(db.execute('SELECT input_status,attempts,retry_limit FROM recordings').fetchone()) == ('ready', 3, 4)
     assert availability.states()[record['recording_id']]['state'] == 'ready'
     assert backend.vision_calls == backend.semantic_calls == 0
 
@@ -450,4 +455,21 @@ def test_completed_alert_priority_wraps_before_full_archive_sweep(monitor_case):
         assert db.execute("SELECT COUNT(*) FROM checks WHERE lane='retention_closure'").fetchone()[0] == 1
         assert db.execute("SELECT state FROM alerts WHERE key=?",
                           ('retention_failed:' + record['recording_id'],)).fetchone()[0] == 'resolved'
+    assert backend.vision_calls == backend.semantic_calls == 0
+
+
+def test_ordinary_input_wait_does_not_trigger_a_seal_repair(monitor_case):
+    from visioncortex.input_availability import Availability
+    config, record, layout, backend, runner, monitor = monitor_case
+    availability = Availability(runner.runtime_root)
+    availability.mark(record, 'waiting', reason='capture_not_closed')
+    queue = runner.queues['retention']
+    with queue.connect() as db:
+        db.execute("UPDATE recordings SET status='failed',attempts=3,result=?",
+                   (json.dumps({'error_type': 'InputChanged'}),))
+    queue.sync_availability(availability.states())
+    with queue.connect() as db:
+        assert db.execute('SELECT input_status FROM recordings').fetchone()[0] == 'waiting'
+    assert monitor.tick()['status'] == 'idle'
+    assert availability.states()[record['recording_id']]['state'] == 'waiting'
     assert backend.vision_calls == backend.semantic_calls == 0

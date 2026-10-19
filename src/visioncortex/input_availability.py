@@ -541,6 +541,7 @@ class IntegrityMonitor:
             return recovered
         with self._db(readonly=True) as db:
             cursors = dict(db.execute('SELECT lane,position FROM cursors'))
+        held_inputs = Availability(self.root).states()
         start = cursors.get('_lane', 0) % len(self.LANES)
         for offset in range(len(self.LANES)):
             index = (start + offset) % len(self.LANES)
@@ -550,7 +551,7 @@ class IntegrityMonitor:
             if not queue.is_file():
                 continue
             condition = ("status='completed'" if kind == 'completed' else
-                         "status='failed' AND input_status='ready' AND blocked_reason IS NULL "
+                         "status='failed' AND input_status IN ('ready','waiting') AND blocked_reason IS NULL "
                          "AND json_extract(result,'$.error_type')='InputChanged' "
                          "AND attempts>=MAX(?,retry_limit)")
             parameters = () if kind == 'completed' else ((self.config.get('device_day') or {}).get('failure_retry_limit') or 3,)
@@ -562,6 +563,11 @@ class IntegrityMonitor:
             for candidate in rows:
                 row = dict(candidate)
                 position = row.pop('scan_id')
+                if kind == 'failed' and row['input_status'] == 'waiting':
+                    held = held_inputs.get(row['recording_id'], {})
+                    if (held.get('reason') != 'content_identity_conflict'
+                            or held.get('signature') != json.loads(row['payload']).get('source_signature')):
+                        continue
                 if not in_processing_scope(self.config.get('device_day') or {}, json.loads(row['payload'])):
                     continue
                 fingerprint = digest(row)
@@ -738,6 +744,12 @@ class IntegrityMonitor:
                             raise IntegrityIssue('archive_content_conflict')
                 repair_id = digest(['input-integrity-recovery/1', proof['source_generation']])
                 proof = proof | {'current_queue_revision': revision}
+                if row['input_status'] == 'waiting':
+                    held = Availability(self.root).states().get(record['recording_id'], {})
+                    if (held.get('reason') != 'content_identity_conflict'
+                            or held.get('signature') != record['source_signature']):
+                        raise IntegrityIssue('input_recovery_state_changed')
+                    proof['verified_wait_reason'] = 'content_identity_conflict'
                 grant = self.runner.queues[stage].authorize_input_recovery(row, repair_id, proof)
                 if grant == 'repair_already_authorized':
                     raise IntegrityIssue('recovery_retry_exhausted')
