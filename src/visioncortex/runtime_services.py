@@ -270,6 +270,16 @@ class NativeInfrastructureVerifier:
             return {'status': 'PROVEN'}
 
     @staticmethod
+    def rejection_reason(exc):
+        return {'Target queue has no current source admission': 'current_source_not_admitted',
+                'Current queue recipe changed; normal admission is required': 'current_recipe_requires_normal_admission',
+                'Current parent execution is not verified': 'current_parent_execution_unverified',
+                'Current input does not match the sealed recording': 'current_source_metadata_changed',
+                'Current inventory source differs from the queue': 'current_inventory_source_changed',
+                'Original content differs from its input seal': 'current_source_content_conflict',
+                'Current parent artifact is not verified': 'current_parent_artifact_unverified'}.get(str(exc))
+
+    @staticmethod
     def _identity(path):
         from .device_day_inputs import identity
         return tuple(identity(path))
@@ -357,6 +367,12 @@ class NativeInfrastructureVerifier:
         runner = DeviceDayRunner(config, backend=object())
         record = json.loads(row['payload'])
         rid, layout = record['recording_id'], runner.layout(record)
+        # A repair budget never establishes permission for historical work.
+        # Reject before NAS hashing when no exact-source admission exists.
+        if (row.get('processing_cohort') not in {'live', 'current_recovery', 'historical_backfill'}
+                or row.get('admission_signature') != record.get('source_signature')
+                or row.get('admitted_at') is None):
+            raise ValueError('Target queue has no current source admission')
         if row.get('lease_owner') or row.get('lease_until'):
             raise ValueError('Target queue still has a stage owner')
         root = Path(config['collection_ingest']['source_root'])

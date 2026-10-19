@@ -25,6 +25,7 @@ def failed_retention(device_config):  # noqa: F811
     assert runner.process(record, stage='retention')['status'] == 'completed'
     enqueue(runner, record, 'retention')
     queue = runner.queues['retention']
+    queue.grant_admission(record, cohort='current_recovery', reason='owned_verified_repair_fixture')
     with queue.connect() as db:
         db.execute("UPDATE recordings SET status='failed',attempts=3,result=?",
                    (json.dumps({'status': 'failed', 'stage': 'retention', 'error_type': 'OperationalError',
@@ -100,4 +101,20 @@ def test_native_worker_grants_one_budget_without_erasing_the_failure(failed_rete
         db.execute("UPDATE recordings SET status='failed',attempts=4")
     assert worker.tick(threading.Event())['status'] in {'waiting', 'verification_rejected'}
     assert port._row(runner, 'retention', row['recording_id'])['retry_limit'] == 4
+    assert backend.vision_calls == backend.semantic_calls == 0
+
+
+def test_unadmitted_history_is_rejected_before_source_reads(failed_retention, monkeypatch):
+    config, runner, row, backend = failed_retention
+    from visioncortex import nas_recordings
+    def unexpected_read(*args, **kwargs):
+        pytest.fail('Unadmitted history must not trigger a source scan')
+    monkeypatch.setattr(nas_recordings, '_inspect', unexpected_read)
+    with runner.queues['retention'].connect() as db:
+        db.execute('UPDATE recordings SET admitted_at=NULL')
+        row = dict(db.execute('SELECT * FROM recordings').fetchone())
+    port = NativeInfrastructureVerifier(config)
+    with pytest.raises(ValueError, match='no current source admission') as exc:
+        port.verify(config, 'retention', row, 'database_lock', threading.Event())
+    assert port.rejection_reason(exc.value) == 'current_source_not_admitted'
     assert backend.vision_calls == backend.semantic_calls == 0
