@@ -279,7 +279,9 @@ def _json_events(handle, *, streaming=False):
     # non-integral JSON numbers back to float, matching the historical decoder.
     try:
         events, depth = 0, 0
-        for event, value in ijson.basic_parse(handle):
+        # Match archive hashing/copy quanta. Tiny parser reads otherwise
+        # repeatedly rejoin behind MiB bandwidth reservations under load.
+        for event, value in ijson.basic_parse(handle, buf_size=1024 * 1024):
             events += 1
             maximum = _MAX_STREAM_EVENTS if streaming else _MAX_JSON_EVENTS
             if events > maximum:
