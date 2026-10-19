@@ -483,6 +483,13 @@ def test_concurrent_preprocessing_keeps_publication_journal_until_all_locks_rele
         assert reconcile(runner) == 0
         release.set()
         assert stt.result()['status'] == 'completed'
+    # A busy replay remains durably deferred after the stage lock releases.
+    # Expiry, rather than a tight immediate retry, makes it runnable again.
+    journal = PublicationJournal(runner.runtime_root)
+    assert journal.pending() and not journal.pending(ready_only=True)
+    from visioncortex.sqlite_store import connection
+    with connection(journal.path) as db:
+        db.execute('UPDATE retries SET next_attempt_at=0')
     assert reconcile(runner) == 1
 
 
