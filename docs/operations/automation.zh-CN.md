@@ -98,7 +98,11 @@ python -m visioncortex.runtime_services --progress --config <站点配置>
 `VISIONCORTEX_RECEIPT_PROJECTION_SHARED_AUDITS=1`，流式读取并按完整摘要及内容相等性
 恢复共享对象，也支持完整相等的候选证据。原始回执、全部字段、执行键和历史证据保持原样。
 唯一对象与单个临时共享对象分别受内存上限约束；该上限默认沿用原配置，可通过
-`VISIONCORTEX_RECEIPT_PROJECTION_RESIDENT_BYTES` 显式设置，最多 1 GiB。编码流最多 1 GiB，
+`VISIONCORTEX_RECEIPT_PROJECTION_RESIDENT_BYTES` 显式设置，最多 1 GiB。编码流默认最多 1 GiB，
+站点可用 `VISIONCORTEX_RECEIPT_PROJECTION_STREAM_MAX_BYTES` 显式提高到最多 2 GiB，
+`VISIONCORTEX_RECEIPT_PROJECTION_STREAM_MAX_JSON_EVENTS` 最多 268435456 个流事件。
+这些流式上限与整份回执缓冲上限独立；后者的 `MAX_BYTES` 仍最多 256 MiB、
+`MAX_JSON_EVENTS` 仍最多 8000000，不得把大索引流上限写进回执缓冲参数。
 每轮临时缓存最多 2 GiB，超限保留旧发布版本。
 使用前核对站点磁盘余量；此选项不会放宽输入、来源、产物或模型结果的验证。
 

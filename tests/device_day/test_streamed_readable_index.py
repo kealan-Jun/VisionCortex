@@ -13,6 +13,28 @@ from visioncortex.device_day_file_index import _READABLE_OMIT
 from visioncortex.receipt_projection import projected_json, replace_json_field, ProjectionDeferred
 
 
+def test_large_stream_policy_keeps_buffered_receipts_within_their_separate_limits():
+    package = Path(__import__('visioncortex').__file__).resolve().parent.parent
+    env = os.environ | {'PYTHONPATH': str(package),
+        'VISIONCORTEX_RECEIPT_PROJECTION_MAX_BYTES': str(256 * 1024**2),
+        'VISIONCORTEX_RECEIPT_PROJECTION_MAX_JSON_EVENTS': '8000000',
+        'VISIONCORTEX_RECEIPT_PROJECTION_STREAM_MAX_BYTES': str(2 * 1024**3),
+        'VISIONCORTEX_RECEIPT_PROJECTION_STREAM_MAX_JSON_EVENTS': '268435456'}
+    script = '''
+from visioncortex.receipt_projection import (
+    _MAX_RECEIPT_BYTES, _MAX_JSON_EVENTS, _MAX_STREAM_BYTES, _MAX_STREAM_EVENTS)
+assert _MAX_RECEIPT_BYTES == 256 * 1024**2
+assert _MAX_JSON_EVENTS == 8000000
+assert _MAX_STREAM_BYTES == 2 * 1024**3
+assert _MAX_STREAM_EVENTS == 268435456
+'''
+    result = subprocess.run([sys.executable, '-c', script], env=env, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    env['VISIONCORTEX_RECEIPT_PROJECTION_STREAM_MAX_BYTES'] = str(2 * 1024**3 + 1)
+    result = subprocess.run([sys.executable, '-c', script], env=env, capture_output=True, text=True, timeout=10)
+    assert result.returncode != 0 and 'must be between 1' in result.stderr
+
+
 def test_projection_matches_legacy_fields_without_decoding_dense_subtrees(tmp_path):
     value = {'archive': 'owned', 'recordings': [{'processing': {
         'batches': [{'huge': 'x' * 1000}], 'scan_reports': [], 'audit_artifacts': [],
