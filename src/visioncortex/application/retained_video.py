@@ -269,8 +269,9 @@ def _defer_attempt(path, previous, key, error):
 def publish_selected(config, index, *, recording_id=None, maximum_new_videos=1, evidence_validator=None):
     """Publish only the exact selected subintervals, independently of reports.
 
-    Candidate records and historical whole-candidate files remain readable.
-    The existing publisher owns bounded retries; this adds no second queue.
+    Every candidate contributes to the day projection. ``recording_id`` limits
+    new materialization only; it must not hide other recordings' verified
+    published intervals. The existing publisher owns bounded retries.
     """
     from ..device_day_contract import DeviceDayLayout
     from ..device_day_content_paths import private_folder, understanding_relative
@@ -284,8 +285,6 @@ def publish_selected(config, index, *, recording_id=None, maximum_new_videos=1, 
     for candidate in index.get('segments', []):
         record = records.get(candidate['recording_id'])
         if not record or not candidate.get('start_us') or not candidate.get('end_us'):
-            continue
-        if recording_id is not None and candidate['recording_id'] != recording_id:
             continue
         backend = config['storage'].get('local_cache_root')
         layout = DeviceDayLayout(root, index['archive'][11:], candidate['start_us'], Path(backend) if backend else None)
@@ -331,6 +330,8 @@ def publish_selected(config, index, *, recording_id=None, maximum_new_videos=1, 
                 pointer = private_folder(layout, 'ProcessedClips', 'Retention', child['segment_id'], 'Published.json')
                 row['receipt'] = read_json(pointer)['receipt']
                 continue
+            if recording_id is not None and candidate['recording_id'] != recording_id:
+                continue  # Reuse verified output above, without exporting another source.
             if not config.get('device_day', {}).get('derived_video_retention', False):
                 continue
             attempt_path, previous_attempt, invalid = _read_attempt(layout, child, decision)
