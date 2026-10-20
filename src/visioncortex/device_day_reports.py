@@ -200,9 +200,6 @@ def render_day(layout, index):
     day_template, day_contract = template_contract("VC-DEVICE-DAY-REPORT-V1")
     daily_contents = {"daily_overview": overview, "experiment_briefs": ''.join(readable_html) + '<details><summary>逐片段画面、模型执行与来源</summary>' + ''.join(briefs) + '</details>',
                       "attention_and_handoff": uncertainties, "cost_and_timing": cost}
-    semantic_template, semantic_contract = template_contract("VC-DEVICE-UNDERSTANDING-REPORT-V1")
-    semantic_contents = {"coverage": overview, "timeline": ''.join(sections) or '<p>等待理解产出。</p>',
-                         "context": '<ul>' + ''.join(context_rows) + '</ul>', "uncertainty": uncertainties, "execution": cost}
     check_yield(checkpoint=False)
     # Once publication begins, finish this report generation. Each existing
     # atomic writer retains its old file until replacement; the journal covers
@@ -216,7 +213,3 @@ def render_day(layout, index):
             "evidence_status": "PARTIAL_EVIDENCE", "entries": daily_entries,
             "additional_mllm_calls": False, "additional_model_tokens": 0,
             "sections": day_template["sections"], "input_index_digest": digest(index)})
-        atomic_bytes(layout.understanding / "UnderstandingReport.html", render_page(f"{layout.name} 多模态理解报告", semantic_template, semantic_contract, semantic_contents).encode())
-        atomic_json(layout.understanding / "Understanding.json", {"schema_version": VERSION, "archive": layout.name,
-                    **semantic_contract, "understandings": index["understandings"], "sections": semantic_template["sections"],
-                    "additional_mllm_calls": False, "additional_model_tokens": 0})

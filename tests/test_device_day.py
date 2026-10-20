@@ -1026,9 +1026,8 @@ def test_fixed_report_templates_preserve_existing_columns_and_do_not_call_model(
     assert report["additional_model_tokens"] == 0 and not report["additional_mllm_calls"]
     base = read_json(Path(__file__).parents[1] / "src/visioncortex/templates/VC-LAB-DAILY-REPORT-V2.json")
     assert report["sections"] == base["sections"]
-    semantic = read_json(layout.understanding / "Understanding.json")
-    assert semantic["template_id"] == "VC-DEVICE-UNDERSTANDING-REPORT-V1"
-    assert '按时间的步骤与场景理解' in (layout.understanding / "UnderstandingReport.html").read_text()
+    assert not (layout.understanding / "Understanding.json").exists()
+    assert not (layout.understanding / "UnderstandingReport.html").exists()
     assert '关注事项与交接' in (layout.reports / "LaboratoryDailyReport.html").read_text()
 
 
