@@ -758,6 +758,7 @@ class DeviceDayRunner:
                 retention = receipt
             elif current == "vision":
                 if (receipt.get("retention_digest") != digest(retention)
+                        and receipt.get('vision_input_digest') != digest(visual_input(retention))
                         and not self._completed_stage_receipts.accepts(receipt, key)):
                     atomic_json(path.parent / "history" / f"vision-{digest(receipt)}.json", receipt)
                     receipt = receipt | {"retention_digest": digest(retention)}

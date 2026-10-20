@@ -179,7 +179,8 @@ def _archive(runner, record, layout):
     # Copy each independently sealed media set before touching the next one.
     # A disappearing audio sidecar must not prevent saving an expiring video.
     for stage in ('vision', 'stt'):
-        if stage == 'stt' and record.get('audio', {}).get('status') in {'pending_publication', 'association_mismatch'}:
+        if stage == 'stt' and (record.get('audio', {}).get('status') in {'pending_publication', 'association_mismatch'}
+                or record.get('audio', {}).get('status') == 'provided' and not stage_input_ready(record, 'stt')):
             continue
         with slot(runner.config, copy=True, urgent=urgent), phase('input_validation_seconds'):
             seal = seal_input(runner, record, stage)
@@ -204,6 +205,13 @@ def _archive(runner, record, layout):
     audio.pop('files', None)
     audio['artifacts'] = [s['retained'] | {'kind': s['kind']} for s in sources.values() if s['kind'].startswith('audio_')]
     speech_seal = next((seal for seal in seals if seal['stage'] == 'input-stt'), None)
+    if speech_seal is None:
+        audio['input_verification'] = {'status': 'waiting_for_input_verification',
+            'reasons': record.get('stt_readiness_reasons') or record.get('audio', {}).get('association_issues')
+                       or ['audio_not_independently_ready'], 'stt_binding_granted': False}
+        audio['collector_sources'] = [{'kind': source['kind'], 'original_path': source['path'],
+            'verification_status': 'unverified', 'ownership': 'collector'}
+            for source in record.get('audio', {}).get('files', [])]
     return {'input_binding_version': 1, 'recording': record, 'capture_root': runner.config['collection_ingest']['source_root'],
             'sources': list(sources.values()), 'artifacts': [s['retained'] for s in sources.values()], 'audio': audio,
             'input_bindings': {s['stage'].removeprefix('input-'): binding(s) for s in seals},
@@ -242,10 +250,18 @@ def execute(runner, layout, record, *, stage, retry):
     started = time.perf_counter()
     key = None
     try:
-        archived = None if stage == 'stt' and record.get('audio', {}).get('status') == 'provided' else verified_archive(runner, record)
+        prior_archive = receipt(runner, record, 'retention')
+        audio_revised = (prior_archive.get('status') == 'completed'
+            and prior_archive.get('recording', {}).get('source_signature') == record.get('source_signature')
+            and prior_archive.get('recording', {}).get('audio', {}).get('source_signature')
+                != record.get('audio', {}).get('source_signature'))
+        archived = (None if audio_revised or stage == 'stt' and record.get('audio', {}).get('status') == 'provided'
+                    else verified_archive(runner, record))
         if stage == 'retention':
             audio_signature = record.get('audio', {}).get('source_signature')
-            if archived and archived['recording'].get('audio', {}).get('source_signature') == audio_signature:
+            requires_audio = record.get('audio', {}).get('status') == 'provided' and stage_input_ready(record, 'stt')
+            if (archived and archived['recording'].get('audio', {}).get('source_signature') == audio_signature
+                    and (not requires_audio or archived.get('input_bindings', {}).get('stt'))):
                 result = archived
             else:
                 result = _archive(runner, record, layout)
@@ -459,6 +475,8 @@ def _publish(runner, record):
             if not seal_path.is_file():
                 continue
             seal = read_json(seal_path)
+            if stage == 'stt' and archived.get('input_bindings', {}).get('stt') != binding(seal):
+                continue  # An old/invalid audio generation does not own this visual publication.
             # Existing captures must still be the sealed versions. A missing
             # capture is recoverable only after independently verified archival.
             for source in seal['sources']:
@@ -466,11 +484,9 @@ def _publish(runner, record):
                 if p.exists() and (identity(p) != source['identity'] or
                                    str(p.resolve()) != source.get('resolved_path', str(p.resolve()))):
                     raise InputChanged('Capture was replaced after preprocessing')
-        checkpoint = runner._completed_stage_receipts.accepts(
-            visual, runner._key('vision', record, visual_input(archived)))
-        if visual.get('retention_digest') != digest(archived) and not checkpoint:
-            visual = visual | {'retention_digest': digest(archived)}
-            durable_json(runner._receipt(layout, record, 'vision'), visual)
+        # Keep the CV receipt's original retention provenance byte-identical.
+        # The verified visual input binding above proves reuse; publication.json
+        # separately binds this current archive generation, including late audio.
         stt = receipt(runner, record, 'stt')
         stt_ready = (stt.get('status') == 'completed' and stt.get('input_binding') == archived['input_bindings'].get('stt'))
         if stt_ready:
