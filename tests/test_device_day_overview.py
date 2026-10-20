@@ -35,7 +35,9 @@ def test_overview_preserves_grains_role_time_union_and_unprocessed_gap(tmp_path)
     day=data['days'][0]
     assert day['active_count']==2
     assert day['keyframes']==2  # inactive scene sample is never an action keyframe
-    assert day['activity_seconds']==15  # 10 seconds per view, 5-second overlap
+    assert day['activity_seconds']==0  # candidates without verified exact files are never selected video
+    assert day['selected_count']==day['available_selected_count']==0
+    assert union_seconds([(0, 10_000_000), (5_000_000, 15_000_000)])==15
     assert day['preprocessed_recordings']==2
     assert day['indexed_recordings']==4
     assert day['stt_transcribed_recordings']==0  # completed/no-audio is not STT
@@ -43,12 +45,12 @@ def test_overview_preserves_grains_role_time_union_and_unprocessed_gap(tmp_path)
     page=render(data)
     assert '2 尚无发布结果' in page
     assert '#t=0.000,10.000' in page
-    assert '打开实验视频' in page
+    assert '打开实验视频' not in page and 'data-watch ' not in page
     assert '原录音 / 已转写分片' in page
-    assert page.index('实验片段，从这里看') < page.index('当前运行情况')
-    assert page.index('观看实验片段') < page.index('每天处理到哪里了')
-    assert 'data-multiview' in page and '在 NAS 中的位置' in page
-    assert 'VisionCortexExperimentArchive/2026-09-10_a_cam01/MetaVideo/10-00.mp4' in page
+    assert page.index('选中视频，从这里看') < page.index('当前运行情况')
+    assert page.index('视频与 JSON') < page.index('每天处理到哪里了')
+    assert '预处理候选 JSON' in page and '原片对应时间' in page
+    assert '2026-09-10_a_cam01/MetaVideo/10-00.mp4' in page
 
 
 def test_overview_rejects_cross_archive_and_unassociated_segment():
@@ -73,11 +75,10 @@ def test_publication_updates_same_readme_and_drops_unreadable_cache(tmp_path, mo
     assert (root/'Readme.html').read_bytes()==(runner.runtime_root/'ArchiveOverview.html').read_bytes()
     first=(root/'Readme.html').read_text()
     assert name in first
-    import visioncortex.device_day_overview as module
-    original=module.read_json
-    monkeypatch.setattr(module,'read_json',lambda p: (_ for _ in ()).throw(AssertionError('unchanged index reread')))
+    original=worker._published_views.index
+    monkeypatch.setattr(worker._published_views,'index',lambda p: (_ for _ in ()).throw(AssertionError('unchanged index reread')))
     assert worker.publish(runner)['active_segments']==1
-    monkeypatch.setattr(module,'read_json',original)
+    monkeypatch.setattr(worker._published_views,'index',original)
     path.write_text('broken')
     result=worker.publish(runner)
     assert len(result['errors'])==1 and result['active_segments']==0

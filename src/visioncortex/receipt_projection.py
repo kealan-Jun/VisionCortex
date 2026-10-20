@@ -240,6 +240,21 @@ class ProjectionDeferred(BlockingIOError):
         self.recording_id = recording_id
 
 
+class ProjectionGenerationChanged(BlockingIOError):
+    """A concurrent receipt commit requires a fresh complete publication read."""
+
+    def __init__(self, recording_id, expected, observed):
+        super().__init__('Receipt source changed during projection')
+        self.recording_id = recording_id
+        self.expected_generation = hashlib.sha256(expected.encode()).hexdigest()
+        self.observed_generation = hashlib.sha256(observed.encode()).hexdigest()
+
+    def details(self):
+        return {'reason': 'receipt_generation_changed', 'error_type': type(self).__name__,
+                'projection_recording_id': self.recording_id,
+                'expected_generation': self.expected_generation, 'observed_generation': self.observed_generation}
+
+
 def _check_size(size, recording_id=None):
     if size > _MAX_RECEIPT_BYTES:
         raise ProjectionDeferred('encoded_bytes', size, _MAX_RECEIPT_BYTES, recording_id)
@@ -414,19 +429,25 @@ class ReceiptProjection:
         """Compatibility for small callers; publication consumes iter_records."""
         return list(self.iter_records(layout, stages, recording_id=recording_id))
 
-    def iter_records(self, layout, stages, *, recording_id=None):
+    def iter_records(self, layout, stages, *, recording_id=None, exclude=()):
         """Bound derived-cache hydration; preserve full authoritative receipts."""
         state = self.path.parent / 'ReceiptProjectionDeferred' / (
             hashlib.sha256(layout.name.encode()).hexdigest()[:24] + '.json')
         from .device_day_contract import atomic_json
         try:
-            yield from self._iter_records(layout, stages, recording_id=recording_id)
+            yield from self._iter_records(layout, stages, recording_id=recording_id, exclude=frozenset(exclude))
         except ProjectionDeferred as exc:
             atomic_json(state, {'status': 'deferred', 'archive': layout.name,
                 'recording_id': exc.recording_id, 'requested_recording_id': recording_id,
                 'reason': 'receipt_projection_memory_limit', 'metric': exc.metric,
                 'observed': exc.observed, 'limit': exc.limit, 'updated_at': time.time(),
                 'scope': 'derived_index_rebuild', 'authoritative_receipts_modified': False})
+            raise
+        except ProjectionGenerationChanged as exc:
+            atomic_json(state, {'status': 'deferred', 'archive': layout.name,
+                'recording_id': exc.recording_id, 'requested_recording_id': recording_id,
+                **exc.details(), 'updated_at': time.time(), 'scope': 'derived_index_rebuild',
+                'authoritative_receipts_modified': False})
             raise
         else:
             if state.exists():
@@ -462,7 +483,7 @@ class ReceiptProjection:
                 rows.append((stage, st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns))
         return json.dumps(rows, separators=(',', ':'))
 
-    def _iter_records(self, layout, stages, *, recording_id=None):
+    def _iter_records(self, layout, stages, *, recording_id=None, exclude=frozenset()):
         # The caller owns the device/day file lock. Do NAS reads before the
         # short SQLite transaction so another day's writer is never blocked by I/O.
         with connection(self.path, readonly=True) as db:
@@ -474,8 +495,11 @@ class ReceiptProjection:
             if Path(recording_id).name != recording_id:
                 raise ValueError('Invalid recording identity')
             folders = [layout.receipts / recording_id]
+        # Explicit read-only historical producers have a separate byte/proof
+        # reader. Do not parse their damaged bytes before record isolation.
+        folders = [folder for folder in folders if folder.name not in exclude]
         with connection(self.path, readonly=True) as db:
-            self._check_cached(db, layout.name, replacing={folder.name for folder in folders})
+            self._check_cached(db, layout.name, replacing={folder.name for folder in folders} | exclude)
         # Stage one receipt at a time on the existing local runtime volume.
         # Do not hold a SQLite writer across NAS I/O or retain a whole day's
         # decoded receipts plus their serialized copies. Failure preserves the
@@ -531,12 +555,15 @@ class ReceiptProjection:
                         raise
                 else:
                     json.loads(path.read_text(encoding='utf-8'))
-                if self._source_version(folder, stages) != version:
-                    raise ValueError('Receipt source changed during projection')
+                observed = self._source_version(folder, stages)
+                if observed != version:
+                    raise ProjectionGenerationChanged(folder.name, version, observed)
                 staged.append((folder.name, path, version))
                 spool_bytes += path.stat().st_size
-            if any(self._source_version(folder, stages) != version for folder, version in source_versions.items()):
-                raise ValueError('Receipt source changed during projection')
+            for folder, version in source_versions.items():
+                observed = self._source_version(folder, stages)
+                if observed != version:
+                    raise ProjectionGenerationChanged(folder.name, version, observed)
             with connection(self.path) as db:
                 db.execute('BEGIN IMMEDIATE')
                 if full:
@@ -559,9 +586,11 @@ class ReceiptProjection:
                                 db.execute('INSERT INTO receipt_chunks VALUES(?,?,?,?)',
                                            (layout.name, identifier, ordinal, chunk))
         with connection(self.path, readonly=True) as db:
-            self._check_cached(db, layout.name)
+            self._check_cached(db, layout.name, replacing=exclude)
             for row in db.execute(
                 'SELECT id,payload FROM receipts WHERE day=? ORDER BY id', (layout.name,)):
+                if row[0] in exclude:
+                    continue
                 if row[1]:
                     yield row[0], json.loads(row[1])
                 else:

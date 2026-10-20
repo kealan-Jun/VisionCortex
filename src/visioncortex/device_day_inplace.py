@@ -334,8 +334,13 @@ def execute(runner, layout, record, *, stage, retry):
                                        {'preprocessing': {stage: 'completed'}}))
         # Queue completion describes this stage only. Publication failures retain
         # the journal and never revoke a successful model or archive receipt.
+        from .receipt_projection import ProjectionGenerationChanged
+        publication_pending = {}
         try:
             published = publish(runner, record)
+        except ProjectionGenerationChanged as exc:
+            published = False
+            publication_pending = exc.details()
         except ExecutionYielded:
             # A complete stage remains complete when live work defers its
             # independent publication. The journal retains the pending output.
@@ -345,7 +350,7 @@ def execute(runner, layout, record, *, stage, retry):
         return {'schema_version': VERSION, 'recording_id': record['recording_id'], 'archive': layout.name,
                 'stage': stage, 'status': 'completed', 'formal_publication': 'completed' if published else 'pending',
                 'message': '预处理完成，等待归档' if stage == 'vision' and not archived else '阶段结果已持久保存',
-                'capture_deletion': 'disabled_by_user'}
+                'capture_deletion': 'disabled_by_user', **publication_pending}
     except ExecutionYielded as exc:
         if path.is_file():
             previous = read_json(path)
@@ -498,13 +503,22 @@ def _publish(runner, record):
         path = runner._receipt(layout, record, 'publication')
         durable_json(path, publication)
         with phase('formal_publication_seconds'):
-            if not runner.refresh_index(layout, recording_id=record['recording_id']):
-                return False
+            from .receipt_projection import ProjectionGenerationChanged
+            try:
+                if not runner.refresh_index(layout, recording_id=record['recording_id']):
+                    return False
+            except ProjectionGenerationChanged as exc:
+                # Still hold this record's publication lock: a later stage
+                # cannot seal success between this pending state and its cause.
+                deferred = {'stage': 'publication', 'recording_id': record['recording_id'],
+                            **exc.details(), 'at': time.time()}
+                update_state(runner, record, publication='pending', publication_defer=deferred)
+                raise
         from .device_day_inputs import sync_directory
         sync_directory(layout.index.parent)
         sync_directory(layout.comments)
         durable_json(path, publication | {'status': 'completed', 'completed_at': time.time()})
-        update_state(runner, record, publication='completed')
+        update_state(runner, record, publication='completed', publication_defer=None)
         from .capture_link_cleanup import submit_after_preprocessing
         submit_after_preprocessing(runner, layout, record)
         return True
@@ -541,7 +555,7 @@ def update_state(runner, record, **changes):
     with state_lock(runner.runtime_root / 'locks' / f'{record["recording_id"]}.state.lock'):
         state = read_json(path)
         for key, value in changes.items():
-            state[key] = (state.get(key, {}) | value) if isinstance(value, dict) else value
+            state[key] = state[key] | value if isinstance(state.get(key), dict) and isinstance(value, dict) else value
         state['updated_at'] = time.time()
         durable_json(path, state)
 
@@ -571,12 +585,14 @@ def progress(config):
         archive = state.get('archive', 'pending')
         publication = state.get('publication', 'pending')
         label = ('发布受阻，保留可恢复结果' if publication == 'blocked' else
+                 '阶段结果已保存，等待回执稳定后发布' if publication == 'pending' and state.get('publication_defer') else
                  '预处理完成，等待归档' if visual == 'completed' and archive != 'completed' else
                  '正式索引已发布' if publication == 'completed' else
                  '归档已完成，等待预处理或发布' if archive == 'completed' else '等待输入或预处理')
         rows.append({'recording_id': record['recording_id'], 'archive': path.parent.parent.name,
                      'input_ready': state.get('input_ready', {}), 'preprocessing': state.get('preprocessing', {}),
                      'archive_status': archive, 'publication_status': publication, 'label': label,
+                     **({'publication_defer': state['publication_defer']} if state.get('publication_defer') else {}),
                      'retention_policy': state['retention_policy'], 'timings': state.get('timings', {})})
     return rows
 
@@ -635,8 +651,17 @@ def has_legacy_execution(path):
 
 
 def publish(runner, record):
+    from .receipt_projection import ProjectionGenerationChanged
     try:
         return _publish(runner, record)
+    except ProjectionGenerationChanged as exc:
+        from .publication_journal import PublicationJournal
+        import json
+        journal = PublicationJournal(runner.runtime_root)
+        token = journal.ensure_pending(record)
+        if token:
+            journal.defer(record['recording_id'], token, reason=json.dumps(exc.details(), sort_keys=True))
+        raise
     except BlockingIOError:
         return False
     except (OSError, ValueError) as exc:

@@ -101,3 +101,82 @@ def test_readable_service_preserves_round_robin_cursor_on_shutdown(tmp_path, mon
     state = read_json(path)
     assert state['status'] == 'stopped' and state['checked'][name] > 123
     assert state['scope'] == 'readable_file_projection' and state['model_invoked'] is False
+
+
+def test_new_local_completed_hint_overtakes_old_cursor_with_historical_share(tmp_path, monkeypatch):
+    from visioncortex.timeline_invalidation import TimelineInvalidations
+    from visioncortex.device_day_queue import DeviceDayQueue
+    import time
+    root = tmp_path/'runtime/device-day'
+    now = time.time()
+    current = {'recording_id': 'current', 'camera_key': 'current_cam01',
+               'recording_start_us': round((now-100)*1e6), 'recording_end_us': round(now*1e6)}
+    historical = [{'recording_id': 'old'+str(i), 'camera_key': 'old'+str(i)+'_cam01',
+                   'recording_start_us': round((now-86400*(i+1))*1e6)} for i in range(3)]
+    observe(root, {'recordings': [current, *historical]})
+    recent_name = archive_name(current['camera_key'], current['recording_start_us'])
+    old_names = [archive_name(r['camera_key'], r['recording_start_us']) for r in historical]
+    # An old compatible checkpoint may be hours newer than every old day.
+    atomic_json(root/'ReadablePublication/Service.json', {'checked': {recent_name: now-14400}})
+    invalidations = TimelineInvalidations(root)
+    for name in old_names:
+        invalidations.changed(name, 'historical')
+    queue = DeviceDayQueue(root/'queue-stt.sqlite3')
+    queue.enqueue(current, 'native-stt')
+    with queue.connect() as db:
+        db.execute("UPDATE recordings SET status='completed',updated_at=?", (now,))
+    calls = []
+    class Publisher:
+        def __init__(self, config):
+            pass
+        def tick(self, *, archives):
+            calls.extend(archives)
+            return {'status': 'completed', 'published': 1}
+    monkeypatch.setattr('visioncortex.device_day_file_index.FileIndexPublisher', Publisher)
+    monkeypatch.setattr('visioncortex.device_day_recovery_worker.verify_storage', lambda config: None)
+    monkeypatch.setattr('visioncortex.device_day_io.slot', lambda config: nullcontext())
+    monkeypatch.setattr('visioncortex.runtime_control.resource_slot', lambda *a, **k: nullcontext())
+    config = {'storage': {'local_runtime_root': str(root.parent)}, 'runtime': {'local_only': True}}
+    runner = SimpleNamespace(runtime_root=root, config=config)
+    worker = ReadableReplay(threading.Event())
+    assert worker.tick(runner)['archive'] == recent_name
+    # Continuing arrivals keep the recent lane eligible, but not its third turn.
+    for stamp in (now+1, now+2):
+        with queue.connect() as db:
+            db.execute('UPDATE recordings SET updated_at=?', (stamp,))
+        worker.tick(runner)
+    assert calls[:2] == [recent_name, recent_name]
+    assert calls[2] in old_names
+    assert worker.turn == 3 and len(worker.published_hints) == 2
+
+
+def test_failed_day_never_acknowledges_changed_hint_or_blocks_other_archive(tmp_path, monkeypatch):
+    from visioncortex.timeline_invalidation import TimelineInvalidations
+    import time
+    root = tmp_path/'runtime/device-day'
+    start = round(time.time()*1e6)
+    records = [{'recording_id': str(i), 'camera_key': f'owned{i}_cam01', 'recording_start_us': start}
+               for i in range(2)]
+    observe(root, {'recordings': records})
+    names = [archive_name(r['camera_key'], r['recording_start_us']) for r in records]
+    for name in names:
+        TimelineInvalidations(root).changed(name, 'new')
+    calls = []
+    class Publisher:
+        def __init__(self, config):
+            pass
+        def tick(self, *, archives):
+            calls.extend(archives)
+            return {'status': 'partial', 'published': 0, 'busy': 1}
+    monkeypatch.setattr('visioncortex.device_day_file_index.FileIndexPublisher', Publisher)
+    monkeypatch.setattr('visioncortex.device_day_recovery_worker.verify_storage', lambda config: None)
+    monkeypatch.setattr('visioncortex.device_day_io.slot', lambda config: nullcontext())
+    monkeypatch.setattr('visioncortex.runtime_control.resource_slot', lambda *a, **k: nullcontext())
+    runner = SimpleNamespace(runtime_root=root, config={
+        'storage': {'local_runtime_root': str(root.parent)}, 'runtime': {'local_only': True}})
+    worker = ReadableReplay(threading.Event())
+    worker.tick(runner)
+    worker.tick(runner)
+    assert set(calls) == set(names) and worker.published_hints == {}
+    assert worker.tick(runner)['status'] == 'publication_backoff'
+    assert all(stamp > time.time() for stamp in worker.retry_at.values())

@@ -11,6 +11,7 @@ import re
 from .device_day_contract import atomic_json, digest, file_hash, read_json
 
 VERSION = "visioncortex-completed-execution-bindings/1"
+READER_VERSION = "visioncortex-completed-execution-bindings/2"
 SETTING = "completed_execution_bindings"
 STAGES = {"stt", "understanding", "report"}
 _MLLM_FIELDS = {
@@ -136,14 +137,16 @@ def _validate_hold(hold):
 
 def write_manifest(path, entries, *, holds=()):
     """Write an owned migration manifest; return its exact config reference."""
-    manifest = {"schema_version": VERSION, "entries": list(entries), "holds": list(holds)}
+    entries = list(entries)
+    version = READER_VERSION if any(entry.get('kind') == 'receipt_only_historical' for entry in entries) else VERSION
+    manifest = {"schema_version": version, "entries": entries, "holds": list(holds)}
     _entries(manifest)
     atomic_json(Path(path), manifest)
     return {"path": str(Path(path).resolve()), "sha256": file_hash(Path(path))}
 
 
 def _entries(manifest):
-    if manifest.get("schema_version") != VERSION:
+    if manifest.get("schema_version") not in {VERSION, READER_VERSION}:
         raise ValueError("Unknown completed execution binding manifest")
     entries = manifest.get("entries")
     if not isinstance(entries, list) or len(entries) > 100_000:
@@ -152,12 +155,20 @@ def _entries(manifest):
     for entry in entries:
         if not isinstance(entry, dict):
             raise ValueError("Invalid completed execution binding entry")
-        _validate_entry(entry)
+        historical = entry.get('kind') == 'receipt_only_historical'
+        if historical:
+            if manifest['schema_version'] != READER_VERSION:
+                raise ValueError('Historical reader requires explicit v2 manifest')
+            from .device_day_historical_reader import validate_entry
+            validate_entry(entry)
+        else:
+            _validate_entry(entry)
         identity = (entry["stage"], entry["recording_id"])
-        if identity in seen or entry["expected_key"] in keys:
+        key = entry['reader_key'] if historical else entry['expected_key']
+        if identity in seen or key in keys:
             raise ValueError("Duplicate completed execution binding")
         seen.add(identity)
-        keys.add(entry["expected_key"])
+        keys.add(key)
     holds = manifest.get("holds", [])
     if not isinstance(holds, list) or len(holds) > 100_000:
         raise ValueError("Invalid completed hold manifest size")
@@ -175,6 +186,7 @@ def _entries(manifest):
 class CompletedExecutionBindings:
     def __init__(self, settings):
         self.entries, self.by_key, self.holds = {}, {}, {}
+        self.historical, self.readers_by_key = {}, {}
         reference = settings.get(SETTING)
         if not reference:
             return
@@ -185,6 +197,10 @@ class CompletedExecutionBindings:
             raise ValueError("Completed execution binding manifest checksum mismatch")
         manifest = read_json(path)
         for entry in _entries(manifest):
+            if entry.get('kind') == 'receipt_only_historical':
+                self.historical[(entry['stage'], entry['recording_id'])] = entry
+                self.readers_by_key[entry['reader_key']] = entry
+                continue
             self.entries[(entry["stage"], entry["recording_id"])] = entry
             self.by_key[entry["expected_key"]] = entry
         for hold in manifest.get("holds", []):
@@ -200,6 +216,11 @@ class CompletedExecutionBindings:
         entry = self.entries.get((stage, recording.get("recording_id")))
         return entry if entry and entry["source_signature"] == recording.get("source_signature") else None
 
+    def historical_candidate(self, stage, recording):
+        # A reviewed reader reserves this record even on source drift. Drift
+        # must fail closed, never select the active provider as a fallback.
+        return self.historical.get((stage, recording.get('recording_id')))
+
     @staticmethod
     def config_for(config, entry):
         # Never mutate shared runner configuration across simultaneous stages.
@@ -210,10 +231,10 @@ class CompletedExecutionBindings:
         return computed_key in {entry["expected_key"], entry.get("queue_key")}
 
     def requires(self, expected_key):
-        return expected_key in self.by_key
+        return expected_key in self.by_key or expected_key in self.readers_by_key
 
     def accepts(self, receipt, expected_key, *, queue_revision=None):
-        entry = self.by_key.get(expected_key)
+        entry = self.readers_by_key.get(expected_key) or self.by_key.get(expected_key)
         return bool(entry and isinstance(receipt, dict)
                     and receipt.get("status") == "completed"
                     and receipt.get("stage") == entry["stage"]

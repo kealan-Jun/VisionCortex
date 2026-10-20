@@ -49,14 +49,17 @@ def scheduling_record(record, today=None, focus_date=None, live_priority_seconds
     return record | {'processing_priority': priority}
 
 
-def refresh_queue_priorities(queue, focus_date=None, live_priority_seconds=14400, *, latest_first=False):
+def refresh_queue_priorities(queue, focus_date=None, live_priority_seconds=14400, *, latest_first=False, exclude=()):
     """Reclassify old pending rows without resetting results, attempts or leases."""
     import time
+    exclusions = tuple(sorted(exclude))
+    where = ' AND recording_id NOT IN (' + ','.join('?' for _ in exclusions) + ')' if exclusions else ''
     if latest_first:
         with queue.connect() as db:
             db.execute("UPDATE recordings SET payload=json_set(payload,'$.processing_priority',-1) "
                        "WHERE status!='completed' AND (status!='running' OR COALESCE(lease_until,0)<?) "
-                       "AND COALESCE(json_extract(payload,'$.processing_priority'),0)!=-1", (time.time(),))
+                       "AND COALESCE(json_extract(payload,'$.processing_priority'),0)!=-1" + where,
+                       (time.time(), *exclusions))
         return
     zone = ZoneInfo('Asia/Shanghai')
     midnight = datetime.now(zone).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -71,5 +74,5 @@ def refresh_queue_priorities(queue, focus_date=None, live_priority_seconds=14400
     with queue.connect() as db:
         db.execute("UPDATE recordings SET payload=json_set(payload,'$.processing_priority'," + expression + ") "
                    "WHERE (status!='running' OR COALESCE(lease_until,0)<?) AND "
-                   "COALESCE(json_extract(payload,'$.processing_priority'),-1) != " + expression,
-                   (*values, time.time(), *values))
+                   "COALESCE(json_extract(payload,'$.processing_priority'),-1) != " + expression + where,
+                   (*values, time.time(), *values, *exclusions))

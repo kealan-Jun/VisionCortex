@@ -125,6 +125,8 @@ def test_deferred_day_keeps_published_index_and_journal_but_other_day_progresses
     runner = SimpleNamespace(runtime_root=root, backend_root=tmp_path, settings={}, _index_locks={},
                              layout=lambda record: layout if record['recording_id'] == 'bad' else None)
     runner.config = {'runtime': {'local_only': True}}
+    from visioncortex.device_day_bindings import CompletedExecutionBindings
+    runner._completed_execution_bindings = CompletedExecutionBindings({})
     runner._guarded_refresh_index = lambda target, **kw: DeviceDayRunner._guarded_refresh_index(runner, target, **kw)
     runner.refresh_index = lambda target, **kw: (DeviceDayRunner.refresh_index(runner, target, **kw)
                                                 if target is not None else True)
@@ -148,6 +150,11 @@ def test_report_projection_deferral_never_completes_queue_or_acknowledges_journa
     monkeypatch.setattr(module, '_MAX_RECEIPT_BYTES', 512)
     result = runner.run_once(inventory, stage='report')
     assert result['results'][0]['status'] == 'waiting_for_publication'
+    assert result['results'][0]['reason'] == 'readable_projection_limit'
+    assert result['results'][0]['error_type'] == 'ProjectionDeferred'
+    assert result['results'][0]['metric'] == 'encoded_bytes'
+    assert result['results'][0]['observed'] > result['results'][0]['limit'] == 512
+    assert read_json(report_receipt)['status'] == 'waiting_for_publication'
     with runner.queues['report'].connect() as db:
         status = db.execute('SELECT status FROM recordings WHERE recording_id=?',
                             (record['recording_id'],)).fetchone()[0]

@@ -116,11 +116,13 @@ def test_reconciler_keeps_child_before_canonical_replay_and_after_history(tmp_pa
     assert original.read_bytes() == b'collector-original-bytes'
 
 
-def test_large_canonical_index_defers_all_optional_legacy_moves(tmp_path):
+def test_compatibility_reconciliation_does_not_open_large_canonical_index(tmp_path):
     from visioncortex.device_day_contract import DeviceDayLayout
-    from visioncortex.device_day_publication import _kept_clip_folders
     layout = DeviceDayLayout(tmp_path, 'camera-1', 1000000)
     layout.index.parent.mkdir(parents=True)
     with layout.index.open('wb') as handle:
         handle.truncate(8*1024*1024+1)  # owned sparse fixture, never parsed
-    assert _kept_clip_folders(layout, {'segments': []}, {'recording_id': 'r'}) is None
+    before = layout.index.stat()
+    runner = SimpleNamespace(archive_root=tmp_path)
+    assert reconcile_outputs(runner)['relocated'] == []
+    assert layout.index.stat() == before  # no parse, rewrite or optional directory walk

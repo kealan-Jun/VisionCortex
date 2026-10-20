@@ -181,6 +181,9 @@ class RetentionWorker:
         candidates = []
         for record in records:
             rid = record['recording_id']
+            bindings = getattr(runner, '_completed_execution_bindings', None)
+            if bindings and bindings.historical_candidate('understanding', record):
+                continue
             if ready is not None and rid not in ready:
                 continue
             state = states.get(rid, {})
@@ -348,6 +351,9 @@ class RetentionWorker:
         result = {'completed': 0, 'result_unknown': 0, 'busy': 0}
         for expected in queue.expired(limit=limit):
             record = json.loads(expected['payload'])
+            bindings = getattr(runner, '_completed_execution_bindings', None)
+            if bindings and bindings.historical_candidate('understanding', record):
+                continue
             proof = {'model_invoked': False, 'queue_revision': expected['revision'],
                      'source_signature': record.get('source_signature')}
             try:
@@ -398,6 +404,9 @@ class RetentionWorker:
         return result
 
     def admit(self, runner, record):
+        bindings = getattr(runner, '_completed_execution_bindings', None)
+        if bindings and bindings.historical_candidate('understanding', record):
+            return False
         from .device_day import load_context, visual_input
         from .device_day_inplace import active, receipt
         from .device_day_inputs import same_stage_source, stage_input_ready
@@ -618,6 +627,8 @@ def serve(config_path, stop, *, stage='retention'):
     backfill = BackfillSupervisor(stage, stop) if stage in SUPPORTED_STAGES else None
     from .device_day_synthesis_worker import DaySynthesisSupervisor
     synthesis = DaySynthesisSupervisor(stop) if stage == 'report' else None
+    from .device_day_transcript_publication import TranscriptPublicationSupervisor
+    transcripts = TranscriptPublicationSupervisor(stop) if stage == 'stt' else None
     synthesis_not_before = 0
     try:
         while not stop.is_set():
@@ -660,6 +671,7 @@ def serve(config_path, stop, *, stage='retention'):
                              'understanding': 'UnderstandingWorker', 'report': 'ReportWorker'}[stage]
                 status_path = runner.runtime_root / directory / 'Service.json'
                 atomic_json(status_path, {'status': 'running', 'updated_at': time.time(), 'stage': stage})
+                transcript_status = transcripts.poll(runner) if transcripts is not None else None
                 consumer.update(scope='recent' if worker.recent_seconds is not None else 'all',
                                 recording_id=None, backfill_status='checking_live')
                 # Poll the fair lane before a live tick can occupy this
@@ -687,7 +699,8 @@ def serve(config_path, stop, *, stage='retention'):
                         delay = 0
                     consumer.update(backfill_status=(history.get('reason') or history['status']) if history else 'waiting_for_live')
                 status = {'status': 'running', 'updated_at': time.time(), 'stage': stage,
-                          'last_result': result, 'backfill_result': history, 'day_synthesis': day_result}
+                          'last_result': result, 'backfill_result': history, 'day_synthesis': day_result,
+                          'transcript_publication': transcript_status}
                 consumer.update(scope='history' if history_running else (
                                     'recent' if worker.recent_seconds is not None else 'all'),
                                 last_result=history or result)
@@ -706,6 +719,8 @@ def serve(config_path, stop, *, stage='retention'):
                 atomic_json(status_path, status)
             stop.wait(delay)
     finally:
+        if transcripts is not None:
+            transcripts.close()
         if synthesis is not None:
             synthesis.close()
         if backfill is not None:

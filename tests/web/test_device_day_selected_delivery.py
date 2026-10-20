@@ -70,10 +70,14 @@ const tick=()=>new Promise(setImmediate);
 async function resolvePage(tab='clips',time=timeline,sourceValue=source){
  const offset=requests.length;location.hash=`#/device-day/2026-10-20_cam/${tab}`;
  const render=window.VisionCortexDeviceDays.renderDetail(ctx,'2026-10-20_cam',tab);
- if(sourceValue instanceof Error)requests[offset].reject(sourceValue);else requests[offset].resolve(sourceValue);
- if(time instanceof Error)requests[offset+1].reject(time);else requests[offset+1].resolve(time);
+ assert.ok(requests[offset].url.endsWith('/time-index'));
+ if(time instanceof Error){
+  requests[offset].reject(time);await tick();
+  assert.ok(requests[offset+1].url.endsWith('/index'));
+  if(sourceValue instanceof Error)requests[offset+1].reject(sourceValue);else requests[offset+1].resolve(sourceValue);
+ }else requests[offset].resolve(time);
  if(tab==='report'){await tick();return {render,offset};}
- if(tab==='comment'){await tick();requests[offset+2].resolve({text:''});}
+ if(tab==='comment'){await tick();requests[offset+1].resolve({text:''});}
  await render;return {render,offset};
 }
 '''
@@ -136,8 +140,43 @@ def test_time_index_still_delivers_selected_files_when_canonical_index_is_unavai
     run_node(r'''
 (async()=>{
  await resolvePage('clips',timeline,Error('source index unavailable'));
+ assert.equal(requests.length,1);
+ assert.ok(requests[0].url.endsWith('/time-index'));
  assert.ok(body.nodes['[data-device-segment-view]'].innerHTML.includes('NoExperimentActivity_Selected1/NoExperimentActivity.mp4'));
  assert.ok(main.innerHTML.includes('2 个选中'));
+})().catch(e=>{console.error(e);process.exitCode=1;});
+''')
+
+
+def test_published_sources_and_ocr_do_not_wait_for_canonical_index():
+    run_node(r'''
+(async()=>{
+ const time={recordings:[{recording_id:'r',start_us:1000000,sources:[
+  {kind:'video',retained:ref(original)},{kind:'frames',retained:ref('MetaData/Capture/frames.csv')}],
+  capture_manifest:ref('Comment/.Evidence/CaptureFiles/abc.json')}],streams:{video:[],audio:[]},
+  field_events_file:ref('Comment/FieldEvents.json')};
+ await resolvePage('media',time);
+ assert.ok(body.innerHTML.includes('MetaData/Capture/frames.csv'));
+ assert.ok(body.innerHTML.includes('MetaData/Capture/rgb.mp4'));
+ assert.equal(requests.length,1);assert.ok(requests[0].url.endsWith('/time-index'));
+ await resolvePage('comment',time);
+ assert.ok(body.innerHTML.includes('Comment/FieldEvents.json'));
+ assert.equal(requests.some(r=>r.url.endsWith('/index')),false);
+})().catch(e=>{console.error(e);process.exitCode=1;});
+''')
+
+
+def test_replaced_detail_cannot_render_a_late_time_index_or_start_legacy_reads():
+    run_node(r'''
+(async()=>{
+ const old=window.VisionCortexDeviceDays.renderDetail(ctx,'2026-10-20_cam','clips');
+ const currentRender=window.VisionCortexDeviceDays.renderDetail(ctx,'2026-10-20_cam','clips');
+ requests[1].resolve(timeline);await currentRender;
+ const latest=body.nodes['[data-device-segment-view]'].innerHTML;
+ requests[0].resolve({streams:{video:[interval('Obsolete')]}});await old;
+ assert.equal(body.nodes['[data-device-segment-view]'].innerHTML,latest);
+ assert.equal(requests[0].options.signal.aborted,true);
+ assert.equal(requests.length,2);
 })().catch(e=>{console.error(e);process.exitCode=1;});
 ''')
 
@@ -149,10 +188,10 @@ def test_report_reads_json_and_same_route_refresh_rejects_stale_response():
  const oldBody=body,oldPreview=body.nodes['[data-device-report]'];
  assert.ok(oldBody.innerHTML.includes('LaboratoryDailyReport/LaboratoryDailyReport.json'));
  assert.equal(oldBody.innerHTML.includes('<iframe'),false);
- const oldReport=requests[old.offset+2];
+ const oldReport=requests[old.offset+1];
  const fresh=await resolvePage('report');
  assert.equal(requests[old.offset].options.signal.aborted,true);
- requests[fresh.offset+2].resolve({生成时间:'new',输入覆盖:'actual'});await fresh.render;
+ requests[fresh.offset+1].resolve({生成时间:'new',输入覆盖:'actual'});await fresh.render;
  const latest=body.nodes['[data-device-report]'].textContent;
  oldReport.resolve({生成时间:'obsolete'});await old.render;
  assert.equal(body.nodes['[data-device-report]'].textContent,latest);

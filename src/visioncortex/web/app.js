@@ -709,11 +709,18 @@ async function loadDeviceDayArchives() {
 function deviceDaySummary(archive) {
   const rows = archive.recordings || [];
   const stages = rows.flatMap((row) => Object.values(row.stages || {}));
+  const publishedCount = (value) => Number.isSafeInteger(value) && value >= 0 ? value : null;
   const completed = rows.filter((row) => row.current_results_ready === true && ["retention", "vision", "stt", "understanding", "report"]
     .every((stage) => row.stages?.[stage]?.status === "completed")).length;
   const preprocessed = rows.filter((row) => row.preprocessing_ready === true).length;
-  return {count: rows.length, completed, preprocessed, reportReady: completed > 0,
+  const unread = rows.length === 0 && ["deferred", "unavailable"].includes(archive.read_status);
+  return {count: unread ? null : rows.length, completed, preprocessed: unread ? null : preprocessed,
+    candidateCount: publishedCount(archive.preprocessing_candidate_count === undefined ? archive.segment_count : archive.preprocessing_candidate_count),
+    selectedCount: publishedCount(archive.selected_interval_count), pendingCount: publishedCount(archive.pending_interval_count),
+    noValueCount: publishedCount(archive.confirmed_no_value_interval_count),
+    reportReady: archive.report_exists === true && (!archive.report_path || archive.report_path === "LaboratoryDailyReport/LaboratoryDailyReport.json"),
     running: stages.some((stage) => stage.status === "running"),
+    unknown: stages.some((stage) => stage.status === "submitted_unknown"),
     failed: stages.some((stage) => stage.status === "failed")};
 }
 
@@ -725,8 +732,11 @@ function deviceDaySection(reportsOnly = false, limit = Infinity, archives = stat
   const cards = rows.slice(0, limit).map((row) => {
     const summary = deviceDaySummary(row);
     const url = `#/device-day/${encodeURIComponent(row.archive)}`;
-    const report = `${url}/report`;
-    return `<article class="report-library-card"><header><span class="report-cover-mark">${icon(reportsOnly ? "file" : "folder")}</span><div><small>${esc(row.archive.slice(0,10))}</small><h2>${esc(row.archive.slice(11))}</h2></div><em>${summary.failed ? "有失败待处理" : summary.running ? "处理中" : summary.completed === summary.count ? "已归档分片处理完成" : "等待后续处理"}</em></header><p>已归档 ${number(summary.count)} 个采集分片，${number(summary.preprocessed)} 个预处理完成，${number(summary.completed)} 个全流程完成；保留 ${number(row.segment_count)} 个活动／无活动区间。</p><footer><a href="${url}/media">视频与 CSV</a><a href="${url}/clips">片段与关键帧</a><a href="${url}/comment">录音识别</a>${summary.reportReady ? `<a href="${report}">查看整合日报</a>` : ""}</footer></article>`;
+    const report = `/api/device-days/${encodeURIComponent(row.archive)}/files/LaboratoryDailyReport/LaboratoryDailyReport.json`;
+    const count = (value) => value === null ? "待索引" : number(value);
+    const status = summary.failed ? "有失败待处理" : summary.unknown ? "有调用结果未知" : summary.running ? "处理中" :
+      row.read_status === "unavailable" ? "索引暂不可读" : row.read_status === "deferred" ? "索引待更新" : "各阶段分别记录状态";
+    return `<article class="report-library-card"><header><span class="report-cover-mark">${icon(reportsOnly ? "file" : "folder")}</span><div><small>${esc(row.archive.slice(0,10))}</small><h2>${esc(row.archive.slice(11))}</h2></div><em>${status}</em></header><p>原始录像 ${count(summary.count)} 条 · 预处理完成 ${count(summary.preprocessed)} 条 · 预处理候选 ${count(summary.candidateCount)} 个。</p><p>视频价值：选中计划 ${count(summary.selectedCount)} 个 · 待判定 ${count(summary.pendingCount)} 个 · 确认无价值 ${count(summary.noValueCount)} 个。</p><small>实验／非实验分类、各阶段处理状态与实际视频文件分别查看；候选数量和选中计划不等于实际已留存视频。</small><footer><a href="${url}/media">原片与 CSV</a><a href="${url}/clips">筛选区间与 JSON</a><a href="${url}/comment">录音识别</a>${summary.reportReady ? `<a href="${report}" target="_blank" rel="noopener">查看日报 JSON（已有内容）</a>` : ""}</footer></article>`;
   }).join("");
   return `<section class="device-day-library"><header class="panel-heading"><div><h2>${reportsOnly ? "设备日整合日报" : "NAS 设备日实验记录"}</h2><p>按采集日期和真实设备名查阅 · ${number(rows.length)} 份${state.deviceDaySyncError ? " · 同步中断，显示上次结果" : ""}</p></div><a href="#/device-days">全部设备日归档</a></header><div class="report-library-grid">${cards}</div></section>`;
 }

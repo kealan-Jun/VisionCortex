@@ -151,15 +151,15 @@ visioncortex dry-run --config configs/development-local.yaml --output outputs/dr
 
 ## 产物与追溯
 
-### NAS 自动采集：设备日五目录
+### NAS 自动采集：设备日原始数据与四类结果
 
 ```text
 <日期>_<相机>/
 ├── MetaData/ 或 MetaVideo/     采集端拥有的原生目录、原视频、原录音与元数据
-├── ProcessedClips/             活动片段、动作关键帧与场景采样
-├── MultimodalUnderstanding/    理解结果、画面引用与模型回执
+├── ProcessedClips/             精确筛选片段、全部时段记录与原片映射
+├── MultimodalUnderstanding/    对应片段的实际步骤理解、画面与来源
 ├── LaboratoryDailyReport/      同一设备同一天的日报
-└── Comment/                    备注、protocol 与实际录音转写
+└── Comment/                    备注、参考材料、实际转写与 OCR 关联
 ```
 
 目录拼写与 v1 语义由[设备日归档契约](docs/DEVICE-DAY-ARCHIVE-CONTRACT.zh-CN.md)
@@ -169,6 +169,8 @@ visioncortex dry-run --config configs/development-local.yaml --output outputs/dr
 已入队任务继续处理，不要求采集端改名或改变格式。
 `key_frames` 保留给五类物理动作的选定事件；无活动区间使用 `scene_frames`，
 不会以普通场景抽帧充当动作关键帧。录音及 STT 保留在实际设备、实际日期下。
+用户所说的 protocol 是片段 `Understanding.json` 中实际观察到的动作步骤，不以提供 SOP 为前提。
+历史 `Comment/Protocol.json` 继续表示参考材料，不替代实际步骤理解。
 
 ### 离线多视角实验
 

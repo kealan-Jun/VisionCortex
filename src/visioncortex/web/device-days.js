@@ -44,17 +44,29 @@ window.VisionCortexDeviceDays = (() => {
     setChrome('device-days');
     main.innerHTML='<div class="page"><section class="panel" role="status">正在读取设备日归档…</section></div>';
     try {
-      const [sourceResult,timeResult] = await Promise.allSettled([
-        api(`/api/device-days/${encodeURIComponent(name)}/index`,options),
-        api(file(name,'Comment/TimeIndex.json'),options)
-      ]);
+      let data={},timeIndex=null;
+      try {timeIndex=await api(`/api/device-days/${encodeURIComponent(name)}/time-index`,options);} catch {
+        if(!current())return;
+        data=await api(`/api/device-days/${encodeURIComponent(name)}/index`,options);
+      }
       if(!current())return;
-      if(sourceResult.status==='rejected'&&timeResult.status==='rejected')throw sourceResult.reason;
-      const data=sourceResult.status==='fulfilled'?sourceResult.value:{};
-      const timeIndex=timeResult.status==='fulfilled'?timeResult.value:null;
       if(!tabs[tab])tab='report';
       const recordMap=new Map((timeIndex?.recordings||[]).map(row=>[row.recording_id,row]));
       (data.recordings||[]).forEach(row=>recordMap.set(row.recording_id,{...recordMap.get(row.recording_id),...row}));
+      // Older published time indexes have direct media refs but no sources list.
+      // Keep these existing files usable before a legacy canonical view is read.
+      const addSource=(rid,kind,ref)=>{
+        if(!rid||!ref)return;
+        const record=recordMap.get(rid)||{recording_id:rid};
+        const sources=[...(record.sources||[])];
+        if(!sources.some(source=>source.kind===kind&&source.retained?.path===ref.path))sources.push({kind,retained:ref});
+        recordMap.set(rid,{...record,sources});
+      };
+      (timeIndex?.streams?.video||[]).filter(row=>row.kind==='original_video').forEach(row=>addSource(row.recording_id,'video',row.file));
+      (timeIndex?.streams?.audio||[]).forEach(row=>{
+        addSource(row.recording_id,'audio_audio',row.file);
+        (row.metadata_files||[]).forEach(ref=>addSource(row.recording_id,'audio_metadata',ref));
+      });
       const records=[...recordMap.values()];
       const intervals=(timeIndex?.streams?.video||[]).filter(row=>row.kind==='video_segment'&&row.record_scope==='retention_interval');
       const chosen=intervals.filter(row=>row.video_value==='selected');
@@ -105,12 +117,15 @@ window.VisionCortexDeviceDays = (() => {
         }).join('') || '<p>正在归档采集文件。</p>';
         body.querySelectorAll('[data-capture-files]').forEach(details=>details.addEventListener('toggle',async()=>{
           const record=records.find(row=>row.recording_id===details.dataset.captureFiles);
-          if(!details.open||details.dataset.loaded||!record?.capture_manifest)return;
+          if(!details.open||details.dataset.loaded||!record)return;
           try {
-            const catalog=await api(file(name,record.capture_manifest.path),options);
+            const catalog=record.capture_manifest
+              ?await api(file(name,record.capture_manifest.path),options)
+              :{files:((await api(`/api/device-days/${encodeURIComponent(name)}/index`,options)).recordings||[])
+                .find(row=>row.recording_id===record.recording_id)?.sources||[]};
             if(!current()||!details.isConnected)return;
-            const refs=(catalog.files||[]).filter(row=>!record.sources.some(source=>['video','audio_audio'].includes(source.kind)&&source.retained.path===row.retained.path));
-            details.querySelector('ul').innerHTML=refs.map(row=>`<li>${link(row.retained,row.retained.path.split('/').pop())}</li>`).join('')+`<li>${link(record.capture_manifest,'CaptureFiles.json')}</li>`;
+            const refs=(catalog.files||[]).filter(row=>row.retained&&!record.sources?.some(source=>['video','audio_audio'].includes(source.kind)&&source.retained?.path===row.retained.path));
+            details.querySelector('ul').innerHTML=refs.map(row=>`<li>${link(row.retained,row.retained.path.split('/').pop())}</li>`).join('')+(record.capture_manifest?`<li>${link(record.capture_manifest,'CaptureFiles.json')}</li>`:'');
             details.dataset.loaded='true';
           } catch {if(current()&&details.isConnected)details.querySelector('ul').insertAdjacentHTML('beforeend','<li>补充文件清单暂时无法读取，已归档的 CSV 仍可打开。</li>');}
         }));
@@ -141,7 +156,7 @@ window.VisionCortexDeviceDays = (() => {
           const existingPlayer=records.some(record=>(record.sources||[]).some(source=>source.kind==='audio_audio'&&pathOf(source.retained)===audio));
           return `<article class="device-day-source"><h3>独立录音 · ${esc(formatDate(row.start_us/1000))}</h3><p>${esc(status[stt.outcome]||processing[stt.status]||'等待识别')} · 以该录音自己的时间与来源为准。</p>${audio&&!existingPlayer?`<audio controls preload="none" src="${file(name,audio)}"></audio>`:''}<p>${link(stt.content_file,'Transcript.json')} · ${link(stt.readable_text_file,'Transcript.txt')}</p></article>`;
         }).join('');
-        body.innerHTML=`<h2>录音与 STT 识别</h2><p>仅展示该设备、该采集日的录音。点击句子时间可播放对应原录音区间。</p>${audioEntries}${records.map(record=>{
+        body.innerHTML=`<h2>录音与 STT 识别</h2><p>仅展示该设备、该采集日的录音。点击句子时间可播放对应原录音区间。</p>${timeIndex?.field_events_file?`<p>${link(timeIndex.field_events_file,'现场 OCR 事件 JSON')} · 读数与操作结论分别记录。</p>`:''}${audioEntries}${records.map(record=>{
           const transcript=record.transcription||{},comments=transcript.comments||[],chunks=transcript.chunks||[];
           const models=[...new Set(chunks.map(c=>c.model?.model||c.model?.repository).filter(Boolean))];
           const audio=(record.sources||[]).find(s=>s.kind==='audio_audio')?.retained;

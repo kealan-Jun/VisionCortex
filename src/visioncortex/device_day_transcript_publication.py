@@ -62,8 +62,13 @@ def publish_one(runner, record, *, queue_token=None):
 class TranscriptPublication:
     """Replay completed queue rows after restart; failures never rerun ASR."""
 
-    def tick(self, runner, *, limit=4):
+    def __init__(self):
+        self.turn = 0
+
+    def tick(self, runner, *, limit=4, stop=None):
         from .device_day import exclusive
+        if type(limit) is not int or not 1 <= limit <= 64:
+            raise ValueError('Transcript publication limit must be between 1 and 64')
         # The optional standalone publisher and a future upgraded companion
         # share both the projection checkpoint and this OS-owned lock.
         with ExitStack() as locks:
@@ -71,9 +76,9 @@ class TranscriptPublication:
                 locks.enter_context(exclusive(runner.runtime_root / 'locks' / 'transcript-publication.lock'))
             except BlockingIOError:
                 return {'status': 'running_elsewhere', 'results': []}
-            return self._tick(runner, limit=limit)
+            return self._tick(runner, limit=limit, stop=stop)
 
-    def _tick(self, runner, *, limit):
+    def _tick(self, runner, *, limit, stop):
         from .device_day_schedule import in_processing_scope
         from .sqlite_store import connection
         state_path = runner.runtime_root / 'TranscriptProjection' / 'State.json'
@@ -86,8 +91,14 @@ class TranscriptPublication:
             rows = db.execute("SELECT recording_id,revision,updated_at FROM recordings "
                               "WHERE status='completed' ORDER BY "
                               "COALESCE(json_extract(payload,'$.recording_start_us'),0) DESC").fetchall()
-            selected = []
+            selected, seen = [], set()
+            self.turn += 1
+            # Reserve a share for the oldest unprojected completed speech.
+            # New arrivals cannot perpetually replace its publication slot.
+            historical = max(1, limit // 3) if limit > 1 else int(self.turn % 3 == 0)
             for row in rows:
+                if len(selected) >= limit - historical:
+                    break
                 token = digest([row['revision'], row['updated_at']])
                 previous = state.get(row['recording_id'], {})
                 if previous.get('token') == token and (previous.get('status') == 'completed'
@@ -97,10 +108,25 @@ class TranscriptPublication:
                                                (row['recording_id'],)).fetchone()['payload'])
                 if in_processing_scope(runner.settings, record):
                     selected.append((token, record))
+                    seen.add(row['recording_id'])
+            for row in reversed(rows):
                 if len(selected) >= limit:
                     break
+                if row['recording_id'] in seen:
+                    continue
+                token = digest([row['revision'], row['updated_at']])
+                previous = state.get(row['recording_id'], {})
+                if previous.get('token') == token and (previous.get('status') == 'completed'
+                                                       or previous.get('retry_at', 0) > current):
+                    continue
+                record = json.loads(db.execute('SELECT payload FROM recordings WHERE recording_id=?',
+                                               (row['recording_id'],)).fetchone()['payload'])
+                if in_processing_scope(runner.settings, record):
+                    selected.append((token, record))
         results = []
         for token, record in selected:
+            if stop is not None and stop.is_set():
+                break
             try:
                 result = {'status': 'completed', 'projection': publish_one(runner, record, queue_token=token)}
             except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -111,6 +137,71 @@ class TranscriptPublication:
             results.append(result)
             atomic_json(state_path, state)
         return {'results': results}
+
+
+class TranscriptPublicationSupervisor:
+    """One existing-owner publication task beside the split speech worker."""
+
+    def __init__(self, stop, *, interval=5):
+        from concurrent.futures import ThreadPoolExecutor
+        self.stop, self.interval = stop, interval
+        self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='speech-publication')
+        self.future, self.generation, self.yield_event = None, None, None
+
+    def poll(self, runner):
+        import threading
+        key = digest(runner.config)
+        if self.future is not None and self.generation != key:
+            self.yield_event.set()
+        if self.future is not None and not self.future.done():
+            return {'status': 'running' if self.generation == key else 'configuration_handover'}
+        if self.future is not None:
+            finished, self.future = self.future, None
+            finished.result()
+        if self.stop.is_set():
+            return {'status': 'stopping'}
+        self.generation, self.yield_event = key, threading.Event()
+        self.future = self.pool.submit(self._serve, runner, self.yield_event)
+        return {'status': 'running'}
+
+    def _serve(self, runner, yield_event):
+        from .device_day_recovery_worker import verify_storage
+        from .device_day_write_guard import storage_guard
+        from .device_day_io import slot
+        from .runtime_control import execution_context, resource_slot
+        publisher = TranscriptPublication()
+        path = runner.runtime_root / 'TranscriptProjection' / 'Service.json'
+        try:
+            while not self.stop.is_set() and not yield_event.is_set():
+                started = time.time()
+                try:
+                    verify_storage(runner.config)
+                    with storage_guard(runner.config), execution_context(job_id='speech-publication',
+                            source='retention_recovery', priority=10, stop=self.stop,
+                            yield_signal=lambda: self.stop.is_set() or yield_event.is_set()):
+                        with resource_slot(runner.config, 'cpu'), slot(runner.config):
+                            # Resource waits are resumable. Once a projection
+                            # starts, finish its atomic files before shutdown.
+                            with execution_context(stop=None, yield_signal=None):
+                                result = publisher.tick(runner, stop=self.stop)
+                    status = {'status': 'running', 'last_result': result}
+                except Exception as exc:
+                    status = {'status': 'failed', 'error_type': type(exc).__name__}
+                atomic_json(path, status | {'started_at': started, 'updated_at': time.time(),
+                    'scope': 'readable_transcript_only', 'model_invoked': False})
+                # Short waits observe shutdown promptly while in-flight atomic
+                # writes and artifact verification are allowed to finish.
+                deadline = time.monotonic() + self.interval
+                while not self.stop.is_set() and not yield_event.is_set() and time.monotonic() < deadline:
+                    yield_event.wait(min(.1, max(0, deadline - time.monotonic())))
+        finally:
+            atomic_json(path, {'status': 'stopped', 'updated_at': time.time(),
+                'scope': 'readable_transcript_only', 'model_invoked': False})
+
+    def close(self):
+        if self.yield_event is not None:
+            self.yield_event.set()
+        self.pool.shutdown(wait=True)
 
 
 def serve(config_path, stop):

@@ -214,6 +214,7 @@ def segment_record(segment, meaning, recording, context=None, *, segments=None):
         '实验员': experimenter(context, recording.get('camera_key'), start, end),
         '内容状态': state['status'], '状态说明': state['说明'],
         '阶段状态': state['阶段状态'], '处理原因': state['处理原因'],
+        **({'关联更新状态': recording['historical_association']} if recording.get('historical_association') else {}),
         '实验步骤': steps, '非实验工作': work, '分窗口观察': observations,
         '录音记录': [{'开始时间': timestamp(s['start_us']), '结束时间': timestamp(s['end_us']),
                       '原话': s.get('text'), '转写来源': s.get('transcript_path'), '识别方式': '自动转写'} for s in speech],
@@ -225,7 +226,9 @@ def segment_record(segment, meaning, recording, context=None, *, segments=None):
         '溯源': {'原视频': segment['source_ref'], '保留视频': segment.get('video'),
                  '原视频开始毫秒': segment['start_ms'], '原视频结束毫秒': segment['end_ms'],
                  '片段索引': segment.get('json_path'), '执行记录': receipts,
-                 '原录音': recording.get('audio'), '片段编号': segment['segment_id']},
+                 '原录音': recording.get('audio'), '片段编号': segment['segment_id'],
+                 **({'历史执行来源': meaning['historical_execution_read']}
+                    if meaning and meaning.get('historical_execution_read') else {})},
         '质量说明': '自动模型记录，保留可见依据与不确定性；抽样覆盖不证明完整动作召回。'}
 
 

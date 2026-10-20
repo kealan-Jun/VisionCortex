@@ -535,12 +535,14 @@ class DeviceDayQueue:
                    'expired_lease_recovered': expired})
             return True
 
-    def migrate_prerequisite_failures(self):
+    def migrate_prerequisite_failures(self, *, exclude=()):
         from .device_day_prerequisites import legacy_prerequisite_failure
         with self.connect() as db:
             rows = list(db.execute("SELECT recording_id,revision,result FROM recordings WHERE status='failed' "
                                    "AND json_extract(result,'$.error_type')='ValueError'"))
         for row in rows:
+            if row['recording_id'] in exclude:
+                continue
             prerequisite = legacy_prerequisite_failure(json.loads(row['result'] or '{}'))
             if prerequisite:
                 self.wait_for_prerequisite(row['recording_id'], row['revision'], prerequisite)
@@ -558,10 +560,10 @@ class DeviceDayQueue:
                        data={'all_prerequisites_verified': True})
             return bool(changed)
 
-    def sync_availability(self, states):
+    def sync_availability(self, states, *, exclude=()):
         with self.connect() as db:
             db.executemany("UPDATE recordings SET input_status=? WHERE recording_id=? AND status NOT IN ('completed','running') AND input_status!=? AND json_extract(payload,'$.source_signature') IS ?",
-                           [(s['state'], key, s['state'], s.get('signature')) for key,s in states.items()])
+                           [(s['state'], key, s['state'], s.get('signature')) for key,s in states.items() if key not in exclude])
 
     def snapshot(self):
         with self.connect() as db:
