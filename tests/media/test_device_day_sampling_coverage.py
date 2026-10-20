@@ -217,6 +217,7 @@ def test_saved_request_quantum_resumes_without_rebilling_and_records_actual_pts(
     assert partial['vision_key'] == vision['key'] and partial['content_source'] == 'video_only'
     assert partial['understandings'][0]['status'] == 'partial'
     assert len(partial['understandings'][0]['windows']) == 1 and partial['artifacts']
+    assert partial['partial_observations'] is True
     assert audit['requests'][0]['status'] == 'validated_return'
     assert audit['status'] == 'scheduled_checkpoint'
     request = audit['requests'][0]
@@ -236,6 +237,36 @@ def test_saved_request_quantum_resumes_without_rebilling_and_records_actual_pts(
     assert audit['actual_request_coverage'] == 'validated_selected_frames_only'
     understand(backend, layout, recording, vision, {}, 'a'*64)
     assert len(calls) == 2  # Reused windows do not consume a paid-work quantum.
+
+
+@pytest.mark.parametrize('unknown', [False, True])
+def test_later_window_failure_retains_successful_windows_without_changing_failure(fake_understanding, monkeypatch, unknown):
+    from visioncortex import scene_requests
+    from visioncortex.multimodal_usage import SubmittedUnknown
+    from visioncortex.device_day_contract import verify_artifact
+    backend, layout, recording, _, calls = fake_understanding
+    backend.settings['understanding_requests_per_turn'] = 0
+    row = segment(activity='active', end=15000)
+    row['source_ref'] = artifact(layout.root, source(layout.root, 15))
+    vision = {'key': 'vision-fixture', 'segments': [row]}
+    original = scene_requests.window
+    failure = SubmittedUnknown('submitted_unknown') if unknown else ValueError('invalid later response')
+    attempted = []
+    def fail_second(*args, **kwargs):
+        attempted.append(args)
+        if len(attempted) == 2:
+            raise failure
+        return original(*args, **kwargs)
+    monkeypatch.setattr(scene_requests, 'window', fail_second)
+    with pytest.raises(type(failure)) as raised:
+        understand(backend, layout, recording, vision, {}, 'a'*64)
+    assert raised.value is failure and len(calls) == 1
+    saved = raised.value.partial_receipt
+    assert saved['partial_observations'] is True and saved['vision_key'] == vision['key']
+    assert saved['understandings'][0]['status'] == 'partial'
+    assert len(saved['understandings'][0]['windows']) == 1
+    assert all(verify_artifact(layout.root, ref) for ref in saved['artifacts'])
+    assert read_json(layout.root/saved['sampling_coverage_manifest'])['status'] == 'partial'
 
 
 def test_explicit_zero_quantum_completes_all_bounded_requests(fake_understanding):

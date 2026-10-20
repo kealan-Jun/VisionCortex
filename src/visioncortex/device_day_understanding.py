@@ -191,17 +191,19 @@ def understand(backend, layout, recording, vision, context, key):
                 'status': 'partial', 'content_source': 'video_only', 'evidence_status': 'PARTIAL_EVIDENCE',
                 'physical_action_confirmed': False, 'windows': list(current_results)})
         return {'vision_key': vision['key'], 'context_digest': None, 'content_source': 'video_only',
+            'partial_observations': bool(completed),
             'sampling_coverage_manifest': audit_ref, 'understandings': completed,
             'held_segment_ids': sorted(held_segments),
             'artifacts': [*artifacts, artifact(layout.root, audit_path)]}
+    current_segment, results = None, []
     try:
         for segment in runnable:
+            current_segment, results = segment, []
             active = segment['activity'] == 'active'
             from .device_day_inputs import source_path, source_relative
             source = source_path(layout, {'retained': segment['source_ref']})
             from .device_day_content_paths import analysis_folder
             folder = analysis_folder(layout, segment, key)
-            results = []
             previously_selected = set()
             selected_windows = selections(source, segment, backend.settings, recording, vision['key'],
                 folder/'SelectedWindows.json')
@@ -309,6 +311,15 @@ def understand(backend, layout, recording, vision, context, key):
                 'mode': 'event_preserving_native_pts_sampling' if active else 'interval_sampling', 'status': 'completed',
                 'content_source': 'video_only', 'evidence_status': 'PARTIAL_EVIDENCE',
                 'physical_action_confirmed': False, 'windows': results})
+            current_segment, results = None, []
+    except Exception as exc:
+        # A later transport/validation/source failure cannot erase already
+        # validated windows. Keep its original failure type and paid-request
+        # state; the runner publishes only these immutable successful receipts.
+        saved = partial_receipt(current_segment, results)
+        if saved['partial_observations']:
+            exc.partial_receipt = saved
+        raise
     finally:
         analyzer.close()
     if held_segments:

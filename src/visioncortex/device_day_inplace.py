@@ -16,6 +16,7 @@ from .device_day_activity import phase
 from .device_day_inputs import (
     InputChanged, binding, copy_sealed, durable_json, identity, input_path, input_context,
     processing_input, seal_input, validate_after, validate_snapshot, verify_content,
+    stage_input_ready,
 )
 from .device_day_io import slot
 
@@ -107,7 +108,8 @@ def receipt(runner, record, stage):
 
 def enqueue(runner, record, stage):
     """Return admission without reading media or changing historical completions."""
-    if not record.get('processable', record.get('available')) or record.get('configured_role') not in {'first_person', 'third_person'}:
+    if (not stage_input_ready(record, stage)
+            or stage not in {'retention', 'stt'} and record.get('configured_role') not in {'first_person', 'third_person'}):
         return False
     if not active(runner, record, initialize=True):
         return False
@@ -123,7 +125,9 @@ def enqueue(runner, record, stage):
         update_state(runner, record, retention_policy=policy)
     urgent, aged = archive_priority(runner, record, state['created_at'])
     visual = receipt(runner, record, 'vision')
-    admitted = not (stage == 'retention' and not (urgent or aged or visual.get('status') in {'completed', 'failed'}))
+    from .capture_layout import METADATA_LAYOUT
+    native = record.get('input_layout') == METADATA_LAYOUT
+    admitted = not (stage == 'retention' and not (native or urgent or aged or visual.get('status') in {'completed', 'failed'}))
     if stage == 'stt' and record.get('audio', {}).get('status') in {'pending_publication', 'association_mismatch'}:
         admitted = False
     record = record | {'archive_date': runner.layout(record).name[:10],
@@ -160,6 +164,9 @@ def verified_archive(runner, record):
     with slot(runner.config, copy=True), phase('archive_hash_seconds'):
         if not all(verify_content(safe_child(layout.root, s['retained']['path']), s['retained']) for s in saved['sources']):
             raise InputChanged('Archived originals failed verification')
+    if saved['recording'].get('configured_role') != record.get('configured_role'):
+        from .device_day_inputs import supplement_archive_role
+        return supplement_archive_role(runner, record, saved)
     return saved
 
 
@@ -196,9 +203,13 @@ def _archive(runner, record, layout):
     audio = dict(seals[-1]['audio']) if len(seals) > 1 else dict(record.get('audio', {}))
     audio.pop('files', None)
     audio['artifacts'] = [s['retained'] | {'kind': s['kind']} for s in sources.values() if s['kind'].startswith('audio_')]
+    speech_seal = next((seal for seal in seals if seal['stage'] == 'input-stt'), None)
     return {'input_binding_version': 1, 'recording': record, 'capture_root': runner.config['collection_ingest']['source_root'],
             'sources': list(sources.values()), 'artifacts': [s['retained'] for s in sources.values()], 'audio': audio,
             'input_bindings': {s['stage'].removeprefix('input-'): binding(s) for s in seals},
+            **({'stt_recording': speech_seal['recording']} if speech_seal else {}),
+            **({'independent_audio_identity': speech_seal['independent_audio_identity']}
+               if speech_seal and speech_seal.get('independent_audio_identity') else {}),
             'capture_deletion': 'disabled_by_user'}
 
 
@@ -231,7 +242,7 @@ def execute(runner, layout, record, *, stage, retry):
     started = time.perf_counter()
     key = None
     try:
-        archived = verified_archive(runner, record)
+        archived = None if stage == 'stt' and record.get('audio', {}).get('status') == 'provided' else verified_archive(runner, record)
         if stage == 'retention':
             audio_signature = record.get('audio', {}).get('source_signature')
             if archived and archived['recording'].get('audio', {}).get('source_signature') == audio_signature:
@@ -242,6 +253,9 @@ def execute(runner, layout, record, *, stage, retry):
         else:
             with slot(runner.config), phase('input_validation_seconds'):
                 seal = seal_input(runner, record, stage)
+                if stage == 'stt' and record.get('audio', {}).get('status') == 'provided':
+                    from .device_day_inputs import verified_stt_archive
+                    archived = verified_stt_archive(runner, record, seal)
                 update_state(runner, record, input_ready={stage: 'ready'})
                 if archived and archived.get('input_bindings', {}).get(stage) != binding(seal):
                     archived = None  # Late independent audio has not been copied yet.
@@ -347,11 +361,88 @@ def execute(runner, layout, record, *, stage, retry):
         return failure
 
 
+def verified_stt_projection(runner, record):
+    """Read verified independent audio/STT without requiring visual retention.
+
+    Returns a standard device/day recording view or None. This port never
+    invokes a model, creates an input seal, or grants video/retention completion.
+    """
+    if (record.get('audio', {}).get('status') != 'provided' or not stage_input_ready(record, 'stt')):
+        return None
+    layout = runner.layout(record)
+    path = runner._receipt(layout, record, 'stt')
+    seal_path = input_path(runner, record, 'stt')
+    if not path.is_file() or not seal_path.is_file():
+        return None
+    stt, saved = read_json(path), read_json(seal_path)
+    if stt.get('status') != 'completed' or saved.get('audio', {}).get('status') != 'provided':
+        return None
+    seal = seal_input(runner, record, 'stt')  # Existing seal only; revalidate current producer identity/clock.
+    from .device_day_inputs import independent_transcript_span, verified_stt_archive
+    archived = verified_stt_archive(runner, record, seal)
+    if archived is None:
+        validate_snapshot(seal, hashes=True)
+    # Raw ownership is frozen. Missing retained originals are not repaired by
+    # making another raw directory or copying a source for convenience.
+    if not all(verify_content(safe_child(layout.root, source['retained']['path']), source['retained'])
+               for source in seal['sources']):
+        raise InputChanged('Independent audio is not readable at its frozen source reference')
+    value = processing_input(layout, seal, archived)
+    expected = runner._key('stt', record, value)
+    verified = runner._load(path, expected, layout)
+    if verified is None or verified.get('input_binding') != binding(seal):
+        raise InputChanged('Independent STT execution/artifacts do not bind the actual sealed audio')
+    return {'recording_id': record['recording_id'], 'camera_key': record['camera_key'],
+        'start_us': record['recording_start_us'], 'end_us': record['recording_end_us'],
+        'source_signature': record['source_signature'],
+        'stt_source_signature': record.get('stt_source_signature'),
+        'capture_complete': record.get('capture_complete'), 'capture_issues': record.get('issues', []),
+        'audio': value['audio'], 'sources': value['sources'], 'transcription': verified,
+        'processing': {'status': 'waiting_for_capture' if not stage_input_ready(record, 'vision') else 'pending'},
+        'stages': {'stt': {k: verified.get(k) for k in ('status', 'key', 'completed_at', 'message')}},
+        'independent_audio_verified': True, 'video_processing_complete': False,
+        **({'transcript_span': independent_transcript_span(seal)}
+           if seal.get('independent_audio_identity') else {})}
+
+
+def _publish_independent_stt(runner, record):
+    projection = verified_stt_projection(runner, record)
+    if projection is None:
+        return False
+    from .device_day_content import publish_transcript
+    from .device_day_contract import artifact
+    layout = runner.layout(record)
+    published = publish_transcript(runner.config, layout.name, projection)
+    seal_path = input_path(runner, record, 'stt')
+    stage_path = runner._receipt(layout, record, 'stt')
+    value = {'schema_version': 'visioncortex-independent-stt-publication/1', 'status': 'completed',
+        'recording_id': record['recording_id'], 'input_binding': binding(read_json(seal_path)),
+        'stt_receipt': layout.backend_artifact(stage_path), 'input_seal': layout.backend_artifact(seal_path),
+        'artifacts': [artifact(layout.root, safe_child(layout.root, published[name])) for name in ('content', 'text')],
+        'retention_status': 'not_granted', 'vision_status': 'not_granted', 'model_invoked': False}
+    target = runner._receipt(layout, record, 'stt-publication')
+    if not target.is_file() or read_json(target) != value:
+        durable_json(target, value)
+    return True
+
+
 def _publish(runner, record):
     """No inference: bind completed outputs, then atomically publish the index."""
     from .device_day import exclusive, visual_input
     layout = runner.layout(record)
     with exclusive(runner.runtime_root / 'locks' / f'{record["recording_id"]}.publication.lock'):
+        try:
+            _publish_independent_stt(runner, record)
+        except (OSError, ValueError) as exc:
+            target = runner._receipt(layout, record, 'stt-publication-attempt')
+            failure = {'stage': 'stt-publication', 'status': 'waiting_for_verified_evidence',
+                'recording_id': record['recording_id'], 'error_type': type(exc).__name__,
+                'reason': str(exc)[:500], 'automatic_action': 'recheck_owning_audio_and_stt_artifacts',
+                'model_invoked': False}
+            if not target.is_file() or read_json(target) != failure:
+                durable_json(target, failure)
+        if not stage_input_ready(record, 'vision'):
+            return False
         archived = verified_archive(runner, record)
         if not archived:
             return False

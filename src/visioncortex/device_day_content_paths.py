@@ -149,6 +149,17 @@ def publish_selected_videos(layout, segments, *, max_bytes=536870912, bounded_ba
     for segment in segments:
         if segment.get('camera_key', layout.name[11:]) != layout.name[11:]:
             raise ValueError('Selected video belongs to another device/camera')
+        # The exact-interval publisher keeps a preceding whole-candidate video
+        # at its historical path. Its presence does not authorize another broad
+        # copy, or turn that history into a newly selected exact interval.
+        if segment.get('historical_scope'):
+            continue
+        parent = segment.get('candidate_segment_id')
+        child = bool(parent and parent != segment.get('segment_id'))
+        policy = (segment.get('derived_video_disposition') or {}).get('selection_policy')
+        if not child and ('retention_intervals' in segment
+                          or policy == 'visioncortex-exact-value-intervals/1'):
+            continue
         video = segment.get('video')
         if not video:
             continue

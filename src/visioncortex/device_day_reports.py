@@ -44,8 +44,45 @@ def preserve_prior_synthesis(layout, replacement):
     path = layout.reports/'LaboratoryDailyReport.json'
     if not path.is_file():
         return
-    previous = read_json(path)
-    prior = previous.get('全天综合理解') or {}
+    try:
+        previous = read_json(path)
+        prior = previous.get('全天综合理解') or {}
+        if not isinstance(prior, dict):
+            raise ValueError('Current daily synthesis is not an object')
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        import hashlib
+        def identity():
+            stat = path.stat()
+            return {field: getattr(stat, field) for field in (
+                'st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns')}
+        before = identity()
+        raw = path.read_bytes()
+        if identity() != before or len(raw) != before['st_size']:
+            raise ValueError('Unverified current report changed during preservation') from exc
+        checksum = hashlib.sha256(raw).hexdigest()
+        saved = safe_child(layout.root, 'LaboratoryDailyReport/.Evidence/History/UnverifiedReport' + checksum + '.json')
+        if saved.exists():
+            if saved.stat().st_size != len(raw) or file_hash(saved) != checksum:
+                raise ValueError('Unverified report history collision; preserving both originals') from exc
+        else:
+            atomic_bytes(saved, raw)
+        if (saved.stat().st_size != len(raw) or file_hash(saved) != checksum or identity() != before):
+            raise ValueError('Unverified report preservation failed byte/source verification') from exc
+        recovery = {'schema_version': 'visioncortex-unverified-report-preservation/1',
+            'source_path': layout.relative(path), 'source_stat': before,
+            'preserved_reference': {'path': layout.relative(saved), 'size_bytes': len(raw), 'sha256': checksum},
+            'error_type': type(exc).__name__, 'reason': 'current_report_unreadable_or_invalid',
+            'evidence_status': 'NOT_PROVEN', 'model_invoked': False,
+            'recovery_action': 'preserve_exact_unverified_bytes_then_publish_verified_history_or_explicit_unverified_state'}
+        record = safe_child(layout.root, 'LaboratoryDailyReport/.Evidence/Recovery/Report' + digest(recovery) + '.json')
+        if record.exists():
+            if read_json(record) != recovery:
+                raise ValueError('Unverified report recovery record collision') from exc
+        else:
+            atomic_json(record, recovery)
+        if identity() != before:
+            raise ValueError('Unverified current report changed before recovery publication') from exc
+        return
     if prior.get('status') == 'completed_for_available_inputs' and prior != replacement:
         atomic_json(layout.reports/'.Evidence/History'/('Report'+digest(previous)+'.json'), previous)
 
@@ -60,21 +97,22 @@ def render_page(title, template, contract, contents, *, scope_label='单设备�
 
 
 def render_day(layout, index):
-    from .device_day_narrative import day_record
-    readable = day_record(index)
+    from .device_day_narrative import day_record, effective_meaning, report_candidates
+    readable = day_record(index, layout.root)
+    segments = report_candidates(index)
     from .device_day_synthesis import current_synthesis
     synthesis = current_synthesis(layout, index)
     preserve_prior_synthesis(layout, synthesis)
     day_scope = '跨设备全天上下文' if len(synthesis.get('context_archives', [])) > 1 else '单设备全天上下文'
     from .runtime_control import check_yield, defer_yield
     check_yield(checkpoint=False)
-    by_segment = {item["segment_id"]: item for item in index["understandings"]}
+    by_segment = {item["segment_id"]: effective_meaning(item) for item in index["understandings"]}
     by_recording = {item["recording_id"]: item for item in index["recordings"]}
     sections, briefs, context_rows, uncertainty_rows, execution_rows = [], [], [], [], []
     daily_entries = []
     provider_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
     usage_unknown = 0
-    for segment in index["segments"]:
+    for segment in segments:
         check_yield(checkpoint=False)
         understanding = by_segment.get(segment["segment_id"])
         label = f'{clock(segment["start_us"])}—{clock(segment["end_us"])} · {segment["activity_label"]}'
@@ -149,12 +187,18 @@ def render_day(layout, index):
                               "understanding": understanding, "key_frames": segment["key_frames"], "scene_frames": segment["scene_frames"],
                               "source_ref": segment["source_ref"], "segment_json": segment["json_path"],
                               "transcription": recording.get("transcription"), "audio": recording.get("audio")})
-    pending = sum(1 for record in index["recordings"]
-                  if not any(s["recording_id"] == record["recording_id"] for s in index["segments"])
+    pending = sum(1 for record in by_recording.values()
+                  if not any(s["recording_id"] == record["recording_id"] for s in segments)
                   or any(s["recording_id"] == record["recording_id"] and (s["segment_id"] not in by_segment
                          or by_segment[s["segment_id"]].get('status') == 'partial')
-                         for s in index["segments"]))
-    overview = f'<p>{len(index["recordings"])} 个采集分片；{len(index["segments"])} 个分析区间；{pending} 个分片仍有阶段待完成。</p><p>{text(readable["覆盖说明"])}</p>'
+                         for s in segments))
+    retained = readable['视频留存统计']
+    overview = f'<p>{retained["original_video_count"]} 个已索引原始视频，{retained["original_recording_count"]} 条采集记录；{len(segments)} 个分析候选；{pending} 条记录仍有阶段待完成。</p><p>{text(readable["覆盖说明"])}</p>'
+    overview += (f'<p>选中 {retained["selected_interval_count"]} 个精确片段，实际可读 '
+        f'{retained["available_selected_interval_count"]} 个，已验证视频总时长 '
+        f'{retained["actual_video_duration_seconds"]} 秒；待判定 {retained["pending_interval_count"]} 个区间，'
+        f'确认无价值 {retained["confirmed_no_value_interval_count"]} 个区间。'
+        '全部分区、未发布原因、采样覆盖与缺口直接见日报 JSON 的“视频留存统计”。</p>')
     overview += '<article><h3>模型全天综合理解</h3>'
     if synthesis.get('status') in {'completed_for_available_inputs', 'updating_for_new_inputs'}:
         overview += '<p>' + text(synthesis.get('说明', '模型结合当前已保存全天证据综合理解；完整性和未处理范围见理解文件。')) + '</p>'
@@ -209,6 +253,8 @@ def render_day(layout, index):
         atomic_json(layout.reports / "LaboratoryDailyReport.json", {
             '全天综合理解': synthesis,
             '全天记录': readable,
+            '视频留存统计': retained,
+            'report_generated_at': datetime.now(ZoneInfo(TIMEZONE)).isoformat(timespec='microseconds'),
             "schema_version": VERSION, "archive": layout.name, "logical_report_count": 1, **day_contract,
             "evidence_status": "PARTIAL_EVIDENCE", "entries": daily_entries,
             "additional_mllm_calls": False, "additional_model_tokens": 0,

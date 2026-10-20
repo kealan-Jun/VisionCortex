@@ -230,6 +230,76 @@ def serve_integrity(config_path, stop):
             publish(status='stopped', phase='stopped')
 
 
+def serve_availability(config_path, stop, *, interval=5):
+    """Own the existing bounded input reconciliation loop without model startup."""
+    from .build_identity import identity
+    from .config import load_config
+    from .device_day import exclusive
+    from .device_day_consumers import process_start_ticks
+    from .device_day_io import slot
+    from .device_day_queue import DeviceDayQueue
+    from .device_day_recovery_worker import verify_storage
+    from .device_day_write_guard import storage_guard
+    from .input_availability import Availability, Reconciler
+    from .local_storage import require_local_path
+    from .runtime_control import ExecutionCancelled, ExecutionYielded, execution_context, resource_slot
+    config = load_config(Path(config_path))
+    root = require_local_path(Path(config['storage']['local_runtime_root'])) / 'device-day'
+    reconciler, availability = Reconciler(config), Availability(root)
+    queues = [DeviceDayQueue(root / f'queue-{stage}.sqlite3') for stage in STAGES]
+    build = identity()
+    state = {'schema_version': 'visioncortex-input-reconciliation-service/1', 'source_sha': build.get('commit'),
+             'build': build, 'pid': os.getpid(), 'process_start_ticks': process_start_ticks(os.getpid()),
+             'started_at': time.time(), 'status': 'starting', 'ticks': 0, 'tick_count': 0,
+             'model_invoked': False, 'capture_modified': False}
+    path = root / 'InputReconciliation/Service.json'
+    lock, heartbeat_stop = threading.Lock(), threading.Event()
+    def publish(**fields):
+        with lock:
+            state.update(fields)
+            atomic_json(path, state | {'updated_at': time.time()})
+    def heartbeat():
+        while not heartbeat_stop.wait(2):
+            try:
+                publish()
+            except OSError:
+                pass
+    with exclusive(root / 'locks/input-availability-consumer.lock'):
+        thread = threading.Thread(target=heartbeat, name='input-availability-heartbeat', daemon=True)
+        thread.start()
+        try:
+            while not stop.is_set():
+                try:
+                    publish(status='running', phase='checking', tick_count=state['tick_count'] + 1)
+                    verify_storage(config)
+                    with storage_guard(config), execution_context(job_id='input-reconciliation',
+                            source='retention_recovery', priority=20, background_fair=True,
+                            stop=stop, yield_signal=stop):
+                        with resource_slot(config, 'cpu'), slot(config):
+                            reconciler.tick()
+                            states = availability.states()
+                            for stage, queue in zip(STAGES, queues, strict=True):
+                                queue.sync_availability(availability.states_for_stage(stage, states=states))
+                    with lock:
+                        state.pop('error_type', None)
+                    publish(status='reconciled', phase='waiting', ticks=state['ticks'] + 1,
+                            last_completed_at=time.time(),
+                            ready=sum(item['state'] == 'ready' for item in states.values()),
+                            missing=sum(item['state'] == 'missing' for item in states.values()))
+                except ExecutionCancelled:
+                    break
+                except ExecutionYielded:
+                    publish(status='waiting', phase='waiting', last_result={'status': 'yielded_to_foreground'})
+                except Exception as exc:
+                    logging.getLogger(__name__).error('Input reconciliation failed: %s', type(exc).__name__)
+                    publish(status='failed', phase='waiting', error_type=type(exc).__name__)
+                stop.wait(interval)
+        finally:
+            heartbeat_stop.set()
+            thread.join(timeout=5)
+            publish(status='stopped', phase='stopped')
+
+
 def serve_progress(config_path, stop, *, interval=5):
     """Publish local queue observations when inference owners run separately."""
     from .config import load_config
@@ -277,7 +347,16 @@ class NativeInfrastructureVerifier:
                 'Current input does not match the sealed recording': 'current_source_metadata_changed',
                 'Current inventory source differs from the queue': 'current_inventory_source_changed',
                 'Original content differs from its input seal': 'current_source_content_conflict',
-                'Current parent artifact is not verified': 'current_parent_artifact_unverified'}.get(str(exc))
+                'Current parent artifact is not verified': 'current_parent_artifact_unverified',
+                'Readmission repair class is not authorized': 'readmission_repair_class_not_authorized',
+                'Readmission paid request evidence is unavailable': 'readmission_request_evidence_unavailable',
+                'Readmission requires an unowned known failed result': 'readmission_result_not_safe',
+                'Readmission current worker scope is unavailable': 'readmission_worker_scope_unavailable',
+                'Readmission historical scope is not authorized': 'readmission_historical_scope_not_authorized',
+                'Readmission current scheduling observation is unavailable': 'readmission_scheduling_unavailable',
+                'Readmission original input seals are unavailable': 'input_seal_unavailable',
+                'Readmission requires an actually changed execution recipe': 'execution_recipe_unchanged',
+                'Readmission normal worker admission is waiting': 'readmission_normal_admission_waiting'}.get(str(exc))
 
     @staticmethod
     def _identity(path):
@@ -354,7 +433,7 @@ class NativeInfrastructureVerifier:
         with storage_guard(config):
             return self._verify(config, stage, row, kind, stop)
 
-    def _verify(self, config, stage, row, kind, stop):
+    def _verify(self, config, stage, row, kind, stop, *, readmission=False, normal_handoff=False):
         from .device_day import DeviceDayRunner, visual_input
         from .device_day_contract import dependencies_for, file_hash, read_json, safe_child
         from .device_day_inputs import binding
@@ -362,14 +441,14 @@ class NativeInfrastructureVerifier:
         from .nas_recordings import _inspect
         from .runtime_control import check_cancelled
         self.pending = None
-        if kind not in self.supported:
+        if kind not in self.supported and not normal_handoff:
             raise ValueError('Repair class requires its own explicit execution proof')
         runner = DeviceDayRunner(config, backend=object())
         record = json.loads(row['payload'])
         rid, layout = record['recording_id'], runner.layout(record)
         # A repair budget never establishes permission for historical work.
         # Reject before NAS hashing when no exact-source admission exists.
-        if (row.get('processing_cohort') not in {'live', 'current_recovery', 'historical_backfill'}
+        if not readmission and (row.get('processing_cohort') not in {'live', 'current_recovery', 'historical_backfill'}
                 or row.get('admission_signature') != record.get('source_signature')
                 or row.get('admitted_at') is None):
             raise ValueError('Target queue has no current source admission')
@@ -473,9 +552,9 @@ class NativeInfrastructureVerifier:
             dependencies = dependencies_for(runner.settings, record)[stage]
             selected = record if stage == 'retention' else inputs if stage == 'vision' else {p: parents[p] for p in dependencies}
             revision = runner._key(stage, record, [selected, context if stage == 'understanding' else None])
-        if revision != row['revision']:
+        if revision != row['revision'] and not readmission:
             raise ValueError('Current queue recipe changed; normal admission is required')
-        repair = self._repair(config, runner, stage, row, kind)
+        repair = None if normal_handoff else self._repair(config, runner, stage, row, kind)
         proof = {'schema_version': VERSION, 'status': 'PROVEN', 'verified_at': time.time(), 'stage': stage,
                  'queue_row_sha256': digest(row), 'source_signature': record['source_signature'],
                  'inventory_sha256': digest(inventory), 'source_proof_sha256': digest(hashes),
@@ -500,6 +579,139 @@ class NativeInfrastructureVerifier:
         self.recheck(config, stage, row, proof, stop)
         return proof
 
+    def _readmission_scope(self, config, stage, row, kind, *, normal_recipe=False):
+        """Scheduling permission is separate from a verified repair budget."""
+        from .device_day_admission import admission_status
+        from .device_day_backfill_policy import live_demand
+        from .device_day_cohort import recovery_entries
+        from .device_day_night_schedule import stage_admitted
+        from .device_day_retry import failure_kind
+        from .device_day_schedule import in_processing_scope
+        settings = config.get('device_day') or {}
+        policy = settings.get('retry_repair') or {}
+        failure = json.loads(row.get('result') or '{}')
+        authorized = ((settings.get('input_integrity') or {}).get('enabled') is True
+                      and failure.get('error_type') == 'InputChanged') if normal_recipe else (
+            policy.get('enabled') is True and kind in policy.get('allowed_classes', [])
+            and kind in self.supported and failure_kind(failure) == kind)
+        if not authorized:
+            raise ValueError('Readmission repair class is not authorized')
+        # Neither a failed stage row nor an absent response proves a paid
+        # request was never submitted. Those stages keep their ledger/cache
+        # reconciliation gates; this handoff is strictly model-free.
+        if stage not in {'retention', 'vision'}:
+            raise ValueError('Readmission paid request evidence is unavailable')
+        if (row.get('status') != 'failed' or row.get('input_status') != 'ready'
+                or row.get('blocked_reason') or row.get('lease_owner') or row.get('lease_until')
+                or row.get('attempts', 0) < max(settings.get('failure_retry_limit') or 3, row.get('retry_limit') or 0)
+                or failure.get('status') in {'submitted_unknown', 'result_unknown'}):
+            raise ValueError('Readmission requires an unowned known failed result')
+        record = json.loads(row['payload'])
+        if (not in_processing_scope(settings, record) or not stage_admitted(config, stage)
+                or admission_status(config, stage) is not None):
+            raise ValueError('Readmission current worker scope is unavailable')
+        entry = recovery_entries(settings).get((stage, record['recording_id']))
+        restored = entry and entry['source_signature'] == record.get('source_signature')
+        recent = max(record.get('recording_start_us') or 0, record.get('recording_end_us') or 0) >= (
+            time.time() - settings.get('live_priority_seconds', 14400)) * 1_000_000
+        backfill = settings.get('backfill') or {}
+        if restored:
+            cohort = 'current_recovery'
+        elif recent and row.get('processing_cohort') != 'historical_backfill':
+            cohort = 'live'
+        elif backfill.get('enabled') is True and stage in backfill.get('stages', []):
+            cohort = 'historical_backfill'
+        else:
+            raise ValueError('Readmission historical scope is not authorized')
+        demand = live_demand(config, stage)
+        if demand['blocked']:
+            raise ValueError('Readmission current scheduling observation is unavailable')
+        return cohort
+
+    def readmit(self, config, stage, row, kind, stop):
+        """Re-enter normal admission after exact current byte/parent proof.
+
+        Same-recipe failures retain attempts and result until the ordinary
+        verifier grants a finite retry. A genuinely new recipe goes through
+        the existing worker's enqueue path and archives the former queue row.
+        No completion, execution alias or paid submission is created here.
+        """
+        from .device_day_contract import read_json
+        from .device_day_retention_worker import RetentionWorker
+        from .device_day_write_guard import storage_guard
+        from .runtime_control import check_cancelled
+        cohort = self._readmission_scope(config, stage, row, kind)
+        with storage_guard(config):
+            proof = self._verify(config, stage, row, kind, stop, readmission=True)
+            _, runner, *_ = self.pending
+            record = json.loads(row['payload'])
+            receipt = runner._receipt(runner.layout(record), record, stage)
+            if receipt.is_file() and read_json(receipt).get('status') in {'submitted_unknown', 'result_unknown'}:
+                raise ValueError('Readmission requires an unowned known failed result')
+            self._recheck(config, stage, row, proof, stop)
+            if self._readmission_scope(config, stage, row, kind) != cohort:
+                raise ValueError('Readmission current worker scope is unavailable')
+            check_cancelled(stop)
+            proof_id = digest(proof)
+            evidence_path = runner.runtime_root / 'RetryRepair' / 'Readmission' / stage / (proof_id + '.json')
+            atomic_json(evidence_path, proof | {'previous_queue_revision': row['revision'],
+                                              'processing_cohort': cohort, 'paid_request_scope': 'not_applicable'})
+            if proof['current_queue_revision'] == row['revision']:
+                admitted = runner.queues[stage].grant_admission(record, cohort=cohort,
+                    reason='verified_infrastructure_readmission:' + proof_id, expected=row)
+                if not admitted:
+                    raise ValueError('Current verification changed before grant')
+                status = 'source_readmitted'
+            else:
+                if self._row(runner, stage, row['recording_id']) != row:
+                    raise ValueError('Current verification changed before grant')
+                admitted = RetentionWorker(stage=stage, admission_cohort=cohort).admit(runner, record)
+                current = self._row(runner, stage, row['recording_id'])
+                if not admitted or not current or current['revision'] != proof['current_queue_revision']:
+                    raise ValueError('Readmission normal worker admission is waiting')
+                status = 'recipe_readmitted'
+            return {'status': status, 'stage': stage, 'recording_id': row['recording_id'],
+                    'previous_revision': row['revision'], 'current_revision': proof['current_queue_revision'],
+                    'proof_sha256': proof_id, 'model_invoked': False, 'completed': False}
+
+    def normal_readmit(self, config, stage, row, stop):
+        """Hand off an actually changed primary recipe, never grant a repair budget."""
+        from .device_day import DeviceDayRunner
+        from .device_day_contract import read_json
+        from .device_day_recovery_worker import verify_storage
+        from .device_day_retention_worker import RetentionWorker
+        from .device_day_write_guard import storage_guard
+        from .input_availability import revalidated_input_seals
+        cohort = self._readmission_scope(config, stage, row, None, normal_recipe=True)
+        verify_storage(config)
+        with storage_guard(config):
+            runner = DeviceDayRunner(config, backend=object())
+            record = json.loads(row['payload'])
+            with revalidated_input_seals(runner, record) as seals:
+                if not seals['verified_seals']:
+                    raise ValueError('Readmission original input seals are unavailable')
+                proof = self._verify(config, stage, row, None, stop, readmission=True, normal_handoff=True)
+                if proof['current_queue_revision'] == row['revision']:
+                    raise ValueError('Readmission requires an actually changed execution recipe')
+                receipt = runner._receipt(runner.layout(record), record, stage)
+                if receipt.is_file() and read_json(receipt).get('status') in {'submitted_unknown', 'result_unknown'}:
+                    raise ValueError('Readmission requires an unowned known failed result')
+                self._recheck(config, stage, row, proof, stop)
+                if self._readmission_scope(config, stage, row, None, normal_recipe=True) != cohort:
+                    raise ValueError('Readmission current worker scope is unavailable')
+                proof_id = digest(proof)
+                atomic_json(runner.runtime_root / 'InputIntegrity/Readmission' / stage / (proof_id + '.json'),
+                            proof | {'previous_revision': row['revision'], 'input_seal_proof': seals,
+                                     'retry_budget_granted': False})
+                admitted = RetentionWorker(stage=stage, admission_cohort=cohort).admit(runner, record)
+                current = self._row(runner, stage, row['recording_id'])
+                if not admitted or not current or current['revision'] != proof['current_queue_revision']:
+                    raise ValueError('Readmission normal worker admission is waiting')
+                return {'status': 'normal_recipe_readmitted', 'stage': stage, 'recording_id': row['recording_id'],
+                        'previous_revision': row['revision'], 'current_revision': current['revision'],
+                        'proof_sha256': proof_id, 'retry_budget_granted': False,
+                        'model_invoked': False, 'capture_modified': False, 'completed': False}
+
     def recheck(self, config, stage, row, proof, stop):
         from .device_day_write_guard import storage_guard
         with storage_guard(config):
@@ -513,7 +725,7 @@ class NativeInfrastructureVerifier:
         _, runner, snapshots, inventory, repair, config_hash, kind = self.pending
         if (digest(config) != config_hash or self._row(runner, stage, row['recording_id']) != row
                 or digest(self._inventory(runner, row['recording_id'])) != inventory
-                or self._repair(config, runner, stage, row, kind) != repair):
+                or (self._repair(config, runner, stage, row, kind) if kind is not None else None) != repair):
             raise ValueError('Current verification changed before grant')
         for path, before in snapshots.items():
             after = self._identity(path) if path.is_file() else None
@@ -533,6 +745,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description='Independent model-free operational services')
     modes = parser.add_mutually_exclusive_group(required=True)
     modes.add_argument('--input-integrity', action='store_true')
+    modes.add_argument('--input-availability', action='store_true')
     modes.add_argument('--progress', action='store_true')
     parser.add_argument('--config', type=Path, required=True)
     args = parser.parse_args(argv)
@@ -542,6 +755,8 @@ def main(argv=None):
     logging.basicConfig(level=logging.INFO)
     if args.progress:
         serve_progress(args.config, stop)
+    elif args.input_availability:
+        serve_availability(args.config, stop)
     else:
         serve_integrity(args.config, stop)
 

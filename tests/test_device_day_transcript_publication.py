@@ -22,7 +22,8 @@ def speech(device_config):  # noqa: F811
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text('owned fixture words')
         return {'outcome': 'transcribed', 'comments': [{'text': 'owned fixture words',
-                'start_us': record['recording_start_us']}], 'artifacts': [artifact(layout.root, path)],
+                'start_us': record['recording_start_us'], 'end_us': record['recording_start_us'] + 1000000}],
+                'artifacts': [artifact(layout.root, path)],
                 'transcript_file': layout.relative(path), 'model_invocation': 'NOT_PROVEN'}
     backend.transcribe = transcribe
     runner = DeviceDayRunner(device_config, backend)

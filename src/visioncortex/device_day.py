@@ -66,7 +66,7 @@ def exclusive(path: Path):
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
-def copy_verified(source: Path, target: Path) -> dict[str, Any]:
+def copy_verified(source: Path, target: Path, *, allow_create=True) -> dict[str, Any]:
     if source.is_symlink() or not source.is_file():
         raise ValueError("Only completed regular capture files may be retained")
     before = source.stat()
@@ -77,6 +77,8 @@ def copy_verified(source: Path, target: Path) -> dict[str, Any]:
         if target.is_symlink() or target.stat().st_size != before.st_size or file_hash(target) != checksum:
             raise ValueError("Immutable retained source collision")
     else:
+        if not allow_create:
+            raise ValueError('Recorder-owned original is unavailable; creating a raw copy is disabled')
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.partial")
         try:
@@ -171,7 +173,9 @@ def retained_recording(layout: DeviceDayLayout, recording: dict, config: dict) -
         if not source.resolve().is_relative_to(original.parent.resolve()):
             raise ValueError("Capture sidecar escapes recording directory")
         destination = safe_child(layout.root, layout.relative(layout.source_path(recording, kind, source)))
-        snapshot = copy_verified(source, destination)
+        if config.get('device_day', {}).get('raw_originals_read_only', False) and not destination.is_file():
+            raise ValueError('Recorder-owned original is unavailable; creating a raw copy is disabled')
+        snapshot = copy_verified(source, destination, allow_create=not layout.read_only_originals)
         reference = {"path": layout.relative(destination), "size_bytes": snapshot["size_bytes"],
                      "sha256": snapshot["sha256"]}
         sources.append(snapshot | {"kind": kind, "retained": reference})
@@ -321,6 +325,11 @@ class DeviceDayRunner:
         return self._hash_cache[identity]
 
     def _key(self, stage: str, recording: dict, inputs: Any, *, _binding=True) -> str:
+        if (stage == 'stt' and isinstance(inputs, dict) and inputs.get('input_binding_version') == 1
+                and any(row.get('kind') == 'audio_audio' for row in inputs.get('sources') or [])):
+            # Bind provider/recipe lookup to the original actual audio seal.
+            # Late video metadata does not select a new STT execution identity.
+            recording = inputs.get('stt_recording') or inputs['recording']
         binding = self._completed_execution_bindings.candidate(stage, recording) if _binding else None
         original_inputs = inputs
         config = self._completed_execution_bindings.config_for(self.config, binding) if binding else self.config
@@ -408,10 +417,14 @@ class DeviceDayRunner:
                 from .device_day_runtime_identity import independent_vision_backend_hash
                 return independent_vision_backend_hash(path, checksum, legacy_understanding=stage == 'understanding')
             return checksum
+        from .device_day_inputs import stage_source_signature
+        source_identity = recording['recording_id'] if stage == 'vision' else stage_source_signature(recording, stage)
         if stage == 'stt' and isinstance(inputs, dict) and inputs.get('input_binding_version') == 1:
             from .device_day_inputs import canonical_stt
+            source_identity = (digest(inputs['independent_audio_identity']) if inputs.get('independent_audio_identity')
+                               else recording['source_signature'])
             inputs = canonical_stt(inputs)
-        descriptor = {"stage": stage, "source": recording["recording_id"] if stage == "vision" else recording["source_signature"],
+        descriptor = {"stage": stage, "source": source_identity,
                       "inputs": inputs, "settings": settings, "device_day": stage_settings,
                       "code": [self._execution_identity if p == Path(__file__) else code_hash(p) for p in sources]}
         descriptor["code"] = [value for value in descriptor["code"] if value is not None]
@@ -449,7 +462,9 @@ class DeviceDayRunner:
     def layout(self, recording):
         from .capture_layout import METADATA_LAYOUT
         return DeviceDayLayout(self.archive_root, recording["camera_key"], recording["recording_start_us"], self.backend_root,
-                               raw_directory='MetaData' if recording.get('input_layout') == METADATA_LAYOUT else None)
+                               raw_directory=recording.get('source_raw_directory', 'MetaData')
+                               if recording.get('input_layout') == METADATA_LAYOUT else None,
+                               read_only_originals=self.settings.get('raw_originals_read_only', False))
 
     def _receipt(self, layout, recording, stage):
         return layout.receipts / recording["recording_id"] / f"{stage}.json"
@@ -490,10 +505,16 @@ class DeviceDayRunner:
     def process(self, recording: dict, *, stage="all", retry=False, stop_event=None) -> dict:
         if stage != "all" and stage not in STAGES:
             raise ValueError("Unknown device/day stage")
-        if not recording.get("processable", recording.get("available")):
-            return {"recording_id": recording["recording_id"], "status": "waiting_for_capture"}
-        if recording.get("configured_role") not in {"first_person", "third_person"}:
-            return {"recording_id": recording["recording_id"], "status": "needs_camera_role"}
+        from .device_day_inputs import stage_input_ready
+        if not stage_input_ready(recording, stage):
+            independent = ({'stt': self.process(recording, stage='stt', retry=retry, stop_event=stop_event)}
+                           if stage == 'all' and stage_input_ready(recording, 'stt') else {})
+            return {"recording_id": recording["recording_id"], "status": "waiting_for_capture",
+                    **({'independent_stages': independent} if independent else {})}
+        if stage not in {"retention", "stt"} and recording.get("configured_role") not in {"first_person", "third_person"}:
+            independent = ({name: self.process(recording, stage=name, retry=retry, stop_event=stop_event)
+                            for name in ('retention', 'stt')} if stage == 'all' else {})
+            return {"recording_id": recording["recording_id"], "status": "needs_camera_role", 'independent_stages': independent}
         from .device_day_inplace import active
         if active(self, recording) and not active(self, recording, initialize=True):
             return {'recording_id': recording['recording_id'], 'status': 'running_elsewhere'}
@@ -676,22 +697,10 @@ class DeviceDayRunner:
                         receipt = executor.run('stt', self._backend().transcribe, layout, retention, key)
                     else:
                         # A day report is an aggregate; it is re-rendered under the day lock.
-                        materials = {}
-                        if self.settings.get('derived_video_retention', False):
-                            from .application.retained_video import materialize
-                            from .device_day_inputs import source_path
-                            meanings = {u['segment_id']: u for u in understanding.get('understandings', [])}
-                            context = self._context(layout, recording)
-                            record_view = recording | {'audio': retention.get('audio'), 'transcription': stt,
-                                'camera_key': recording['camera_key']}
-                            for segment in vision['segments']:
-                                materials[segment['segment_id']] = materialize(layout,
-                                    source_path(layout, {'retained': segment['source_ref']}), segment,
-                                    meanings.get(segment['segment_id']), record_view, context,
-                                    segments=vision['segments'])
+                        # Selected video has its own verified publication
+                        # receipt. It never waits for this aggregate stage.
                         self.refresh_index(layout, recording_id=recording["recording_id"])
-                        receipt = {"artifacts": [m['video'] for m in materials.values() if m.get('video')],
-                                   'retained_videos': materials,
+                        receipt = {"artifacts": [],
                                    "report": layout.relative(layout.reports / "LaboratoryDailyReport.html")}
                     receipt.update(schema_version=VERSION, key=key, stage=current, status="completed",
                                    recording_id=recording["recording_id"], completed_at=now(),
@@ -720,18 +729,20 @@ class DeviceDayRunner:
                                    'status': status, 'recording_id': recording['recording_id'], 'at': now(),
                                    'reason': exc.reason, 'plan_ref': exc.plan_ref}
                         atomic_json(path, receipt)
+                        self.refresh_index(layout, recording_id=recording['recording_id'])
                         return receipt
                     from .multimodal_usage import SubmittedUnknown
                     if isinstance(exc, SubmittedUnknown):
-                        receipt = {'schema_version': VERSION, 'key': key, 'stage': current,
+                        receipt = dict(getattr(exc, 'partial_receipt', None) or {}) | {'schema_version': VERSION, 'key': key, 'stage': current,
                                    'status': 'submitted_unknown', 'recording_id': recording['recording_id'],
                                    'at': now(), 'reason': exc.reason}
                         atomic_json(path, receipt)
+                        self.refresh_index(layout, recording_id=recording['recording_id'])
                         return receipt
                     if current in {"understanding", "stt"}:
                         from .device_day_provider_gate import ProviderGate
                         ProviderGate(self.config).record_failure({"error": str(exc)})
-                    failure = {"schema_version": VERSION, "key": key, "stage": current, "status": "failed",
+                    failure = dict(getattr(exc, 'partial_receipt', None) or {}) | {"schema_version": VERSION, "key": key, "stage": current, "status": "failed",
                                "recording_id": recording["recording_id"], "at": now(),
                                "error_type": type(exc).__name__, "message": str(exc)[:1000]}
                     atomic_json(path, failure)
@@ -808,9 +819,13 @@ class DeviceDayRunner:
                             retained = stages.get("retention") or {}
                             record = retained.get("recording") or {}
                             visual = stages.get("vision") or {}
+                            from .device_day_inputs import independent_transcript_span
+                            transcript_span = (independent_transcript_span(retained)
+                                if stages.get('stt', {}).get('status') == 'completed' else None)
                             recordings.append({"recording_id": identifier, "start_us": record.get("recording_start_us"),
                                                'camera_key': record.get('camera_key'),
                                                "end_us": record.get("recording_end_us"),
+                                               **({'transcript_span': transcript_span} if transcript_span else {}),
                                                "capture_complete": record.get("capture_complete"), "capture_issues": record.get("issues", []),
                                                "audio": retained.get("audio", {"status": "not_provided", "artifacts": []}),
                                                "sources": retained.get("sources", []),
@@ -831,7 +846,8 @@ class DeviceDayRunner:
                                     stt.get('status') == 'completed' and self._accepts_receipt(stt, self._key('stt', record, retained)))
                                 partial = (video_only_enabled(self.settings, record)
                                            and semantic.get('partial_observations') is True
-                                           and semantic.get('status') in {'scheduled_checkpoint', 'waiting_for_plan_review'})
+                                           and semantic.get('status') in {'scheduled_checkpoint', 'waiting_for_plan_review',
+                                                                         'submitted_unknown', 'failed'})
                                 if partial:
                                     from .device_day_verification import verify_artifact_cached
                                     references = semantic.get('artifacts')
@@ -844,7 +860,8 @@ class DeviceDayRunner:
                                     context = recording_context(day_context, record, stt)
                                     if self._accepts_receipt(semantic, self._key("understanding", record, {"vision": visual, "stt": stt, "context": context})):
                                         values = semantic.get("understandings", [])
-                                        understandings.extend((value | {'status': 'partial'} for value in values) if partial else values)
+                                        understandings.extend((value | {'status': value.get('status', 'partial')}
+                                                               for value in values) if partial else values)
                                 # Only after every original receipt/key check:
                                 # publish a lighter derived view, preserving the
                                 # full authoritative receipt and semantic input.
@@ -881,6 +898,8 @@ class DeviceDayRunner:
                              "capture_deletion": "disabled_by_user", "evidence_status": "PARTIAL_EVIDENCE"}
                     from .device_day_narrative import attach_context
                     index = attach_context(self.config, index)
+                    from .application.retained_video import publish_selected
+                    index['retained_video_publication'] = publish_selected(self.config, index, recording_id=recording_id)
                     cached_path = self.runtime_root / 'DayTimeline' / f'{layout.name[:10]}.json'
                     if cached_path.is_file():
                         try:
@@ -954,7 +973,7 @@ class DeviceDayRunner:
             latest_first=self.settings.get('latest_first', False),
         )
         from .input_availability import Availability, configured_record
-        states = Availability(self.runtime_root).states()
+        states = Availability(self.runtime_root).states_for_stage(stage)
         self.queues[stage].migrate_prerequisite_failures()
         self.queues[stage].sync_availability(states)
         durable = {r["recording_id"]: r for r in self.queues[stage].pending()}
@@ -1005,7 +1024,8 @@ class DeviceDayRunner:
         for record in records:
             if stop_event is not None and stop_event.is_set():
                 return eligible
-            if not record.get("processable", record.get("available")):
+            from .device_day_inputs import stage_input_ready
+            if not stage_input_ready(record, stage):
                 continue
             if date and self.layout(record).name[:10] != date:
                 continue

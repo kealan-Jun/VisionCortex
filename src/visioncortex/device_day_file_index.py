@@ -5,6 +5,7 @@ from datetime import datetime
 from itertools import chain
 from pathlib import Path, PurePosixPath
 import sys
+import sqlite3
 from zoneinfo import ZoneInfo
 
 from .device_day_contract import ARTIFACT_DIRECTORIES, atomic_json, read_json, safe_child, validate_archive_name
@@ -106,10 +107,11 @@ def build_file_index(config, index, photos):
             transcription_status=stt.get('status'), transcription_outcome=stt.get('outcome'),
             model_invocation=stt.get('model_invocation', 'NOT_PROVEN'),
             transcript_file=reference(stt.get('transcript_file'))))
-        entries.append(entry('original_video', rid, row.get('start_us'), row.get('end_us'),
-            file=reference(sources.get('video')),
-            clock_mapping=(row.get('processing') or {}).get('clock_mapping') or {},
-            capture_complete=row.get('capture_complete')))
+        if sources.get('video'):
+            entries.append(entry('original_video', rid, row.get('start_us'), row.get('end_us'),
+                file=reference(sources.get('video')),
+                clock_mapping=(row.get('processing') or {}).get('clock_mapping') or {},
+                capture_complete=row.get('capture_complete')))
         audio_ref = reference(sources.get('audio_audio') or next(
             (a for a in audio.get('artifacts', []) if a.get('kind') == 'audio_audio'), None))
         if audio_ref:
@@ -126,8 +128,8 @@ def build_file_index(config, index, photos):
                 transcript_file=reference(comment.get('transcript_path')), model=comment.get('model'),
                 time_basis=comment.get('time_basis'), accuracy='NOT_PROVEN', processing_method='automatic_stt',
                 physical_action_confirmed=False))
-    meanings = {m['segment_id']: m for m in index.get('understandings', [])}
-    for segment in index.get('segments', []):
+    from .device_day_retention_projection import interval_views
+    for segment, meaning, interval in interval_views(index):
         rid = segment['recording_id']
         if rid not in records:
             continue
@@ -136,8 +138,12 @@ def build_file_index(config, index, photos):
             file=reference(segment.get('video')), source_video=reference(segment.get('source_ref')),
             source_start_ms=segment.get('start_ms'), source_end_ms=segment.get('end_ms'),
             metadata_file=reference(segment.get('json_path')),
+            record_scope='retention_interval' if interval else 'preprocessing_candidate',
+            candidate_segment_id=segment.get('candidate_segment_id', segment['segment_id']),
+            video_value=(interval or {}).get('video_value'), selection_reason=(interval or {}).get('reason'),
+            historical_scope=segment.get('historical_scope'),
+            source_mapping=(interval or {}).get('source_mapping'),
             physical_action_confirmed=False))
-        meaning = meanings.get(segment['segment_id'])
         if meaning:
             # Existing understanding consumes video AND comments. A reference
             # to that output must never be labeled pure video or verbatim audio.
@@ -222,6 +228,113 @@ class FileIndexPublisher:
         self.source_index_bytes = 0
         self.runtime = Path(config['storage']['local_runtime_root'])/'device-day'
         self.last_result = {'status': 'not_started'}
+        self._audio_runner = None
+
+    def _independent_audio(self, name, index, records):
+        """Compose verified STT into readable views, never into canonical CV data."""
+        from .device_day_inplace import verified_stt_projection
+        from .device_day_contract import digest
+        rows = {r['recording_id']: r for r in index.get('recordings', [])}
+        changes, errors = {}, []
+        backend = self.config['storage'].get('local_cache_root')
+        if not backend:
+            return index, (), errors
+        for record in records:
+            rid = record['recording_id']
+            prior = rows.get(rid, {})
+            if (prior.get('transcription') or {}).get('status') == 'completed':
+                continue  # Its canonical producer already owns this output.
+            if record.get('audio', {}).get('status') != 'provided':
+                continue
+            path = safe_child(Path(backend), f'device-day-receipts/{name}/{rid}/stt.json')
+            if not path.is_file():
+                continue
+            try:
+                if self._audio_runner is None:
+                    from .device_day import DeviceDayRunner
+                    self._audio_runner = DeviceDayRunner(self.config)
+                value = verified_stt_projection(self._audio_runner, record)
+                if value is None:
+                    continue
+                if prior:
+                    value = prior | {key: value[key] for key in
+                        ('audio', 'transcription', 'independent_audio_verified', 'video_processing_complete',
+                         'transcript_span') if key in value} | {
+                        'stages': prior.get('stages', {}) | value['stages']}
+                changes[rid] = value
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                errors.append({'archive': name, 'recording_id': rid,
+                    'operation': 'independent_audio_verification', 'error_type': type(exc).__name__,
+                    'automatic_action': 'retry_verified_stt_publication_without_model_call'})
+        if not changes:
+            return index, (), errors
+        merged = rows | changes
+        return index | {'recordings': list(merged.values())}, digest(changes), errors
+
+    def _request_canonical_publication(self, source, index):
+        """Ask the verified journal replayer to update the canonical generation.
+
+        The reduced readable projection is never written over dense CV data.
+        Only exact current inventory/source/interval matches may request replay;
+        the owning runner still checks execution keys and all artifact bytes.
+        """
+        from .publication_journal import PublicationJournal
+        from .sqlite_store import connection
+        originals = {row['segment_id']: row for row in source.get('segments', [])}
+        changed = {}
+        for segment in index.get('segments', []):
+            previous = originals.get(segment['segment_id'])
+            has_published_interval = any(row.get('video') for row in [
+                *segment.get('retention_intervals', []), *(previous or {}).get('retention_intervals', [])])
+            if previous and ((segment.get('video') and segment['video'] != previous.get('video'))
+                    or has_published_interval and segment.get('retention_intervals') != previous.get('retention_intervals')):
+                changed.setdefault(segment['recording_id'], []).append(segment)
+        result = {'pending': len(changed), 'requested': 0, 'errors': []}
+        inventory = self.runtime/'observed-inventory.sqlite3'
+        backend = self.config['storage'].get('local_cache_root')
+        if not changed:
+            return result
+        for rid, segments in changed.items():
+            try:
+                if not inventory.is_file() or not backend:
+                    raise ValueError('Current inventory or retained-source receipt root is unavailable')
+                with connection(inventory, readonly=True) as db:
+                    row = db.execute('SELECT payload FROM observations WHERE id=?', (rid,)).fetchone()
+                if row is None:
+                    raise ValueError('Selected-video recording is not in the current inventory')
+                import json
+                record = json.loads(row['payload'])
+                folder = safe_child(Path(backend), 'device-day-receipts/' + index['archive'] + '/' + rid)
+                retained = read_json(folder/'retention.json')
+                sealed = retained.get('recording') or {}
+                fields = ('recording_id', 'source_signature', 'camera_key', 'recording_start_us', 'recording_end_us')
+                if (retained.get('status') != 'completed' or not record.get('source_signature')
+                        or any(record.get(k) != sealed.get(k) for k in fields)
+                        or record.get('camera_key') != index['archive'][11:]):
+                    raise ValueError('Selected-video source differs from the current admitted recording')
+                visual = read_json(folder/'vision.json')
+                prior_segments = {s['segment_id']: s for s in visual.get('segments', [])}
+                source_refs = [s.get('retained') for s in retained.get('sources', []) if s.get('kind') == 'video']
+                interval_fields = ('recording_id', 'source_ref', 'start_ms', 'end_ms', 'start_us', 'end_us', 'activity', 'json_path')
+                if (visual.get('status') != 'completed' or any(
+                        segment['source_ref'] not in source_refs
+                        or segment['segment_id'] not in prior_segments
+                        or any(segment.get(k) != prior_segments[segment['segment_id']].get(k) for k in interval_fields)
+                        for segment in segments)):
+                    raise ValueError('Selected-video interval is not bound to the retained source and CV receipt')
+                with connection(inventory, readonly=True) as db:
+                    current = db.execute('SELECT payload FROM observations WHERE id=?', (rid,)).fetchone()
+                if current is None or current['payload'] != row['payload']:
+                    raise ValueError('Current inventory changed during publication admission')
+                token = PublicationJournal(self.runtime).ensure_pending(record)
+                if token is None:
+                    raise ValueError('An existing publication request owns a different source generation')
+                result['requested'] += 1
+            except (OSError, ValueError, KeyError, TypeError, sqlite3.Error) as exc:
+                result['errors'].append({'archive': index['archive'], 'recording_id': rid,
+                    'operation': 'canonical_video_publication', 'error_type': type(exc).__name__,
+                    'reason': str(exc)[:200], 'automatic_action': 'retry_existing_verified_publication'})
+        return result
 
     def _drop_source(self, name):
         self.source_indexes.pop(name, None)
@@ -251,10 +364,39 @@ class FileIndexPublisher:
         root = safe_child(Path(self.config['storage']['archive_root']), name)
         paths = [root/'LaboratoryDailyReport'/f'LaboratoryDailyReport.{suffix}' for suffix in ('json', 'html')]
         from .device_day_content_paths import understanding_relative
+        from .device_day_content import time_folder, transcript_interval
+        for record in index.get('recordings', []):
+            if record.get('start_us') and record.get('end_us'):
+                relative = 'Comment/' + time_folder(*transcript_interval(record))
+                paths.extend(root/relative/name for name in ('Transcript.json', 'Transcript.txt'))
         paths.extend(root/understanding_relative(s)/'Understanding.json'
                      for s in index.get('segments', []) if s.get('start_us') and s.get('end_us'))
+        from .device_day_retention_projection import interval_views
+        paths.extend(root/understanding_relative(s)/'Understanding.json'
+                     for s, _meaning, interval in interval_views(index) if interval is not None)
+        # The readable index also includes intervals not yet in canonical
+        # evidence. Inspect their actual outputs without caching another day
+        # projection or treating a missing video as confirmed no value.
+        readable = root/'MultimodalUnderstanding/Index.json'
+        if readable.is_file():
+            if readable.stat().st_size > 16*1024*1024:
+                raise ValueError('Readable interval index exceeds bounded output verification')
+            entries = read_json(readable).get('entries', [])
+            if len(entries) > 20000:
+                raise ValueError('Readable interval entry limit exceeded')
+            for entry in entries:
+                relative = entry.get('content')
+                if not isinstance(relative, str):
+                    continue
+                parts = PurePosixPath(relative).parts
+                if len(parts) != 3 or parts[0] != 'MultimodalUnderstanding' or parts[2] != 'Understanding.json':
+                    raise ValueError('Readable interval content path differs from frozen layout')
+                paths.append(safe_child(root, relative))
+                folder = safe_child(root, 'ProcessedClips/Clips/' + parts[1])
+                activity = {'active': 'ExperimentActivity', 'inactive': 'NoExperimentActivity'}[entry['activity']]
+                paths.extend(folder/name for name in ('Retention.json', activity+'.json', activity+'.mp4'))
         result = []
-        for path in paths:
+        for path in sorted(set(paths)):
             try:
                 stat = path.stat()
                 value = (stat.st_ino, stat.st_mtime_ns, stat.st_size)
@@ -279,9 +421,19 @@ class FileIndexPublisher:
                                            observed=exc.observed, limit=exc.limit)
             logging.getLogger(__name__).warning('File time index unavailable for %s during %s: %s',
                                                name, operation, type(exc).__name__)
-        names = {archive_name(r['camera_key'], r['recording_start_us'])
-                 for r in read_inventory(self.runtime)['recordings']
-                 if in_processing_scope(self.config.get('device_day', {}), r)}
+        records_by_day = {}
+        for record in read_inventory(self.runtime)['recordings']:
+            if in_processing_scope(self.config.get('device_day', {}), record):
+                name = archive_name(record['camera_key'], record['recording_start_us'])
+                records_by_day.setdefault(name, []).append(record)
+        names = set(records_by_day)
+        from .application.field_archive_context import archive_days
+        try:
+            field_days = archive_days(self.config)
+        except (OSError, ValueError) as exc:
+            failed('FieldRecognition', 'archive_discovery', exc)
+            field_days = {}
+        names.update(field_days)
         requested = None if archives is None else tuple(dict.fromkeys(validate_archive_name(n) for n in archives))
         if requested is not None:
             names.intersection_update(requested)
@@ -318,10 +470,16 @@ class FileIndexPublisher:
                 operation = 'source_index'
                 with exclusive(self.runtime/'locks'/f'{name}.index.lock'):
                     path = safe_child(Path(self.config['storage']['archive_root']), name+'/ProcessedClips/Index.json')
-                    if not path.is_file() and name in photo_starts:
-                        # A photo does not have to wait for a video from this device/day.
-                        layout = DeviceDayLayout(Path(self.config['storage']['archive_root']), name[11:], photo_starts[name])
-                        layout.create()
+                    audio_records = records_by_day.get(name, [])
+                    audio_index, audio_version, audio_errors = self._independent_audio(name,
+                        {'archive': name, 'recordings': []}, audio_records) if not path.is_file() else (None, (), [])
+                    if not path.is_file() and (name in photo_starts or name in field_days or audio_version):
+                        # Independent events never create recorder-owned raw directories.
+                        start = photo_starts.get(name, field_days.get(name)) or audio_records[0]['recording_start_us']
+                        layout = DeviceDayLayout(Path(self.config['storage']['archive_root']), name[11:], start)
+                        from .device_day_write_guard import guarded_mkdir
+                        for folder in (layout.processed, layout.understanding, layout.reports, layout.comments):
+                            guarded_mkdir(folder)
                         atomic_json(path, {'schema_version': VERSION, 'archive': name, 'recordings': [],
                             'segments': [], 'understandings': [], 'capture_deletion': 'disabled_by_user',
                             'evidence_status': 'PARTIAL_EVIDENCE'})
@@ -336,6 +494,17 @@ class FileIndexPublisher:
                         if index is None:
                             index = _read_source_index(self.config, path)
                             self._remember_source(name, identity, index)
+                    # This projection remains separate from the canonical
+                    # index, including while its video is absent/still writing.
+                    source_index = index or _read_source_index(self.config, path)
+                    if audio_index is None:
+                        audio_index, audio_version, audio_errors = self._independent_audio(name, source_index, audio_records)
+                    else:
+                        audio_index = source_index | {'recordings': audio_index['recordings']}
+                    version += (audio_version,)
+                    if audio_errors:
+                        result['status'] = 'partial'
+                        result['errors'].extend(audio_errors)
                     if content_enabled:
                         from contextlib import ExitStack
                         from .device_day_content_paths import migrate_display_layout, publish_selected_videos
@@ -363,25 +532,42 @@ class FileIndexPublisher:
                                 result['layout_pending'] = True
                         from .device_day_content import content_revision
                         operation = 'content_revision'
-                        content_version = content_revision(self.config, index)
-                        version += (content_version, self._output_revision(name, index))
+                        from .application.field_archive_context import archive_revision
+                        content_version = (content_revision(self.config, index), archive_revision(self.config, name))
+                        version += (content_version, self._output_revision(name, audio_index))
                     if self.versions.get(name) == version and not result.get('layout_pending') and not layout_changed:
                         result['unchanged'] += 1
                         continue
-                    index = index or _read_source_index(self.config, path)
+                    index = audio_index
                     before = index.get('time_index')
                     if content_enabled:
                         from .device_day_content import publish_content, with_partial_understandings
                         from .device_day_contract import DeviceDayLayout
                         from .device_day_reports import render_day
-                        source = index
+                        source = source_index
                         operation = 'partial_understandings'
                         index = with_partial_understandings(self.config, index)
                         from .device_day_narrative import attach_context
                         index = attach_context(self.config, index)
+                        from .application.field_archive_context import publish_context
+                        publish_context(self.config, index)
+                        from .application.retained_video import publish_selected
+                        operation = 'selected_video_publication'
+                        retention_progress = publish_selected(self.config, index)
+                        canonical_progress = self._request_canonical_publication(source, index)
+                        if canonical_progress['pending']:
+                            result['status'] = 'partial'
+                            result['canonical_video_pending'] = result.get('canonical_video_pending', 0) + canonical_progress['pending']
+                            result['errors'].extend(canonical_progress['errors'])
+                        if retention_progress['materialized']:
+                            result['selected_videos_materialized'] = result.get('selected_videos_materialized', 0) + retention_progress['materialized']
+                        if retention_progress['pending']:
+                            result['status'] = 'partial'
+                            result['retained_video_pending'] = result.get('retained_video_pending', 0) + retention_progress['pending']
+                            result['errors'].extend(retention_progress['errors'])
                         operation = 'readable_content'
                         index['readable_content'] = publish_content(self.config, index)
-                        if index.get('recordings'):
+                        if index.get('recordings') or (index.get('context') or {}).get('events'):
                             from .device_day_night_schedule import paused_stages
                             if 'report' not in paused_stages(self.config):
                                 operation = 'day_report'
@@ -403,7 +589,7 @@ class FileIndexPublisher:
                         replace_json_field(path, 'time_index', index['time_index'],
                             opener=lambda mode: _index_reader(self.config, path, mode))
                     stat = path.stat()
-                    self.versions[name] = (stat.st_mtime_ns, stat.st_size, photo_version)
+                    self.versions[name] = (stat.st_mtime_ns, stat.st_size, photo_version, audio_version)
                     if content_enabled:
                         # Remember our own completed writes. A later canonical
                         # renderer may overwrite partial meaning with pending;
@@ -411,6 +597,8 @@ class FileIndexPublisher:
                         self.versions[name] += (content_version, self._output_revision(name, index))
                         source['time_index'] = index['time_index']
                         self._remember_source(name, (stat.st_mtime_ns, stat.st_size), source)
+                        if retention_progress['pending'] or canonical_progress['pending']:
+                            self.versions.pop(name, None)  # Existing publisher owns retry, without rerunning models.
                     result['published'] += 1
             except ProjectionDeferred as exc:
                 failed(name, operation, exc)

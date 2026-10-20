@@ -22,7 +22,8 @@ PROMPT = DAY_SYNTHESIS.prompt
 def _device_bundle(index):
     """Include every available window and independent stream, without pixels."""
     records = {r['recording_id']: r for r in index.get('recordings', [])}
-    meanings = {m['segment_id']: m for m in index.get('understandings', [])}
+    from .device_day_narrative import effective_meaning
+    meanings = {m['segment_id']: effective_meaning(m) for m in index.get('understandings', [])}
     camera, context = index['archive'][11:], index.get('context') or {}
     rows = []
 
@@ -298,38 +299,59 @@ def _verify_saved_synthesis(layout, value, archive):
 
 def current_synthesis(layout, index):
     """Keep verified as-of conclusions visible while newer clips are synthesized."""
+    if index['archive'] != layout.name:
+        return {'status': 'stale_inputs_changed', '说明': '日报与当前设备日身份不一致，不能替代当前相机观察。'}
     path = layout.reports/'LaboratoryDailyReport.json'
-    value = read_json(path).get('全天综合理解') if path.is_file() else None
-    if not (value or {}).get('input_digest'):
-        # Older publishers may replace the current view with a pending marker.
-        # Their preserved snapshots remain receipts, not a second daily report.
-        history = sorted((layout.reports/'History').glob('Report*.json'),
-                         key=lambda item: item.stat().st_mtime_ns, reverse=True)
-        for previous in history[:64]:
-            candidate = read_json(previous).get('全天综合理解') or {}
-            if candidate.get('input_digest') and candidate.get('context_archives') == [index['archive']]:
-                value = candidate
-                break
-    others = []
-    for name in (value or {}).get('context_archives', []):
-        if name != index['archive']:
-            other = safe_child(layout.root.parent, name + '/ProcessedClips/Index.json')
-            if not other.is_file():
-                return {'status': 'stale_inputs_changed', '说明': '全天上下文来源暂不可读，需要核验后重新综合。'}
-            others.append(read_json(other))
-    if value and isinstance(value.get('input_digest'), str):
-        _verify_saved_synthesis(layout, value, index['archive'])
-        current_digest = digest(evidence_bundle(index, others))
-        saved = {key: item for key, item in value.items()
-                 if key not in ('human_reviewed', 'current_input_digest', 'current_coverage', '说明')}
-        saved.update(status='completed_for_available_inputs', processing_method='automatic_day_synthesis')
-        if value['input_digest'] == current_digest:
-            return saved
-        if value.get('context_archives') == [index['archive']]:
-            return saved | {'status': 'updating_for_new_inputs', 'current_input_digest': current_digest,
-                'current_coverage': synthesis_coverage(index),
-                '说明': '新增片段正在补入综合；以下保留上一轮已完成结论，其覆盖范围见input_coverage，新增范围见current_coverage。'}
-    return {'status': 'pending' if not value else 'stale_inputs_changed',
+    errors, history = [], []
+    def rejected(candidate, exc):
+        errors.append({'path': layout.relative(candidate), 'error_type': type(exc).__name__,
+                       'reason': str(exc)[:200], 'automatic_action': 'try_older_verified_synthesis'})
+    # A bad newest snapshot must not hide an older byte-verified conclusion.
+    # Keep both historical spellings readable; never move or rewrite them here.
+    for folder in (layout.reports/'.Evidence/History', layout.reports/'History'):
+        for previous in folder.glob('Report*.json'):
+            try:
+                history.append((previous.stat().st_mtime_ns, previous))
+            except OSError as exc:
+                rejected(previous, exc)
+    candidates = ([path] if path.is_file() else []) + [p for _, p in sorted(
+        history, key=lambda item: (item[0], str(item[1])), reverse=True)[:64]]
+    for candidate in candidates:
+        try:
+            value = read_json(candidate).get('全天综合理解') or {}
+            if not value.get('input_digest'):
+                continue  # A pending projection is not a completed conclusion.
+            contexts = value.get('context_archives')
+            if (not isinstance(value['input_digest'], str) or not isinstance(contexts, list)
+                    or index['archive'] not in contexts):
+                raise ValueError('Saved day synthesis is not bound to this camera/day')
+            if (candidate != path and value.get('context_archives') != [index['archive']]):
+                continue
+            _verify_saved_synthesis(layout, value, index['archive'])
+            others = []
+            for name in value.get('context_archives', []):
+                if name != index['archive']:
+                    other = safe_child(layout.root.parent, name + '/ProcessedClips/Index.json')
+                    others.append(read_json(other))
+            current_digest = digest(evidence_bundle(index, others))
+            saved = {key: item for key, item in value.items()
+                     if key not in ('human_reviewed', 'current_input_digest', 'current_coverage', '说明', 'recovery_errors')}
+            saved.update(status='completed_for_available_inputs', processing_method='automatic_day_synthesis')
+            if errors:
+                saved['recovery_errors'] = list(errors)
+            if value['input_digest'] == current_digest:
+                return saved
+            if value.get('context_archives') == [index['archive']]:
+                return saved | {'status': 'updating_for_new_inputs', 'current_input_digest': current_digest,
+                    'current_coverage': synthesis_coverage(index),
+                    '说明': '新增片段正在补入综合；以下保留上一轮已完成结论，其覆盖范围见input_coverage，新增范围见current_coverage。'}
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            rejected(candidate, exc)
+    if errors:
+        return {'status': 'unverified_saved_synthesis', 'evidence_status': 'NOT_PROVEN',
+                'findings': [], 'recovery_errors': errors,
+                '说明': '当前及已检查历史日报均未通过来源与模型回执校验，未展示未验证结论；原文件保持不动，已有片段理解继续保留。'}
+    return {'status': 'pending',
             '说明': '等待模型结合当前全天证据综合理解；已有片段理解继续保留。'}
 
 

@@ -2,6 +2,7 @@
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import math
 import threading
 import time
 from zoneinfo import ZoneInfo
@@ -59,7 +60,25 @@ def live_config(config):
     return discovery_config(config, metadata_cameras=cameras)
 
 
-def discovery_status(settings, snapshot, *, recordings=()):
+def lane_unavailable(lane, *, now, max_age):
+    """A lane's failure, incomplete first scan or stale scan stays local."""
+    if lane.get('thread_alive') is not True or lane.get('errors') or lane.get('truncated'):
+        return True
+    status = lane.get('status')
+    if status not in {'watching', 'scanning'}:
+        return True
+    if status == 'scanning' and lane.get('initial_scan_completed') is False:
+        return True
+    stamp = lane.get('completed_at' if status == 'watching' else 'started_at')
+    return (type(stamp) not in (int, float) or not math.isfinite(stamp)
+            or stamp <= 0 or not -5 <= now - stamp <= max_age)
+
+
+def discovery_status(settings, snapshot, *, recordings=(), observed_at=None):
+    current = time.time() if observed_at is None else observed_at
+    max_age = float((settings.get('device_day', {}).get('backfill') or {}).get('monitor_max_age_seconds', 30))
+    if not math.isfinite(max_age) or max_age <= 0:
+        raise ValueError('Invalid discovery monitor age limit')
     roles = settings['collection_ingest'].get('camera_role_map') or {}
     resolved = {record['camera_key'] for record in recordings
                 if record.get('configured_role') in {'first_person', 'third_person'}}
@@ -69,12 +88,23 @@ def discovery_status(settings, snapshot, *, recordings=()):
                           if name in unresolved or (
                               roles.get(name) not in {'first_person', 'third_person'} and name not in resolved)) if (
                               discovery_mode(settings['collection_ingest']) == 'metadata_only') else []
-    degraded = bool(unconfigured) or any(
-        s['status'] in {'failed', 'retrying', 'slow_or_unavailable'} or not s['thread_alive']
-        for s in snapshot['discovery_lanes'])
+    lanes = snapshot['discovery_lanes']
+    unavailable = sorted({lane['camera_key'] for lane in lanes
+                          if lane_unavailable(lane, now=current, max_age=max_age)})
+    lane_errors = [error for lane in lanes for error in lane.get('errors', [])]
+    global_errors = [error for error in snapshot.get('errors', []) if error not in lane_errors]
+    degraded = bool(unconfigured or unavailable or global_errors)
     return {**snapshot, 'status': 'degraded' if degraded else 'watching',
-            'updated_at': time.time(), 'poll_seconds': 5,
+            'updated_at': current, 'poll_seconds': 5,
             'scope': 'current_and_previous_beijing_date_metadata_only',
+            # A versioned, verifiable partition lets consumers isolate a bad
+            # lane without treating arbitrary degraded monitors as healthy.
+            # Missing roles do not prevent observing stable original inputs.
+            'admission_scope': {'schema_version': 'device-day-discovery-admission/1',
+                                'max_age_seconds': max_age,
+                                'unavailable_camera_keys': unavailable,
+                                'role_unconfigured_camera_keys': unconfigured,
+                                'global_errors': global_errors},
             'unconfigured_camera_directories': unconfigured,
             'alerts': [{'type': 'camera_role_unconfigured', 'camera_key': name,
                         'message': '已发现采集目录，等待配置第一或第三人称视角'}

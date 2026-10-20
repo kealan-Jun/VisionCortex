@@ -41,6 +41,20 @@ def test_bundle_keeps_independent_streams_and_source_limits():
     assert not bundle['completeness']['whole_day_capture_proven']
 
 
+def test_day_context_excludes_explicit_placeholder_work_but_keeps_real_uncertain_waiting():
+    source = index()
+    window = source['understandings'][0]['windows'][0]
+    placeholder = {'description': '仅为占位，不承载动作', 'basis': 'uncertain',
+                   'outcome': 'incomplete_or_uncertain', 'before_state': '未知', 'after_state': '未知'}
+    waiting = placeholder | {'description': '等待仪器读数变化', 'category': 'waiting'}
+    window['work_activities'] = [placeholder, waiting]
+    before = copy.deepcopy(source)
+    video = next(row for row in evidence_bundle(source)['evidence'] if row['kind'] == 'video')
+    assert video['work_activities'] == [waiting]
+    assert any('占位' in reason for reason in video['uncertainties'])
+    assert video['source']['model_receipt'] == 'Result.json' and source == before
+
+
 def test_contextual_claim_requires_actual_multiple_sources():
     with pytest.raises(ValueError, match='multiple'):
         validate_findings({'status': 'completed', 'findings': [finding(['a'], 'contextual_inference')]}, {'a'})
@@ -75,10 +89,11 @@ def test_completed_daily_report_is_recoverable_when_later_inputs_arrive(tmp_path
                 '全天记录': {'说明': '先前已保存的版本'}}
     atomic_json(layout.reports/'LaboratoryDailyReport.json', previous)
     preserve_prior_synthesis(layout, previous['全天综合理解'])
-    assert not list((layout.reports/'History').glob('*.json'))
+    assert not list((layout.reports/'.Evidence/History').glob('*.json'))
     preserve_prior_synthesis(layout, {'status': 'stale_inputs_changed'})
-    saved = list((layout.reports/'History').glob('*.json'))
+    saved = list((layout.reports/'.Evidence/History').glob('*.json'))
     assert len(saved) == 1 and read_json(saved[0]) == previous
+    assert not (layout.reports/'History').exists()
 
 
 def test_bounded_hierarchy_never_drops_day_tail():
@@ -118,7 +133,8 @@ def test_day_wire_preserves_content_and_clock_but_keeps_paths_in_source_receipt(
         expand(raw, receipt)
 
 
-def test_separate_model_pass_and_single_day_file_check_input_and_receipts(tmp_path, monkeypatch):
+@pytest.mark.parametrize('history_directory', ['.Evidence/History', 'History'])
+def test_separate_model_pass_and_single_day_file_check_input_and_receipts(tmp_path, monkeypatch, history_directory):
     from visioncortex import scene_requests
     from visioncortex.device_day_contract import artifact, digest
     source = index()
@@ -151,6 +167,13 @@ def test_separate_model_pass_and_single_day_file_check_input_and_receipts(tmp_pa
     # the canonical view with a pending marker. No new model call is implicit.
     from visioncortex.device_day_reports import preserve_prior_synthesis
     preserve_prior_synthesis(layout, {'status': 'pending'})
+    hidden_history = next((layout.reports/'.Evidence/History').glob('Report*.json'))
+    original_history_bytes = hidden_history.read_bytes()
+    if history_directory == 'History':
+        legacy_history = layout.reports/'History'/hidden_history.name
+        legacy_history.parent.mkdir()
+        hidden_history.rename(legacy_history)
+    expected_history = layout.reports/history_directory/hidden_history.name
     atomic_json(layout.reports/'LaboratoryDailyReport.json', {'全天综合理解': {'status': 'pending'}})
     changed['understandings'][0]['status'] = 'completed'
     recovered = current_synthesis(layout, changed)
@@ -158,6 +181,7 @@ def test_separate_model_pass_and_single_day_file_check_input_and_receipts(tmp_pa
     assert recovered['current_coverage']['completed_clips'] == 1
     assert recovered['input_coverage']['completed_clips'] == 0
     assert len(calls) == 1
+    assert expected_history.read_bytes() == original_history_bytes
     another_camera = copy.deepcopy(changed)
     another_camera['archive'] = '2026-09-16_camera-2'
     assert current_synthesis(layout, another_camera)['status'] == 'stale_inputs_changed'
@@ -165,8 +189,89 @@ def test_separate_model_pass_and_single_day_file_check_input_and_receipts(tmp_pa
     path = layout.root/last['path']
     atomic_json(path, {'model_result': {'status': 'completed', 'findings': []}})
     assert artifact(layout.root, path) != last
-    with pytest.raises(ValueError, match='identity changed'):
-        current_synthesis(layout, changed)
+    rejected = current_synthesis(layout, changed)
+    assert rejected['status'] == 'unverified_saved_synthesis'
+    assert rejected['evidence_status'] == 'NOT_PROVEN' and rejected['findings'] == []
+    assert any('identity changed' in row['reason'] for row in rejected['recovery_errors'])
+
+
+def saved_synthesis_fixture(tmp_path, monkeypatch):
+    from visioncortex import scene_requests
+    source = index()
+    source['segments'][0].update(activity='inactive', activity_label='无实验活动',
+        start_ms=0, end_ms=2000, key_frames=[], scene_frames=[],
+        json_path='ProcessedClips/Clips/00-00-01_00-00-03_NoExperimentActivity_s/NoExperimentActivity.json')
+    source['understandings'][0]['windows'][0].update(input=None, model_receipt=None)
+    layout = DeviceDayLayout(tmp_path, 'camera-1', 1789488000000000)
+    calls = []
+    def window(config, analyzer, prompt, metadata, images, request, result, validator):
+        calls.append(metadata)
+        raw = {'status': 'completed', 'findings': [finding([r['evidence_id'] for r in metadata['evidence']])]}
+        atomic_json(request, {'metadata': metadata, 'prompt': prompt})
+        atomic_json(result, {'model_result': raw})
+        return raw, validator(raw), False
+    monkeypatch.setattr(scene_requests, 'window', window)
+    return layout, source, synthesize({}, layout, source, object()), calls
+
+
+@pytest.mark.parametrize('current_kind,newest_kind', [
+    ('malformed', 'malformed'), ('bad_receipt', 'malformed'), ('pending', 'bad_receipt'),
+])
+def test_recovery_checks_every_candidate_before_falling_back_to_older_verified_history(tmp_path, monkeypatch,
+        current_kind, newest_kind):
+    import os
+    layout, source, saved, calls = saved_synthesis_fixture(tmp_path, monkeypatch)
+    older = layout.reports/'.Evidence/History/ReportOld.json'
+    newest = older.with_name('ReportNew.json')
+    current = layout.reports/'LaboratoryDailyReport.json'
+    bad = copy.deepcopy(saved)
+    bad['model_receipts'][0]['result']['sha256'] = 'f' * 64
+    atomic_json(older, {'全天综合理解': saved})
+    for path, kind in ((current, current_kind), (newest, newest_kind)):
+        if kind == 'malformed':
+            path.write_bytes(b'{broken original report bytes')
+        else:
+            atomic_json(path, {'全天综合理解': bad if kind == 'bad_receipt' else {'status': 'pending'}})
+    os.utime(older, (1000, 1000))
+    os.utime(newest, (2000, 2000))
+    before = {path: path.read_bytes() for path in (older, newest, current)}
+    result = current_synthesis(layout, source)
+    assert result['status'] == 'completed_for_available_inputs'
+    assert result['findings'] == saved['findings'] and result['input_digest'] == saved['input_digest']
+    assert result['recovery_errors'] and len(calls) == 1
+    assert all(path.read_bytes() == raw for path, raw in before.items())
+
+
+@pytest.mark.parametrize('valid_older', [True, False])
+def test_render_recovers_from_corrupt_current_and_preserves_exact_unverified_bytes(tmp_path, monkeypatch, valid_older):
+    import hashlib
+    from visioncortex.device_day_contract import read_json
+    from visioncortex.device_day_reports import render_day
+    layout, source, saved, calls = saved_synthesis_fixture(tmp_path, monkeypatch)
+    older = layout.reports/'.Evidence/History/ReportOld.json'
+    bad = copy.deepcopy(saved)
+    bad['model_receipts'][0]['result']['sha256'] = 'f' * 64
+    atomic_json(older, {'全天综合理解': saved if valid_older else bad})
+    original_history = older.read_bytes()
+    current = layout.reports/'LaboratoryDailyReport.json'
+    original_current = b'{unreadable current with historical evidence'
+    current.write_bytes(original_current)
+    render_day(layout, source)
+    result = read_json(current)['全天综合理解']
+    if valid_older:
+        assert result['status'] == 'completed_for_available_inputs'
+        assert result['findings'] == saved['findings']
+    else:
+        assert result['status'] == 'unverified_saved_synthesis'
+        assert result['evidence_status'] == 'NOT_PROVEN' and result['findings'] == []
+    assert result['recovery_errors'] and len(calls) == 1
+    preserved = layout.reports/'.Evidence/History'/('UnverifiedReport' + hashlib.sha256(original_current).hexdigest() + '.json')
+    assert preserved.read_bytes() == original_current and older.read_bytes() == original_history
+    record = read_json(next((layout.reports/'.Evidence/Recovery').glob('Report*.json')))
+    assert record['source_path'] == layout.relative(current)
+    assert record['source_stat']['st_size'] == len(original_current)
+    assert record['preserved_reference']['sha256'] == hashlib.sha256(original_current).hexdigest()
+    assert record['evidence_status'] == 'NOT_PROVEN' and record['model_invoked'] is False
 
 
 def test_output_upgrade_uses_matching_adapter_preserves_success_and_cannot_bypass_unknown(tmp_path, monkeypatch):

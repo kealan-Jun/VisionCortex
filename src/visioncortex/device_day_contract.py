@@ -286,7 +286,7 @@ def verify_artifact(root: Path, reference: dict[str, Any]) -> bool:
 
 class DeviceDayLayout:
     def __init__(self, archive_root: Path, camera_key: str, start_us: int, backend_root: Path | None = None,
-                 *, raw_directory: str | None = None):
+                 *, raw_directory: str | None = None, read_only_originals: bool = False):
         self.name = archive_name(camera_key, start_us)
         self.root = safe_child(archive_root, self.name)
         self.raw, self.processed, self.understanding, self.reports, self.comments = (
@@ -301,7 +301,8 @@ class DeviceDayLayout:
             self.raw = self.root / 'MetaVideo'
         self.index = self.processed / "Index.json"
         self.backend_root = backend_root
-        self.recorder_owned_raw = raw_directory == 'MetaData'
+        self.recorder_owned_raw = raw_directory in RAW_DIRECTORIES
+        self.read_only_originals = read_only_originals or self.recorder_owned_raw
 
     @property
     def receipts(self) -> Path:
@@ -319,7 +320,7 @@ class DeviceDayLayout:
         if recording.get('input_layout') == METADATA_LAYOUT:
             location = metadata_location(source)
             if location is None or location['root'].parent != self.root:
-                raise ValueError('Recorder source must remain in its own device/day MetaData')
+                raise ValueError('Recorder source must remain in its own device/day raw directory')
             return safe_child(self.root, source.relative_to(self.root).as_posix())
         def label(value):
             return datetime.fromtimestamp(value / 1e6, ZoneInfo(TIMEZONE)).strftime("%H-%M-%S")
@@ -333,9 +334,9 @@ class DeviceDayLayout:
     def create(self) -> None:
         from .device_day_write_guard import guarded_mkdir, verify_before_submission
         verify_before_submission()
-        if self.recorder_owned_raw and not self.raw.is_dir():
-            raise ValueError('Recorder-owned MetaData is unavailable')
-        names = DIRECTORIES[1:] if self.recorder_owned_raw else (self.raw.name, *DIRECTORIES[1:])
+        if self.read_only_originals and not self.raw.is_dir():
+            raise ValueError(f'Recorder-owned {self.raw.name} is unavailable')
+        names = DIRECTORIES[1:] if self.read_only_originals else (self.raw.name, *DIRECTORIES[1:])
         for name in names:
             guarded_mkdir(safe_child(self.root, name))
         verify_before_submission()
@@ -357,6 +358,8 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError("Device/day timezone is frozen at Asia/Shanghai")
     if settings.get("delete_capture_sources", False):
         raise ValueError("Capture source deletion is suspended by user instruction")
+    if type(settings.get('raw_originals_read_only', False)) is not bool:
+        raise ValueError('raw_originals_read_only must be boolean')
     for name in ("vision_workers", "stt_workers", "understanding_workers", "inactive_frames", "active_frames_per_window"):
         value = settings.get(name, 2 if name.endswith("workers") else 8)
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:

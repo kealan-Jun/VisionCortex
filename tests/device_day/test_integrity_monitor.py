@@ -313,9 +313,11 @@ def test_source_repair_cannot_grant_a_different_execution_recipe(monitor_case):
     with runner.queues['retention'].connect() as db:
         db.execute("UPDATE recordings SET status='failed',attempts=3,revision='different-recipe',result=?",
                    (json.dumps({'error_type': 'InputChanged'}),))
-    assert tick_selected(monitor)['reason'] == 'execution_recipe_changed'
+    assert tick_selected(monitor)['reason'] == 'readmission_historical_scope_not_authorized'
     with runner.queues['retention'].connect() as db:
-        assert db.execute('SELECT retry_limit FROM recordings').fetchone()[0] == 0
+        row = db.execute('SELECT * FROM recordings').fetchone()
+        assert row['retry_limit'] == 0 and row['revision'] == 'different-recipe'
+        assert row['status'] == 'failed' and row['attempts'] == 3
 
 
 def test_coverage_does_not_count_an_old_generation_as_current(monitor_case):

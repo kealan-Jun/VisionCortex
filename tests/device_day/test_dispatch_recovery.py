@@ -102,7 +102,10 @@ def test_late_recorder_audio_reopens_owned_stages_without_repeating_vision(devic
     folder = Path(item['video_path']).parent
     (folder / 'audio.opus').write_bytes(b'owned-late-recorder-audio')
     atomic_json(folder / 'audio_meta.json', {'recording_session_id': 'fixture-1',
-                'first_audio_global_us': item['recording_start_us']})
+                'audio_valid': True, 'first_audio_global_us': item['recording_start_us'],
+                'last_audio_global_us': item['recording_start_us'] + 10000000})
+    (folder / 'audio_timing.csv').write_text(
+        f"global_timestamp_us\n{item['recording_start_us']}\n")
     for path in folder.glob('audio*'):
         os.utime(path, (time.time() - 1000, time.time() - 1000))
     pending, _ = item_and_layout(device_config)
@@ -110,7 +113,7 @@ def test_late_recorder_audio_reopens_owned_stages_without_repeating_vision(devic
     observe(runner.runtime_root, {'recordings': [pending]})
     assert RetentionWorker(stage='stt').candidates(runner) == []
     assert read_json(runner._receipt(layout, item, 'stt')) == previous['stt']
-    atomic_json(folder / 'audio_ready.json', {'recording_session_id': 'fixture-1', 'ready': True})
+    atomic_json(folder / 'audio_ready.json', {'recording_session_id': 'fixture-1', 'ready': True, 'audio_valid': True})
     os.utime(folder / 'audio_ready.json', (time.time() - 1000, time.time() - 1000))
     updated, _ = item_and_layout(device_config)
     assert updated['audio']['status'] == 'provided'

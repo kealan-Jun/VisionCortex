@@ -92,6 +92,46 @@ def test_protocol_failures_open_shared_transport_circuit(tmp_path):
         circuit.admit(now=101)
 
 
+def test_repeated_provider_outage_backs_off_across_restarts_and_resets_on_success(tmp_path):
+    binding = {'provider': 'synthetic', 'base_url': 'https://example.test/v1'}
+    error = httpx.RemoteProtocolError('owned test')
+    circuit = Circuit(tmp_path, binding, 'understanding')
+    circuit.failed(error, now=100)
+    probes = circuit.admit(now=130)
+    with pytest.raises(ProviderUnavailable):
+        Circuit(tmp_path, binding, 'understanding').admit(now=131)
+    circuit.failed(error, now=131)
+    circuit.succeeded(probes)  # An earlier response cannot erase the new failure.
+    assert Circuit(tmp_path, binding, 'understanding').state()[0]['retry_at'] == 191
+    for _ in range(8):
+        circuit.failed(error, now=200)
+    assert circuit.state()[0]['retry_at'] == 1100
+    circuit.succeeded(circuit.admit(now=1100))
+    assert circuit.state() == []
+    circuit.failed(error, now=1200)
+    assert circuit.state()[0]['retry_at'] == 1230
+
+
+def test_provider_backoff_keeps_previous_runtime_writer_compatible(tmp_path):
+    circuit = Circuit(tmp_path, {'provider': 'synthetic'}, 'understanding')
+    with connection(circuit.path) as db:
+        db.execute('INSERT OR REPLACE INTO circuits VALUES(?,?,?,0)', (circuit.key, 'transport_unavailable', 100))
+        assert len(db.execute('PRAGMA table_info(circuits)').fetchall()) == 4
+    circuit.failed(httpx.RemoteProtocolError('owned test'), now=100)
+    with connection(circuit.path) as db:
+        db.execute('INSERT OR REPLACE INTO circuits VALUES(?,?,?,0)', (circuit.key, 'transport_unavailable', 200))
+    assert circuit.admit(now=200)
+
+
+@pytest.mark.parametrize('stage,expected', [('retention', 'queued'), ('stt', 'queued'),
+                                          ('vision', 'needs_camera_role'), ('understanding', 'needs_camera_role')])
+def test_only_role_dependent_queues_wait_for_camera_role(tmp_path, stage, expected):
+    queue = DeviceDayQueue(tmp_path / f'queue-{stage}.sqlite3')
+    queue.enqueue({'recording_id': 'new-camera', 'source_signature': 'same'}, 'v1')
+    with queue.connect() as db:
+        assert db.execute('SELECT status FROM recordings').fetchone()[0] == expected
+
+
 def test_publication_backoff_survives_restart_and_new_receipt_wakes_it(tmp_path):
     journal = PublicationJournal(tmp_path)
     token = journal.begin({'recording_id': 'a'})

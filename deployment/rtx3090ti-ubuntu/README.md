@@ -78,15 +78,25 @@ Web 与 worker 按配置的角色运行；认证、监听地址及跨机访问�
 持续有新输入的站点可选择 `mode: fair`，并在 `stages` 列出
 `retention`、`vision`、`stt`、`understanding`、`report`。每阶段必须部署对应 worker。
 `fair_interval_seconds` 默认 60；`quantum_seconds` 在可恢复单位完成后让出，
-不会打断已发送的付费请求或接受半份内容。历史按最老输入和阶段轮转处理，实际执行
+不会打断已发送的付费请求或接受半份内容。历史沿用持久队列的相机轮次，在每相机内
+优先最老输入，并在阶段间轮转，实际执行
 仍验证输入与前序回执，并加入有容量上限和等待老化的共享资源队列。
 `fair_turn_timeout_seconds` 默认 15，避免缺失消费者一直占住历史轮次。
 monitor、用户暂停、处理时段和内容验证失败仍会阻止不安全执行。
 历史和实时消费者并行轮询，通过共享资源容量与独占任务租约协调；历史执行不会关闭实时准入。
 
 独立 `device_day_live_discovery` 同时发布自身状态和本地
-`state/nas-recording-monitor.json`。历史调度继续验证实际相机线程、扫描完整性和时间新鲜度；
-独立发现服务停止或退化时关闭历史准入，不能以手工写入 watching 状态恢复队列。
+`state/nas-recording-monitor.json`。历史调度继续验证实际相机线程、扫描完整性和时间新鲜度。
+原生设备日监控的版本化通道摘要只允许隔离已明确定位的故障、首次未完成扫描或陈旧通道；
+其余健康相机可继续历史处理。缺少人称绑定保留告警，只等待依赖该绑定的阶段，
+原始校验及 STT 可独立推进。监控停止、全部通道不可用、全局清单未完整发布、
+摘要不一致或未知退化仍关闭历史准入，不能以手工写入 watching 状态恢复队列。
+
+拆分输入可用性服务使用标准入口
+`python -m visioncortex.runtime_services --input-availability --config "$VISIONCORTEX_CONFIG"`。
+它沿用 `input-availability-consumer.lock`、既有 Reconciler、输入状态和各阶段队列，
+每轮验证存储及资源准入；`InputReconciliation/Service.json` 发布构建身份、心跳、
+成功轮次及具体异常类型。它不创建另一套扫描器、不加载模型，也不把存储不可见记成原片丢失。
 
 FieldRecognition 尚未部署事件 feed 时，可显式设置
 `device_day.field_recognition.archive_context_enabled: true`、实际归档的绝对
@@ -104,6 +114,16 @@ FieldRecognition 尚未部署事件 feed 时，可显式设置
 和稳定修复身份；凭据修复额外核对既有私有验证记录。累计 attempts 和原失败保留，
 同一修复不能反复续预算。计划文件、修复证据及授权日志属于站点私有运行数据。
 不能以清空队列或无限重试代替故障恢复。
+
+对允许的基础设施失败，retention／vision 的旧任务若缺少当前来源准入，修复 owner
+先完整验证当前来源、封存字节、父产物及已授权处理范围，再通过 CAS 补齐准入；
+原失败和 attempts 保持不变，后续仍需原验证器授予有界预算。执行配方确已变化时只走
+现有 worker 的正常重新入队，保留旧队列快照与回执，实际执行新配方；不接受旧执行哈希。
+输入完整性 owner 对 retention／vision 的 `InputChanged` 只在执行配方确已变化时，
+完整重验旧输入封存、当前 inventory、父产物、监控及处理范围后移交正常入队；
+不把它改称基础设施修复，不授予修复预算。同配方仍走原有一次来源恢复授权。
+付费阶段缺少完整本地请求证据、结果未知或未授权历史范围继续隔离，
+不能以基础设施修复顺带重发请求。
 
 依次核对解释器及依赖、CUDA/TensorRT、模型/引擎身份、输入指纹、存储容量、
 服务健康与任务回执。健康响应或合成媒体通过仅证明相应接口/结构。

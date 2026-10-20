@@ -275,8 +275,10 @@ def test_audio_stt_comments_feed_understanding_without_repeating_yolo(device_con
     runner = DeviceDayRunner(device_config, backend)
     assert runner.process(item)["status"] == "completed"
     (folder / "audio.opus").write_bytes(b"fixture-audio-not-real-speech")
-    atomic_json(folder / "audio_meta.json", {"audio_valid": True, "first_audio_global_us": item["recording_start_us"]})
-    atomic_json(folder / "audio_ready.json", {"ready": True, "audio_valid": True})
+    atomic_json(folder / "audio_meta.json", {"recording_session_id": "fixture-1", "audio_valid": True,
+                "first_audio_global_us": item["recording_start_us"], "last_audio_global_us": item["recording_end_us"]})
+    (folder / "audio_timing.csv").write_text(f"global_timestamp_us\n{item['recording_start_us']}\n")
+    atomic_json(folder / "audio_ready.json", {"recording_session_id": "fixture-1", "ready": True, "audio_valid": True})
     for path in folder.glob("audio*"):
         os.utime(path, (time.time() - 1000, time.time() - 1000))
     updated, _ = item_and_layout(device_config)

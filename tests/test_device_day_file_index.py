@@ -118,7 +118,8 @@ def test_photo_only_device_publishes_without_waiting_for_video(tmp_path):
                                            'source_ref': {'path': 'voice_photos/camera_cam01/Photo.jpg'}}]}]})
     FileIndexPublisher(cfg).tick()
     root = Path(cfg['storage']['archive_root'])/ARCHIVE
-    assert {p.name for p in root.iterdir()} == set(DIRECTORIES)
+    assert {p.name for p in root.iterdir()} == set(DIRECTORIES[1:])
+    assert not (root/'MetaData').exists() and not (root/'MetaVideo').exists()
     assert read_json(root/'ProcessedClips/Index.json')['recordings'] == []
     assert [e['kind'] for e in all_entries(read_json(root/'Comment/TimeIndex.json'))] == ['voice_photo']
 

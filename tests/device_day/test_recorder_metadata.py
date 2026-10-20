@@ -63,6 +63,29 @@ def inventory(config):
     return result['recordings']
 
 
+@pytest.mark.parametrize('stage', ['retention', 'stt'])
+def test_split_worker_admits_ready_native_input_without_camera_role(config, stage):
+    from visioncortex.device_day_retention_worker import RetentionWorker
+    config['collection_ingest']['camera_role_map'] = {}
+    folder = incoming(config)
+    audio(folder)
+    stable(folder)
+    record, = inventory(config)
+    assert not record.get('configured_role')
+    before = {p.name: p.read_bytes() for p in folder.iterdir()}
+    backend = FakeModels()
+    runner = DeviceDayRunner(config, backend)
+    worker = RetentionWorker(stage=stage)
+    assert worker.admit(runner, record) is True
+    claimed = runner.queues[stage].claim('independent-worker')
+    assert claimed and claimed['recording_id'] == record['recording_id']
+    result = worker._execute_claimed(runner, record, 'independent-worker', threading.Event())
+    assert result['result']['status'] == 'completed', result
+    assert backend.vision_calls == backend.semantic_calls == 0
+    assert before == {p.name: p.read_bytes() for p in folder.iterdir()}
+    assert RetentionWorker(stage='vision').admit(runner, record) is False
+
+
 @pytest.mark.parametrize('flat', [False, True])
 @pytest.mark.parametrize('inplace', [False, True])
 def test_precreated_metadata_processes_without_changing_or_copying_sources(config, monkeypatch, flat, inplace):
@@ -91,7 +114,7 @@ def test_precreated_metadata_processes_without_changing_or_copying_sources(confi
     for source in receipt['sources']:
         assert safe_child(layout.root, source['retained']['path']) == Path(source['original_path'])
     catalog = retain_capture_files(runner, record)
-    assert catalog['path'].startswith('ProcessedClips/CaptureMetadata/')
+    assert catalog['path'].startswith('ProcessedClips/.Evidence/CaptureMetadata/')
     entries = read_json(safe_child(layout.root, catalog['path']))['files']
     assert next(e for e in entries if e['original_name'] == 'camera-log.txt')['retained']['path'].endswith('camera-log.txt')
     assert before == {p.name: (p.read_bytes(), p.stat().st_ino) for p in folder.iterdir()}
@@ -445,7 +468,8 @@ def test_unregistered_metadata_is_persisted_and_alerted_without_model_execution(
     from visioncortex.device_day_live_discovery import discovery_status, live_config
     from visioncortex.device_day_service import DeviceDayService
     from visioncortex.observed_inventory import read_inventory
-    incoming(config, camera='new_cam01', start=int((time.time() - 10) * 1e6))
+    folder = incoming(config, camera='new_cam01', start=int((time.time() - 10) * 1e6))
+    before = {path: (path.read_bytes(), path.stat().st_ino) for path in folder.rglob('*') if path.is_file()}
     config['collection_ingest'].update(discovery_mode='metadata_only', camera_role_map={})
     current = live_config(config)
     stop, observed = threading.Event(), threading.Event()
@@ -466,9 +490,14 @@ def test_unregistered_metadata_is_persisted_and_alerted_without_model_execution(
         record, = read_inventory(root)['recordings']
         assert record['camera_key'] == 'new_cam01' and not record.get('configured_role')
         models = FakeModels()
-        assert DeviceDayRunner(current, models).process(record)['status'] == 'needs_camera_role'
+        result = DeviceDayRunner(current, models).process(record)
+        assert result['status'] == 'needs_camera_role'
+        assert {stage: value['status'] for stage, value in result['independent_stages'].items()} == {
+            'retention': 'completed', 'stt': 'completed'}
         assert models.vision_calls == models.semantic_calls == 0
-        assert not (Path(config['storage']['archive_root']) / archive_name('new_cam01', record['recording_start_us']) / 'ProcessedClips').exists()
+        processed = Path(config['storage']['archive_root']) / archive_name('new_cam01', record['recording_start_us']) / 'ProcessedClips'
+        assert not list(processed.rglob('*.mp4'))
+        assert all((path.read_bytes(), path.stat().st_ino) == expected for path, expected in before.items())
         # Explicit registration resolves the alert; discovery never guesses it.
         current['collection_ingest']['camera_role_map']['new_cam01'] = 'third_person'
         status = discovery_status(current, monitor.poll(include_recordings=False))
@@ -563,9 +592,13 @@ def test_switching_discovery_mode_keeps_completed_vision_receipt(config):
 
 def test_switching_discovery_keeps_already_admitted_legacy_work_processable(config):
     folder = capture(config)
+    before = {path: (path.read_bytes(), path.stat().st_ino) for path in folder.iterdir() if path.is_file()}
     record, = inventory(config)
     layout = DeviceDayLayout(Path(config['storage']['archive_root']), record['camera_key'],
                             record['recording_start_us'], raw_directory='MetaVideo')
+    # The fixture supplies a pre-existing historical raw root. The pipeline
+    # cannot create a recorder-owned root merely to switch discovery modes.
+    layout.raw.mkdir(parents=True)
     layout.create()
     config['collection_ingest']['discovery_mode'] = 'metadata_only'
     assert inventory(config) == []
@@ -573,6 +606,7 @@ def test_switching_discovery_keeps_already_admitted_legacy_work_processable(conf
     assert runner.process(record)['status'] == 'completed'
     assert runner.layout(record).raw.name == 'MetaVideo'
     assert (folder / 'rgb.mp4').is_file()
+    assert all((path.read_bytes(), path.stat().st_ino) == expected for path, expected in before.items())
 
 
 @pytest.mark.parametrize('names', ['a_cam01', ['../outside']])
