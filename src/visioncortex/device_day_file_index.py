@@ -143,6 +143,8 @@ def build_file_index(config, index, photos):
             record_scope='retention_interval' if interval else 'preprocessing_candidate',
             candidate_segment_id=segment.get('candidate_segment_id', segment['segment_id']),
             video_value=(interval or {}).get('video_value'), selection_reason=(interval or {}).get('reason'),
+            activity_category=(interval or {}).get('activity_category'),
+            processing_status=(interval or {}).get('processing_status'),
             historical_scope=segment.get('historical_scope'),
             source_mapping=(interval or {}).get('source_mapping'),
             physical_action_confirmed=False))
