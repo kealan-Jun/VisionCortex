@@ -141,14 +141,14 @@ def revalidate_remounted_seals(runner, record):
     return len(updates)
 
 
-def reconcile(runner, *, stop=None):
+def reconcile(runner, *, stop=None, limit=32):
     from .device_day import exclusive
     from .device_day_contract import STAGES
     journal = PublicationJournal(runner.runtime_root)
     from .device_day_schedule import processing_cutoff
     completed = 0
     recent = round((time.time() - runner.settings.get('live_priority_seconds', 14400)) * 1e6)
-    for token, record in journal.pending(since_us=processing_cutoff(runner.settings), prefer_since_us=recent,
+    for token, record in journal.pending(limit, since_us=processing_cutoff(runner.settings), prefer_since_us=recent,
                                         latest_first=runner.settings.get('latest_first', False), ready_only=True):
         if stop is not None and stop.is_set():
             break  # Finish one atomic recording, then preserve the remaining journal.
@@ -180,12 +180,17 @@ def reconcile(runner, *, stop=None):
                 else:
                     journal.defer(record['recording_id'], token)
         except (OSError, ValueError, KeyError, TypeError, sqlite3.Error) as exc:
+            from .receipt_projection import ProjectionDeferred, ProjectionGenerationChanged
             # One unavailable archive must not block other recoverable days.
             # The unacknowledged item stays pending for a later bounded round.
-            if not isinstance(exc, BlockingIOError):
+            deferred = isinstance(exc, (ProjectionDeferred, ProjectionGenerationChanged))
+            if deferred or not isinstance(exc, BlockingIOError):
                 import logging
                 logging.getLogger(__name__).warning('Publication replay deferred %s: %s',
                                                     record['recording_id'], type(exc).__name__)
-            journal.defer(record['recording_id'], token,
-                          reason='lock_busy' if isinstance(exc, BlockingIOError) else type(exc).__name__)
+            reason = (json.dumps(exc.details(), sort_keys=True) if isinstance(exc, ProjectionGenerationChanged) else
+                json.dumps({'reason': 'readable_projection_limit', 'error_type': type(exc).__name__,
+                'metric': exc.metric, 'observed': exc.observed, 'limit': exc.limit}, sort_keys=True)
+                if deferred else 'lock_busy' if isinstance(exc, BlockingIOError) else type(exc).__name__)
+            journal.defer(record['recording_id'], token, reason=reason)
     return completed

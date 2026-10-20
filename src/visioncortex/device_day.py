@@ -218,6 +218,16 @@ def load_context(layout: DeviceDayLayout, recording: dict) -> dict:
     return recording_context(load_day_context(layout), recording, stt)
 
 
+def current_recording_context(config, layout, recording):
+    """Current association port shared by execution and historical readers."""
+    context = load_context(layout, recording)
+    from .application.field_event_consumer import context_events
+    incoming = context_events(config, recording)
+    if incoming['status'] == 'no_input':
+        return context
+    return context | {'events': incoming['events'], 'field_event_status': incoming['status']}
+
+
 def stage_worker_capacity(settings, stage, camera_count):
     from .device_day_admission import validate
     validate(settings)
@@ -301,12 +311,7 @@ class DeviceDayRunner:
         return self.backend
 
     def _context(self, layout, recording):
-        context = load_context(layout, recording)
-        from .application.field_event_consumer import context_events
-        incoming = context_events(self.config, recording)
-        if incoming['status'] == 'no_input':
-            return context
-        return context | {'events': incoming['events'], 'field_event_status': incoming['status']}
+        return current_recording_context(self.config, layout, recording)
 
     def _hash(self, path):
         path = Path(path).resolve()
@@ -325,6 +330,10 @@ class DeviceDayRunner:
         return self._hash_cache[identity]
 
     def _key(self, stage: str, recording: dict, inputs: Any, *, _binding=True) -> str:
+        historical = self._completed_execution_bindings.historical_candidate(stage, recording) if _binding else None
+        if historical:
+            from .device_day_historical_reader import current_key
+            return current_key(self.config, historical, recording, inputs)
         if (stage == 'stt' and isinstance(inputs, dict) and inputs.get('input_binding_version') == 1
                 and any(row.get('kind') == 'audio_audio' for row in inputs.get('sources') or [])):
             # Bind provider/recipe lookup to the original actual audio seal.
@@ -453,6 +462,10 @@ class DeviceDayRunner:
         return actual == expected or actual in self._key_aliases.get(expected, ())
 
     def _accepts_receipt(self, receipt, expected):
+        historical = self._completed_execution_bindings.historical_candidate(
+            receipt.get('stage'), {'recording_id': receipt.get('recording_id')})
+        if historical and expected != historical['reader_key']:
+            return False
         if self._completed_execution_bindings.requires(expected):
             return self._completed_execution_bindings.accepts(receipt, expected)
         return (self._matches_key(receipt.get("key"), expected)
@@ -479,6 +492,18 @@ class DeviceDayRunner:
             return receipt
 
     def _load_verified(self, path, key, layout):
+        reserved = self._completed_execution_bindings.historical_candidate(Path(path).stem, {'recording_id': Path(path).parent.name})
+        if reserved and key != reserved['reader_key']:
+            from .device_day_bindings import CompletedBindingInvalid
+            raise CompletedBindingInvalid('Historical completion requires its explicit read descriptor; no provider fallback')
+        historical = self._completed_execution_bindings.readers_by_key.get(key)
+        if historical:
+            from .device_day_historical_reader import verify
+            from .device_day_bindings import CompletedBindingInvalid
+            if Path(path) != self._receipt(layout, {'recording_id': historical['recording_id']}, 'understanding'):
+                raise CompletedBindingInvalid('Historical reader receipt path differs; no provider fallback')
+            return verify(self.config, historical, layout,
+                          context_reader=lambda record: self._context(layout, record))
         if not path.is_file():
             return None
         receipt = read_json(path)
@@ -505,6 +530,10 @@ class DeviceDayRunner:
     def process(self, recording: dict, *, stage="all", retry=False, stop_event=None) -> dict:
         if stage != "all" and stage not in STAGES:
             raise ValueError("Unknown device/day stage")
+        if self._completed_execution_bindings.historical_candidate('understanding', recording):
+            # A historical reader reserves the entire producer graph. Even a
+            # prerequisite-only request must not recreate its original receipts.
+            return self._observed_process(recording, stage=stage, retry=retry)
         from .device_day_inputs import stage_input_ready
         if not stage_input_ready(recording, stage):
             independent = ({'stt': self.process(recording, stage='stt', retry=retry, stop_event=stop_event)}
@@ -593,6 +622,17 @@ class DeviceDayRunner:
                     'reason': exc.reason, 'error_type': type(exc).__name__}
 
     def _guarded_process(self, recording, *, stage, retry):
+        from .receipt_projection import ProjectionDeferred, ProjectionGenerationChanged
+        historical = self._completed_execution_bindings.historical_candidate('understanding', recording)
+        if historical:
+            from .device_day_historical_reader import verify
+            layout = self.layout(recording)
+            verify(self.config, historical, layout, recording=recording,
+                   context_reader=lambda record: self._context(layout, record))
+            return {'recording_id': recording['recording_id'],
+                    'status': 'historical_read_only_publication_required',
+                    'reader_key': historical['reader_key'], 'stage': stage,
+                    'new_model_invoked': False, 'publication_verified': False}
         from .device_day_contract import dependencies_for
         dependencies = dependencies_for(self.settings, recording)
         needed = set(STAGES) if stage == 'all' else {stage}
@@ -633,6 +673,12 @@ class DeviceDayRunner:
                 record_timings(self, recording, stage, measured['phase_seconds'])
                 return result | {'component_timings': dict(measured['phase_seconds']),
                                  'measured_frame_counts': dict(measured['frame_counts'])}
+        except ProjectionGenerationChanged as exc:
+            return {'recording_id': recording['recording_id'], 'status': 'waiting_for_publication', **exc.details()}
+        except ProjectionDeferred as exc:
+            return {'recording_id': recording['recording_id'], 'status': 'waiting_for_publication',
+                    'reason': 'readable_projection_limit', 'error_type': type(exc).__name__,
+                    'metric': exc.metric, 'observed': exc.observed, 'limit': exc.limit}
         except BlockingIOError:
             return {"recording_id": recording["recording_id"], "status": "running_elsewhere"}
 
@@ -649,6 +695,25 @@ class DeviceDayRunner:
         from .publication_journal import PublicationJournal
         publication_journal = PublicationJournal(self.runtime_root)
         publication_token = publication_journal.begin(recording)
+        from .receipt_projection import ProjectionGenerationChanged
+        publication_pending = None
+
+        def publish_completed():
+            # A different stage may atomically commit while we project this
+            # folder. Retain our completed native receipt and the journal;
+            # accepting a mixed generation or rerunning its model is forbidden.
+            nonlocal publication_pending
+            try:
+                published = self.refresh_index(layout, recording_id=recording['recording_id'])
+            except ProjectionGenerationChanged as exc:
+                publication_pending = exc.details()
+                publication_journal.defer(recording['recording_id'], publication_token,
+                                          reason=json.dumps(publication_pending, sort_keys=True))
+                return False
+            if published:
+                publication_pending = None
+            return published
+
         from .device_day_contract import dependencies_for
         dependencies = dependencies_for(self.settings, recording)
         needed = set(STAGES) if stage == "all" else {stage}
@@ -716,6 +781,22 @@ class DeviceDayRunner:
                             "stage": current, "reason": exc.reason,
                             "error_type": type(exc).__name__, "message": str(exc)}
                 except Exception as exc:
+                    from .receipt_projection import ProjectionDeferred
+                    if isinstance(exc, ProjectionGenerationChanged):
+                        receipt = {'schema_version': VERSION, 'key': key, 'stage': current,
+                            'status': 'waiting_for_publication', 'recording_id': recording['recording_id'],
+                            **exc.details(), 'at': now()}
+                        atomic_json(path, receipt)
+                        publication_journal.defer(recording['recording_id'], publication_token,
+                                                  reason=json.dumps(exc.details(), sort_keys=True))
+                        return receipt
+                    if isinstance(exc, ProjectionDeferred):
+                        receipt = {'schema_version': VERSION, 'key': key, 'stage': current,
+                            'status': 'waiting_for_publication', 'recording_id': recording['recording_id'],
+                            'reason': 'readable_projection_limit', 'error_type': type(exc).__name__,
+                            'metric': exc.metric, 'observed': exc.observed, 'limit': exc.limit, 'at': now()}
+                        atomic_json(path, receipt)
+                        return receipt
                     from .device_day_write_guard import NASUnavailable
                     if isinstance(exc, NASUnavailable):
                         return {'recording_id': recording['recording_id'], 'stage': current,
@@ -729,7 +810,7 @@ class DeviceDayRunner:
                                    'status': status, 'recording_id': recording['recording_id'], 'at': now(),
                                    'reason': exc.reason, 'plan_ref': exc.plan_ref}
                         atomic_json(path, receipt)
-                        self.refresh_index(layout, recording_id=recording['recording_id'])
+                        publish_completed()
                         return receipt
                     from .multimodal_usage import SubmittedUnknown
                     if isinstance(exc, SubmittedUnknown):
@@ -737,7 +818,7 @@ class DeviceDayRunner:
                                    'status': 'submitted_unknown', 'recording_id': recording['recording_id'],
                                    'at': now(), 'reason': exc.reason}
                         atomic_json(path, receipt)
-                        self.refresh_index(layout, recording_id=recording['recording_id'])
+                        publish_completed()
                         return receipt
                     if current in {"understanding", "stt"}:
                         from .device_day_provider_gate import ProviderGate
@@ -746,7 +827,7 @@ class DeviceDayRunner:
                                "recording_id": recording["recording_id"], "at": now(),
                                "error_type": type(exc).__name__, "message": str(exc)[:1000]}
                     atomic_json(path, failure)
-                    self.refresh_index(layout, recording_id=recording["recording_id"])
+                    publish_completed()
                     from .provider_control import ProviderUnavailable, classify
                     from .runtime_control import ExecutionCancelled
                     if isinstance(exc, ExecutionCancelled):
@@ -779,19 +860,20 @@ class DeviceDayRunner:
                             "recording_id": recording["recording_id"],
                             "start_us": recording["recording_start_us"], "end_us": recording["recording_end_us"],
                             "audio": retention.get("audio"), "transcription": receipt})
-                elif not self.refresh_index(layout, recording_id=recording["recording_id"]):
+                elif not publish_completed() and publication_pending is None:
                     return {"recording_id": recording["recording_id"], "status": "waiting_for_publication"}
-            if current == "vision" and receipt.get("status") == "completed":
+            if current == "vision" and receipt.get("status") == "completed" and publication_pending is None:
                 from .capture_link_cleanup import submit_after_preprocessing
                 submit_after_preprocessing(self, layout, recording)
-        if not deferred_publication:
+        if not deferred_publication and publication_pending is None:
             publication_journal.complete(recording["recording_id"], publication_token)
-        # Deferred stages keep their durable journal entry until the background
-        # publisher finishes. CV always publishes before completion/cleanup.
+        # Deferred publication keeps its durable journal entry. A completed
+        # native stage is independent; cleanup still requires published output.
         return {"schema_version": VERSION, "archive": layout.name,
                 "recording_id": recording["recording_id"], "status": "completed", "stage": stage,
                 "capture_deletion": "disabled_by_user",
-                "media_duration_seconds": vision.get("source_duration_ms", 0) / 1000 if vision and vision.get("source_duration_ms") is not None else None}
+                "media_duration_seconds": vision.get("source_duration_ms", 0) / 1000 if vision and vision.get("source_duration_ms") is not None else None,
+                **({'formal_publication': 'pending', **publication_pending} if publication_pending else {})}
 
     def refresh_index(self, layout, *, recording_id=None):
         from .device_day_write_guard import storage_guard
@@ -800,6 +882,7 @@ class DeviceDayRunner:
 
     def _guarded_refresh_index(self, layout, *, recording_id=None):
         from .device_day_reports import render_day
+        from .receipt_projection import ProjectionDeferred, ProjectionGenerationChanged
         from .runtime_control import check_yield
         check_yield(checkpoint=False)
         # Threads use a mutex; the OS lock also protects a separate CLI worker.
@@ -807,14 +890,51 @@ class DeviceDayRunner:
             try:
                 with exclusive(self.runtime_root / "locks" / f"{layout.name}.index.lock"):
                     recordings, segments, understandings, published_records = [], [], [], []
-                    day_context = None
+                    historical_quarantines = []
                     from .receipt_projection import ReceiptProjection
                     from contextlib import closing
-                    with closing(ReceiptProjection(self.runtime_root).iter_records(layout, STAGES, recording_id=recording_id)) as projected:
-                        for identifier, stages in projected:
+                    from itertools import chain
+                    reserved = {identifier for (_, identifier), entry in self._completed_execution_bindings.historical.items()
+                                if entry['archive'] == layout.name}
+                    projection_options = {'exclude': reserved} if reserved else {}
+                    with closing(ReceiptProjection(self.runtime_root).iter_records(layout, STAGES,
+                            recording_id=recording_id, **projection_options)) as projected:
+                        for identifier, stages in chain(((identifier, {}) for identifier in sorted(reserved)), projected):
                             check_yield(checkpoint=False)
-                            from .device_day_inplace import publication_filter
-                            stages = publication_filter(self, layout, stages)
+                            historical = self._completed_execution_bindings.historical_candidate(
+                                'understanding', {'recording_id': identifier})
+                            if historical:
+                                from .device_day_historical_reader import read_bundle
+                                # This distinct publication capability verifies
+                                # the complete native bundle; it does not alias
+                                # any old parent key to today's execution recipe.
+                                try:
+                                    stages = read_bundle(self.config, historical, layout,
+                                        context_reader=lambda record: self._context(layout, record))
+                                except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+                                    marker = {'recording_id': identifier, 'reader_key': historical['reader_key'],
+                                        'status': 'current_historical_read_quarantined', 'new_model_invoked': False,
+                                        'reason': str(exc)[:200], 'current_association': 'pending_verification',
+                                        'producer_context_unchanged': True}
+                                    try:
+                                        from .device_day_historical_publication import previous_published_scope
+                                        prior = previous_published_scope(self.config, historical, layout)
+                                        for row in prior['recordings']:
+                                            row['historical_association'] = marker | {'previous_published_scope': 'verified_and_preserved'}
+                                        recordings.extend(prior['recordings'])
+                                        segments.extend(prior['segments'])
+                                        understandings.extend(prior['understandings'])
+                                        marker['previous_published_scope'] = 'verified_and_preserved'
+                                    except (OSError, ValueError, KeyError, TypeError, AttributeError) as previous:
+                                        marker.update(previous_published_scope='unavailable_original_files_retained',
+                                                      previous_scope_error=str(previous)[:200])
+                                    historical_quarantines.append(marker)
+                                    # A reserved record can never make another
+                                    # record's completed native receipts vanish.
+                                    continue
+                            else:
+                                from .device_day_inplace import publication_filter
+                                stages = publication_filter(self, layout, stages)
                             if not stages.get('retention'):
                                 continue
                             retained = stages.get("retention") or {}
@@ -836,14 +956,14 @@ class DeviceDayRunner:
                                                "stages": {s: {k: value.get(k) for k in ("status", "key", "message", "completed_at")}
                                                           for s, value in stages.items()}})
                             visual = stages.get("vision") or {}
-                            if (visual.get("status") == "completed" and retained.get("status") == "completed"
+                            if (historical or visual.get("status") == "completed" and retained.get("status") == "completed"
                                     and visual.get("vision_input_digest") == digest(visual_input(retained))
                                     and self._accepts_receipt(visual, self._key("vision", record, visual_input(retained)))):
                                 published_records.append(record)
                                 semantic = stages.get("understanding") or {}
                                 stt = stages.get("stt") or {}
                                 from .device_day_understanding import enabled as video_only_enabled
-                                speech_ready = (video_only_enabled(self.settings, record) or
+                                speech_ready = (historical or video_only_enabled(self.settings, record) or
                                     stt.get('status') == 'completed' and self._accepts_receipt(stt, self._key('stt', record, retained)))
                                 partial = (video_only_enabled(self.settings, record)
                                            and semantic.get('partial_observations') is True
@@ -856,11 +976,13 @@ class DeviceDayRunner:
                                                and all(verify_artifact_cached(layout.root, ref) for ref in references))
                                 if ((semantic.get("status") == "completed" or partial) and semantic.get("vision_key") == visual.get("key")
                                         and speech_ready):
-                                    if day_context is None:
-                                        day_context = load_day_context(layout)
-                                    context = recording_context(day_context, record, stt)
+                                    context = self._context(layout, record)
                                     if self._accepts_receipt(semantic, self._key("understanding", record, {"vision": visual, "stt": stt, "context": context})):
+                                        if historical:
+                                            from .device_day_historical_reader import provenance
                                         values = semantic.get("understandings", [])
+                                        if historical:
+                                            values = [value | {'historical_execution_read': provenance(historical, semantic)} for value in values]
                                         understandings.extend((value | {'status': value.get('status', 'partial')}
                                                                for value in values) if partial else values)
                                 # Only after every original receipt/key check:
@@ -897,10 +1019,18 @@ class DeviceDayRunner:
                     index = {"schema_version": VERSION, "archive": layout.name, "updated_at": now(),
                              "recordings": recordings, "segments": segments, "understandings": understandings,
                              "capture_deletion": "disabled_by_user", "evidence_status": "PARTIAL_EVIDENCE"}
+                    if historical_quarantines:
+                        index['historical_read_quarantines'] = historical_quarantines
                     from .device_day_narrative import attach_context
                     index = attach_context(self.config, index)
                     from .application.retained_video import publish_selected
                     index['retained_video_publication'] = publish_selected(self.config, index, recording_id=recording_id)
+                    if self.settings.get('readable_content_enabled', False):
+                        from .device_day_content import publish_content
+                        # The in-memory generation is already validated. Its
+                        # actual completed windows become directly readable
+                        # before any whole-day synthesis or background scan.
+                        index['readable_content'] = publish_content(self.config, index)
                     cached_path = self.runtime_root / 'DayTimeline' / f'{layout.name[:10]}.json'
                     if cached_path.is_file():
                         try:
@@ -934,6 +1064,8 @@ class DeviceDayRunner:
                         from .application.field_event_consumer import consume_device_index
                         consume_device_index(self.config, index, layout.name)
                     return True
+            except (ProjectionDeferred, ProjectionGenerationChanged):
+                raise
             except BlockingIOError:
                 # The owning process publishes the complete index from receipts.
                 return
@@ -967,16 +1099,18 @@ class DeviceDayRunner:
     def _build_stage_inventory(self, inventory, stage, date, stop_event=None):
         from .device_day_schedule import in_processing_scope, priority_date, refresh_queue_priorities
         focus_date = priority_date(self.runtime_root)
+        reserved = {recording_id for _, recording_id in self._completed_execution_bindings.historical}
         refresh_queue_priorities(
             self.queues[stage],
             focus_date,
             self.settings.get('live_priority_seconds', 14400),
             latest_first=self.settings.get('latest_first', False),
+            exclude=reserved,
         )
         from .input_availability import Availability, configured_record
         states = Availability(self.runtime_root).states_for_stage(stage)
-        self.queues[stage].migrate_prerequisite_failures()
-        self.queues[stage].sync_availability(states)
+        self.queues[stage].migrate_prerequisite_failures(exclude=reserved)
+        self.queues[stage].sync_availability(states, exclude=reserved)
         durable = {r["recording_id"]: r for r in self.queues[stage].pending()}
         if self.settings.get('inplace_preprocessing'):
             # A restart may see only an older stage queue before discovery
@@ -1025,6 +1159,10 @@ class DeviceDayRunner:
         for record in records:
             if stop_event is not None and stop_event.is_set():
                 return eligible
+            if self._completed_execution_bindings.historical_candidate('understanding', record):
+                # Receipt-only publication never re-enqueues a paid producer or
+                # changes its existing queue revision, lease, attempts or state.
+                continue
             from .device_day_inputs import stage_input_ready
             if not stage_input_ready(record, stage):
                 continue
@@ -1163,6 +1301,8 @@ class DeviceDayRunner:
         if stage == "all":
             from .device_day_inplace import active
             for record in inventory.get('recordings', []):
+                if self._completed_execution_bindings.historical_candidate('understanding', record):
+                    continue
                 if record.get('configured_role') in {'first_person', 'third_person'}:
                     active(self, record, initialize=True)
             # Independent persistent stage queues: a slow model request never

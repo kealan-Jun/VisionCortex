@@ -83,7 +83,7 @@ def test_receipt_change_during_stream_preserves_prior_generation(tmp_path, monke
             return io.BytesIO(b'{"status":"new"}')
         return opened(path, *args, **kwargs)
     monkeypatch.setattr(Path, 'open', raced)
-    with pytest.raises(ValueError, match='source changed'):
+    with pytest.raises(module.ProjectionGenerationChanged, match='source changed'):
         cache.records(layout, ['vision'])
     with module.connection(cache.path, readonly=True) as db:
         assert 'old' in db.execute("SELECT payload FROM receipts WHERE id='a'").fetchone()[0]

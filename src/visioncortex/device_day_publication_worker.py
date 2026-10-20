@@ -22,7 +22,7 @@ class PublicationReplay:
                 return {'status': 'running_elsewhere', 'published': 0}
             # The standard replay owns per-record stage locks, validates every
             # receipt/artifact, prefers recent records and bounds each round.
-            published = reconcile(runner, stop=self.stop) if self.stop is not None else reconcile(runner)
+            published = reconcile(runner, stop=self.stop, limit=4)
             pending = PublicationJournal(runner.runtime_root).pending(1, since_us=processing_cutoff(runner.settings))
             if self.stop is not None and self.stop.is_set():
                 return {'status': 'stopping', 'published': published, 'pending_publications': bool(pending)}
@@ -47,6 +47,35 @@ class ReadableReplay:
     """Publish through the owning file-index service without private glue scripts."""
     def __init__(self, stop):
         self.stop, self.checked, self.publisher, self.generation = stop, {}, None, None
+        self.published_hints, self.retry_at, self.turn = {}, {}, 0
+
+    @staticmethod
+    def _local_hints(runner, records, names):
+        """Scheduling hints only; the owning publisher still verifies facts."""
+        from .device_day_contract import archive_name
+        from .sqlite_store import connection
+        grouped = {name: [] for name in names}
+        owners = {r['recording_id']: archive_name(r['camera_key'], r['recording_start_us']) for r in records}
+        path = runner.runtime_root / 'timeline-invalidations.sqlite3'
+        if path.is_file():
+            with connection(path, readonly=True) as db:
+                for row in db.execute('SELECT archive,digest FROM inputs ORDER BY archive'):
+                    if row['archive'] in grouped:
+                        grouped[row['archive']].append(['canonical', row['digest']])
+        # Existing durable stage rows also cover speech published before any
+        # video/day index and new partial windows after a failed later window.
+        for stage in ('retention', 'vision', 'stt', 'understanding', 'report'):
+            path = runner.runtime_root / f'queue-{stage}.sqlite3'
+            if not path.is_file():
+                continue
+            with connection(path, readonly=True) as db:
+                for row in db.execute("SELECT recording_id,revision,updated_at,status FROM recordings "
+                        "WHERE status='completed' OR json_extract(result,'$.status') IN "
+                        "('partial','paused_for_live','scheduled_checkpoint') ORDER BY recording_id"):
+                    owner = owners.get(row['recording_id'])
+                    if owner in grouped:
+                        grouped[owner].append([stage, row['recording_id'], row['revision'], row['updated_at'], row['status']])
+        return {name: digest(values) for name, values in grouped.items() if values}
 
     def tick(self, runner):
         if self.stop.is_set():
@@ -64,7 +93,11 @@ class ReadableReplay:
             self.publisher, self.generation = FileIndexPublisher(runner.config), key
             state = runner.runtime_root / 'ReadablePublication' / 'Service.json'
             if state.is_file():
-                self.checked = read_json(state).get('checked', {})
+                saved = read_json(state)
+                self.checked = saved.get('checked', {})
+                self.published_hints = saved.get('published_hints', {})
+                self.retry_at = saved.get('retry_at', {})
+                self.turn = saved.get('fair_turn', 0)
         with exclusive(runner.runtime_root / 'locks' / 'readable-file-publication-consumer.lock'):
             verify_storage(runner.config)
             with storage_guard(runner.config), execution_context(job_id='readable-publication',
@@ -80,16 +113,48 @@ class ReadableReplay:
                     field_discovery = {'status': 'unavailable', 'error_type': type(exc).__name__,
                         'automatic_action': 'retry_field_archive_discovery', 'other_publication_continues': True}
                 self.checked = {name: stamp for name, stamp in self.checked.items() if name in names}
+                self.published_hints = {n: h for n, h in self.published_hints.items() if n in names}
+                self.retry_at = {n: stamp for n, stamp in self.retry_at.items() if n in names}
                 if not names or self.stop.is_set():
                     return {'status': 'waiting_for_inventory' if not names else 'stopping'} | (
                         {'field_archive_discovery': field_discovery} if field_discovery else {})
-                name = min(names, key=lambda n: (self.checked.get(n, 0),
-                           -int(n[:10].replace('-', '')), n))
+                import sqlite3
+                hint_error = None
+                try:
+                    hints = self._local_hints(runner, records, names)
+                except (OSError, ValueError, sqlite3.Error) as exc:
+                    hints = {}
+                    hint_error = {'status': 'unavailable', 'error_type': type(exc).__name__}
+                now = time.time()
+                eligible = {n for n in names if self.retry_at.get(n, 0) <= now}
+                if not eligible:
+                    return {'status': 'publication_backoff', 'retry_at': min(self.retry_at.values())}
+                changed = {n for n in eligible if n in hints and hints[n] != self.published_hints.get(n)}
+                cutoff = (now - runner.config.get('device_day', {}).get('live_priority_seconds', 14400)) * 1e6
+                recent = {archive_name(r['camera_key'], r['recording_start_us']) for r in records
+                          if max(r.get('recording_start_us', 0), r.get('recording_end_us', 0)) >= cutoff}
+                self.turn += 1
+                priority = (changed & recent) or changed or (eligible & recent)
+                lane = 'changed_or_live' if priority and self.turn % 3 else 'historical_fair_share'
+                pool = priority if lane == 'changed_or_live' else eligible
+                name = min(pool, key=lambda n: (self.checked.get(n, 0), -int(n[:10].replace('-', '')), n))
                 self.checked[name] = time.time()
-                with resource_slot(runner.config, 'cpu'), slot(runner.config):
-                    result = self.publisher.tick(archives=[name])
-                return {'status': 'published', 'archive': name, 'result': result} | (
-                    {'field_archive_discovery': field_discovery} if field_discovery else {})
+                try:
+                    with resource_slot(runner.config, 'cpu'), slot(runner.config):
+                        result = self.publisher.tick(archives=[name])
+                except Exception:
+                    self.retry_at[name] = time.time() + 30
+                    raise
+                if (result.get('status') == 'completed' and not result.get('busy') and not result.get('errors')
+                        and (result.get('published', 0) or result.get('unchanged', 0))):
+                    if name in hints:
+                        self.published_hints[name] = hints[name]
+                    self.retry_at.pop(name, None)
+                else:
+                    self.retry_at[name] = time.time() + 30
+                return {'status': 'published', 'archive': name, 'result': result, 'scheduling_lane': lane} | (
+                    {'field_archive_discovery': field_discovery} if field_discovery else {}) | (
+                    {'local_change_hints': hint_error} if hint_error else {})
 
 
 def serve(config_path, stop, *, readable=False):
@@ -118,7 +183,11 @@ def serve(config_path, stop, *, readable=False):
             initial = {'status': 'running', 'started_at': started,
                        'scope': scope, 'model_invoked': False, 'build': build}
             if readable:
-                initial['checked'] = replay.checked or (read_json(state_path).get('checked', {}) if state_path.is_file() else {})
+                saved = read_json(state_path) if state_path.is_file() else {}
+                initial.update(checked=replay.checked or saved.get('checked', {}),
+                    published_hints=replay.published_hints or saved.get('published_hints', {}),
+                    retry_at=replay.retry_at or saved.get('retry_at', {}),
+                    fair_turn=replay.turn or saved.get('fair_turn', 0))
             atomic_json(state_path, initial)
             result = replay.tick(runner)
             status = {'status': 'watching', 'started_at': started, 'updated_at': time.time(),
@@ -128,14 +197,16 @@ def serve(config_path, stop, *, readable=False):
                       'error_type': type(exc).__name__, 'scope': scope, 'model_invoked': False, 'build': build}
         if state_path is not None:
             if readable:
-                status['checked'] = replay.checked
+                status.update(checked=replay.checked, published_hints=replay.published_hints,
+                              retry_at=replay.retry_at, fair_turn=replay.turn)
             atomic_json(state_path, status)
         stop.wait(5)
     if state_path is not None:
         final = {'status': 'stopped', 'updated_at': time.time(),
                  'scope': scope, 'model_invoked': False, 'build': build}
         if readable:
-            final['checked'] = replay.checked
+            final.update(checked=replay.checked, published_hints=replay.published_hints,
+                         retry_at=replay.retry_at, fair_turn=replay.turn)
         atomic_json(state_path, final)
 
 

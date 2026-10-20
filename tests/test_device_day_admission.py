@@ -1,6 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
-import subprocess
+import ast
 import threading
 from types import SimpleNamespace
 
@@ -182,9 +182,22 @@ def test_service_memory_wait_does_not_claim_and_resumes_after_recovery(device_co
 def test_scheduling_edits_preserve_execution_identity():
     from visioncortex import device_day
     from visioncortex.device_day_cache_identity import execution_identity
-    before = subprocess.check_output(['git', 'show', 'HEAD:src/visioncortex/device_day.py'], text=True)
-    after = __import__('pathlib').Path(device_day.__file__).read_text()
-    assert execution_identity(before) == execution_identity(after)
+    before = __import__('pathlib').Path(device_day.__file__).read_text()
+
+    def changed_method(name, status):
+        tree = ast.parse(before)
+        runner = next(node for node in tree.body if isinstance(node, ast.ClassDef)
+                      and node.name == 'DeviceDayRunner')
+        method = next(node for node in runner.body if isinstance(node, ast.FunctionDef)
+                      and node.name == name)
+        method.body.insert(0, ast.parse(f"return {{'status': '{status}'}}").body[0])
+        return ast.unparse(ast.fix_missing_locations(tree))
+
+    # These owned variants change actual control flow without touching the
+    # checkout. A scheduling change must preserve completed model identities;
+    # an executor change must receive a new identity, regardless of Git HEAD.
+    assert execution_identity(before) == execution_identity(changed_method('run_once', 'owned_scheduler_wait'))
+    assert execution_identity(before) != execution_identity(changed_method('_process', 'owned_execution_change'))
 
 
 def test_memory_settings_preserve_all_stage_cache_keys(device_config):

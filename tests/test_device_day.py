@@ -724,7 +724,7 @@ def test_scan_cache_reuses_only_verified_complete_evidence(device_config, tmp_pa
         model._scan(*args)
 
 
-def test_publication_keeps_current_clips_and_relocates_old_versions(device_config):
+def test_publication_keeps_current_clips_and_historical_paths_and_bytes(device_config):
     import shutil
     from visioncortex.device_day import exclusive
     from visioncortex.device_day_publication import reconcile_outputs, write_archive_guide
@@ -735,16 +735,16 @@ def test_publication_keeps_current_clips_and_relocates_old_versions(device_confi
     current = safe_child(layout.root, read_json(layout.index)['segments'][0]['json_path']).parent
     old = current.with_name('09-00-00_09-01-00_experiment_activity_old')
     shutil.copytree(current, old)
+    original = {path.relative_to(old): path.read_bytes() for path in old.rglob('*') if path.is_file()}
     source = Path(item['video_path'])
     before = source.read_bytes()
     with exclusive(runner.runtime_root / 'locks' / f"{item['recording_id']}.vision.lock"):
         assert reconcile_outputs(runner)['relocated'] == []
     result = reconcile_outputs(runner)
-    assert len(result['relocated']) == 1
-    assert current.is_dir() and not old.exists()
-    moved = safe_child(runner.backend_root, result['relocated'][0]['to'])
-    assert moved.is_dir() and source.read_bytes() == before
-    assert [a['sha256'] for a in result['relocated'][0]['artifacts_before']] == [a['sha256'] for a in result['relocated'][0]['artifacts_after']]
+    assert result['relocated'] == [] and result['automatic_relocation'] is False
+    assert current.is_dir() and old.is_dir() and source.read_bytes() == before
+    assert {path.relative_to(old): path.read_bytes() for path in old.rglob('*') if path.is_file()} == original
+    assert not (layout.receipts/item['recording_id']/'history/superseded-clips').exists()
     write_archive_guide(runner)
     assert 'NoExperimentActivity' in (runner.archive_root / 'Readme.html').read_text()
 
@@ -822,6 +822,23 @@ def test_existing_monitor_automatically_processes_new_slices_during_slow_underst
         return original_understand(*args)
     backend.understand = slow_understand
     runner = DeviceDayRunner(device_config, backend)
+    all_finished = threading.Event()
+    expected_report_ids = set()
+    report_queue = runner.queues['report']
+    original_finish = report_queue.finish
+
+    def finish_report(*args, **kwargs):
+        result = original_finish(*args, **kwargs)
+        # Observe the real completed CAS after its transaction closes. Do not
+        # repeatedly rebuild the complete device-day view while workers finish.
+        with report_queue.connect() as db:
+            completed = {row[0] for row in db.execute(
+                "SELECT recording_id FROM recordings WHERE status='completed'")}
+        if len(expected_report_ids) == 2 and expected_report_ids <= completed:
+            all_finished.set()
+        return result
+
+    monkeypatch.setattr(report_queue, 'finish', finish_report)
     monkeypatch.setattr(module, "DeviceDayRunner", lambda settings: runner)
     monkeypatch.setattr(module.shutil, "disk_usage", lambda path: type("Disk", (), {"free": 10**12})())
     monkeypatch.setattr("visioncortex.nas_recordings.scan_recordings", scan_recordings)
@@ -835,6 +852,7 @@ def test_existing_monitor_automatically_processes_new_slices_during_slow_underst
         # The second camera arrives after the first is already at the slow model.
         capture(device_config, "b_cam02")
         updated = scan_recordings(device_config)
+        expected_report_ids.update(record['recording_id'] for record in updated['recordings'])
         service.observe(device_config, updated)
         def diagnostics():
             status = service.monitor_status(updated)
@@ -852,10 +870,9 @@ def test_existing_monitor_automatically_processes_new_slices_during_slow_underst
         release.set()
         # Completion has its own budget after proving vision progressed while
         # semantics was held; scheduling spent in that proof cannot drain it.
-        completion_deadline = time.monotonic() + 8
-        while service.monitor_status(updated)["batches"][0]["processing"]["status"] != "completed":
-            assert time.monotonic() < completion_deadline, ("Released stages did not complete", diagnostics())
-            time.sleep(.05)
+        assert all_finished.wait(8), ("Released stages did not complete", diagnostics())
+        status = service.monitor_status(updated)
+        assert status["batches"][0]["processing"]["status"] == "completed", status
         service.observe(device_config, updated)
         time.sleep(.1)
         assert backend.vision_calls == 2

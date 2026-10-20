@@ -101,8 +101,13 @@ def build_file_index(config, index, photos):
         records[rid] = row
         sources = {s['kind']: s.get('retained') for s in row.get('sources', [])}
         audio, stt = row.get('audio') or {}, row.get('transcription') or {}
+        source_entries = [{'kind': source.get('kind'), 'retained': reference(source.get('retained'))}
+                          for source in row.get('sources', []) if reference(source.get('retained'))]
+        capture_manifest = reference(row.get('capture_manifest'))
         entries.append(entry('recording', rid, row.get('start_us'), row.get('end_us'),
             video=reference(sources.get('video')), stages=row.get('stages', {}),
+            **({'sources': source_entries} if source_entries else {}),
+            **({'capture_manifest': capture_manifest} if capture_manifest else {}),
             capture_complete=row.get('capture_complete'), capture_issues=row.get('capture_issues', []),
             transcription_status=stt.get('status'), transcription_outcome=stt.get('outcome'),
             audio_status=audio.get('status'), audio_verification=audio.get('input_verification'),
@@ -218,10 +223,48 @@ def publish_file_index(config, index, photos=None):
         photos = read_json(photo_path) if photo_path.is_file() else {}
     value = build_file_index(config, index, photos)
     root = safe_child(Path(config['storage']['archive_root']), name)
+    field_reference = verified_field_events_reference(config, index, root)
+    if field_reference:
+        value['field_events_file'] = field_reference
     atomic_json(root/'Comment'/'TimeIndex.json', value)
     # This is a mutable projection, so do not advertise an immutable content hash.
     index['time_index'] = {'path': 'Comment/TimeIndex.json', 'schema_version': value['schema_version']}
     return value
+
+
+def verified_field_events_reference(config, index, root):
+    """Point only at the current native-published, byte-verified OCR snapshot."""
+    if not (config.get('device_day', {}).get('field_recognition') or {}).get('archive_context_enabled'):
+        return None
+    from .device_day_contract import digest
+    from .device_day_verification import verify_artifact_cached
+    from .application.field_archive_context import snapshot
+    path = root/'Comment/FieldEvents.json'
+    try:
+        if not path.is_file() or path.stat().st_size > 8*1024*1024:
+            return None
+        value, observed = snapshot(path)
+        context = index.get('context') or {}
+        expected = {'schema_version': 'visioncortex-field-archive-context/1', 'archive': index['archive'],
+            'source': 'field_recognition', 'model_invoked': False, 'physical_action_verified': False,
+            'status': context.get('field_event_status', 'not_received'), 'events': context.get('events', []),
+            'errors': context.get('field_event_errors', []), 'source_references': context.get('field_source_references', []),
+            'association_basis': 'same_camera_actual_interval_overlap_not_action_confirmation'}
+        if value != expected:
+            return None
+        saved = root/'Comment/.Evidence/FieldRecognition'/(digest(value)+'.json')
+        if not saved.is_file() or saved.stat().st_size > 8*1024*1024:
+            return None
+        saved_value, saved_observed = snapshot(saved)
+        if saved_value != value:
+            return None
+        reference = observed | {'path': 'Comment/FieldEvents.json'}
+        saved_ref = saved_observed | {'path': saved.relative_to(root).as_posix()}
+        if verify_artifact_cached(root, reference) and verify_artifact_cached(root, saved_ref):
+            return reference | {'path_base': 'device_day'}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+    return None
 
 
 class FileIndexPublisher:
@@ -233,6 +276,27 @@ class FileIndexPublisher:
         self.runtime = Path(config['storage']['local_runtime_root'])/'device-day'
         self.last_result = {'status': 'not_started'}
         self._audio_runner = None
+        from .device_day_bindings import CompletedExecutionBindings
+        readers = CompletedExecutionBindings(config.get('device_day') or {}).historical.values()
+        self.historical_readers = {}
+        for entry in readers:
+            self.historical_readers.setdefault(entry['archive'], []).append(entry)
+
+    def _historical_publication(self, name, index=None):
+        """Only explicit readers have an additional, byte-verified proof gate."""
+        entries = self.historical_readers.get(name, [])
+        if not entries:
+            return []
+        from .device_day_historical_publication import checked, publish
+        results = []
+        for entry in entries:
+            try:
+                value = checked(self.config, entry) if index is None else publish(self.config, entry, index)
+            except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+                value = {'status': 'publication_verification_pending', 'error_type': type(exc).__name__,
+                         'reason': str(exc)[:200], 'automatic_action': 'retry_existing_readable_publication'}
+            results.append(value | {'recording_id': entry['recording_id'], 'reader_key': entry['reader_key']})
+        return results
 
     def _independent_audio(self, name, index, records):
         """Compose verified STT into readable views, never into canonical CV data."""
@@ -414,7 +478,7 @@ class FileIndexPublisher:
         from .device_day import exclusive
         from .device_day_contract import archive_name, DeviceDayLayout, VERSION
         from .observed_inventory import read_inventory
-        from .receipt_projection import ProjectionDeferred
+        from .receipt_projection import ProjectionDeferred, ProjectionGenerationChanged
         result = {'status': 'completed', 'published': 0, 'unchanged': 0, 'busy': 0, 'errors': []}
 
         def failed(name, operation, exc):
@@ -423,6 +487,8 @@ class FileIndexPublisher:
             if isinstance(exc, ProjectionDeferred):
                 result['errors'][-1].update(reason='readable_projection_limit', metric=exc.metric,
                                            observed=exc.observed, limit=exc.limit)
+            elif isinstance(exc, ProjectionGenerationChanged):
+                result['errors'][-1].update(exc.details())
             logging.getLogger(__name__).warning('File time index unavailable for %s during %s: %s',
                                                name, operation, type(exc).__name__)
         records_by_day = {}
@@ -540,8 +606,12 @@ class FileIndexPublisher:
                         content_version = (content_revision(self.config, index), archive_revision(self.config, name))
                         version += (content_version, self._output_revision(name, audio_index))
                     if self.versions.get(name) == version and not result.get('layout_pending') and not layout_changed:
-                        result['unchanged'] += 1
-                        continue
+                        historical = self._historical_publication(name)
+                        if all(row['status'] == 'recovered_published' for row in historical):
+                            if historical:
+                                result.setdefault('historical_publications', []).extend(historical)
+                            result['unchanged'] += 1
+                            continue
                     index = audio_index
                     before = index.get('time_index')
                     if content_enabled:
@@ -592,6 +662,13 @@ class FileIndexPublisher:
                         # only the pointer. Never hydrate the full day here.
                         replace_json_field(path, 'time_index', index['time_index'],
                             opener=lambda mode: _index_reader(self.config, path, mode))
+                    historical = self._historical_publication(name, index)
+                    if historical:
+                        result.setdefault('historical_publications', []).extend(historical)
+                        if any(row['status'] != 'recovered_published' for row in historical):
+                            result['status'] = 'partial'
+                            result['errors'].extend({'archive': name, 'operation': 'historical_reader_publication', **row}
+                                for row in historical if row['status'] != 'recovered_published')
                     stat = path.stat()
                     self.versions[name] = (stat.st_mtime_ns, stat.st_size, photo_version, audio_version)
                     if content_enabled:
@@ -604,7 +681,7 @@ class FileIndexPublisher:
                         if retention_progress['pending'] or canonical_progress['pending']:
                             self.versions.pop(name, None)  # Existing publisher owns retry, without rerunning models.
                     result['published'] += 1
-            except ProjectionDeferred as exc:
+            except (ProjectionDeferred, ProjectionGenerationChanged) as exc:
                 failed(name, operation, exc)
             except BlockingIOError:
                 result['busy'] += 1

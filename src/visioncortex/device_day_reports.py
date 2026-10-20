@@ -96,6 +96,39 @@ def render_page(title, template, contract, contents, *, scope_label='单设备�
 <main><header><img src="{brand_logo_data_url()}" alt="VisionCortex"><h1>{text(title)}</h1><p>{text(scope_label)} · PARTIAL_EVIDENCE</p></header>{sections}<footer>{text(contract['template_id'])} · 模板 SHA-256：{text(contract['template_sha256'])}<p>本次页面排版不新增模型调用；片段理解与全天综合的实际调用及用量见各自回执。</p></footer></main></html>'''
 
 
+def day_entries(index):
+    """Pure persisted-window projection shared by the day publisher and proof."""
+    from .device_day_narrative import effective_meaning, report_candidates
+    meanings = {row['segment_id']: effective_meaning(row) for row in index['understandings']}
+    records = {row['recording_id']: row for row in index['recordings']}
+    result = []
+    for segment in report_candidates(index):
+        meaning = meanings.get(segment['segment_id'])
+        recording = records.get(segment['recording_id'], {})
+        label = f'{clock(segment["start_us"])}—{clock(segment["end_us"])} · {segment["activity_label"]}'
+        result.append({'segment_id': segment['segment_id'], 'label': label,
+            'start_us': segment['start_us'], 'end_us': segment['end_us'],
+            'understanding_status': (meaning or {}).get('status', 'completed' if meaning else 'pending'),
+            'understanding': meaning, 'key_frames': segment['key_frames'], 'scene_frames': segment['scene_frames'],
+            'source_ref': segment['source_ref'], 'segment_json': segment['json_path'],
+            'transcription': recording.get('transcription'), 'audio': recording.get('audio')})
+    return result
+
+
+def day_document(layout, index, synthesis, *, readable=None, entries=None, report_generated_at=None):
+    """Pure JSON projection; only report_generated_at is a publication clock."""
+    from .device_day_narrative import day_record
+    if readable is None:
+        readable = day_record(index, layout.root)
+    day_template, day_contract = template_contract('VC-DEVICE-DAY-REPORT-V1')
+    return {'全天综合理解': synthesis, '全天记录': readable, '视频留存统计': readable['视频留存统计'],
+        'report_generated_at': report_generated_at or datetime.now(ZoneInfo(TIMEZONE)).isoformat(timespec='microseconds'),
+        'schema_version': VERSION, 'archive': layout.name, 'logical_report_count': 1, **day_contract,
+        'evidence_status': 'PARTIAL_EVIDENCE', 'entries': day_entries(index) if entries is None else entries,
+        'additional_mllm_calls': False, 'additional_model_tokens': 0,
+        'sections': day_template['sections'], 'input_index_digest': digest(index)}
+
+
 def render_day(layout, index):
     from .device_day_narrative import day_record, effective_meaning, report_candidates
     readable = day_record(index, layout.root)
@@ -109,7 +142,7 @@ def render_day(layout, index):
     by_segment = {item["segment_id"]: effective_meaning(item) for item in index["understandings"]}
     by_recording = {item["recording_id"]: item for item in index["recordings"]}
     sections, briefs, context_rows, uncertainty_rows, execution_rows = [], [], [], [], []
-    daily_entries = []
+    daily_entries = day_entries(index)
     provider_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
     usage_unknown = 0
     for segment in segments:
@@ -181,12 +214,6 @@ def render_day(layout, index):
                         f'<div class="frames">{"".join(frames)}</div><p>{video_link} · {metadata_link}</p></article>')
         briefs.append(f'<article><h3>{text(label)}</h3>{"".join(paragraphs)}<p>{video_link} · {metadata_link}</p>'
                       f'<details><summary>本时段动作关键帧与场景采样理解</summary><div class="frames">{"".join(frames)}</div></details></article>')
-        daily_entries.append({"segment_id": segment["segment_id"], "label": label,
-                              "start_us": segment["start_us"], "end_us": segment["end_us"],
-                              "understanding_status": (understanding or {}).get('status', 'completed' if understanding else 'pending'),
-                              "understanding": understanding, "key_frames": segment["key_frames"], "scene_frames": segment["scene_frames"],
-                              "source_ref": segment["source_ref"], "segment_json": segment["json_path"],
-                              "transcription": recording.get("transcription"), "audio": recording.get("audio")})
     pending = sum(1 for record in by_recording.values()
                   if not any(s["recording_id"] == record["recording_id"] for s in segments)
                   or any(s["recording_id"] == record["recording_id"] and (s["segment_id"] not in by_segment
@@ -250,12 +277,5 @@ def render_day(layout, index):
     # process death between files. Arrivals yield before this commit group.
     with defer_yield():
         atomic_bytes(layout.reports / "LaboratoryDailyReport.html", render_page(f"{layout.name} 实验室日报", day_template, day_contract, daily_contents, scope_label=day_scope).encode())
-        atomic_json(layout.reports / "LaboratoryDailyReport.json", {
-            '全天综合理解': synthesis,
-            '全天记录': readable,
-            '视频留存统计': retained,
-            'report_generated_at': datetime.now(ZoneInfo(TIMEZONE)).isoformat(timespec='microseconds'),
-            "schema_version": VERSION, "archive": layout.name, "logical_report_count": 1, **day_contract,
-            "evidence_status": "PARTIAL_EVIDENCE", "entries": daily_entries,
-            "additional_mllm_calls": False, "additional_model_tokens": 0,
-            "sections": day_template["sections"], "input_index_digest": digest(index)})
+        atomic_json(layout.reports / "LaboratoryDailyReport.json",
+                    day_document(layout, index, synthesis, readable=readable, entries=daily_entries))

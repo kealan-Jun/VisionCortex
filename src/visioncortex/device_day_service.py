@@ -11,7 +11,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 
 from .device_day import DeviceDayRunner, append_comment
 from .device_day_contract import (
@@ -330,6 +330,9 @@ class DeviceDayService:
             overview = ArchiveOverview()
             probe_job = None
             while not self.stop_event.is_set():
+                # Clear before inspecting futures/inventory. A completion that
+                # arrives during this turn must still wake the following wait.
+                self.wakeup.clear()
                 try:
                     settings = self.settings_factory()
                     if not (settings.get("device_day") or {}).get("enabled"):
@@ -407,7 +410,6 @@ class DeviceDayService:
                                 'paused_stages': sorted(paused_stages(settings)),
                                 'admission_stopped': True}
                             self.wakeup.wait(1)
-                            self.wakeup.clear()
                             continue
                         self._runner = DeviceDayRunner(settings)
                         self._settings_key = settings_key
@@ -491,6 +493,10 @@ class DeviceDayService:
                                             max_workers=1, thread_name_prefix=f"device-{stage}-{ordinal}"))
                                     job_generations[slot] = self._runner._prerequisite_generation[stage]
                                     jobs[slot] = slot_workers[slot].submit(run_stage, self._runner, inventory, stage)
+                                    # Completed work can admit its dependents
+                                    # immediately; empty results still receive
+                                    # the existing per-slot no-work backoff.
+                                    jobs[slot].add_done_callback(lambda _job: self.wakeup.set())
                     from .timeline_invalidation import TimelineInvalidations
                     invalidations = TimelineInvalidations(self._runner.runtime_root)
                     if timeline_job is not None and timeline_job.done():
@@ -560,19 +566,24 @@ class DeviceDayService:
                 except Exception as exc:
                     self.last_result = {"schema_version": VERSION, "status": "failed", "error_type": type(exc).__name__}
                 self.wakeup.wait(1)
-                self.wakeup.clear()
 
 
 def install_routes(app, settings_factory, service):
+    from .application.device_day_readmodel import DeviceDayReadModels, ReadModelDeferred
+    views = DeviceDayReadModels(published_recording_status)
+
+    def published_view(root, kind='index'):
+        try:
+            return views.time_index(root) if kind == 'time' else views.index(root)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(503, '归档只读视图暂不可用：' + str(exc)[:240],
+                                headers={'Retry-After': '3'}) from exc
+
     from .device_day_timeline import install_routes as install_timeline
     install_timeline(app, settings_factory)
     @app.get('/archive-overview', response_class=HTMLResponse)
     def overview_document():
-        path = Path(settings_factory()['storage']['local_runtime_root']) / 'device-day' / 'ArchiveOverview.html'
-        if not path.is_file():
-            return HTMLResponse('<h1>实验数据总览正在生成</h1><p>请稍后刷新，预处理继续运行。</p>', status_code=503,
-                                headers={'Retry-After': '30'})
-        return FileResponse(path, media_type='text/html', headers={'Cache-Control': 'no-store'})
+        return RedirectResponse('/#/device-days', status_code=307, headers={'Cache-Control': 'no-store'})
 
     def archive(name):
         try:
@@ -588,35 +599,51 @@ def install_routes(app, settings_factory, service):
     @app.get("/api/device-days")
     def listing():
         root = Path(settings_factory()["storage"]["archive_root"])
-        items = []
+        items, errors = [], []
         if root.is_dir():
-            for child in sorted(root.iterdir(), reverse=True):
+            children = []
+            for child in root.iterdir():
+                if len(children) >= 2048:
+                    raise HTTPException(503, '设备日目录数量超过本次有界读取范围', headers={'Retry-After': '3'})
+                children.append(child)
+            for child in sorted(children, reverse=True):
                 try:
                     validate_archive_name(child.name)
                     if child.is_symlink():
                         continue
                     index = child / DIRECTORIES[1] / "Index.json"
                     if index.is_file():
-                        data = published_recording_status(read_json(index))
-                        items.append({"archive": child.name, "segment_count": len(data.get("segments", [])),
-                                      "transcript_count": sum(len((r.get("transcription") or {}).get("comments") or []) for r in data.get("recordings", [])),
-                                      "updated_at": data.get("updated_at"), "recordings": [
-                                          {k: r.get(k) for k in ("recording_id", "start_us", "end_us", "capture_complete", "stages", "current_results_ready", "preprocessing_ready")}
-                                          for r in data.get("recordings", [])],
-                                      "report_url": f"/api/device-days/{quote(child.name)}/files/{quote(DIRECTORIES[3])}/LaboratoryDailyReport.html"})
+                        try:
+                            row = views.summary(child)
+                        except (ValueError, OSError) as exc:
+                            row = {'archive': child.name, 'recordings': [], 'segment_count': None,
+                                'preprocessing_candidate_count': None, 'transcript_count': None,
+                                'selected_interval_count': None, 'pending_interval_count': None,
+                                'confirmed_no_value_interval_count': None,
+                                'read_status': 'deferred' if isinstance(exc, (ReadModelDeferred, BlockingIOError)) else 'unavailable',
+                                'read_error': {'type': type(exc).__name__, 'reason': str(exc)[:240]}}
+                            errors.append({'archive': child.name, **row['read_error']})
+                        row.update(views.report(child),
+                            report_url=f"/api/device-days/{quote(child.name)}/files/{quote(DIRECTORIES[3])}/LaboratoryDailyReport.html",
+                            report_json_url=f"/api/device-days/{quote(child.name)}/files/{quote(DIRECTORIES[3])}/LaboratoryDailyReport.json")
+                        items.append(row)
                 except (ValueError, OSError):
                     continue
         queue = service._runner.queue_snapshot() if service._runner else {}
         observed = Path(settings_factory()["storage"]["local_runtime_root"]) / "device-day" / "observed-inventory.json"
         from .observed_inventory import read_inventory
-        errors = read_inventory(observed.parent).get("errors", [])
+        discovery_errors = read_inventory(observed.parent).get("errors", [])
         return {"schema_version": VERSION, "archives": items, "service": service.last_result, "queue": queue,
-                "discovery_errors": errors,
+                "discovery_errors": discovery_errors, 'archive_read_errors': errors,
                 "capture_deletion": "disabled_by_user"}
 
     @app.get("/api/device-days/{name}/index")
     def index(name: str):
-        return published_recording_status(read_json(archive(name) / DIRECTORIES[1] / "Index.json"))
+        return Response(published_view(archive(name)).body, media_type='application/json')
+
+    @app.get('/api/device-days/{name}/time-index')
+    def time_index(name: str):
+        return Response(published_view(archive(name), 'time').body, media_type='application/json')
 
     @app.get("/api/device-days/{name}/files/{relative:path}")
     def file(name: str, relative: str, request: Request):
@@ -694,11 +721,11 @@ def install_routes(app, settings_factory, service):
     def archive_browser(name: str):
         from .device_day_browser import render_archive
         root = archive(name)
-        return render_archive(root, read_json(root / DIRECTORIES[1] / "Index.json"))
+        return render_archive(root, published_view(root).value)
 
     @app.get("/device-days/{name}/stt", response_class=HTMLResponse)
     def stt_browser(name: str):
-        data = read_json(archive(name) / DIRECTORIES[1] / "Index.json")
+        data = published_view(archive(name)).value
         from .device_day_reports import clock
         sections = []
         def href(path):

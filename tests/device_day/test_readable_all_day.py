@@ -371,7 +371,8 @@ def test_later_window_failure_keeps_completed_observations_and_selected_video(de
     from visioncortex.multimodal_usage import SubmittedUnknown
     capture(device_config)
     record, layout = item_and_layout(device_config)
-    device_config['device_day'].update(derived_video_retention=True, understanding_coverage_since_us=1)
+    device_config['device_day'].update(derived_video_retention=True, understanding_coverage_since_us=1,
+                                       readable_content_enabled=True)
     def extract(source, target, *args):
         target.write_bytes(b'derived')
     monkeypatch.setattr('visioncortex.video_io.extract_clip', extract)
@@ -403,6 +404,25 @@ def test_later_window_failure_keeps_completed_observations_and_selected_video(de
     assert (selected['start_ms'], selected['end_ms']) == (0, 1000)
     stage = read_json(layout.receipts/record['recording_id']/'understanding.json')
     assert stage['status'] == error_kind and stage['partial_observations']
+    assert models.semantic_calls == 1
+    # No FileIndexPublisher scan or report synthesis is needed to make this
+    # actual completed model window directly readable after the later failure.
+    entries = read_json(layout.understanding/'Index.json')['entries']
+    entry = next(row for row in entries if row['segment_id'] == candidate['segment_id'])
+    readable = read_json(layout.root/entry['content'])
+    assert readable['status'] == 'partial'
+    assert readable['understanding']['windows'][0]['work_activities']
+    assert readable['video'] is None  # A candidate is never the selected export.
+    child = next(row for row in entries if row['segment_id'] == selected['segment_id'])
+    assert read_json(layout.root/child['content'])['video'] == selected['video']
+    before = (layout.receipts/record['recording_id']/'understanding.json').read_bytes()
+    def aggregate_unavailable(*_args, **_kwargs):
+        raise RuntimeError('owned aggregate unavailable')
+    monkeypatch.setattr('visioncortex.device_day_reports.render_day', aggregate_unavailable)
+    with pytest.raises(RuntimeError, match='aggregate unavailable'):
+        runner.refresh_index(layout, recording_id=record['recording_id'])
+    assert read_json(layout.root/entry['content'])['understanding'] == readable['understanding']
+    assert (layout.receipts/record['recording_id']/'understanding.json').read_bytes() == before
     assert models.semantic_calls == 1
 
 

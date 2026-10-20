@@ -32,7 +32,8 @@ def test_missing_only_is_not_our_backlog_or_a_stall_and_completed_work_is_preser
     state = processing_health(config, now=100)['stages']['vision']
     assert state['workload'] == {'completed': 1, 'running': 1, 'processing_backlog': 0, 'system_attention': 0,
                                  'waiting_for_input': 1, 'scheduled_wait': 0, 'outside_processing_scope': 0,
-                                 'failed': 0, 'result_unknown': 0}
+                                 'failed': 0, 'result_unknown': 0,
+                                 'publication_pending': 0, 'recovered_published': 0}
     with queue.connect() as db:
         db.execute("UPDATE recordings SET status='completed',completed_at=10 WHERE recording_id='active'")
     health = processing_health(config, now=5000)

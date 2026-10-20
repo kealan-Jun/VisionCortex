@@ -114,7 +114,7 @@ def test_unbound_fixed_camera_does_not_invent_people_and_late_replay_is_determin
 def test_publication_tick_invokes_consumer_and_late_events_publish_without_models(tmp_path, monkeypatch):
     from visioncortex.device_day_publication_worker import PublicationReplay
     import visioncortex.publication_journal as journal
-    monkeypatch.setattr(journal, "reconcile", lambda runner: 0)
+    monkeypatch.setattr(journal, "reconcile", lambda runner, **kwargs: 0)
     replies = [page([event(wearer="a")]), page([event("late", 2, wearer="a", when="2026-10-14T01:00:00Z")], after=1)]
     calls = []
     def fetch(url, timeout):

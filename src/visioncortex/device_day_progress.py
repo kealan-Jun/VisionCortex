@@ -125,12 +125,14 @@ def _workload_counts(categories):
     """Keep runnable work, failures and unknown outcomes independently visible."""
     result = dict.fromkeys(('completed', 'running', 'processing_backlog', 'system_attention',
                             'waiting_for_input', 'scheduled_wait', 'outside_processing_scope',
-                            'failed', 'result_unknown'), 0)
+                            'failed', 'result_unknown', 'publication_pending', 'recovered_published'), 0)
     attention = {'inventory_unobserved', 'source_version_mismatch', 'input_unavailable',
                  'blocked', 'camera_role_unconfigured',
-                 'input_not_processable', 'retry_exhausted'}
+                 'input_not_processable', 'retry_exhausted', 'local_completed_unpublished', 'historical_publication_verification_pending'}
     for category, count in categories.items():
         group = ('waiting_for_input' if category in {'input_missing', 'input_waiting', 'upstream_input_waiting'} else
+                 'publication_pending' if category in {'local_completed_unpublished', 'historical_publication_verification_pending'} else
+                 'recovered_published' if category == 'historical_recovered_published' else
                  'result_unknown' if category in {'awaiting_request_reconciliation', 'local_execution_outcome_unknown'} else
                  'failed' if category in {'retry_exhausted', 'failed_retry_backoff', 'failed_ready'} else
                  'scheduled_wait' if category in {'paused_by_user', 'waiting_for_night_window'} else
@@ -151,10 +153,16 @@ def processing_health(config, *, now=None):
     current = time.time() if now is None else now
     root = Path(config['storage']['local_runtime_root']) / 'device-day'
     settings = config.get('device_day') or {}
+    queues, errors, inventory, availability = {}, [], None, {}
+    from .device_day_bindings import CompletedExecutionBindings
+    try:
+        historical = CompletedExecutionBindings(settings).historical
+    except (OSError, ValueError, KeyError, TypeError):
+        historical = {}
+        errors.append('historical_reader_manifest_unavailable')
     threshold = settings.get('progress_stall_seconds', 1800)
     if type(threshold) not in (int, float) or not math.isfinite(threshold) or threshold < 60:
         raise ValueError('device_day.progress_stall_seconds must be finite and >= 60')
-    queues, errors, inventory, availability = {}, [], None, {}
     availability_path = root / 'InputAvailability.sqlite3'
     if availability_path.is_file():
         try:
@@ -181,7 +189,7 @@ def processing_health(config, *, now=None):
         try:
             from .sqlite_store import connection
             with connection(path, readonly=True, timeout=.25) as db:
-                for row in db.execute("SELECT payload,recording_id,status,input_status,lease_until,queued_at,updated_at,"
+                for row in db.execute("SELECT payload,recording_id,revision,status,input_status,lease_until,queued_at,updated_at,blocked_reason,"
                     "completed_at,attempts,retry_limit,json_extract(payload,'$.source_signature') AS signature,"
                     "json_extract(payload,'$.configured_role') AS role,"
                     "json_extract(payload,'$.processable') AS processable,"
@@ -230,7 +238,7 @@ def processing_health(config, *, now=None):
                 return True
         return False
 
-    stages, alerts = {}, []
+    stages, alerts, local_completed, recovered, historical_states = {}, [], set(), set(), []
     for stage, rows in queues.items():
         counts, ready_since, completed = {}, [], []
         for rid, row in rows.items():
@@ -251,13 +259,38 @@ def processing_health(config, *, now=None):
                 readiness['stt_processable'] = row['stt_processable'] == 1
             if stage == 'stt' and current_source(stage, rid, row):
                 readiness = inventory[rid]
+            entry = historical.get((stage, rid))
+            known_completion = False
+            historical_category = None
+            external_unknown = row['blocked_reason'] == 'submitted_unknown' or row['reason'] == 'submitted_unknown' or row['result_status'] == 'submitted_unknown'
+            active = status == 'running' and (row['lease_until'] or 0) >= current
+            if (entry and row['revision'] == entry['queue_revision']
+                    and not active and not external_unknown):
+                from .device_day_historical_reader import local_completion
+                known_completion = local_completion(config, entry, json.loads(row['payload']))
+                if known_completion:
+                    from .device_day_historical_publication import progress_checked
+                    publication_state = progress_checked(config, entry)
+                    if publication_state['status'] == 'recovered_published':
+                        recovered.add(rid)
+                        historical_category = 'historical_recovered_published'
+                    else:
+                        local_completed.add(rid)
+                        historical_category = 'local_completed_unpublished'
+                    historical_states.append({'recording_id': rid, 'archive': entry['archive'],
+                        'queue_status_unchanged': status, 'producer_native_key': entry['producer']['native_key'],
+                        'reader_key': entry['reader_key'], **publication_state})
+                else:
+                    historical_category = 'historical_publication_verification_pending'
             category = (
+                historical_category if historical_category else
                 'completed' if status == 'completed' else
                 'outside_processing_scope' if cutoff and (row['capture_us'] or 0) < cutoff else
                 'running' if status == 'running' and (row['lease_until'] or 0) >= current else
                 'local_execution_outcome_unknown' if status == 'running'
                     and stage in {'understanding', 'stt', 'report'} else
-                'awaiting_request_reconciliation' if row['reason'] == 'submitted_unknown' else
+                'awaiting_request_reconciliation' if row['blocked_reason'] == 'submitted_unknown'
+                    or row['reason'] == 'submitted_unknown' or row['result_status'] == 'submitted_unknown' else
                 'local_execution_outcome_unknown' if row['reason'] == 'result_unknown' else
                 'input_' + input_state(stage, rid, row) if input_state(stage, rid, row) != 'ready' else
                 'inventory_unobserved' if inventory is not None and rid not in inventory else
@@ -288,6 +321,8 @@ def processing_health(config, *, now=None):
                  'no_completed_progress' if stalled else 'working' if ready_since else
                  'blocked' if workload['processing_backlog'] else
                  'result_unknown' if workload['result_unknown'] else
+                 'publication_pending' if workload['publication_pending'] else
+                 'recovered_published' if workload['recovered_published'] else
                  'failed' if workload['failed'] else
                  'waiting_for_input' if workload['waiting_for_input'] else
                  'scheduled_wait' if workload['scheduled_wait'] else 'idle')
@@ -317,6 +352,10 @@ def processing_health(config, *, now=None):
     if integrity['status'] not in {'not_configured', 'running', 'disabled'}:
         alerts.append({'stage': 'archive', 'reason': 'integrity_service_unavailable'})
     publication = {'pending_recordings': 0, 'completed_output_stage_pending_recordings': 0,
+                   'local_completed_unpublished_recordings': len(local_completed),
+                   'historical_recovered_published_recordings': len(recovered),
+                   'historical_reader_publications': historical_states,
+                   'historical_completion_scope': 'reviewed_local_producer_metadata_not_current_artifact_or_source_readability',
                    'generated_pending_recordings': None, 'unit': 'unique_recordings',
                    'classification_basis': 'queue_completion_metadata_not_artifact_validation',
                    'artifact_validation_required': True}
@@ -354,6 +393,9 @@ def render_processing_health(health):
                   'inventory_unobserved': '当前清单未观察到', 'source_version_mismatch': '来源版本待核对',
                   'awaiting_request_reconciliation': '请求结果待核对', 'waiting_for_prerequisite': '等待前置阶段',
                   'local_execution_outcome_unknown': '原进程租约已过期，缺本地完成回执；已隔离且未自动重发',
+                  'local_completed_unpublished': '本地历史完成回执已确认，等待当前读取校验与发布；非外部结果未知',
+                  'historical_publication_verification_pending': '历史读取与发布证明待验证；保留原队列与执行记录',
+                  'historical_recovered_published': '历史理解及留存区间文件已校验恢复发布；筛选待定及动作不确定性仍按原记录保留',
                   'failed_retry_backoff': '处理失败，重试退避', 'failed_ready': '处理失败，等待有限重试',
                   'retry_backoff': '重试退避', 'retry_exhausted': '失败预算耗尽', 'blocked': '待处理阻塞',
                   'input_unavailable': '输入不可访问', 'camera_role_unconfigured': '机位待绑定',
@@ -370,6 +412,8 @@ def render_processing_health(health):
                       f'（待排查 {workload["system_attention"]}）；运行中 {workload["running"]}；'
                       f'输入等待 {workload["waiting_for_input"]}（不计处理积压）；'
                       f'处理失败 {workload.get("failed", 0)}；结果未知 {workload.get("result_unknown", 0)}；'
+                      f'本地完成待验证与发布 {workload.get("publication_pending", 0)}；'
+                      f'历史恢复已验证发布 {workload.get("recovered_published", 0)}（原队列状态保留）；'
                       f'按计划等待 {workload["scheduled_wait"]}<small>{details}</small></li>')
     errors = '<p>部分本地状态不可读，进度核验不完整。</p>' if health['errors'] else ''
     publication = health.get('publication') or {}

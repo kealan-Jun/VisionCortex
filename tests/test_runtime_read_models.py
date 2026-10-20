@@ -115,7 +115,8 @@ def test_camera_binding_releases_only_blocked_jobs_without_changing_success(tmp_
     from visioncortex.input_availability import configured_record
 
     config = {'collection_ingest': {'camera_role_map': {'a': 'first_person'}}}
-    q = DeviceDayQueue(tmp_path / 'queue-retention.sqlite3')
+    # Visual inference requires a view role; raw retention and STT are independent.
+    q = DeviceDayQueue(tmp_path / 'queue-vision.sqlite3')
     item = {'recording_id': 'one', 'camera_key': 'a', 'source_signature': 'same'}
     q.enqueue(item, 'same')
     a = Availability(tmp_path)
