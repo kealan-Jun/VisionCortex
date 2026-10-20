@@ -50,11 +50,23 @@ bash VisionCortexAutomation-Candidate/install.sh --setup
 前置阶段未完成、重试退避和请求结果待核对；这些分类不会删除任务或接受未经验证的媒体。
 `stages.<stage>.workload` 按阶段任务统计，不能将跨阶段数量相加当作独立分片数：
 
-- `processing_backlog` 是本系统待处理任务，不含运行中、输入等待、按计划等待及范围外任务。
+- `processing_backlog` 是本系统待处理任务，不含运行中、输入等待、处理失败、结果未知、按计划等待及范围外任务。
 - `waiting_for_input` 单列输入缺失、输入尚未就绪，以及同来源版本的前序输入等待；不计处理积压。
-- `system_attention` 是处理积压中待排查的子集，包含存储访问故障、清单未观察到、来源版本不一致、
-  请求结果待核对和失败预算耗尽等；这些问题仍须本系统排查。
+- `system_attention` 是待排查维度，包含存储访问故障、清单未观察到、来源版本不一致、
+  失败预算耗尽等；可能与失败维度重叠，不能再相加作为任务总数。
 - `running`、`scheduled_wait`、`completed`、`outside_processing_scope` 分别保留实际状态。
+
+`failed`、`result_unknown` 与内部待处理分别计数；`ready_backlog` 仅计本地元数据就绪，
+仍须实际输入与产物核验。`submitted_unknown` 表示已有外部提交结果未知，
+`result_unknown` 表示旧进程租约过期且本地完成证据不足，不能将后者说成已确认外部提交。
+两者均不自动重发。`publication.completed_output_stage_pending_recordings` 按录像去重统计
+已有结果阶段完成但仍在发布日志中的记录，不能把多个阶段队列行相加当录像数量。
+该本地元数据观察不替代产物核验，`generated_pending_recordings` 在未验实际文件时保持 null。
+
+生产显式启用 `device_day.raw_originals_read_only: true`，只核验已有原始目录及文件，
+缺失原件保留异常，不补建原始目录、不从其他目录复制一份原始数据。
+新采集资料索引在 `ProcessedClips/.Evidence/CaptureMetadata`，旧目录和原引用保持可读。
+连续厂商故障使用持久化递增退避，最长 900 秒；同一未知请求的账本保护不随重启失效。
 
 经完整字节证据确认的 `content_identity_conflict` 保持输入等待；仅元数据可读或队列完成不能解除。
 新来源版本或完整封存校验可恢复；失败预算只约束相同来源，旧失败记录继续保留。

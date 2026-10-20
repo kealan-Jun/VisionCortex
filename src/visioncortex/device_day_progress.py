@@ -122,14 +122,17 @@ STAGES = ('retention', 'vision', 'stt', 'understanding', 'report')
 
 
 def _workload_counts(categories):
-    """Input dependencies are not processing backlog; access faults still are."""
+    """Keep runnable work, failures and unknown outcomes independently visible."""
     result = dict.fromkeys(('completed', 'running', 'processing_backlog', 'system_attention',
-                            'waiting_for_input', 'scheduled_wait', 'outside_processing_scope'), 0)
+                            'waiting_for_input', 'scheduled_wait', 'outside_processing_scope',
+                            'failed', 'result_unknown'), 0)
     attention = {'inventory_unobserved', 'source_version_mismatch', 'input_unavailable',
-                 'awaiting_request_reconciliation', 'blocked', 'camera_role_unconfigured',
+                 'blocked', 'camera_role_unconfigured',
                  'input_not_processable', 'retry_exhausted'}
     for category, count in categories.items():
         group = ('waiting_for_input' if category in {'input_missing', 'input_waiting', 'upstream_input_waiting'} else
+                 'result_unknown' if category in {'awaiting_request_reconciliation', 'local_execution_outcome_unknown'} else
+                 'failed' if category in {'retry_exhausted', 'failed_retry_backoff', 'failed_ready'} else
                  'scheduled_wait' if category in {'paused_by_user', 'waiting_for_night_window'} else
                  category if category in {'completed', 'running', 'outside_processing_scope'} else
                  'processing_backlog')
@@ -157,16 +160,17 @@ def processing_health(config, *, now=None):
         try:
             from .sqlite_store import connection
             with connection(availability_path, readonly=True, timeout=.25) as db:
-                availability = {row['id']: dict(row) for row in db.execute('SELECT id,signature,state FROM inputs')}
+                availability = {row['id']: dict(row) for row in db.execute('SELECT id,signature,state,reason FROM inputs')}
         except (OSError, sqlite3.Error):
             errors.append('input_availability_unavailable')
+    from .input_availability import states_for_stage
+    stage_availability = {stage: states_for_stage(root, stage, states=availability) for stage in STAGES}
     inventory_path = root / 'observed-inventory.sqlite3'
     if inventory_path.is_file():
         try:
             from .sqlite_store import connection
             with connection(inventory_path, readonly=True, timeout=.25) as db:
-                inventory = {row[0]: row[1] for row in db.execute(
-                    "SELECT id,json_extract(payload,'$.source_signature') FROM observations")}
+                inventory = {row[0]: json.loads(row[1]) for row in db.execute('SELECT id,payload FROM observations')}
         except (OSError, sqlite3.Error):
             errors.append('current_inventory_unavailable')
     for stage in STAGES:
@@ -177,11 +181,13 @@ def processing_health(config, *, now=None):
         try:
             from .sqlite_store import connection
             with connection(path, readonly=True, timeout=.25) as db:
-                for row in db.execute("SELECT recording_id,status,input_status,lease_until,queued_at,updated_at,"
+                for row in db.execute("SELECT payload,recording_id,status,input_status,lease_until,queued_at,updated_at,"
                     "completed_at,attempts,retry_limit,json_extract(payload,'$.source_signature') AS signature,"
                     "json_extract(payload,'$.configured_role') AS role,"
                     "json_extract(payload,'$.processable') AS processable,"
                     "json_extract(payload,'$.available') AS available,"
+                    "json_extract(payload,'$.stt_processable') AS stt_processable,"
+                    "json_extract(payload,'$.audio.status') AS audio_status,"
                     "json_extract(payload,'$.recording_start_us') AS capture_us,"
                     "json_extract(result,'$.status') AS result_status,json_extract(result,'$.reason') AS reason,"
                     "json_extract(result,'$.retry_at') AS retry_at FROM recordings"):
@@ -192,8 +198,16 @@ def processing_health(config, *, now=None):
     from .device_day_night_schedule import paused_stages, stage_admitted
     from .device_day_retry import retry_limit
 
-    def input_state(rid, row):
-        observed = availability.get(rid, {})
+    def current_source(stage, rid, row):
+        from .device_day_inputs import same_stage_source
+        return (inventory is not None and rid in inventory
+                and same_stage_source(json.loads(row['payload']), inventory[rid], stage))
+
+    def input_state(stage, rid, row):
+        observed = stage_availability[stage].get(rid, {})
+        if (stage == 'stt' and current_source(stage, rid, row)
+                and observed.get('reason') == 'independent_recorder_audio_ready'):
+            return 'ready'
         if observed.get('signature') == row['signature'] and observed.get('state', 'ready') != 'ready':
             return observed['state']
         return row['input_status']
@@ -207,7 +221,7 @@ def processing_health(config, *, now=None):
                 continue
             if prior['status'] == 'running' and (prior['lease_until'] or 0) >= current:
                 continue
-            if input_state(rid, prior) in {'missing', 'waiting'}:
+            if input_state(parent, rid, prior) in {'missing', 'waiting'}:
                 return True
             dependencies = dependencies_for(settings, {'recording_start_us': prior['capture_us'] or 0})[parent]
             if settings.get('inplace_preprocessing') and parent in {'vision', 'stt'}:
@@ -228,22 +242,37 @@ def processing_health(config, *, now=None):
             parents = dependencies_for(settings, record)[stage]
             if settings.get('inplace_preprocessing') and stage in {'vision', 'stt'}:
                 parents = ()
+            from .device_day_inputs import stage_input_ready
+            readiness = {'audio': {'status': row['audio_status'] or 'not_provided'},
+                         'available': bool(row['available'])}
+            if row['processable'] is not None:
+                readiness['processable'] = bool(row['processable'])
+            if row['stt_processable'] is not None:
+                readiness['stt_processable'] = row['stt_processable'] == 1
+            if stage == 'stt' and current_source(stage, rid, row):
+                readiness = inventory[rid]
             category = (
                 'completed' if status == 'completed' else
                 'outside_processing_scope' if cutoff and (row['capture_us'] or 0) < cutoff else
                 'running' if status == 'running' and (row['lease_until'] or 0) >= current else
-                'input_' + input_state(rid, row) if input_state(rid, row) != 'ready' else
-                'inventory_unobserved' if inventory is not None and rid not in inventory else
-                'source_version_mismatch' if inventory is not None and inventory.get(rid) != row['signature'] else
+                'local_execution_outcome_unknown' if status == 'running'
+                    and stage in {'understanding', 'stt', 'report'} else
                 'awaiting_request_reconciliation' if row['reason'] == 'submitted_unknown' else
+                'local_execution_outcome_unknown' if row['reason'] == 'result_unknown' else
+                'input_' + input_state(stage, rid, row) if input_state(stage, rid, row) != 'ready' else
+                'inventory_unobserved' if inventory is not None and rid not in inventory else
+                'source_version_mismatch' if inventory is not None and not current_source(stage, rid, row) else
                 'blocked' if status == 'blocked' else
-                'camera_role_unconfigured' if row['role'] not in {'first_person', 'third_person'} else
-                'input_not_processable' if not (row['processable'] if row['processable'] is not None else row['available']) else
+                'camera_role_unconfigured' if stage in {'vision', 'understanding', 'report'}
+                    and row['role'] not in {'first_person', 'third_person'} else
+                'input_not_processable' if not stage_input_ready(readiness, stage) else
                 'upstream_input_waiting' if upstream_input_waiting(rid, row, parents) else
                 'waiting_for_prerequisite' if status == 'waiting_for_prerequisite' or any(
                     queues[parent].get(rid, {}).get('status') != 'completed' for parent in parents) else
                 'retry_exhausted' if status == 'failed' and row['attempts'] >= retry_limit(
                     row, settings.get('failure_retry_limit') or 3) else
+                'failed_retry_backoff' if status == 'failed' and (row['retry_at'] or 0) > current else
+                'failed_ready' if status == 'failed' else
                 'retry_backoff' if (row['retry_at'] or 0) > current else
                 'paused_by_user' if stage in paused_stages(config) else
                 'waiting_for_night_window' if not stage_admitted(config, stage) else
@@ -258,9 +287,16 @@ def processing_health(config, *, now=None):
         state = ('evidence_unavailable' if f'{stage}_queue_unavailable' in errors else
                  'no_completed_progress' if stalled else 'working' if ready_since else
                  'blocked' if workload['processing_backlog'] else
+                 'result_unknown' if workload['result_unknown'] else
+                 'failed' if workload['failed'] else
                  'waiting_for_input' if workload['waiting_for_input'] else
                  'scheduled_wait' if workload['scheduled_wait'] else 'idle')
-        stages[stage] = {'status': state, 'categories': counts, 'workload': workload, 'last_completed_at': last_completed,
+        queue_states = {}
+        for row in rows.values():
+            queue_states[row['status']] = queue_states.get(row['status'], 0) + 1
+        stages[stage] = {'status': state, 'categories': counts, 'workload': workload,
+                         'ready_backlog': counts.get('locally_ready', 0), 'queue_status_counts': queue_states,
+                         'last_completed_at': last_completed,
                          'seconds_without_completion': max(0, current - anchor) if anchor is not None else None}
         if stalled:
             alerts.append({'stage': stage, 'reason': 'no_completed_progress'})
@@ -280,10 +316,27 @@ def processing_health(config, *, now=None):
         alerts.append({'stage': 'archive', 'reason': 'archive_integrity_alerts'})
     if integrity['status'] not in {'not_configured', 'running', 'disabled'}:
         alerts.append({'stage': 'archive', 'reason': 'integrity_service_unavailable'})
+    publication = {'pending_recordings': 0, 'completed_output_stage_pending_recordings': 0,
+                   'generated_pending_recordings': None, 'unit': 'unique_recordings',
+                   'classification_basis': 'queue_completion_metadata_not_artifact_validation',
+                   'artifact_validation_required': True}
+    journal = root / 'publication-journal.sqlite3'
+    if journal.is_file():
+        try:
+            from .sqlite_store import connection
+            with connection(journal, readonly=True, timeout=.25) as db:
+                for row in db.execute("SELECT id,json_extract(record,'$.source_signature') signature FROM dirty"):
+                    publication['pending_recordings'] += 1
+                    publication['completed_output_stage_pending_recordings'] += any(
+                        queue.get(row['id'], {}).get('status') == 'completed'
+                        and queue[row['id']]['signature'] == row['signature']
+                        for stage, queue in queues.items() if stage != 'retention')
+        except (OSError, sqlite3.Error):
+            errors.append('publication_journal_unavailable')
     return {'status': 'attention_required' if alerts else 'evidence_unavailable' if errors else 'observing',
             'observed_at': current, 'stall_threshold_seconds': threshold, 'stages': stages,
             'workload_unit': 'stage_tasks', 'workload_complete': not errors, 'input_loss_evidence': 'NOT_PROVEN',
-            'request_recovery': recovery, 'input_integrity': integrity,
+            'request_recovery': recovery, 'input_integrity': integrity, 'publication': publication,
             'alerts': alerts, 'errors': errors, 'local_metadata_only': True,
             'readiness_boundary': 'receipt_and_media_validation_required'}
 
@@ -300,6 +353,8 @@ def render_processing_health(health):
                   'input_waiting': '等待输入就绪', 'upstream_input_waiting': '前序等待输入',
                   'inventory_unobserved': '当前清单未观察到', 'source_version_mismatch': '来源版本待核对',
                   'awaiting_request_reconciliation': '请求结果待核对', 'waiting_for_prerequisite': '等待前置阶段',
+                  'local_execution_outcome_unknown': '原进程租约已过期，缺本地完成回执；已隔离且未自动重发',
+                  'failed_retry_backoff': '处理失败，重试退避', 'failed_ready': '处理失败，等待有限重试',
                   'retry_backoff': '重试退避', 'retry_exhausted': '失败预算耗尽', 'blocked': '待处理阻塞',
                   'input_unavailable': '输入不可访问', 'camera_role_unconfigured': '机位待绑定',
                   'input_not_processable': '输入尚不可处理', 'paused_by_user': '已暂停',
@@ -312,15 +367,21 @@ def render_processing_health(health):
         details = '；'.join(f'{categories.get(key, escape(key))} {count}'
                            for key, count in state['categories'].items() if key != 'completed')
         counts.append(f'<li>{escape(stage)}：本系统待处理 {workload["processing_backlog"]}'
-                      f'（其中待排查 {workload["system_attention"]}）；运行中 {workload["running"]}；'
+                      f'（待排查 {workload["system_attention"]}）；运行中 {workload["running"]}；'
                       f'输入等待 {workload["waiting_for_input"]}（不计处理积压）；'
+                      f'处理失败 {workload.get("failed", 0)}；结果未知 {workload.get("result_unknown", 0)}；'
                       f'按计划等待 {workload["scheduled_wait"]}<small>{details}</small></li>')
     errors = '<p>部分本地状态不可读，进度核验不完整。</p>' if health['errors'] else ''
+    publication = health.get('publication') or {}
+    publication_text = ('<p>有结果阶段完成的发布待办 ' + str(publication.get('completed_output_stage_pending_recordings', 0))
+                        + ' 条录像；发布待办 ' + str(publication.get('pending_recordings', 0))
+                        + ' 条录像。按录像去重，实际生成文件数量须经产物校验确认。</p>')
     return ('<details open><summary>处理进度核验</summary><p>服务心跳与处理进度分别核验；'
-            '输入等待单列，不计处理积压。访问故障、来源版本和处理失败仍属本系统待排查。'
+            '输入等待、处理失败和结果未知分别列出；内部可处理积压见本地元数据就绪。'
             '缺失标记不代表已确认原片丢失或责任归属；队列就绪状态仍须通过原文件与回执校验。'
             '以下按阶段任务计数，同一分片可涉及多个阶段。</p>' + errors + '<ul>' + rows + '</ul><ul>'
-            + ''.join(counts) + '</ul>' + render_integrity(health.get('input_integrity', {})) + '</details>')
+            + ''.join(counts) + '</ul>' + publication_text
+            + render_integrity(health.get('input_integrity', {})) + '</details>')
 
 
 def render_integrity(state):
@@ -411,6 +472,8 @@ def snapshot(config):
     lifecycle_records = {}
     from .input_availability import Availability
     availability = Availability(root).states() if (root/'InputAvailability.sqlite3').is_file() else {}
+    from .input_availability import states_for_stage
+    stage_availability = {stage: states_for_stage(root, stage, states=availability) for stage in STAGES}
     def bucket(day):
         return days.setdefault(day, {'recordings': set(), 'cameras': set(), 'stages': {
             s: {'completed': 0, 'queued': 0, 'running': 0, 'failed': 0, 'expired': 0} for s in STAGES}})
@@ -456,11 +519,15 @@ def snapshot(config):
                     b['cameras'].add(camera)
                     state = 'expired' if status == 'running' and (lease or 0) < now else status
                     source_signatures.setdefault(rid, signature)
-                    if status not in {'running', 'completed'} and input_status != 'ready':
+                    current_inputs = stage_availability[stage]
+                    observed_input = current_inputs.get(rid, {})
+                    audio_ready = (stage == 'stt' and observed_input.get('signature') == signature
+                                   and observed_input.get('reason') == 'independent_recorder_audio_ready')
+                    if status not in {'running', 'completed'} and input_status != 'ready' and not audio_ready:
                         state = 'input_' + input_status
-                    if (status not in {'running', 'completed'} and availability.get(rid, {}).get('state', 'ready') != 'ready'
-                            and availability[rid].get('signature') == signature):
-                        state = 'input_' + availability[rid]['state']
+                    if (status not in {'running', 'completed'} and current_inputs.get(rid, {}).get('state', 'ready') != 'ready'
+                            and current_inputs[rid].get('signature') == signature):
+                        state = 'input_' + current_inputs[rid]['state']
                     if availability.get(rid, {}).get('state') == 'missing' and availability[rid].get('signature') == signature:
                         missing_inputs.setdefault(day, set()).add(rid)
                     counts = b['stages'][stage]
@@ -482,7 +549,7 @@ def snapshot(config):
                             'capture_us': max(start or 0, end or 0), 'stage_states': {},
                             'input_ready': {}, 'timings': {}})
                         lifecycle['stage_states'][stage] = state
-                        lifecycle['input_ready'][stage] = input_status
+                        lifecycle['input_ready'][stage] = 'ready' if audio_ready else observed_input.get('state', input_status)
                         components = result.get('component_timings')
                         timing = {name: value for name, value in (components if isinstance(components, dict) else {}).items()
                                   if type(value) in (int, float) and math.isfinite(value) and value >= 0}
@@ -520,8 +587,9 @@ def snapshot(config):
                 if available['state'] == 'missing':
                     missing_inputs.setdefault(day, set()).add(rid)
                 for stage, counts in b['stages'].items():
-                    if stage not in states.get(rid, {}):
-                        state = 'input_' + available['state']
+                    stage_input = stage_availability[stage].get(rid, available)
+                    if stage not in states.get(rid, {}) and stage_input.get('state', 'ready') != 'ready':
+                        state = 'input_' + stage_input['state']
                         counts[state] = counts.get(state, 0)+1
                         states.setdefault(rid, {})[stage] = (state, day)
         missing = {rid for rid in missing_inputs.get(day, set())
@@ -537,7 +605,8 @@ def snapshot(config):
             # A completed historical/no-audio result or an active lease still
             # belongs to its own denominator, regardless of other stages.
             excluded = {rid for rid in missing_inputs.get(day, set()) & recordings
-                        if states.get(rid, {}).get(stage, ('missing',))[0] not in {'completed', 'running'}}
+                        if states.get(rid, {}).get(stage, ('missing',))[0] not in {'completed', 'running'}
+                        and stage_availability[stage].get(rid, {}).get('state') != 'ready'}
             counts['missing_input_count'] = len(excluded)
             counts['processing_total'] = b['total'] - len(excluded)
     from .device_day_night_schedule import night_schedule, paused_stages

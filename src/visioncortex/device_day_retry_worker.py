@@ -250,7 +250,19 @@ class RetryRepair:
                             job_id='retry-repair:' + row['recording_id'], source='repair_verification',
                             priority=2, stop=stop, yield_signal=stop):
                         with resource_slot(self.config, 'cpu'), slot(self.config):
-                            proof = self.verifier.verify(self.config, stage, row, kind, stop)
+                            try:
+                                proof = self.verifier.verify(self.config, stage, row, kind, stop)
+                            except ValueError as exc:
+                                handoff = getattr(self.verifier, 'readmit', None)
+                                if not callable(handoff) or rejection_reason(self.verifier, exc) not in {
+                                        'current_source_not_admitted', 'current_recipe_requires_normal_admission'}:
+                                    raise
+                                result = handoff(self.config, stage, row, kind, stop)
+                                if not isinstance(result, dict) or result.get('status') not in {
+                                        'source_readmitted', 'recipe_readmitted'}:
+                                    raise ValueError('Readmission normal worker admission is waiting') from exc
+                                self._checkpoint(identity, result['status'])
+                                return result | counts
                             evidence = verify_proof(proof, row, stage, kind, self.config)
                             plan = plan_retry(path, row['recording_id'], evidence, budget=self.options['budget'],
                                               baseline=self.config.get('device_day', {}).get('failure_retry_limit', 3),

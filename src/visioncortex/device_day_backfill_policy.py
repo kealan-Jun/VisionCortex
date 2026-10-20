@@ -61,17 +61,65 @@ def _options(config, now):
     return root, current, int((current - horizon) * 1_000_000), cooldown
 
 
-def _monitor(config, root, now):
+def _monitor(config, root, now, *, include_scope=False):
     # Only complete, verified observations can authorize the brief scanning
     # state which the existing discovery publisher emits on every normal poll.
     # Keep this evidence process-local, bounded and isolated by runtime root.
     root_key = os.path.abspath(root)
     with _MONITOR_LOCK:
         try:
-            return _monitor_snapshot(config, root, now, root_key)
+            result = _monitor_snapshot(config, root, now, root_key)
+            return result if include_scope else result['age_seconds']
         except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError):
             _MONITOR_SUCCESSES.pop(root_key, None)
             raise
+
+
+def _isolated_lanes(data, monitor, *, now, max_age):
+    """Accept only the independent publisher's complete lane partition.
+
+    Arbitrary degraded snapshots, global publication failures and unknown
+    failures remain closed. A known unavailable camera is excluded from all
+    candidate queries; role registration remains a stage-specific input gate.
+    """
+    scope = data.get('admission_scope')
+    if monitor.get('status') == 'watching' and (scope is None or data.get('discovery_mode') != 'metadata_only'):
+        return set()
+    if (data.get('monitor_source') != 'independent_live_discovery'
+            or data.get('discovery_mode') != 'metadata_only'
+            or not isinstance(scope, dict)
+            or scope.get('schema_version') != 'device-day-discovery-admission/1'
+            or scope.get('max_age_seconds') != max_age
+            or scope.get('global_errors') != []):
+        raise PolicyUnavailable('monitor_not_watching')
+    lanes = data.get('discovery_lanes')
+    if not isinstance(lanes, list) or any(not isinstance(lane, dict) for lane in lanes):
+        raise PolicyUnavailable('monitor_lanes_invalid')
+    cameras = [lane.get('camera_key') for lane in lanes if lane.get('mode') == 'live']
+    if any(not isinstance(camera, str) or not camera for camera in cameras) or len(cameras) != len(set(cameras)):
+        raise PolicyUnavailable('monitor_lanes_invalid')
+    for name in ('unavailable_camera_keys', 'role_unconfigured_camera_keys'):
+        values = scope.get(name)
+        if (not isinstance(values, list) or any(not isinstance(value, str) for value in values)
+                or len(values) != len(set(values)) or not set(values) <= set(cameras)):
+            raise PolicyUnavailable('monitor_scope_invalid')
+    from .device_day_live_discovery import lane_unavailable
+    unavailable = {lane['camera_key'] for lane in lanes if lane.get('mode') == 'live'
+                   and lane_unavailable(lane, now=now, max_age=max_age)}
+    if any(lane.get('camera_key') not in unavailable and (
+            lane.get('errors') != [] or lane.get('truncated') is not False) for lane in lanes):
+        raise PolicyUnavailable('monitor_scope_invalid')
+    if (unavailable != set(scope['unavailable_camera_keys'])
+            or data.get('unconfigured_camera_directories') != scope['role_unconfigured_camera_keys']
+            or set(data.get('camera_directories') or []) != set(cameras)
+            or not set(cameras) - unavailable):
+        raise PolicyUnavailable('monitor_scope_invalid')
+    lane_errors = [error for lane in lanes for error in lane.get('errors', [])]
+    if any(error not in lane_errors for error in data.get('errors', [])):
+        raise PolicyUnavailable('monitor_inventory_incomplete')
+    if monitor.get('status') == 'degraded' and not (unavailable or scope['role_unconfigured_camera_keys']):
+        raise PolicyUnavailable('monitor_not_watching')
+    return unavailable
 
 
 def _monitor_snapshot(config, root, now, root_key):
@@ -101,7 +149,8 @@ def _monitor_snapshot(config, root, now, root_key):
         data = {}
         decoder = json.JSONDecoder()
         for metadata_key in ('monitor', 'truncated', 'discovery_lanes', 'pending_publication_count',
-                    'pending_live_publication_count'):
+                    'pending_live_publication_count', 'admission_scope', 'monitor_source',
+                    'discovery_mode', 'unconfigured_camera_directories', 'camera_directories', 'errors'):
             marker = '\n  ' + json.dumps(metadata_key) + ':'
             at = tail.rfind(marker)
             if at < 0:
@@ -116,7 +165,7 @@ def _monitor_snapshot(config, root, now, root_key):
     if not isinstance(data, dict):
         raise PolicyUnavailable('monitor_snapshot_invalid')
     monitor = data.get('monitor')
-    if not isinstance(monitor, dict) or monitor.get('status') != 'watching':
+    if not isinstance(monitor, dict) or monitor.get('status') not in {'watching', 'degraded'}:
         raise PolicyUnavailable('monitor_not_watching')
     stamp = datetime.fromisoformat(monitor['observed_at'])
     if stamp.tzinfo is None:
@@ -128,15 +177,19 @@ def _monitor_snapshot(config, root, now, root_key):
     if (not math.isfinite(poll) or poll <= 0 or not math.isfinite(limit) or limit <= 0
             or not math.isfinite(age) or age < -5 or age > limit):
         raise PolicyUnavailable('monitor_stale')
+    excluded_cameras = _isolated_lanes(data, monitor, now=stamp.timestamp(), max_age=limit)
     previous = _MONITOR_SUCCESSES.get(root_key)
     if previous and (clock_at < previous['clock_at'] or stamp.timestamp() < previous['snapshot_at']):
         raise PolicyUnavailable('monitor_time_reversed')
     pending_live = data.get('pending_live_publication_count', data.get('pending_publication_count', 0))
     if type(pending_live) is not int or pending_live < 0:
         raise PolicyUnavailable('monitor_pending_count_invalid')
-    if data.get('truncated') or pending_live:
+    if (data.get('truncated') and not excluded_cameras) or pending_live:
         raise PolicyUnavailable('monitor_inventory_incomplete')
-    reusable_snapshot = (data.get('truncated') is False
+    if excluded_cameras and data.get('truncated') != any(
+            bool(lane.get('truncated')) for lane in data['discovery_lanes']):
+        raise PolicyUnavailable('monitor_inventory_incomplete')
+    reusable_snapshot = ((data.get('truncated') is False or bool(excluded_cameras))
                          and ('pending_live_publication_count' in data or 'pending_publication_count' in data))
     if not reusable_snapshot:
         # Preserve the legacy watching gate, but unknown global completeness
@@ -159,6 +212,11 @@ def _monitor_snapshot(config, root, now, root_key):
             if not isinstance(camera, str) or not camera or len(camera) > 256 or camera in cameras:
                 raise PolicyUnavailable('monitor_lanes_invalid')
             cameras.add(camera)
+            if camera in excluded_cameras:
+                continue
+            if data.get('admission_scope') is not None and (
+                    lane.get('errors') != [] or lane.get('truncated') is not False):
+                raise PolicyUnavailable('monitor_live_lane_unavailable')
             if (lane.get('thread_alive') is not True or lane.get('errors') or lane.get('truncated')):
                 raise PolicyUnavailable('monitor_live_lane_unavailable')
             if lane.get('status') == 'watching':
@@ -194,7 +252,7 @@ def _monitor_snapshot(config, root, now, root_key):
         _MONITOR_SUCCESSES.move_to_end(root_key)
         while len(_MONITOR_SUCCESSES) > _MONITOR_ROOT_LIMIT:
             _MONITOR_SUCCESSES.popitem(last=False)
-    return max(0.0, age)
+    return {'age_seconds': max(0.0, age), 'excluded_cameras': sorted(excluded_cameras)}
 
 
 @contextmanager
@@ -203,6 +261,14 @@ def _snapshot(root):
     connection = sqlite3.connect((base / 'observed-inventory.sqlite3').as_uri() + '?mode=ro',
                                  uri=True, timeout=.2)
     connection.row_factory = sqlite3.Row
+    from .device_day_inputs import same_stage_source, stage_input_ready
+    from .input_availability import stage_input_state
+    connection.create_function('stage_source_matches', 3, lambda previous, current, stage:
+        bool(previous and current and same_stage_source(json.loads(previous), json.loads(current), stage)))
+    connection.create_function('stage_input_ready', 2, lambda payload, stage:
+        bool(payload and stage_input_ready(json.loads(payload), stage)))
+    connection.create_function('stage_input_state', 4, lambda payload, stage, state, reason:
+        stage_input_state(json.loads(payload), stage, {'state': state, 'reason': reason})['state'])
     attached = set()
     try:
         for alias, path, required in [
@@ -216,6 +282,9 @@ def _snapshot(root):
                 continue
             connection.execute(f'ATTACH DATABASE ? AS {alias}', (path.as_uri() + '?mode=ro',))
             attached.add(alias)
+            if alias == 'availability' and 'reason' in {
+                    row['name'] for row in connection.execute('PRAGMA availability.table_info(inputs)')}:
+                attached.add('availability_reason')
         yield connection, attached
     finally:
         connection.close()
@@ -229,6 +298,8 @@ def _parents(stage):
 
 
 def _signature_matches(queue, record, stage):
+    if stage == 'stt':
+        return f"stage_source_matches({queue}.payload,{record}.payload,'stt')"
     source = (f"json_extract({queue}.payload,'$.source_signature') IS "
               f"json_extract({record}.payload,'$.source_signature')")
     if stage != 'vision':
@@ -237,16 +308,19 @@ def _signature_matches(queue, record, stage):
     return '(' + source + ')'
 
 
-def _record_conditions(config, attached):
+def _record_conditions(config, attached, stage, *, excluded_cameras=()):
     role_map = config.get('collection_ingest', {}).get('camera_role_map') or {}
     # Explicit configured roles override the stored observation after metadata
     # reinspection. Unbound additional directories must stay fail-closed.
     clauses = [
-        "COALESCE(json_extract(o.payload,'$.processable'),json_extract(o.payload,'$.available'),0)=1",
-        "COALESCE((SELECT value FROM json_each(:roles) WHERE key=json_extract(o.payload,'$.camera_key')),"
-        "json_extract(o.payload,'$.configured_role')) IN ('first_person','third_person')",
+        f"stage_input_ready(o.payload,'{stage}')=1",
         "COALESCE(json_extract(o.payload,'$.camera_binding_status'),'')!='needs_directory_binding'",
+        "json_extract(o.payload,'$.camera_key') NOT IN (SELECT value FROM json_each(:excluded_cameras))",
     ]
+    if stage not in {'retention', 'stt'}:
+        clauses.append(
+            "COALESCE((SELECT value FROM json_each(:roles) WHERE key=json_extract(o.payload,'$.camera_key')),"
+            "json_extract(o.payload,'$.configured_role')) IN ('first_person','third_person')")
     cutoff = (config.get('device_day') or {}).get('process_since_us')
     if cutoff is not None:
         if type(cutoff) is not int or cutoff <= 0:
@@ -254,15 +328,22 @@ def _record_conditions(config, attached):
         clauses.append("MAX(COALESCE(json_extract(o.payload,'$.recording_start_us'),0),"
                        "COALESCE(json_extract(o.payload,'$.recording_end_us'),0))>=:scope")
     if 'availability' in attached:
+        state = "stage_input_state(o.payload,'stt',a.state,a.reason)" if stage == 'stt' else 'a.state'
+        # Old immutable availability stores had no reason. They cannot prove a
+        # missing source is only a video wait, so remain closed until reobserved.
+        if stage == 'stt' and 'availability_reason' not in attached:
+            state = "stage_input_state(o.payload,'stt',a.state,'')"
         clauses.append("NOT EXISTS(SELECT 1 FROM availability.inputs a WHERE a.id=o.id "
-                       "AND a.signature IS json_extract(o.payload,'$.source_signature') AND a.state!='ready')")
+                       f"AND a.signature IS json_extract(o.payload,'$.source_signature') AND {state}!='ready')")
     return clauses, {'roles': json.dumps(role_map), 'scope': cutoff,
+                     'excluded_cameras': json.dumps(list(excluded_cameras)),
                      'visual_cutoff': (config.get('device_day') or {}).get('understanding_coverage_since_us')}
 
 
 def _eligible_conditions(stage, *, historical=False, retry_budget=':attempts'):
     matches = _signature_matches('q', 'o', stage)
     clauses = [
+        f"(q.recording_id IS NULL OR NOT {matches} OR q.status!='blocked')",
         "(q.recording_id IS NULL OR q.status!='running' OR COALESCE(q.lease_until,0)<:now)",
         f"(q.recording_id IS NULL OR NOT {matches} OR (q.status!='completed' AND "
         "NOT(q.status='running' AND COALESCE(q.lease_until,0)>=:now) AND "
@@ -305,6 +386,14 @@ def _repair_order(db, stage):
             "THEN 0 ELSE 1 END,")
 
 
+def _camera_order(db, stage):
+    """Reuse the queue's durable camera turns before the bounded history LIMIT."""
+    if not db.execute(f"SELECT 1 FROM q_{stage}.sqlite_master WHERE name='camera_dispatch'").fetchone():
+        return ''
+    return (f"COALESCE((SELECT last_claim FROM q_{stage}.camera_dispatch c "
+            "WHERE c.camera_key=json_extract(o.payload,'$.camera_key')),0),")
+
+
 def _provider_blocked(config, stage, db, attached, root, now):
     if stage not in {'stt', 'understanding'}:
         return False
@@ -345,7 +434,9 @@ def live_demand(config, stage, now=None):
         root, current, cutoff, cooldown = _options(config, now)
         result['observed_at'] = current
         try:
-            result['monitor_age_seconds'] = _monitor(config, root, current)
+            monitor = _monitor(config, root, current, include_scope=True)
+            result['monitor_age_seconds'] = monitor['age_seconds']
+            result['isolated_camera_keys'] = monitor['excluded_cameras']
         except (OSError, ValueError, KeyError, TypeError, OverflowError, AttributeError) as exc:
             result.update(status='waiting_for_monitor', reasons=[
                 str(exc) if isinstance(exc, PolicyUnavailable) else 'monitor_snapshot_unavailable'])
@@ -362,7 +453,8 @@ def live_demand(config, stage, now=None):
                 if stage != 'stt' and _provider_blocked(config, stage, db, attached, root, current):
                     result.update(status='waiting_for_provider', reasons=['waiting_for_provider'])
                     return result
-            clauses, parameters = _record_conditions(config, attached)
+            _, parameters = _record_conditions(config, attached, stage,
+                                               excluded_cameras=monitor['excluded_cameras'])
             parameters.update(now=current, cutoff=cutoff, retry_before=current - cooldown,
                               attempts=(config.get('device_day') or {}).get('failure_retry_limit') or 3)
             recent = ("MAX(COALESCE(json_extract(o.payload,'$.recording_start_us'),0),"
@@ -383,6 +475,8 @@ def live_demand(config, stage, now=None):
                     continue
                 if _provider_blocked(config, live_stage, db, attached, root, current):
                     continue
+                clauses, _ = _record_conditions(config, attached, live_stage,
+                                                excluded_cameras=monitor['excluded_cameras'])
                 eligible = clauses + [recent] + _eligible_conditions(
                     live_stage, retry_budget=_retry_budget(db, live_stage))
                 counts['eligible'] += db.execute(
@@ -423,7 +517,7 @@ def historical_candidates(config, stage, *, limit=16, now=None, exclude=()):
         raise PolicyUnavailable('invalid_candidate_exclusions')
     root, current, cutoff, cooldown = _options(config, now)
     try:
-        _monitor(config, root, current)
+        monitor = _monitor(config, root, current, include_scope=True)
     except (OSError, ValueError, KeyError, TypeError, OverflowError, AttributeError):
         return []
     if not stage_admitted(config, stage, datetime.fromtimestamp(current).astimezone()):
@@ -433,7 +527,8 @@ def historical_candidates(config, stage, *, limit=16, now=None, exclude=()):
             provider_blocked = _provider_blocked(config, stage, db, attached, root, current)
             if provider_blocked and stage != 'stt':
                 return []
-            clauses, parameters = _record_conditions(config, attached)
+            clauses, parameters = _record_conditions(config, attached, stage,
+                                                     excluded_cameras=monitor['excluded_cameras'])
             parameters.update(now=current, cutoff=cutoff, retry_before=current - cooldown, limit=limit,
                               attempts=(config.get('device_day') or {}).get('failure_retry_limit') or 3,
                               excluded=json.dumps(list(exclude)))
@@ -447,9 +542,10 @@ def historical_candidates(config, stage, *, limit=16, now=None, exclude=()):
             clauses.append('o.id NOT IN (SELECT value FROM json_each(:excluded))')
             fair = ((config.get('device_day') or {}).get('backfill') or {}).get('mode', 'idle') == 'fair'
             order = 'ASC' if fair else 'DESC'
+            camera_order = _camera_order(db, stage) if fair else ''
             rows = db.execute(f"SELECT o.payload FROM observations o LEFT JOIN q_{stage}.recordings q "
                               "ON q.recording_id=o.id WHERE " + ' AND '.join(clauses) +
-                              f" ORDER BY {_repair_order(db, stage)}"
+                              f" ORDER BY {_repair_order(db, stage)}{camera_order}"
                               f"json_extract(o.payload,'$.recording_start_us') {order},o.id LIMIT :limit",
                               parameters)
             from .input_availability import configured_record

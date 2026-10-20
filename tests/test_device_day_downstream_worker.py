@@ -112,12 +112,24 @@ def test_local_parent_prefilter_and_latest_order_ignore_unready_newer_records(tm
 def test_downstream_pause_schedule_and_cli_keep_stage_independence(tmp_path, monkeypatch, stage):
     from visioncortex import device_day_retention_worker as module
     runner = setup(tmp_path, monkeypatch, [])
+    queue = DeviceDayQueue(runner.runtime_root / f'queue-{stage}.sqlite3')
+    runner.queues[stage] = queue
+    pending = record('paused-ready', 1_000_000)
+    queue.enqueue(pending, 'paused-stage-recipe')
+    observe(runner.runtime_root, {'recordings': [pending]})
+    runner.process = lambda *a, **kw: pytest.fail('Paused/scheduled stage executed a new request')
+    worker = RetentionWorker(stage=stage)
+    monkeypatch.setattr(worker, 'admit', lambda *a: pytest.fail('Paused/scheduled stage admitted new work'))
+    with queue.connect() as db:
+        before = dict(db.execute('SELECT * FROM recordings').fetchone())
     runner.config['storage'] = {'local_runtime_root': str(runner.runtime_root)}
     runner.config['device_day'] = {'paused_stages': [stage]}
-    assert RetentionWorker(stage=stage).tick(runner, threading.Event())['status'] == 'paused_by_user'
+    assert worker.tick(runner, threading.Event())['status'] == 'paused_by_user'
     runner.config['device_day'] = {}
     monkeypatch.setattr('visioncortex.device_day_night_schedule.stage_admitted', lambda *_: False)
-    assert RetentionWorker(stage=stage).tick(runner, threading.Event())['status'] == 'waiting_for_night_window'
+    assert worker.tick(runner, threading.Event())['status'] == 'waiting_for_night_window'
+    with queue.connect() as db:
+        assert dict(db.execute('SELECT * FROM recordings').fetchone()) == before
     calls = []
     monkeypatch.setattr(module, 'serve', lambda config, stop, stage: calls.append(stage))
     module.main(['--config', 'owned-fixture.yaml', '--stage', stage])

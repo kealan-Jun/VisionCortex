@@ -349,7 +349,9 @@ def test_stt_chunk_resume_after_archive_path_change_without_repeat_calls(setup, 
     folder = Path(record['video_path']).parent
     (folder / 'audio.opus').write_bytes(b'owned-synthetic-audio')
     atomic_json(folder / 'audio_meta.json', {'recording_session_id': 'fixture-1',
-                'first_audio_global_us': record['recording_start_us'], 'audio_duration_us': 360000000})
+                'audio_valid': True, 'first_audio_global_us': record['recording_start_us'],
+                'last_audio_global_us': record['recording_start_us'] + 360000000, 'audio_duration_us': 360000000})
+    (folder / 'audio_timing.csv').write_text(f"global_timestamp_us\n{record['recording_start_us']}\n")
     atomic_json(folder / 'audio_ready.json', {'recording_session_id': 'fixture-1', 'ready': True, 'audio_valid': True})
     for file in folder.glob('audio*'):
         os.utime(file, (time.time() - 1000, time.time() - 1000))
@@ -382,6 +384,37 @@ def test_stt_chunk_resume_after_archive_path_change_without_repeat_calls(setup, 
     assert all(p.read_bytes() == content for p, content in requests.items())
 
 
+@pytest.mark.parametrize('defect', ['archive_bytes', 'binding', 'remaining_original'])
+def test_expired_audio_resume_rejects_unverified_archive_or_changed_original(setup, defect):
+    from test_recorder_metadata import audio
+    from visioncortex.device_day_contract import atomic_json
+    config, record, _, backend, runner = setup
+    folder = Path(record['video_path']).parent
+    audio(folder, record['recording_start_us'])
+    record, _ = item_and_layout(config)
+    calls = []
+    backend.transcribe = lambda *_args: calls.append(True) or {
+        'outcome': 'no_speech', 'comments': [], 'artifacts': [], 'model_invocation': 'NOT_PROVEN'}
+    assert runner.process(record, stage='stt')['status'] == 'completed'
+    assert runner.process(record, stage='retention')['status'] == 'completed'
+    layout = runner.layout(record)
+    retained_path = runner._receipt(layout, record, 'retention')
+    retained = read_json(retained_path)
+    source = next(s for s in retained['sources'] if s['kind'] == 'audio_audio')
+    (folder/'audio.opus').unlink()  # External expiry only on owned fixtures.
+    if defect == 'archive_bytes':
+        (layout.root/source['retained']['path']).write_bytes(b'corrupt-owned-archive')
+    elif defect == 'binding':
+        retained['input_bindings']['stt'] = '0'*64
+        atomic_json(retained_path, retained)
+    else:
+        (folder/'audio_meta.json').write_text('{}')
+    result = DeviceDayRunner(config, backend).process(record, stage='stt', retry=True)
+    assert result['status'] == 'failed' and result['error_type'] == 'InputChanged', result
+    assert calls == [True]
+    assert not (folder/'audio.opus').exists()
+
+
 def test_stt_live_arrival_finishes_and_reuses_paid_chunk(setup, monkeypatch):
     config, record, _, backend, _ = setup
     from visioncortex import speech, speech_qwen as qwen, speech_worker
@@ -392,7 +425,9 @@ def test_stt_live_arrival_finishes_and_reuses_paid_chunk(setup, monkeypatch):
     folder = Path(record['video_path']).parent
     (folder/'audio.opus').write_bytes(b'owned-synthetic-audio')
     atomic_json(folder/'audio_meta.json', {'recording_session_id': 'fixture-1',
-                'first_audio_global_us': record['recording_start_us'], 'audio_duration_us': 360000000})
+                'audio_valid': True, 'first_audio_global_us': record['recording_start_us'],
+                'last_audio_global_us': record['recording_start_us'] + 360000000, 'audio_duration_us': 360000000})
+    (folder/'audio_timing.csv').write_text(f"global_timestamp_us\n{record['recording_start_us']}\n")
     atomic_json(folder/'audio_ready.json', {'recording_session_id': 'fixture-1', 'ready': True, 'audio_valid': True})
     for path in folder.glob('audio*'):
         os.utime(path, (time.time()-1000, time.time()-1000))
@@ -435,7 +470,10 @@ def test_late_audio_does_not_repeat_video(setup):
     assert runner.process(record, stage='retention')['status'] == 'completed'
     folder = Path(record['video_path']).parent
     (folder / 'audio.opus').write_bytes(b'owned-late-audio')
-    atomic_json(folder / 'audio_ready.json', {'ready': True})
+    atomic_json(folder / 'audio_meta.json', {'recording_session_id': 'fixture-1', 'audio_valid': True,
+                'first_audio_global_us': record['recording_start_us'], 'last_audio_global_us': record['recording_end_us']})
+    (folder / 'audio_timing.csv').write_text(f"global_timestamp_us\n{record['recording_start_us']}\n")
+    atomic_json(folder / 'audio_ready.json', {'recording_session_id': 'fixture-1', 'ready': True, 'audio_valid': True})
     for file in folder.glob('audio*'):
         os.utime(file, (time.time() - 1000, time.time() - 1000))
     updated, _ = item_and_layout(config)

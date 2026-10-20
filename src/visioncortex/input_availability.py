@@ -143,9 +143,15 @@ def revalidated_input_seals(runner, record, *, verify_bytes=None):
             saved = json.loads(original)
             expected = (record.get('audio', {}).get('source_signature') if stage == 'stt'
                         else record['source_signature'])
+            identity_fields = fields
+            if (stage == 'stt' and saved.get('recording', {}).get('configured_role') is None
+                    and record.get('configured_role') in {'first_person', 'third_person'}):
+                from .device_day_inputs import role_supplement
+                role_supplement(runner, record, saved, stage)
+                identity_fields = tuple(name for name in fields if name != 'configured_role')
             if (saved.get('stage') != 'input-' + stage or saved.get('status') != 'ready'
                     or saved.get('source_signature') != expected
-                    or any(saved.get('recording', {}).get(field) != record.get(field) for field in fields)
+                    or any(saved.get('recording', {}).get(field) != record.get(field) for field in identity_fields)
                     or not 1 <= len(saved.get('sources', [])) <= 32):
                 raise ValueError('Input seal does not match the current recording')
             updated = json.loads(original)
@@ -202,6 +208,67 @@ def revalidated_input_seals(runner, record, *, verify_bytes=None):
                'source_generation': digest([updated for _, _, _, updated in updates])}
 
 
+def stage_input_state(record, stage, state):
+    """Keep video readiness and independently verified recorder audio separate."""
+    if stage != 'stt':
+        return dict(state)
+    from .device_day_inputs import stage_input_ready
+    audio = record.get('audio') or {}
+    status = audio.get('status', 'not_provided')
+    result = dict(state)
+    video_wait = state.get('state', 'ready') == 'ready' or state.get('reason') in {
+        'monitor_observation', 'capture_not_closed', 'empty_capture',
+        'capture_missing_pending_archive_verification', 'legacy_unavailable_observation'}
+    if not video_wait or state.get('reason') == 'content_identity_conflict':
+        return result
+    if status in {'pending_publication', 'association_mismatch'} or (
+            status == 'provided' and not stage_input_ready(record, stage)):
+        return result | {'state': 'waiting', 'reason': 'independent_audio_not_ready'}
+    if record.get('stt_processable') is True and stage_input_ready(record, stage):
+        # These observations concern video availability. Content conflicts,
+        # unverified storage and unknown inspection failures remain closed.
+        return result | {'state': 'ready', 'reason': 'independent_recorder_audio_ready'}
+    return result
+
+
+def states_for_stage(root, stage, *, states):
+    """Read-only projection for workers and progress; no state database writes."""
+    if stage != 'stt':
+        return states
+    result = {rid: dict(state) for rid, state in states.items()}
+    inventory = Path(root) / 'observed-inventory.sqlite3'
+    if not inventory.is_file():
+        return result
+    with connection(inventory, readonly=True) as db:
+        rows = db.execute("SELECT payload FROM observations WHERE "
+            "json_type(payload,'$.stt_processable') IS NOT NULL OR "
+            "json_extract(payload,'$.audio.status') IN ('provided','pending_publication','association_mismatch')")
+        for row in rows:
+            record = json.loads(row['payload'])
+            rid, signature = record['recording_id'], record.get('source_signature')
+            state = states.get(rid, {'state': 'ready', 'signature': signature})
+            if state.get('signature') != signature:
+                continue  # A stale observation cannot release another version.
+            result[rid] = stage_input_state(record, stage, state)
+    return result
+
+
+def _revoke_stt_observation(root, record):
+    """An inspection failure can revoke its own observation, never roll it back."""
+    path = Path(root) / 'observed-inventory.sqlite3'
+    if not path.is_file():
+        return
+    with connection(path) as db:
+        db.execute('BEGIN IMMEDIATE')
+        changed = db.execute("UPDATE observations SET payload=json_set(payload,'$.stt_processable',json('false')) "
+            "WHERE id=? AND json_extract(payload,'$.source_signature') IS ? "
+            "AND json_extract(payload,'$.stt_processable')=1",
+            (record['recording_id'], record.get('source_signature'))).rowcount
+        if changed:
+            db.execute("UPDATE metadata SET value=CAST(value AS INTEGER)+1 WHERE key='revision'")
+            db.execute("INSERT OR REPLACE INTO metadata VALUES('observed_at',?)", (str(time.time()),))
+
+
 class Availability:
     def __init__(self, root):
         self.path = Path(root) / "InputAvailability.sqlite3"
@@ -252,6 +319,9 @@ class Availability:
     def states(self):
         with connection(self.path, readonly=True) as db:
             return {r["id"]: dict(r) for r in db.execute("SELECT * FROM inputs")}
+
+    def states_for_stage(self, stage, *, states=None):
+        return states_for_stage(self.path.parent, stage, states=self.states() if states is None else states)
 
     def migrate_legacy(self, queue):
         # One-time import of old, explicit unavailable observations. No stat of
@@ -349,16 +419,10 @@ class Reconciler:
             video = record.get("video_path")
             if not video:
                 continue
-            inspecting_metadata = False
             try:
-                info = Path(video).stat()
-                if info.st_size <= 0:
-                    availability.mark(record, "waiting", reason="empty_capture")
-                    continue
                 # A present file is not necessarily a closed, compatible input.
                 from .nas_recordings import _inspect
 
-                inspecting_metadata = True
                 fresh = _inspect(
                     source,
                     Path(video),
@@ -366,6 +430,11 @@ class Reconciler:
                     float(self.config["collection_ingest"].get("settle_seconds", 5)),
                 )
                 fresh = configured_record(self.config, fresh)
+                from .observed_inventory import observe
+                # The video may be missing/writing while audio is already
+                # finalized, or previously ready audio may become unavailable.
+                # Keep the actual per-media observation in the same catalog.
+                observe(self.root, {"recordings": [fresh]})
                 if fresh.get("processable"):
                     previous = states.get(fresh['recording_id'], {})
                     conflict = (previous.get('signature') == fresh.get('source_signature')
@@ -373,21 +442,20 @@ class Reconciler:
                                 and previous.get('reason') == 'content_identity_conflict')
                     if not conflict:
                         availability.mark(fresh, "ready", reason="capture_reinspected")
-                    from .observed_inventory import observe
-
-                    observe(self.root, {"recordings": [fresh]})
                 else:
-                    availability.mark(record, "waiting", reason="capture_not_closed")
+                    missing_video = fresh.get('size_bytes') is None
+                    availability.mark(fresh, "missing" if missing_video else "waiting",
+                        reason='capture_missing_pending_archive_verification' if missing_video else
+                        'empty_capture' if fresh.get('size_bytes') == 0 else 'capture_not_closed')
             except FileNotFoundError:
+                _revoke_stt_observation(self.root, record)
                 # Retention recovery separately verifies archive-only originals.
                 # Missing capture never authorizes changing a successful receipt.
-                availability.mark(
-                    record,
-                    "waiting" if inspecting_metadata else "missing",
-                    reason="capture_metadata_missing" if inspecting_metadata else
-                    "capture_missing_pending_archive_verification",
-                )
+                missing_video = not Path(video).is_file()
+                availability.mark(record, 'missing' if missing_video else 'waiting',
+                    reason='capture_missing_pending_archive_verification' if missing_video else 'capture_metadata_missing')
             except (OSError, ValueError) as exc:
+                _revoke_stt_observation(self.root, record)
                 availability.mark(
                     record, "unavailable", reason=f"input_inspection_unavailable:{type(exc).__name__}:errno={getattr(exc, 'errno', None)}"
                 )
@@ -701,7 +769,7 @@ class IntegrityMonitor:
             elif not verify(target, ref):
                 raise IntegrityIssue('archive_content_conflict')
         if missing:
-            if layout.recorder_owned_raw:
+            if layout.read_only_originals or layout.recorder_owned_raw:
                 raise IntegrityIssue('recorder_input_missing')
             with revalidated_input_seals(self.runner, record, verify_bytes=verify) as proof:
                 if not proof['verified_seals']:
@@ -767,7 +835,7 @@ class IntegrityMonitor:
 
     def _check(self, stage, row):
         from .device_day_contract import digest, read_json
-        record = json.loads(row['payload'])
+        record = configured_record(self.config, json.loads(row['payload']))
         verify = _IntegrityBytes(self.config, self.options['max_hash_bytes'])
         restored, artifacts, grant = 0, 0, None
         if row['status'] == 'failed':
@@ -783,7 +851,15 @@ class IntegrityMonitor:
             revision = digest(['inplace-queue/1', stage, record['recording_id'], inputs,
                                self.runner._key(stage, record, {})])
             if revision != row['revision']:
-                raise IntegrityIssue('execution_recipe_changed')
+                if stage not in {'retention', 'vision'}:
+                    raise IntegrityIssue('execution_recipe_changed')
+                from .runtime_services import NativeInfrastructureVerifier
+                verifier = NativeInfrastructureVerifier(self.config)
+                try:
+                    return verifier.normal_readmit(self.config, stage, row, None)
+                except (OSError, ValueError) as exc:
+                    reason = verifier.rejection_reason(exc) or 'execution_recipe_changed'
+                    raise IntegrityIssue(reason) from exc
             retention = self.runner._receipt(layout, record, 'retention')
             if retention.is_file() and retention.stat().st_size <= 4 * 1024**2 and read_json(retention).get('status') == 'completed':
                 artifacts, restored = self._archive(record, verify)

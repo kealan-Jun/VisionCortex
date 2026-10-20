@@ -797,8 +797,6 @@ class DeviceDayModels:
                                    reason='waiting_for_warm_model')
         from .detection import iter_frame_evidence, validate_models
         from .schemas import AlignmentTransform, ViewInput, ViewRole
-        from .video_io import extract_clip
-
         from .performance_stages import StageTimings
         timings = StageTimings()
         vision_started = time.perf_counter()
@@ -938,12 +936,11 @@ class DeviceDayModels:
                                              wall_time_basis=clock_mapping["basis"])
                             key_refs.extend(selected_frames)
                         artifacts.extend({k: f[k] for k in ("path", "size_bytes", "sha256")} for f in key_refs)
-                    video = None
-                    if activity == "active":
-                        output = folder / "ExperimentActivity.mp4"
-                        extract_clip(source, output, left, right - left, perf["ffmpeg_video_encoder"])
-                        video = artifact(layout.root, output)
-                        artifacts.append(video)
+                    # Fine activity classification creates a candidate, not a
+                    # video-retention decision. Only the separate value owner
+                    # may export verified, explicitly selected subintervals.
+                    # Historical completed receipts keep their existing videos
+                    # through the ordinary receipt reader, without re-export.
                     record = {"schema_version": VERSION, "segment_id": identifier,
                               "recording_id": recording["recording_id"], "camera_key": recording["camera_key"],
                               "capture_complete": recording.get("capture_complete"),
@@ -953,7 +950,7 @@ class DeviceDayModels:
                               "start_us": capture_us(clock_mapping, left),
                               "end_us": capture_us(clock_mapping, right),
                               "wall_time_basis": clock_mapping["basis"], "clock_ref": clock["retained"],
-                              "source_ref": main["retained"], "video": video, "key_frames": key_refs, "scene_frames": frame_refs,
+                              "source_ref": main["retained"], "video": None, "key_frames": key_refs, "scene_frames": frame_refs,
                               "evidence_status": "PARTIAL_EVIDENCE", "physical_action_confirmed": False,
                               "classification_basis": "existing_fine_audit_and_device_boundaries_not_ground_truth",
                               "activity_audit": audit_summary, "activity_audit_ref": audit_reference,

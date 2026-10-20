@@ -72,15 +72,24 @@ class ReadableReplay:
                     stop=self.stop, yield_signal=self.stop):
                 records = read_inventory(runner.runtime_root)['recordings']
                 names = {archive_name(r['camera_key'], r['recording_start_us']) for r in records}
+                from .application.field_archive_context import archive_days
+                field_discovery = None
+                try:
+                    names.update(archive_days(runner.config))
+                except (OSError, ValueError) as exc:
+                    field_discovery = {'status': 'unavailable', 'error_type': type(exc).__name__,
+                        'automatic_action': 'retry_field_archive_discovery', 'other_publication_continues': True}
                 self.checked = {name: stamp for name, stamp in self.checked.items() if name in names}
                 if not names or self.stop.is_set():
-                    return {'status': 'waiting_for_inventory' if not names else 'stopping'}
+                    return {'status': 'waiting_for_inventory' if not names else 'stopping'} | (
+                        {'field_archive_discovery': field_discovery} if field_discovery else {})
                 name = min(names, key=lambda n: (self.checked.get(n, 0),
                            -int(n[:10].replace('-', '')), n))
                 self.checked[name] = time.time()
                 with resource_slot(runner.config, 'cpu'), slot(runner.config):
                     result = self.publisher.tick(archives=[name])
-                return {'status': 'published', 'archive': name, 'result': result}
+                return {'status': 'published', 'archive': name, 'result': result} | (
+                    {'field_archive_discovery': field_discovery} if field_discovery else {})
 
 
 def serve(config_path, stop, *, readable=False):

@@ -5,6 +5,7 @@ from collections import OrderedDict
 from contextlib import contextmanager
 from contextvars import ContextVar
 import hashlib
+import json
 from threading import Lock
 import os
 from pathlib import Path
@@ -18,6 +19,31 @@ from .device_day_io import pace_copy, slot
 
 class InputChanged(ValueError):
     pass
+
+
+def stage_input_ready(record, stage):
+    if stage == 'stt' and (record.get('audio') or {}).get('status') == 'provided':
+        return record.get('stt_processable', record.get('processable', record.get('available', False))) is True
+    return bool(record.get('processable', record.get('available', False)))
+
+
+def stage_source_signature(record, stage):
+    if stage == 'stt' and record.get('stt_processable') is True and record.get('stt_source_signature'):
+        return record['stt_source_signature']
+    return record.get('source_signature')
+
+
+def same_stage_source(previous, current, stage):
+    if stage != 'stt':
+        return previous.get('source_signature') == current.get('source_signature')
+    old, new = previous.get('audio') or {}, current.get('audio') or {}
+    if new.get('status') != 'provided' or current.get('stt_processable') is not True:
+        return (previous.get('source_signature') == current.get('source_signature')
+                and old.get('source_signature') == new.get('source_signature'))
+    return (bool(current.get('recording_session_id')) and bool(new.get('source_signature'))
+            and all(previous.get(k) == current.get(k) for k in ('recording_id', 'camera_key', 'recording_session_id'))
+            and old.get('status') == 'provided'
+            and all(old.get(k) == new.get(k) for k in ('source_signature', 'start_us', 'end_us')))
 
 
 _CONTENT = OrderedDict()
@@ -115,6 +141,220 @@ def input_path(runner, record, stage):
     return runner._receipt(runner.layout(record), record, 'input-' + stage)
 
 
+def preserve_receipt_bytes(runner, path, original, stage):
+    """Keep exact evidence bytes and an explicit old-reference mapping."""
+    from .device_day_contract import atomic_bytes
+    checksum = hashlib.sha256(original).hexdigest()
+    backup = path.parent / 'history' / f'{stage}-{checksum}.json'
+    if backup.is_file():
+        if backup.read_bytes() != original:
+            raise InputChanged('Historical input evidence collision')
+    else:
+        atomic_bytes(backup, original)
+        sync_directory(backup.parent)
+    return {'previous': {'path': path.relative_to(runner.backend_root).as_posix(),
+                         'size_bytes': len(original), 'sha256': checksum},
+            'preserved': {'path': backup.relative_to(runner.backend_root).as_posix(),
+                          'size_bytes': len(original), 'sha256': checksum}}
+
+
+def role_supplement(runner, record, saved, stage):
+    """Bind a previously unknown view, after complete unchanged input proof.
+
+    Speech retains its original seal and binding. Vision receives a new role
+    identity; this never turns an existing known role into another role.
+    """
+    from .input_availability import configured_record
+    from .nas_recordings import _inspect
+    prior = saved['recording']
+    role = record.get('configured_role')
+    fields = ('recording_id', 'camera_key', 'recording_start_us', 'recording_end_us',
+              'recording_session_id', 'video_path', 'frames_path', 'source_signature')
+    if (prior.get('configured_role') is not None or role not in {'first_person', 'third_person'}
+            or any(prior.get(name) != record.get(name) for name in fields)):
+        raise InputChanged('Sealed device/date/role identity changed')
+    original = Path(record['video_path'])
+    root = Path(runner.config['collection_ingest']['source_root'])
+    if original.is_symlink() or not original.resolve().is_relative_to(root.resolve()):
+        raise InputChanged('Role binding input escaped capture root')
+    fresh = configured_record(runner.config, _inspect(root, original, time.time(),
+        runner.config['collection_ingest'].get('settle_seconds', 120),
+        bool(runner.config['collection_ingest'].get('discover_plain_video_csv', False))))
+    if (fresh.get('configured_role') != role or not fresh.get('processable')
+            or any(fresh.get(name) != record.get(name) for name in fields)):
+        raise InputChanged('Role supplement requires a current explicit binding')
+    vision_path = input_path(runner, record, 'vision')
+    if not vision_path.is_file():
+        raise InputChanged('Role supplement requires the original sealed camera metadata')
+    visual = read_json(vision_path)
+    if (visual['recording'].get('configured_role') not in {None, role}
+            or any(visual['recording'].get(name) != record.get(name) for name in fields)):
+        raise InputChanged('Sealed device/date/role identity changed')
+    validate_snapshot(visual, hashes=True)
+    validate_snapshot(saved, hashes=True)
+    path = input_path(runner, record, stage)
+    raw = path.read_bytes()
+    if json.loads(raw) != saved:
+        raise InputChanged('Input seal changed during role binding')
+    updated_record = prior | {'configured_role': role}
+    for field in ('camera_binding_status', 'camera_role_binding'):
+        if field in fresh:
+            updated_record[field] = fresh[field]
+    updated = saved | {'recording': updated_record}
+    evidence = {'schema_version': 'visioncortex-input-role-supplement/1',
+                'recording_id': record['recording_id'], 'camera_key': record['camera_key'],
+                'source_signature': record['source_signature'], 'stage': stage,
+                'previous_role': None, 'configured_role': role,
+                'binding_source': fresh.get('camera_role_binding') or {'camera_role_map': record['camera_key']},
+                'previous_binding': binding(saved), 'current_binding': binding(updated) if stage == 'vision' else binding(saved),
+                'model_invoked': False, 'capture_modified': False}
+    if stage == 'vision':
+        evidence['previous_seal_mapping'] = preserve_receipt_bytes(runner, path, raw, 'input-' + stage)
+    else:
+        evidence['original_seal_sha256'] = hashlib.sha256(raw).hexdigest()
+    audit = path.parent / 'RoleBindings' / (digest(evidence) + '.json')
+    if not audit.is_file():
+        durable_json(audit, evidence)
+    elif read_json(audit) != evidence:
+        raise InputChanged('Role binding evidence collision')
+    reference = {'path': audit.relative_to(runner.backend_root).as_posix(),
+                 'size_bytes': audit.stat().st_size, 'sha256': hash_content(audit)}
+    if stage == 'vision':
+        updated['role_binding_evidence'] = reference
+        durable_json(path, updated)
+        return updated
+    return saved
+
+
+def supplement_archive_role(runner, record, saved):
+    """Reverify and supplement only retention metadata; model receipts stay intact."""
+    from .device_day import exclusive
+    path = runner._receipt(runner.layout(record), record, 'retention')
+    with exclusive(runner.runtime_root / 'locks' / f'{record["recording_id"]}.role-binding.lock'):
+        raw = path.read_bytes()
+        if json.loads(raw) != saved:
+            raise InputChanged('Retention changed during role binding')
+        old = saved['recording']
+        if (old.get('configured_role') is not None
+                or record.get('configured_role') not in {'first_person', 'third_person'}
+                or not runner._accepts_receipt(saved, runner._key('retention', old, old))):
+            raise InputChanged('Role supplement cannot accept another retention execution')
+        visual = seal_input(runner, record, 'vision')
+        validate_snapshot(visual, hashes=True)
+        audit_ref = visual.get('role_binding_evidence')
+        if not audit_ref:
+            raise InputChanged('Role supplement has no preserved original binding')
+        audit_path = safe_child(runner.backend_root, audit_ref['path'])
+        if not verify_content(audit_path, audit_ref):
+            raise InputChanged('Role binding audit failed verification')
+        audit = read_json(audit_path)
+        if (audit.get('previous_binding') != saved['input_bindings']['vision']
+                or audit.get('current_binding') != binding(visual)):
+            raise InputChanged('Role supplement does not bind the original archive')
+        layout = runner.layout(record)
+        if not all(verify_content(safe_child(layout.root, source['retained']['path']), source['retained'])
+                   for source in saved['sources']):
+            raise InputChanged('Archived originals failed role binding verification')
+        updated_record = old | {'configured_role': record['configured_role']}
+        for name in ('camera_binding_status', 'camera_role_binding'):
+            if name in visual['recording']:
+                updated_record[name] = visual['recording'][name]
+        mapping = preserve_receipt_bytes(runner, path, raw, 'retention')
+        updated = saved | {'recording': updated_record,
+            'key': runner._key('retention', updated_record, updated_record),
+            'input_bindings': saved['input_bindings'] | {'vision': binding(visual)},
+            'role_binding_supplement': {'evidence': audit_ref, 'previous_receipt_mapping': mapping,
+                                      'verified_at': time.time(), 'model_invoked': False, 'capture_modified': False}}
+        if path.read_bytes() != raw:
+            raise InputChanged('Retention changed during role binding')
+        durable_json(path, updated)
+        return updated
+
+
+def verified_stt_archive(runner, record, seal, *, fresh=None):
+    """Read a prior exact audio archive after an external source has expired.
+
+    Missing recorder-native originals have no separate retained copy and still
+    fail closed. Existing source bytes and the full retained generation must
+    remain unchanged; this port never creates or repairs an original path.
+    """
+    sources = seal.get('sources') or []
+    if not sources or all(Path(s['original_path']).exists() for s in sources):
+        return None
+    if (seal.get('status') != 'ready' or seal.get('stage') != 'input-stt'
+            or seal.get('recording_id') != record['recording_id']
+            or seal.get('audio', {}).get('status') != 'provided'
+            or seal.get('source_signature') != record.get('audio', {}).get('source_signature')
+            or not same_stage_source(seal.get('recording') or {}, record, 'stt')):
+        raise InputChanged('Expired audio does not match its original independent seal')
+    if fresh is None:
+        from .input_availability import configured_record
+        from .nas_recordings import _inspect
+        fresh = configured_record(runner.config, _inspect(
+            Path(runner.config['collection_ingest']['source_root']), Path(record['video_path']), time.time(),
+            runner.config['collection_ingest'].get('settle_seconds', 120),
+            bool(runner.config['collection_ingest'].get('discover_plain_video_csv', False))))
+    capture_fields = ('recording_id', 'camera_key', 'recording_session_id', 'source_signature',
+                      'recording_start_us', 'recording_end_us', 'video_path', 'frames_path')
+    if (not record.get('recording_session_id')
+            or any(fresh.get(k) != record.get(k) for k in capture_fields)):
+        raise InputChanged('Expired audio capture identity no longer matches the admitted source')
+    layout = runner.layout(record)
+    path = runner._receipt(layout, record, 'retention')
+    if not path.is_file():
+        return None
+    original_receipt = path.read_bytes()
+    retained = json.loads(original_receipt)
+    prior = retained.get('recording') or {}
+    if (retained.get('status') != 'completed' or retained.get('stage') != 'retention'
+            or retained.get('recording_id') != record['recording_id']
+            or retained.get('input_binding_version') != 1
+            or any(prior.get(k) != record.get(k) for k in capture_fields)
+            or not same_stage_source(prior, record, 'stt')
+            or retained.get('input_bindings', {}).get('stt') != binding(seal)):
+        raise InputChanged('Completed archive does not bind the expired independent audio')
+    verified = runner._load(path, runner._key('retention', prior, prior), layout)
+    if verified is None or verified != retained:
+        raise InputChanged('Expired audio archive execution or artifacts failed verification')
+    archived_sources = {digest(s['retained']): s for s in verified.get('sources', [])}
+    for source in sources:
+        archived = archived_sources.get(digest(source['retained']))
+        if (not archived or any(archived.get(k) != source.get(k)
+                              for k in ('kind', 'sha256', 'size_bytes', 'original_path', 'resolved_path', 'identity'))):
+            raise InputChanged('Expired audio archive source mapping changed')
+        original = Path(source['original_path'])
+        if original.exists() or original.is_symlink():
+            validate_snapshot({'sources': [source]}, hashes=True)
+        if not verify_content(safe_child(layout.root, source['retained']['path']), source['retained']):
+            raise InputChanged('Expired audio retained bytes failed verification')
+    if path.read_bytes() != original_receipt:
+        raise InputChanged('Expired audio archive changed during verification')
+    return verified
+
+
+def independent_transcript_span(value):
+    """A fixed public interval, derived only by verified input owners."""
+    marker = value.get('independent_audio_identity')
+    if not marker:
+        return None  # Historical seals retain their original public naming.
+    record = value.get('stt_recording') or value.get('recording') or {}
+    audio = value.get('audio') or {}
+    start, end = marker.get('start_us'), marker.get('end_us')
+    if (marker.get('schema_version') != 'visioncortex-independent-recorder-audio/1'
+            or not marker.get('recording_session_id')
+            or any(marker.get(k) != record.get(k) for k in
+                   ('recording_id', 'camera_key', 'recording_session_id'))
+            or type(start) is not int or type(end) is not int or not 0 < start < end
+            or audio.get('status') != 'provided'
+            or (start, end) != (audio.get('start_us'), audio.get('end_us'))
+            or marker.get('audio_source_signature') != audio.get('source_signature')):
+        raise InputChanged('Independent transcript interval does not bind the sealed audio clock')
+    return {'schema_version': 'visioncortex-sealed-audio-span/1',
+            'recording_id': record['recording_id'], 'start_us': start, 'end_us': end,
+            'audio_source_signature': marker['audio_source_signature'],
+            'audio_identity_sha256': digest(marker), 'time_basis': 'sealed_recorder_audio'}
+
+
 def seal_input(runner, record, stage):
     """Video and audio seals are independent; supplied hashes never confer trust."""
     from .device_day import exclusive
@@ -122,26 +362,48 @@ def seal_input(runner, record, stage):
     layout = runner.layout(record)
     path = input_path(runner, record, stage)
     with exclusive(runner.runtime_root / 'locks' / f'{record["recording_id"]}.input-{stage}.lock'):
+        independent = stage == 'stt' and (record.get('audio') or {}).get('status') == 'provided'
+        root = Path(runner.config['collection_ingest']['source_root'])
+        original = Path(record['video_path'])
+        if original.is_symlink() or not original.resolve().is_relative_to(root.resolve()):
+            raise InputChanged('Capture input escapes configured source root')
+        fresh = None
+        if independent:
+            from .input_availability import configured_record
+            fresh = configured_record(runner.config, _inspect(root, original, time.time(),
+                runner.config['collection_ingest'].get('settle_seconds', 120),
+                bool(runner.config['collection_ingest'].get('discover_plain_video_csv', False))))
+            if fresh.get('stt_processable') is not True or not same_stage_source(record, fresh, 'stt'):
+                if path.is_file():
+                    saved = read_json(path)
+                    if verified_stt_archive(runner, record, saved, fresh=fresh) is not None:
+                        return saved
+                raise InputChanged('Independent audio readiness, identity or clock changed')
         if path.is_file():
             saved = read_json(path)
             expected = (record.get('audio', {}).get('source_signature') if stage == 'stt' else record['source_signature'])
             if saved['source_signature'] == expected:
+                if independent:
+                    if any(saved['recording'].get(k) != record.get(k) for k in (
+                            'recording_id', 'camera_key', 'recording_session_id')):
+                        raise InputChanged('Independent audio capture identity changed')
+                    validate_snapshot(saved, hashes=True)
+                    return saved  # Video/role/time-window updates do not relabel old STT evidence.
                 if any(saved['recording'].get(k) != record.get(k) for k in (
                         'recording_id', 'camera_key', 'configured_role', 'recording_start_us', 'recording_end_us')):
-                    raise InputChanged('Sealed device/date/role identity changed')
+                    return role_supplement(runner, record, saved, stage)
                 return saved
             # Video version replacement is never silently accepted. Audio may
             # arrive later; preserve its previous independent no-audio receipt.
             if stage != 'stt' or saved.get('audio', {}).get('status') == 'provided':
                 raise InputChanged('Discovery now describes a different sealed input')
             durable_json(path.parent / 'history' / f'input-{stage}-{digest(saved)}.json', saved)
-        root = Path(runner.config['collection_ingest']['source_root'])
-        original = Path(record['video_path'])
-        if original.is_symlink() or not original.resolve().is_relative_to(root.resolve()):
-            raise InputChanged('Capture input escapes configured source root')
-        fresh = _inspect(root, original, time.time(), runner.config['collection_ingest'].get('settle_seconds', 120),
-                         bool(runner.config['collection_ingest'].get('discover_plain_video_csv', False)))
-        if (not fresh.get('processable', fresh.get('available')) or fresh['source_signature'] != record['source_signature']
+        if fresh is None:
+            from .input_availability import configured_record
+            fresh = configured_record(runner.config, _inspect(root, original, time.time(),
+                runner.config['collection_ingest'].get('settle_seconds', 120),
+                bool(runner.config['collection_ingest'].get('discover_plain_video_csv', False))))
+        if not independent and (not fresh.get('processable', fresh.get('available')) or fresh['source_signature'] != record['source_signature']
                 or fresh['camera_key'] != record['camera_key']
                 or fresh['recording_start_us'] != record['recording_start_us']
                 or fresh['recording_end_us'] != record['recording_end_us']):
@@ -161,6 +423,14 @@ def seal_input(runner, record, stage):
             files = [('audio_' + s['kind'], Path(s['path'])) for s in audio.get('files', [])]
             if not any(kind == 'audio_audio' for kind, _ in files):
                 files.append(('video', original))  # Embedded audio remains supported.
+        publication_specs = None
+        if independent:
+            publication = next((Path(row['path']) for row in audio['files'] if row['kind'] == 'ready'), None)
+            published = read_json(publication) if publication else {}
+            if 'files' in published:
+                publication_specs = published['files']
+                if not isinstance(publication_specs, dict):
+                    raise InputChanged('Audio producer publication file ledger is invalid')
         sources = []
         for kind, source in files:
             if source.is_symlink() or not source.resolve().is_relative_to(original.parent.resolve()):
@@ -179,6 +449,11 @@ def seal_input(runner, record, stage):
                     checksum = hash_content(source)
             if before != identity(source):
                 raise InputChanged('Capture changed while sealing content')
+            if publication_specs is not None and kind.startswith('audio_') and kind != 'audio_ready':
+                expected_file = publication_specs.get(source.name)
+                if (not isinstance(expected_file, dict) or expected_file.get('sha256') != checksum
+                        or expected_file.get('size', expected_file.get('size_bytes')) != before[2]):
+                    raise InputChanged('Audio bytes differ from the producer publication receipt')
             remember_content(source, checksum)
             reference = {'path': layout.relative(layout.source_path(record, kind, source)),
                          'size_bytes': before[2], 'sha256': checksum}
@@ -188,6 +463,8 @@ def seal_input(runner, record, stage):
                 'recording': record, 'recording_id': record['recording_id'], 'sources': sources,
                 'source_signature': audio.get('source_signature') if stage == 'stt' else record['source_signature'],
                 'audio': {k: v for k, v in audio.items() if k != 'files'}, 'sealed_at': time.time()}
+        if independent:
+            seal['independent_audio_identity'] = fresh['stt_identity'] | {'camera_key': record['camera_key']}
         validate_snapshot(seal)
         durable_json(path, seal)
         return seal
@@ -195,6 +472,10 @@ def seal_input(runner, record, stage):
 
 def binding(seal):
     record = seal['recording']
+    if seal.get('independent_audio_identity'):
+        return digest({'independent_audio_identity': seal['independent_audio_identity'],
+            'sources': [{'kind': s['kind'], 'sha256': s['sha256'], 'size_bytes': s['size_bytes']}
+                        for s in seal['sources']]})
     return digest({'recording': {k: record.get(k) for k in ('recording_id', 'camera_key', 'configured_role',
                    'recording_start_us', 'recording_end_us', 'recording_session_id')},
                    'sources': [{'kind': s['kind'], 'sha256': s['sha256'], 'size_bytes': s['size_bytes']}
@@ -219,7 +500,8 @@ def processing_input(layout, seal, archived=None):
     audio = dict(seal['audio'])
     audio['artifacts'] = [s['retained'] | {'kind': s['kind']} for s in sources if s['kind'].startswith('audio_')]
     return {'input_binding_version': 1, 'recording': seal['recording'], 'sources': sources, 'audio': audio,
-            'artifacts': [], 'input_binding': binding(seal)}
+            'artifacts': [], 'input_binding': binding(seal),
+            **({'independent_audio_identity': seal['independent_audio_identity']} if seal.get('independent_audio_identity') else {})}
 
 
 def _verify_owned_copy(path, reference):
@@ -259,6 +541,8 @@ def copy_sealed(config, source, target, *, urgent=False):
             if not verify_content(target, reference):
                 raise InputChanged('Immutable MetaVideo destination collision')
         return
+    if (config.get('device_day') or {}).get('raw_originals_read_only', False):
+        raise InputChanged('Recorder-owned original destination is missing; creation is disabled')
     if (identity(original) != source['identity']
             or str(original.resolve()) != source.get('resolved_path', str(original.resolve()))):
         raise InputChanged('Capture input changed before archival copy')
@@ -303,7 +587,11 @@ def canonical_stt(value):
     audio_sources = [s['retained'] for s in value['sources'] if s['kind'].startswith('audio_')]
     if not any(s['kind'] == 'audio_audio' for s in value['sources']):
         audio_sources += [s['retained'] for s in value['sources'] if s['kind'] == 'video']
-    return {'recording': {k: value['recording'].get(k) for k in ('recording_id', 'camera_key',
+    if value.get('independent_audio_identity'):
+        return {'independent_audio_identity': value['independent_audio_identity'],
+                'audio': value.get('audio'), 'sources': audio_sources}
+    record = value.get('stt_recording') or value['recording']
+    return {'recording': {k: record.get(k) for k in ('recording_id', 'camera_key',
              'recording_start_us', 'recording_end_us')}, 'audio': value.get('audio'),
             'sources': audio_sources}
 

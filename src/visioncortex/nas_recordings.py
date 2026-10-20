@@ -98,6 +98,71 @@ def _plain_clock_bounds(clock: Path) -> tuple[int, int]:
     return (first[0], last[-1]) if first and last else (0, 0)
 
 
+def _independent_stt(record, video, metadata, ready, now, settle):
+    """Audio readiness has its own identity/clock/producer completion gate."""
+    from .device_day_contract import digest
+    result = {'stt_processable': False, 'stt_readiness_reasons': []}
+    reasons = result['stt_readiness_reasons']
+    audio = record['audio']
+    if audio.get('status') != 'provided':
+        reasons.append('independent_audio_not_ready')
+        return result
+    try:
+        paths = {row['kind']: Path(row['path']) for row in audio.get('files') or []}
+        if not all(kind in paths for kind in ('audio', 'metadata', 'ready', 'timing')):
+            raise ValueError('independent_audio_files_incomplete')
+        audio_meta, audio_ready = _json(paths['metadata']), _json(paths['ready'])
+        session = record.get('recording_session_id')
+        if not session or any(row.get('recording_session_id') != session
+                              for row in (metadata, ready, audio_meta, audio_ready)):
+            raise ValueError('independent_audio_session_unverified')
+        if any(row.get('camera_key') and row['camera_key'] != record['camera_key']
+               for row in (metadata, ready, audio_meta, audio_ready)):
+            raise ValueError('independent_audio_camera_mismatch')
+        prefix = video.name[:-len('rgb.mp4')] if video.name.endswith('rgb.mp4') else None
+        identity_paths = ([video.with_name(prefix + suffix) for suffix in ('meta.json', 'recording_ready.json')]
+                          if prefix is not None else [video.with_suffix('.json'), video.with_suffix('.ready.json')])
+        if any(not path.is_file() or path.is_symlink() or now - path.stat().st_mtime < settle for path in identity_paths):
+            raise ValueError('capture_identity_not_stable')
+        if audio_ready.get('ready') is not True or (audio_meta | audio_ready).get('audio_valid') is not True:
+            raise ValueError('independent_audio_completion_unverified')
+        start, end = audio.get('start_us'), audio.get('end_us')
+        if type(start) is not int or type(end) is not int or not 0 < start < end:
+            raise ValueError('independent_audio_time_unverified')
+        if not record.get('recording_start_us') or record['recording_end_us'] <= record['recording_start_us']:
+            raise ValueError('capture_time_identity_unverified')
+        unsafe = [issue for issue in record['issues'] if issue not in {
+            '视频尚未写入', '缺少原始视频', '缺少配对的时间戳 CSV', 'CSV 缺少采集时间或视频帧序号',
+            '缺少完整的采集时间范围', '等待采集完成标记', '采集程序报告数据不完整', '等待文件写入稳定'}]
+        if unsafe or audio.get('association_issues'):
+            raise ValueError('capture_identity_or_audio_association_mismatch')
+        timing = paths['timing']
+        if timing.stat().st_size > 2*1024*1024:
+            raise ValueError('independent_audio_clock_exceeds_bound')
+        previous, count = None, 0
+        with timing.open(encoding='utf-8-sig', newline='') as handle:
+            rows = csv.DictReader(handle)
+            if 'global_timestamp_us' not in (rows.fieldnames or []):
+                raise ValueError('independent_audio_clock_header_invalid')
+            for row in rows:
+                stamp = int(row['global_timestamp_us'])
+                if not start <= stamp <= end or previous is not None and stamp < previous:
+                    raise ValueError('independent_audio_clock_time_mismatch')
+                if previous is None and stamp != start:
+                    raise ValueError('independent_audio_clock_origin_mismatch')
+                previous, count = stamp, count + 1
+        if not count:
+            raise ValueError('independent_audio_clock_empty')
+        identity = {'schema_version': 'visioncortex-independent-recorder-audio/1',
+            'recording_id': record['recording_id'], 'camera_key': record['camera_key'],
+            'recording_session_id': session, 'start_us': start, 'end_us': end,
+            'audio_source_signature': audio['source_signature']}
+        result.update(stt_processable=True, stt_identity=identity, stt_source_signature=digest(identity))
+    except (OSError, ValueError, KeyError, TypeError, OverflowError) as exc:
+        reasons.append(str(exc)[:200] or type(exc).__name__)
+    return result
+
+
 def _inspect(root: Path, video: Path, now: float, settle: float, allow_plain: bool = False) -> dict[str, Any]:
     from .device_day_audio import recorder_audio
     relative = video.relative_to(root).as_posix()
@@ -107,6 +172,7 @@ def _inspect(root: Path, video: Path, now: float, settle: float, allow_plain: bo
     metadata = _json(meta_path) if meta_path.is_file() and not meta_path.is_symlink() else {}
     ready = _json(ready_path) if ready_path.is_file() and not ready_path.is_symlink() else {}
     merged = metadata | ready
+    audio = recorder_audio(video, metadata, ready, now, settle)
     plain = allow_plain and not meta_path.exists() and not ready_path.exists()
     issues: list[str] = []
     if merged.get("rgb_file") and _child(video.parent, merged["rgb_file"]) != video:
@@ -124,8 +190,10 @@ def _inspect(root: Path, video: Path, now: float, settle: float, allow_plain: bo
         if path.is_file() and not path.is_symlink():
             stat = path.stat()
             snapshots.append((path.relative_to(root).as_posix(), stat.st_size, stat.st_mtime_ns))
-    video_stat = video.stat()
-    if video_stat.st_size == 0:
+    video_stat = video.stat() if video.is_file() else None
+    if video_stat is None:
+        issues.append('缺少原始视频')
+    elif video_stat.st_size == 0:
         issues.append("视频尚未写入")
     if not clock.is_file():
         issues.append("缺少配对的时间戳 CSV")
@@ -152,11 +220,14 @@ def _inspect(root: Path, video: Path, now: float, settle: float, allow_plain: bo
         start, end = _plain_clock_bounds(clock)
     if not start or end <= start:
         issues.append("缺少完整的采集时间范围")
+        if (type(audio.get('start_us')) is int and type(audio.get('end_us')) is int
+                and 0 < audio['start_us'] < audio['end_us']):
+            start, end = audio['start_us'], audio['end_us']
     if not plain and (not ready or ready.get("ready") is not True or metadata.get("closed") is not True or metadata.get("frames_publish_state") != "finalized"):
         issues.append("等待采集完成标记")
     if ready and (ready.get("recording_complete") is not True or ready.get("recording_quality_status") != "complete"):
         issues.append("采集程序报告数据不完整")
-    latest = max(item[2] for item in snapshots) / 1e9
+    latest = max((item[2] for item in snapshots), default=round(now*1e9)) / 1e9
     if now - latest < settle:
         issues.append("等待文件写入稳定")
     # This capture format embeds a physical camera identifier, not a view role.
@@ -176,16 +247,19 @@ def _inspect(root: Path, video: Path, now: float, settle: float, allow_plain: bo
         wrong_camera = any(sidecar.get('camera_key') and str(sidecar['camera_key']) != location['camera_key']
                            for sidecar in (metadata, ready))
         if wrong_camera or (start and archive_name(camera_key, start) != location['archive']):
-            issues.append('MetaData 目录与采集设备或日期不一致')
+            issues.append(f"{location['root'].name} 目录与采集设备或日期不一致")
         input_layout = {'input_layout': METADATA_LAYOUT}
-    return input_layout | {
+        if location['root'].name != 'MetaData':
+            # Keep existing MetaData observation/receipt identities unchanged.
+            input_layout['source_raw_directory'] = location['root'].name
+    result = input_layout | {
         "recording_id": hashlib.sha256(relative.encode()).hexdigest()[:24],
         "camera_key": camera_key,
         "camera_identity_source": "device_day_metadata" if location else "capture_filename" if capture_name else "relative_path" if plain else "recorder_metadata" if merged.get("camera_key") else "directory_layout",
         "relative_path": relative,
         "video_path": str(video),
         "frames_path": str(clock),
-        "size_bytes": video_stat.st_size,
+        "size_bytes": video_stat.st_size if video_stat else None,
         "recording_session_id": str(merged.get("recording_session_id") or ""),
         "recording_start_us": start,
         "recording_end_us": end,
@@ -210,9 +284,10 @@ def _inspect(root: Path, video: Path, now: float, settle: float, allow_plain: bo
             "scope": "recorder_reported_not_analysis_accuracy",
         },
         "source_signature": hashlib.sha256(json.dumps(snapshots).encode()).hexdigest(),
-        "audio": recorder_audio(video, metadata, ready, now, settle),
+        "audio": audio,
         "updated_at": datetime.fromtimestamp(latest, timezone.utc).isoformat(),
     }
+    return result | _independent_stt(result, video, metadata, ready, now, settle)
 
 
 def _camera_directories(root: Path, settings: dict[str, Any], allow_plain: bool) -> list[Path]:
@@ -418,6 +493,7 @@ def scan_recordings(config: dict[str, Any], *, on_record=None, skip_folders=()) 
     allow_plain = bool(settings.get("discover_plain_video_csv", False))
     # Bound discovery and exclude archives/caches at every depth.
     from .capture_layout import discovery_mode, metadata_directories
+    from .device_day_contract import RAW_DIRECTORIES
     archive_root = Path(config['storage']['archive_root']).resolve()
     # Derived output siblings remain excluded even when source == archive.
     cameras = [p for p in _camera_directories(root, settings, allow_plain)
@@ -428,7 +504,7 @@ def scan_recordings(config: dict[str, Any], *, on_record=None, skip_folders=()) 
         if not camera.is_dir() or (camera != root and camera.is_symlink()) or camera.resolve() in excluded:
             continue
         monitored_camera_directories.append(
-            camera.parent.name[11:] if camera.name == 'MetaData' else
+            camera.parent.name[11:] if camera.name in RAW_DIRECTORIES else
             "." if camera == root else camera.relative_to(root).as_posix()
         )
         if str(camera) in skip_folders:
@@ -441,7 +517,7 @@ def scan_recordings(config: dict[str, Any], *, on_record=None, skip_folders=()) 
         for folder, directories, files in os.walk(camera, followlinks=False, onerror=scan_error):
             current = Path(folder)
             depth = len(current.relative_to(camera).parts)
-            max_depth = min(8, int(settings.get("max_scan_depth", 6))) if allow_plain or camera.name == 'MetaData' else 2
+            max_depth = min(8, int(settings.get("max_scan_depth", 6))) if allow_plain or camera.name in RAW_DIRECTORIES else 2
             directories[:] = sorted(
                 (
                     name
@@ -460,7 +536,21 @@ def scan_recordings(config: dict[str, Any], *, on_record=None, skip_folders=()) 
             if visited > int(settings.get("max_scan_directories", 20000)):
                 truncated = True
                 break
-            for name in sorted(files):
+            candidates = set(files)
+            if not allow_plain:
+                # Reuse the same bounded metadata walk for independently
+                # ready recorder audio; no parallel scanner or second queue.
+                for sidecar_name in files:
+                    if sidecar_name.endswith('meta.json') and not sidecar_name.endswith('audio_meta.json'):
+                        sidecar = current/sidecar_name
+                        try:
+                            info = _json(sidecar) if not sidecar.is_symlink() else {}
+                            declared = info.get('rgb_file')
+                            if isinstance(declared, str) and _child(current, declared).parent == current:
+                                candidates.add(declared)
+                        except (OSError, ValueError, TypeError):
+                            continue
+            for name in sorted(candidates):
                 if not name.lower().endswith((".mp4", ".mov", ".mkv", ".avi", ".webm")) or name.startswith("."):
                     continue
                 if not allow_plain and not name.lower().endswith("rgb.mp4"):
@@ -470,6 +560,15 @@ def scan_recordings(config: dict[str, Any], *, on_record=None, skip_folders=()) 
                 path = current / name
                 if path.is_symlink():
                     continue
+                if camera.name == 'MetaVideo':
+                    prefix = path.name[:-len('rgb.mp4')] if path.name.endswith('rgb.mp4') else None
+                    native_sidecars = ([path.with_name(prefix + suffix) for suffix in ('meta.json', 'recording_ready.json')]
+                                       if prefix is not None else [path.with_suffix('.json'), path.with_suffix('.ready.json')])
+                    if not any(sidecar.is_file() and not sidecar.is_symlink() for sidecar in native_sidecars):
+                        # Historical retained videos also live in MetaVideo.
+                        # Their presence alone cannot establish new capture
+                        # identity, readiness, clocks or a producer handoff.
+                        continue
                 try:
                     item = _inspect(
                         root,

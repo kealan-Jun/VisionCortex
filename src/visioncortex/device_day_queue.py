@@ -66,9 +66,26 @@ class DeviceDayQueue:
     def enqueue(self, recording, revision):
         observed = time.time()
         payload = json.dumps(recording, ensure_ascii=False)
-        status = "queued" if recording.get("configured_role") in {"first_person", "third_person"} else "needs_camera_role"
+        role_independent = self.path.stem in {'queue-retention', 'queue-stt'}
+        status = ("queued" if role_independent or recording.get("configured_role") in {"first_person", "third_person"}
+                  else "needs_camera_role")
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
+            if self.requires_expired_reconciliation:
+                previous = db.execute('SELECT * FROM recordings WHERE recording_id=?',
+                                      (recording['recording_id'],)).fetchone()
+                if previous:
+                    old_record = json.loads(previous['payload'])
+                    same_source = old_record.get('source_signature') == recording.get('source_signature')
+                    if self.path.stem == 'queue-stt':
+                        from .device_day_inputs import same_stage_source
+                        same_source = same_stage_source(old_record, recording, 'stt')
+                    unresolved = (previous['status'] == 'running' and (previous['lease_until'] or 0) < observed
+                        or previous['status'] == 'blocked' and previous['blocked_reason'] in {'result_unknown', 'submitted_unknown'})
+                    if same_source and unresolved:
+                        # Recipe/config changes cannot erase an uncertain paid
+                        # attempt. Reconciliation owns its old lease and budget.
+                        return False
             old = db.execute("SELECT * FROM recordings WHERE recording_id=? AND "
                              "(json_extract(payload,'$.source_signature') IS NOT ? OR revision!=?) AND "
                              "(status!='running' OR COALESCE(lease_until,0)<?)",
@@ -110,7 +127,7 @@ class DeviceDayQueue:
             return [json.loads(row["payload"]) for row in db.execute(
                 "SELECT payload FROM recordings WHERE status != 'completed'")]
 
-    def grant_admission(self, recording, *, cohort='live', reason='recent_ready', at=None):
+    def grant_admission(self, recording, *, cohort='live', reason='recent_ready', at=None, expected=None):
         """Grant only after readiness checks; old rows remain unadmitted by migration."""
         if cohort not in {'live', 'current_recovery', 'historical_backfill'} or not reason:
             raise ValueError('Invalid processing cohort or admission reason')
@@ -120,6 +137,11 @@ class DeviceDayQueue:
         current = time.time() if at is None else at
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
+            if expected is not None:
+                current_row = db.execute('SELECT * FROM recordings WHERE recording_id=?',
+                                         (recording['recording_id'],)).fetchone()
+                if current_row is None or dict(current_row) != expected:
+                    return False
             previous = db.execute('SELECT processing_cohort,admission_signature FROM recordings WHERE recording_id=?',
                                   (recording['recording_id'],)).fetchone()
             if (previous and previous['processing_cohort'] == 'historical_backfill'
@@ -188,6 +210,55 @@ class DeviceDayQueue:
                  recording['recording_id'], previous_revision),
             ).rowcount == 1
 
+    @property
+    def requires_expired_reconciliation(self):
+        return self.path.stem in {'queue-understanding', 'queue-stt', 'queue-report'}
+
+    def expired(self, *, limit=32):
+        """Bounded local snapshots for receipt reconciliation, never claims."""
+        if type(limit) is not int or not 1 <= limit <= 128:
+            raise ValueError('Expired lease recovery must be bounded')
+        with self.connect() as db:
+            return [dict(row) for row in db.execute("SELECT * FROM recordings WHERE status='running' "
+                "AND COALESCE(lease_until,0)<? ORDER BY lease_until,recording_id LIMIT ?", (time.time(), limit))]
+
+    def recover_expired(self, expected, result, proof):
+        """CAS one expired lease; retain its exact prior row and attempt count."""
+        from .device_day_contract import digest
+        status = result.get('status')
+        record = json.loads(expected['payload'])
+        if (status not in {'completed', 'result_unknown'} or result.get('recording_id') != expected['recording_id']
+                or proof.get('queue_revision') != expected['revision']
+                or proof.get('source_signature') != record.get('source_signature')
+                or proof.get('model_invoked') is not False
+                or status == 'completed' and (proof.get('status') != 'verified'
+                    or not proof.get('receipt_sha256') or not proof.get('expected_execution_key'))):
+            raise ValueError('Expired lease recovery requires exact-source receipt evidence')
+        current = time.time()
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT * FROM recordings WHERE recording_id=?', (expected['recording_id'],)).fetchone()
+            if row is None or dict(row) != expected or row['status'] != 'running' or (row['lease_until'] or 0) >= current:
+                return False
+            db.execute('CREATE TABLE IF NOT EXISTS lease_recoveries('
+                       'recovery_id TEXT PRIMARY KEY,recording_id TEXT,revision TEXT,previous_row TEXT,'
+                       'result TEXT,proof TEXT,recovered_at REAL)')
+            recovery = digest(expected)
+            db.execute('INSERT INTO lease_recoveries VALUES(?,?,?,?,?,?,?)',
+                       (recovery, row['recording_id'], row['revision'], json.dumps(expected),
+                        json.dumps(result), json.dumps(proof), current))
+            completed = status == 'completed'
+            published = result | {'lease_recovery': recovery}
+            db.execute("UPDATE recordings SET status=?,blocked_reason=?,result=?,completed_at=?,"
+                       "lease_owner=NULL,lease_until=NULL,updated_at=? WHERE recording_id=?",
+                       ('completed' if completed else 'blocked', None if completed else 'result_unknown',
+                        json.dumps(published), current if completed else row['completed_at'], current, row['recording_id']))
+            from .task_events import append
+            append(db, row['recording_id'], 'expired_lease_recovered', revision=row['revision'], attempt=row['attempts'],
+                   data={'recovery_id': recovery, 'outcome': status, 'proof_sha256': digest(proof),
+                         'previous_lease_owner': row['lease_owner'], 'model_invoked': False})
+        return True
+
     def claim(self, owner, *, retry=False, date=None, exclude=(), allowed=None, camera_serial=False,
               camera_limit=1, max_attempts=None, latest_over_camera=False):
         if isinstance(camera_limit, bool) or not isinstance(camera_limit, int) or camera_limit < 1:
@@ -200,11 +271,12 @@ class DeviceDayQueue:
             # Filter and order in SQLite before loading one payload. The old
             # implementation decoded every pending JSON for every camera slot.
             # json_each keeps large allowlists below SQLite's parameter limit.
-            conditions = ["(r.status='queued' OR (r.status='running' AND COALESCE(r.lease_until,0)<?)"
+            expired = "" if self.requires_expired_reconciliation else " OR (r.status='running' AND COALESCE(r.lease_until,0)<?)"
+            conditions = ["(r.status='queued'" + expired
                           + (" OR (r.status='failed' AND (? IS NULL OR r.attempts<MAX(?,r.retry_limit))))" if retry else ")")]
             conditions.append("r.input_status='ready'")
             conditions.append('r.blocked_reason IS NULL')
-            parameters = [current]
+            parameters = [] if self.requires_expired_reconciliation else [current]
             if retry:
                 parameters.extend([max_attempts, max_attempts])
             conditions.append("COALESCE(json_extract(r.result,'$.retry_at'),0)<=?")
@@ -440,6 +512,8 @@ class DeviceDayQueue:
             row = db.execute('SELECT * FROM recordings WHERE recording_id=? AND revision=?',
                              (recording_id, revision)).fetchone()
             expired = bool(row and row['status'] == 'running' and (row['lease_until'] or 0) < time.time())
+            if expired and self.requires_expired_reconciliation:
+                return False
             if not row or row['status'] not in {'queued', 'failed'} and not expired:
                 return False
             previous = json.loads(row['result'] or '{}')

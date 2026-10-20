@@ -11,6 +11,34 @@ from .device_day_contract import (
 )
 
 
+def _kept_clip_folders(layout, vision, record):
+    """Candidate receipts and canonical exact intervals share one namespace."""
+    parents = {s['segment_id']: s for s in vision.get('segments', [])}
+    keep = {Path(s['json_path']).parent.as_posix() for s in parents.values()}
+    if not layout.index.is_file():
+        return keep
+    if layout.index.stat().st_size > 8*1024*1024:
+        # Optional legacy tidying is never worth hydrating a large canonical
+        # day or risking a child's reference. Defer every move for this record.
+        return None
+    index = read_json(layout.index)
+    from .device_day_content_paths import clip_name
+    fields = ('recording_id', 'source_ref', 'start_ms', 'end_ms', 'start_us', 'end_us')
+    for candidate in index.get('segments', []):
+        parent = parents.get(candidate.get('segment_id'))
+        if (not parent or candidate.get('recording_id') != record['recording_id']
+                or any(candidate.get(key) != parent.get(key) for key in fields)):
+            continue
+        for child in candidate.get('retention_intervals') or []:
+            if (child.get('candidate_segment_id') != candidate['segment_id']
+                    or child.get('recording_id') != record['recording_id']
+                    or child.get('source_ref') != candidate.get('source_ref')):
+                continue
+            # This protects paths, never grants completion or accepts bytes.
+            keep.add('ProcessedClips/Clips/' + clip_name(child))
+    return keep
+
+
 def reconcile_outputs(runner):
     relocated = []
     if not runner.archive_root.is_dir():
@@ -46,7 +74,9 @@ def reconcile_outputs(runner):
                         # artifact. Keep the preceding visible result until
                         # its successor has successfully sealed its outputs.
                         continue
-                    keep = {Path(s["json_path"]).parent.as_posix() for s in vision.get("segments", [])} if current else set()
+                    keep = _kept_clip_folders(layout, vision, record)
+                    if keep is None:
+                        continue
                     for folder in sorted((layout.processed / "Clips").glob("*")):
                         if not folder.is_dir() or folder.is_symlink() or layout.relative(folder) in keep:
                             continue
@@ -55,6 +85,13 @@ def reconcile_outputs(runner):
                             continue
                         segment = read_json(metadata[0])
                         if segment.get('scope') == 'aligned_experiment':
+                            continue
+                        if (segment.get('record_scope') == 'retention_interval'
+                                or segment.get('schema_version') == 'visioncortex-retained-interval/1'
+                                or segment.get('candidate_segment_id') not in {None, segment.get('segment_id')}):
+                            # A child can become durable before its canonical
+                            # replay. Keep it, including older child history;
+                            # reconciling CV candidates must never relocate it.
                             continue
                         if segment.get("recording_id") != record["recording_id"]:
                             continue

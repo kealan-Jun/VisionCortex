@@ -26,6 +26,12 @@ def publish_one(runner, record, *, queue_token=None):
         seal_path = runner._receipt(layout, record, 'input-stt')
         if seal_path.is_file():
             seal = read_json(seal_path)
+            if seal.get('independent_audio_identity'):
+                from .device_day_inplace import verified_stt_projection
+                projection = verified_stt_projection(runner, record)
+                if projection is None:
+                    raise ValueError('Independent speech publication has no verified sealed projection')
+                return publish_transcript(runner.config, layout.name, projection)
             saved = seal['recording']
             fields = ('recording_id', 'camera_key', 'recording_start_us', 'recording_end_us', 'configured_role')
             if (seal.get('status') != 'ready' or seal.get('recording_id') != record['recording_id']

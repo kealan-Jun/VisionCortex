@@ -1,5 +1,6 @@
 """Persist unfinished publication before modifying receipts; replay without CV."""
 import json
+import sqlite3
 from copy import deepcopy
 from contextlib import ExitStack
 from pathlib import Path
@@ -26,6 +27,25 @@ class PublicationJournal:
                        (record['recording_id'], token, json.dumps(record)))
             db.execute('DELETE FROM retries WHERE id=?', (record['recording_id'],))
         return token
+
+    def ensure_pending(self, record):
+        """Join existing publication work without resetting its token/backoff.
+
+        A file publisher can discover output after a producer crash. It must
+        not replace a different source generation or continually invalidate an
+        in-progress replay's compare-and-swap token.
+        """
+        fields = ('recording_id', 'source_signature', 'camera_key', 'recording_start_us', 'recording_end_us')
+        with connection(self.path) as db:
+            db.execute('BEGIN IMMEDIATE')
+            previous = db.execute('SELECT token,record FROM dirty WHERE id=?', (record['recording_id'],)).fetchone()
+            if previous:
+                saved = json.loads(previous['record'])
+                return previous['token'] if all(saved.get(k) == record.get(k) for k in fields) else None
+            token = uuid.uuid4().hex
+            db.execute('INSERT INTO dirty VALUES(?,?,?)',
+                       (record['recording_id'], token, json.dumps(record)))
+            return token
 
     def complete(self, identifier, token):
         with connection(self.path) as db:
@@ -139,6 +159,15 @@ def reconcile(runner, *, stop=None):
                 for stage in ('all', *STAGES):
                     locks.enter_context(exclusive(runner.runtime_root / 'locks' /
                         f"{record['recording_id']}.{stage}.lock"))
+                inventory = runner.runtime_root/'observed-inventory.sqlite3'
+                if inventory.is_file():
+                    with connection(inventory, readonly=True) as db:
+                        observed = db.execute('SELECT payload FROM observations WHERE id=?',
+                                              (record['recording_id'],)).fetchone()
+                    current = json.loads(observed['payload']) if observed else {}
+                    if (not observed or any(current.get(k) != record.get(k) for k in (
+                            'recording_id', 'source_signature', 'camera_key', 'recording_start_us', 'recording_end_us'))):
+                        raise ValueError('Publication source differs from the current inventory')
                 from .device_day_inplace import active, publish
                 if active(runner, record):
                     revalidate_remounted_seals(runner, record)
@@ -150,7 +179,7 @@ def reconcile(runner, *, stop=None):
                     completed += 1
                 else:
                     journal.defer(record['recording_id'], token)
-        except (OSError, ValueError, KeyError, TypeError) as exc:
+        except (OSError, ValueError, KeyError, TypeError, sqlite3.Error) as exc:
             # One unavailable archive must not block other recoverable days.
             # The unacknowledged item stays pending for a later bounded round.
             if not isinstance(exc, BlockingIOError):

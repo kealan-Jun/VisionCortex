@@ -4,7 +4,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from .device_day_contract import artifact, atomic_json, media_sidecar_name, read_json, safe_child
+from .device_day_contract import artifact, atomic_json, digest, media_sidecar_name, read_json, safe_child
 
 
 def retain_capture_files(runner, record):
@@ -20,11 +20,12 @@ def retain_capture_files(runner, record):
     existing = {s["original_path"]: s["retained"] for s in receipt["sources"]}
     video = next(s["retained"] for s in receipt["sources"] if s["kind"] == "video")
     folder = layout.raw / "Metadata" / Path(video["path"]).stem
+    capture_folder = folder / 'Capture'
     from .capture_layout import METADATA_LAYOUT
     direct = record.get('input_layout') == METADATA_LAYOUT
-    if direct:
+    if direct or layout.read_only_originals:
         # Keep generated catalogs out of the recorder's incoming directory.
-        folder = layout.processed / 'CaptureMetadata' / record['recording_id']
+        folder = layout.processed / '.Evidence' / 'CaptureMetadata' / record['recording_id']
     path = folder / "CaptureFiles.json"
     with exclusive(runner.runtime_root / "locks" / f"{record['recording_id']}.capture-files.lock"):
         files, excluded, pending, destinations = [], [], [], set()
@@ -56,27 +57,41 @@ def retain_capture_files(runner, record):
                     files.append({'original_name': relative.as_posix(), 'original_path': str(source),
                                   'retained': reference})
                     continue
-                destination = folder / "Capture"
+                destination = capture_folder
                 for part in relative.parts:
                     destination /= media_sidecar_name(Path(part))
                 identity = destination.as_posix().casefold()
                 if identity in destinations:
                     raise ValueError("Capture file names collide after PascalCase conversion")
                 destinations.add(identity)
+                if layout.read_only_originals and not destination.is_file():
+                    pending.append({'original_name': relative.as_posix(),
+                                    'reason': 'original_destination_absent_read_only',
+                                    'original_path': str(source)})
+                    continue
                 from .device_day_io import slot
                 with slot(runner.config, copy=True, whole_copy=True), slot(runner.config, copy=True):
-                    copy_verified(source, destination)
+                    copy_verified(source, destination, allow_create=not layout.read_only_originals)
                     reference = artifact(layout.root, destination)
             files.append({"original_name": relative.as_posix(), "original_path": str(source), "retained": reference})
         catalog = {"recording_id": record["recording_id"], "camera_key": record["camera_key"],
                    "archive_date": layout.name[:10], "files": files, "excluded": excluded,
                    "pending": pending, "status": "waiting" if pending else "completed",
                    "capture_sources_changed": False}
+        if direct or layout.read_only_originals:
+            # Late evidence creates an immutable version. Historical artifact
+            # pointers must keep resolving to their original complete bytes.
+            path = folder / digest(catalog) / 'CaptureFiles.json'
+            if path.is_file() and read_json(path) != catalog:
+                raise ValueError('Immutable capture catalog collision')
         if not path.is_file() or read_json(path) != catalog:
             atomic_json(path, catalog)
         reference = artifact(layout.root, path)
         pointer = layout.receipts / record["recording_id"] / "capture-files.json"
         if not pointer.is_file() or read_json(pointer) != reference:
+            if pointer.is_file():
+                previous = read_json(pointer)
+                atomic_json(pointer.parent / 'history' / ('capture-files-' + digest(previous) + '.json'), previous)
             atomic_json(pointer, reference)
         return reference
 

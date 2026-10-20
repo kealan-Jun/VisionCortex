@@ -36,6 +36,30 @@ def test_readable_mode_restores_cursor_and_calls_only_file_index_owner(tmp_path,
     assert calls.count('created') == 1
 
 
+def test_field_archive_discovery_failure_does_not_block_existing_video_publication(tmp_path, monkeypatch):
+    root = tmp_path/'runtime/device-day'
+    record = {'recording_id': 'a', 'camera_key': 'owned_cam01', 'recording_start_us': 1_800_000_000_000_000}
+    observe(root, {'recordings': [record]})
+    calls = []
+    class Publisher:
+        def __init__(self, config):
+            pass
+        def tick(self, *, archives):
+            calls.extend(archives)
+            return {'status': 'completed', 'published': 1}
+    monkeypatch.setattr('visioncortex.device_day_file_index.FileIndexPublisher', Publisher)
+    monkeypatch.setattr('visioncortex.device_day_recovery_worker.verify_storage', lambda config: None)
+    monkeypatch.setattr('visioncortex.device_day_io.slot', lambda config: nullcontext())
+    monkeypatch.setattr('visioncortex.runtime_control.resource_slot', lambda *a, **k: nullcontext())
+    config = {'storage': {'local_runtime_root': str(root.parent)}, 'runtime': {'local_only': True},
+              'device_day': {'field_recognition': {'archive_context_enabled': True,
+                                                 'archive_root': str(tmp_path/'unavailable')}}}
+    result = ReadableReplay(threading.Event()).tick(SimpleNamespace(runtime_root=root, config=config))
+    assert result['status'] == 'published' and len(calls) == 1
+    assert result['field_archive_discovery']['status'] == 'unavailable'
+    assert result['field_archive_discovery']['other_publication_continues'] is True
+
+
 def test_readable_mode_stops_before_projection_with_no_media_reads(tmp_path, monkeypatch):
     root = tmp_path / 'runtime' / 'device-day'
     observe(root, {'recordings': []})

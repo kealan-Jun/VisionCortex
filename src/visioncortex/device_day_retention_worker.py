@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
 import json
 from pathlib import Path
+import sqlite3
 import time
 import uuid
 
@@ -13,7 +14,7 @@ from .device_day_contract import DEPENDENCIES, STAGES, atomic_json, digest, read
 from .device_day_inplace import enqueue, retention_policy
 from .device_day_retry import retry_limit
 from .device_day_schedule import in_processing_scope
-from .input_availability import configured_record
+from .input_availability import configured_record, stage_input_state
 from .sqlite_store import connection
 from .device_day import DeviceDayRunner
 
@@ -87,6 +88,19 @@ class RetentionWorker:
         self.failure_cooldown = max(5, float(failure_cooldown))
         self.deferred = {}
 
+    def _input_available(self, runner, record, *, states=None):
+        if states is None:
+            path = runner.runtime_root / 'InputAvailability.sqlite3'
+            if not path.is_file():
+                return True
+            with connection(path, readonly=True) as db:
+                row = db.execute('SELECT * FROM inputs WHERE id=?', (record['recording_id'],)).fetchone()
+                state = dict(row) if row else {}
+        else:
+            state = states.get(record['recording_id'], {})
+        return (state.get('signature') != record.get('source_signature')
+                or stage_input_state(record, self.stage, state).get('state', 'ready') == 'ready')
+
     def candidates(self, runner, *, limit=16):
         path = runner.runtime_root / 'observed-inventory.sqlite3'
         if not path.is_file():
@@ -131,6 +145,12 @@ class RetentionWorker:
             return []
         ids = json.dumps([record['recording_id'] for record in records])
         selected = 'recording_id IN (SELECT value FROM json_each(?))'
+        availability = {}
+        availability_path = runner.runtime_root / 'InputAvailability.sqlite3'
+        if availability_path.is_file():
+            with connection(availability_path, readonly=True) as db:
+                availability = {row['id']: dict(row) for row in db.execute(
+                    'SELECT * FROM inputs WHERE id IN (SELECT value FROM json_each(?))', (ids,))}
         with connection(runner.queues[self.stage].path, readonly=True) as db:
             states = {r['recording_id']: dict(r) for r in db.execute(
                 'SELECT recording_id,status,lease_until,attempts,retry_limit,updated_at,blocked_reason,'
@@ -138,7 +158,7 @@ class RetentionWorker:
                 "json_extract(result,'$.retry_at') AS retry_at,"
                 "json_extract(payload,'$.activity_kind') AS activity_kind,"
                 "json_extract(payload,'$.source_signature') AS source_signature,"
-                "json_extract(payload,'$.audio.source_signature') AS audio_signature FROM recordings WHERE "
+                "json_extract(payload,'$.audio.source_signature') AS audio_signature,payload FROM recordings WHERE "
                 + selected, (ids,))}
         visual = set()
         if self.stage == 'retention':
@@ -174,15 +194,17 @@ class RetentionWorker:
                 continue
             same_video = state.get('source_signature') == record.get('source_signature')
             same_audio = state.get('audio_signature') == (record.get('audio') or {}).get('source_signature')
+            from .device_day_inputs import same_stage_source, stage_input_ready
+            same_source = (same_stage_source(json.loads(state['payload']), record, self.stage)
+                           if self.stage == 'stt' and state.get('payload') else
+                           same_video and (self.stage == 'vision' or same_audio))
             # Independent recorder audio may arrive after a no-audio receipt.
             # Only changed source metadata reopens a completion; admission and
             # execution still verify each source and preserve old receipts.
-            completed_current = state.get('status') == 'completed' and same_video and (
-                self.stage == 'vision' or same_audio)
+            completed_current = state.get('status') == 'completed' and same_source
             if (completed_current
                     or state.get('status') == 'running' and (state.get('lease_until') or 0) >= current
-                    or state.get('status') == 'failed' and same_video and (
-                        self.stage == 'vision' or same_audio) and (
+                    or state.get('status') == 'failed' and same_source and (
                         state.get('attempts', 0) >= retry_limit(state, maximum)
                         or current - state.get('updated_at', current) < self.failure_cooldown)
                     or self.deferred.get(rid, 0) > current):
@@ -194,8 +216,10 @@ class RetentionWorker:
                         preserved.get(rid) != record.get('source_signature')):
                 continue
             record = configured_record(runner.config, record)
-            if (not record.get('processable', record.get('available'))
-                    or record.get('configured_role') not in {'first_person', 'third_person'}):
+            if (not stage_input_ready(record, self.stage)
+                    or not self._input_available(runner, record, states=availability)
+                    or self.stage in {'vision', 'understanding', 'report'}
+                    and record.get('configured_role') not in {'first_person', 'third_person'}):
                 continue
             if self.stage in {'vision', 'understanding', 'report'}:
                 order = (-record['recording_start_us'], record['camera_key'])
@@ -253,16 +277,139 @@ class RetentionWorker:
             needed.update(parent for stage in tuple(needed) for parent in dependencies[stage])
         return [stage for stage in STAGES if stage in needed]
 
+    def _verified_prerequisites(self, runner, record, layout, context):
+        from .device_day import visual_input
+        prerequisites = {}
+        for parent in self.parents(runner, record):
+            retained = prerequisites.get('retention')
+            inputs = (record if parent == 'retention' else visual_input(retained) if parent == 'vision'
+                      else retained if parent == 'stt' else
+                      {'vision': prerequisites.get('vision'), 'stt': prerequisites.get('stt'), 'context': context})
+            key = runner._key(parent, record, inputs)
+            loaded = runner._load(runner._receipt(layout, record, parent), key, layout)
+            if loaded is None:
+                return None
+            prerequisites[parent] = loaded
+        return prerequisites
+
+    def _expired_completion(self, runner, record, expected):
+        """Use the same prerequisite/key/artifact gates as ordinary admission."""
+        from .device_day import load_context, visual_input
+        from .device_day_contract import dependencies_for, file_hash
+        from .device_day_inplace import active
+        inventory = runner.runtime_root/'observed-inventory.sqlite3'
+        if inventory.is_file():
+            with connection(inventory, readonly=True) as db:
+                observed = db.execute('SELECT payload FROM observations WHERE id=?', (record['recording_id'],)).fetchone()
+            if observed is None or json.loads(observed[0]).get('source_signature') != record.get('source_signature'):
+                return None, {'reason': 'current_source_not_admitted'}
+        if self.stage not in {'understanding', 'report'} and active(runner, record):
+            return None, {'reason': 'native_input_revalidation_required'}
+        layout = runner.layout(record)
+        context = (getattr(runner, '_context', load_context)(layout, record) if self.stage in {'understanding', 'report'}
+                   else {'comments': [], 'protocol': None})
+        prerequisites = self._verified_prerequisites(runner, record, layout, context)
+        if prerequisites is None:
+            return None, {'reason': 'current_prerequisite_not_verified'}
+        dependencies = dependencies_for(runner.settings, record)
+        inputs = record if self.stage == 'retention' else {p: prerequisites[p] for p in dependencies[self.stage]}
+        if self.stage == 'vision':
+            inputs = visual_input(inputs['retention'])
+        queue_key = runner._key(self.stage, record, [inputs, context if self.stage == 'understanding' else None])
+        execution_inputs = (record if self.stage == 'retention' else inputs if self.stage == 'vision'
+            else prerequisites.get('retention') if self.stage == 'stt'
+            else {'vision': prerequisites.get('vision'), 'stt': prerequisites.get('stt'), 'context': context}
+                if self.stage == 'understanding' else prerequisites['understanding'])
+        key = runner._key(self.stage, record, execution_inputs)
+        path = runner._receipt(layout, record, self.stage)
+        saved = runner._load(path, key, layout)
+        if saved is None:
+            return None, {'reason': 'current_stage_receipt_not_verified', 'expected_execution_key': key}
+        if queue_key != expected['revision'] and not (
+                runner._completed_stage_receipts.accepts(saved, key, queue_revision=expected['revision'])
+                or runner._completed_execution_bindings.accepts(saved, key, queue_revision=expected['revision'])):
+            return None, {'reason': 'current_queue_recipe_changed', 'current_queue_revision': queue_key}
+        proof = {'status': 'verified', 'expected_execution_key': key,
+                 'receipt_path': str(path), 'receipt_sha256': file_hash(path),
+                 'receipt_key': saved['key'], 'verified_artifacts': len(saved['artifacts']),
+                 'current_queue_revision': queue_key,
+                 'queue_continuity': 'same_recipe' if queue_key == expected['revision'] else 'exact_manifest_pin'}
+        return {'status': 'completed', 'recording_id': record['recording_id'], 'stage': self.stage,
+                'archive': layout.name, 'formal_publication': 'pending_replay',
+                'message': '已校验本地完成回执与产物，恢复过期阶段租约；未新增模型调用'}, proof
+
+    def recover_expired(self, runner, *, limit=16):
+        """Reconcile paid-stage process death before any candidate can be claimed."""
+        from .device_day import exclusive
+        from .device_day_contract import file_hash, safe_child
+        queue = runner.queues[self.stage]
+        if not queue.requires_expired_reconciliation:
+            return {'completed': 0, 'result_unknown': 0, 'busy': 0}
+        result = {'completed': 0, 'result_unknown': 0, 'busy': 0}
+        for expected in queue.expired(limit=limit):
+            record = json.loads(expected['payload'])
+            proof = {'model_invoked': False, 'queue_revision': expected['revision'],
+                     'source_signature': record.get('source_signature')}
+            try:
+                with ExitStack() as locks:
+                    for stage in ('all', self.stage):
+                        locks.enter_context(exclusive(runner.runtime_root/'locks'/f'{record["recording_id"]}.{stage}.lock'))
+                    completed, evidence = self._expired_completion(runner, record, expected)
+                    proof.update(evidence)
+                    if completed is None:
+                        layout = runner.layout(record)
+                        path = runner._receipt(layout, record, self.stage)
+                        saved = read_json(path) if path.is_file() else {}
+                        proof.update(receipt_status=saved.get('status', 'missing'),
+                                     receipt_sha256=file_hash(path) if path.is_file() else None)
+                        manifest = saved.get('sampling_coverage_manifest')
+                        if not manifest and self.stage == 'understanding' and isinstance(saved.get('key'), str):
+                            from .device_day_content_paths import private_folder
+                            candidate = private_folder(layout, 'MultimodalUnderstanding', 'RequestPlans',
+                                record['recording_id'], saved['key'])/'SamplingCoverage.json'
+                            if candidate.is_file():
+                                manifest = layout.relative(candidate)
+                        proof['local_request_ledger'] = 'request_identity_not_available'
+                        if manifest:
+                            audit = read_json(safe_child(layout.root, manifest))
+                            if audit.get('recording_id') != record['recording_id']:
+                                raise ValueError('Expired lease request manifest crossed its recording')
+                            from .multimodal_usage import UsageLedger
+                            ledger = UsageLedger(runner.config, readonly=True)
+                            keys = {r['request_key'] for r in audit.get('requests', []) if r.get('request_key')}
+                            proof['local_request_ledger'] = {'identified_requests': len(keys),
+                                'unresolved_requests': sum(ledger.unresolved(key) for key in keys),
+                                'sampling_manifest_sha256': file_hash(safe_child(layout.root, manifest))}
+                        completed = {'status': 'result_unknown', 'recording_id': record['recording_id'],
+                            'stage': self.stage, 'reason': 'result_unknown',
+                            'message': '原进程租约已过期，本地证据不足以确认完成或未提交；隔离等待本地回执恢复，禁止自动重发'}
+                    if queue.recover_expired(expected, completed, proof):
+                        result[completed['status']] += 1
+            except BlockingIOError:
+                result['busy'] += 1
+            except (OSError, ValueError, KeyError, TypeError, sqlite3.Error) as exc:
+                # A missing/corrupt receipt remains unknown, while the exact
+                # previous lease and attempt history remain recoverable.
+                proof.update(reason='local_reconciliation_unavailable', error_type=type(exc).__name__)
+                unknown = {'status': 'result_unknown', 'recording_id': record['recording_id'],
+                           'stage': self.stage, 'reason': 'result_unknown', 'error_type': type(exc).__name__}
+                if queue.recover_expired(expected, unknown, proof):
+                    result['result_unknown'] += 1
+        return result
+
     def admit(self, runner, record):
         from .device_day import load_context, visual_input
         from .device_day_inplace import active, receipt
+        from .device_day_inputs import same_stage_source, stage_input_ready
+        if not stage_input_ready(record, self.stage) or not self._input_available(runner, record):
+            return False
         # Durable waits apply to both foreground and historical admitters,
         # before rereading or hashing any parent artifacts on the NAS.
         with connection(runner.queues[self.stage].path, readonly=True) as db:
-            waiting = db.execute("SELECT json_extract(result,'$.retry_at') FROM recordings "
-                                 "WHERE recording_id=? AND json_extract(payload,'$.source_signature') IS ?",
-                                 (record['recording_id'], record.get('source_signature'))).fetchone()
-        if waiting and (waiting[0] or 0) > time.time():
+            waiting = db.execute("SELECT json_extract(result,'$.retry_at'),payload FROM recordings "
+                                 "WHERE recording_id=?", (record['recording_id'],)).fetchone()
+        if (waiting and same_stage_source(json.loads(waiting[1]), record, self.stage)
+                and (waiting[0] or 0) > time.time()):
             return False
         native = active(runner, record)
         if self.stage not in {'understanding', 'report'} and native:
@@ -280,21 +427,9 @@ class RetentionWorker:
         record = record | {'archive_date': layout.name[:10]}
         context = (getattr(runner, '_context', load_context)(layout, record) if self.stage in {'understanding', 'report'}
                    else {'comments': [], 'protocol': None})
-        prerequisites = {}
-        for parent in self.parents(runner, record):
-            retained = prerequisites.get('retention')
-            inputs = (record if parent == 'retention' else visual_input(retained) if parent == 'vision'
-                      else retained if parent == 'stt' else
-                      {'vision': prerequisites.get('vision'), 'stt': prerequisites.get('stt'), 'context': context})
-            key = runner._key(parent, record, inputs)
-            path = runner._receipt(layout, record, parent)
-            saved = read_json(path) if path.is_file() else {}
-            if saved.get('status') != 'completed' or not runner._accepts_receipt(saved, key):
-                return False
-            loaded = runner._load(path, key, layout)
-            if loaded is None:
-                return False
-            prerequisites[parent] = loaded
+        prerequisites = self._verified_prerequisites(runner, record, layout, context)
+        if prerequisites is None:
+            return False
         # This is the ordinary single-record scheduling recipe. process()
         # rechecks publication, identities and all artifact bytes after claim;
         # it never runs a missing parent model for a single-stage request.
@@ -391,17 +526,19 @@ class RetentionWorker:
         hold = admission_status(runner.config, self.stage)
         if hold:
             return hold
-        if self.stage in {'understanding', 'report'}:
-            if not stage_admitted(runner.config, self.stage):
-                return {'status': 'waiting_for_night_window'}
-            from .device_day_provider_gate import ProviderGate
-            if ProviderGate(runner.config).blocks(self.stage):
-                return {'status': 'waiting_for_provider'}
         with ExitStack() as locks:
             try:
                 locks.enter_context(exclusive(runner.runtime_root / 'locks' / f'{self.stage}-worker.lock'))
             except BlockingIOError:
                 return {'status': 'running_elsewhere'}
+            recovery = self.recover_expired(runner)
+            recovery_fields = {'expired_lease_recovery': recovery} if any(recovery.values()) else {}
+            if self.stage in {'understanding', 'report'}:
+                if not stage_admitted(runner.config, self.stage):
+                    return {'status': 'waiting_for_night_window'} | recovery_fields
+                from .device_day_provider_gate import ProviderGate
+                if ProviderGate(runner.config).blocks(self.stage):
+                    return {'status': 'waiting_for_provider'} | recovery_fields
             admitted = set()
             for record in self.candidates(runner):
                 if stop.is_set():
@@ -414,7 +551,7 @@ class RetentionWorker:
                 except (OSError, ValueError, KeyError, TypeError):
                     self.deferred[record['recording_id']] = time.time() + self.failure_cooldown
             if not admitted or stop.is_set():
-                return {'status': 'waiting', 'admitted': len(admitted)}
+                return {'status': 'waiting', 'admitted': len(admitted)} | recovery_fields
             queue = runner.queues[self.stage]
             # The main service may have failed a candidate during admission.
             # Honor that fresh failure's cooldown before this worker retries it.

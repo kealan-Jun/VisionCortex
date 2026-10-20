@@ -74,11 +74,11 @@ def configured_camera_names(settings):
 
 def metadata_location(video):
     """Identify a recorder-owned device/day without inferring its view role."""
-    from .device_day_contract import safe_child, validate_archive_name
+    from .device_day_contract import RAW_DIRECTORIES, safe_child, validate_archive_name
     video = Path(video)
     location = None
     for parent in video.parents:
-        if parent.name != 'MetaData':
+        if parent.name not in RAW_DIRECTORIES:
             continue
         try:
             name = validate_archive_name(parent.parent.name)
@@ -86,14 +86,18 @@ def metadata_location(video):
             continue
         safe_child(parent.parent, video.relative_to(parent.parent).as_posix())
         if location is not None:
-            raise ValueError('Nested MetaData device/day identities are ambiguous')
+            raise ValueError(f'Nested {parent.name} device/day identities are ambiguous')
         location = {'archive': name, 'camera_key': name[11:], 'root': parent}
     return location
 
 
 def metadata_directories(config):
-    """Join existing discovery with recorder-owned MetaData only; create nothing."""
-    from .device_day_contract import safe_child, validate_archive_name
+    """Discover both recorder-owned raw spellings in place; create nothing.
+
+    The historical function name and discovery mode remain public adapters.
+    Neither spelling authorizes creating, normalizing or copying originals.
+    """
+    from .device_day_contract import RAW_DIRECTORIES, safe_child, validate_archive_name
     settings = config['collection_ingest']
     only = discovery_mode(settings) == 'metadata_only'
     if not settings.get('discover_recorder_metadata', True):
@@ -110,7 +114,7 @@ def metadata_directories(config):
         return []
     if not archive.is_dir() or archive.is_symlink():
         if only:
-            raise OSError('Recorder MetaData archive root is unavailable')
+            raise OSError('Recorder device/day archive root is unavailable')
         return []
     if archive != source:
         safe_child(source, archive.relative_to(source).as_posix())
@@ -129,9 +133,15 @@ def metadata_directories(config):
                         or (settings.get('capture_since_date') and date < settings['capture_since_date'])
                         or (settings.get('metadata_capture_dates') and date not in settings['metadata_capture_dates'])):
                     continue
-                raw = safe_child(archive, day.name + '/MetaData')
-                if raw.is_dir():
-                    result.add(raw)
+                for raw_name in RAW_DIRECTORIES:
+                    try:
+                        raw = safe_child(archive, day.name + '/' + raw_name)
+                        if raw.is_dir():
+                            result.add(raw)
+                    except ValueError:
+                        # A bad sibling must not hide another valid capture
+                        # root; unsafe paths are never followed.
+                        continue
             except ValueError:
                 continue
     return sorted(result, reverse=True)

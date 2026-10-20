@@ -40,6 +40,8 @@ def test_public_understanding_matches_clip_and_does_not_create_internal_display_
     retention = read_json(root/'ProcessedClips/Clips'/name/'Retention.json')
     assert retention['folder_retained'] and not retention['no_value_proven']
     assert retention['selection_status'] == 'pending_value_review'
+    assert retention['decision'] == 'pending_value_review'
+    assert retention['status'] == 'pending_selection'
     assert not list(root.rglob('*.html'))
     assert result['multimodal'][0]['content'] == 'MultimodalUnderstanding/' + name + '/Understanding.json'
     assert index == original
@@ -59,7 +61,20 @@ def test_declared_but_missing_or_truncated_video_is_not_reported_as_retained(tmp
     path.write_bytes(b'x')
     assert publish_content(config, index)['multimodal'][0]['video_status'] == 'missing'
     path.write_bytes(b'xxx')
+    assert publish_content(config, index)['multimodal'][0]['video_status'] == 'missing'
+    segment['video'] = artifact(root, path)
     assert publish_content(config, index)['multimodal'][0]['video_status'] == 'available'
+
+
+def test_previous_execution_cannot_override_the_current_value_selection(tmp_path):
+    config, index = fixture(tmp_path)
+    index['segments'][0]['derived_video_disposition'] = {'decision': 'retain_derivative', 'reason': 'old conservative default'}
+    result = publish_content(config, index)
+    value = read_json(tmp_path/index['archive']/result['multimodal'][0]['content'])
+    selection = value['处理视频留存']
+    assert value['video_status'] == 'pending_selection'
+    assert selection['decision'] == 'pending_value_review'
+    assert selection['previous_execution']['decision'] == 'retain_derivative'
 
 
 def test_empty_model_results_explain_actual_submission_hold_in_both_file_views(tmp_path):

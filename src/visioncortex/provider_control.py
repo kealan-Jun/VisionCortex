@@ -48,6 +48,9 @@ class Circuit:
             db.executescript('''PRAGMA journal_mode=WAL;
                 CREATE TABLE IF NOT EXISTS circuits(key TEXT PRIMARY KEY, reason TEXT,
                     retry_at REAL, probe_until REAL NOT NULL DEFAULT 0);''')
+            # Keep the four-column table writable by the previous immutable
+            # runtime during draining and rollback (it uses positional INSERT).
+            db.execute('CREATE TABLE IF NOT EXISTS circuit_failures(key TEXT PRIMARY KEY,failures INTEGER NOT NULL)')
 
     def admit(self, now=None):
         now = time.time() if now is None else now
@@ -68,15 +71,26 @@ class Circuit:
         reason, delay = classified
         key = self.account if reason in {'account_unavailable', 'credential_unavailable'} else self.key
         with connect(self.path) as db:
+            db.execute('BEGIN IMMEDIATE')
+            old = db.execute('SELECT f.failures FROM circuit_failures f JOIN circuits c ON c.key=f.key WHERE c.key=?',
+                             (key,)).fetchone()
+            failures = (old['failures'] if old else 0) + 1
+            # A persistent outage must not consume a fresh paid input every
+            # thirty seconds. One half-open probe owns the next attempt; the
+            # backoff survives process restarts and resets only on success.
+            delay = min(900, delay * 2 ** min(failures - 1, 5))
             db.execute('INSERT OR REPLACE INTO circuits VALUES(?,?,?,0)',
                        (key, reason, (time.time() if now is None else now)+delay))
+            db.execute('INSERT OR REPLACE INTO circuit_failures VALUES(?,?)', (key, failures))
         return True
 
     def succeeded(self, probes):
         with connect(self.path) as db:
             # A concurrent request may have reopened the circuit. Its newer
             # failure must survive an earlier probe's late successful response.
-            db.executemany('DELETE FROM circuits WHERE key=? AND probe_until=?', probes)
+            for key, generation in probes:
+                if db.execute('DELETE FROM circuits WHERE key=? AND probe_until=?', (key, generation)).rowcount:
+                    db.execute('DELETE FROM circuit_failures WHERE key=?', (key,))
 
     def state(self):
         with connect(self.path, readonly=True) as db:

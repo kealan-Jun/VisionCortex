@@ -58,8 +58,16 @@ def window_files(config, index):
 def content_revision(config, index):
     backend = config['storage'].get('local_cache_root')
     receipts = Path(backend) / 'device-day-receipts' / index['archive'] if backend else None
-    paths = [p for _, _, request, result in window_files(config, index) for p in (request, result)]
     root = Path(config['storage']['archive_root']) / index['archive']
+    paths = []
+    for _, _, request, result in window_files(config, index):
+        paths.extend((request, result))
+        try:
+            frames = read_json(request).get('metadata', {}).get('frames', [])
+            for frame in frames:
+                paths.append(safe_child(root, frame['path']))
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            pass  # The window reader isolates malformed requests individually.
     for segment in index.get('segments', []):
         paths.extend((root/'MultimodalUnderstanding/.Evidence/Analysis'/segment['segment_id']/'StepReview.json',
                       root/'MultimodalUnderstanding'/time_folder(segment['start_us'], segment['end_us'])/'Analysis/StepReview.json'))
@@ -69,7 +77,14 @@ def content_revision(config, index):
         paths.extend(Path(runtime)/'device-day'/name for name in ('field-events.sqlite3', 'field-events.sqlite3-wal'))
     if receipts:
         paths.extend(receipts / r['recording_id'] / 'understanding.json' for r in index.get('recordings', []))
-    return tuple((str(p), p.stat().st_mtime_ns, p.stat().st_size) for p in paths if p.is_file())
+    revisions = []
+    for path in dict.fromkeys(paths):
+        try:
+            stat = path.stat()
+            revisions.append((str(path), stat.st_mtime_ns, stat.st_size, stat.st_ctime_ns, stat.st_ino))
+        except OSError as exc:
+            revisions.append((str(path), type(exc).__name__))
+    return tuple(revisions)
 
 
 def readable_source_index(index):
@@ -95,6 +110,7 @@ def with_partial_understandings(config, index):
     """Expose valid completed windows even when a later window is pending/failed."""
     from .device_day_models import validate_understanding
     from .media_time import capture_us
+    from .device_day_verification import verify_artifact_cached
     value = readable_source_index(index)
     root = Path(config['storage']['archive_root']) / index['archive']
     from .device_day_content_paths import aliases, public_references
@@ -117,26 +133,48 @@ def with_partial_understandings(config, index):
         sid = segment['segment_id']
         if sid in complete:
             continue
-        request, result = read_json(request_path), read_json(result_path)
-        metadata, raw = request.get('metadata', {}), result.get('model_result', {})
-        if (not request.get('input_key') or request['input_key'] != result.get('input_key')
-                or raw.get('status') != 'completed' or metadata.get('source_ref') != segment['source_ref']
-                or metadata.get('segment_id') != sid):
-            continue
-        left, right = metadata.get('start_ms'), metadata.get('end_ms')
-        if left is None or right is None or not segment['start_ms'] <= left < right <= segment['end_ms'] + 1:
-            continue
-        record = records[segment['recording_id']]
-        clock = (record.get('processing') or {}).get('clock_mapping') or {'origin_us': record['start_us']}
         try:
+            request, result = read_json(request_path), read_json(result_path)
+            metadata, raw = request.get('metadata', {}), result.get('model_result', {})
+            if (not request.get('input_key') or request['input_key'] != result.get('input_key')
+                    or raw.get('status') != 'completed' or metadata.get('source_ref') != segment['source_ref']
+                    or metadata.get('segment_id') != sid):
+                continue
+            left, right = metadata.get('start_ms'), metadata.get('end_ms')
+            if left is None or right is None or not segment['start_ms'] <= left < right <= segment['end_ms'] + 1:
+                continue
+            frames = metadata.get('frames')
+            if (not isinstance(frames, list) or not frames
+                    or not all(verify_artifact_cached(root, frame) for frame in frames)):
+                raise ValueError('partial_window_frame_artifact_integrity_failed')
+            identity_integrity = 'unavailable_legacy_prompt_missing'
+            if 'prompt' in request:
+                if not isinstance(request['prompt'], str) or request['input_key'] != digest([metadata, request['prompt']]):
+                    raise ValueError('partial_window_request_identity_changed')
+                identity_integrity = 'verified_exact_metadata_and_prompt'
+            receipt_integrity = {}
+            for name, path in (('input', request_path), ('result', result_path)):
+                refs = [ref for ref in stage.get('artifacts') or []
+                        if public_references(ref.get('path'), mapping) == path.relative_to(root).as_posix()]
+                if refs and not all(verify_artifact_cached(root, ref) for ref in refs):
+                    raise ValueError('partial_window_' + name + '_receipt_identity_changed')
+                receipt_integrity[name] = 'verified_against_stage_artifact' if refs else 'unavailable_stage_artifact_reference'
+            record = records[segment['recording_id']]
+            clock = (record.get('processing') or {}).get('clock_mapping') or {'origin_us': record['start_us']}
             if 'experiment_steps' in raw:
                 from .device_day_steps import validate
                 parsed = validate(raw, metadata['frames'], left, right, record['start_us'], clock)
             else:
                 parsed = validate_understanding(raw, metadata['frames'], metadata.get('comments', []),
                     left, right, record['start_us'], clock)
-        except (ValueError, KeyError):
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            value.setdefault('partial_window_integrity_errors', []).append({'segment_id': sid,
+                'input': request_path.relative_to(root).as_posix(),
+                'model_receipt': result_path.relative_to(root).as_posix(), 'error_type': type(exc).__name__,
+                'reason': str(exc)[:200], 'automatic_action': 'isolate_window_and_recheck_original_evidence'})
             continue  # Invalid model output remains in its receipt, not report prose.
+        if identity_integrity.startswith('unavailable') or any(state.startswith('unavailable') for state in receipt_integrity.values()):
+            parsed['uncertainties'].append('历史窗口缺少完整的请求或阶段产物摘要，当前仅展示已核验帧字节与结构的部分观察；不能视为整阶段完成。')
         for step in parsed['steps']:
             step.update(start_us=capture_us(clock, step['start_ms']), end_us=capture_us(clock, step['end_ms']))
         item = partial.setdefault(sid, {'segment_id': sid, 'activity': segment['activity'],
@@ -144,6 +182,8 @@ def with_partial_understandings(config, index):
             'evidence_status': 'PARTIAL_EVIDENCE', 'physical_action_confirmed': False, 'windows': []})
         item['windows'].append({'start_ms': left, 'end_ms': right, **parsed,
             'source_frames': metadata['frames'], 'coverage': metadata.get('coverage'),
+            'frame_artifact_integrity': 'verified', 'request_identity_integrity': identity_integrity,
+            'receipt_integrity': receipt_integrity,
             'content_source': metadata.get('content_source', 'multimodal_context'),
             'model_receipt': result_path.relative_to(root).as_posix(),
             'input': request_path.relative_to(root).as_posix(), 'usage': raw.get('usage'),
@@ -169,16 +209,38 @@ def with_partial_understandings(config, index):
     return value
 
 
+def transcript_interval(record):
+    """New independent seals use their own fixed audio interval; old paths stay."""
+    span = record.get('transcript_span')
+    if span is None:
+        return record['start_us'], record['end_us']
+    audio = record.get('audio') or {}
+    start, end = span.get('start_us'), span.get('end_us')
+    if (span.get('schema_version') != 'visioncortex-sealed-audio-span/1'
+            or span.get('recording_id') != record['recording_id']
+            or span.get('time_basis') != 'sealed_recorder_audio'
+            or type(start) is not int or type(end) is not int or not 0 < start < end
+            or audio.get('status') != 'provided'
+            or (start, end) != (audio.get('start_us'), audio.get('end_us'))
+            or span.get('audio_source_signature') != audio.get('source_signature')
+            or not isinstance(span.get('audio_identity_sha256'), str)
+            or len(span['audio_identity_sha256']) != 64):
+        raise ValueError('Independent transcript publication has no bound sealed audio interval')
+    return start, end
+
+
 def publish_transcript(config, archive, record, context=None):
     """Publish one completed recording without walking or rewriting the day."""
     root = Path(config['storage']['archive_root']) / archive
     common = {'archive': archive, 'device': archive[11:], 'date': archive[:10],
               'timezone': 'Asia/Shanghai', 'timestamp_unit': 'unix_microseconds',
               'path_base': 'device_day', 'physical_action_confirmed': False}
-    relative = 'Comment/' + time_folder(record['start_us'], record['end_us'])
+    start, end = transcript_interval(record)
+    relative = 'Comment/' + time_folder(start, end)
     stt = record.get('transcription') or {}
     value = {**common, 'schema_version': 'visioncortex-readable-transcript/1',
-        'recording_id': record['recording_id'], 'start_us': record['start_us'], 'end_us': record['end_us'],
+        'recording_id': record['recording_id'], 'start_us': start, 'end_us': end,
+        **({'transcript_span': record['transcript_span']} if record.get('transcript_span') else {}),
         'audio': record.get('audio'), 'status': stt.get('status'), 'outcome': stt.get('outcome'),
         'content_source': 'machine_transcribed_speech', 'model_invocation': stt.get('model_invocation'),
         'processing_method': 'automatic_stt', 'accuracy': 'NOT_PROVEN', 'sentences': stt.get('comments') or [],
@@ -217,12 +279,14 @@ def publish_content(config, index):
         if not record.get('start_us') or not record.get('end_us'):
             continue
         audio_entries.append(publish_transcript(config, index['archive'], record, index.get('context')))
-    meanings = {u['segment_id']: u for u in index.get('understandings', [])}
-    for segment in index.get('segments', []):
+    from .device_day_retention_projection import interval_views
+    for segment, source_meaning, interval in interval_views(index):
         if segment['recording_id'] not in records:
             continue
         from .device_day_steps import readable_meaning
-        meaning, experiment_steps, step_status = readable_meaning(meanings.get(segment['segment_id']))
+        meaning, experiment_steps, step_status = readable_meaning(source_meaning)
+        from .device_day_narrative import effective_meaning
+        meaning = effective_meaning(meaning)
         from .device_day_content_paths import LAYOUT_VERSION, clip_name, understanding_relative
         if segment.get('camera_key', index['archive'][11:]) != index['archive'][11:]:
             raise ValueError('Understanding belongs to another device/camera')
@@ -234,6 +298,10 @@ def publish_content(config, index):
             'start_us': segment['start_us'], 'end_us': segment['end_us'],
             'source_start_ms': segment['start_ms'], 'source_end_ms': segment['end_ms'],
             'source_video': segment['source_ref'], 'video': segment.get('video'),
+            'record_scope': 'retention_interval' if interval else 'preprocessing_candidate',
+            'candidate_segment_id': segment.get('candidate_segment_id', segment['segment_id']),
+            'retention_intervals': segment.get('retention_intervals', []),
+            'selection_interval': interval,
             'activity': segment['activity'], 'status': (meaning or {}).get('status', 'completed' if meaning else stage.get('status', 'pending')),
             'message': stage.get('message'), 'understanding': meaning,
             'experiment_steps': experiment_steps, 'step_understanding_status': step_status,
@@ -244,37 +312,128 @@ def publish_content(config, index):
         value['status'] = state['status']
         value = {'内容记录': segment_record(segment, meaning, record, index.get('context'),
                   segments=[s for s in index['segments'] if s['recording_id'] == segment['recording_id']]), **value}
+        if interval is not None:
+            value['内容记录']['区间价值依据'] = interval.get('evidence', [])
+            value['内容记录']['动作原始区间'] = interval.get('core_action_ranges', [])
+            value['内容记录']['必要上下文区间'] = interval.get('context_subranges', [])
+            value['内容记录']['连贯性说明'] = ('有来源的必要上下文仅帮助观看相近操作，'
+                '各动作仍按原始范围记录；不证明衔接时间内动作持续发生。'
+                if interval.get('context_subranges') else '按已有价值与边界证据记录，未自动增加上下文。')
+            value['内容记录']['原模型关联观察'] = [
+                {'动作': row['original_observation'].get('action'),
+                 '内容': row['original_observation'].get('description'),
+                 '对象': row['original_observation'].get('objects'),
+                 '原片开始毫秒': row['original_observation'].get('start_ms'),
+                 '原片结束毫秒': row['original_observation'].get('end_ms'),
+                 '说明': '原观察跨越当前区间或引用区间外画面；这里仅保留关联，不声称当前视频呈现完整动作。'}
+                for window in (meaning or {}).get('windows', [])
+                for row in window.get('overlapping_parent_observations', [])
+                if row['collection'] in {'experiment_steps', 'work_activities'}]
         from .media.retained_intervals import disposition
         decision = disposition(segment, meaning, record, index.get('context'),
                     segments=[s for s in index['segments'] if s['recording_id'] == segment['recording_id']])
+        if interval is None and segment.get('retention_intervals'):
+            rows = segment['retention_intervals']
+            selected_rows = [row for row in rows if row['video_value'] == 'selected']
+            no_value = all(row['video_value'] == 'confirmed_no_value' for row in rows)
+            decision.update(proposed_partition_identity=(decision.get('partition') or {}).get('partition_identity'),
+                partition={'schema_version': 'visioncortex-retention-interval-partition/1',
+                    'candidate_segment_id': segment['segment_id'], 'source_ref': segment['source_ref'],
+                    'source_start_ms': segment['start_ms'], 'source_end_ms': segment['end_ms'],
+                    'intervals': rows, 'actual_publication_evidence_applied': True,
+                    'candidate_is_export_unit': False, 'default_padding_ms': 0, 'physical_action_confirmed': False},
+                selected_duration_ms=sum(row['end_ms']-row['start_ms'] for row in selected_rows),
+                pending_duration_ms=sum(row['end_ms']-row['start_ms'] for row in rows if row['video_value'] == 'pending'),
+                video_value='selected' if selected_rows else 'confirmed_no_value' if no_value else 'pending',
+                no_value_confirmed=no_value,
+                decision='retain_derivative' if selected_rows else 'omit_static_derivative' if no_value else 'pending_value_review',
+                value_signals=sorted({row['reason'] for row in selected_rows}),
+                reason='只导出已通过证据校验的精确选中区间；其他区间按各自原因保留记录与原片映射。')
+        if interval is not None:
+            # Presentation of the parent's verified partition. Do not infer a
+            # second selection from cropped model observations.
+            decision.update({key: interval[key] for key in ('video_value', 'reason', 'evidence',
+                'context_basis', 'activity_category') if key in interval})
+            decision['decision'] = {'selected': 'retain_derivative',
+                'confirmed_no_value': 'omit_static_derivative', 'pending': 'pending_value_review'}[interval['video_value']]
+            decision['no_value_confirmed'] = interval['video_value'] == 'confirmed_no_value'
+            decision['source_start_ms'], decision['source_end_ms'] = segment['start_ms'], segment['end_ms']
+            decision['partition'] = {'schema_version': 'visioncortex-retention-interval-partition/1',
+                'candidate_segment_id': segment['candidate_segment_id'], 'source_ref': segment['source_ref'],
+                'source_start_ms': segment['start_ms'], 'source_end_ms': segment['end_ms'],
+                'intervals': [interval], 'projection_from_verified_candidate_partition': True,
+                'candidate_is_export_unit': False, 'default_padding_ms': 0, 'physical_action_confirmed': False}
+            duration = segment['end_ms']-segment['start_ms']
+            decision['selected_duration_ms'] = duration if interval['video_value'] == 'selected' else 0
+            decision['pending_duration_ms'] = duration if interval['video_value'] == 'pending' else 0
+            decision['value_signals'] = [interval['reason']] if interval['video_value'] == 'selected' else []
         video = segment.get('video')
-        video_path = safe_child(root, video['path']) if video else None
-        present = bool(video_path and video_path.is_file()
-                       and video_path.stat().st_size == video.get('size_bytes'))
+        from .device_day_verification import verify_artifact_cached
+        present = bool(video and verify_artifact_cached(root, video))
         value['video_status'] = ('available' if present else 'missing' if video else
-                                 'omitted_by_selection' if decision['decision'] == 'omit_static_derivative' else 'pending_retention')
-        value['处理视频留存'] = {**(segment.get('derived_video_disposition') or decision),
+                                 'omitted_by_selection' if decision['decision'] == 'omit_static_derivative' else
+                                 'pending_selection' if decision['decision'] == 'pending_value_review' else 'pending_retention')
+        if interval is None and segment.get('retention_intervals'):
+            value['video_status'] = 'historical_video_preserved' if present else 'see_exact_retention_intervals'
+        value['处理视频留存'] = {**decision,
+                                'previous_execution': segment.get('derived_video_disposition'),
                                 'derived_video_present': present, 'status': value['video_status']}
+        execution = segment.get('derived_video_disposition') or {}
+        if interval is not None:
+            execution = execution | {key: interval[key] for key in ('processing_status', 'error', 'retry_at') if key in interval}
+        value['处理视频留存']['processing_status'] = ('completed' if present else
+            'failed' if execution.get('processing_status') == 'failed' else
+            'completed' if decision['decision'] == 'omit_static_derivative' else
+            'waiting_for_value' if decision['decision'] == 'pending_value_review' else 'queued')
+        if interval is not None and not present and execution.get('processing_status') == 'waiting_for_evidence':
+            value['video_status'] = value['处理视频留存']['status'] = 'waiting_for_evidence'
+            value['处理视频留存']['processing_status'] = 'waiting_for_evidence'
+        if interval is None and segment.get('retention_intervals'):
+            rows = segment['retention_intervals']
+            selected = [row for row in rows if row['video_value'] == 'selected']
+            available = sum(bool(row.get('video') and verify_artifact_cached(root, row['video'])) for row in selected)
+            undecided = sum(row['video_value'] == 'pending' for row in rows)
+            value['处理视频留存'].update(
+                candidate_is_export_unit=False, historical_scope=segment.get('historical_scope'),
+                selected_interval_count=len(selected), available_selected_interval_count=available,
+                pending_value_interval_count=undecided,
+                processing_status=('failed' if any(row.get('processing_status') == 'failed' for row in selected)
+                    else 'partial' if available < len(selected) or undecided else 'completed'),
+                derived_video_present=bool(available), historical_video_present=present)
+        if execution.get('processing_status') == 'failed' and not present:
+            value['处理视频留存'].update(error=execution.get('error'), retry_at=execution.get('retry_at'))
         value['layout_version'] = LAYOUT_VERSION
         _write(safe_child(root, relative + '/Understanding.json'), value)
         retention = {**common, 'schema_version': 'visioncortex-readable-retention/1',
             'recording_id': segment['recording_id'], 'segment_id': segment['segment_id'],
             'start_us': segment['start_us'], 'end_us': segment['end_us'],
             'source_ref': segment['source_ref'], 'video': video,
-            'folder_retained': True, 'no_value_proven': bool(decision.get('continuous_inactivity_proven')),
-            'selection_status': 'pending_value_review' if not meaning else value['处理视频留存']['decision'],
+            'folder_retained': True, 'no_value_proven': bool(decision.get('no_value_confirmed')),
+            'record_scope': value['record_scope'], 'candidate_segment_id': value['candidate_segment_id'],
+            'retention_intervals': value['retention_intervals'], 'selection_interval': interval,
+            'selection_status': decision['decision'],
             **value['处理视频留存']}
         _write(safe_child(root, 'ProcessedClips/Clips/' + clip_name(segment) + '/Retention.json'), retention)
+        if interval is not None:
+            from .device_day_contract import VERSION
+            _write(safe_child(root, segment['json_path']), {
+                **common, **segment, 'schema_version': VERSION,
+                'selection_interval': interval, 'projection_from_candidate': True,
+                'model_invoked': False, 'physical_action_confirmed': False})
         visual_entries.append({'开始时间': value['内容记录']['开始时间'], '结束时间': value['内容记录']['结束时间'],
             '状态说明': state['说明'], '阶段状态': state['阶段状态'], '处理原因': state['处理原因']} |
             {k: value[k] for k in ('recording_id', 'segment_id', 'start_us', 'end_us', 'activity', 'status')} |
                               {'content': relative + '/Understanding.json', 'video_status': value['video_status']})
+        visual_entries[-1].update(record_scope=value['record_scope'],
+                                 candidate_segment_id=value['candidate_segment_id'])
     for directory, entries in [('Comment', audio_entries), ('MultimodalUnderstanding', visual_entries)]:
         summary = {}
         if directory == 'MultimodalUnderstanding':
             from collections import Counter
-            counts = Counter(row['status'] for row in entries)
-            summary = {'理解进度': {'片段总数': len(entries), '已返回结果': counts['completed'],
+            candidates = [row for row in entries if row.get('record_scope') != 'retention_interval']
+            counts = Counter(row['status'] for row in candidates)
+            summary = {'理解进度': {'片段总数': len(candidates),
+                '留存区间记录数': len(entries)-len(candidates), '已返回结果': counts['completed'],
                 '部分返回': counts['partial'], '已提交待确认': counts['submitted_unknown'],
                 '各状态片段数': dict(counts),
                 '说明': '按下方 content 路径打开对应片段的 Understanding.json；只有实际返回的模型观察才展示步骤内容。'}}

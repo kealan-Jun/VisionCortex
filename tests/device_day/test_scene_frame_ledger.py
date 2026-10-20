@@ -168,7 +168,10 @@ def test_only_understanding_recipe_changes_and_completed_cv_stt_are_reused(devic
 
 def test_cv_owner_matches_reviewed_production_scan_reuse_integration():
     path = ROOT / 'src/visioncortex/device_day_models.py'
-    assert hashlib.sha256(path.read_bytes()).hexdigest() == '9f1daccb81881823ba3faac0dd6a9f495793992aeb621104ddb29a1e2280f188'
+    # Reviewed from clean V27/V28 owner d5fc8c3b with only automatic whole-
+    # candidate export removed. Dedicated candidate-selection tests preserve
+    # CV/frame/audit behavior and exact historical receipt bytes.
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == 'ca0a0d90715cc355fb4e01546e58aca528daae7944b962097c44ca9cb55b3939'
 
 
 def test_other_vision_dependency_change_invalidates_its_stage(device_config, monkeypatch):

@@ -1,13 +1,27 @@
+import json
+
 from visioncortex.device_day_queue import DeviceDayQueue
 
 
-def test_publication_contention_does_not_exhaust_failure_budget(tmp_path):
+def test_publication_contention_does_not_exhaust_failure_budget(tmp_path, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr('visioncortex.device_day_queue.time.time', lambda: clock[0])
     q = DeviceDayQueue(tmp_path/'Queue.sqlite3')
     q.enqueue({'recording_id':'slice','configured_role':'first_person'}, 'v1')
     for n in range(4):
         owner = str(n)
         assert q.claim(owner, max_attempts=3)
         q.finish(owner,'slice',{'status':'running_elsewhere'}, .1)
+        # Contention refunds the attempt but keeps a durable increasing wait.
+        # Another poll cannot claim the same slice until that wait expires.
+        assert q.claim('before-retry', max_attempts=3) is None
+        with q.connect() as db:
+            row = db.execute('SELECT status,attempts,result FROM recordings').fetchone()
+            wait = json.loads(row['result'])
+            assert (row['status'], row['attempts']) == ('queued', 0)
+            assert wait['wait_count'] == n + 1
+            assert wait['retry_at'] == clock[0] + 5 * 2 ** n
+        clock[0] = wait['retry_at']
     with q.connect() as db:
         row = db.execute('select status,attempts,revision from recordings').fetchone()
         assert tuple(row) == ('queued',0,'v1')

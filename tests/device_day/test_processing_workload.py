@@ -31,7 +31,8 @@ def test_missing_only_is_not_our_backlog_or_a_stall_and_completed_work_is_preser
         db.execute("UPDATE recordings SET status='running',lease_until=5000 WHERE recording_id='active'")
     state = processing_health(config, now=100)['stages']['vision']
     assert state['workload'] == {'completed': 1, 'running': 1, 'processing_backlog': 0, 'system_attention': 0,
-                                 'waiting_for_input': 1, 'scheduled_wait': 0, 'outside_processing_scope': 0}
+                                 'waiting_for_input': 1, 'scheduled_wait': 0, 'outside_processing_scope': 0,
+                                 'failed': 0, 'result_unknown': 0}
     with queue.connect() as db:
         db.execute("UPDATE recordings SET status='completed',completed_at=10 WHERE recording_id='active'")
     health = processing_health(config, now=5000)
@@ -102,3 +103,54 @@ def test_legacy_raw_pending_counts_are_not_rendered_as_processing_backlog():
     assert '999' not in text
     assert '自动处理消费者与积压' not in text
     assert '输入等待、系统待排查和处理积压见处理进度核验' in text
+
+
+def test_unknown_failures_and_publication_are_separate_from_ready_backlog(default_config, tmp_path):
+    from visioncortex.publication_journal import PublicationJournal
+    config, queue = setup_queue(default_config, tmp_path, 'understanding')
+    for rid in ('unknown', 'expired', 'failed', 'ready', 'generated'):
+        queue.enqueue(record(rid), rid)
+    with queue.connect() as db:
+        for rid, reason in [('unknown', 'submitted_unknown'), ('expired', 'result_unknown')]:
+            db.execute("UPDATE recordings SET status='blocked',result=? WHERE recording_id=?",
+                       (json.dumps({'reason': reason}), rid))
+        db.execute("UPDATE recordings SET status='failed',attempts=3 WHERE recording_id='failed'")
+        db.execute("UPDATE recordings SET status='completed',completed_at=10 WHERE recording_id='generated'")
+    # Completed primary stages make remaining understanding work locally ready.
+    for stage in ('retention', 'vision', 'stt'):
+        parent = DeviceDayQueue(queue.path.with_name(f'queue-{stage}.sqlite3'))
+        for rid in ('failed', 'ready'):
+            parent.enqueue(record(rid), rid)
+        with parent.connect() as db:
+            db.execute("UPDATE recordings SET status='completed'")
+    journal = PublicationJournal(queue.path.parent)
+    journal.begin(record('generated'))
+    journal.begin(record('generated'))  # Replacement is one recording, not two tasks.
+    health = processing_health(config, now=100)
+    state = health['stages']['understanding']
+    assert state['workload']['result_unknown'] == 2
+    assert state['workload']['failed'] == 1
+    assert state['workload']['processing_backlog'] == state['ready_backlog'] == 1
+    assert state['queue_status_counts'] == {'blocked': 2, 'failed': 1, 'queued': 1, 'completed': 1}
+    assert health['publication']['completed_output_stage_pending_recordings'] == 1
+    assert health['publication']['generated_pending_recordings'] is None
+    assert health['publication']['pending_recordings'] == 1
+    assert '结果未知 2' in render_processing_health(health)
+
+
+def test_expired_paid_lease_is_unknown_before_recovery_and_retention_is_not_generated_output(default_config, tmp_path):
+    from visioncortex.publication_journal import PublicationJournal
+    config, queue = setup_queue(default_config, tmp_path, 'understanding')
+    queue.enqueue(record('expired'), 'old')
+    with queue.connect() as db:
+        db.execute("UPDATE recordings SET status='running',lease_until=1")
+    parent = DeviceDayQueue(queue.path.with_name('queue-retention.sqlite3'))
+    parent.enqueue(record('only-originals'), 'originals')
+    with parent.connect() as db:
+        db.execute("UPDATE recordings SET status='completed'")
+    PublicationJournal(queue.path.parent).begin(record('only-originals'))
+    health = processing_health(config, now=100)
+    state = health['stages']['understanding']
+    assert state['workload']['result_unknown'] == 1
+    assert state['ready_backlog'] == state['workload']['processing_backlog'] == 0
+    assert health['publication']['completed_output_stage_pending_recordings'] == 0
