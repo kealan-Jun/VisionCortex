@@ -1023,14 +1023,28 @@ class DeviceDayRunner:
                         index['historical_read_quarantines'] = historical_quarantines
                     from .device_day_narrative import attach_context
                     index = attach_context(self.config, index)
+                    from .device_day_content import with_partial_understandings
+                    # A later failed/unknown window does not revoke completed
+                    # native windows. Share this verified readable generation
+                    # across all public outputs, without promoting its partial
+                    # observations into the canonical execution receipt view.
+                    publication_index = with_partial_understandings(self.config, index)
                     from .application.retained_video import publish_selected
-                    index['retained_video_publication'] = publish_selected(self.config, index, recording_id=recording_id)
+                    index['retained_video_publication'] = publish_selected(
+                        self.config, publication_index, recording_id=recording_id)
+                    publication_index['retained_video_publication'] = index['retained_video_publication']
+                    published_segments = {row['segment_id']: row for row in publication_index['segments']}
+                    for segment in index['segments']:
+                        published = published_segments[segment['segment_id']]
+                        segment.update({key: published[key] for key in (
+                            'retention_intervals', 'video', 'historical_scope') if key in published})
                     if self.settings.get('readable_content_enabled', False):
                         from .device_day_content import publish_content
                         # The in-memory generation is already validated. Its
                         # actual completed windows become directly readable
                         # before any whole-day synthesis or background scan.
-                        index['readable_content'] = publish_content(self.config, index)
+                        index['readable_content'] = publish_content(self.config, publication_index)
+                        publication_index['readable_content'] = index['readable_content']
                     cached_path = self.runtime_root / 'DayTimeline' / f'{layout.name[:10]}.json'
                     if cached_path.is_file():
                         try:
@@ -1042,6 +1056,8 @@ class DeviceDayRunner:
                                 index['aligned_experiments'] = [e for e in cached.get('aligned_experiments', [])
                                                                if any(s['archive'] == layout.name for s in e['sources'])]
                                 index['multiview_analysis'] = cached.get('multiview_analysis')
+                                publication_index.update({key: index[key] for key in (
+                                    'cross_view_links', 'aligned_experiments', 'multiview_analysis')})
                         except (OSError, ValueError):
                             pass
                     from .timeline_invalidation import TimelineInvalidations
@@ -1049,7 +1065,8 @@ class DeviceDayRunner:
                     ends = [r.get('end_us') for r in recordings if r.get('end_us') is not None]
                     from .device_day_file_index import publish_file_index
                     check_yield(checkpoint=False)
-                    publish_file_index(self.config, index)
+                    publish_file_index(self.config, publication_index)
+                    index['time_index'] = publication_index['time_index']
                     atomic_json(layout.index, index)
                     # The publication journal covers a crash after this write.
                     # Notify only after readers can see the new generation.
@@ -1060,7 +1077,7 @@ class DeviceDayRunner:
                     published(self.config, published_records)
                     from .device_day_night_schedule import paused_stages
                     if 'report' not in paused_stages(self.config):
-                        render_day(layout, index)
+                        render_day(layout, publication_index)
                         from .application.field_event_consumer import consume_device_index
                         consume_device_index(self.config, index, layout.name)
                     return True
