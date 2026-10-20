@@ -65,3 +65,22 @@ def test_audio_coverage_preserves_missing_time_and_status():
         assert coverage['开始时间'] is coverage['结束时间'] is None
         assert coverage['录音状态'] == status
         assert result['录音时间线'] == []
+
+
+def test_unverified_collector_audio_keeps_source_gap_without_verified_stream(device_config):
+    from visioncortex.device_day_file_index import build_file_index
+    sources = [{'kind': 'audio', 'original_path': '/collector/device/day/MetaData/120000/audio.opus',
+                'verification_status': 'unverified', 'ownership': 'collector'}]
+    verification = {'status': 'waiting_for_input_verification',
+                    'reasons': ['independent_audio_session_unverified'], 'stt_binding_granted': False}
+    value = build_file_index(device_config, {
+        'archive': '2026-10-20_test_cam01', 'segments': [], 'understandings': [],
+        'recordings': [{'recording_id': 'unverified-audio', 'start_us': 1792468800000000,
+                        'end_us': 1792468860000000, 'audio': {'status': 'provided',
+                            'input_verification': verification, 'collector_sources': sources}}]}, {})
+    recording, = value['recordings']
+    assert recording['audio_status'] == 'provided'
+    assert recording['audio_verification'] == verification
+    assert recording['audio_source_references'] == sources
+    assert value['streams']['audio'] == []
+    assert all(not row.get('file') for row in value['streams']['video'])

@@ -98,6 +98,71 @@ def _plain_clock_bounds(clock: Path) -> tuple[int, int]:
     return (first[0], last[-1]) if first and last else (0, 0)
 
 
+
+def _capture_session(value):
+    """Read recorder integer IDs and their exact string representation."""
+    if type(value) is int:
+        return str(value) if value > 0 else None
+    return value if isinstance(value, str) and value else None
+
+
+def _independent_audio_clock(timing, audio_meta, audio_ready, start, end):
+    if timing.stat().st_size > 2*1024*1024:
+        raise ValueError('independent_audio_clock_exceeds_bound')
+    previous, count, received = None, 0, 0
+    first_nonempty, last_nonempty, empty_windows = None, None, []
+    with timing.open(encoding='utf-8-sig', newline='') as handle:
+        rows = csv.DictReader(handle)
+        fields = set(rows.fieldnames or [])
+        if 'global_timestamp_us' not in fields:
+            raise ValueError('independent_audio_clock_header_invalid')
+        windows = bool(fields & {'window_start_global_us', 'window_end_global_us'})
+        if windows and (not {'window_start_global_us', 'window_end_global_us', 'received_packets',
+                            'clock_sync_valid'}.issubset(fields)
+                or any(row.get('schema_version') != 2 or row.get('task_audio') is not True
+                       for row in (audio_meta, audio_ready))
+                or audio_meta.get('global_timestamp_source') != 'sender_system_timestamp_us_plus_clock_offset'):
+            raise ValueError('independent_audio_window_clock_schema_unverified')
+        for row in rows:
+            stamp = int(row['global_timestamp_us'])
+            if windows:
+                left, right, packets = (int(row[k]) for k in
+                    ('window_start_global_us', 'window_end_global_us', 'received_packets'))
+                if (stamp != left or right-left != 1000000 or packets < 0
+                        or previous is not None and left != previous
+                        or packets and row['clock_sync_valid'] != '1'):
+                    raise ValueError('independent_audio_window_clock_time_mismatch')
+                if packets:
+                    first_nonempty = first_nonempty or (left, right)
+                    last_nonempty = (left, right)
+                else:
+                    empty_windows.append({'start_us': left, 'end_us': right, 'reason': 'no_received_packets'})
+                previous = right
+                received += packets
+            else:
+                if not start <= stamp <= end or previous is not None and stamp < previous:
+                    raise ValueError('independent_audio_clock_time_mismatch')
+                if previous is None and stamp != start:
+                    raise ValueError('independent_audio_clock_origin_mismatch')
+                previous = stamp
+            count += 1
+        if not count:
+            raise ValueError('independent_audio_clock_empty')
+        if windows:
+            if first_nonempty is None or not first_nonempty[0] <= start < first_nonempty[1]:
+                raise ValueError('independent_audio_window_clock_origin_mismatch')
+            if not last_nonempty[0] < end <= last_nonempty[1]:
+                raise ValueError('independent_audio_window_clock_end_mismatch')
+            if (received <= 0 or any(type(row.get('received_packets')) is not int
+                    or row['received_packets'] != received for row in (audio_meta, audio_ready))
+                    or type(audio_meta.get('clock_sync_valid_packets')) is not int
+                    or audio_meta['clock_sync_valid_packets'] != received):
+                raise ValueError('independent_audio_window_clock_packet_mismatch')
+    return {'kind': 'recorder_task_audio_v2_window_summary' if windows else 'explicit_audio_timestamp_rows',
+            'rows': count, 'received_packets': received if windows else None,
+            **({'empty_packet_windows': empty_windows} if windows else {})}
+
+
 def _independent_stt(record, video, metadata, ready, now, settle):
     """Audio readiness has its own identity/clock/producer completion gate."""
     from .device_day_contract import digest
@@ -112,13 +177,16 @@ def _independent_stt(record, video, metadata, ready, now, settle):
         if not all(kind in paths for kind in ('audio', 'metadata', 'ready', 'timing')):
             raise ValueError('independent_audio_files_incomplete')
         audio_meta, audio_ready = _json(paths['metadata']), _json(paths['ready'])
-        session = record.get('recording_session_id')
-        if not session or any(row.get('recording_session_id') != session
+        session = _capture_session(record.get('recording_session_id'))
+        if not session or any(_capture_session(row.get('recording_session_id')) != session
                               for row in (metadata, ready, audio_meta, audio_ready)):
             raise ValueError('independent_audio_session_unverified')
         if any(row.get('camera_key') and row['camera_key'] != record['camera_key']
                for row in (metadata, ready, audio_meta, audio_ready)):
             raise ValueError('independent_audio_camera_mismatch')
+        if any(len({str(row[field]) for row in (metadata, ready, audio_meta, audio_ready)
+                    if row.get(field) is not None}) > 1 for field in ('camera_id', 'sender_id')):
+            raise ValueError('independent_audio_capture_identity_mismatch')
         prefix = video.name[:-len('rgb.mp4')] if video.name.endswith('rgb.mp4') else None
         identity_paths = ([video.with_name(prefix + suffix) for suffix in ('meta.json', 'recording_ready.json')]
                           if prefix is not None else [video.with_suffix('.json'), video.with_suffix('.ready.json')])
@@ -136,28 +204,13 @@ def _independent_stt(record, video, metadata, ready, now, settle):
             '缺少完整的采集时间范围', '等待采集完成标记', '采集程序报告数据不完整', '等待文件写入稳定'}]
         if unsafe or audio.get('association_issues'):
             raise ValueError('capture_identity_or_audio_association_mismatch')
-        timing = paths['timing']
-        if timing.stat().st_size > 2*1024*1024:
-            raise ValueError('independent_audio_clock_exceeds_bound')
-        previous, count = None, 0
-        with timing.open(encoding='utf-8-sig', newline='') as handle:
-            rows = csv.DictReader(handle)
-            if 'global_timestamp_us' not in (rows.fieldnames or []):
-                raise ValueError('independent_audio_clock_header_invalid')
-            for row in rows:
-                stamp = int(row['global_timestamp_us'])
-                if not start <= stamp <= end or previous is not None and stamp < previous:
-                    raise ValueError('independent_audio_clock_time_mismatch')
-                if previous is None and stamp != start:
-                    raise ValueError('independent_audio_clock_origin_mismatch')
-                previous, count = stamp, count + 1
-        if not count:
-            raise ValueError('independent_audio_clock_empty')
+        clock_proof = _independent_audio_clock(paths['timing'], audio_meta, audio_ready, start, end)
         identity = {'schema_version': 'visioncortex-independent-recorder-audio/1',
             'recording_id': record['recording_id'], 'camera_key': record['camera_key'],
             'recording_session_id': session, 'start_us': start, 'end_us': end,
             'audio_source_signature': audio['source_signature']}
-        result.update(stt_processable=True, stt_identity=identity, stt_source_signature=digest(identity))
+        result.update(stt_processable=True, stt_identity=identity, stt_source_signature=digest(identity),
+                      stt_clock_evidence=clock_proof)
     except (OSError, ValueError, KeyError, TypeError, OverflowError) as exc:
         reasons.append(str(exc)[:200] or type(exc).__name__)
     return result

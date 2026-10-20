@@ -117,6 +117,29 @@ def effective_meaning(meaning):
     return meaning | {'windows': windows} if changed else meaning
 
 
+def _source_range(start_ms, end_ms, origin):
+    return {'原片开始毫秒': start_ms, '原片结束毫秒': end_ms,
+            '开始时间': timestamp(origin + round(start_ms * 1000)) if _finite_number(start_ms) else None,
+            '结束时间': timestamp(origin + round(end_ms * 1000)) if _finite_number(end_ms) else None,
+            '区间语义': '左闭右开'}
+
+
+def _projected_scope(window, segment, origin):
+    if not window.get('projection_from_parent'):
+        return {}
+    parent = window.get('parent_model_window') or {}
+    return {'范围说明': '原模型窗口背景观察；原文中的相对时间和全程描述属于原模型窗口，不能作为当前子片段的完整结论。',
+            '原模型窗口范围': _source_range(parent.get('start_ms'), parent.get('end_ms'), origin),
+            '当前片段范围': _source_range(segment['start_ms'], segment['end_ms'], origin)}
+
+
+def _outside_boundary_frames(window, identifiers):
+    frames = {frame['frame_id']: frame for frame in window.get('boundary_evidence_frames', [])}
+    return [{'画面编号': identifier, '原片毫秒': frames.get(identifier, {}).get('local_ms'),
+             '原片证据': frames.get(identifier),
+             '说明': '原片在当前区间右界的证据画面；不属于当前派生视频内的像素。'} for identifier in identifiers]
+
+
 def segment_record(segment, meaning, recording, context=None, *, segments=None):
     """Readable content first, technical identities at the evidence boundary.
 
@@ -127,27 +150,34 @@ def segment_record(segment, meaning, recording, context=None, *, segments=None):
     meaning = effective_meaning(meaning)
     context = context or {}
     start, end = segment['start_us'], segment['end_us']
+    origin = start - round(segment['start_ms'] * 1000)
     windows = (meaning or {}).get('windows', [])
     steps, work, observations, receipts = [], [], [], []
     for window in windows:
-        observations.append({'内容': window.get('summary'), '活动类别': window.get('activity_kind', '旧版观察'),
+        scope = _projected_scope(window, segment, origin)
+        observations.append({**scope, '内容': window.get('summary'), '活动类别': window.get('activity_kind', '旧版观察'),
                              '可见性': window.get('observability', 'unknown'),
                              '不确定性': window.get('uncertainties', []), '模型回执': window.get('model_receipt'),
                              '无效结构化内容': window.get('invalid_structured_content', [])})
         for field, output in [('experiment_steps', steps), ('work_activities', work)]:
             for step in window.get(field, []):
-                origin = start - round(segment['start_ms'] * 1000)
                 left = step.get('start_us', origin + round(step['start_ms'] * 1000))
                 right = step.get('end_us', origin + round(step['end_ms'] * 1000))
-                output.append({'开始时间': timestamp(left), '结束时间': timestamp(right),
+                boundary = set(step.get('exclusive_end_boundary_frame_ids', [])) if scope else set()
+                outside = [identifier for identifier in step['frame_ids'] if identifier in boundary]
+                row = {'开始时间': timestamp(left), '结束时间': timestamp(right),
                     '动作': step['action'], '操作对象': step['objects'], '内容': step['description'],
                     '操作前': step['before_state'], '操作后': step['after_state'],
                     '可见依据': step['visible_evidence'], '结果状态': step['outcome'],
                     '工作类别': step.get('category'), '判断依据': step['basis'],
-                    '画面引用': step['frame_ids'], '模型输入': window.get('input'),
-                    '模型回执': window.get('model_receipt')})
+                    '画面引用': [identifier for identifier in step['frame_ids'] if identifier not in boundary],
+                    '模型输入': window.get('input'), '模型回执': window.get('model_receipt')}
+                if scope:
+                    row.update(scope, 前后状态说明='动作描述、可见依据及操作前后状态保留原模型原文；前后状态可能来自当前子片段外，不作为本片内完整动作或状态变化的确认。',
+                               片外原片边界证据=_outside_boundary_frames(window, outside))
+                output.append(row)
         receipts.append({'输入': window.get('input'), '输出': window.get('model_receipt'),
-                         '覆盖': window.get('coverage')})
+                         '覆盖': window.get('coverage'), **scope})
     speech = [row for row in ((recording.get('transcription') or {}).get('comments') or [])
               if overlaps(row.get('start_us'), row.get('end_us'), start, end)]
     events = [row for row in context.get('events', [])
@@ -166,6 +196,19 @@ def segment_record(segment, meaning, recording, context=None, *, segments=None):
     decision = ('retain_valuable_activity' if steps or work else
                 'retain_protected_context' if selected_context else
                 'static_candidate_requires_continuous_review' if static else 'pending_value_review')
+    retention = {'决定': decision, '保护原因': protected, '价值依据': selected_context, '原视频允许删除': False,
+                 '留存单位': '有证据的具体原片区间；预处理候选和活动分类不决定整段留存',
+                 '区间记录': segment.get('retention_intervals', []),
+                 '边界说明': '保护原片不等于选中处理视频；只为有价值内容另存片段，判断未完成时保留原片与待筛选状态。'}
+    interval = segment.get('retention_interval')
+    if interval is not None:
+        value = interval['video_value']
+        retention.update(决定={'selected': 'retain_derivative', 'confirmed_no_value': 'omit_static_derivative',
+                            'pending': 'pending_value_review'}[value],
+                         视频价值=value, 原因=interval.get('reason'),
+                         价值依据=[interval['reason']] if value == 'selected' else [], 区间记录=[interval],
+                         区间价值依据=interval.get('evidence', []), 动作原始区间=interval.get('core_action_ranges', []),
+                         必要上下文依据=interval.get('context_basis', []), 必要上下文区间=interval.get('context_subranges', []))
     state = understanding_state(meaning, recording)
     return {'开始时间': timestamp(start), '结束时间': timestamp(end),
         '实验员': experimenter(context, recording.get('camera_key'), start, end),
@@ -178,10 +221,7 @@ def segment_record(segment, meaning, recording, context=None, *, segments=None):
             '仪器': e.get('instrument_id'), '识别内容': recognition_payload(e.get('payload')),
             '原始照片与媒体': e.get('media'), '来源': e.get('evidence_refs'),
             '时钟': e.get('clock'), '关联依据': '同设备与时间重叠，尚未证明属于同一步操作'} for e in events],
-        '留存判断': {'决定': decision, '保护原因': protected, '价值依据': selected_context, '原视频允许删除': False,
-                     '留存单位': '有证据的具体原片区间；预处理候选和活动分类不决定整段留存',
-                     '区间记录': segment.get('retention_intervals', []),
-                     '边界说明': '保护原片不等于选中处理视频；只为有价值内容另存片段，判断未完成时保留原片与待筛选状态。'},
+        '留存判断': retention,
         '溯源': {'原视频': segment['source_ref'], '保留视频': segment.get('video'),
                  '原视频开始毫秒': segment['start_ms'], '原视频结束毫秒': segment['end_ms'],
                  '片段索引': segment.get('json_path'), '执行记录': receipts,

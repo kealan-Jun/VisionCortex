@@ -105,6 +105,8 @@ def build_file_index(config, index, photos):
             video=reference(sources.get('video')), stages=row.get('stages', {}),
             capture_complete=row.get('capture_complete'), capture_issues=row.get('capture_issues', []),
             transcription_status=stt.get('status'), transcription_outcome=stt.get('outcome'),
+            audio_status=audio.get('status'), audio_verification=audio.get('input_verification'),
+            audio_source_references=audio.get('collector_sources', []),
             model_invocation=stt.get('model_invocation', 'NOT_PROVEN'),
             transcript_file=reference(stt.get('transcript_file'))))
         if sources.get('video'):
