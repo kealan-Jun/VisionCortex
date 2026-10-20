@@ -908,8 +908,6 @@ class DeviceDayRunner:
                         min(bounds) if bounds else None, max(ends) if ends else None)
                     from .device_day_latency import published
                     published(self.config, published_records)
-                    atomic_json(layout.understanding / "Understanding.json", {
-                        "schema_version": VERSION, "archive": layout.name, "understandings": understandings})
                     from .device_day_night_schedule import paused_stages
                     if 'report' not in paused_stages(self.config):
                         render_day(layout, index)

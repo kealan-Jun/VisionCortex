@@ -58,6 +58,8 @@ def private_folder(layout, directory, kind, *parts):
 def legacy_reference(relative):
     parts = relative.split('/')
     return len(parts) > 1 and (
+        relative in {'MultimodalUnderstanding/Understanding.json', 'MultimodalUnderstanding/UnderstandingReport.html'}
+        or
         (parts[0] in {'Comment', 'MultimodalUnderstanding', 'ProcessedClips'} and bool(_TIME_DIRECTORY.fullmatch(parts[1])))
         or relative.startswith(('Comment/Stt/', 'MultimodalUnderstanding/ClipUnderstanding/',
                                 'MultimodalUnderstanding/RequestPlans/', 'LaboratoryDailyReport/History/',
@@ -194,6 +196,16 @@ def migrate_display_layout(runner, layout, *, max_bytes=536870912, max_files=200
     from .device_day import copy_verified
     from .device_day_contract import atomic_json, digest, file_hash
     plans = []
+    # Obsolete day-level templates are neither model results nor part of the
+    # frozen public tree. Preserve exact bytes and receipt aliases, using a
+    # content identity so a recovered older producer cannot overwrite history.
+    for name in ('Understanding.json', 'UnderstandingReport.html'):
+        source = layout.understanding / name
+        if source.is_file():
+            if source.stat().st_size > max_single_artifact_bytes:
+                raise ValueError('Legacy summary exceeds its bounded artifact size')
+            plans.append((source, private_folder(layout, 'MultimodalUnderstanding',
+                'LegacySummaries', file_hash(source), name)))
     for directory, names in {
             'MultimodalUnderstanding': ('RequestPlans', 'ClipUnderstanding'),
             'LaboratoryDailyReport': ('Analysis', 'History'),

@@ -110,7 +110,7 @@ def with_partial_understandings(config, index):
             receipt = Path(backend) / 'device-day-receipts' / index['archive'] / row['recording_id'] / 'understanding.json'
             if receipt.is_file():
                 stage = read_json(receipt)
-                row.setdefault('stages', {})['understanding'] = {k: stage.get(k) for k in ('status', 'key', 'message')}
+                row.setdefault('stages', {})['understanding'] = {k: stage.get(k) for k in ('status', 'key', 'message', 'reason')}
     complete = {u['segment_id'] for u in value.get('understandings', [])}
     partial = {}
     for segment, stage, request_path, result_path in window_files(config, index):
@@ -239,7 +239,9 @@ def publish_content(config, index):
             'experiment_steps': experiment_steps, 'step_understanding_status': step_status,
             'step_accuracy': 'NOT_PROVEN',
             'transcript_content': next((a['content'] for a in audio_entries if a['recording_id'] == segment['recording_id']), None)}
-        from .device_day_narrative import segment_record
+        from .device_day_narrative import segment_record, understanding_state
+        state = understanding_state(meaning, record)
+        value['status'] = state['status']
         value = {'内容记录': segment_record(segment, meaning, record, index.get('context'),
                   segments=[s for s in index['segments'] if s['recording_id'] == segment['recording_id']]), **value}
         from .media.retained_intervals import disposition
@@ -263,9 +265,19 @@ def publish_content(config, index):
             'selection_status': 'pending_value_review' if not meaning else value['处理视频留存']['decision'],
             **value['处理视频留存']}
         _write(safe_child(root, 'ProcessedClips/Clips/' + clip_name(segment) + '/Retention.json'), retention)
-        visual_entries.append({k: value[k] for k in ('recording_id', 'segment_id', 'start_us', 'end_us', 'activity', 'status')} |
+        visual_entries.append({'开始时间': value['内容记录']['开始时间'], '结束时间': value['内容记录']['结束时间'],
+            '状态说明': state['说明'], '阶段状态': state['阶段状态'], '处理原因': state['处理原因']} |
+            {k: value[k] for k in ('recording_id', 'segment_id', 'start_us', 'end_us', 'activity', 'status')} |
                               {'content': relative + '/Understanding.json', 'video_status': value['video_status']})
     for directory, entries in [('Comment', audio_entries), ('MultimodalUnderstanding', visual_entries)]:
-        _write(root / directory / 'Index.json', {**common, 'schema_version': 'visioncortex-readable-content-index/1',
+        summary = {}
+        if directory == 'MultimodalUnderstanding':
+            from collections import Counter
+            counts = Counter(row['status'] for row in entries)
+            summary = {'理解进度': {'片段总数': len(entries), '已返回结果': counts['completed'],
+                '部分返回': counts['partial'], '已提交待确认': counts['submitted_unknown'],
+                '各状态片段数': dict(counts),
+                '说明': '按下方 content 路径打开对应片段的 Understanding.json；只有实际返回的模型观察才展示步骤内容。'}}
+        _write(root / directory / 'Index.json', {**summary, **common, 'schema_version': 'visioncortex-readable-content-index/1',
             'entries': sorted(entries, key=lambda r: r['start_us'])})
     return {'audio': audio_entries, 'multimodal': visual_entries, 'digest': digest([audio_entries, visual_entries])}
