@@ -719,8 +719,9 @@ class DeviceDayRunner:
         needed = set(STAGES) if stage == "all" else {stage}
         for _ in STAGES:
             needed.update(parent for name in list(needed) for parent in dependencies[name])
-        deferred_publication = (stage in {"retention", "stt"}
-                                and self.settings.get("defer_audio_day_publication", False))
+        deferred_publication = (
+            stage in {"retention", "stt"} and self.settings.get("defer_audio_day_publication", False)
+            or stage in {"retention", "vision", "stt"} and self.settings.get("defer_primary_publication", False))
         for current in STAGES:
             if current not in needed:
                 continue
@@ -873,7 +874,8 @@ class DeviceDayRunner:
                 "recording_id": recording["recording_id"], "status": "completed", "stage": stage,
                 "capture_deletion": "disabled_by_user",
                 "media_duration_seconds": vision.get("source_duration_ms", 0) / 1000 if vision and vision.get("source_duration_ms") is not None else None,
-                **({'formal_publication': 'pending', **publication_pending} if publication_pending else {})}
+                **({'formal_publication': 'pending', **(publication_pending or {})}
+                   if deferred_publication or publication_pending else {})}
 
     def refresh_index(self, layout, *, recording_id=None):
         from .device_day_write_guard import storage_guard
