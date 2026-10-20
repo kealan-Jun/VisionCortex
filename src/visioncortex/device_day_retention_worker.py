@@ -63,15 +63,14 @@ def foreground_history_config(config):
 class DeferredPrimaryPublicationRunner(DeviceDayRunner):
     """Keep native primary queue completion independent of whole-day rendering.
 
-    Native execute() has already saved the stage receipt and dirty journal.
+    Native and legacy primary stages retain their receipts and dirty journal.
     Returning False leaves formal publication pending; the standard replay
     still verifies source/artifacts and owns the completed publication receipt.
-    CLI, legacy stages and multimodal/report publication retain the base path.
+    CLI, all-stage and multimodal/report publication retain the base path.
     """
     def refresh_index(self, layout, *, recording_id=None):
         from .device_day_activity import current_stage
-        if (recording_id is not None and current_stage() in {'retention', 'vision', 'stt'}
-                and (layout.receipts / recording_id / 'input-state.json').is_file()):
+        if recording_id is not None and current_stage() in {'retention', 'vision', 'stt'}:
             return False
         return super().refresh_index(layout, recording_id=recording_id)
 
