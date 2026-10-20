@@ -6,7 +6,7 @@ from ..device_day_contract import atomic_bytes, atomic_json, digest
 from ..device_day_narrative import effective_meaning
 from ..media_time import capture_us
 
-POLICY = 'visioncortex-value-only-derivatives/2'
+POLICY = 'visioncortex-value-only-derivatives/3'
 
 
 def _number(value):
@@ -356,6 +356,48 @@ def _context_intervals(segment, context, clock, valid_clock):
     return result
 
 
+def _continuous_selected_groups(intervals):
+    """One export for a connected positive union; no unselected gap is added.
+
+    Atomic evidence membership is a provenance boundary, not a video boundary.
+    Retain every original atomic row and action while combining only touching
+    selected rows of the same category/activity in this one source candidate.
+    """
+    groups = []
+    for row in intervals:
+        previous = groups[-1] if groups else None
+        boundary = row['start_ms']
+        # Context connections retain their separate, stricter owner above.
+        # Two context extensions touching must not establish a new cross-window
+        # or different-work bridge. This join only removes atomic boundaries
+        # crossed by actual positive action coverage on both sides.
+        positive_boundary = (previous
+            and any(core['start_ms'] < boundary <= core['end_ms']
+                    for core in previous.get('core_action_ranges', []))
+            and any(core['start_ms'] <= boundary < core['end_ms']
+                    for core in row.get('core_action_ranges', [])))
+        compatible = (positive_boundary and row['video_value'] == previous['video_value'] == 'selected'
+            and row['start_ms'] == previous['end_ms'] and row['start_us'] == previous['end_us']
+            and all(row.get(key) == previous.get(key) for key in
+                    ('activity', 'activity_category', 'activity_categories')))
+        if not compatible:
+            groups.append(row)
+            continue
+        if 'selected_subranges' not in previous:
+            previous['selected_subranges'] = [deepcopy(previous)]
+        previous['selected_subranges'].append(deepcopy(row))
+        previous.update(end_ms=row['end_ms'], end_us=row['end_us'],
+            export_group_basis='contiguous_selected_union',
+            export_group_limitation='连续选中内容作为一个视频保存；各原始观察范围独立保留，不宣称同一或完整物理动作。')
+        for key in ('evidence', 'context_basis', 'core_action_ranges', 'context_subranges'):
+            values = previous.setdefault(key, [])
+            for item in row.get(key, []):
+                if item not in values:
+                    values.append(deepcopy(item))
+        previous['reason'] = '+'.join(sorted({atom['reason'] for atom in previous['selected_subranges']}))
+    return groups
+
+
 def partition(segment, meaning, recording, context=None, *, segments=None):
     """Full half-open partition in original media milliseconds and recorder time.
 
@@ -417,6 +459,7 @@ def partition(segment, meaning, recording, context=None, *, segments=None):
             intervals[-1].update(end_ms=end, end_us=row['end_us'])
         else:
             intervals.append(row)
+    intervals = _continuous_selected_groups(intervals)
     return {'schema_version': 'visioncortex-retention-interval-partition/1', 'selection_policy': POLICY,
         'candidate_segment_id': segment['segment_id'], 'source_ref': deepcopy(segment['source_ref']),
         'source_start_ms': left, 'source_end_ms': right, 'intervals': intervals,
