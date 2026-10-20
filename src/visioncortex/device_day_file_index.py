@@ -489,6 +489,9 @@ class FileIndexPublisher:
                                            observed=exc.observed, limit=exc.limit)
             elif isinstance(exc, ProjectionGenerationChanged):
                 result['errors'][-1].update(exc.details())
+            elif operation in {'frozen_layout_migration', 'legacy_selected_video_publication'}:
+                result['errors'][-1].update(reason=str(exc)[:500],
+                    automatic_action='preserve_existing_bytes_and_retry_verified_publication')
             logging.getLogger(__name__).warning('File time index unavailable for %s during %s: %s',
                                                name, operation, type(exc).__name__)
         records_by_day = {}
@@ -593,8 +596,9 @@ class FileIndexPublisher:
                             migration = migrate_display_layout(None, migration_layout, bounded_batch=True)
                             result['layout_migrated'] = result.get('layout_migrated', 0) + len(migration['moved'])
                             video_progress = {}
+                            operation = 'legacy_selected_video_publication'
                             published_videos = publish_selected_videos(migration_layout, index.get('segments', []),
-                                bounded_batch=True, progress=video_progress)
+                                bounded_batch=True, progress=video_progress, exact_intervals_only=True)
                             result['selected_videos_published'] = result.get('selected_videos_published', 0) + len(published_videos)
                             layout_changed = bool(migration['moved'] or published_videos)
                             if migration['pending'] or video_progress['pending']:

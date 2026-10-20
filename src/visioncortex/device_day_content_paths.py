@@ -136,11 +136,13 @@ def analysis_folder(layout, segment, key):
 
 
 def publish_selected_videos(layout, segments, *, max_bytes=536870912, bounded_batch=False,
-                            max_single_artifact_bytes=8589934592, progress=None):
+                            max_single_artifact_bytes=8589934592, progress=None, exact_intervals_only=False):
     """Expose already selected historical bytes in the frozen clip directory.
 
     No extraction or selection change. Old receipts retain exact bytes through
     an explicit alias; missing or damaged media cannot be called retained.
+    The current exact-selection owner must opt in before passing canonical CV
+    candidates: an unmarked historical video never authorizes a new copy.
     """
     from .device_day import copy_verified
     from .device_day_contract import artifact, safe_child
@@ -156,7 +158,28 @@ def publish_selected_videos(layout, segments, *, max_bytes=536870912, bounded_ba
             continue
         parent = segment.get('candidate_segment_id')
         child = bool(parent and parent != segment.get('segment_id'))
-        policy = (segment.get('derived_video_disposition') or {}).get('selection_policy')
+        disposition = segment.get('derived_video_disposition') or {}
+        policy = disposition.get('selection_policy')
+        if exact_intervals_only:
+            if (not child or segment.get('video_value') != 'selected'
+                    or policy != 'visioncortex-exact-value-intervals/1'
+                    or disposition.get('decision') != 'retain_derivative'):
+                continue
+            # Use the exact owner's complete receipt/video verifier, rather
+            # than accepting a child ID or a historical retain decision alone.
+            from .application.retained_video import published_material
+            prior = published_material(layout, segment)
+            if (not prior or prior.get('segment_id') != segment['segment_id']
+                    or prior.get('candidate_segment_id') != parent
+                    or prior.get('selection_policy') != policy
+                    or prior.get('decision') != 'retain_derivative'
+                    or prior.get('video') != segment.get('video')
+                    or any(disposition.get(key) != prior.get(key) for key in
+                           ('segment_id', 'candidate_segment_id', 'source_ref', 'source_start_ms',
+                            'source_end_ms', 'start_us', 'end_us', 'selection', 'video'))
+                    or any((prior.get('selection') or {}).get(key) != segment.get(key)
+                           for key in ('start_ms', 'end_ms', 'start_us', 'end_us', 'activity', 'video_value'))):
+                raise ValueError('Exact selected child lacks its matching verified publication receipt')
         if not child and ('retention_intervals' in segment
                           or policy == 'visioncortex-exact-value-intervals/1'):
             continue
