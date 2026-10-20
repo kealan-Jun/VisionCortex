@@ -53,6 +53,27 @@ def recognition_payload(payload):
             if key not in {'review_status', 'human_reviewed'}}
 
 
+def understanding_state(meaning, recording):
+    """Keep returned content and the owning stage's unresolved state distinct."""
+    stage = (recording.get('stages') or {}).get('understanding') or {}
+    status = ((meaning.get('status') or 'completed') if meaning else stage.get('status') or 'pending')
+    labels = {
+        'completed': '已返回模型观察，具体步骤和可见依据见下文。',
+        'partial': '仅部分窗口已返回结果；已展示的观察不代表全片理解完成。',
+        'submitted_unknown': '请求已提交，本地尚无可确认的返回结果；当前没有可展示的模型理解。为避免重复提交，等待原请求结果确认。',
+        'pending': '模型理解尚未完成，当前没有已确认的观察结果。',
+        'queued': '等待模型理解处理。',
+        'running': '模型理解正在处理，尚未完成。',
+        'blocked': '模型理解已暂停，需先解决处理原因。',
+        'failed': '模型理解处理失败，当前没有完整结果。',
+        'waiting_for_plan_review': '采样计划尚未就绪，模型理解未完成。',
+        'scheduled_checkpoint': '已保存处理进度，仍有窗口待完成。',
+    }
+    reason = stage.get('reason') or stage.get('message')
+    return {'status': status, '说明': labels.get(status, '模型理解尚未确认完成，详见处理状态。'),
+            '阶段状态': stage.get('status', 'pending'), '处理原因': reason}
+
+
 def segment_record(segment, meaning, recording, context=None, *, segments=None):
     """Readable content first, technical identities at the evidence boundary.
 
@@ -96,9 +117,11 @@ def segment_record(segment, meaning, recording, context=None, *, segments=None):
     decision = ('retain_valuable_activity' if steps or work else
                 'retain_protected_context' if protected else
                 'static_candidate_requires_continuous_review' if static else 'retain_uncertain')
+    state = understanding_state(meaning, recording)
     return {'开始时间': timestamp(start), '结束时间': timestamp(end),
         '实验员': experimenter(context, recording.get('camera_key'), start, end),
-        '内容状态': (meaning or {}).get('status', 'pending'),
+        '内容状态': state['status'], '状态说明': state['说明'],
+        '阶段状态': state['阶段状态'], '处理原因': state['处理原因'],
         '实验步骤': steps, '非实验工作': work, '分窗口观察': observations,
         '录音记录': [{'开始时间': timestamp(s['start_us']), '结束时间': timestamp(s['end_us']),
                       '原话': s.get('text'), '转写来源': s.get('transcript_path'), '识别方式': '自动转写'} for s in speech],

@@ -62,6 +62,54 @@ def test_declared_but_missing_or_truncated_video_is_not_reported_as_retained(tmp
     assert publish_content(config, index)['multimodal'][0]['video_status'] == 'available'
 
 
+def test_empty_model_results_explain_actual_submission_hold_in_both_file_views(tmp_path):
+    config, index = fixture(tmp_path)
+    index['recordings'][0]['stages'] = {'understanding': {
+        'status': 'submitted_unknown', 'reason': 'submitted_unknown'}}
+    result = publish_content(config, index)
+    root = tmp_path/index['archive']
+    value = read_json(root/result['multimodal'][0]['content'])
+    assert value['status'] == value['内容记录']['内容状态'] == 'submitted_unknown'
+    assert value['内容记录']['处理原因'] == 'submitted_unknown'
+    assert '本地尚无可确认的返回结果' in value['内容记录']['状态说明']
+    assert value['内容记录']['实验步骤'] == value['内容记录']['分窗口观察'] == []
+    summary = read_json(root/'MultimodalUnderstanding/Index.json')
+    assert summary['理解进度']['已提交待确认'] == 1
+    assert summary['理解进度']['已返回结果'] == 0
+    assert summary['entries'][0]['状态说明'] == value['内容记录']['状态说明']
+
+
+def test_partial_observations_keep_remaining_stage_hold_visible(tmp_path):
+    config, index = fixture(tmp_path)
+    index['recordings'][0]['stages'] = {'understanding': {
+        'status': 'submitted_unknown', 'reason': 'submitted_unknown'}}
+    index['understandings'] = [{'segment_id': index['segments'][0]['segment_id'],
+        'status': 'partial', 'windows': [{'summary': '已确认的窗口观察'}]}]
+    result = publish_content(config, index)
+    value = read_json(tmp_path/index['archive']/result['multimodal'][0]['content'])['内容记录']
+    assert value['内容状态'] == 'partial' and value['阶段状态'] == 'submitted_unknown'
+    assert value['分窗口观察'][0]['内容'] == '已确认的窗口观察'
+    assert '不代表全片理解完成' in value['状态说明']
+
+
+def test_legacy_empty_summary_is_retired_without_losing_receipt_bytes(tmp_path):
+    layout = DeviceDayLayout(tmp_path, 'camera_cam01', 1792376825000000)
+    originals = []
+    for name, data in [('Understanding.json', b'{"understandings":[]}'),
+                       ('UnderstandingReport.html', b'<p>old template</p>')]:
+        path = layout.understanding/name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        originals.append((artifact(layout.root, path), data))
+    result = migrate_display_layout(None, layout)
+    assert len(result['moved']) == 2
+    for ref, data in originals:
+        assert not (layout.root/ref['path']).exists()
+        assert safe_child(layout.root, ref['path']).read_bytes() == data
+        assert verify_artifact(layout.root, ref)
+    assert migrate_display_layout(None, layout)['moved'] == []
+
+
 def test_cross_camera_projection_and_arbitrary_clip_paths_fail_closed(tmp_path):
     config, index = fixture(tmp_path)
     index['segments'][0]['camera_key'] = 'other_camera'
