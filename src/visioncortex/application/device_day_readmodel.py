@@ -166,6 +166,58 @@ class DeviceDayReadModels:
     def time_index(self, root):
         return self._read(safe_child(root, 'Comment/TimeIndex.json'), 'time')
 
+    def timeline_index(self, root):
+        """Adapt published file times without hydrating dense CV diagnostics."""
+        try:
+            data = self.time_index(root).value
+        except FileNotFoundError:
+            return self.index(root).value
+        if data.get('schema_version') != 'visioncortex-file-time-index/2':
+            return self.index(root).value
+        try:
+            return self._timeline_index(data)
+        except (KeyError, TypeError, AttributeError) as exc:
+            raise ReadModelDeferred('Invalid published timeline references') from exc
+
+    @staticmethod
+    def _timeline_index(data):
+        if data.get('schema_version') != 'visioncortex-file-time-index/2':
+            raise ReadModelDeferred('Timeline lookup requires a version 2 time index')
+        streams = data['streams']
+        originals = {r['recording_id']: r for r in streams.get('video', []) if r['kind'] == 'original_video'}
+        audio = {r['recording_id']: r for r in streams.get('audio', [])}
+        records = []
+        for row in data['recordings']:
+            rid = row['recording_id']
+            video, sound = originals.get(rid, {}), audio.get(rid, {})
+            transcript = sound.get('transcription') or {}
+            records.append({**row, 'camera_key': data['archive'][11:],
+                'sources': row.get('sources') or ([{'kind': 'video', 'retained': video['file']}]
+                                                 if video.get('file') else []),
+                'processing': {'clock_mapping': video.get('clock_mapping') or {}},
+                'audio': {'start_us': sound.get('start_us'), 'end_us': sound.get('end_us'),
+                          'artifacts': [{'kind': 'audio_audio', **sound['file']}] if sound.get('file') else []},
+                'transcription': {'status': transcript.get('status', row.get('transcription_status')),
+                    'outcome': transcript.get('outcome', row.get('transcription_outcome')),
+                    'transcript_file': transcript.get('text_file') or row.get('transcript_file'),
+                    'comments': [s | {'transcript_path': s.get('transcript_file') or transcript.get('text_file')}
+                                 for s in transcript.get('sentences', [])]}})
+        videos = [r for r in streams.get('video', []) if r['kind'] == 'video_segment']
+        parents = {r['segment_id'] for r in videos if r.get('record_scope') != 'retention_interval'}
+        segments = [{'segment_id': r['segment_id'], 'recording_id': r['recording_id'],
+                     'start_us': r['start_us'], 'end_us': r['end_us'],
+                     'start_ms': r.get('source_start_ms'), 'end_ms': r.get('source_end_ms'),
+                     'activity': r['activity'], 'source_ref': r.get('source_video'),
+                     'video': r.get('file'), 'json_path': r.get('metadata_file'),
+                     'key_frames': [], 'scene_frames': []} for r in videos
+                    if r.get('record_scope') != 'retention_interval' or r.get('candidate_segment_id') not in parents]
+        meanings = [{'segment_id': r['segment_id'], 'status': r.get('status'),
+                     'content_file': r['content_file'], 'windows': []}
+                    for r in streams.get('multimodal', []) if r.get('content_file')]
+        return {'archive': data['archive'], 'recordings': records, 'segments': segments,
+                'understandings': meanings, 'read_model_source': 'Comment/TimeIndex.json',
+                'evidence_status': 'PARTIAL_EVIDENCE', 'dense_evidence_omitted': True}
+
     def summary(self, root):
         try:
             return self._read(safe_child(root, 'Comment/TimeIndex.json'), 'summary',
