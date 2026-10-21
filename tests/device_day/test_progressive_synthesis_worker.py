@@ -237,6 +237,14 @@ def test_restart_prioritizes_stale_running_day_before_history_without_resetting_
     assert worker.state['days'][names[1]] == saved
 
 
+def test_current_day_publication_recovery_overtakes_older_interrupted_days(tmp_path, monkeypatch):
+    worker, config, names, now = scheduled_days(tmp_path, monkeypatch)
+    worker.state['days'][names[3]] = {'status': 'publication_pending', 'attempted_at': now - 600}
+    worker.state['days'][names[0]] = {'status': 'running', 'attempted_at': now - 61}
+    worker.state['schedule']['turn'] = 2
+    assert worker.candidates(config)[0].name == names[0]
+
+
 def test_inventory_grouping_bounds_nas_layout_resolution_and_respects_scope(tmp_path, monkeypatch):
     from types import SimpleNamespace
     from visioncortex.observed_inventory import observe
