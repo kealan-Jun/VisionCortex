@@ -59,6 +59,39 @@ def test_write_uses_verified_directory_fds_and_safe_replacement(tmp_path, monkey
     assert state['marker_verified'] > 2
 
 
+def test_lazy_source_read_failure_is_not_reported_as_nas_write_rejection(tmp_path, monkeypatch):
+    config, volume, _ = mocked_storage(tmp_path, monkeypatch)
+    target = volume/'Archive'/'Result.json'
+    missing = tmp_path/'MissingSource.json'
+    def blocks():
+        yield b'{'
+        with missing.open('rb') as handle:
+            yield handle.read()
+    with guard_module.storage_guard(config) as guard:
+        with pytest.raises(FileNotFoundError) as caught:
+            guard.atomic(target, blocks())
+    assert caught.value.filename == str(missing)
+    assert not target.exists()
+    assert not list(target.parent.glob('*.partial'))
+
+
+def test_destination_failure_preserves_errno_and_atomic_operation(tmp_path, monkeypatch):
+    import errno
+    config, volume, _ = mocked_storage(tmp_path, monkeypatch)
+    target = volume/'Archive'/'Result.json'
+    def denied(*args, **kwargs):
+        raise PermissionError(errno.EACCES, 'owned test replacement denied')
+    monkeypatch.setattr(guard_module.os, 'replace', denied)
+    with guard_module.storage_guard(config):
+        with pytest.raises(guard_module.NASUnavailable) as caught:
+            atomic_json(target, {'safe': True})
+    assert caught.value.errno == errno.EACCES
+    assert caught.value.operation == 'replace_destination'
+    assert caught.value.filename == str(target)
+    assert not target.exists()
+    assert not list(target.parent.glob('*.partial'))
+
+
 def test_declared_storage_aliases_work_and_internal_artifact_symlinks_stay_rejected(tmp_path, monkeypatch):
     config, volume, _ = mocked_storage(tmp_path, monkeypatch)
     alias = tmp_path/'TrustedConfiguredAlias'

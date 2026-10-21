@@ -182,23 +182,36 @@ class PublicationGuard:
             raise NASUnavailable('Publication cannot replace the mount root')
         parent = self.directory(mount, parts[:-1])
         temporary = f'.{parts[-1]}.{uuid.uuid4().hex}.partial'
+        operation = 'create_temporary'
         try:
             self.validate(volume=False)
             descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o666, dir_fd=parent)
             with os.fdopen(descriptor, 'wb') as handle:
+                operation = 'read_source_blocks'
                 for block in blocks:
+                    operation = 'write_temporary'
                     handle.write(block)
+                    operation = 'read_source_blocks'
+                operation = 'flush_temporary'
                 handle.flush()
+                operation = 'sync_temporary'
                 os.fsync(handle.fileno())
             self.validate()
+            operation = 'replace_destination'
             os.replace(temporary, parts[-1], src_dir_fd=parent, dst_dir_fd=parent)
+            operation = 'sync_directory'
             os.fsync(parent)
             self.validate(volume=False)
             return True
         except OSError as exc:
             if isinstance(exc, NASUnavailable):
                 raise
-            raise NASUnavailable('Verified publication filesystem rejected the write') from exc
+            if operation == 'read_source_blocks':
+                raise  # A lazy source read is not a destination filesystem failure.
+            failure = NASUnavailable(exc.errno,
+                f'Verified publication filesystem rejected {operation}', str(path))
+            failure.operation = operation
+            raise failure from exc
         finally:
             try:
                 os.unlink(temporary, dir_fd=parent)
