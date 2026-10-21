@@ -10,13 +10,13 @@ import time
 from .device_day_contract import DeviceDayLayout, archive_name, atomic_json, digest, read_json
 
 
-def current_day_index(config, layout):
+def current_day_index(config, layout, *, source_index=None):
     """Use the same verified partial windows as the published day timeline."""
     from .device_day_file_index import read_source_index
     from .device_day_content import with_partial_understandings
     from .device_day_io import slot
     with slot(config):
-        index = read_source_index(config, layout.index)
+        index = read_source_index(config, layout.index) if source_index is None else source_index
         if index.get('archive') != layout.name:
             raise ValueError('Day index crossed a camera/date boundary')
         index = with_partial_understandings(config, index)
@@ -24,6 +24,13 @@ def current_day_index(config, layout):
             from .device_day_narrative import attach_context
             index = attach_context(config, index)
     return index
+
+
+def _index_version(path):
+    if path.is_symlink():
+        raise ValueError('Day index must not be a symlink')
+    info = path.stat()
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
 
 
 class DaySynthesisWorker:
@@ -108,6 +115,7 @@ class DaySynthesisWorker:
                 if stop.is_set():
                     return {'status': 'stopped'}
                 try:
+                    source_version = _index_version(layout.index)
                     index = current_day_index(config, layout)
                     bundle = evidence_bundle(index)
                     if layout.name in self.hints:
@@ -146,7 +154,10 @@ class DaySynthesisWorker:
                             atomic_json(path, old | {'全天综合理解': result})
                             # A new clip may have arrived during the request.
                             # Rendering retains the verified as-of conclusion.
-                            latest = current_day_index(config, layout)
+                            # Recheck windows/context, but do not stream an
+                            # unchanged multi-GB canonical index a second time.
+                            source = index if _index_version(layout.index) == source_version else None
+                            latest = current_day_index(config, layout, source_index=source)
                             render_day(layout, latest)
                         state['days'][layout.name] |= {'status': 'completed_for_available_inputs',
                             'generated_at': result.get('generated_at'), 'finished_at': time.time()}
