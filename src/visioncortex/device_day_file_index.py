@@ -267,6 +267,31 @@ def verified_field_events_reference(config, index, root):
     return None
 
 
+def _display_migration_pending(layout):
+    """Inspect native legacy names without touching a producer's evidence.
+
+    A new legacy directory arriving after this check is deferred to the next
+    tick; callers must skip migration entirely when this returns False.
+    """
+    from .device_day_content_paths import legacy_reference
+    for directory in ('ProcessedClips', 'MultimodalUnderstanding', 'LaboratoryDailyReport', 'Comment'):
+        parent = layout.root / directory
+        if not parent.is_dir():
+            continue
+        for child in parent.iterdir():
+            relative = directory + '/' + child.name
+            if not legacy_reference(relative + ('/' if child.is_dir() else '')):
+                continue
+            # Current transcript time directories are already public. Only
+            # their old nested Recognition container requires relocation.
+            if directory == 'Comment' and child.name != 'Stt':
+                if (child / 'Recognition').is_dir():
+                    return True
+            else:
+                return True
+    return False
+
+
 class FileIndexPublisher:
     def __init__(self, config):
         self.config, self.versions = config, {}
@@ -589,11 +614,13 @@ class FileIndexPublisher:
                         # Nonblocking stage locks let active producers finish.
                         # The existing index lock owns this publication/move.
                         with ExitStack() as producer_locks:
-                            for record in sorted(index.get('recordings', []), key=lambda r: r['recording_id']):
-                                for stage in ('all', 'retention', 'vision', 'stt', 'understanding', 'report'):
-                                    producer_locks.enter_context(exclusive(self.runtime/'locks'/f'{record["recording_id"]}.{stage}.lock'))
-                            operation = 'frozen_layout_migration'
-                            migration = migrate_display_layout(None, migration_layout, bounded_batch=True)
+                            migration = {'moved': [], 'pending': False}
+                            if _display_migration_pending(migration_layout):
+                                for record in sorted(index.get('recordings', []), key=lambda r: r['recording_id']):
+                                    for stage in ('all', 'retention', 'vision', 'stt', 'understanding', 'report'):
+                                        producer_locks.enter_context(exclusive(self.runtime/'locks'/f'{record["recording_id"]}.{stage}.lock'))
+                                operation = 'frozen_layout_migration'
+                                migration = migrate_display_layout(None, migration_layout, bounded_batch=True)
                             result['layout_migrated'] = result.get('layout_migrated', 0) + len(migration['moved'])
                             video_progress = {}
                             operation = 'legacy_selected_video_publication'
