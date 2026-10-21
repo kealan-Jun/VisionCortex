@@ -116,12 +116,18 @@ class DaySynthesisWorker:
         # Reads and publication may stop at resumable boundaries. Only the
         # issued model unit below masks shutdown until its receipt is durable.
         with storage_guard(config), execution_context(stop=stop):
+            inspected = False
             for layout in self.candidates(config)[:16]:
+                # One existing index per turn keeps a historical fairness
+                # turn from scanning many multi-GB days before live updates.
+                if inspected:
+                    break
                 self.checked[layout.name] = time.time()
                 if stop.is_set():
                     return {'status': 'stopped'}
                 try:
                     source_version = _index_version(layout.index)
+                    inspected = True
                     index = current_day_index(config, layout)
                     bundle = evidence_bundle(index)
                     if layout.name in self.hints:

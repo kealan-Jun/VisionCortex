@@ -266,3 +266,25 @@ def test_restart_keeps_day_rotation_without_rebilling_unchanged_evidence(tmp_pat
     assert restarted.tick(config, Event(), analyzer_factory=lambda _: analyzer())['status'] == 'waiting'
     assert len(calls) == 1
     assert read_json(state_path)['schedule']['checked']['historical'] == 123
+
+
+def test_one_existing_day_index_per_turn_bounds_historical_scan_latency(tmp_path, monkeypatch):
+    import visioncortex.device_day_synthesis_worker as module
+    worker, config, first, source, _ = setup(tmp_path, monkeypatch)
+    second = DeviceDayLayout(tmp_path / 'archive_root', 'second-camera', 1789488000000000)
+    atomic_json(second.index, source | {'archive': second.name})
+    monkeypatch.setattr(worker, 'candidates', lambda _: [first, second])
+    key = digest(evidence_bundle(source))
+    state_path = tmp_path / 'local_runtime_root' / 'device-day' / 'DaySynthesis' / 'State.json'
+    atomic_json(state_path, {'days': {first.name: {'input_digest': key,
+                'status': 'completed_for_available_inputs'}}, 'schedule': {}})
+    monkeypatch.setattr('visioncortex.device_day_synthesis.current_synthesis',
+                        lambda *_: {'input_digest': key, 'status': 'completed_for_available_inputs'})
+    read, original = [], module.current_day_index
+    def reading(config, layout, **kwargs):
+        read.append(layout.name)
+        return original(config, layout, **kwargs)
+    monkeypatch.setattr(module, 'current_day_index', reading)
+    assert worker.tick(config, Event())['status'] == 'waiting'
+    assert read == [first.name]
+    assert second.name not in read_json(state_path)['schedule']['checked']
