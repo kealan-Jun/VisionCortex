@@ -1,5 +1,6 @@
 """One date's observation timeline, derived from unchanged device/day indexes."""
 from collections import defaultdict
+from functools import lru_cache
 from datetime import date, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote
@@ -67,6 +68,7 @@ def build_timeline(day, indexes, *, config=None):
                             'source_ref': segment.get('source_ref'), 'source_url': source,
                             'clip_url': link(archive, segment.get('video')),
                             'json_url': link(archive, segment.get('json_path')),
+                            'understanding_url': link(archive, meaning.get('content_file')),
                             'key_frames': [{**f, 'url': link(archive, f)} for f in segment.get('key_frames', [])],
                             'scene_frames': [{**f, 'url': link(archive, f)} for f in segment.get('scene_frames', [])],
                             'steps': sorted(steps, key=lambda s: s['start_us']),
@@ -124,7 +126,7 @@ def load_timeline(config, day, *, audit=False):
             path = safe_child(root, name+'/'+DIRECTORIES[1]+'/Index.json')
             if (root/name).is_symlink() or path.is_symlink():
                 raise ValueError('Symlink is not an archive index')
-            indexes.append((name, read_json(path)))
+            indexes.append((name, read_json(path) if audit else _published_readmodels().timeline_index(root/name)))
         except (OSError, ValueError) as exc:
             errors.append({'archive': name, 'status': 'index_unavailable', 'error_type': type(exc).__name__})
     result = build_timeline(day, indexes, config=config)
@@ -161,6 +163,14 @@ def load_timeline(config, day, *, audit=False):
         entry.pop('action_candidates', None)
         entry.pop('clock_mapping', None)
     return result
+
+
+@lru_cache(maxsize=1)
+def _published_readmodels():
+    from .application.device_day_readmodel import DeviceDayReadModels
+    # Keep native PTS clocks intact for exact source seeks. Two bounded
+    # readers and one shared cache replace unbounded full CV-index hydration.
+    return DeviceDayReadModels(lambda value: value, resident_limit=64 * 1024**2, cache_limit=128 * 1024**2)
 
 def defer_multiview_audit(runner):
     """Source probing for an entire day yields to slice and speech queues."""
