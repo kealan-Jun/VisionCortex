@@ -104,7 +104,7 @@ class DaySynthesisWorker:
         from .device_day_reports import preserve_prior_synthesis, render_day
         from .device_day_write_guard import storage_guard
         from .mllm import ArkAnalyzer
-        from .runtime_control import execution_context
+        from .runtime_control import ExecutionCancelled, execution_context
         root = Path(config['storage']['local_runtime_root']) / 'device-day'
         state_path = root / 'DaySynthesis' / 'State.json'
         state = read_json(state_path) if state_path.is_file() else {'days': {}}
@@ -113,7 +113,9 @@ class DaySynthesisWorker:
         minimum = settings.get('minimum_update_seconds', 60)
         if type(minimum) not in (int, float) or not 60 <= minimum <= 86400:
             raise ValueError('day_synthesis.minimum_update_seconds must be between 60 and 86400')
-        with storage_guard(config):
+        # Reads and publication may stop at resumable boundaries. Only the
+        # issued model unit below masks shutdown until its receipt is durable.
+        with storage_guard(config), execution_context(stop=stop):
             for layout in self.candidates(config)[:16]:
                 self.checked[layout.name] = time.time()
                 if stop.is_set():
@@ -190,6 +192,11 @@ class DaySynthesisWorker:
                 except BlockingIOError:
                     continue
                 except Exception as exc:
+                    if isinstance(exc, ExecutionCancelled) and stop.is_set():
+                        atomic_json(state_path, state)
+                        pending = state['days'].get(layout.name, {}).get('status') == 'publication_pending'
+                        return {'status': 'publication_pending' if pending else 'stopped',
+                                'archive': layout.name}
                     from .multimodal_usage import SubmittedUnknown
                     from .runtime_control import ExecutionYielded
                     from .provider_control import ProviderUnavailable
