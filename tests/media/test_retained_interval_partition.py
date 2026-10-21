@@ -63,7 +63,7 @@ def test_fifteen_minute_candidate_exports_only_25_plus_20_seconds_and_keeps_rest
     decision = disposition(segment, meaning, record)
     assert decision['selected_duration_ms'] == 45000 and decision['pending_duration_ms'] == 855000
     assert not decision['candidate_is_export_unit'] and result['default_padding_ms'] == 0
-    assert decision['selection_policy'] == 'visioncortex-value-only-derivatives/3'
+    assert decision['selection_policy'] == 'visioncortex-value-only-derivatives/4'
     assert decision['schema_version'] == 'visioncortex-derived-video-disposition/1'
     assert (segment, record, meaning) == before
 
@@ -268,15 +268,21 @@ def coherent_work_window(*, second_start=6000):
     return first
 
 
-def test_same_object_work_with_actual_gap_context_exports_one_coherent_group_without_combining_actions():
+@pytest.mark.parametrize('experimental', [False, True])
+def test_same_object_work_with_actual_gap_context_exports_one_coherent_group_without_combining_actions(experimental):
     segment, record, meaning = fixture()
     window = coherent_work_window()
+    if experimental:
+        window['experiment_steps'] = window.pop('work_activities')
+        for step in window['experiment_steps']:
+            step.pop('category')
     meaning['windows'] = [window]
     before = deepcopy(meaning)
     result = partition(segment, meaning, record)
     assert_partition(result)
     group, = selected(result)
-    assert (group['start_ms'], group['end_ms'], group['activity_category']) == (1000, 7000, 'non_experiment')
+    assert (group['start_ms'], group['end_ms'], group['activity_category']) == (
+        1000, 7000, 'experiment' if experimental else 'non_experiment')
     assert [(r['start_ms'], r['end_ms']) for r in group['core_action_ranges']] == [(1000, 2000), (6000, 7000)]
     gap, = group['context_subranges']
     assert gap['kind'] == 'continuity_context' and (gap['start_ms'], gap['end_ms']) == (2000, 6000)
@@ -349,6 +355,85 @@ def test_short_work_uses_nearest_actual_before_and_after_observations_up_to_two_
         (2500, 3000, 'before'), (4000, 5000, 'after')]
     assert [(r['start_ms'], r['end_ms']) for r in group['core_action_ranges']] == [(3000, 4000)]
     assert all(r['end_ms']-r['start_ms'] <= 2000 for r in group['context_subranges'])
+
+
+@pytest.mark.parametrize('field', ['experiment_steps', 'work_activities'])
+def test_dense_observations_retain_watchable_context_and_keep_exact_subsecond_action(field):
+    segment, record, meaning = fixture()
+    window = action_window(3000, 3700, field=field)
+    window.update(start_ms=0, end_ms=10000, frame_observations=[])
+    for stamp in (1000, 1500, 2000, 2500, 2900, 3800, 4000, 4500, 5000, 5500, 5700):
+        identifier = f'context-{stamp}'
+        window['source_frames'].append(window['source_frames'][0] | {'frame_id': identifier, 'local_ms': stamp})
+        window['frame_observations'].append({'frame_id': identifier, 'text': '工具与双手位置可见'})
+    meaning['windows'] = [window]
+    original = deepcopy(meaning)
+    group, = selected(partition(segment, meaning, record))
+    assert (group['start_ms'], group['end_ms']) == (1000, 5700)
+    assert [(r['start_ms'], r['end_ms']) for r in group['core_action_ranges']] == [(3000, 3700)]
+    assert [len(r['source_frames']) for r in group['context_subranges']] == [5, 6]
+    assert all(not r['physical_action_confirmed'] for r in group['context_subranges'])
+    assert meaning == original
+
+
+@pytest.mark.parametrize('field', ['experiment_steps', 'work_activities'])
+@pytest.mark.parametrize('barrier', ['missing', 'uncertain', 'other_activity', 'absent_object'])
+def test_viewing_context_stops_at_first_problem_without_discarding_nearer_clear_context(field, barrier):
+    segment, record, meaning = fixture()
+    window = action_window(3000, 3700, field=field)
+    window.update(start_ms=0, end_ms=10000, frame_observations=[])
+    for stamp in (1500, 2000, 2500):
+        identifier = f'context-{stamp}'
+        window['source_frames'].append(window['source_frames'][0] | {'frame_id': identifier, 'local_ms': stamp})
+        text = '工具可见' if stamp != 2000 else {
+            'missing': '', 'uncertain': '工具附近画面模糊',
+            'other_activity': '工具在旁，人员使用手机', 'absent_object': '未见工具'}[barrier]
+        if text:
+            window['frame_observations'].append({'frame_id': identifier, 'text': text})
+    meaning['windows'] = [window]
+    group, = selected(partition(segment, meaning, record))
+    assert (group['start_ms'], group['end_ms']) == (2500, 3700)
+    assert [f['local_ms'] for f in group['context_basis'][0]['source_frames']] == [2500]
+
+
+def test_experiment_context_can_show_same_apparatus_waiting_without_promoting_uncertain_work():
+    segment, record, meaning = fixture()
+    window = action_window(3000, 3700)
+    window.update(start_ms=0, end_ms=10000, frame_observations=[])
+    window['experiment_steps'][0]['objects'] = ['磁力搅拌器']
+    for stamp in (1500, 2500, 4000, 5000):
+        identifier = f'context-{stamp}'
+        window['source_frames'].append(window['source_frames'][0] | {'frame_id': identifier, 'local_ms': stamp})
+        window['frame_observations'].append({'frame_id': identifier, 'text': '搅拌器亮屏，双手在台面下缘'})
+    window['work_activities'] = [
+        {'start_ms': 1500, 'end_ms': 2500, 'category': 'waiting', 'objects': ['磁力搅拌器', '烧杯'],
+         'basis': 'uncertain', 'frame_ids': ['context-1500', 'context-2500']},
+        {'start_ms': 4000, 'end_ms': 5000, 'category': 'waiting', 'objects': ['磁力搅拌器', '烧杯'],
+         'basis': 'uncertain', 'frame_ids': ['context-4000', 'context-5000']}]
+    meaning['windows'] = [window]
+    group, = selected(partition(segment, meaning, record))
+    assert (group['start_ms'], group['end_ms']) == (1500, 5000)
+    assert group['activity_category'] == 'experiment'
+    assert len(group['core_action_ranges']) == 1
+    assert group['core_action_ranges'][0]['activity_category'] == 'experiment'
+    assert all(r['basis'] == 'observed_context_only' for r in group['context_basis'])
+
+
+def test_context_never_overlaps_another_windows_selected_waiting_core_into_a_tiny_mixed_clip():
+    segment, record, meaning = fixture()
+    window = action_window(3000, 3700)
+    window.update(start_ms=0, end_ms=6000, frame_observations=[])
+    for stamp in (4000, 4500, 5000):
+        identifier = f'context-{stamp}'
+        window['source_frames'].append(window['source_frames'][0] | {'frame_id': identifier, 'local_ms': stamp})
+        window['frame_observations'].append({'frame_id': identifier, 'text': '工具在台上，双手放低'})
+    waiting = action_window(4500, 7000, field='work_activities')
+    waiting['work_activities'][0]['category'] = 'waiting'
+    meaning['windows'] = [window, waiting]
+    rows = selected(partition(segment, meaning, record))
+    assert [(r['start_ms'], r['end_ms'], r['activity_category']) for r in rows] == [
+        (3000, 4500, 'experiment'), (4500, 7000, 'non_experiment')]
+    assert all('activity_categories' not in r for r in rows)
 
 
 def test_readability_context_does_not_expand_a_short_action_to_the_entire_candidate():
