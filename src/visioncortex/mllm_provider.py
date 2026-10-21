@@ -90,4 +90,9 @@ def build_vision_request(settings: dict[str, Any], system_prompt: str, content: 
             request.update(stream=True, stream_options={"include_usage": True})
     elif settings.get("provider") == "zhipu" or required_thinking:
         request["thinking"] = {"type": thinking}
+    stream_response = settings.get("stream_response", required_thinking and settings.get("provider") == "nianfeng")
+    if type(stream_response) is not bool:
+        raise ValueError("stream_response must be a boolean")
+    if stream_response:
+        request.update(stream=True, stream_options={"include_usage": True})
     return base + "/chat/completions", request

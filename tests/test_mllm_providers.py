@@ -77,6 +77,28 @@ def test_model_specific_zhipu_image_and_thinking_parameters():
     assert previous['messages'][1]['content'][0]['image_url']['url'] == 'aW1hZ2U='
 
 
+def test_custom_glm_streaming_preserves_images_policy_and_semantic_cache():
+    settings = dict(selection('custom', base_url='https://example.test/v1', model='glm-5.3-flashx'),
+                    provider='nianfeng', max_output_tokens=16384)
+    content = [{'type': 'input_image', 'image_url': 'data:image/png;base64,aW1hZ2U='}]
+    _, default = build_vision_request(settings, 'same evidence rules', content)
+    assert default['stream'] is True
+    nonstreamed = settings | {'stream_response': False}
+    url, baseline = build_vision_request(nonstreamed, 'same evidence rules', content)
+    assert baseline['stream'] is False
+    streamed = settings | {'stream_response': True}
+    stream_url, request = build_vision_request(streamed, 'same evidence rules', content)
+    assert stream_url == url
+    assert request['stream'] is True
+    assert request['stream_options'] == {'include_usage': True}
+    assert request['messages'] == baseline['messages']
+    assert request['thinking'] == baseline['thinking']
+    assert request['max_tokens'] == baseline['max_tokens']
+    assert vision_request_identity(streamed) == vision_request_identity(nonstreamed)
+    with pytest.raises(ValueError, match='stream_response'):
+        build_vision_request(settings | {'stream_response': 'true'}, 'rules', content)
+
+
 @pytest.mark.parametrize('url', ['http://example.test/v1', 'https://user:secret@example.test/v1', 'https://example.test/v1?api_key=secret', 'https://example.test/v1#fragment', 'https://example.test/v1/chat/completions'])
 def test_connection_rejects_credential_urls_and_wrong_endpoint_shape(url):
     with pytest.raises(ValueError):
