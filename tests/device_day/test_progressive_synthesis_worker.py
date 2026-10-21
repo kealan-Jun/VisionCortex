@@ -245,6 +245,13 @@ def test_current_day_publication_recovery_overtakes_older_interrupted_days(tmp_p
     assert worker.candidates(config)[0].name == names[0]
 
 
+def test_old_interrupted_days_keep_history_turn_without_displacing_live_updates(tmp_path, monkeypatch):
+    worker, config, names, now = scheduled_days(tmp_path, monkeypatch)
+    worker.state['days'][names[1]] = {'status': 'publication_pending', 'attempted_at': now - 61}
+    for turn in range(1, 4):
+        assert worker.candidates(config)[0].name == (names[1] if turn == 3 else names[0])
+
+
 def test_inventory_grouping_bounds_nas_layout_resolution_and_respects_scope(tmp_path, monkeypatch):
     from types import SimpleNamespace
     from visioncortex.observed_inventory import observe
