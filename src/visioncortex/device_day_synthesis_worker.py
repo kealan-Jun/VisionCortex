@@ -1,5 +1,6 @@
 """Progressive camera-day synthesis owned by the existing report consumer."""
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -65,7 +66,9 @@ class DaySynthesisWorker:
         settings = config.get('device_day') or {}
         now = time.time()
         minimum = (settings.get('day_synthesis') or {}).get('minimum_update_seconds', 60)
-        eligible = {n for n in days if now - self.state['days'].get(n, {}).get('attempted_at', 0) >= minimum}
+        pending = {n for n in days if self.state['days'].get(n, {}).get('status') == 'publication_pending'}
+        eligible = {n for n in days if n in pending or
+                    now - self.state['days'].get(n, {}).get('attempted_at', 0) >= minimum}
         schedule = self.state.setdefault('schedule', {})
         self.hint_error = None
         try:
@@ -86,7 +89,8 @@ class DaySynthesisWorker:
         self.lane = 'changed_or_live' if priority and turn % 3 else 'historical_fair_share'
         def order(name):
             return self.checked.get(name, 0), -int(name[:10].replace('-', '')), name
-        names = sorted(priority, key=order) if self.lane == 'changed_or_live' else []
+        names = sorted(pending, key=order)
+        names += sorted(priority - set(names), key=order) if self.lane == 'changed_or_live' else []
         names += sorted(eligible - set(names), key=order)
         return [DeviceDayLayout(Path(config['storage']['archive_root']), days[n]['camera_key'],
                     days[n]['recording_start_us'], Path(config['storage']['local_cache_root'])) for n in names[:16]]
@@ -124,41 +128,59 @@ class DaySynthesisWorker:
                         continue
                     key = digest(bundle)
                     previous = current_synthesis(layout, index)
-                    if previous.get('input_digest') == key:
-                        continue
                     saved = state['days'].get(layout.name, {})
-                    if time.time() - saved.get('attempted_at', 0) < minimum:
+                    ready = previous if previous.get('input_digest') == key else None
+                    if ready and saved.get('input_digest') == key and saved.get('status') == 'completed_for_available_inputs':
+                        continue
+                    if not ready and time.time() - saved.get('attempted_at', 0) < minimum:
                         continue
                     # This local lock prevents overlapping paid synthesis for
                     # the same camera-day across a graceful service handover.
                     with exclusive(root / 'locks' / ('day-synthesis-' + layout.name + '.lock')):
-                        state['days'][layout.name] = {'input_digest': key, 'attempted_at': time.time(),
-                                                     'status': 'running'}
-                        atomic_json(state_path, state)
-                        analyzer = (analyzer_factory or ArkAnalyzer)(config)
-                        try:
-                            # No stop signal can interrupt an already issued
-                            # request before its durable provider receipt.
-                            with execution_context(job_id='day_' + layout.name, source='device_day_backfill',
-                                                   priority=20, background_fair=True, stop=None):
-                                result = synthesize(config, layout, index, analyzer,
-                                    retry_output_tokens=settings.get('retry_output_tokens'))
-                        finally:
-                            analyzer.close()
+                        result = ready
+                        if result is None:
+                            state['days'][layout.name] = {'input_digest': key, 'attempted_at': time.time(),
+                                                         'status': 'running'}
+                            atomic_json(state_path, state)
+                            analyzer = (analyzer_factory or ArkAnalyzer)(config)
+                            try:
+                                # No stop signal can interrupt an already issued
+                                # request before its durable provider receipt.
+                                with execution_context(job_id='day_' + layout.name, source='device_day_backfill',
+                                                       priority=20, background_fair=True, stop=None):
+                                    result = synthesize(config, layout, index, analyzer,
+                                        retry_output_tokens=settings.get('retry_output_tokens'))
+                            finally:
+                                analyzer.close()
                         if result.get('context_archives') != [layout.name]:
                             raise ValueError('Day output crossed a camera/date boundary')
-                        with exclusive(root / 'locks' / (layout.name + '.index.lock')):
-                            path = layout.reports / 'LaboratoryDailyReport.json'
-                            old = read_json(path) if path.is_file() else {}
-                            preserve_prior_synthesis(layout, result)
-                            atomic_json(path, old | {'全天综合理解': result})
-                            # A new clip may have arrived during the request.
-                            # Rendering retains the verified as-of conclusion.
-                            # Recheck windows/context, but do not stream an
-                            # unchanged multi-GB canonical index a second time.
-                            source = index if _index_version(layout.index) == source_version else None
-                            latest = current_day_index(config, layout, source_index=source)
-                            render_day(layout, latest)
+                        # Save the complete native result before a busy publisher
+                        # can defer it. The normal verified history reader also
+                        # recovers this snapshot after a graceful handover.
+                        snapshot = {'全天综合理解': result}
+                        atomic_json(layout.reports / '.Evidence/History' / ('Report' + digest(snapshot) + '.json'), snapshot)
+                        state['days'][layout.name] = saved | state['days'].get(layout.name, {}) | {
+                            'input_digest': key, 'status': 'publication_pending'}
+                        atomic_json(state_path, state)
+                        while True:
+                            with ExitStack() as acquired:
+                                try:
+                                    acquired.enter_context(exclusive(root / 'locks' / (layout.name + '.index.lock')))
+                                except BlockingIOError:
+                                    if stop.wait(1):
+                                        return {'status': 'publication_pending', 'archive': layout.name,
+                                                'input_digest': key}
+                                    continue
+                                path = layout.reports / 'LaboratoryDailyReport.json'
+                                old = read_json(path) if path.is_file() else {}
+                                preserve_prior_synthesis(layout, result)
+                                atomic_json(path, old | {'全天综合理解': result})
+                                # Recheck windows/context after the request, but
+                                # avoid rescanning an unchanged multi-GB index.
+                                source = index if _index_version(layout.index) == source_version else None
+                                latest = current_day_index(config, layout, source_index=source)
+                                render_day(layout, latest)
+                                break
                         state['days'][layout.name] |= {'status': 'completed_for_available_inputs',
                             'generated_at': result.get('generated_at'), 'finished_at': time.time()}
                         atomic_json(state_path, state)
