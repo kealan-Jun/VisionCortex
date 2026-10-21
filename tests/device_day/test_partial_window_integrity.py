@@ -122,3 +122,33 @@ def test_replacing_a_stale_checkpoint_still_isolates_damaged_new_window(device_c
     assert len(projected['understandings']) == 1
     assert [row['summary'] for row in projected['understandings'][0]['windows']] == ['Validated fixture window 0']
     assert projected['partial_window_integrity_errors'][0]['reason'] == 'partial_window_frame_artifact_integrity_failed'
+
+
+def test_daily_synthesis_consumes_verified_new_windows_without_replacing_canonical_index(device_config, monkeypatch):
+    from threading import Event
+    from visioncortex.device_day_synthesis import evidence_bundle
+    from visioncortex.device_day_synthesis_worker import DaySynthesisWorker
+    index, layout, _ = windows(device_config, receipt_artifacts=True)
+    first = with_partial_understandings(device_config, index)['understandings'][0]
+    first['windows'] = first['windows'][:1]
+    index['understandings'] = [first]
+    atomic_json(layout.index, index)
+    original = layout.index.read_bytes()
+    config = deepcopy(device_config)
+    config['device_day']['day_synthesis'] = {'enabled': True}
+    worker, calls, rendered = DaySynthesisWorker(), [], []
+    monkeypatch.setattr(worker, 'candidates', lambda _: [layout])
+    monkeypatch.setattr('visioncortex.device_day_synthesis.current_synthesis', lambda *_: {})
+    monkeypatch.setattr('visioncortex.device_day_reports.render_day', lambda layout, index: rendered.append(index))
+    def synthesize(config, layout, current, analyzer, **kwargs):
+        calls.append(current)
+        return {'context_archives': [layout.name], 'input_digest': digest(evidence_bundle(current)),
+                'status': 'completed_for_available_inputs', 'findings': []}
+    monkeypatch.setattr('visioncortex.device_day_synthesis.synthesize', synthesize)
+    class Analyzer:
+        def close(self):
+            pass
+    assert worker.tick(config, Event(), analyzer_factory=lambda _: Analyzer())['status'] == 'processed'
+    assert len(calls[0]['understandings'][0]['windows']) == 2
+    assert rendered == calls
+    assert layout.index.read_bytes() == original

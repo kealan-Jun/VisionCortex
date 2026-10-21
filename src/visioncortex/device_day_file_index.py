@@ -37,13 +37,17 @@ def _index_reader(config, path, mode):
         yield Reader()
 
 
-def _read_source_index(config, path):
+def read_source_index(config, path):
     from .receipt_projection import projected_json
     value = projected_json(path, omit=_READABLE_OMIT,
                            opener=lambda mode: _index_reader(config, path, mode))
     for key in ('recordings', 'segments', 'understandings'):
         value.setdefault(key, [])
     return value
+
+
+def _read_source_index(config, path):
+    return read_source_index(config, path)
 
 
 def _source_index_size(value, limit):
