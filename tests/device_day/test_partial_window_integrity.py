@@ -93,3 +93,32 @@ def test_matching_but_forged_input_keys_cannot_replace_actual_metadata_identity(
     value = with_partial_understandings(device_config, index)
     assert [window['summary'] for window in value['understandings'][0]['windows']] == ['Validated fixture window 1']
     assert value['partial_window_integrity_errors'][0]['reason'] == 'partial_window_request_identity_changed'
+
+
+@pytest.mark.parametrize('completed', [False, True])
+def test_later_windows_refresh_a_published_checkpoint_without_replacing_completion(device_config, completed):
+    index, _, _ = windows(device_config, receipt_artifacts=True)
+    first = with_partial_understandings(device_config, index)['understandings'][0]
+    first['windows'] = first['windows'][:1]
+    first['status'] = 'completed' if completed else 'partial'
+    index['understandings'] = [first]
+    original = deepcopy(index)
+    projected = with_partial_understandings(device_config, index)
+    assert index == original
+    assert len(projected['understandings']) == 1
+    expected = ['Validated fixture window 0'] if completed else [
+        'Validated fixture window 0', 'Validated fixture window 1']
+    assert [row['summary'] for row in projected['understandings'][0]['windows']] == expected
+    assert with_partial_understandings(device_config, projected) == projected
+
+
+def test_replacing_a_stale_checkpoint_still_isolates_damaged_new_window(device_config):
+    index, _, created = windows(device_config, receipt_artifacts=True)
+    first = with_partial_understandings(device_config, index)['understandings'][0]
+    first['windows'] = first['windows'][:1]
+    index['understandings'] = [first]
+    created[1][0].write_bytes(b'damaged later frame')
+    projected = with_partial_understandings(device_config, index)
+    assert len(projected['understandings']) == 1
+    assert [row['summary'] for row in projected['understandings'][0]['windows']] == ['Validated fixture window 0']
+    assert projected['partial_window_integrity_errors'][0]['reason'] == 'partial_window_frame_artifact_integrity_failed'
