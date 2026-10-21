@@ -191,6 +191,9 @@ def test_native_failures_identify_the_actual_owner_and_keep_bounded_reason(tmp_p
     observe(tmp_path/'OwnedRuntime/device-day', {'recordings': [{
         'recording_id': 'recording', 'camera_key': index['archive'][11:],
         'recording_start_us': index['segments'][0]['start_us']}]})
+    if function == 'migrate_display_layout':
+        legacy = tmp_path/index['archive']/'Comment/Stt'
+        legacy.mkdir(parents=True)
     def failed(*_args, **kwargs):
         if function == 'publish_selected_videos':
             assert kwargs['exact_intervals_only'] is True
