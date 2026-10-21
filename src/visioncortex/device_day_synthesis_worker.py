@@ -1,24 +1,48 @@
 """Progressive camera-day synthesis owned by the existing report consumer."""
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 import json
+import sqlite3
 import time
 
-from .device_day_contract import DeviceDayLayout, atomic_json, digest, read_json
+from .device_day_contract import DeviceDayLayout, archive_name, atomic_json, digest, read_json
+
+
+def current_day_index(config, layout):
+    """Use the same verified partial windows as the published day timeline."""
+    from .device_day_file_index import read_source_index
+    from .device_day_content import with_partial_understandings
+    from .device_day_io import slot
+    with slot(config):
+        index = read_source_index(config, layout.index)
+        if index.get('archive') != layout.name:
+            raise ValueError('Day index crossed a camera/date boundary')
+        index = with_partial_understandings(config, index)
+        if (config.get('device_day', {}).get('field_recognition') or {}).get('archive_context_enabled'):
+            from .device_day_narrative import attach_context
+            index = attach_context(config, index)
+    return index
 
 
 class DaySynthesisWorker:
     def __init__(self):
         self.checked = {}
+        self.state = {'days': {}, 'schedule': {}}
+        self.lane = 'historical_fair_share'
+        self.hint_error = None
+        self.hints = {}
 
     def candidates(self, config):
         from .device_day_schedule import in_processing_scope
+        from .device_day_publication_worker import local_change_hints
         from .sqlite_store import connection
         root = Path(config['storage']['local_runtime_root']) / 'device-day'
         path = root / 'observed-inventory.sqlite3'
         if not path.is_file():
             return []
-        days = {}
+        days, records = {}, []
         with connection(path, readonly=True) as db:
             for row in db.execute('SELECT payload FROM observations'):
                 record = json.loads(row[0])
@@ -26,12 +50,39 @@ class DaySynthesisWorker:
                     continue
                 if not record.get('camera_key') or not record.get('recording_start_us'):
                     continue
-                layout = DeviceDayLayout(Path(config['storage']['archive_root']), record['camera_key'],
-                    record['recording_start_us'], Path(config['storage']['local_cache_root']))
-                days[layout.name] = layout
-        # Every camera-day eventually gets a turn, including late audio/OCR.
-        return sorted(days.values(), key=lambda layout: (self.checked.get(layout.name, 0),
-                      -int(layout.name[:10].replace('-', '')), layout.name))
+                records.append(record)
+                name = archive_name(record['camera_key'], record['recording_start_us'])
+                days[name] = record
+        # Group locally before constructing layouts: resolving a NAS layout
+        # for every recording delayed admission across thousands of captures.
+        settings = config.get('device_day') or {}
+        now = time.time()
+        minimum = (settings.get('day_synthesis') or {}).get('minimum_update_seconds', 60)
+        eligible = {n for n in days if now - self.state['days'].get(n, {}).get('attempted_at', 0) >= minimum}
+        schedule = self.state.setdefault('schedule', {})
+        self.hint_error = None
+        try:
+            hints = local_change_hints(root, records, days)
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            hints = {}
+            self.hint_error = type(exc).__name__
+        changed = {n for n in eligible if n in hints and hints[n] != schedule.get('observed_hints', {}).get(n)}
+        cutoff = (now - settings.get('live_priority_seconds', 14400)) * 1e6
+        recent = {archive_name(r['camera_key'], r['recording_start_us']) for r in records
+                  if max(r.get('recording_start_us') or 0, r.get('recording_end_us') or 0) >= cutoff}
+        today = datetime.fromtimestamp(now, ZoneInfo('Asia/Shanghai')).date().isoformat()
+        recent.update(n for n in days if n[:10] >= today)
+        priority = (changed & recent) or (eligible & recent) or changed
+        turn = schedule.get('turn', 0) + 1
+        schedule.update(turn=turn)
+        self.hints = hints
+        self.lane = 'changed_or_live' if priority and turn % 3 else 'historical_fair_share'
+        def order(name):
+            return self.checked.get(name, 0), -int(name[:10].replace('-', '')), name
+        names = sorted(priority, key=order) if self.lane == 'changed_or_live' else []
+        names += sorted(eligible - set(names), key=order)
+        return [DeviceDayLayout(Path(config['storage']['archive_root']), days[n]['camera_key'],
+                    days[n]['recording_start_us'], Path(config['storage']['local_cache_root'])) for n in names[:16]]
 
     def tick(self, config, stop, *, analyzer_factory=None):
         settings = config.get('device_day', {}).get('day_synthesis') or {}
@@ -46,6 +97,8 @@ class DaySynthesisWorker:
         root = Path(config['storage']['local_runtime_root']) / 'device-day'
         state_path = root / 'DaySynthesis' / 'State.json'
         state = read_json(state_path) if state_path.is_file() else {'days': {}}
+        self.state = state
+        self.checked = state.setdefault('schedule', {}).setdefault('checked', {})
         minimum = settings.get('minimum_update_seconds', 60)
         if type(minimum) not in (int, float) or not 60 <= minimum <= 86400:
             raise ValueError('day_synthesis.minimum_update_seconds must be between 60 and 86400')
@@ -55,13 +108,10 @@ class DaySynthesisWorker:
                 if stop.is_set():
                     return {'status': 'stopped'}
                 try:
-                    index = read_json(layout.index)
-                    if index.get('archive') != layout.name:
-                        raise ValueError('Day index crossed a camera/date boundary')
-                    if (config.get('device_day', {}).get('field_recognition') or {}).get('archive_context_enabled'):
-                        from .device_day_narrative import attach_context
-                        index = attach_context(config, index)
+                    index = current_day_index(config, layout)
                     bundle = evidence_bundle(index)
+                    if layout.name in self.hints:
+                        state['schedule'].setdefault('observed_hints', {})[layout.name] = self.hints[layout.name]
                     if not any(row['kind'] in {'video', 'speech', 'field'} for row in bundle['evidence']):
                         continue
                     key = digest(bundle)
@@ -96,15 +146,13 @@ class DaySynthesisWorker:
                             atomic_json(path, old | {'全天综合理解': result})
                             # A new clip may have arrived during the request.
                             # Rendering retains the verified as-of conclusion.
-                            latest = read_json(layout.index)
-                            if (config.get('device_day', {}).get('field_recognition') or {}).get('archive_context_enabled'):
-                                latest = attach_context(config, latest)
-                                atomic_json(layout.index, latest)
+                            latest = current_day_index(config, layout)
                             render_day(layout, latest)
                         state['days'][layout.name] |= {'status': 'completed_for_available_inputs',
                             'generated_at': result.get('generated_at'), 'finished_at': time.time()}
                         atomic_json(state_path, state)
                         return {'status': 'processed', 'archive': layout.name, 'input_digest': key,
+                                'scheduling_lane': self.lane,
                                 'result': {'status': 'completed_for_available_inputs'}}
                 except BlockingIOError:
                     continue
@@ -118,7 +166,8 @@ class DaySynthesisWorker:
                                                  'error_type': type(exc).__name__}
                     atomic_json(state_path, state)
                     return {'status': status, 'archive': layout.name, 'error_type': type(exc).__name__}
-        return {'status': 'waiting'}
+            atomic_json(state_path, state)
+        return {'status': 'waiting', 'scheduling_lane': self.lane, 'hint_error': self.hint_error}
 
 
 class DaySynthesisSupervisor:
