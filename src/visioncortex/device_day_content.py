@@ -127,7 +127,7 @@ def with_partial_understandings(config, index):
             if receipt.is_file():
                 stage = read_json(receipt)
                 row.setdefault('stages', {})['understanding'] = {k: stage.get(k) for k in ('status', 'key', 'message', 'reason')}
-    complete = {u['segment_id'] for u in value.get('understandings', [])}
+    complete = {u['segment_id'] for u in value.get('understandings', []) if u.get('status') != 'partial'}
     partial = {}
     for segment, stage, request_path, result_path in window_files(config, index):
         sid = segment['segment_id']
@@ -188,7 +188,10 @@ def with_partial_understandings(config, index):
             'model_receipt': result_path.relative_to(root).as_posix(),
             'input': request_path.relative_to(root).as_posix(), 'usage': raw.get('usage'),
             'response_cache_reused': result.get('response_cache_reused', False)})
-    value['understandings'] = [*value.get('understandings', []), *partial.values()]
+    # An earlier canonical checkpoint is not completion. Replace its view
+    # with the current byte-verified windows, without duplicating the segment.
+    value['understandings'] = [*[u for u in value.get('understandings', [])
+                                if u['segment_id'] not in partial], *partial.values()]
     from .device_day_steps import reviewed_window
     meanings = {u['segment_id']: u for u in value['understandings']}
     for segment in value['segments']:
