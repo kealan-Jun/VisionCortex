@@ -161,6 +161,56 @@ def scheduled_days(tmp_path, monkeypatch):
     return worker, config, names, now
 
 
+def test_shutdown_can_leave_io_admission_before_an_unissued_model_call(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from visioncortex.runtime_control import ResourceCoordinator
+    import visioncortex.device_day_synthesis_worker as module
+    worker, config, _, _, _ = setup(tmp_path, monkeypatch)
+    entered, stop = Event(), Event()
+    original = module.current_day_index
+    def reading(*args, **kwargs):
+        entered.set()
+        return original(*args, **kwargs)
+    monkeypatch.setattr(module, 'current_day_index', reading)
+    coordinator = ResourceCoordinator(tmp_path / 'local_runtime_root' / 'state' / 'resources.sqlite3')
+    def forbidden(_):
+        raise AssertionError('No model may be admitted while source IO is waiting')
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with coordinator.acquire('nas-io-read', capacity=2, units=2):
+            future = pool.submit(worker.tick, config, stop, analyzer_factory=forbidden)
+            assert entered.wait(10)
+            stop.set()
+            assert future.result(timeout=10)['status'] == 'stopped'
+
+
+def test_shutdown_after_receipt_does_not_wait_for_a_busy_io_budget(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import ExitStack
+    from visioncortex.runtime_control import ResourceCoordinator
+    import visioncortex.device_day_synthesis_worker as module
+    worker, config, layout, _, analyzer = setup(tmp_path, monkeypatch)
+    durable, stop, calls = Event(), Event(), []
+    coordinator = ResourceCoordinator(tmp_path / 'local_runtime_root' / 'state' / 'resources.sqlite3')
+    with ExitStack() as busy, ThreadPoolExecutor(max_workers=1) as pool:
+        def synthesize(config, layout, index, analyzer, **kwargs):
+            calls.append(index)
+            busy.enter_context(coordinator.acquire('nas-io-read', capacity=2, units=2))
+            return {'context_archives': [layout.name], 'input_digest': digest(evidence_bundle(index)),
+                    'status': 'completed_for_available_inputs', 'findings': []}
+        def save(path, value):
+            atomic_json(path, value)
+            if path.name == 'State.json' and value['days'][layout.name]['status'] == 'publication_pending':
+                durable.set()
+        monkeypatch.setattr('visioncortex.device_day_synthesis.synthesize', synthesize)
+        monkeypatch.setattr(module, 'atomic_json', save)
+        future = pool.submit(worker.tick, config, stop, analyzer_factory=lambda _: analyzer())
+        assert durable.wait(10)
+        stop.set()
+        assert future.result(timeout=10)['status'] == 'publication_pending'
+        assert read_json(next((layout.reports / '.Evidence/History').glob('Report*.json')))['全天综合理解']['input_digest']
+        assert len(calls) == 1
+
+
 def test_changed_current_day_overtakes_older_cursor_and_history_keeps_a_turn(tmp_path, monkeypatch):
     worker, config, names, now = scheduled_days(tmp_path, monkeypatch)
     for turn in range(1, 4):
