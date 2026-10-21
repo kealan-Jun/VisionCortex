@@ -228,6 +228,15 @@ def test_recent_backoff_does_not_hide_other_days_or_reset_unknown_receipts(tmp_p
     assert worker.state['days'][names[0]] == unknown
 
 
+def test_restart_prioritizes_stale_running_day_before_history_without_resetting_receipts(tmp_path, monkeypatch):
+    worker, config, names, now = scheduled_days(tmp_path, monkeypatch)
+    saved = {'attempted_at': now - 61, 'status': 'running', 'input_digest': 'native-receipt-input'}
+    worker.state['days'][names[1]] = deepcopy(saved)
+    worker.state['schedule']['turn'] = 2
+    assert worker.candidates(config)[0].name == names[1]
+    assert worker.state['days'][names[1]] == saved
+
+
 def test_inventory_grouping_bounds_nas_layout_resolution_and_respects_scope(tmp_path, monkeypatch):
     from types import SimpleNamespace
     from visioncortex.observed_inventory import observe
