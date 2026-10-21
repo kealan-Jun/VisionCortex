@@ -214,6 +214,27 @@ def saved_synthesis_fixture(tmp_path, monkeypatch):
     return layout, source, synthesize({}, layout, source, object()), calls
 
 
+def test_verified_ready_history_overtakes_stale_public_report_without_new_model_call(tmp_path, monkeypatch):
+    from visioncortex.device_day_contract import digest
+    layout, source, old, calls = saved_synthesis_fixture(tmp_path, monkeypatch)
+    atomic_json(layout.reports / 'LaboratoryDailyReport.json', {'全天综合理解': old})
+    changed = copy.deepcopy(source)
+    changed['context']['protocol'] = {'text': '新增方案，不是执行事实'}
+    latest = synthesize({}, layout, changed, object())
+    assert latest['input_digest'] != old['input_digest'] and len(calls) == 2
+    snapshot = {'全天综合理解': latest}
+    atomic_json(layout.reports / '.Evidence/History' / ('Report' + digest(snapshot) + '.json'), snapshot)
+    recovered = current_synthesis(layout, changed)
+    assert recovered == latest and len(calls) == 2
+    # New snapshots retain the same byte verification as older history.
+    last = latest['model_receipts'][-1]['result']
+    atomic_json(layout.root / last['path'], {'model_result': {'status': 'completed', 'findings': []}})
+    fallback = current_synthesis(layout, changed)
+    assert fallback['status'] == 'updating_for_new_inputs'
+    assert fallback['input_digest'] == old['input_digest']
+    assert fallback['recovery_errors'] and len(calls) == 2
+
+
 @pytest.mark.parametrize('current_kind,newest_kind', [
     ('malformed', 'malformed'), ('bad_receipt', 'malformed'), ('pending', 'bad_receipt'),
 ])

@@ -78,6 +78,70 @@ def test_cross_camera_output_is_rejected(tmp_path, monkeypatch):
     assert not (layout.reports / 'LaboratoryDailyReport.json').exists()
 
 
+def test_busy_publication_lock_keeps_result_and_waits_without_rebilling(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from visioncortex.device_day import exclusive
+    import visioncortex.device_day_synthesis_worker as module
+    worker, config, layout, _, analyzer = setup(tmp_path, monkeypatch)
+    calls, durable = [], Event()
+    def synthesize(config, layout, index, analyzer, **kwargs):
+        calls.append(index)
+        return {'context_archives': [layout.name], 'input_digest': digest(evidence_bundle(index)),
+                'status': 'completed_for_available_inputs', 'findings': [{'observation': 'native result'}]}
+    def save(path, value):
+        atomic_json(path, value)
+        if path.name == 'State.json' and value['days'][layout.name]['status'] == 'publication_pending':
+            durable.set()
+    monkeypatch.setattr('visioncortex.device_day_synthesis.synthesize', synthesize)
+    monkeypatch.setattr(module, 'atomic_json', save)
+    lock = tmp_path / 'local_runtime_root' / 'device-day' / 'locks' / (layout.name + '.index.lock')
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with exclusive(lock):
+            future = pool.submit(worker.tick, config, Event(), analyzer_factory=lambda _: analyzer())
+            assert durable.wait(10)
+            snapshot = read_json(next((layout.reports / '.Evidence/History').glob('Report*.json')))
+            assert snapshot['全天综合理解']['findings'] == [{'observation': 'native result'}]
+            assert not (layout.reports / 'LaboratoryDailyReport.json').exists()
+            assert not future.done() and len(calls) == 1
+        assert future.result(timeout=10)['status'] == 'processed'
+    assert read_json(layout.reports / 'LaboratoryDailyReport.json') == snapshot
+    assert len(calls) == 1
+
+
+def test_shutdown_during_publication_wait_recovers_saved_result_before_cooldown(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from visioncortex.device_day import exclusive
+    import visioncortex.device_day_synthesis_worker as module
+    worker, config, layout, _, analyzer = setup(tmp_path, monkeypatch)
+    calls, durable, stop = [], Event(), Event()
+    def synthesize(config, layout, index, analyzer, **kwargs):
+        calls.append(index)
+        return {'context_archives': [layout.name], 'input_digest': digest(evidence_bundle(index)),
+                'status': 'completed_for_available_inputs', 'findings': []}
+    def save(path, value):
+        atomic_json(path, value)
+        if path.name == 'State.json' and value['days'][layout.name]['status'] == 'publication_pending':
+            durable.set()
+    monkeypatch.setattr('visioncortex.device_day_synthesis.synthesize', synthesize)
+    monkeypatch.setattr(module, 'atomic_json', save)
+    lock = tmp_path / 'local_runtime_root' / 'device-day' / 'locks' / (layout.name + '.index.lock')
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with exclusive(lock):
+            future = pool.submit(worker.tick, config, stop, analyzer_factory=lambda _: analyzer())
+            assert durable.wait(10)
+            stop.set()
+            assert future.result(timeout=10)['status'] == 'publication_pending'
+    snapshot = read_json(next((layout.reports / '.Evidence/History').glob('Report*.json')))['全天综合理解']
+    monkeypatch.setattr('visioncortex.device_day_synthesis.current_synthesis', lambda *_: snapshot)
+    restarted = DaySynthesisWorker()
+    monkeypatch.setattr(restarted, 'candidates', lambda _: [layout])
+    def forbidden(_):
+        raise AssertionError('A completed saved synthesis must not instantiate a paid analyzer')
+    assert restarted.tick(config, Event(), analyzer_factory=forbidden)['status'] == 'processed'
+    assert read_json(layout.reports / 'LaboratoryDailyReport.json')['全天综合理解'] == snapshot
+    assert len(calls) == 1
+
+
 def scheduled_days(tmp_path, monkeypatch):
     import time
     from visioncortex.device_day_contract import archive_name
