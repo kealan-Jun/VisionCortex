@@ -6,7 +6,7 @@ from ..device_day_contract import atomic_bytes, atomic_json, digest
 from ..device_day_narrative import effective_meaning
 from ..media_time import capture_us
 
-POLICY = 'visioncortex-value-only-derivatives/3'
+POLICY = 'visioncortex-value-only-derivatives/4'
 
 
 def _number(value):
@@ -165,7 +165,7 @@ def _explicit_other_activity(text, category):
 
 def _context_uncertain(text):
     return any(term in text.casefold() for term in (
-        '未知', 'unknown', 'uncertain', '不确定', '看不清', '不可见', '遮挡', '模糊', '无法', '不明', '疑似'))
+        '未知', 'unknown', 'uncertain', '不确定', '看不清', '不可见', '遮挡', '模糊', '略糊', '无法', '不明', '疑似'))
 
 
 def _observed_context(window, start, end, objects, category, *, include_start=False, include_end=False):
@@ -221,7 +221,7 @@ def _static_scene_context(window, start, end, objects, category):
     return sorted(found, key=lambda row: (row[0]['local_ms'], row[0]['frame_id']))
 
 
-def _other_activity(windows, start, end, category, objects):
+def _other_activity(windows, start, end, category, objects, *, viewing_context=False):
     for window in windows:
         if not isinstance(window, dict):
             continue
@@ -232,10 +232,55 @@ def _other_activity(windows, start, end, category, objects):
                     continue
                 overlaps = (row['start_ms'] < end and (row['end_ms'] > start
                             or row['start_ms'] == row['end_ms'] and row['start_ms'] >= start))
+                # Waiting around the same apparatus can establish viewing
+                # context without establishing a confirmed waiting activity.
+                # Actual per-frame observations are checked separately.
+                if (viewing_context and category == 'experiment' and field == 'work_activities'
+                        and row.get('category') == 'waiting'
+                        and row.get('basis') != 'observed'
+                        and set(_object_names(row.get('objects') or [])) & set(objects)):
+                    continue
                 if overlaps and (field == 'experiment_steps' or row.get('category') != category
                                  or _object_names(row.get('objects') or []) != objects):
                     return True
     return False
+
+
+def _viewing_context(window, edge, side, objects, category, windows):
+    """Walk adjacent actual observations, stopping at the first evidence gap.
+
+    Two seconds is a search ceiling, never padding or a minimum duration.
+    Use the farthest supported object observation, not the nearest single
+    frame: otherwise a dense input still exports a blink. Frame/object
+    attribution may anchor context independently of an uncertain action claim;
+    it cannot turn that claim into a selected core action.
+    """
+    observations = {r.get('frame_id'): r for r in window.get('frame_observations') or []
+                    if isinstance(r, dict) and isinstance(r.get('text'), str)}
+    attributed = set()
+    for field in ('experiment_steps', 'work_activities'):
+        for row in window.get(field) or []:
+            if isinstance(row, dict) and set(_object_names(row.get('objects') or [])) & set(objects):
+                attributed.update(row.get('frame_ids') or [])
+    frames = [f for f in window.get('source_frames') or [] if isinstance(f, dict)
+              and _number(f.get('local_ms')) and window['start_ms'] <= f['local_ms'] < window['end_ms']
+              and (edge-2000 <= f['local_ms'] < edge if side == 'before' else edge < f['local_ms'] <= edge+2000)]
+    frames.sort(key=lambda f: (f['local_ms'], f.get('frame_id', '')), reverse=side == 'before')
+    found, supported = [], []
+    for frame in frames:
+        observation = observations.get(frame.get('frame_id'))
+        text = observation.get('text', '').strip() if observation else ''
+        stamp = frame['local_ms']
+        left, right = (stamp, edge) if side == 'before' else (edge, stamp)
+        if (not _frame_reference(frame) or not text or _context_uncertain(text)
+                or _object_absent(text, objects) or _explicit_other_activity(text, category)
+                or any(term in text for term in ('无关活动', '其他活动', '另一活动'))
+                or _other_activity(windows, left, right, category, objects, viewing_context=True)):
+            break
+        found.append((frame, observation))
+        if frame.get('frame_id') in attributed or any(obj.casefold() in text.casefold() for obj in objects):
+            supported = list(found)
+    return sorted(supported, key=lambda row: (row[0]['local_ms'], row[0]['frame_id']))
 
 
 def _context_basis(window, kind, start, end, observed, **extra):
@@ -260,22 +305,22 @@ def _coherent_work(selected, windows, segment):
         prior = previous['evidence'][-1] if previous else {}
         objects = _object_names(evidence.get('objects') or [])
         window = by_window.get((evidence.get('input'), evidence.get('model_receipt')))
-        compatible = (previous and item['activity_category'] == previous['activity_category'] == 'non_experiment'
+        compatible = (previous and item['activity_category'] == previous['activity_category']
             and evidence.get('work_category') == prior.get('work_category')
-            and evidence.get('work_category') in {'computer', 'phone', 'organizing', 'cleaning', 'walking', 'waiting', 'other'}
+            and (item['activity_category'] == 'experiment' or evidence.get('work_category')
+                 in {'computer', 'phone', 'organizing', 'cleaning', 'walking', 'waiting', 'other'})
             and bool(objects) and _object_names(prior.get('objects') or []) == objects
             and (evidence.get('input'), evidence.get('model_receipt')) == (prior.get('input'), prior.get('model_receipt'))
             and window is not None and 0 <= item['start_ms'] - previous['end_ms'] <= 15000
             and _known_state(prior.get('after_state')) and _known_state(evidence.get('before_state')))
-        observed = _observed_context(window, previous['end_ms'], item['start_ms'], objects,
-                                     evidence.get('work_category')) if compatible else []
+        category = 'experiment' if item['activity_category'] == 'experiment' else evidence.get('work_category')
+        observed = _observed_context(window, previous['end_ms'], item['start_ms'], objects, category) if compatible else []
         context_kind = 'continuity_context'
         if compatible and not observed:
-            observed = _static_scene_context(window, previous['end_ms'], item['start_ms'], objects,
-                                             evidence.get('work_category'))
+            observed = _static_scene_context(window, previous['end_ms'], item['start_ms'], objects, category)
             context_kind = 'anchored_static_scene_context'
         if (compatible and observed and not _other_activity(windows, previous['end_ms'], item['start_ms'],
-                                                           evidence.get('work_category'), objects)):
+                                                           category, objects)):
             basis = _context_basis(window, context_kind, previous['end_ms'], item['start_ms'], observed,
                 objects=objects, work_category=evidence.get('work_category'),
                 preceding_after_state=prior.get('after_state'), following_before_state=evidence.get('before_state'))
@@ -287,7 +332,8 @@ def _coherent_work(selected, windows, segment):
                         for row in (prior, evidence)],
                     reason='仅为观看两端同对象的已观察操作保留有实际采样静止记录的短衔接；不证明间隙逐帧同对象存在、持续动作或状态相同。')
             previous['end_ms'] = item['end_ms']
-            previous['reason'] = 'observed_non_experiment_work_with_continuity_context'
+            previous['reason'] = ('observed_experiment_steps_with_continuity_context' if category == 'experiment'
+                                  else 'observed_non_experiment_work_with_continuity_context')
             previous['evidence'].extend(current['evidence'])
             previous['core_action_ranges'].extend(current['core_action_ranges'])
             previous['context_basis'].append(basis)
@@ -295,8 +341,6 @@ def _coherent_work(selected, windows, segment):
         else:
             groups.append(current)
     for group in groups:
-        if group['activity_category'] != 'non_experiment':
-            continue
         first, last = group['evidence'][0], group['evidence'][-1]
         window = by_window.get((first.get('input'), first.get('model_receipt')))
         if window is None:
@@ -305,30 +349,32 @@ def _coherent_work(selected, windows, segment):
         if not objects:
             continue
         for side, evidence in (('before', first), ('after', last)):
-            core = group['core_action_ranges'][0 if side == 'before' else -1]
-            if core['end_ms'] - core['start_ms'] > 2000 or not _known_state(evidence.get('before_state' if side == 'before' else 'after_state')):
+            if not _known_state(evidence.get('before_state' if side == 'before' else 'after_state')):
                 continue
             edge = group['start_ms' if side == 'before' else 'end_ms']
-            start, end = ((max(window['start_ms'], edge-2000), edge) if side == 'before'
-                          else (edge, min(window['end_ms'], edge+2000)))
-            observed = _observed_context(window, start, end, objects, evidence.get('work_category'),
-                                         include_start=side == 'before', include_end=side == 'after')
+            # A group's two endpoints may belong to different source windows.
+            # Never use one window's observations to extend the other endpoint.
+            window = by_window.get((evidence.get('input'), evidence.get('model_receipt')))
+            if window is None:
+                continue
+            category = 'experiment' if group['activity_category'] == 'experiment' else evidence.get('work_category')
+            observed = _viewing_context(window, edge, side, objects, category, windows)
             if not observed:
                 continue
-            nearest = observed[-1:] if side == 'before' else observed[:1]
-            stamp = nearest[0][0]['local_ms']
+            stamp = observed[0 if side == 'before' else -1][0]['local_ms']
             left, right = (stamp, edge) if side == 'before' else (edge, stamp)
-            if (_other_activity(windows, left, right, evidence.get('work_category'), objects)
-                    or min(group['start_ms'], left) <= segment['start_ms']
+            if (min(group['start_ms'], left) <= segment['start_ms']
                     and max(group['end_ms'], right) >= segment['end_ms']):
                 continue
-            basis = _context_basis(window, 'readability_context', left, right, nearest, side=side,
+            basis = _context_basis(window, 'readability_context', left, right, observed, side=side,
+                context_policy='visioncortex-observed-viewing-context/1', search_ceiling_ms=2000,
                 objects=objects, work_category=evidence.get('work_category'),
                 adjacent_state=evidence.get('before_state' if side == 'before' else 'after_state'))
             group['start_ms' if side == 'before' else 'end_ms'] = stamp
             group['context_basis'].append(basis)
             group['context_subranges'].append(deepcopy(basis))
-            group['reason'] = 'observed_non_experiment_work_with_readable_context'
+            group['reason'] = ('observed_experiment_step_with_readable_context' if category == 'experiment'
+                               else 'observed_non_experiment_work_with_readable_context')
     return groups
 
 
