@@ -66,7 +66,9 @@ class DaySynthesisWorker:
         settings = config.get('device_day') or {}
         now = time.time()
         minimum = (settings.get('day_synthesis') or {}).get('minimum_update_seconds', 60)
-        pending = {n for n in days if self.state['days'].get(n, {}).get('status') == 'publication_pending'}
+        pending = {n for n in days if self.state['days'].get(n, {}).get('status') == 'publication_pending'
+                   or (self.state['days'].get(n, {}).get('status') == 'running' and
+                       now - self.state['days'][n].get('attempted_at', 0) >= minimum)}
         eligible = {n for n in days if n in pending or
                     now - self.state['days'].get(n, {}).get('attempted_at', 0) >= minimum}
         schedule = self.state.setdefault('schedule', {})
