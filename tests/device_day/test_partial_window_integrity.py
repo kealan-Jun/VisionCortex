@@ -128,6 +128,7 @@ def test_daily_synthesis_consumes_verified_new_windows_without_replacing_canonic
     from threading import Event
     from visioncortex.device_day_synthesis import evidence_bundle
     from visioncortex.device_day_synthesis_worker import DaySynthesisWorker
+    from visioncortex.device_day_file_index import read_source_index
     index, layout, _ = windows(device_config, receipt_artifacts=True)
     first = with_partial_understandings(device_config, index)['understandings'][0]
     first['windows'] = first['windows'][:1]
@@ -137,6 +138,11 @@ def test_daily_synthesis_consumes_verified_new_windows_without_replacing_canonic
     config = deepcopy(device_config)
     config['device_day']['day_synthesis'] = {'enabled': True}
     worker, calls, rendered = DaySynthesisWorker(), [], []
+    reads = []
+    def reader(config, path):
+        reads.append(path)
+        return read_source_index(config, path)
+    monkeypatch.setattr('visioncortex.device_day_file_index.read_source_index', reader)
     monkeypatch.setattr(worker, 'candidates', lambda _: [layout])
     monkeypatch.setattr('visioncortex.device_day_synthesis.current_synthesis', lambda *_: {})
     monkeypatch.setattr('visioncortex.device_day_reports.render_day', lambda layout, index: rendered.append(index))
@@ -151,4 +157,5 @@ def test_daily_synthesis_consumes_verified_new_windows_without_replacing_canonic
     assert worker.tick(config, Event(), analyzer_factory=lambda _: Analyzer())['status'] == 'processed'
     assert len(calls[0]['understandings'][0]['windows']) == 2
     assert rendered == calls
+    assert reads == [layout.index]
     assert layout.index.read_bytes() == original
