@@ -91,9 +91,9 @@ class DaySynthesisWorker:
         self.lane = 'changed_or_live' if priority and turn % 3 else 'historical_fair_share'
         def order(name):
             return self.checked.get(name, 0), -int(name[:10].replace('-', '')), name
-        names = sorted(pending, key=lambda n: (n not in recent, order(n)))
+        names = sorted(pending & recent, key=order)
         names += sorted(priority - set(names), key=order) if self.lane == 'changed_or_live' else []
-        names += sorted(eligible - set(names), key=order)
+        names += sorted(eligible - set(names), key=lambda n: (n not in pending, order(n)))
         return [DeviceDayLayout(Path(config['storage']['archive_root']), days[n]['camera_key'],
                     days[n]['recording_start_us'], Path(config['storage']['local_cache_root'])) for n in names[:16]]
 
