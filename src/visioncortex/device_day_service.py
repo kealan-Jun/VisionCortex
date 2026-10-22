@@ -589,7 +589,11 @@ def install_routes(app, settings_factory, service):
         try:
             root = safe_child(Path(settings_factory()["storage"]["archive_root"]), validate_archive_name(name))
             if not (root / DIRECTORIES[1] / "Index.json").is_file():
-                raise ValueError("Unknown device/day archive")
+                if not (root / 'Comment/TimeIndex.json').is_file():
+                    raise ValueError("Unknown device/day archive")
+                # Published files have an independent, bounded read model.
+                # Validate its device/day identity without recreating CV data.
+                published_view(root, 'time')
             return root
         except (ValueError, OSError) as exc:
             from .artifact_reader import storage_status
@@ -612,7 +616,7 @@ def install_routes(app, settings_factory, service):
                     if child.is_symlink():
                         continue
                     index = child / DIRECTORIES[1] / "Index.json"
-                    if index.is_file():
+                    if index.is_file() or (child / 'Comment/TimeIndex.json').is_file():
                         try:
                             row = views.summary(child)
                         except (ValueError, OSError) as exc:
