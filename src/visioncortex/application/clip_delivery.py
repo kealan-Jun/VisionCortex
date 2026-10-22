@@ -55,8 +55,20 @@ def _original_bounds(layout, unit):
     """Actual recorder bounds, never the nominal segment end or selected action."""
     path = layout.root/unit['observed_source']
     value = {}
-    if len(PurePosixPath(unit['observed_source']).parts) >= 3:
-        meta = path.parent/'meta.json'
+    parts = PurePosixPath(unit['observed_source']).parts
+    if len(parts) >= 3 or parts[0] == 'MetaVideo':
+        if len(parts) == 2:
+            meta = path.parent/'Metadata'/path.stem/'Video/Meta.json'
+        else:
+            meta = path.parent/'meta.json'
+            if not meta.is_file():
+                candidates = list(path.parent.glob('*_rgb.mp4'))
+                if len(candidates) == 1:
+                    candidate = candidates[0]
+                    alternate = candidate.with_name(candidate.name[:-len('_rgb.mp4')]+'_meta.json')
+                    if alternate.is_file():
+                        meta = alternate
+                        unit['observed_source'] = layout.relative(candidate)
         if meta.is_file() and not meta.is_symlink():
             before = meta.stat()
             if before.st_size > 1024*1024:
@@ -65,6 +77,8 @@ def _original_bounds(layout, unit):
             after = meta.stat()
             if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
                 raise ValueError('Recorder time metadata changed during projection')
+            if value.get('camera_key') and value['camera_key'] != layout.name[11:]:
+                raise ValueError('Recorder time metadata belongs to another device/camera')
             unit['capture_session_id'] = value.get('recording_session_id')
             unit['capture_segment_index'] = value.get('global_segment_index')
             start = value.get('recording_window_first_valid_rgb_global_us')
@@ -556,7 +570,8 @@ def _retire_obsolete(layout, unit, rows):
 
 
 def publish(config, index, audio_entries, *, document_builder, writer, entry_builder,
-            maximum_new_videos=4, maximum_video_bytes=512*1024**2):
+            maximum_new_videos=4, maximum_video_bytes=512*1024**2, source_views=None,
+            source_units=None, maximum_retired=64):
     """One original -> one directory; every selected interval is a file inside it."""
     from ..device_day_timeline import day_bounds
     from ..runtime_control import check_yield
@@ -564,8 +579,10 @@ def publish(config, index, audio_entries, *, document_builder, writer, entry_bui
     backend = config['storage'].get('local_cache_root')
     start, _ = day_bounds(index['archive'][:10])
     layout = DeviceDayLayout(root, index['archive'][11:], max(start, 1), Path(backend) if backend else None)
-    values = views(index)
-    units = original_units(layout, index, values)
+    # A format-only historical migration supplies existing, source-bound
+    # materializations. Normal producers retain the same selection owner.
+    values = views(index) if source_views is None else source_views
+    units = original_units(layout, index, values) if source_units is None else source_units
     grouped = {key: [] for key in units}
     for row in values:
         key, _ = source_unit(row['segment']['source_ref'])
@@ -575,7 +592,8 @@ def publish(config, index, audio_entries, *, document_builder, writer, entry_bui
         grouped[key].append(row)
     _recover_files(layout)
     rename_original_groups(layout, units)
-    progress = retire_native(layout, index, {unit['name'] for unit in units.values()}, source_units=set(units))
+    progress = retire_native(layout, index, {unit['name'] for unit in units.values()},
+                             source_units=set(units), maximum=maximum_retired)
     for key, unit in units.items():
         _retire_obsolete(layout, unit, grouped[key])
     entries, copied, copied_bytes = [], 0, 0
