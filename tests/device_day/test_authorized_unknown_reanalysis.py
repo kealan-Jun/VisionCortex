@@ -50,6 +50,28 @@ def test_resume_after_live_yield_does_not_spend_another_attempt(tmp_path):
     assert row['status'] == 'completed' and row['attempts'] == old['attempts']+1
 
 
+def test_recipe_upgrade_cannot_erase_the_authorized_source_attempt_ceiling(tmp_path):
+    queue, record, old, proof = blocked(tmp_path)
+    assert queue.authorize_reanalysis(old, 'c'*64, proof)
+    assert not queue.enqueue(record, 'd'*64)
+    queue.claim('worker')
+    queue.finish('worker', record['recording_id'], {'status': 'failed'}, 1)
+    assert not queue.enqueue(record, 'e'*64)
+    assert queue.claim('extra-worker', retry=True, max_attempts=999) is None
+    with queue.connect() as db:
+        row = dict(db.execute('select * from recordings').fetchone())
+    assert row['revision'] == 'c'*64 and row['attempts'] == old['attempts']+1
+
+
+def test_a_new_source_is_not_bound_to_an_old_source_reanalysis_grant(tmp_path):
+    queue, record, old, proof = blocked(tmp_path)
+    assert queue.authorize_reanalysis(old, 'c'*64, proof)
+    queue.enqueue(record | {'source_signature': 'new-sealed-source'}, 'd'*64)
+    with queue.connect() as db:
+        row = dict(db.execute('select * from recordings').fetchone())
+    assert row['revision'] == 'd'*64 and row['attempts'] == 0
+
+
 @pytest.mark.parametrize('change', [{'potential_duplicate_billing_accepted': False},
     {'source_signature': 'other-source'}, {'recording_id': 'other'},
     {'authorization_id': ''}, {'current_source_verified': 'NOT_PROVEN'}, {'prior_results_checked': None}, {'prerequisites_verified': None}])

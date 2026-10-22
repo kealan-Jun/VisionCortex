@@ -756,12 +756,14 @@ class DeviceDayModels:
 
     def _recover_short_fine(self, error, layout, recording, key, ordinal, view, info,
                             transform, retention, scan_windows, previous_directory):
-        # A sub-second stream can lose one sampled tail frame to FPS rounding.
+        # A short stream can lose one sampled tail frame to FPS rounding.
+        # At 20 FPS, one frame exceeds the 2% tolerance below 2.5 seconds.
         # Obtain more real observations through the same scanner; never lower
         # the coverage gate or fill missing evidence with duplicated detections.
+        # The existing 60 FPS cap keeps this single retry within 150 frames.
         perf = self.config["performance"]
         if (str(error) != "Existing fine frame coverage evidence gate did not pass"
-                or not 0 < info.duration_ms <= 1000
+                or not 0 < info.duration_ms <= 2500
                 or not float(perf["detection_fps"]) < info.fps <= 60
                 or len(scan_windows) != 1
                 or abs(scan_windows[0][0]) > 1e-6
