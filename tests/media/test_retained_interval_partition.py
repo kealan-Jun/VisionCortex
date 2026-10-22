@@ -63,7 +63,7 @@ def test_fifteen_minute_candidate_exports_only_25_plus_20_seconds_and_keeps_rest
     decision = disposition(segment, meaning, record)
     assert decision['selected_duration_ms'] == 45000 and decision['pending_duration_ms'] == 855000
     assert not decision['candidate_is_export_unit'] and result['default_padding_ms'] == 0
-    assert decision['selection_policy'] == 'visioncortex-value-only-derivatives/4'
+    assert decision['selection_policy'] == 'visioncortex-value-only-derivatives/5'
     assert decision['schema_version'] == 'visioncortex-derived-video-disposition/1'
     assert (segment, record, meaning) == before
 
@@ -295,7 +295,7 @@ def test_same_object_work_with_actual_gap_context_exports_one_coherent_group_wit
 
 
 @pytest.mark.parametrize('case', ['no_gap_frame', 'no_observation', 'different_object', 'different_category',
-    'long_gap', 'unknown_state', 'different_window', 'other_activity', 'experiment_point_other_window',
+    'long_gap', 'unknown_state', 'other_activity', 'experiment_point_other_window',
     'object_absent', 'object_removed', 'positive_and_negative_observations'])
 def test_proximity_alone_conflicts_or_missing_observations_never_bridge_work(case):
     segment, record, meaning = fixture()
@@ -310,12 +310,6 @@ def test_proximity_alone_conflicts_or_missing_observations_never_bridge_work(cas
         window['work_activities'][1]['category'] = 'phone'
     elif case == 'unknown_state':
         window['work_activities'][0]['after_state'] = '未知'
-    elif case == 'different_window':
-        other = deepcopy(window)
-        other['input'], other['model_receipt'] = 'OtherInput.json', 'OtherResult.json'
-        window['work_activities'] = window['work_activities'][:1]
-        other['work_activities'] = other['work_activities'][1:]
-        meaning['windows'].append(other)
     elif case == 'other_activity':
         other = deepcopy(window['work_activities'][0])
         other.update(start_ms=3500, end_ms=4500, category='phone', objects=['手机'], basis='uncertain')
@@ -340,7 +334,21 @@ def test_proximity_alone_conflicts_or_missing_observations_never_bridge_work(cas
     assert not any(len(group['core_action_ranges']) > 1 for group in selected(result))
 
 
-def test_short_work_uses_nearest_actual_before_and_after_observations_up_to_two_seconds():
+def test_same_work_with_continuous_selected_context_is_not_split_at_a_model_window():
+    segment, record, meaning = fixture()
+    first = coherent_work_window()
+    second = deepcopy(first)
+    second.update(input='OtherInput.json', model_receipt='OtherResult.json')
+    first['work_activities'] = first['work_activities'][:1]
+    second['work_activities'] = second['work_activities'][1:]
+    meaning['windows'] = [first, second]
+    row, = selected(partition(segment, meaning, record))
+    assert (row['start_ms'], row['end_ms']) == (1000, 7000)
+    assert len(row['core_action_ranges']) == 2
+    assert {e['input'] for e in row['evidence']} == {first['input'], second['input']}
+
+
+def test_work_retains_observed_process_context_beyond_a_two_second_action_ceiling():
     segment, record, meaning = fixture()
     window = action_window(3000, 4000, field='work_activities')
     window.update(start_ms=0, end_ms=10000, frame_observations=[])
@@ -350,11 +358,11 @@ def test_short_work_uses_nearest_actual_before_and_after_observations_up_to_two_
         window['frame_observations'].append({'frame_id': identifier, 'text': '键盘与双手位置可见'})
     meaning['windows'] = [window]
     group, = selected(partition(segment, meaning, record))
-    assert (group['start_ms'], group['end_ms']) == (2500, 5000)
+    assert (group['start_ms'], group['end_ms']) == (500, 7500)
     assert [(r['start_ms'], r['end_ms'], r['side']) for r in group['context_subranges']] == [
-        (2500, 3000, 'before'), (4000, 5000, 'after')]
+        (500, 3000, 'before'), (4000, 7500, 'after')]
     assert [(r['start_ms'], r['end_ms']) for r in group['core_action_ranges']] == [(3000, 4000)]
-    assert all(r['end_ms']-r['start_ms'] <= 2000 for r in group['context_subranges'])
+    assert all(r['search_ceiling_ms'] == 10000 for r in group['context_subranges'])
 
 
 @pytest.mark.parametrize('field', ['experiment_steps', 'work_activities'])
