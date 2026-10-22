@@ -563,6 +563,13 @@ def _retire_obsolete(layout, unit, rows):
                 path = relocated(path, aliases(layout.root))
             if not path or PurePosixPath(path).name in expected:
                 continue
+            directory = 'MultimodalUnderstanding' if field == 'content' else 'ProcessedClips'
+            if path.startswith(directory+'/.Evidence/'):
+                # A prior durable relocation already retired this reference.
+                # Validate containment; never attempt to retire its hidden copy
+                # again or treat it as a public file in the renamed group.
+                safe_child(layout.root, path)
+                continue
             prefix = ('ProcessedClips/Clips/' if field != 'content' else 'MultimodalUnderstanding/')+unit['name']+'/'
             if not path.startswith(prefix) or len(PurePosixPath(path).parts) != len(PurePosixPath(prefix).parts)+1:
                 raise ValueError('Previous interval link escapes its original-capture folder')

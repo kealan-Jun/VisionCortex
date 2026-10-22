@@ -151,6 +151,16 @@ def run(config, archive, plan_root, stop, *, apply):
             and len(a) == len(unit_catalog)
             and {h["source_unit"] for h in headers} == set(unit_catalog)
         )
+        checkpoint_path = plan_root / (archive + ".discovery.json")
+        if checkpoint_path.is_file() and not read_json(checkpoint_path).get(
+            "completed"
+        ):
+            current = False
+        acceptance = layout.processed / ".Evidence/ArchiveUnification/Acceptance.json"
+        if not acceptance.is_file() or read_json(acceptance).get("recipe") != RECIPE:
+            # A grouped view alone does not prove all saved older generations
+            # were included. Recover their native journals on the first pass.
+            current = False
         result = {
             "archive": archive,
             "recipe": RECIPE,
@@ -175,6 +185,10 @@ def run(config, archive, plan_root, stop, *, apply):
         if not current:
             unifier = ArchiveUnifier(config, archive, index)
             known = {r["recording_id"] for r in index["recordings"]}
+            if checkpoint_path.is_file() and not read_json(checkpoint_path).get(
+                "completed"
+            ):
+                unifier.restore(checkpoint_path)
             result["discovery"] = unifier.discover()
             # Earlier presentation generations have their own durable stage
             # identities; acquire their locks as well before moving a byte.
@@ -190,6 +204,7 @@ def run(config, archive, plan_root, stop, *, apply):
                     locks.enter_context(
                         exclusive(runtime / "locks" / f"{rid}.{stage}.lock")
                     )
+            unifier.checkpoint(checkpoint_path)
             for batch in range(256):
                 check_yield(checkpoint=False)
                 progress = unifier.publish()
@@ -227,6 +242,9 @@ def run(config, archive, plan_root, stop, *, apply):
         else:
             raise ValueError("Supporting evidence exceeded the bounded batch count")
         retire_day_html(layout)
+        from visioncortex.application.archive_unification import refresh_group_index
+
+        result["readable_index"] = refresh_group_index(layout)
         after_a, after_b = (
             visible(layout.processed / "Clips"),
             visible(layout.understanding),
@@ -243,7 +261,17 @@ def run(config, archive, plan_root, stop, *, apply):
         )
         if not result["sets_match"] or result["canonical_index_changed"]:
             raise ValueError(
-                "Post-migration group equality or canonical identity verification failed"
+                "Post-migration verification failed: "
+                + json.dumps(
+                    {
+                        "only_clips": sorted(after_a - after_b),
+                        "only_understanding": sorted(after_b - after_a),
+                        "missing": sorted(expected - after_a),
+                        "extra": sorted(after_a - expected),
+                        "canonical_changed": result["canonical_index_changed"],
+                    },
+                    ensure_ascii=False,
+                )
             )
         for name in expected:
             h = read_json(layout.processed / "Clips" / name / "Index.json")
@@ -258,6 +286,10 @@ def run(config, archive, plan_root, stop, *, apply):
             layout.processed / ".Evidence/ArchiveUnification/Acceptance.json",
             result | {"build": identity(), "verified_at": time.time()},
         )
+        if checkpoint_path.is_file():
+            atomic_json(
+                checkpoint_path, read_json(checkpoint_path) | {"completed": True}
+            )
         return result
 
 

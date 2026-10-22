@@ -175,6 +175,111 @@ class ArchiveUnifier:
         self.current_groups = set()
         self.legacy_folders = set()
 
+    def checkpoint(self, path):
+        """Persist the complete source-bound plan before retiring any folder."""
+        atomic_json(
+            path,
+            {
+                "recipe": RECIPE,
+                "archive": self.layout.name,
+                "index": self.index,
+                "rows": [
+                    {
+                        k: v
+                        for k, v in row.items()
+                        if k not in {"record", "candidate", "unit"}
+                    }
+                    for row in self.values
+                ],
+                "legacy_folders": sorted(
+                    self.layout.relative(p) for p in self.legacy_folders
+                ),
+            },
+        )
+
+    def restore(self, path):
+        value = bounded_document(path, maximum_bytes=64 * 1024**2)
+        if value.get("recipe") != RECIPE or value.get("archive") != self.layout.name:
+            raise ValueError(
+                "Historical migration checkpoint belongs to another archive"
+            )
+        for saved in value.get("rows", []):
+            row = self._row(saved["segment"])
+            if (
+                row is None
+                or row["key"] != saved["key"]
+                or saved["category"] not in clip_delivery.LABELS
+            ):
+                raise ValueError(
+                    "Historical migration checkpoint has an invalid source binding"
+                )
+            for key in ("metadata_document", "understanding_document"):
+                relative = saved["meaning"].get(key)
+                if relative:
+                    safe_child(self.layout.root, relative)
+            row.update(
+                {
+                    k: v
+                    for k, v in saved.items()
+                    if k not in {"record", "candidate", "unit"}
+                }
+            )
+            row.update(
+                record=self.records[row["segment"]["recording_id"]],
+                candidate=row["segment"],
+            )
+        for relative in value.get("legacy_folders", []):
+            parts = Path(relative).parts
+            if not (
+                parts[:2] == ("ProcessedClips", "Clips")
+                and len(parts) == 3
+                or parts[:1] == ("MultimodalUnderstanding",)
+                and len(parts) == 2
+            ):
+                raise ValueError("Checkpoint contains an unowned retirement path")
+            self.legacy_folders.add(self.layout.root / relative)
+
+    def _recover_relocated(self):
+        """Import only owned sidecars preserved by durable native move intents."""
+        for directory in ("ProcessedClips", "MultimodalUnderstanding"):
+            journals = self.layout.root / directory / ".Evidence/ClipRelocations"
+            for journal in sorted(journals.glob("*.json")):
+                intent = bounded_document(journal)
+                old, target = intent.get("from", ""), intent.get("to", "")
+                parts = Path(old).parts
+                owned = (
+                    directory == "ProcessedClips"
+                    and parts[:2] == (directory, "Clips")
+                    and len(parts) == 3
+                    or directory == "MultimodalUnderstanding"
+                    and parts[:1] == (directory,)
+                    and len(parts) == 2
+                )
+                if (
+                    intent.get("schema_version") != clip_delivery.VERSION
+                    or not owned
+                    or intent.get("operation") != "preserve_owned_derived_directory"
+                    or not target.startswith(
+                        directory + "/.Evidence/LegacyPresentation/"
+                    )
+                ):
+                    raise ValueError(
+                        "Historical relocation intent lacks owned provenance"
+                    )
+                folder = safe_child(self.layout.root, target)
+                if not folder.is_dir():
+                    continue
+                if directory == "ProcessedClips":
+                    for path in clip_delivery._metadata_files(folder):
+                        if path.is_file():
+                            self._read_candidate(path)
+                else:
+                    path = folder / "Understanding.json"
+                    if path.is_file():
+                        doc = bounded_document(path)
+                        if doc.get("schema_version") != clip_delivery.VERSION:
+                            self._read_understanding(path)
+
     def _row(self, value):
         reference = value.get("source_ref") or value.get("source_video")
         if not isinstance(reference, dict) or not reference.get("path"):
@@ -263,6 +368,18 @@ class ArchiveUnifier:
         row["meaning"].setdefault("metadata_document", self.layout.relative(path))
         row["segment"]["json_path"] = self.layout.relative(path)
         retention = document.get("retention") or {}
+        separate = path.parent / "Retention.json"
+        if (
+            not retention
+            and separate.is_file()
+            and path.parent not in self.current_groups
+        ):
+            prior = bounded_document(separate)
+            if all(
+                prior.get(k) == document.get(k)
+                for k in ("recording_id", "source_ref", "start_us", "end_us")
+            ):
+                retention = prior
         selection = (
             document.get("selection_interval")
             or retention.get("selection_interval")
@@ -321,6 +438,8 @@ class ArchiveUnifier:
         # pending and never becomes an experiment claim during migration.
         prior = document.get("display_category")
         observed = document.get("understanding") or document.get("experiment_steps")
+        if row["category"] == "NoValueNoExperimentActivity":
+            return
         if observed and prior in {"ExperimentActivity", "ValuableNoExperimentActivity"}:
             row["category"] = prior
         elif observed and row["meaning"].get("prior_display_category") in {
@@ -331,6 +450,7 @@ class ArchiveUnifier:
 
     def discover(self):
         """Read public source-bound sidecars before any relocation happens."""
+        self._recover_relocated()
         root = self.layout.root
         parent = self.layout.processed / "Clips"
         for folder in sorted(parent.iterdir()) if parent.is_dir() else []:
@@ -362,9 +482,18 @@ class ArchiveUnifier:
                     row = self._row(segment)
                     if row:
                         row["segment"]["json_path"] = segment.get("json_path")
+            count = len(self.rows)
             for path in paths:
                 self._read_candidate(path)
-            self.legacy_folders.add(folder)
+            if paths and (
+                len(self.rows) > count
+                or any(
+                    r["meaning"].get("metadata_document") == self.layout.relative(p)
+                    for p in paths
+                    for r in self.rows.values()
+                )
+            ):
+                self.legacy_folders.add(folder)
         for folder in (
             sorted(self.layout.understanding.iterdir())
             if self.layout.understanding.is_dir()
@@ -470,9 +599,8 @@ class ArchiveUnifier:
             status=status,
             video_status="available" if segment.get("video") else "not_materialized",
             record_scope="retention_interval",
-            candidate_segment_id=segment.get(
-                "candidate_segment_id", segment["segment_id"]
-            ),
+            candidate_segment_id=segment.get("candidate_segment_id")
+            or segment["segment_id"],
         )
         value["内容记录"] = narrative
         value["historical_format_migration"] = {
@@ -517,10 +645,16 @@ class ArchiveUnifier:
             "结束时间": value["内容记录"]["结束时间"],
         }
 
-    def publish(self, *, maximum_new_videos=16, maximum_video_bytes=512 * 1024**2):
+    def publish(self, *, maximum_new_videos=64, maximum_video_bytes=512 * 1024**2):
         from ..device_day import copy_verified
         from ..device_day_content import content_index
 
+        # Discovery and its durable checkpoint precede this call. The native
+        # retirement owner retains exact bytes and aliases, including sidecars
+        # larger than its ordinary publication fast-path inspection cap.
+        for folder in sorted(self.legacy_folders):
+            if folder.is_dir():
+                clip_delivery._retire(self.layout, folder)
         index_path = self.layout.understanding / "Index.json"
         if index_path.is_file():
             from ..device_day_contract import file_hash
@@ -553,3 +687,43 @@ class ArchiveUnifier:
             content_index(self.layout.name, "MultimodalUnderstanding", entries),
         )
         return progress
+
+
+def refresh_group_index(layout):
+    """Rebuild derived counts from saved groups, without decoding media."""
+    from ..device_day_content import content_index
+
+    entries = []
+    for folder in layout.understanding.iterdir():
+        if not folder.is_dir() or folder.name.startswith("."):
+            continue
+        header = bounded_document(folder / "Understanding.json")
+        if header.get("schema_version") != clip_delivery.VERSION:
+            raise ValueError("Ungrouped understanding remains during index refresh")
+        for source in header.get("intervals", []):
+            entry = dict(source)
+            entry["candidate_segment_id"] = (
+                entry.get("candidate_segment_id") or entry["segment_id"]
+            )
+            entries.append(entry)
+    value = content_index(layout.name, "MultimodalUnderstanding", entries)
+    path = layout.understanding / "Index.json"
+    if not path.is_file() or bounded_document(path) != value:
+        if path.is_file():
+            from ..device_day import copy_verified
+            from ..device_day_contract import file_hash
+
+            backup = private_folder(
+                layout,
+                "MultimodalUnderstanding",
+                "ArchiveUnification",
+                "PriorIndexes",
+                file_hash(path) + ".json",
+            )
+            if not backup.is_file():
+                copy_verified(path, backup)
+        atomic_json(path, value)
+    return {
+        "intervals": len(entries),
+        "candidate_count": len({e["candidate_segment_id"] for e in entries}),
+    }
