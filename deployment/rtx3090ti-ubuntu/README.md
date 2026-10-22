@@ -80,7 +80,7 @@ Web 与 worker 按配置的角色运行；认证、监听地址及跨机访问�
 这些调度行为不重写模型回执，不重发结果未知的付费请求。
 
 拆分阶段的历史调度由 `device_day.backfill` 明确配置。生产采用 `mode: idle`，优先当前新输入，历史从新到旧补跑；
-持续有新输入的站点可选择 `mode: fair`，并在 `stages` 列出
+旧的可选 `mode: fair` 保留相机轮次和旧输入优先策略，不属于此生产顺序。其 `stages` 可列出
 `retention`、`vision`、`stt`、`understanding`、`report`。每阶段必须部署对应 worker。
 `fair_interval_seconds` 默认 60；`quantum_seconds` 在可恢复单位完成后让出，
 不会打断已发送的付费请求或接受半份内容。历史沿用持久队列的相机轮次，在每相机内
