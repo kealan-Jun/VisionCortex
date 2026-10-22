@@ -621,3 +621,30 @@ def test_large_cv_metadata_streams_dense_audit_without_changing_source_or_losing
     assert "activity_audit" not in value
     assert value["historical_metadata_projection"]["complete_original_document_preserved"]
     assert file_hash(path) == before
+
+
+def test_large_retired_cv_sidecar_resumes_with_exact_video_addresses(tmp_path):
+    import json
+    from visioncortex.application.clip_delivery import _retire
+    from visioncortex.device_day_contract import file_hash, read_json, safe_child
+
+    layout, index, config, source, refs = case(tmp_path)
+    folder = (layout.root / refs[0]['path']).parent
+    metadata = folder / 'ExperimentActivity.json'
+    value = read_json(metadata)
+    with metadata.open('w') as handle:
+        handle.write(json.dumps(value)[:-1] + ',"activity_audit":[')
+        for i in range(33000):
+            if i:
+                handle.write(',')
+            handle.write(json.dumps('synthetic-diagnostic-'+'x'*1024))
+        handle.write(']}')
+    original, canonical, checksum = source.read_bytes(), layout.index.read_bytes(), file_hash(metadata)
+    assert _retire(layout, folder)
+    for _ in range(2):
+        unifier = ArchiveUnifier(config, layout.name, read_json(layout.index), public_video_inventory=refs)
+        assert unifier.discover()['originals'] == 1
+        unifier.publish()
+        assert all(verify_artifact(layout.root, ref) for ref in refs)
+        assert file_hash(safe_child(layout.root, layout.relative(metadata))) == checksum
+    assert source.read_bytes() == original and layout.index.read_bytes() == canonical
