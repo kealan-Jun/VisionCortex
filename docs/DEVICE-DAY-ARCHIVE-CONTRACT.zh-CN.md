@@ -19,16 +19,17 @@
 用户进一步明确：一段原片对应一个处理目录，处理目录数与原片目录数相等。
 同一原片筛出的多个不同时间区间必须作为文件放在这个目录内，不能各建目录，
 也不能因为候选、导出策略或执行版本的内部 ID 不同重复建目录。
+数量按原片对应，命名仍保留“起止时间_类别_标识”样式。两处目录采用原片实际完整起止时间，不能改成采集编号；区间文件采用各自的筛选时间。目录类别表示其中已观察内容，不证明整段原片都属于该动作。未取得可靠完整时间的来源明确标记 TimePending，取得实际时间后原位迁移，不虚构结束时间。
 本节优先于下文历史展示命名。启用 `device_day.clip_delivery: source_recording_v2`：
 
 ```text
 MetaData/110101/rgb.mp4
-ProcessedClips/Clips/110101/
+ProcessedClips/Clips/<原片开始>_<原片结束>_<类别>_<短标识>/
   Index.json
   Retention.json
   <开始>_<结束>_<类别>_<短标识>.json
   <开始>_<结束>_<类别>_<短标识>.mp4
-MultimodalUnderstanding/110101/
+MultimodalUnderstanding/<同名原片时间目录>/
   Understanding.json
   <开始>_<结束>_<类别>_<短标识>.json
 ```
