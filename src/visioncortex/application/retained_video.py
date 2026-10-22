@@ -14,12 +14,52 @@ class EvidenceUnverified(ValueError):
     """Keep an interval pending when its actual model evidence cannot be proven."""
 
 
+def _validate_activity_process(layout, candidate, selection, meaning, recording, context):
+    """Authenticate process selection independently of optional model/STT work."""
+    from ..device_day_audit import AuditReader
+    from ..device_day_content_paths import aliases, public_references
+    from ..device_day_contract import safe_child
+    from ..media.retained_intervals import audited_process
+    try:
+        if recording.get('recording_id') != candidate['recording_id']:
+            raise ValueError('Activity process belongs to a different recording')
+        path = layout.receipts/candidate['recording_id']/'vision.json'
+        snapshots = [(path, identity(path))]
+        visual = public_references(read_json(path), aliases(layout.root))
+        expected = ((recording.get('stages') or {}).get('vision') or {}).get('key')
+        if (visual.get('stage') != 'vision' or visual.get('recording_id') != candidate['recording_id']
+                or visual.get('status') != 'completed' or not visual.get('key')
+                or expected and visual['key'] != expected):
+            raise ValueError('Activity process lacks its completed owning vision receipt')
+        fields = ('segment_id', 'recording_id', 'source_ref', 'start_ms', 'end_ms', 'start_us', 'end_us',
+                  'activity', 'classification_basis', 'activity_audit_ref')
+        saved = next(row for row in visual.get('segments', [])
+                     if all(row.get(key) == candidate.get(key) for key in fields))
+        if not audited_process(saved):
+            raise ValueError('Activity label alone cannot select a process video')
+        audit_path = safe_child(layout.backend_root, saved['activity_audit_ref']['path'])
+        snapshots.append((audit_path, identity(audit_path)))
+        audit = AuditReader({'storage': {'local_cache_root': str(layout.backend_root)}}).read(saved)
+        if (audit.get('scope') != 'single_device_activity_not_cross_view_experiment_confirmation'
+                or audit.get('coarse_only_can_label_activity') is not False):
+            raise ValueError('Activity process lacks actual fine-audit evidence')
+        if selection not in _selection_partition(saved, meaning, recording, context)['intervals']:
+            raise ValueError('Process selection differs from the owning fine-audited interval')
+        if any(identity(p) != before for p, before in snapshots):
+            raise ValueError('Activity process evidence changed during verification')
+        return snapshots
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, StopIteration) as exc:
+        raise EvidenceUnverified(str(exc) or type(exc).__name__) from exc
+
+
 def validate_selection_evidence(layout, candidate, selection, meaning, recording, context=None):
     """Revalidate actual input/response/frame bytes against the owning receipt.
 
     This never calls a model or writes evidence. Historical incomplete anchors
     remain readable observations, but cannot authorize a new video derivative.
     """
+    if selection.get('selection_owner') == 'audited_device_activity':
+        return _validate_activity_process(layout, candidate, selection, meaning, recording, context)
     from ..device_day_content_paths import aliases, public_references
     from ..device_day_contract import safe_child
     from ..device_day_verification import verify_artifact_cached
@@ -152,7 +192,7 @@ def _decision(candidate, interval):
         'candidate_end_us': candidate['end_us'], 'selection': interval,
         'model_evidence': interval.get('evidence', []), 'context_basis': interval.get('context_basis', []),
         'continuous_inactivity_proven': False,
-        'limitation': '只保留有明确边界与依据的选中区间；其他区间保持原片追溯，不把候选整体当作选中。'}
+        'limitation': '视频按有依据的连续过程留存，细动作是独立的语义记录；不宣称完整实验或物理动作已获确证。'}
 
 
 def _selection_partition(candidate, meaning, recording, context):
@@ -267,7 +307,7 @@ def _defer_attempt(path, previous, key, error):
 
 
 def publish_selected(config, index, *, recording_id=None, maximum_new_videos=1, evidence_validator=None):
-    """Publish only the exact selected subintervals, independently of reports.
+    """Publish selected process intervals independently of reports and identity binding.
 
     Every candidate contributes to the day projection. ``recording_id`` limits
     new materialization only; it must not hide other recordings' verified
