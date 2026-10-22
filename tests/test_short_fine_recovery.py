@@ -19,7 +19,8 @@ def run_recovery(model, info, error=None, windows=None):
     )
 
 
-def test_short_coverage_recovery_uses_native_fps_and_a_separate_index():
+@pytest.mark.parametrize('duration', [566.667, 1001, 1266.667, 2499, 2500])
+def test_short_coverage_recovery_uses_native_fps_and_a_separate_index(duration):
     model = backend()
     calls = []
     model._scan = lambda *args: (calls.append(args) or ({"v": "new-ledger"}, "new-scan", {}))
@@ -30,13 +31,13 @@ def test_short_coverage_recovery_uses_native_fps_and_a_separate_index():
         return "indexed", {"formal_evidence_ready": True}, ["artifact"]
 
     model._index_fine = index
-    result = run_recovery(model, SimpleNamespace(duration_ms=566.667, fps=30))
+    result = run_recovery(model, SimpleNamespace(duration_ms=duration, fps=30))
     assert len(calls) == 1
     assert calls[0][-2:] == (30, 640)
     assert result[-1]["coverage_recovery"]["coverage_threshold_unchanged"] is True
 
 
-@pytest.mark.parametrize("duration,fps", [(1001, 30), (0, 30), (500, 20), (500, 120)])
+@pytest.mark.parametrize("duration,fps", [(2500.001, 30), (0, 30), (500, 20), (500, 120)])
 def test_recovery_does_not_expand_to_long_or_inapplicable_sources(duration, fps):
     with pytest.raises(ValueError, match="coverage evidence"):
         run_recovery(backend(), SimpleNamespace(duration_ms=duration, fps=fps))

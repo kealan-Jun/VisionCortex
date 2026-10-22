@@ -79,6 +79,21 @@ class DeviceDayQueue:
                   else "needs_camera_role")
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
+            if self.path.stem == 'queue-understanding':
+                previous = db.execute('SELECT * FROM recordings WHERE recording_id=?',
+                                      (recording['recording_id'],)).fetchone()
+                if previous:
+                    from .device_day_inputs import same_stage_source
+                    for grant in db.execute('SELECT previous_row FROM reanalysis_authorizations WHERE recording_id=?',
+                                            (recording['recording_id'],)):
+                        authorized = json.loads(json.loads(grant['previous_row'])['payload'])
+                        if (authorized.get('source_signature') and recording.get('source_signature')
+                                and same_stage_source(authorized, recording, 'understanding')
+                                and same_stage_source(json.loads(previous['payload']), recording, 'understanding')):
+                            # A recipe upgrade cannot reset the one-attempt
+                            # grant or move it to an unbounded new revision.
+                            # Execution still checks current code and artifacts.
+                            return False
             if self.preserve_completed_on_recipe_change:
                 previous = db.execute('SELECT * FROM recordings WHERE recording_id=?',
                                       (recording['recording_id'],)).fetchone()
