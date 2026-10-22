@@ -44,8 +44,9 @@ MultimodalUnderstanding/<同名原片时间目录>/
 | `ExperimentActivity` | 有来源与时间、帧绑定的实际模型实验观察 | 选中且校验成功后发布 |
 | `ValuableNoExperimentActivity` | 有实际观察支持的非实验工作及观看上下文 | 选中且校验成功后发布 |
 | `NoValueNoExperimentActivity` | 已满足确认无价值条件的非实验区间 | 不导出 |
-| `ActivityPendingClassification` | 已选中活动过程，实验类型仍缺少足够理解依据 | 可先发布选中的过程视频 |
-| `PendingValueReview` | 视频价值尚未判断完成 | 不把待判断当作无价值，也不据此新增导出 |
+| `NoExperimentActivity` | 尚未归类为实验，具体待判定状态保留在 JSON；不等于无价值 | 只发布已选中且通过校验的视频 |
+
+处理状态 `ActivityPendingClassification`、`PendingValueReview` 只写入 JSON，不进入目录或文件的类别名称。目录时间优先取当前文件记录的有效 RGB 首尾帧时间；缺少该范围时才使用当前分片 quality window 或已校验原片范围。不能把整次录制的 session 起点、恢复件继承的公共窗口或名义分片终点当作当前文件的完整范围。索引保留时间依据、采集会话及分片编号，原有处理窗口单独保留；首尾帧范围不保证中间持续有画面。
 
 只有选中且校验成功的区间才有对应 MP4；确认无价值的区间只保留 JSON。
 CV 的 `active` 与精扫活动过程边界不直接证明正在做实验；活动是否选中、实际模型

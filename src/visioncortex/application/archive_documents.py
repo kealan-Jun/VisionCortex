@@ -9,7 +9,7 @@ from ..device_day_inputs import identity
 from ..device_day_verification import verify_artifact_cached
 
 VERSION = 'visioncortex-archive-documents/1'
-GUIDE_SHA256 = '1a79c7d1baffed9a53771ca587af0ad66c74cbd613820ce84918aed42264cb9d'
+GUIDE_SHA256 = 'a664711f08d5de61bcbf9afe966d31f78f1b10589b76202b81a41759cb297106'
 
 
 def html_enabled(config):

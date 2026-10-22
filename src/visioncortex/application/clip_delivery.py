@@ -45,9 +45,16 @@ def _stamp(value):
     return datetime.fromtimestamp(value / 1e6, ZoneInfo('Asia/Shanghai')).strftime('%H-%M-%S')
 
 
+def _display_category(kind):
+    # Keep the established filename vocabulary. Unresolved classification and
+    # value are explicit JSON states, never a confirmed no-value decision.
+    return 'NoExperimentActivity' if kind in {'ActivityPendingClassification', 'PendingValueReview'} else kind
+
+
 def _original_bounds(layout, unit):
     """Actual recorder bounds, never the nominal segment end or selected action."""
     path = layout.root/unit['observed_source']
+    value = {}
     if len(PurePosixPath(unit['observed_source']).parts) >= 3:
         meta = path.parent/'meta.json'
         if meta.is_file() and not meta.is_symlink():
@@ -58,16 +65,28 @@ def _original_bounds(layout, unit):
             after = meta.stat()
             if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
                 raise ValueError('Recorder time metadata changed during projection')
-            for left, right in [('recording_window_start_global_us', 'recording_window_end_global_us'),
-                                ('recording_quality_window_start_global_us', 'recording_quality_window_end_global_us')]:
+            unit['capture_session_id'] = value.get('recording_session_id')
+            unit['capture_segment_index'] = value.get('global_segment_index')
+            start = value.get('recording_window_first_valid_rgb_global_us')
+            end = value.get('recording_window_last_valid_rgb_global_us')
+            if type(start) is int and type(end) is int and 0 < start < end:
+                return start, end, 'recorded_rgb_frame_extent'
+            # recording_window_* can describe the whole recording session:
+            # a later file may still carry the first file's session start.
+            # Keep a quality-window fallback explicitly labelled; it does not
+            # assert that every point in that window has a recorded RGB frame.
+            for left, right in [('recording_quality_window_start_global_us', 'recording_quality_window_end_global_us')]:
                 start, end = value.get(left), value.get(right)
                 if type(start) is int and type(end) is int and 0 < start < end:
-                    return start, end
+                    return start, end, 'capture_quality_window'
     records = unit['recordings']
     bounds = [(r.get('start_us'), r.get('end_us')) for r in records]
     if bounds and all(type(a) is int and type(b) is int and 0 < a < b for a, b in bounds):
-        return min(a for a, _ in bounds), max(b for _, b in bounds)
-    return None, None
+        return min(a for a, _ in bounds), max(b for _, b in bounds), 'verified_recording_window'
+    start, end = value.get('segment_start_us'), value.get('segment_end_us')
+    if type(start) is int and type(end) is int and 0 < start < end:
+        return start, end, 'recorder_segment_extent'
+    return None, None, 'time_pending'
 
 
 def original_units(layout, index, values=None):
@@ -123,10 +142,10 @@ def original_units(layout, index, values=None):
         kind = next((v for v in ('ExperimentActivity', 'ValuableNoExperimentActivity',
                                  'ActivityPendingClassification', 'PendingValueReview') if v in kinds),
                     'NoValueNoExperimentActivity' if kinds else 'PendingValueReview')
-        start, end = _original_bounds(layout, unit)
-        unit.update(start_us=start, end_us=end, category=kind)
+        start, end, basis = _original_bounds(layout, unit)
+        unit.update(start_us=start, end_us=end, time_basis=basis, category=kind)
         times = f'{_stamp(start)}_{_stamp(end)}' if start and end else 'TimePending_TimePending'
-        unit['name'] = f"{times}_{kind}_{digest(['source-recording-display/1', unit['key']])[:8]}"
+        unit['name'] = f"{times}_{_display_category(kind)}_{digest(['source-recording-display/1', unit['key']])[:8]}"
     return units
 
 
@@ -175,7 +194,7 @@ def views(index):
         key = digest([VERSION, segment['recording_id'], segment['source_ref'], *times])
         def stamp(value):
             return datetime.fromtimestamp(value / 1e6, ZoneInfo('Asia/Shanghai')).strftime('%H-%M-%S')
-        name = f"{stamp(segment['start_us'])}_{stamp(segment['end_us'])}_{kind}_{key[:8]}"
+        name = f"{stamp(segment['start_us'])}_{stamp(segment['end_us'])}_{_display_category(kind)}_{key[:8]}"
         value = {'key': key, 'name': name, 'category': kind, 'label': LABELS[kind],
                  'segment': segment, 'meaning': meaning, 'interval': interval, 'record': record,
                  'candidate': candidate, 'source_segment_ids': [segment['segment_id']]}
@@ -630,6 +649,12 @@ def publish(config, index, audio_entries, *, document_builder, writer, entry_bui
         header = {'schema_version': VERSION, 'archive': index['archive'], 'source_unit': key,
             'source_folder': unit['name'], 'original_source': {'path': unit['observed_source'], 'ownership': 'recorder'},
             'original_start_us': unit['start_us'], 'original_end_us': unit['end_us'],
+            'original_time_basis': unit['time_basis'],
+            'original_range_is_continuous_coverage': False,
+            'capture_session_id': unit.get('capture_session_id'),
+            'capture_segment_index': unit.get('capture_segment_index'),
+            'processing_windows': [{'recording_id': r['recording_id'], 'start_us': r.get('start_us'),
+                                    'end_us': r.get('end_us')} for r in unit['recordings']],
             'capture_name': unit['capture_name'], 'display_category': unit['category'],
             'folder_scope': 'complete_original_recording_collection',
             'folder_category_is_whole_recording_classification': False,

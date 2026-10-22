@@ -63,7 +63,7 @@ def test_multiple_intervals_share_original_folder_and_native_receipts_remain_rea
     assert '.Evidence/LegacyPresentation' in str(safe_child(case.layout.root, native['path']))
     for reference in old_videos:
         assert verify_artifact(case.layout.root, reference)
-        assert 'ActivityPendingClassification' in safe_child(case.layout.root, reference['path']).name
+        assert 'NoExperimentActivity' in safe_child(case.layout.root, reference['path']).name
         assert safe_child(case.layout.root, reference['path']).parent.name == public_name(case)
     case.index['readable_content'] = result
     timeline = build_file_index(case.config, case.index, {})
@@ -307,6 +307,7 @@ def test_full_original_range_names_both_groups_not_selected_subintervals(exact_c
     end = 1792650344802068
     atomic_json(case.source.parent/'meta.json', {
         'recording_window_start_global_us': start, 'recording_window_end_global_us': end,
+        'recording_quality_window_start_global_us': start, 'recording_quality_window_end_global_us': end,
         'segment_window_end_global_us': start+900000000})
     unit = clip_delivery.original_units(case.layout, case.index)['MetaData/capture']
     assert unit['name'].startswith('14-25-35_14-25-44_')
@@ -316,6 +317,18 @@ def test_full_original_range_names_both_groups_not_selected_subintervals(exact_c
     assert (case.layout.processed/'Clips'/unit['name']/'Index.json').is_file()
     assert (case.layout.understanding/unit['name']/'Understanding.json').is_file()
     assert case.source.parent.name == 'capture'
+
+
+def test_later_original_never_uses_the_session_start_or_nominal_segment_end(exact_case):
+    case = exact_case
+    start, end = 1792638961324222, 1792639444784727
+    atomic_json(case.source.parent/'meta.json', {
+        'recording_window_start_global_us': start-900000000, 'recording_window_end_global_us': end,
+        'recording_quality_window_start_global_us': start, 'recording_quality_window_end_global_us': end,
+        'segment_window_start_global_us': start, 'segment_window_end_global_us': start+900000000})
+    unit = clip_delivery.original_units(case.layout, case.index)['MetaData/capture']
+    assert unit['name'].startswith('11-16-01_11-24-04_')
+    assert (unit['start_us'], unit['end_us']) == (start, end)
 
 
 def test_numbered_group_rename_replays_crash_and_preserves_video_bytes(exact_case, monkeypatch):
@@ -353,3 +366,28 @@ def test_group_rename_refuses_unowned_destination(exact_case):
     with pytest.raises(ValueError, match='destination changed'):
         clip_delivery.rename_original_groups(case.layout, units)
     assert (old/'Index.json').is_file() and (target/'Foreign.json').is_file()
+
+
+def test_processing_states_stay_in_json_not_in_public_filenames(exact_case):
+    case = exact_case
+    case.config['device_day']['clip_delivery'] = 'source_recording_v2'
+    retained_video.publish_selected(case.config, case.index, maximum_new_videos=2, evidence_validator=case.validator)
+    result = publish_content(case.config, case.index)
+    assert 'NoExperimentActivity' in public_name(case)
+    assert all('Pending' not in row['content'] for row in result['multimodal'])
+    assert any(row['display_category'] == 'ActivityPendingClassification' for row in result['multimodal'])
+    assert sum(bool(row['video']) for row in result['multimodal']) == 2
+
+
+def test_recovered_file_uses_its_own_recorded_rgb_extent_not_shared_window(exact_case):
+    case = exact_case
+    atomic_json(case.source.parent/'meta.json', {
+        'recording_session_id': 1792640296154871, 'global_segment_index': 0,
+        'recording_quality_window_start_global_us': 1792640297154844,
+        'recording_quality_window_end_global_us': 1792640404193809,
+        'recording_window_first_valid_rgb_global_us': 1792640321176943,
+        'recording_window_last_valid_rgb_global_us': 1792640374098139})
+    unit = clip_delivery.original_units(case.layout, case.index)['MetaData/capture']
+    assert unit['name'].startswith('11-38-41_11-39-34_')
+    assert unit['time_basis'] == 'recorded_rgb_frame_extent'
+    assert unit['capture_segment_index'] == 0
