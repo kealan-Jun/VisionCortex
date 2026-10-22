@@ -2,8 +2,10 @@
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+import errno
 import os
 from pathlib import Path
+import time
 import uuid
 
 
@@ -198,7 +200,18 @@ class PublicationGuard:
                 os.fsync(handle.fileno())
             self.validate()
             operation = 'replace_destination'
-            os.replace(temporary, parts[-1], src_dir_fd=parent, dst_dir_fd=parent)
+            # A CIFS sharing lease may briefly deny an otherwise valid rename.
+            # Keep the same fsynced temporary file and pinned directory; never
+            # unlink the destination, change permissions, or bypass the guard.
+            for attempt in range(5):
+                try:
+                    os.replace(temporary, parts[-1], src_dir_fd=parent, dst_dir_fd=parent)
+                    break
+                except OSError as exc:
+                    if exc.errno not in {errno.EACCES, errno.EBUSY} or attempt == 4:
+                        raise
+                    time.sleep(0.05 * 2**attempt)
+                    self.validate()
             operation = 'sync_directory'
             os.fsync(parent)
             self.validate(volume=False)

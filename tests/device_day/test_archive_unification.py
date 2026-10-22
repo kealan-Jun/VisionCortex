@@ -268,6 +268,30 @@ def test_separate_no_value_retention_outranks_stale_model_classification(tmp_pat
     assert all(verify_artifact(layout.root, ref) for ref in refs)
 
 
+@pytest.mark.parametrize("missing_file", [True, False])
+def test_missing_derived_alias_index_is_rebuilt_from_moves_and_identical_videos(
+    tmp_path,
+    missing_file,
+):
+    layout, index, config, source, refs = case(tmp_path)
+    first = ArchiveUnifier(config, layout.name, index)
+    first.discover()
+    first.publish()
+    for directory in (layout.processed, layout.understanding):
+        path = directory / ".Evidence/LegacyPaths.json"
+        if missing_file:
+            path.unlink()
+        else:
+            atomic_json(
+                path,
+                {"schema_version": "visioncortex-content-aliases/1", "aliases": {}},
+            )
+    recovered = ArchiveUnifier(config, layout.name, index)
+    assert recovered.discover()["intervals"] == 2
+    assert not recovered.publish()["pending"]
+    assert all(verify_artifact(layout.root, ref) for ref in refs)
+
+
 def test_migration_rejects_a_changed_historical_video_before_relocation(tmp_path):
     layout, index, config, source, refs = case(tmp_path)
     (layout.root / refs[0]["path"]).write_bytes(b"changed-video")
