@@ -503,7 +503,12 @@ def _retire_file(layout, relative, reference=None):
     physical = artifact(source.parent, source)
     if reference and any(reference.get(key) != physical[key] for key in ('sha256', 'size_bytes')):
         raise ValueError('Obsolete video differs from its last published binding')
-    target = private_folder(layout, parts[0], 'LegacyPresentation', parts[-2], physical['sha256'], source.name)
+    # An earlier publication can alias a reclaimed historical video back to
+    # this public file. A write destination must be physical, never resolved
+    # through that reader alias (which could otherwise turn retirement into
+    # source == destination followed by unlink).
+    hidden = '/'.join(('.Evidence', 'LegacyPresentation', parts[-2], physical['sha256'], source.name))
+    target = safe_child(parent, hidden)
     intent = {'schema_version': VERSION, 'from': relative, 'to': layout.relative(target),
               'source_identity': before, 'file': physical, 'original_media_changed': False, 'model_invoked': False}
     journal = private_folder(layout, parts[0], 'ClipFileRelocations', digest(intent)+'.json')
@@ -512,14 +517,25 @@ def _retire_file(layout, relative, reference=None):
     verify_before_submission()
     if identity(source) != before:
         raise ValueError('Interval file changed before preserving its old name')
-    if target.exists():
+    duplicate = target.exists()
+    if duplicate:
         if not verify_artifact_cached(target.parent, physical):
             raise ValueError('Interval history destination collision')
-        _mapping(layout, parts[0], {relative: layout.relative(target)})
-        source.unlink()
     else:
         source.rename(target)
-        _mapping(layout, parts[0], {relative: layout.relative(target)})
+    mapping = {k: v for k, v in aliases(layout.root).items() if k.startswith(parts[0]+'/')}
+    mapping.pop(layout.relative(target), None)
+    if relocated(layout.relative(target), mapping) != layout.relative(target):
+        raise ValueError('Physical interval history is shadowed by a directory alias')
+    previous = {k: v for k, v in aliases(layout.root).items() if k.startswith(parts[0]+'/')}
+    if mapping != previous:
+        _publish_aliases(layout, parts[0], mapping)
+    _mapping(layout, parts[0], {relative: layout.relative(target)})
+    if duplicate:
+        verify_before_submission()
+        if identity(source) != before or not verify_artifact_cached(target.parent, physical):
+            raise ValueError('Interval history changed before duplicate reclaim')
+        source.unlink()
     atomic_json(journal, intent | {'status': 'completed'})
 
 

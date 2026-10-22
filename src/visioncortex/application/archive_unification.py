@@ -158,7 +158,7 @@ class ArchiveUnifier:
     its presence is never presented as newly proven value or physical action.
     """
 
-    def __init__(self, config, name, index):
+    def __init__(self, config, name, index, *, public_video_inventory=None):
         from ..device_day_timeline import day_bounds
 
         self.config, self.index = config, index
@@ -174,6 +174,21 @@ class ArchiveUnifier:
         self.records = {r["recording_id"]: r for r in index["recordings"]}
         self.current_groups = set()
         self.legacy_folders = set()
+        self.public_video_inventory = public_video_inventory or []
+
+    def _was_public_video(self, reference):
+        from ..device_day_content_paths import relocated
+
+        mapping = aliases(self.layout.root)
+        resolved = relocated(reference["path"], mapping)
+        return any(
+            item.get("size_bytes") == reference.get("size_bytes")
+            and (
+                item["path"] == reference["path"]
+                or relocated(item["path"], mapping) == resolved
+            )
+            for item in self.public_video_inventory
+        )
 
     def checkpoint(self, path):
         """Persist the complete source-bound plan before retiring any folder."""
@@ -228,6 +243,19 @@ class ArchiveUnifier:
                 record=self.records[row["segment"]["recording_id"]],
                 candidate=row["segment"],
             )
+            ref = row["segment"].get("video") or row["interval"].get(
+                "historical_existing_video"
+            )
+            if (
+                ref
+                and not row["interval"].get("historical_public_materialization")
+                and not self._was_public_video(ref)
+            ):
+                row["meaning"]["historical_video_reference"] = ref
+                row["segment"]["video"] = None
+                row["interval"].update(
+                    video_value="pending", reason="retired_history_preserved_privately"
+                )
         for relative in value.get("legacy_folders", []):
             parts = Path(relative).parts
             if not (
@@ -273,7 +301,7 @@ class ArchiveUnifier:
                 if directory == "ProcessedClips":
                     for path in clip_delivery._metadata_files(folder):
                         if path.is_file():
-                            self._read_candidate(path)
+                            self._read_candidate(path, historical_hidden=True)
                 else:
                     path = folder / "Understanding.json"
                     if path.is_file():
@@ -374,6 +402,20 @@ class ArchiveUnifier:
             for path in sorted((evidence / "ClipFileRelocations").glob("*.json")):
                 intent = bounded_document(path)
                 old, target = intent.get("from", ""), intent.get("to", "")
+                if (
+                    old == target
+                    and intent.get("status") == "completed"
+                    and old.startswith(directory + "/")
+                ):
+                    # Preserve the malformed old intent, but never construct a
+                    # self-alias. A separate exact-byte recovery must exist.
+                    if not verify_artifact_cached(
+                        self.layout.root, intent["file"] | {"path": old}
+                    ):
+                        raise ValueError(
+                            "Legacy self-retirement requires verified artifact recovery"
+                        )
+                    continue
                 if not old.startswith(directory + "/") or not target.startswith(
                     directory + "/.Evidence/LegacyPresentation/"
                 ):
@@ -499,7 +541,7 @@ class ArchiveUnifier:
         self.rows[key] = row
         return row
 
-    def _read_candidate(self, path):
+    def _read_candidate(self, path, *, historical_hidden=False):
         document = bounded_document(path)
         row = self._row(document)
         if row is None:
@@ -549,13 +591,28 @@ class ArchiveUnifier:
                 raise ValueError(
                     "Existing historical video differs from its recorded checksum"
                 )
-            row["segment"]["video"] = video
-            row["interval"].update(
-                video_value="selected",
-                reason="existing_historical_materialization_preserved",
-                selection_revalidated=False,
-                historical_existing_video=video,
+            public = (
+                self._was_public_video(video)
+                or selection.get("historical_public_materialization")
+                or row["interval"].get("historical_public_materialization")
+                or not historical_hidden
+                and not selection.get("historical_format_migration_only")
             )
+            row["meaning"]["historical_video_reference"] = video
+            if public:
+                row["segment"]["video"] = video
+                row["interval"].update(
+                    video_value="selected",
+                    reason="existing_historical_materialization_preserved",
+                    selection_revalidated=False,
+                    historical_existing_video=video,
+                    historical_public_materialization=True,
+                )
+            elif row["interval"]["video_value"] != "selected":
+                row["segment"]["video"] = None
+                row["interval"].update(
+                    video_value="pending", reason="retired_history_preserved_privately"
+                )
             row["meaning"]["historical_selection_only"] = True
         prior = document.get("display_category")
         row["meaning"]["prior_display_category"] = prior
