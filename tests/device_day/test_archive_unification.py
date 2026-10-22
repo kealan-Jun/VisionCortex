@@ -292,6 +292,36 @@ def test_missing_derived_alias_index_is_rebuilt_from_moves_and_identical_videos(
     assert all(verify_artifact(layout.root, ref) for ref in refs)
 
 
+def test_returning_public_group_does_not_alias_back_into_its_video_history(tmp_path):
+    import shutil
+    from visioncortex.application import clip_delivery
+    from visioncortex.device_day_contract import read_json
+
+    layout, index, config, source, refs = case(tmp_path)
+    first = ArchiveUnifier(config, layout.name, index)
+    first.discover()
+    first.publish()
+    group = next(p for p in (layout.processed / "Clips").iterdir() if p.is_dir())
+    clip_delivery._retire(layout, group)
+    journals = layout.processed / ".Evidence/ClipRelocations"
+    move = next(
+        read_json(p)
+        for p in journals.glob("*.json")
+        if read_json(p)["from"] == layout.relative(group)
+    )
+    saved = layout.root / move["to"]
+    shutil.copytree(saved, group)
+    # Reclaimed old copies can already point at the returning public material.
+    mapping = {
+        layout.relative(saved / p.name): layout.relative(p) for p in group.glob("*.mp4")
+    }
+    clip_delivery._mapping(layout, "ProcessedClips", mapping)
+    recovered = ArchiveUnifier(config, layout.name, index)
+    assert recovered.discover()["intervals"] == 2
+    assert not recovered.publish()["pending"]
+    assert all(verify_artifact(layout.root, ref) for ref in refs)
+
+
 def test_migration_rejects_a_changed_historical_video_before_relocation(tmp_path):
     layout, index, config, source, refs = case(tmp_path)
     (layout.root / refs[0]["path"]).write_bytes(b"changed-video")

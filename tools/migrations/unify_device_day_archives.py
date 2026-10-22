@@ -27,6 +27,7 @@ from visioncortex.device_day import exclusive
 from visioncortex.device_day_contract import (
     atomic_json,
     read_json,
+    safe_child,
     validate_archive_name,
 )
 from visioncortex.device_day_io import slot
@@ -142,6 +143,12 @@ def run(config, archive, plan_root, stop, *, apply):
                 if (h.get("original_start_us"), h.get("original_end_us")) != (
                     u["start_us"],
                     u["end_us"],
+                ):
+                    break
+                if h.get("intervals") != m.get("intervals") or any(
+                    not safe_child(layout.root, row[field]).is_file()
+                    for row in h.get("intervals", [])
+                    for field in ("metadata", "content")
                 ):
                     break
                 headers.append(h)
@@ -282,6 +289,21 @@ def run(config, archive, plan_root, stop, *, apply):
                 or m["source_folder"] != name
             ):
                 raise ValueError("Paired collection ownership differs")
+            if h.get("intervals") != m.get("intervals"):
+                raise ValueError("Paired interval indexes differ")
+            for entry in h.get("intervals", []):
+                for field in ("metadata", "content"):
+                    if not safe_child(layout.root, entry[field]).is_file():
+                        raise ValueError("A published interval document is missing")
+                if entry.get("video"):
+                    from visioncortex.device_day_verification import (
+                        verify_artifact_cached,
+                    )
+
+                    if not verify_artifact_cached(layout.root, entry["video"]):
+                        raise ValueError(
+                            "A published interval video failed byte verification"
+                        )
         atomic_json(
             layout.processed / ".Evidence/ArchiveUnification/Acceptance.json",
             result | {"build": identity(), "verified_at": time.time()},
