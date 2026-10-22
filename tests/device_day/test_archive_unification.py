@@ -145,6 +145,7 @@ def test_consolidation_preserves_video_payloads_meaning_and_originals(
     assert all(not d["physical_action_confirmed"] for d in docs)
     assert all(not d["historical_format_migration"]["model_invoked"] for d in docs)
     assert source.read_bytes() == original and layout.index.read_bytes() == canonical
+    assert read_json(layout.understanding / "Index.json")["理解进度"]["片段总数"] == 2
     assert all(
         (layout.root / relocated(ref["path"], aliases(layout.root))).is_file()
         for ref in refs
@@ -159,6 +160,88 @@ def test_budgeted_migration_can_resume_without_losing_unpublished_video(tmp_path
     second = ArchiveUnifier(config, layout.name, index)
     second.discover()
     assert not second.publish(maximum_new_videos=2)["pending"]
+    assert all(verify_artifact(layout.root, ref) for ref in refs)
+
+
+def test_crash_after_retirement_recovers_the_full_plan_and_saved_meaning(
+    tmp_path, monkeypatch
+):
+    from visioncortex.application import clip_delivery
+    from visioncortex.device_day_contract import read_json
+
+    layout, index, config, source, refs = case(tmp_path)
+    canonical = layout.index.read_bytes()
+    original = source.read_bytes()
+    first = ArchiveUnifier(config, layout.name, index)
+    first.discover()
+    checkpoint = tmp_path / "discovery.json"
+    first.checkpoint(checkpoint)
+    real = clip_delivery.publish
+    monkeypatch.setattr(
+        clip_delivery,
+        "publish",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("interrupted")),
+    )
+    with pytest.raises(OSError, match="interrupted"):
+        first.publish()
+    monkeypatch.setattr(clip_delivery, "publish", real)
+    recovered = ArchiveUnifier(config, layout.name, index)
+    recovered.restore(checkpoint)
+    assert recovered.discover()["intervals"] == 2
+    assert not recovered.publish()["pending"]
+    assert source.read_bytes() == original and layout.index.read_bytes() == canonical
+    assert all(verify_artifact(layout.root, ref) for ref in refs)
+    docs = [
+        read_json(p)
+        for p in layout.understanding.glob("*/*.json")
+        if p.name != "Understanding.json" and not p.parent.name.startswith(".")
+    ]
+    assert sorted(d["experiment_steps"][0]["description"] for d in docs) == [
+        "原有步骤 0",
+        "原有步骤 1",
+    ]
+
+
+def test_native_move_journals_recover_a_legacy_interruption_without_a_checkpoint(
+    tmp_path,
+):
+    from visioncortex.application import clip_delivery
+
+    layout, index, config, source, refs = case(tmp_path)
+    for parent in (layout.processed / "Clips", layout.understanding):
+        for folder in list(parent.iterdir()):
+            if folder.is_dir():
+                clip_delivery._retire(layout, folder)
+    recovered = ArchiveUnifier(
+        config, layout.name, {"archive": layout.name, "recordings": [], "segments": []}
+    )
+    assert recovered.discover()["intervals"] == 2
+    assert not recovered.publish()["pending"]
+    assert all(verify_artifact(layout.root, ref) for ref in refs)
+
+
+def test_separate_no_value_retention_outranks_stale_model_classification(tmp_path):
+    from visioncortex.device_day_contract import read_json
+
+    layout, index, config, source, refs = case(tmp_path)
+    for ref in refs:
+        folder = (layout.root / ref["path"]).parent
+        candidate = read_json(folder / "ExperimentActivity.json")
+        atomic_json(
+            folder / "Retention.json",
+            {
+                k: candidate[k]
+                for k in ("recording_id", "source_ref", "start_us", "end_us")
+            }
+            | {"no_value_proven": True},
+        )
+    for path in layout.understanding.glob("*/Understanding.json"):
+        atomic_json(path, read_json(path) | {"display_category": "ExperimentActivity"})
+    unifier = ArchiveUnifier(config, layout.name, index)
+    unifier.discover()
+    assert {r["category"] for r in unifier.values} == {"NoValueNoExperimentActivity"}
+    unifier.publish()
+    assert not list((layout.processed / "Clips").glob("*/*.mp4"))
     assert all(verify_artifact(layout.root, ref) for ref in refs)
 
 
