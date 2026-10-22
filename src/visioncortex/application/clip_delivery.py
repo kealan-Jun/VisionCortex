@@ -41,7 +41,36 @@ def source_unit(reference):
     return key, name
 
 
-def original_units(layout, index):
+def _stamp(value):
+    return datetime.fromtimestamp(value / 1e6, ZoneInfo('Asia/Shanghai')).strftime('%H-%M-%S')
+
+
+def _original_bounds(layout, unit):
+    """Actual recorder bounds, never the nominal segment end or selected action."""
+    path = layout.root/unit['observed_source']
+    if len(PurePosixPath(unit['observed_source']).parts) >= 3:
+        meta = path.parent/'meta.json'
+        if meta.is_file() and not meta.is_symlink():
+            before = meta.stat()
+            if before.st_size > 1024*1024:
+                raise ValueError('Recorder time metadata exceeds its bounded size')
+            value = read_json(meta)
+            after = meta.stat()
+            if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+                raise ValueError('Recorder time metadata changed during projection')
+            for left, right in [('recording_window_start_global_us', 'recording_window_end_global_us'),
+                                ('recording_quality_window_start_global_us', 'recording_quality_window_end_global_us')]:
+                start, end = value.get(left), value.get(right)
+                if type(start) is int and type(end) is int and 0 < start < end:
+                    return start, end
+    records = unit['recordings']
+    bounds = [(r.get('start_us'), r.get('end_us')) for r in records]
+    if bounds and all(type(a) is int and type(b) is int and 0 < a < b for a, b in bounds):
+        return min(a for a, _ in bounds), max(b for _, b in bounds)
+    return None, None
+
+
+def original_units(layout, index, values=None):
     """Project source inventory; creating a status folder never admits a model.
 
     Immediate recorder directory names include slices still being finalized.
@@ -66,23 +95,38 @@ def original_units(layout, index):
             else:
                 continue
             key, name = source_unit(reference)
-            units[key] = {'key': key, 'name': name, 'observed_source': reference['path'], 'recordings': []}
+            units[key] = {'key': key, 'capture_name': name, 'observed_source': reference['path'], 'recordings': []}
     for record in index.get('recordings', []):
         for source in record.get('sources', []):
             if source.get('kind') != 'video' or not source.get('retained'):
                 continue
             reference = source['retained']
             key, name = source_unit(reference)
-            unit = units.setdefault(key, {'key': key, 'name': name, 'observed_source': reference['path'], 'recordings': []})
+            unit = units.setdefault(key, {'key': key, 'capture_name': name, 'observed_source': reference['path'], 'recordings': []})
             if record['recording_id'] not in {row['recording_id'] for row in unit['recordings']}:
                 unit['recordings'].append(record)
-    names = {}
+    records = {r['recording_id']: r for r in index.get('recordings', [])}
+    for segment in index.get('segments', []):
+        key, _ = source_unit(segment['source_ref'])
+        record = records.get(segment['recording_id'])
+        if key in units and record and record['recording_id'] not in {
+                r['recording_id'] for r in units[key]['recordings']}:
+            units[key]['recordings'].append(record)
+    # The full original range names the collection. Its individual files keep
+    # their selected ranges and categories; the collection is not one action.
+    categories = {key: set() for key in units}
+    for row in views(index) if values is None else values:
+        key, _ = source_unit(row['segment']['source_ref'])
+        categories.setdefault(key, set()).add(row['category'])
     for unit in units.values():
-        names.setdefault(unit['name'], []).append(unit)
-    for values in names.values():
-        if len(values) > 1:
-            for unit in values:
-                unit['name'] = unit['key'].split('/')[0]+'_'+unit['name']
+        kinds = categories[unit['key']]
+        kind = next((v for v in ('ExperimentActivity', 'ValuableNoExperimentActivity',
+                                 'ActivityPendingClassification', 'PendingValueReview') if v in kinds),
+                    'NoValueNoExperimentActivity' if kinds else 'PendingValueReview')
+        start, end = _original_bounds(layout, unit)
+        unit.update(start_us=start, end_us=end, category=kind)
+        times = f'{_stamp(start)}_{_stamp(end)}' if start and end else 'TimePending_TimePending'
+        unit['name'] = f"{times}_{kind}_{digest(['source-recording-display/1', unit['key']])[:8]}"
     return units
 
 
@@ -152,6 +196,86 @@ def _mapping(layout, directory, additions):
     mapping = {key: value for key, value in aliases(layout.root).items() if key.startswith(directory + '/')}
     mapping.update(additions)
     _publish_aliases(layout, directory, mapping)
+
+
+def _group_header(folder, filename, key=None):
+    path = folder/filename
+    if folder.is_symlink() or path.is_symlink() or not path.is_file() or path.stat().st_size > 16*1024**2:
+        return None
+    value = read_json(path)
+    if value.get('schema_version') == VERSION and (key is None or value.get('source_unit') == key):
+        return value
+    return None
+
+
+def _complete_group_rename(layout, intent, journal):
+    """Rename an owned group once; replay after a crash without copying video."""
+    from ..device_day_write_guard import verify_before_submission
+    directory = intent['directory']
+    prefix = 'ProcessedClips/Clips/' if directory == 'ProcessedClips' else 'MultimodalUnderstanding/'
+    filename = 'Index.json' if directory == 'ProcessedClips' else 'Understanding.json'
+    old, new = intent['from'], intent['to']
+    for relative in (old, new):
+        if not relative.startswith(prefix) or len(relative.split('/')) != len(prefix.split('/')):
+            raise ValueError('Group rename escapes its owning public directory')
+    parent = layout.root/prefix
+    # Resolve physical names without applying a previous generation's alias.
+    source, target = (safe_child(parent, PurePosixPath(p).name) for p in (old, new))
+    if source.exists():
+        if target.exists() or digest(_group_header(source, filename, intent['source_unit'])) != intent['header_digest']:
+            raise ValueError('Original group rename source or destination changed')
+        stat = source.stat()
+        if [stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns] != intent['source_identity']:
+            raise ValueError('Original group changed before rename')
+        verify_before_submission()
+        source.rename(target)
+    if digest(_group_header(target, filename, intent['source_unit'])) != intent['header_digest']:
+        raise ValueError('Renamed original group failed ownership verification')
+    mapping = {k: v for k, v in aliases(layout.root).items() if k.startswith(directory+'/')}
+    # Flatten old destinations and remove a returning category's directory
+    # alias before binding the previous display name to the new physical name.
+    flattened = {}
+    for key, value in mapping.items():
+        value = relocated(value, mapping)
+        if value == old or value.startswith(old+'/'):
+            value = new+value[len(old):]
+        if key != new and key != value:
+            flattened[key] = value
+    flattened[old] = new
+    _publish_aliases(layout, directory, flattened)
+    atomic_json(journal, intent | {'status': 'completed'})
+
+
+def rename_original_groups(layout, units):
+    """Preserve the old readable naming style for both public source groups."""
+    for directory, parent, filename in [
+            ('ProcessedClips', layout.processed/'Clips', 'Index.json'),
+            ('MultimodalUnderstanding', layout.understanding, 'Understanding.json')]:
+        journals = private_folder(layout, directory, 'OriginalGroupRenames')
+        for journal in journals.glob('*.json'):
+            intent = read_json(journal)
+            if intent.get('status') != 'completed':
+                _complete_group_rename(layout, intent, journal)
+        if not parent.is_dir():
+            continue
+        for source in list(parent.iterdir()):
+            if source.name.startswith('.') or not source.is_dir():
+                continue
+            header = _group_header(source, filename)
+            if not header or header.get('source_unit') not in units:
+                continue
+            unit = units[header['source_unit']]
+            if source.name == unit['name']:
+                continue
+            stat = source.stat()
+            intent = {'schema_version': VERSION, 'directory': directory, 'from': layout.relative(source),
+                      'to': layout.relative(parent/unit['name']), 'source_unit': unit['key'],
+                      'header_digest': digest(header),
+                      'source_identity': [stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns],
+                      'original_media_changed': False, 'model_invoked': False}
+            journal = journals/(digest(intent)+'.json')
+            atomic_json(journal, intent)
+            _complete_group_rename(layout, intent, journal)
 
 
 def _retire(layout, source):
@@ -402,6 +526,8 @@ def _retire_obsolete(layout, unit, rows):
         for field in ('metadata', 'content', 'video'):
             reference = row.get(field)
             path = reference.get('path') if isinstance(reference, dict) else reference
+            if path:
+                path = relocated(path, aliases(layout.root))
             if not path or PurePosixPath(path).name in expected:
                 continue
             prefix = ('ProcessedClips/Clips/' if field != 'content' else 'MultimodalUnderstanding/')+unit['name']+'/'
@@ -419,8 +545,8 @@ def publish(config, index, audio_entries, *, document_builder, writer, entry_bui
     backend = config['storage'].get('local_cache_root')
     start, _ = day_bounds(index['archive'][:10])
     layout = DeviceDayLayout(root, index['archive'][11:], max(start, 1), Path(backend) if backend else None)
-    units = original_units(layout, index)
     values = views(index)
+    units = original_units(layout, index, values)
     grouped = {key: [] for key in units}
     for row in values:
         key, _ = source_unit(row['segment']['source_ref'])
@@ -429,6 +555,7 @@ def publish(config, index, audio_entries, *, document_builder, writer, entry_bui
         row['unit'] = units[key]
         grouped[key].append(row)
     _recover_files(layout)
+    rename_original_groups(layout, units)
     progress = retire_native(layout, index, {unit['name'] for unit in units.values()}, source_units=set(units))
     for key, unit in units.items():
         _retire_obsolete(layout, unit, grouped[key])
@@ -502,6 +629,10 @@ def publish(config, index, audio_entries, *, document_builder, writer, entry_bui
         rows = sorted(details[key], key=lambda value: (value['entry']['start_us'], value['entry']['segment_id']))
         header = {'schema_version': VERSION, 'archive': index['archive'], 'source_unit': key,
             'source_folder': unit['name'], 'original_source': {'path': unit['observed_source'], 'ownership': 'recorder'},
+            'original_start_us': unit['start_us'], 'original_end_us': unit['end_us'],
+            'capture_name': unit['capture_name'], 'display_category': unit['category'],
+            'folder_scope': 'complete_original_recording_collection',
+            'folder_category_is_whole_recording_classification': False,
             'recording_ids': [row['recording_id'] for row in unit['recordings']],
             'stages': {row['recording_id']: row.get('stages', {}) for row in unit['recordings']},
             'processing_status': 'available_partial_projection' if rows else 'waiting_for_source_finalization_or_processing',

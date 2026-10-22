@@ -352,7 +352,7 @@ def segment_documents(index, root, segment, source_meaning, interval, record, au
         decision['no_value_confirmed'] = interval['video_value'] == 'confirmed_no_value'
         decision['source_start_ms'], decision['source_end_ms'] = segment['start_ms'], segment['end_ms']
         decision['partition'] = {'schema_version': 'visioncortex-retention-interval-partition/1',
-            'candidate_segment_id': segment['candidate_segment_id'], 'source_ref': segment['source_ref'],
+            'candidate_segment_id': segment.get('candidate_segment_id', segment['segment_id']), 'source_ref': segment['source_ref'],
             'source_start_ms': segment['start_ms'], 'source_end_ms': segment['end_ms'],
             'intervals': [interval], 'projection_from_verified_candidate_partition': True,
             'candidate_is_export_unit': False, 'default_padding_ms': 0, 'physical_action_confirmed': False}

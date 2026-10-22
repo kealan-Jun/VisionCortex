@@ -14,6 +14,10 @@ from visioncortex.device_day_narrative import retention_summary
 __all__ = ['exact_case']
 
 
+def public_name(case):
+    return clip_delivery.original_units(case.layout, case.index)['MetaData/capture']['name']
+
+
 def test_cv_activity_never_names_an_experiment_and_no_value_has_no_video(monkeypatch):
     candidate = {'segment_id': 'candidate'}
     record = {'stages': {'understanding': {'status': 'completed'}}}
@@ -51,16 +55,16 @@ def test_multiple_intervals_share_original_folder_and_native_receipts_remain_rea
     assert case.index == original
     assert result['clip_delivery']['retired'] == 2
     public = list((case.layout.processed/'Clips').iterdir())
-    assert [folder.name for folder in public] == ['capture']
+    assert [folder.name for folder in public] == [public_name(case)]
     assert len(list(public[0].glob('*.json'))) == 7  # five intervals and two original-level indexes
-    assert [folder.name for folder in case.layout.understanding.iterdir() if folder.is_dir() and not folder.name.startswith('.')] == ['capture']
+    assert [folder.name for folder in case.layout.understanding.iterdir() if folder.is_dir() and not folder.name.startswith('.')] == [public_name(case)]
     assert len(list((case.layout.processed/'Clips').glob('*/*.mp4'))) == 2
     assert verify_artifact(case.layout.root, native)
     assert '.Evidence/LegacyPresentation' in str(safe_child(case.layout.root, native['path']))
     for reference in old_videos:
         assert verify_artifact(case.layout.root, reference)
         assert 'ActivityPendingClassification' in safe_child(case.layout.root, reference['path']).name
-        assert safe_child(case.layout.root, reference['path']).parent.name == 'capture'
+        assert safe_child(case.layout.root, reference['path']).parent.name == public_name(case)
     case.index['readable_content'] = result
     timeline = build_file_index(case.config, case.index, {})
     videos = [row for row in timeline['streams']['video'] if row['kind'] == 'video_segment']
@@ -153,7 +157,7 @@ def test_category_updates_retire_interval_files_inside_same_original_folder(exac
     for category in ('experiment', 'non_experiment'):
         monkeypatch.setattr('visioncortex.media.retained_intervals.observed_categories', lambda *args: [category])
         result = publish_content(case.config, case.index)
-        assert [folder.name for folder in (case.layout.processed/'Clips').iterdir()] == ['capture']
+        assert [folder.name for folder in (case.layout.processed/'Clips').iterdir()] == [public_name(case)]
         assert len(list((case.layout.processed/'Clips').glob('*/*.mp4'))) == 2
         assert len({row['source_interval_key'] for row in result['multimodal']}) == 5
         assert all(verify_artifact(case.layout.root, row['video']) for row in result['multimodal'] if row.get('video'))
@@ -209,7 +213,9 @@ def test_two_originals_each_own_multiple_intervals_and_understanding_files(exact
     case.index['recordings'].append(record)
     retained_video.publish_selected(case.config, case.index, maximum_new_videos=4, evidence_validator=case.validator)
     result = publish_content(case.config, case.index)
-    expected = {'capture', 'capture_001'}
+    expected = {u['name'] for u in clip_delivery.original_units(case.layout, case.index).values()}
+    assert len(expected) == 2
+    assert any(n.startswith('08-00-01_08-15-01_') for n in expected)
     for root in (case.layout.processed/'Clips', case.layout.understanding):
         assert {p.name for p in root.iterdir() if p.is_dir() and not p.name.startswith('.')} == expected
     from visioncortex.device_day_contract import read_json
@@ -234,7 +240,7 @@ def test_unready_original_gets_matching_status_folder_without_model_or_queue(exa
     case.index.update(recordings=[], segments=[])
     result = publish_content(case.config, case.index)
     from visioncortex.device_day_contract import read_json
-    for unit in ('capture', 'capture_pending'):
+    for unit in (u['name'] for u in clip_delivery.original_units(case.layout, case.index).values()):
         processed = read_json(case.layout.processed/'Clips'/unit/'Index.json')
         meaning = read_json(case.layout.understanding/unit/'Understanding.json')
         assert processed['processing_status'] == 'waiting_for_source_finalization_or_processing'
@@ -268,7 +274,7 @@ def test_output_revision_checks_original_indexes_and_actual_interval_files(exact
     publisher = FileIndexPublisher(case.config)
     revision = publisher._output_revision(case.layout.name, case.index)
     paths = {path for path, _ in revision}
-    assert str(case.layout.understanding/'capture'/'Understanding.json') in paths
+    assert str(case.layout.understanding/public_name(case)/'Understanding.json') in paths
     for row in result['multimodal']:
         assert str(case.layout.root/row['content']) in paths
         assert str(case.layout.root/row['metadata']) in paths
@@ -289,5 +295,61 @@ def test_grouped_producers_never_create_visible_per_interval_folders(exact_case)
     assert aliases(case.layout.root) == {}  # parallel producers do not race on publication alias state
     assert len(list((case.layout.processed/'.Evidence/NativeClips').glob('*/*.mp4'))) == 2
     result = publish_content(case.config, case.index)
-    assert [path.name for path in (case.layout.processed/'Clips').iterdir()] == ['capture']
+    assert [path.name for path in (case.layout.processed/'Clips').iterdir()] == [public_name(case)]
     assert sum(bool(row['video']) for row in result['multimodal']) == 2
+
+
+def test_full_original_range_names_both_groups_not_selected_subintervals(exact_case):
+    case = exact_case
+    case.config['device_day']['clip_delivery'] = 'source_recording_v2'
+    # Actual nine-second closed source, despite a nominal 15-minute endpoint.
+    start = 1792650335785180
+    end = 1792650344802068
+    atomic_json(case.source.parent/'meta.json', {
+        'recording_window_start_global_us': start, 'recording_window_end_global_us': end,
+        'segment_window_end_global_us': start+900000000})
+    unit = clip_delivery.original_units(case.layout, case.index)['MetaData/capture']
+    assert unit['name'].startswith('14-25-35_14-25-44_')
+    assert unit['capture_name'] == 'capture'
+    assert (unit['start_us'], unit['end_us']) == (start, end)
+    publish_content(case.config, case.index)
+    assert (case.layout.processed/'Clips'/unit['name']/'Index.json').is_file()
+    assert (case.layout.understanding/unit['name']/'Understanding.json').is_file()
+    assert case.source.parent.name == 'capture'
+
+
+def test_numbered_group_rename_replays_crash_and_preserves_video_bytes(exact_case, monkeypatch):
+    case = exact_case
+    case.config['device_day']['clip_delivery'] = 'source_recording_v2'
+    retained_video.publish_selected(case.config, case.index, maximum_new_videos=2, evidence_validator=case.validator)
+    result = publish_content(case.config, case.index)
+    references = [row['video'] for row in result['multimodal'] if row['video']]
+    name = public_name(case)
+    # Reproduce the deployed raw-number presentation, with authentic headers.
+    for parent in (case.layout.processed/'Clips', case.layout.understanding):
+        (parent/name).rename(parent/'capture')
+    raw_refs = [r | {'path': r['path'].replace('/'+name+'/', '/capture/')} for r in references]
+    real = clip_delivery._publish_aliases
+    monkeypatch.setattr(clip_delivery, '_publish_aliases', lambda *a: (_ for _ in ()).throw(OSError('group crash')))
+    with pytest.raises(OSError, match='group crash'):
+        clip_delivery.rename_original_groups(case.layout, clip_delivery.original_units(case.layout, case.index))
+    monkeypatch.setattr(clip_delivery, '_publish_aliases', real)
+    again = publish_content(case.config, case.index)
+    for parent in (case.layout.processed/'Clips', case.layout.understanding):
+        assert [p.name for p in parent.iterdir() if p.is_dir() and not p.name.startswith('.')] == [name]
+    assert all(verify_artifact(case.layout.root, r) for r in raw_refs+references)
+    assert sum(bool(row['video']) for row in again['multimodal']) == 2
+    assert len(case.calls) == 2
+
+
+def test_group_rename_refuses_unowned_destination(exact_case):
+    case = exact_case
+    units = clip_delivery.original_units(case.layout, case.index)
+    unit = units['MetaData/capture']
+    old = case.layout.processed/'Clips'/'capture'
+    atomic_json(old/'Index.json', {'schema_version': clip_delivery.VERSION, 'source_unit': unit['key']})
+    target = old.parent/unit['name']
+    atomic_json(target/'Foreign.json', {'untouched': True})
+    with pytest.raises(ValueError, match='destination changed'):
+        clip_delivery.rename_original_groups(case.layout, units)
+    assert (old/'Index.json').is_file() and (target/'Foreign.json').is_file()
