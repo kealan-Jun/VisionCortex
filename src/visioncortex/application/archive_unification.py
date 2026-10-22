@@ -778,7 +778,7 @@ class ArchiveUnifier:
             "结束时间": value["内容记录"]["结束时间"],
         }
 
-    def publish(self, *, maximum_new_videos=64, maximum_video_bytes=512 * 1024**2):
+    def publish(self, *, maximum_new_videos=128, maximum_video_bytes=8 * 1024**3):
         from ..device_day import copy_verified
         from ..device_day_content import content_index
 
