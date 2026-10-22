@@ -6,6 +6,32 @@ import time
 from .device_day_contract import atomic_json, digest, read_json
 
 
+def local_change_hints(runtime_root, records, names):
+    """Durable scheduling hints; consumers must still verify source evidence."""
+    from .device_day_contract import archive_name, digest
+    from .sqlite_store import connection
+    grouped = {name: [] for name in names}
+    owners = {r['recording_id']: archive_name(r['camera_key'], r['recording_start_us']) for r in records}
+    path = runtime_root / 'timeline-invalidations.sqlite3'
+    if path.is_file():
+        with connection(path, readonly=True) as db:
+            for row in db.execute('SELECT archive,digest FROM inputs ORDER BY archive'):
+                if row['archive'] in grouped:
+                    grouped[row['archive']].append(['canonical', row['digest']])
+    for stage in ('retention', 'vision', 'stt', 'understanding', 'report'):
+        path = runtime_root / f'queue-{stage}.sqlite3'
+        if not path.is_file():
+            continue
+        with connection(path, readonly=True) as db:
+            for row in db.execute("SELECT recording_id,revision,updated_at,status FROM recordings "
+                    "WHERE status='completed' OR json_extract(result,'$.status') IN "
+                    "('partial','paused_for_live','scheduled_checkpoint') ORDER BY recording_id"):
+                owner = owners.get(row['recording_id'])
+                if owner in grouped:
+                    grouped[owner].append([stage, row['recording_id'], row['revision'], row['updated_at'], row['status']])
+    return {name: digest(values) for name, values in grouped.items() if values}
+
+
 class PublicationReplay:
     def __init__(self, *, field_fetch=None, stop=None):
         self.field_fetch = field_fetch
@@ -52,30 +78,12 @@ class ReadableReplay:
     @staticmethod
     def _local_hints(runner, records, names):
         """Scheduling hints only; the owning publisher still verifies facts."""
-        from .device_day_contract import archive_name
-        from .sqlite_store import connection
-        grouped = {name: [] for name in names}
-        owners = {r['recording_id']: archive_name(r['camera_key'], r['recording_start_us']) for r in records}
-        path = runner.runtime_root / 'timeline-invalidations.sqlite3'
-        if path.is_file():
-            with connection(path, readonly=True) as db:
-                for row in db.execute('SELECT archive,digest FROM inputs ORDER BY archive'):
-                    if row['archive'] in grouped:
-                        grouped[row['archive']].append(['canonical', row['digest']])
-        # Existing durable stage rows also cover speech published before any
-        # video/day index and new partial windows after a failed later window.
-        for stage in ('retention', 'vision', 'stt', 'understanding', 'report'):
-            path = runner.runtime_root / f'queue-{stage}.sqlite3'
-            if not path.is_file():
-                continue
-            with connection(path, readonly=True) as db:
-                for row in db.execute("SELECT recording_id,revision,updated_at,status FROM recordings "
-                        "WHERE status='completed' OR json_extract(result,'$.status') IN "
-                        "('partial','paused_for_live','scheduled_checkpoint') ORDER BY recording_id"):
-                    owner = owners.get(row['recording_id'])
-                    if owner in grouped:
-                        grouped[owner].append([stage, row['recording_id'], row['revision'], row['updated_at'], row['status']])
-        return {name: digest(values) for name, values in grouped.items() if values}
+        from .media.retained_intervals import EXPORT_POLICY, POLICY
+        hints = local_change_hints(runner.runtime_root, records, names)
+        # A policy upgrade must revisit completed days even when producers
+        # have no new model result. Persist this selective publication version.
+        return {name: digest(['readable-retention-policy/1', POLICY, EXPORT_POLICY, value])
+                for name, value in hints.items()}
 
     def tick(self, runner):
         if self.stop.is_set():
@@ -137,7 +145,7 @@ class ReadableReplay:
                 priority = (changed & recent) or changed or (eligible & recent)
                 lane = 'changed_or_live' if priority and self.turn % 3 else 'historical_fair_share'
                 pool = priority if lane == 'changed_or_live' else eligible
-                if runner.settings.get('latest_first', False) and changed:
+                if runner.config.get('device_day', {}).get('latest_first', False) and changed:
                     latest = {n: 0 for n in names}
                     for record in records:
                         key = archive_name(record['camera_key'], record['recording_start_us'])
