@@ -106,9 +106,69 @@ def _capture_session(value):
     return value if isinstance(value, str) and value else None
 
 
+def _derived_audio_clock(timing, metadata, ready, start, end):
+    """Admit a declared replay sample clock, never invent packet receipts.
+
+    Partial capture quality remains partial. The replay clock locates encoded
+    samples on the replay timeline; it does not verify the original clock.
+    """
+    if any(row.get('artifact_kind') != 'derived_replay' or row.get('schema_version') != 2
+           or row.get('task_audio') is not True
+           or row.get('packet_receipt_evidence') != 'unavailable_for_derived_media'
+           for row in (metadata, ready)) or metadata.get('global_timestamp_source') != 'derived_cfr_source_lineage' or (
+               'global_timestamp_source' in ready and ready['global_timestamp_source'] != 'derived_cfr_source_lineage'):
+        raise ValueError('derived_audio_clock_schema_unverified')
+    lo, hi = metadata.get('segment_window_start_global_us'), metadata.get('segment_window_end_global_us')
+    rate, samples, duration = (metadata.get(k) for k in ('sample_rate', 'audio_sample_count', 'audio_duration_us'))
+    if (any(type(n) is not int for n in (lo, hi, rate, samples, duration)) or rate <= 0 or samples <= 0
+            or hi <= lo or duration != hi-lo or start != lo
+            or abs(samples*1000000/rate-duration) > 1 or abs(hi-end-1000000/rate) > 1
+            or metadata.get('audio_duration_basis') != 'derived_decoded_sample_grid'
+            or metadata.get('audio_timestamp_basis') != 'derived_decoded_sample_origin'
+            or any(ready.get(k) != metadata.get(k) for k in (
+                'segment_window_start_global_us', 'segment_window_end_global_us', 'segment_id'))):
+        raise ValueError('derived_audio_sample_clock_mismatch')
+    quality = metadata.get('quality_evidence')
+    flags = metadata.get('quality_flags')
+    if (not isinstance(quality, list) or len(quality) > 4096 or not isinstance(flags, list)
+            or not all(isinstance(flag, str) for flag in flags)
+            or ready.get('quality_flags') != flags or ready.get('quality_status') != metadata.get('quality_status')
+            or any(not isinstance(row, dict) or type(row.get('start_us')) is not int
+                or type(row.get('end_us')) is not int or not lo <= row['start_us'] < row['end_us'] <= hi
+                for row in quality)
+            or any(flag in flags and not any(row.get('kind') == flag for row in quality)
+                   for flag in ('synthetic_silence', 'source_outage'))):
+        raise ValueError('derived_audio_quality_ranges_unverified')
+    previous, count = lo, 0
+    with timing.open(encoding='utf-8-sig', newline='') as handle:
+        for row in csv.DictReader(handle):
+            left, right = int(row['window_start_global_us']), int(row['window_end_global_us'])
+            if (int(row['global_timestamp_us']) != left or left != previous or right-left != 1000000
+                    or right > hi or row.get('time_basis') != 'derived_cfr_source_lineage'
+                    or row.get('received_packets') not in ('', None)
+                    or row.get('received_packets_basis') != 'unavailable_for_derived_media'):
+                raise ValueError('derived_audio_window_clock_mismatch')
+            evidence = json.loads(row['quality_evidence_json'])
+            if not isinstance(evidence, list) or any(not isinstance(part, dict)
+                    or type(part.get('start_us')) is not int or type(part.get('end_us')) is not int
+                    or not left <= part['start_us'] < part['end_us'] <= right
+                    or not any(part.get('kind') == original.get('kind')
+                        and original['start_us'] <= part['start_us'] < part['end_us'] <= original['end_us']
+                        for original in quality) for part in evidence):
+                raise ValueError('derived_audio_window_quality_mismatch')
+            previous, count = right, count+1
+    if previous != hi or not count:
+        raise ValueError('derived_audio_window_clock_incomplete')
+    return {'kind': 'derived_replay_decoded_sample_clock', 'rows': count, 'received_packets': None,
+            'source_clock_verified': False, 'capture_quality': metadata.get('quality_status'),
+            'quality_flags': metadata.get('quality_flags', []), 'time_alignment': 'PARTIAL_EVIDENCE'}
+
+
 def _independent_audio_clock(timing, audio_meta, audio_ready, start, end):
     if timing.stat().st_size > 2*1024*1024:
         raise ValueError('independent_audio_clock_exceeds_bound')
+    if audio_meta.get('artifact_kind') == 'derived_replay':
+        return _derived_audio_clock(timing, audio_meta, audio_ready, start, end)
     previous, count, received = None, 0, 0
     first_nonempty, last_nonempty, empty_windows = None, None, []
     with timing.open(encoding='utf-8-sig', newline='') as handle:
@@ -192,7 +252,8 @@ def _independent_stt(record, video, metadata, ready, now, settle):
                           if prefix is not None else [video.with_suffix('.json'), video.with_suffix('.ready.json')])
         if any(not path.is_file() or path.is_symlink() or now - path.stat().st_mtime < settle for path in identity_paths):
             raise ValueError('capture_identity_not_stable')
-        if audio_ready.get('ready') is not True or (audio_meta | audio_ready).get('audio_valid') is not True:
+        derived = audio_meta.get('artifact_kind') == 'derived_replay'
+        if audio_ready.get('ready') is not True or not derived and (audio_meta | audio_ready).get('audio_valid') is not True:
             raise ValueError('independent_audio_completion_unverified')
         start, end = audio.get('start_us'), audio.get('end_us')
         if type(start) is not int or type(end) is not int or not 0 < start < end:
