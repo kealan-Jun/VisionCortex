@@ -465,7 +465,7 @@ class ArchiveUnifier:
                     for path in clip_delivery._metadata_files(folder):
                         if not path.is_file():
                             continue
-                        document = bounded_document(path)
+                        document = metadata_document(path)
                         ref = document.get("video")
                         if not ref or not ref.get("path", "").startswith(
                             "ProcessedClips/"
