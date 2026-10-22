@@ -19,6 +19,8 @@ class PublicationJournal:
             # Additive and separate: old workers can still INSERT INTO dirty.
             db.execute('CREATE TABLE IF NOT EXISTS retries(id TEXT PRIMARY KEY,token TEXT NOT NULL,'
                        'attempts INTEGER NOT NULL,next_attempt_at REAL NOT NULL,reason TEXT NOT NULL)')
+            db.execute('CREATE TABLE IF NOT EXISTS outputs(id TEXT PRIMARY KEY,token TEXT NOT NULL,'
+                       'revision TEXT NOT NULL,created REAL NOT NULL)')
 
     def begin(self, record):
         token = uuid.uuid4().hex
@@ -26,6 +28,7 @@ class PublicationJournal:
             db.execute('INSERT OR REPLACE INTO dirty VALUES(?,?,?)',
                        (record['recording_id'], token, json.dumps(record)))
             db.execute('DELETE FROM retries WHERE id=?', (record['recording_id'],))
+            db.execute('DELETE FROM outputs WHERE id=?', (record['recording_id'],))
         return token
 
     def ensure_pending(self, record):
@@ -51,6 +54,24 @@ class PublicationJournal:
         with connection(self.path) as db:
             db.execute('DELETE FROM dirty WHERE id=? AND token=?', (identifier, token))
             db.execute('DELETE FROM retries WHERE id=? AND token=?', (identifier, token))
+            db.execute('DELETE FROM outputs WHERE id=? AND token=?', (identifier, token))
+
+    def notice_output(self, identifier, token, revision):
+        """Schedule a changed derived output once, without resetting failures.
+
+        This is a file-publication hint. Source/receipt checks remain mandatory;
+        neither model jobs nor an unknown provider request can be resubmitted.
+        """
+        with connection(self.path) as db:
+            db.execute('BEGIN IMMEDIATE')
+            if not db.execute('SELECT 1 FROM dirty WHERE id=? AND token=?', (identifier, token)).fetchone():
+                return False
+            old = db.execute('SELECT token,revision FROM outputs WHERE id=?', (identifier,)).fetchone()
+            if old and old['token'] == token and old['revision'] == revision:
+                return False
+            db.execute('INSERT OR REPLACE INTO outputs VALUES(?,?,?,?)', (identifier, token, revision, time.time()))
+            db.execute('UPDATE retries SET next_attempt_at=0 WHERE id=? AND token=?', (identifier, token))
+            return True
 
     def retry_now(self, identifier, token):
         """Wake one owned publication after repair; retain its failures and token.
@@ -74,6 +95,9 @@ class PublicationJournal:
                 "COALESCE(json_extract(record,'$.recording_end_us'),0))>=?) "
                 "AND (?=0 OR NOT EXISTS(SELECT 1 FROM retries r WHERE r.id=dirty.id AND r.token=dirty.token "
                 "AND r.next_attempt_at>?)) ORDER BY "
+                "CASE WHEN EXISTS(SELECT 1 FROM outputs o WHERE o.id=dirty.id AND o.token=dirty.token) "
+                "THEN 0 ELSE 1 END,"
+                "COALESCE((SELECT created FROM outputs o WHERE o.id=dirty.id AND o.token=dirty.token),0),"
                 "CASE WHEN ? IS NOT NULL AND COALESCE(json_extract(record,'$.recording_start_us'),0)>=? "
                 "THEN 0 ELSE 1 END," + time_order + "rowid LIMIT ?",
                 (since_us, since_us, ready_only, time.time(), prefer_since_us, prefer_since_us, limit))]
