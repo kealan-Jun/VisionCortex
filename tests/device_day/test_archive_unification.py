@@ -683,3 +683,37 @@ def test_unbound_native_media_keeps_exact_bytes_without_inventing_an_original(tm
         resumed.publish()
         assert all(verify_artifact(layout.root, ref) for ref in references)
     assert source.read_bytes() == original
+
+
+def test_native_cli_repairs_headers_left_by_an_interrupted_collection_rename(tmp_path):
+    import importlib.util
+    from threading import Event
+    from repo_paths import ROOT
+    from visioncortex.application.clip_delivery import original_units, rename_original_groups
+    from visioncortex.device_day_contract import read_json
+
+    spec = importlib.util.spec_from_file_location('unification_cli_test', ROOT/'tools/migrations/unify_device_day_archives.py')
+    cli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cli)
+    layout, index, config, source, refs = case(tmp_path)
+    original, canonical = source.read_bytes(), layout.index.read_bytes()
+    plans = tmp_path/'Plans'
+    first = cli.run(config, layout.name, plans, Event(), apply=True, public_video_inventory=refs)
+    assert first['sets_match']
+    units = original_units(layout, index, [])
+    for unit in units.values():
+        unit['name'] = unit['name'].replace('NoExperimentActivity', 'ExperimentActivity')
+    rename_original_groups(layout, units)
+    # A stopped renderer has renamed both physical directories but has not
+    # published their new headers. Matching directory counts are insufficient.
+    folder = next(p for p in (layout.processed/'Clips').iterdir() if p.is_dir())
+    assert read_json(folder/'Index.json')['source_folder'] != folder.name
+    repaired = cli.run(config, layout.name, plans, Event(), apply=True, public_video_inventory=refs)
+    assert repaired['sets_match'] and not repaired['already_grouped']
+    for directory, filename in [(layout.processed/'Clips', 'Index.json'),
+                                (layout.understanding, 'Understanding.json')]:
+        for folder in directory.iterdir():
+            if folder.is_dir() and not folder.name.startswith('.'):
+                assert read_json(folder/filename)['source_folder'] == folder.name
+    assert all(verify_artifact(layout.root, ref) for ref in refs)
+    assert source.read_bytes() == original and layout.index.read_bytes() == canonical
