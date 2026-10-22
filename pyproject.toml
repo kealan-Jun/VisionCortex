@@ -52,7 +52,7 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-visioncortex = ["web/*.html", "web/*.css", "web/*.js", "templates/*.json"]
+visioncortex = ["web/*.html", "web/*.css", "web/*.js", "templates/*.json", "templates/*.docx"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

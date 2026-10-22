@@ -315,7 +315,10 @@ def _verified_interval_video(root, candidate, row):
             raise ValueError('selected_video_missing_or_corrupt')
         if not reference or not verify_artifact_cached(root, reference):
             raise ValueError('exact_export_receipt_missing_or_corrupt')
-        receipt = read_json(safe_child(root, reference['path']))
+        from .device_day_content_paths import aliases, public_references
+        mapping_aliases = aliases(root)
+        receipt = public_references(read_json(safe_child(root, reference['path'])), mapping_aliases)
+        video = public_references(video, mapping_aliases)
         expected = {'source_ref': candidate['source_ref'], 'candidate_segment_id': candidate['segment_id'],
             'segment_id': row['segment_id'], 'source_start_ms': row['start_ms'], 'source_end_ms': row['end_ms'],
             'start_us': row['start_us'], 'end_us': row['end_us'], 'video': video}

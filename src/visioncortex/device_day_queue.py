@@ -11,10 +11,14 @@ from pathlib import Path
 
 
 class DeviceDayQueue:
-    def __init__(self, path: Path, *, latest_first=False, scheduling=None):
+    def __init__(self, path: Path, *, latest_first=False, scheduling=None,
+                 preserve_completed_on_recipe_change=False):
         if not isinstance(latest_first, bool):
             raise ValueError('device_day.latest_first must be a boolean')
         self.latest_first = latest_first
+        if type(preserve_completed_on_recipe_change) is not bool:
+            raise ValueError('preserve_completed_on_recipe_change must be a boolean')
+        self.preserve_completed_on_recipe_change = preserve_completed_on_recipe_change
         from .device_day_cohort import scheduling_options
         self.scheduling = scheduling_options({'scheduling': scheduling})
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -75,6 +79,20 @@ class DeviceDayQueue:
                   else "needs_camera_role")
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
+            if self.preserve_completed_on_recipe_change:
+                previous = db.execute('SELECT * FROM recordings WHERE recording_id=?',
+                                      (recording['recording_id'],)).fetchone()
+                if previous and previous['status'] == 'completed':
+                    from .device_day_inputs import same_stage_source
+                    stage = self.path.stem.removeprefix('queue-')
+                    old = json.loads(previous['payload'])
+                    if (old.get('source_signature') and recording.get('source_signature')
+                            and same_stage_source(old, recording, stage)):
+                        # Scheduling preserves the original completion/budget.
+                        # This does not accept its receipt: consumers must still
+                        # verify a pinned source/recipe and actual artifact bytes.
+                        # Explicit repair/reanalysis ports remain separate.
+                        return False
             if self.requires_expired_reconciliation:
                 previous = db.execute('SELECT * FROM recordings WHERE recording_id=?',
                                       (recording['recording_id'],)).fetchone()

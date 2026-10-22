@@ -1,0 +1,519 @@
+"""One public folder per original capture; selected intervals are sibling files."""
+from copy import deepcopy
+from datetime import datetime
+from pathlib import Path, PurePosixPath
+import re
+from zoneinfo import ZoneInfo
+
+from ..device_day_contract import DeviceDayLayout, atomic_json, digest, read_json, safe_child
+from ..device_day_content_paths import aliases, private_folder, public_references, relocated, _publish_aliases
+from ..device_day_verification import verify_artifact_cached
+
+VERSION = 'visioncortex-source-recording-delivery/2'
+LABELS = {
+    'ExperimentActivity': '实验片段（模型观察）',
+    'ValuableNoExperimentActivity': '有价值的非实验片段',
+    'NoValueNoExperimentActivity': '无价值的非实验记录',
+    'ActivityPendingClassification': '活动片段，实验类型待判断',
+    'PendingValueReview': '价值待判断记录',
+}
+
+
+def _metadata_files(folder):
+    return [folder/(name+'.json') for name in LABELS] + [folder/'Clip.json', folder/'NoExperimentActivity.json']
+
+
+def enabled(config):
+    return config.get('device_day', {}).get('clip_delivery') == 'source_recording_v2'
+
+
+def source_unit(reference):
+    """Use the recorder's capture name, not a detector or export generation."""
+    path = reference['path']
+    parts = PurePosixPath(path).parts
+    if (len(parts) < 2 or parts[0] not in {'MetaData', 'MetaVideo'}
+            or any(part in {'', '.', '..'} for part in parts) or '\\' in path or ':' in path):
+        raise ValueError('Clip source is not a recorder-owned original')
+    key = '/'.join(parts[:2]) if len(parts) >= 3 else path
+    name = parts[1] if len(parts) >= 3 else PurePosixPath(path).stem
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', name):
+        name = 'Capture_' + digest(key)[:16]
+    return key, name
+
+
+def original_units(layout, index):
+    """Project source inventory; creating a status folder never admits a model.
+
+    Immediate recorder directory names include slices still being finalized.
+    This does not recurse, inspect media, modify originals or enqueue work.
+    """
+    units = {}
+    for root_name in ('MetaData', 'MetaVideo'):
+        raw = layout.root/root_name
+        if not raw.is_dir() or raw.is_symlink():
+            continue
+        children = list(raw.iterdir())
+        if len(children) > 20000:
+            raise ValueError('Original source inventory exceeds its bounded device-day size')
+        for folder in children:
+            if folder.is_symlink() or folder.name.startswith('.'):
+                continue
+            capture = (folder.is_dir() and (root_name == 'MetaData' or (folder/'rgb.mp4').is_file()))
+            if capture:
+                reference = {'path': layout.relative(folder/'rgb.mp4')}
+            elif folder.is_file() and folder.suffix.lower() == '.mp4':
+                reference = {'path': layout.relative(folder)}
+            else:
+                continue
+            key, name = source_unit(reference)
+            units[key] = {'key': key, 'name': name, 'observed_source': reference['path'], 'recordings': []}
+    for record in index.get('recordings', []):
+        for source in record.get('sources', []):
+            if source.get('kind') != 'video' or not source.get('retained'):
+                continue
+            reference = source['retained']
+            key, name = source_unit(reference)
+            unit = units.setdefault(key, {'key': key, 'name': name, 'observed_source': reference['path'], 'recordings': []})
+            if record['recording_id'] not in {row['recording_id'] for row in unit['recordings']}:
+                unit['recordings'].append(record)
+    names = {}
+    for unit in units.values():
+        names.setdefault(unit['name'], []).append(unit)
+    for values in names.values():
+        if len(values) > 1:
+            for unit in values:
+                unit['name'] = unit['key'].split('/')[0]+'_'+unit['name']
+    return units
+
+
+def category(candidate, meaning, record, interval):
+    """CV activity alone cannot name an experimental clip."""
+    from ..media.retained_intervals import observed_categories
+    value = interval.get('video_value')
+    if value == 'confirmed_no_value':
+        return 'NoValueNoExperimentActivity'
+    if value != 'selected':
+        return 'PendingValueReview'
+    found = observed_categories(candidate, meaning, record, interval['start_ms'], interval['end_ms'])
+    if 'experiment' in found:
+        return 'ExperimentActivity'
+    if 'non_experiment' in found:
+        # A complete audited process may still have an unprocessed tail.
+        # Observed work in its beginning does not classify that unseen tail.
+        if (interval.get('reason') != 'existing_fine_audited_activity_process'
+                or ((meaning or {}).get('status') or (record.get('stages', {}).get('understanding') or {}).get('status'))
+                   == 'completed'):
+            return 'ValuableNoExperimentActivity'
+    return 'ActivityPendingClassification'
+
+
+def views(index):
+    """No candidate/child duplicate and no policy hash in the display identity."""
+    from ..device_day_retention_projection import interval_views
+    records = {row['recording_id']: row for row in index.get('recordings', [])}
+    candidates = {row['segment_id']: row for row in index.get('segments', [])}
+    meanings = {row['segment_id']: row for row in index.get('understandings', [])}
+    grouped = {}
+    for segment, meaning, interval in interval_views(index):
+        if interval is None and segment.get('retention_intervals'):
+            continue
+        candidate = candidates[segment.get('candidate_segment_id', segment['segment_id'])]
+        record = records.get(segment['recording_id'])
+        if not record:
+            continue
+        interval = interval or {
+            **{key: segment[key] for key in ('start_ms', 'end_ms', 'start_us', 'end_us', 'activity')},
+            'video_value': 'pending', 'reason': 'value_not_determined', 'activity_category': 'unknown',
+        }
+        kind = category(candidate, meanings.get(candidate['segment_id']), record, interval)
+        times = [segment[key] for key in ('start_ms', 'end_ms', 'start_us', 'end_us')]
+        times = [int(v) if v == int(v) else v for v in times]
+        key = digest([VERSION, segment['recording_id'], segment['source_ref'], *times])
+        def stamp(value):
+            return datetime.fromtimestamp(value / 1e6, ZoneInfo('Asia/Shanghai')).strftime('%H-%M-%S')
+        name = f"{stamp(segment['start_us'])}_{stamp(segment['end_us'])}_{kind}_{key[:8]}"
+        value = {'key': key, 'name': name, 'category': kind, 'label': LABELS[kind],
+                 'segment': segment, 'meaning': meaning, 'interval': interval, 'record': record,
+                 'candidate': candidate, 'source_segment_ids': [segment['segment_id']]}
+        previous = grouped.get(key)
+        if previous:
+            # Never let a pending or omitted duplicate hide a selected result.
+            if previous['category'] != kind and 'selected' == interval['video_value'] == previous['interval']['video_value']:
+                raise ValueError('Conflicting classifications for one source interval')
+            identifiers = previous['source_segment_ids'] + value['source_segment_ids']
+            if previous['interval']['video_value'] == 'selected' or interval['video_value'] != 'selected':
+                value = previous
+            value['source_segment_ids'] = sorted(set(identifiers))
+        grouped[key] = value
+    return sorted(grouped.values(), key=lambda row: (row['segment']['start_us'], row['key']))
+
+
+def _mapping(layout, directory, additions):
+    mapping = {key: value for key, value in aliases(layout.root).items() if key.startswith(directory + '/')}
+    mapping.update(additions)
+    _publish_aliases(layout, directory, mapping)
+
+
+def _retire(layout, source):
+    """Durable rename intent recovers a crash before alias publication."""
+    from ..device_day_write_guard import guarded_mkdir, verify_before_submission
+    def directory_identity(path):
+        stat = path.stat()
+        return [stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns]
+    old = layout.relative(source)
+    directory = old.split('/')[0]
+    parts = old.split('/')
+    if not (directory == 'ProcessedClips' and parts[:2] == ['ProcessedClips', 'Clips'] and len(parts) == 3
+            or directory == 'MultimodalUnderstanding' and len(parts) == 2):
+        raise ValueError('Only owned public derived clip folders may be relocated')
+    if not source.exists():
+        journal_root = private_folder(layout, directory, 'ClipRelocations')
+        for journal in journal_root.glob('*.json'):
+            intent = read_json(journal)
+            target = safe_child(layout.root, intent['to'])
+            if target.is_dir() and intent.get('from') == old and intent.get('status') != 'completed':
+                _mapping(layout, directory, {old: intent['to']})
+                atomic_json(journal, intent | {'status': 'completed'})
+        return False
+    before = directory_identity(source)
+    target = private_folder(layout, directory, 'LegacyPresentation', source.name)
+    # Mutable public views can return to an earlier category. Preserve each
+    # actual directory generation rather than overwriting its earlier history.
+    presented = any(path.is_file() and not path.is_symlink() and path.stat().st_size <= 4*1024**2
+                    and read_json(path).get('clip_delivery_version') == VERSION for path in _metadata_files(source))
+    if presented or (source/'Understanding.json').is_file():
+        target = target/digest([old, before])[:24]
+    journal = private_folder(layout, directory, 'ClipRelocations', digest([old, layout.relative(target)]) + '.json')
+    if source.is_symlink() or not source.is_dir() or target.exists():
+        raise ValueError('Clip relocation source or destination is ambiguous')
+    intent = {'schema_version': VERSION, 'from': old, 'to': layout.relative(target),
+              'source_identity': before, 'operation': 'preserve_owned_derived_directory',
+              'original_media_changed': False, 'model_invoked': False}
+    atomic_json(journal, intent)
+    guarded_mkdir(target.parent)
+    verify_before_submission()
+    if directory_identity(source) != before:
+        raise ValueError('Clip directory changed before relocation')
+    source.rename(target)
+    _mapping(layout, directory, {old: layout.relative(target)})
+    atomic_json(journal, intent | {'status': 'completed'})
+    return True
+
+
+def retire_native(layout, index, public_names, *, source_units=(), maximum=64):
+    """Retire only source-matching producer/display folders, never raw media."""
+    from ..device_day_content_paths import clip_name
+    from ..device_day_retention_projection import interval_views
+    expected = {}
+    fields = ('recording_id', 'source_ref', 'start_ms', 'end_ms', 'start_us', 'end_us')
+    def signature(value):
+        normalized = {key: value.get(key) for key in fields}
+        for key in ('start_ms', 'end_ms', 'start_us', 'end_us'):
+            number = normalized[key]
+            if type(number) in (int, float) and number == int(number):
+                normalized[key] = int(number)
+        return digest(normalized)
+    for segment, _, _ in interval_views(index):
+        expected[clip_name(segment)] = segment
+    # Old generations can have different IDs but the exact same source range.
+    signatures = {signature(value) for value in expected.values()}
+    owners = {digest([value['recording_id'], value['source_ref']]) for value in expected.values()}
+    def owned_source(value, field='source_ref'):
+        reference = value.get(field) or {}
+        try:
+            return (bool(value.get('recording_id')) and len(reference.get('sha256', '')) == 64
+                    and source_unit(reference)[0] in source_units)
+        except (ValueError, KeyError, TypeError):
+            return False
+    count, pending = 0, False
+    for directory, parent in [('ProcessedClips', layout.processed/'Clips'),
+                              ('MultimodalUnderstanding', layout.understanding)]:
+        if not parent.is_dir():
+            continue
+        for source in sorted(parent.iterdir(), reverse=True):
+            if source.name in public_names or source.name.startswith('.') or not source.is_dir():
+                continue
+            owned = False
+            if not owned:
+                documents = _metadata_files(source)
+                for document in documents:
+                    if not document.is_symlink() and document.is_file() and document.stat().st_size <= 4*1024**2:
+                        value = read_json(document)
+                        if (signature(value) in signatures
+                                or digest([value.get('recording_id'), value.get('source_ref')]) in owners
+                                or owned_source(value)):
+                            owned = True
+                            break
+                if directory == 'MultimodalUnderstanding':
+                    document = source/'Understanding.json'
+                    if not document.is_symlink() and document.is_file() and document.stat().st_size <= 16*1024**2:
+                        value = read_json(document)
+                        source_fields = {key: value.get(key) for key in fields}
+                        source_fields.update(source_ref=value.get('source_video'), start_ms=value.get('source_start_ms'),
+                                             end_ms=value.get('source_end_ms'))
+                        owned = (signature(source_fields) in signatures or
+                                 digest([value.get('recording_id'), value.get('source_video')]) in owners
+                                 or owned_source(value, 'source_video'))
+                elif not owned and source.name in expected:
+                    # A newly materialized native video can precede its first
+                    # readable sidecar. Its exact publication receipt and
+                    # actual physical bytes, never its name alone, own it.
+                    from .retained_video import published_material
+                    segment = expected[source.name]
+                    saved = published_material(layout, segment)
+                    if saved:
+                        name = 'ExperimentActivity.mp4' if segment['activity'] == 'active' else 'NoExperimentActivity.mp4'
+                        reference = saved['video'] | {'path': name}
+                        owned = verify_artifact_cached(source, reference)
+            if not owned:
+                continue
+            if count >= maximum:
+                pending = True
+                continue
+            count += _retire(layout, source)
+    # Replay prepared directory moves even if the old directory disappeared.
+    for directory in ('ProcessedClips', 'MultimodalUnderstanding'):
+        journal_root = private_folder(layout, directory, 'ClipRelocations')
+        if journal_root.is_dir():
+            for journal in journal_root.glob('*.json'):
+                intent = read_json(journal)
+                if intent.get('status') != 'completed':
+                    _retire(layout, layout.root/intent['from'])
+    return {'retired': count, 'pending': pending}
+
+
+def publish_asset(layout, reference, name, *, filename='Video.mp4'):
+    """Publish exact verified bytes; only owned redundant derivative bytes retire."""
+    from ..device_day import copy_verified
+    from ..device_day_inputs import identity
+    from ..device_day_write_guard import guarded_mkdir, verify_before_submission
+    if (not reference or not reference['path'].startswith(('ProcessedClips/Clips/',
+                                                          'ProcessedClips/.Evidence/LegacyPresentation/',
+                                                          'ProcessedClips/.Evidence/NativeClips/'))
+            or not verify_artifact_cached(layout.root, reference)):
+        return None
+    source = safe_child(layout.root, reference['path'])
+    parent = safe_child(layout.root, 'ProcessedClips/Clips')
+    target = safe_child(parent, name+'/'+filename)  # validate physical destination, without legacy aliases
+    if source == target:
+        return reference | {'path': layout.relative(target)}
+    before = identity(source)
+    safe_child(layout.root, layout.relative(target))
+    guarded_mkdir(target.parent)
+    verify_before_submission()
+    copied = copy_verified(source, target)
+    if copied['sha256'] != reference['sha256'] or copied['size_bytes'] != reference['size_bytes']:
+        raise ValueError('Public video differs from its verified selected derivative')
+    result = {'path': layout.relative(target), 'sha256': copied['sha256'], 'size_bytes': copied['size_bytes']}
+    if identity(source) != before:
+        raise ValueError('Selected derivative changed during public delivery')
+    mapping = {key: value for key, value in aliases(layout.root).items() if key.startswith('ProcessedClips/')}
+    source_relative = layout.relative(source)
+    for key in list(mapping):
+        if relocated(key, mapping) == source_relative:
+            mapping[key] = result['path']
+    mapping.update({reference['path']: result['path'], source_relative: result['path']})
+    mapping.pop(result['path'], None)
+    _publish_aliases(layout, 'ProcessedClips', mapping)
+    if not verify_artifact_cached(layout.root, result):
+        raise ValueError('Public video failed independent artifact verification')
+    if source_relative.startswith(('ProcessedClips/.Evidence/LegacyPresentation/', 'ProcessedClips/.Evidence/NativeClips/')):
+        # The verified replacement and aliases are durable before reclaiming
+        # this owned derived copy. Source video/audio/CSV never enter this path.
+        verify_before_submission()
+        if identity(source) != before:
+            raise ValueError('Historical derived copy changed before reclaim')
+        source.unlink()
+    return result
+
+
+def _retire_file(layout, relative, reference=None):
+    """Preserve an obsolete owned interval file before retiring its public name."""
+    from ..device_day_contract import artifact
+    from ..device_day_inputs import identity
+    from ..device_day_write_guard import guarded_mkdir, verify_before_submission
+    parts = relative.split('/')
+    if not (parts[:2] == ['ProcessedClips', 'Clips'] and len(parts) == 4
+            or parts[0] == 'MultimodalUnderstanding' and len(parts) == 3):
+        raise ValueError('Interval file is outside its owned original-capture folder')
+    parent = safe_child(layout.root, parts[0])
+    source = safe_child(parent, '/'.join(parts[1:]))
+    if not source.exists():
+        return
+    if source.is_symlink() or not source.is_file() or source.suffix not in {'.json', '.mp4'}:
+        raise ValueError('Obsolete interval file is not regular derived data')
+    before = identity(source)
+    physical = artifact(source.parent, source)
+    if reference and any(reference.get(key) != physical[key] for key in ('sha256', 'size_bytes')):
+        raise ValueError('Obsolete video differs from its last published binding')
+    target = private_folder(layout, parts[0], 'LegacyPresentation', parts[-2], physical['sha256'], source.name)
+    intent = {'schema_version': VERSION, 'from': relative, 'to': layout.relative(target),
+              'source_identity': before, 'file': physical, 'original_media_changed': False, 'model_invoked': False}
+    journal = private_folder(layout, parts[0], 'ClipFileRelocations', digest(intent)+'.json')
+    atomic_json(journal, intent)
+    guarded_mkdir(target.parent)
+    verify_before_submission()
+    if identity(source) != before:
+        raise ValueError('Interval file changed before preserving its old name')
+    if target.exists():
+        if not verify_artifact_cached(target.parent, physical):
+            raise ValueError('Interval history destination collision')
+        _mapping(layout, parts[0], {relative: layout.relative(target)})
+        source.unlink()
+    else:
+        source.rename(target)
+        _mapping(layout, parts[0], {relative: layout.relative(target)})
+    atomic_json(journal, intent | {'status': 'completed'})
+
+
+def _recover_files(layout):
+    for directory in ('ProcessedClips', 'MultimodalUnderstanding'):
+        for journal in private_folder(layout, directory, 'ClipFileRelocations').glob('*.json'):
+            intent = read_json(journal)
+            if intent.get('status') == 'completed':
+                continue
+            if not intent['from'].startswith(directory+'/'):
+                raise ValueError('Interval history intent differs from its owning evidence directory')
+            target = safe_child(layout.root, intent['to'])
+            if not intent['to'].startswith(directory+'/.Evidence/LegacyPresentation/'):
+                raise ValueError('Interval history intent escapes its owning evidence directory')
+            parent = safe_child(layout.root, directory)
+            source = safe_child(parent, intent['from'].removeprefix(directory+'/'))
+            if source.exists():
+                _retire_file(layout, intent['from'], intent['file'])
+                atomic_json(journal, intent | {'status': 'completed'})
+            elif verify_artifact_cached(target.parent, intent['file']):
+                _mapping(layout, directory, {intent['from']: intent['to']})
+                atomic_json(journal, intent | {'status': 'completed'})
+            else:
+                raise ValueError('Prepared interval history has neither verified source nor destination')
+
+
+def _retire_obsolete(layout, unit, rows):
+    index = layout.processed/'Clips'/unit['name']/'Index.json'
+    if not index.is_file():
+        return
+    previous = read_json(index)
+    if previous.get('schema_version') != VERSION or previous.get('source_unit') != unit['key']:
+        raise ValueError('Original-capture output folder belongs to another source or contract')
+    expected = {row['name']+'.json' for row in rows} | {
+        row['name']+'.mp4' for row in rows if row['interval']['video_value'] == 'selected'}
+    for row in previous.get('intervals', []):
+        for field in ('metadata', 'content', 'video'):
+            reference = row.get(field)
+            path = reference.get('path') if isinstance(reference, dict) else reference
+            if not path or PurePosixPath(path).name in expected:
+                continue
+            prefix = ('ProcessedClips/Clips/' if field != 'content' else 'MultimodalUnderstanding/')+unit['name']+'/'
+            if not path.startswith(prefix) or len(PurePosixPath(path).parts) != len(PurePosixPath(prefix).parts)+1:
+                raise ValueError('Previous interval link escapes its original-capture folder')
+            _retire_file(layout, path, reference if field == 'video' else None)
+
+
+def publish(config, index, audio_entries, *, document_builder, writer, entry_builder,
+            maximum_new_videos=4, maximum_video_bytes=512*1024**2):
+    """One original -> one directory; every selected interval is a file inside it."""
+    from ..device_day_timeline import day_bounds
+    from ..runtime_control import check_yield
+    root = Path(config['storage']['archive_root'])
+    backend = config['storage'].get('local_cache_root')
+    start, _ = day_bounds(index['archive'][:10])
+    layout = DeviceDayLayout(root, index['archive'][11:], max(start, 1), Path(backend) if backend else None)
+    units = original_units(layout, index)
+    values = views(index)
+    grouped = {key: [] for key in units}
+    for row in values:
+        key, _ = source_unit(row['segment']['source_ref'])
+        if key not in units:
+            raise ValueError('Selected interval has no owning original-capture unit')
+        row['unit'] = units[key]
+        grouped[key].append(row)
+    _recover_files(layout)
+    progress = retire_native(layout, index, {unit['name'] for unit in units.values()}, source_units=set(units))
+    for key, unit in units.items():
+        _retire_obsolete(layout, unit, grouped[key])
+    entries, copied, copied_bytes = [], 0, 0
+    details = {key: [] for key in units}
+    work = sorted(values, key=lambda row: row['segment']['start_us'], reverse=True) if (
+        config.get('device_day', {}).get('latest_first')) else values
+    for row in work:
+        check_yield(checkpoint=False)
+        unit = row['unit']
+        segment, interval = deepcopy(row['segment']), deepcopy(row['interval'])
+        relative = 'ProcessedClips/Clips/'+unit['name']+'/'+row['name']+'.json'
+        content = 'MultimodalUnderstanding/'+unit['name']+'/'+row['name']+'.json'
+        target = layout.root/relative
+        if target.is_file() and read_json(target).get('source_interval_key') != row['key']:
+            raise ValueError('Interval filename collides with another source interval')
+        selected, native_video = interval['video_value'] == 'selected', segment.get('video')
+        existing = layout.processed/'Clips'/unit['name']/(row['name']+'.mp4')
+        new_asset = selected and native_video and not existing.is_file()
+        amount = (native_video or {}).get('size_bytes', 0)
+        deferred = new_asset and (copied >= maximum_new_videos
+            or copied and copied_bytes+amount > maximum_video_bytes)
+        if new_asset and amount > 8*1024**3:
+            raise ValueError('Selected video exceeds the bounded single-artifact delivery size')
+        video = publish_asset(layout, native_video, unit['name'], filename=row['name']+'.mp4') if selected and not deferred else None
+        if selected and not video:
+            progress['pending'] = True
+            if native_video and not deferred:
+                interval.update(processing_status='failed', error={
+                    'reason': 'selected_native_video_missing_or_unverified',
+                    'automatic_action': 'preserve_native_receipt_and_retry_verified_export'})
+        if new_asset and video:
+            copied += 1
+            copied_bytes += amount
+        segment.update(json_path=relative, video=video, display_category=row['category'], display_label=row['label'])
+        interval.update(video=video)
+        document, retention = document_builder(index, layout.root, segment, row['meaning'], interval,
+                                               row['record'], audio_entries)
+        display = {'clip_delivery_version': VERSION, 'source_unit': unit['key'], 'source_folder': unit['name'],
+                   'source_interval_key': row['key'], 'display_category': row['category'], 'display_label': row['label'],
+                   'source_segment_ids': row['source_segment_ids'], 'cv_activity': segment['activity'],
+                   'classification_is_physical_ground_truth': False}
+        document.update(display)
+        retention.update(display)
+        document['内容记录']['片段类型'] = row['label']
+        # A category may return to an earlier filename. Public sidecars are
+        # mutable views; immutable producer evidence remains in its own aliases.
+        for directory, planned in [('ProcessedClips', {relative}), ('MultimodalUnderstanding', {content})]:
+            previous = {key: value for key, value in aliases(layout.root).items() if key.startswith(directory+'/')}
+            mapping = {key: value for key, value in previous.items() if key not in planned}
+            if previous != mapping:
+                _publish_aliases(layout, directory, mapping)
+        mapping = aliases(layout.root)
+        writer(layout.root/content, public_references(document, mapping))
+        writer(target, public_references(segment | display | {'selection_interval': interval,
+                                                              'retention': retention, 'model_invoked': False}, mapping))
+        native_metadata = row['segment'].get('json_path')
+        if (native_metadata and native_metadata != relative
+                and native_metadata.startswith(('ProcessedClips/Clips/', 'ProcessedClips/.Evidence/NativeClips/'))
+                and not safe_child(layout.root, native_metadata).exists()):
+            # New exact children have a logical metadata address before the
+            # readable view exists. Bind that missing address only after its
+            # actual file is durable; never replace an immutable native JSON.
+            _mapping(layout, 'ProcessedClips', {native_metadata: relative})
+        entry = entry_builder(document, 'MultimodalUnderstanding/'+unit['name'])
+        entry.update(display, content=content, metadata=relative, video=video,
+                     source_start_ms=segment['start_ms'], source_end_ms=segment['end_ms'])
+        entries.append(entry)
+        details[unit['key']].append({'entry': entry, 'retention': retention, 'narrative': document['内容记录']})
+    for key, unit in units.items():
+        rows = sorted(details[key], key=lambda value: (value['entry']['start_us'], value['entry']['segment_id']))
+        header = {'schema_version': VERSION, 'archive': index['archive'], 'source_unit': key,
+            'source_folder': unit['name'], 'original_source': {'path': unit['observed_source'], 'ownership': 'recorder'},
+            'recording_ids': [row['recording_id'] for row in unit['recordings']],
+            'stages': {row['recording_id']: row.get('stages', {}) for row in unit['recordings']},
+            'processing_status': 'available_partial_projection' if rows else 'waiting_for_source_finalization_or_processing',
+            'interval_count': len(rows), 'available_video_count': sum(bool(row['entry']['video']) for row in rows),
+            'physical_action_confirmed': False, 'model_invoked_by_publication': False,
+            'original_media_changed': False, 'intervals': [row['entry'] for row in rows]}
+        writer(layout.processed/'Clips'/unit['name']/'Index.json', header)
+        writer(layout.processed/'Clips'/unit['name']/'Retention.json', header | {
+            'intervals': [row['retention'] for row in rows]})
+        writer(layout.understanding/unit['name']/'Understanding.json', header | {
+            '片段记录': [{'开始时间': row['entry']['开始时间'], '结束时间': row['entry']['结束时间'],
+                '类别': row['entry']['display_label'], '视频': row['entry']['video'],
+                '内容记录': row['narrative'], '详细记录': row['entry']['content']} for row in rows]})
+    return sorted(entries, key=lambda row: (row['start_us'], row['segment_id'])), progress | {
+        'original_folder_count': len(units), 'videos_published': copied, 'video_bytes_published': copied_bytes}

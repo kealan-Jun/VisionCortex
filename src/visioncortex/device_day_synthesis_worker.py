@@ -110,7 +110,7 @@ class DaySynthesisWorker:
             return {'status': 'disabled' if not settings.get('enabled') else 'stopped'}
         from .device_day import exclusive
         from .device_day_synthesis import current_synthesis, evidence_bundle, synthesize
-        from .device_day_reports import preserve_prior_synthesis, render_day
+        from .device_day_reports import preserve_prior_synthesis, publish_day
         from .device_day_write_guard import storage_guard
         from .mllm import ArkAnalyzer
         from .runtime_control import ExecutionCancelled, execution_context
@@ -196,7 +196,7 @@ class DaySynthesisWorker:
                                 # avoid rescanning an unchanged multi-GB index.
                                 source = index if _index_version(layout.index) == source_version else None
                                 latest = current_day_index(config, layout, source_index=source)
-                                render_day(layout, latest)
+                                publish_day(config, layout, latest)
                                 break
                         state['days'][layout.name] |= {'status': 'completed_for_available_inputs',
                             'generated_at': result.get('generated_at'), 'finished_at': time.time()}

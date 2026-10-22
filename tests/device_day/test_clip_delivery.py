@@ -1,0 +1,293 @@
+"""Display consolidation preserves exact native evidence and source clocks."""
+from copy import deepcopy
+
+import pytest
+
+from test_retained_video_subintervals import exact_case
+from visioncortex.application import clip_delivery, retained_video
+from visioncortex.device_day_content import publish_content
+from visioncortex.device_day_content_paths import clip_name, aliases, private_folder
+from visioncortex.device_day_contract import artifact, atomic_json, safe_child, verify_artifact
+from visioncortex.device_day_file_index import build_file_index
+from visioncortex.device_day_narrative import retention_summary
+
+__all__ = ['exact_case']
+
+
+def test_cv_activity_never_names_an_experiment_and_no_value_has_no_video(monkeypatch):
+    candidate = {'segment_id': 'candidate'}
+    record = {'stages': {'understanding': {'status': 'completed'}}}
+    interval = {'video_value': 'selected', 'start_ms': 0, 'end_ms': 1000,
+                'reason': 'existing_fine_audited_activity_process'}
+    monkeypatch.setattr('visioncortex.media.retained_intervals.observed_categories', lambda *args: [])
+    assert clip_delivery.category(candidate, None, record, interval) == 'ActivityPendingClassification'
+    assert clip_delivery.category(candidate, None, record, interval | {'video_value': 'pending'}) == 'PendingValueReview'
+    assert clip_delivery.category(candidate, None, record, interval | {
+        'video_value': 'confirmed_no_value'}) == 'NoValueNoExperimentActivity'
+    monkeypatch.setattr('visioncortex.media.retained_intervals.observed_categories', lambda *args: ['non_experiment'])
+    assert clip_delivery.category(candidate, {}, record, interval) == 'ValuableNoExperimentActivity'
+    assert clip_delivery.category(candidate, {'status': 'partial'}, record, interval) == 'ActivityPendingClassification'
+    monkeypatch.setattr('visioncortex.media.retained_intervals.observed_categories', lambda *args: ['experiment'])
+    assert clip_delivery.category(candidate, {}, record, interval) == 'ExperimentActivity'
+
+
+def test_multiple_intervals_share_original_folder_and_native_receipts_remain_readable(exact_case):
+    case = exact_case
+    case.config['device_day']['clip_delivery'] = 'source_recording_v2'
+    case.config['collection_ingest'] = {'source_root': str(case.layout.root)}
+    candidate_path = case.layout.processed/'Clips'/clip_name(case.candidate)/'ExperimentActivity.json'
+    case.candidate['json_path'] = case.layout.relative(candidate_path)
+    atomic_json(candidate_path, case.candidate)
+    native = artifact(case.layout.root, candidate_path)
+    selected = retained_video.publish_selected(case.config, case.index, maximum_new_videos=2,
+                                               evidence_validator=case.validator)['selected_intervals']
+    old_videos = [deepcopy(row['video']) for row in selected]
+    # Simulate a previous failed export at exactly the same source extent.
+    old = case.layout.processed/'Clips'/'00-02-11_00-02-36_ExperimentActivity_failed'
+    atomic_json(old/'ExperimentActivity.json', selected[0] | {'start_ms': float(selected[0]['start_ms'])})
+    atomic_json(old/'Retention.json', {'processing_status': 'failed', 'error': 'old failure'})
+    original = deepcopy(case.index)
+    result = publish_content(case.config, case.index)
+    assert case.index == original
+    assert result['clip_delivery']['retired'] == 2
+    public = list((case.layout.processed/'Clips').iterdir())
+    assert [folder.name for folder in public] == ['capture']
+    assert len(list(public[0].glob('*.json'))) == 7  # five intervals and two original-level indexes
+    assert [folder.name for folder in case.layout.understanding.iterdir() if folder.is_dir() and not folder.name.startswith('.')] == ['capture']
+    assert len(list((case.layout.processed/'Clips').glob('*/*.mp4'))) == 2
+    assert verify_artifact(case.layout.root, native)
+    assert '.Evidence/LegacyPresentation' in str(safe_child(case.layout.root, native['path']))
+    for reference in old_videos:
+        assert verify_artifact(case.layout.root, reference)
+        assert 'ActivityPendingClassification' in safe_child(case.layout.root, reference['path']).name
+        assert safe_child(case.layout.root, reference['path']).parent.name == 'capture'
+    case.index['readable_content'] = result
+    timeline = build_file_index(case.config, case.index, {})
+    videos = [row for row in timeline['streams']['video'] if row['kind'] == 'video_segment']
+    assert len(videos) == 5 and sum(bool(row['file']) for row in videos) == 2
+    assert all(row['metadata_file']['path'].endswith('.json') and '/Clips/' in row['metadata_file']['path'] for row in videos)
+    summary = retention_summary(case.index, case.layout.root)
+    assert summary['evidence_status'] == 'PROVEN'
+    # Repeated publication is idempotent and never calls the extractor again.
+    again = publish_content(case.config, case.index)
+    assert not again['clip_delivery']['retired']
+    assert again['multimodal'] == result['multimodal']
+    resumed = retained_video.publish_selected(case.config, case.index, maximum_new_videos=2,
+                                              evidence_validator=case.validator)
+    assert resumed['materialized'] == 0 and len(case.calls) == 2
+    assert case.source.read_bytes().startswith(b'sealed original')
+
+
+def test_display_identity_survives_policy_ids_but_never_merges_different_sources(exact_case):
+    case = exact_case
+    retained_video.publish_selected(case.config, case.index, maximum_new_videos=2, evidence_validator=case.validator)
+    first = clip_delivery.views(case.index)
+    changed = deepcopy(case.index)
+    for row in changed['segments'][0]['retention_intervals']:
+        row['segment_id'] = 'different-export-policy-id'
+        row['export_policy'] = 'later-export-recipe'
+    assert [row['key'] for row in clip_delivery.views(changed)] == [row['key'] for row in first]
+    changed['segments'][0]['source_ref']['sha256'] = 'b'*64
+    assert {row['key'] for row in clip_delivery.views(changed)}.isdisjoint(row['key'] for row in first)
+
+
+def test_relocation_crash_replays_alias_without_changing_native_json(exact_case, monkeypatch):
+    case = exact_case
+    folder = case.layout.processed/'Clips'/clip_name(case.candidate)
+    atomic_json(folder/'ExperimentActivity.json', case.candidate)
+    reference = artifact(case.layout.root, folder/'ExperimentActivity.json')
+    real = clip_delivery._mapping
+    monkeypatch.setattr(clip_delivery, '_mapping', lambda *args: (_ for _ in ()).throw(OSError('crash after rename')))
+    with pytest.raises(OSError, match='crash after rename'):
+        clip_delivery._retire(case.layout, folder)
+    assert not folder.exists()
+    monkeypatch.setattr(clip_delivery, '_mapping', real)
+    assert not clip_delivery._retire(case.layout, folder)
+    assert verify_artifact(case.layout.root, reference)
+    assert aliases(case.layout.root)[case.layout.relative(folder)].startswith('ProcessedClips/.Evidence/')
+
+
+def test_no_value_never_adopts_a_historical_video(exact_case):
+    case = exact_case
+    case.config['device_day']['clip_delivery'] = 'source_recording_v2'
+    for row in case.intervals:
+        row['video_value'] = 'confirmed_no_value'
+    retained_video.publish_selected(case.config, case.index, evidence_validator=case.validator)
+    old_video = case.layout.processed/'Historical.mp4'
+    old_video.parent.mkdir(parents=True, exist_ok=True)
+    old_video.write_bytes(b'old derived file')
+    case.candidate['video'] = artifact(case.layout.root, old_video)
+    result = publish_content(case.config, case.index)
+    assert not case.calls and not list((case.layout.processed/'Clips').glob('*/*.mp4'))
+    assert all('NoValueNoExperimentActivity' in row['content'] and not row['video'] for row in result['multimodal'])
+
+
+def test_asset_collision_does_not_overwrite_or_remove_evidence(exact_case):
+    case = exact_case
+    row = retained_video.publish_selected(case.config, case.index, evidence_validator=case.validator)['selected_intervals'][0]
+    target = case.layout.processed/'Clips'/'public-name'/'Video.mp4'
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b'unrelated bytes')
+    with pytest.raises(ValueError, match='collision'):
+        clip_delivery.publish_asset(case.layout, row['video'], 'public-name')
+    assert target.read_bytes() == b'unrelated bytes' and verify_artifact(case.layout.root, row['video'])
+
+
+def test_native_clip_name_survives_explicit_hidden_relocation(exact_case):
+    case = exact_case
+    name = clip_name(case.candidate)
+    relocated = case.candidate | {'json_path': 'ProcessedClips/.Evidence/LegacyPresentation/'+name+'/ExperimentActivity.json'}
+    assert clip_name(relocated) == name
+    assert private_folder(case.layout, 'ProcessedClips', 'LegacyPresentation', name).parent.name == 'LegacyPresentation'
+
+
+def test_category_updates_retire_interval_files_inside_same_original_folder(exact_case, monkeypatch):
+    case = exact_case
+    case.config['device_day']['clip_delivery'] = 'source_recording_v2'
+    retained_video.publish_selected(case.config, case.index, maximum_new_videos=2, evidence_validator=case.validator)
+    monkeypatch.setattr('visioncortex.media.retained_intervals.observed_categories', lambda *args: ['non_experiment'])
+    first = publish_content(case.config, case.index)
+    saved = [row for row in first['multimodal'] if row.get('video')]
+    assert all(row['display_category'] == 'ValuableNoExperimentActivity' for row in saved)
+    references = [artifact(case.layout.root, case.layout.root/row['content']) for row in saved]
+    for category in ('experiment', 'non_experiment'):
+        monkeypatch.setattr('visioncortex.media.retained_intervals.observed_categories', lambda *args: [category])
+        result = publish_content(case.config, case.index)
+        assert [folder.name for folder in (case.layout.processed/'Clips').iterdir()] == ['capture']
+        assert len(list((case.layout.processed/'Clips').glob('*/*.mp4'))) == 2
+        assert len({row['source_interval_key'] for row in result['multimodal']}) == 5
+        assert all(verify_artifact(case.layout.root, row['video']) for row in result['multimodal'] if row.get('video'))
+        if category == 'experiment':
+            assert all(verify_artifact(case.layout.root, reference) for reference in references)
+    assert len(case.calls) == 2 and case.source.read_bytes().startswith(b'sealed original')
+
+
+def test_delivery_budget_is_bounded_and_retries_without_another_export(exact_case):
+    case = exact_case
+    retained_video.publish_selected(case.config, case.index, maximum_new_videos=2, evidence_validator=case.validator)
+    from visioncortex.device_day_content import segment_documents, visual_entry, _write
+    def publish():
+        return clip_delivery.publish(case.config, case.index, [], document_builder=segment_documents,
+            writer=_write, entry_builder=visual_entry, maximum_new_videos=1)
+    first, progress = publish()
+    assert progress['pending'] and progress['videos_published'] == 1
+    assert sum(bool(row['video']) for row in first) == 1
+    second, progress = publish()
+    assert not progress['pending'] and progress['videos_published'] == 1
+    assert sum(bool(row['video']) for row in second) == 2 and len(case.calls) == 2
+
+
+def test_raw_media_is_never_a_relocation_or_reclaim_target(exact_case):
+    case = exact_case
+    with pytest.raises(ValueError, match='derived clip folders'):
+        clip_delivery._retire(case.layout, case.source.parent)
+    assert clip_delivery.publish_asset(case.layout, artifact(case.layout.root, case.source), 'wrong') is None
+    assert case.source.read_bytes().startswith(b'sealed original')
+
+
+def test_two_originals_each_own_multiple_intervals_and_understanding_files(exact_case, monkeypatch):
+    case = exact_case
+    case.config['device_day']['clip_delivery'] = 'source_recording_v2'
+    second_source = case.source.parent.with_name('capture_001')/'rgb.mp4'
+    second_source.parent.mkdir()
+    second_source.write_bytes(b'independent sealed original')
+    shift = 1000000000
+    second = deepcopy(case.candidate) | {'segment_id': 'candidate-second', 'recording_id': 'recording-second',
+        'source_ref': artifact(case.layout.root, second_source),
+        'start_us': case.candidate['start_us']+shift, 'end_us': case.candidate['end_us']+shift}
+    record = deepcopy(case.record) | {'recording_id': second['recording_id'],
+        'start_us': second['start_us'], 'end_us': second['end_us'],
+        'sources': [{'kind': 'video', 'retained': second['source_ref']}]}
+    case.record['sources'] = [{'kind': 'video', 'retained': case.candidate['source_ref']}]
+    group = deepcopy(case.grouped) | {'candidate_segment_id': second['segment_id'], 'source_ref': second['source_ref']}
+    for interval in group['intervals']:
+        interval['start_us'] += shift
+        interval['end_us'] += shift
+    groups = {case.candidate['segment_id']: case.grouped, second['segment_id']: group}
+    monkeypatch.setattr(retained_video, 'partition', lambda candidate, *args: deepcopy(groups[candidate['segment_id']]))
+    case.index['segments'].append(second)
+    case.index['recordings'].append(record)
+    retained_video.publish_selected(case.config, case.index, maximum_new_videos=4, evidence_validator=case.validator)
+    result = publish_content(case.config, case.index)
+    expected = {'capture', 'capture_001'}
+    for root in (case.layout.processed/'Clips', case.layout.understanding):
+        assert {p.name for p in root.iterdir() if p.is_dir() and not p.name.startswith('.')} == expected
+    from visioncortex.device_day_contract import read_json
+    for unit in expected:
+        folder = case.layout.processed/'Clips'/unit
+        saved = read_json(folder/'Index.json')
+        assert saved['interval_count'] == 5 and saved['available_video_count'] == 2
+        assert len(list(folder.glob('*.mp4'))) == 2
+        meaning = read_json(case.layout.understanding/unit/'Understanding.json')
+        assert len(meaning['片段记录']) == 5
+        assert {r['content'] for r in saved['intervals']} == {
+            row['详细记录'] for row in meaning['片段记录']}
+        assert all(row['metadata'].startswith('ProcessedClips/Clips/'+unit+'/') for row in saved['intervals'])
+    assert len(result['multimodal']) == 10 and len(case.calls) == 4
+
+
+def test_unready_original_gets_matching_status_folder_without_model_or_queue(exact_case):
+    case = exact_case
+    case.config['device_day']['clip_delivery'] = 'source_recording_v2'
+    pending = case.source.parent.with_name('capture_pending')
+    pending.mkdir()
+    case.index.update(recordings=[], segments=[])
+    result = publish_content(case.config, case.index)
+    from visioncortex.device_day_contract import read_json
+    for unit in ('capture', 'capture_pending'):
+        processed = read_json(case.layout.processed/'Clips'/unit/'Index.json')
+        meaning = read_json(case.layout.understanding/unit/'Understanding.json')
+        assert processed['processing_status'] == 'waiting_for_source_finalization_or_processing'
+        assert processed['intervals'] == meaning['intervals'] == []
+        assert not meaning['model_invoked_by_publication']
+    assert result['multimodal'] == [] and case.calls == [] and not (pending/'rgb.mp4').exists()
+
+
+def test_interval_file_rename_crash_preserves_understanding_reference(exact_case, monkeypatch):
+    case = exact_case
+    relative = 'MultimodalUnderstanding/capture/00-00-01_00-00-02_ExperimentActivity_example.json'
+    atomic_json(case.layout.root/relative, {'original': 'actual saved observation'})
+    reference = artifact(case.layout.root, case.layout.root/relative)
+    real = clip_delivery._mapping
+    monkeypatch.setattr(clip_delivery, '_mapping', lambda *args: (_ for _ in ()).throw(OSError('file rename crash')))
+    with pytest.raises(OSError, match='file rename crash'):
+        clip_delivery._retire_file(case.layout, relative)
+    monkeypatch.setattr(clip_delivery, '_mapping', real)
+    clip_delivery._recover_files(case.layout)
+    assert verify_artifact(case.layout.root, reference)
+    assert safe_child(case.layout.root, relative).is_relative_to(case.layout.understanding/'.Evidence')
+
+
+def test_output_revision_checks_original_indexes_and_actual_interval_files(exact_case):
+    case = exact_case
+    case.config['device_day']['clip_delivery'] = 'source_recording_v2'
+    case.config['storage']['local_runtime_root'] = str(case.layout.root/'runtime')
+    retained_video.publish_selected(case.config, case.index, maximum_new_videos=2, evidence_validator=case.validator)
+    result = publish_content(case.config, case.index)
+    from visioncortex.device_day_file_index import FileIndexPublisher
+    publisher = FileIndexPublisher(case.config)
+    revision = publisher._output_revision(case.layout.name, case.index)
+    paths = {path for path, _ in revision}
+    assert str(case.layout.understanding/'capture'/'Understanding.json') in paths
+    for row in result['multimodal']:
+        assert str(case.layout.root/row['content']) in paths
+        assert str(case.layout.root/row['metadata']) in paths
+    saved = next(row for row in result['multimodal'] if row['video'])
+    (case.layout.root/saved['video']['path']).unlink()
+    assert publisher._output_revision(case.layout.name, case.index) != revision
+
+
+def test_grouped_producers_never_create_visible_per_interval_folders(exact_case):
+    case = exact_case
+    case.config['device_day']['clip_delivery'] = 'source_recording_v2'
+    from visioncortex.device_day_content_paths import producer_clip_folder
+    folder = producer_clip_folder(case.layout, clip_name(case.candidate), private=True)
+    atomic_json(folder/'ExperimentActivity.json', case.candidate)
+    assert clip_name(case.candidate | {'json_path': case.layout.relative(folder/'ExperimentActivity.json')}) == clip_name(case.candidate)
+    retained_video.publish_selected(case.config, case.index, maximum_new_videos=2, evidence_validator=case.validator)
+    assert not (case.layout.processed/'Clips').exists()
+    assert aliases(case.layout.root) == {}  # parallel producers do not race on publication alias state
+    assert len(list((case.layout.processed/'.Evidence/NativeClips').glob('*/*.mp4'))) == 2
+    result = publish_content(case.config, case.index)
+    assert [path.name for path in (case.layout.processed/'Clips').iterdir()] == ['capture']
+    assert sum(bool(row['video']) for row in result['multimodal']) == 2

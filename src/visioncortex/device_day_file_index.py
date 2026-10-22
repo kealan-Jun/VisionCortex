@@ -140,15 +140,20 @@ def build_file_index(config, index, photos):
                 time_basis=comment.get('time_basis'), accuracy='NOT_PROVEN', processing_method='automatic_stt',
                 physical_action_confirmed=False))
     from .device_day_retention_projection import interval_views
+    from .application.clip_delivery import enabled as clip_delivery_enabled
     for segment, meaning, interval in interval_views(index):
         rid = segment['recording_id']
         if rid not in records:
             continue
+        public = readable_visual.get(segment['segment_id'], {})
+        if clip_delivery_enabled(config) and not public:
+            continue  # Candidate evidence is retained privately, not a duplicate clip.
         entries.append(entry('video_segment', rid, segment['start_us'], segment['end_us'],
             activity=segment['activity'], segment_id=segment['segment_id'],
-            file=reference(segment.get('video')), source_video=reference(segment.get('source_ref')),
+            file=reference(public.get('video', segment.get('video'))), source_video=reference(segment.get('source_ref')),
             source_start_ms=segment.get('start_ms'), source_end_ms=segment.get('end_ms'),
-            metadata_file=reference(segment.get('json_path')),
+            metadata_file=reference(public.get('metadata', segment.get('json_path'))),
+            **{key: public[key] for key in ('display_category', 'display_label') if key in public},
             record_scope='retention_interval' if interval else 'preprocessing_candidate',
             candidate_segment_id=segment.get('candidate_segment_id', segment['segment_id']),
             video_value=(interval or {}).get('video_value'), selection_reason=(interval or {}).get('reason'),
@@ -279,14 +284,18 @@ def _display_migration_pending(layout):
     A new legacy directory arriving after this check is deferred to the next
     tick; callers must skip migration entirely when this returns False.
     """
-    from .device_day_content_paths import legacy_reference
+    from .device_day_content_paths import _TIME_DIRECTORY
     for directory in ('ProcessedClips', 'MultimodalUnderstanding', 'LaboratoryDailyReport', 'Comment'):
         parent = layout.root / directory
         if not parent.is_dir():
             continue
         for child in parent.iterdir():
-            relative = directory + '/' + child.name
-            if not legacy_reference(relative + ('/' if child.is_dir() else '')):
+            legacy = (directory in {'ProcessedClips', 'MultimodalUnderstanding'} and _TIME_DIRECTORY.fullmatch(child.name)
+                or directory == 'MultimodalUnderstanding' and child.name in {
+                    'Understanding.json', 'UnderstandingReport.html', 'ClipUnderstanding', 'RequestPlans'}
+                or directory == 'LaboratoryDailyReport' and child.name in {'Analysis', 'History'}
+                or directory == 'Comment' and (child.name == 'Stt' or _TIME_DIRECTORY.fullmatch(child.name)))
+            if not legacy:
                 continue
             # Current transcript time directories are already public. Only
             # their old nested Recognition container requires relocation.
@@ -413,7 +422,9 @@ class FileIndexPublisher:
                     raise ValueError('Selected-video source differs from the current admitted recording')
                 from .application.retained_video import selection_visual
                 visual = selection_visual(folder/'vision.json')
-                prior_segments = {s['segment_id']: s for s in visual.get('segments', [])}
+                from .device_day_content_paths import aliases, public_references
+                prior_segments = {s['segment_id']: s for s in public_references(visual.get('segments', []), aliases(
+                    Path(self.config['storage']['archive_root'])/index['archive']))}
                 source_refs = [s.get('retained') for s in retained.get('sources', []) if s.get('kind') == 'video']
                 interval_fields = ('recording_id', 'source_ref', 'start_ms', 'end_ms', 'start_us', 'end_us', 'activity', 'json_path')
                 if (visual.get('status') != 'completed' or any(
@@ -478,6 +489,16 @@ class FileIndexPublisher:
         from .device_day_retention_projection import interval_views
         paths.extend(root/understanding_relative(s)/'Understanding.json'
                      for s, _meaning, interval in interval_views(index) if interval is not None)
+        from .application import clip_delivery
+        if clip_delivery.enabled(self.config):
+            from .device_day_contract import DeviceDayLayout
+            from .device_day_timeline import day_bounds
+            start, _ = day_bounds(name[:10])
+            layout = DeviceDayLayout(root.parent, name[11:], max(start, 1))
+            for unit in clip_delivery.original_units(layout, index).values():
+                paths.extend(root/'ProcessedClips/Clips'/unit['name']/filename
+                             for filename in ('Index.json', 'Retention.json'))
+                paths.append(root/'MultimodalUnderstanding'/unit['name']/'Understanding.json')
         # The readable index also includes intervals not yet in canonical
         # evidence. Inspect their actual outputs without caching another day
         # projection or treating a missing video as confirmed no value.
@@ -493,12 +514,26 @@ class FileIndexPublisher:
                 if not isinstance(relative, str):
                     continue
                 parts = PurePosixPath(relative).parts
-                if len(parts) != 3 or parts[0] != 'MultimodalUnderstanding' or parts[2] != 'Understanding.json':
+                if (len(parts) != 3 or parts[0] != 'MultimodalUnderstanding'
+                        or not parts[2].endswith('.json')):
                     raise ValueError('Readable interval content path differs from frozen layout')
                 paths.append(safe_child(root, relative))
+                if entry.get('clip_delivery_version') == clip_delivery.VERSION:
+                    for field in ('metadata', 'video'):
+                        reference = entry.get(field)
+                        path = reference.get('path') if isinstance(reference, dict) else reference
+                        if path:
+                            pieces = PurePosixPath(path).parts
+                            if pieces[:3] != ('ProcessedClips', 'Clips', parts[1]) or len(pieces) != 4:
+                                raise ValueError('Readable interval file escapes its original-capture folder')
+                            paths.append(safe_child(root, path))
+                    continue
+                if parts[2] != 'Understanding.json':
+                    raise ValueError('Legacy understanding filename differs from frozen layout')
                 folder = safe_child(root, 'ProcessedClips/Clips/' + parts[1])
                 activity = {'active': 'ExperimentActivity', 'inactive': 'NoExperimentActivity'}[entry['activity']]
-                paths.extend(folder/name for name in ('Retention.json', activity+'.json', activity+'.mp4'))
+                names = ('Retention.json', activity+'.json', activity+'.mp4')
+                paths.extend(folder/name for name in names)
         result = []
         for path in sorted(set(paths)):
             try:
@@ -597,7 +632,10 @@ class FileIndexPublisher:
                 photo_path = self.runtime/'CapturePhotos'/f'{name}.json'
                 photos = photo_indexes.get(name) or (read_json(photo_path) if photo_path.is_file() else {})
                 import time
-                if name[11:] in photo_cameras and time.time() - photos.get('observed_at', 0) >= 30:
+                photo_stamp = photos.get('observed_at', 0)
+                photo_due = type(photo_stamp) not in (int, float) or time.time() - photo_stamp >= 30
+                if (name[11:] in photo_cameras and photo_due
+                        and self.config.get('collection_ingest', {}).get('source_root')):
                     from .device_day_time_lookup import refresh_photo_index
                     # Known device/day identity authorizes photo lookup. A
                     # photo reference needs neither a model view role nor a
@@ -697,7 +735,7 @@ class FileIndexPublisher:
                     if content_enabled:
                         from .device_day_content import publish_content, with_partial_understandings
                         from .device_day_contract import DeviceDayLayout
-                        from .device_day_reports import render_day
+                        from .device_day_reports import publish_day
                         source = source_index
                         operation = 'partial_understandings'
                         index = with_partial_understandings(self.config, index)
@@ -721,6 +759,13 @@ class FileIndexPublisher:
                             result['errors'].extend(retention_progress['errors'])
                         operation = 'readable_content'
                         index['readable_content'] = publish_content(self.config, index)
+                        if (index['readable_content'].get('clip_delivery') or {}).get('pending'):
+                            result['status'] = 'partial'
+                            result['clip_delivery_pending'] = True
+                        from .application.clip_delivery import enabled as clip_delivery_enabled
+                        if clip_delivery_enabled(self.config):
+                            from .device_day_content_paths import aliases, public_references
+                            index = public_references(index, aliases(path.parent.parent))
                         if index.get('recordings') or (index.get('context') or {}).get('events'):
                             from .device_day_night_schedule import paused_stages
                             if 'report' not in paused_stages(self.config):
@@ -732,7 +777,7 @@ class FileIndexPublisher:
                                 day_start, _ = day_bounds(validate_archive_name(name)[:10])
                                 layout = DeviceDayLayout(Path(self.config['storage']['archive_root']), name[11:],
                                     day_start)
-                                render_day(layout, index)
+                                publish_day(self.config, layout, index)
                     operation = 'time_index'
                     publish_file_index(self.config, index, photos)
                     if before != index['time_index']:
@@ -758,7 +803,8 @@ class FileIndexPublisher:
                         self.versions[name] += (content_version, self._output_revision(name, index))
                         source['time_index'] = index['time_index']
                         self._remember_source(name, (stat.st_mtime_ns, stat.st_size), source)
-                        if retention_progress['pending'] or canonical_progress['pending']:
+                        if (retention_progress['pending'] or canonical_progress['pending']
+                                or (index['readable_content'].get('clip_delivery') or {}).get('pending')):
                             self.versions.pop(name, None)  # Existing publisher owns retry, without rerunning models.
                     result['published'] += 1
             except (ProjectionDeferred, ProjectionGenerationChanged) as exc:

@@ -29,6 +29,12 @@ def clip_name(segment):
         raise ValueError('Unknown frozen archive activity')
     relative = segment.get('json_path')
     if relative:
+        # Relocation preserves the original candidate name and immutable JSON.
+        # It does not turn the evidence directory into a second public clip.
+        for prefix in ('ProcessedClips/.Evidence/LegacyPresentation/', 'ProcessedClips/.Evidence/NativeClips/'):
+            if relative.startswith(prefix):
+                relative = 'ProcessedClips/Clips/' + relative[len(prefix):]
+                break
         parts = PurePosixPath(relative).parts
         if (len(parts) != 4 or parts[:2] != ('ProcessedClips', 'Clips')
                 or parts[3] != activity + '.json'
@@ -55,15 +61,36 @@ def private_folder(layout, directory, kind, *parts):
     return safe_child(layout.root, '/'.join((directory, layout_contract()['private_evidence_directory'], kind, *parts)))
 
 
+def producer_clip_folder(layout, name, *, private=False):
+    """Keep new producer intermediates out of the per-original public folders.
+
+    Producers write explicit private references, without changing shared alias
+    state while parallel CV workers run. Publication alone owns relocation.
+    """
+    from .device_day_contract import safe_child
+    if private:
+        return private_folder(layout, 'ProcessedClips', 'NativeClips', name)
+    return safe_child(layout.root, 'ProcessedClips/Clips/'+name)
+
+
 def legacy_reference(relative):
     parts = relative.split('/')
     return len(parts) > 1 and (
-        relative in {'MultimodalUnderstanding/Understanding.json', 'MultimodalUnderstanding/UnderstandingReport.html'}
+        # Explicit aliases may retire superseded public clip generations.
+        # Unmapped paths retain their normal resolution; originals never enter
+        # this namespace. The destination validator still rejects traversal.
+        relative.startswith('ProcessedClips/Clips/')
+        or (parts[0] == 'MultimodalUnderstanding' and len(parts) >= 3
+            and not parts[1].startswith('.'))
+        or
+        relative in {'MultimodalUnderstanding/Understanding.json', 'MultimodalUnderstanding/UnderstandingReport.html',
+                     'LaboratoryDailyReport/LaboratoryDailyReport.html'}
         or
         (parts[0] in {'Comment', 'MultimodalUnderstanding', 'ProcessedClips'} and bool(_TIME_DIRECTORY.fullmatch(parts[1])))
         or relative.startswith(('Comment/Stt/', 'MultimodalUnderstanding/ClipUnderstanding/',
                                 'MultimodalUnderstanding/RequestPlans/', 'LaboratoryDailyReport/History/',
-                                'LaboratoryDailyReport/Analysis/', 'ProcessedClips/.Evidence/LegacyPresentation/')))
+                                'LaboratoryDailyReport/Analysis/', 'ProcessedClips/.Evidence/LegacyPresentation/',
+                                'ProcessedClips/.Evidence/NativeClips/')))
 
 
 @lru_cache(maxsize=128)
@@ -149,6 +176,7 @@ def publish_selected_videos(layout, segments, *, max_bytes=536870912, bounded_ba
     from .device_day_verification import verify_artifact_cached
     pending = []
     for segment in segments:
+        segment = public_references(segment, aliases(layout.root))
         if segment.get('camera_key', layout.name[11:]) != layout.name[11:]:
             raise ValueError('Selected video belongs to another device/camera')
         # The exact-interval publisher keeps a preceding whole-candidate video

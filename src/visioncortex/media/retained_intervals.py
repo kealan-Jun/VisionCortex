@@ -605,6 +605,22 @@ def partition(segment, meaning, recording, context=None, *, segments=None):
         'partition_identity': digest([segment['segment_id'], segment['source_ref'], intervals, POLICY])}
 
 
+def observed_categories(segment, meaning, recording, start_ms, end_ms):
+    """Return categories of source-bound observations, never the CV activity label.
+
+    Classification reuses the selection owner's frame/time gates. An audited
+    process can be worth retaining before its experimental meaning is known.
+    """
+    clock, valid = _clock(segment, recording)
+    value = effective_meaning(meaning) or {}
+    if (value.get('segment_id', segment['segment_id']) != segment['segment_id']
+            or recording.get('recording_id') != segment.get('recording_id')):
+        return []
+    selected, _, _ = _actions(segment, value.get('windows') or [], clock, valid)
+    return sorted({row['activity_category'] for row in selected
+                   if row['start_ms'] < end_ms and row['end_ms'] > start_ms})
+
+
 def disposition(segment, meaning, recording, context=None, *, segments=None):
     """Compatibility aggregate; only selected partition children may be exported."""
     parts = partition(segment, meaning, recording, context, segments=segments)
