@@ -94,12 +94,12 @@ class PublicationJournal:
                 "SELECT * FROM dirty WHERE (? IS NULL OR MAX(COALESCE(json_extract(record,'$.recording_start_us'),0),"
                 "COALESCE(json_extract(record,'$.recording_end_us'),0))>=?) "
                 "AND (?=0 OR NOT EXISTS(SELECT 1 FROM retries r WHERE r.id=dirty.id AND r.token=dirty.token "
-                "AND r.next_attempt_at>?)) ORDER BY "
+                "AND r.next_attempt_at>?)) ORDER BY " + time_order +
                 "CASE WHEN EXISTS(SELECT 1 FROM outputs o WHERE o.id=dirty.id AND o.token=dirty.token) "
                 "THEN 0 ELSE 1 END,"
                 "COALESCE((SELECT created FROM outputs o WHERE o.id=dirty.id AND o.token=dirty.token),0),"
                 "CASE WHEN ? IS NOT NULL AND COALESCE(json_extract(record,'$.recording_start_us'),0)>=? "
-                "THEN 0 ELSE 1 END," + time_order + "rowid LIMIT ?",
+                "THEN 0 ELSE 1 END,rowid LIMIT ?",
                 (since_us, since_us, ready_only, time.time(), prefer_since_us, prefer_since_us, limit))]
 
     def defer(self, identifier, token, *, reason='not_ready', now=None):

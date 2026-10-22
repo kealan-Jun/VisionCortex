@@ -60,7 +60,8 @@ class DaySynthesisWorker:
                     continue
                 records.append(record)
                 name = archive_name(record['camera_key'], record['recording_start_us'])
-                days[name] = record
+                if name not in days or record['recording_start_us'] > days[name]['recording_start_us']:
+                    days[name] = record
         # Group locally before constructing layouts: resolving a NAS layout
         # for every recording delayed admission across thousands of captures.
         settings = config.get('device_day') or {}
@@ -94,6 +95,12 @@ class DaySynthesisWorker:
         names = sorted(pending & recent, key=order)
         names += sorted(priority - set(names), key=order) if self.lane == 'changed_or_live' else []
         names += sorted(eligible - set(names), key=lambda n: (n not in pending, order(n)))
+        if settings.get('latest_first', False) and (changed or pending):
+            work = eligible & (changed | pending)
+            def newest(n):
+                return -days[n]['recording_start_us'], self.checked.get(n, 0), n
+            names = sorted(work, key=newest) + sorted(eligible-work, key=newest)
+            self.lane = 'latest_changed_input'
         return [DeviceDayLayout(Path(config['storage']['archive_root']), days[n]['camera_key'],
                     days[n]['recording_start_us'], Path(config['storage']['local_cache_root'])) for n in names[:16]]
 
