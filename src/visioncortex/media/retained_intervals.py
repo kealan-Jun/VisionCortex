@@ -6,7 +6,21 @@ from ..device_day_contract import atomic_bytes, atomic_json, digest
 from ..device_day_narrative import effective_meaning
 from ..media_time import capture_us
 
-POLICY = 'visioncortex-value-only-derivatives/4'
+POLICY = 'visioncortex-value-only-derivatives/5'
+
+
+def audited_process(segment):
+    """Recognize the existing fine-audit owner, never an activity label alone.
+
+    Publication must authenticate this reference against the completed vision
+    receipt and its actual audit bytes before using its process boundaries.
+    Semantic steps describe this process; they do not replace its boundaries.
+    """
+    reference = segment.get('activity_audit_ref') or {}
+    return (segment.get('activity') == 'active'
+        and segment.get('classification_basis') == 'existing_fine_audit_and_device_boundaries_not_ground_truth'
+        and isinstance(reference, dict) and _frame_reference(reference)
+        and reference.get('storage_root') == 'local_cache_root')
 
 
 def _number(value):
@@ -249,7 +263,9 @@ def _other_activity(windows, start, end, category, objects, *, viewing_context=F
 def _viewing_context(window, edge, side, objects, category, windows):
     """Walk adjacent actual observations, stopping at the first evidence gap.
 
-    Two seconds is a search ceiling, never padding or a minimum duration.
+    Work uses its observed scene extent rather than a two-second micro-action
+    ceiling. Every adjacent input observation is still checked; a missing or
+    contrary observation stops extension. This never pads to a minimum length.
     Use the farthest supported object observation, not the nearest single
     frame: otherwise a dense input still exports a blink. Frame/object
     attribution may anchor context independently of an uncertain action claim;
@@ -262,21 +278,24 @@ def _viewing_context(window, edge, side, objects, category, windows):
         for row in window.get(field) or []:
             if isinstance(row, dict) and set(_object_names(row.get('objects') or [])) & set(objects):
                 attributed.update(row.get('frame_ids') or [])
+    ceiling = 2000 if category == 'experiment' else window['end_ms'] - window['start_ms']
     frames = [f for f in window.get('source_frames') or [] if isinstance(f, dict)
               and _number(f.get('local_ms')) and window['start_ms'] <= f['local_ms'] < window['end_ms']
-              and (edge-2000 <= f['local_ms'] < edge if side == 'before' else edge < f['local_ms'] <= edge+2000)]
+              and (edge-ceiling <= f['local_ms'] < edge if side == 'before' else edge < f['local_ms'] <= edge+ceiling)]
     frames.sort(key=lambda f: (f['local_ms'], f.get('frame_id', '')), reverse=side == 'before')
-    found, supported = [], []
+    found, supported, previous_stamp = [], [], edge
     for frame in frames:
         observation = observations.get(frame.get('frame_id'))
         text = observation.get('text', '').strip() if observation else ''
         stamp = frame['local_ms']
         left, right = (stamp, edge) if side == 'before' else (edge, stamp)
-        if (not _frame_reference(frame) or not text or _context_uncertain(text)
+        if (abs(stamp - previous_stamp) > 15000
+                or not _frame_reference(frame) or not text or _context_uncertain(text)
                 or _object_absent(text, objects) or _explicit_other_activity(text, category)
                 or any(term in text for term in ('无关活动', '其他活动', '另一活动'))
                 or _other_activity(windows, left, right, category, objects, viewing_context=True)):
             break
+        previous_stamp = stamp
         found.append((frame, observation))
         if frame.get('frame_id') in attributed or any(obj.casefold() in text.casefold() for obj in objects):
             supported = list(found)
@@ -363,11 +382,12 @@ def _coherent_work(selected, windows, segment):
                 continue
             stamp = observed[0 if side == 'before' else -1][0]['local_ms']
             left, right = (stamp, edge) if side == 'before' else (edge, stamp)
-            if (min(group['start_ms'], left) <= segment['start_ms']
+            if (category == 'experiment' and min(group['start_ms'], left) <= segment['start_ms']
                     and max(group['end_ms'], right) >= segment['end_ms']):
                 continue
             basis = _context_basis(window, 'readability_context', left, right, observed, side=side,
-                context_policy='visioncortex-observed-viewing-context/1', search_ceiling_ms=2000,
+                context_policy='visioncortex-observed-viewing-context/2',
+                search_ceiling_ms=2000 if category == 'experiment' else window['end_ms'] - window['start_ms'],
                 objects=objects, work_category=evidence.get('work_category'),
                 adjacent_state=evidence.get('before_state' if side == 'before' else 'after_state'))
             group['start_ms' if side == 'before' else 'end_ms'] = stamp
@@ -413,16 +433,25 @@ def _continuous_selected_groups(intervals):
     for row in intervals:
         previous = groups[-1] if groups else None
         boundary = row['start_ms']
-        # Context connections retain their separate, stricter owner above.
-        # Two context extensions touching must not establish a new cross-window
-        # or different-work bridge. This join only removes atomic boundaries
-        # crossed by actual positive action coverage on both sides.
+        # Fine physical-action cores retain their stricter owner. Work may
+        # also join overlapping/touching, already selected viewing context of
+        # the same category and objects. No pending gap is introduced here.
         positive_boundary = (previous
             and any(core['start_ms'] < boundary <= core['end_ms']
                     for core in previous.get('core_action_ranges', []))
             and any(core['start_ms'] <= boundary < core['end_ms']
                     for core in row.get('core_action_ranges', [])))
-        compatible = (positive_boundary and row['video_value'] == previous['video_value'] == 'selected'
+        def work_identity(item):
+            evidence = item.get('evidence') or []
+            categories = {e.get('work_category') for e in evidence}
+            objects = {obj for e in evidence for obj in _object_names(e.get('objects') or [])}
+            return categories, objects
+        prior_work, prior_objects = work_identity(previous or {})
+        current_work, current_objects = work_identity(row)
+        continuous_work = (previous and row.get('activity_category') == previous.get('activity_category') == 'non_experiment'
+            and prior_work == current_work and bool(prior_work) and None not in prior_work
+            and bool(prior_objects & current_objects))
+        compatible = ((positive_boundary or continuous_work) and row['video_value'] == previous['video_value'] == 'selected'
             and row['start_ms'] == previous['end_ms'] and row['start_us'] == previous['end_us']
             and all(row.get(key) == previous.get(key) for key in
                     ('activity', 'activity_category', 'activity_categories')))
@@ -434,7 +463,7 @@ def _continuous_selected_groups(intervals):
         previous['selected_subranges'].append(deepcopy(row))
         previous.update(end_ms=row['end_ms'], end_us=row['end_us'],
             export_group_basis='contiguous_selected_union',
-            export_group_limitation='连续选中内容作为一个视频保存；各原始观察范围独立保留，不宣称同一或完整物理动作。')
+            export_group_limitation='连续选中内容作为一个视频保存，含有依据的工作观看上下文；各原始观察范围独立保留，不宣称同一或完整物理动作。')
         for key in ('evidence', 'context_basis', 'core_action_ranges', 'context_subranges'):
             values = previous.setdefault(key, [])
             for item in row.get(key, []):
@@ -447,9 +476,10 @@ def _continuous_selected_groups(intervals):
 def partition(segment, meaning, recording, context=None, *, segments=None):
     """Full half-open partition in original media milliseconds and recorder time.
 
-    The candidate is an analysis unit, never an export decision. Select only
-    observed action spans narrowed to cited source-frame extent, or explicitly
-    bounded necessary context. No default padding or activity-label selection.
+    Fine-audited activity intervals retain their existing process boundaries.
+    Semantic microsteps remain separate observations, including unprocessed
+    tails; they must not fragment an already selected process video. Other
+    inputs still require observed work or explicitly evidenced context.
     This pure policy consumes evidence already verified by publication ports;
     materialization must also verify actual source and generated video bytes.
     """
@@ -506,6 +536,18 @@ def partition(segment, meaning, recording, context=None, *, segments=None):
         else:
             intervals.append(row)
     intervals = _continuous_selected_groups(intervals)
+    if (valid_clock and audited_process(segment)
+            and recording.get('recording_id', segment.get('recording_id')) == segment.get('recording_id')):
+        intervals = [{'start_ms': left, 'end_ms': right,
+            'start_us': segment['start_us'], 'end_us': segment['end_us'],
+            'video_value': 'selected', 'activity': 'active', 'activity_category': 'experiment',
+            'reason': 'existing_fine_audited_activity_process',
+            'selection_owner': 'audited_device_activity',
+            'evidence': [{'activity_audit_ref': deepcopy(segment['activity_audit_ref']),
+                          'classification_basis': segment['classification_basis']}],
+            'context_basis': [], 'boundary_status': 'fine_audited_process_extent',
+            'semantic_steps_define_video_boundaries': False,
+            'physical_action_confirmed': False}]
     return {'schema_version': 'visioncortex-retention-interval-partition/1', 'selection_policy': POLICY,
         'candidate_segment_id': segment['segment_id'], 'source_ref': deepcopy(segment['source_ref']),
         'source_start_ms': left, 'source_end_ms': right, 'intervals': intervals,
@@ -521,7 +563,7 @@ def disposition(segment, meaning, recording, context=None, *, segments=None):
     selected = any(row['video_value'] == 'selected' for row in intervals)
     omit = bool(intervals) and all(row['video_value'] == 'confirmed_no_value' for row in intervals)
     decision = 'retain_derivative' if selected else 'omit_static_derivative' if omit else 'pending_value_review'
-    reason = ('仅选中有实际画面依据的精确子区间；候选剩余范围各自保持待判定或已确认无价值。' if selected else
+    reason = ('按既有精扫活动边界或有实际观察依据的工作过程保存视频，细动作独立留在语义记录。' if selected else
               '该候选全部范围有完整连续静止证据且无待判定上下文，不另存处理视频。' if omit else
               '价值或动作边界尚未确定；保留时段记录及原片追溯，不自动复制整个候选。')
     return {'schema_version': 'visioncortex-derived-video-disposition/1',
@@ -537,7 +579,7 @@ def disposition(segment, meaning, recording, context=None, *, segments=None):
         'protection_signals': parts['protection_signals'],
         'model_evidence': [_refs(w) for w in (meaning or {}).get('windows', [])],
         'continuous_inactivity_proven': False,
-        'limitation': '候选不是导出单位；仅保存选中子区间。抽样观察不证明完整物理动作或帧间绝无短动作。原片与录音保持不动。'}
+        'limitation': '活动标签不能单独选择视频；精扫回执界定的过程不按语义细动作二次裁碎。抽样观察不证明完整物理动作。原片与录音保持不动。'}
 
 
 def publish_disposition(folder, decision, *, video_present=False):
