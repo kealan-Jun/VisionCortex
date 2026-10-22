@@ -52,6 +52,18 @@ class PublicationJournal:
             db.execute('DELETE FROM dirty WHERE id=? AND token=?', (identifier, token))
             db.execute('DELETE FROM retries WHERE id=? AND token=?', (identifier, token))
 
+    def retry_now(self, identifier, token):
+        """Wake one owned publication after repair; retain its failures and token.
+
+        This only schedules existing file publication. It never changes a
+        model queue, execution identity, or a paid request's retry authority.
+        The normal replayer must still verify every source and receipt.
+        """
+        with connection(self.path) as db:
+            return bool(db.execute('UPDATE retries SET next_attempt_at=0 WHERE id=? AND token=? '
+                'AND EXISTS(SELECT 1 FROM dirty d WHERE d.id=retries.id AND d.token=retries.token)',
+                (identifier, token)).rowcount)
+
     def pending(self, limit=32, *, since_us=None, prefer_since_us=None, latest_first=False, ready_only=False):
         if type(latest_first) is not bool:
             raise ValueError('Publication latest_first must be a boolean')
@@ -82,19 +94,22 @@ class PublicationJournal:
 
 
 def revalidate_remounted_seals(runner, record):
-    """Recover only a mount device-number change, with stable verified bytes.
+    """Recover changed mount identities, with stable verified source bytes.
 
     Called under every recording stage lock by replay. Model receipts and
     content bindings remain untouched; the old input seals stay in history.
-    Inode, size, timestamps, resolved path and content must all still match.
-    This never authorizes a replacement file or a source-signature change.
+    A pinned, verified CIFS mount may also change its server inode numbers.
+    Only size/timestamp/path-identical, fully hashed content can be rebound;
+    ordinary local files still require their original inode. Never change a
+    source signature or reinterpret a model execution key.
     """
     from .device_day_contract import digest, read_json
     from .device_day_inputs import binding, durable_json, identity, input_path, verify_content
     from .device_day_io import slot
     from .device_day_write_guard import storage_guard
     updates = []
-    with storage_guard(runner.config), slot(runner.config):
+    from .runtime_control import resource_slot
+    with storage_guard(runner.config) as guard, resource_slot(runner.config, 'cpu'), slot(runner.config):
         for stage in ('vision', 'stt'):
             path = input_path(runner, record, stage)
             if not path.is_file():
@@ -114,7 +129,10 @@ def revalidate_remounted_seals(runner, record):
                 if not original.exists():
                     continue  # Normal publication verifies the surviving archive.
                 observed = identity(original)
-                if (observed[1:] != source['identity'][1:]
+                mount, _ = guard.mount_for(original)
+                cifs = mount is not None and mount.snapshot.get('filesystem') == 'cifs'
+                if (observed[2:] != source['identity'][2:]
+                        or observed[1] != source['identity'][1] and not cifs
                         or str(original.resolve()) != source.get('resolved_path', str(original.resolve()))):
                     raise ValueError('Remount recovery refuses a changed capture')
                 snapshots.append((original, observed))
@@ -136,7 +154,8 @@ def revalidate_remounted_seals(runner, record):
             previous = digest(saved)
             durable_json(path.parent / 'history' / f'{path.stem}-{previous}.json', saved)
             updated['mount_revalidation'] = {'previous_seal_digest': previous, 'verified_at': time.time(),
-                'content_binding_unchanged': True, 'model_invoked': False}
+                'content_binding_unchanged': True, 'model_invoked': False,
+                'policy': 'verified_mount_content_identity/2'}
             durable_json(path, updated)
     return len(updates)
 
@@ -191,6 +210,8 @@ def reconcile(runner, *, stop=None, limit=32):
             reason = (json.dumps(exc.details(), sort_keys=True) if isinstance(exc, ProjectionGenerationChanged) else
                 json.dumps({'reason': 'readable_projection_limit', 'error_type': type(exc).__name__,
                 'metric': exc.metric, 'observed': exc.observed, 'limit': exc.limit}, sort_keys=True)
-                if deferred else 'lock_busy' if isinstance(exc, BlockingIOError) else type(exc).__name__)
+                if deferred else 'lock_busy' if isinstance(exc, BlockingIOError) else
+                json.dumps({'reason': 'publication_verification_failed', 'error_type': type(exc).__name__,
+                            'detail': str(exc)[:500]}, sort_keys=True))
             journal.defer(record['recording_id'], token, reason=reason)
     return completed

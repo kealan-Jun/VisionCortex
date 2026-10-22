@@ -1,6 +1,7 @@
 """Owned local fixtures model remounts; no NAS or model-quality claims."""
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -93,6 +94,54 @@ def test_changed_source_during_hash_prevents_any_seal_update(remounted, monkeypa
 
     monkeypatch.setattr(device_day_inputs, 'verify_content', verify)
     with pytest.raises(ValueError):
+        revalidate_remounted_seals(runner, record)
+    assert [p.read_bytes() for p in paths] == before
+
+
+def test_verified_cifs_inode_refresh_rehashes_bytes_and_preserves_content_binding(remounted, monkeypatch):
+    runner, record, _, backend, previous = remounted
+    from visioncortex import device_day_inputs
+    from visioncortex.device_day_write_guard import PublicationGuard
+    originals = {Path(s['original_path']) for seal in previous.values() for s in seal['sources']}
+    mount_for = PublicationGuard.mount_for
+    monkeypatch.setattr(PublicationGuard, 'mount_for',
+        lambda self, path: (SimpleNamespace(snapshot={'filesystem': 'cifs'}), path)
+        if path in originals else mount_for(self, path))
+    original, calls = device_day_inputs.verify_content, []
+    def verify(path, reference):
+        calls.append(path)
+        return original(path, reference)
+    monkeypatch.setattr(device_day_inputs, 'verify_content', verify)
+    for stage in ('vision', 'stt'):
+        path = input_path(runner, record, stage)
+        seal = read_json(path)
+        for source in seal['sources']:
+            source['identity'][1] += 100
+        atomic_json(path, seal)
+        previous[stage] = seal
+    assert revalidate_remounted_seals(runner, record) == 2
+    assert len(calls) == sum(len(seal['sources']) for seal in previous.values())
+    assert all(binding(read_json(input_path(runner, record, stage))) == binding(old)
+               for stage, old in previous.items())
+    assert backend.vision_calls == 1 and backend.semantic_calls == 0
+
+
+def test_cifs_inode_refresh_rejects_different_bytes_before_any_seal_update(remounted, monkeypatch):
+    runner, record, _, _, previous = remounted
+    from visioncortex.device_day_write_guard import PublicationGuard
+    originals = {Path(s['original_path']) for seal in previous.values() for s in seal['sources']}
+    mount_for = PublicationGuard.mount_for
+    monkeypatch.setattr(PublicationGuard, 'mount_for',
+        lambda self, path: (SimpleNamespace(snapshot={'filesystem': 'cifs'}), path)
+        if path in originals else mount_for(self, path))
+    path = input_path(runner, record, 'vision')
+    seal = read_json(path)
+    seal['sources'][0]['identity'][1] += 100
+    seal['sources'][0]['sha256'] = '0' * 64
+    atomic_json(path, seal)
+    paths = [input_path(runner, record, stage) for stage in ('vision', 'stt')]
+    before = [p.read_bytes() for p in paths]
+    with pytest.raises(ValueError, match='content differs'):
         revalidate_remounted_seals(runner, record)
     assert [p.read_bytes() for p in paths] == before
 
