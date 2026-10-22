@@ -6,7 +6,7 @@ from ..device_day_contract import atomic_bytes, atomic_json, digest
 from ..device_day_narrative import effective_meaning
 from ..media_time import capture_us
 
-POLICY = 'visioncortex-value-only-derivatives/6'
+POLICY = 'visioncortex-value-only-derivatives/7'
 EXPORT_POLICY = 'visioncortex-source-stream-copy/1'
 
 
@@ -312,7 +312,35 @@ def _context_basis(window, kind, start, end, observed, **extra):
         'physical_action_confirmed': False, **extra}
 
 
-def _coherent_work(selected, windows, segment):
+def _work_viewing_context(window, start, end):
+    """Keep an authenticated scene grid between two observed work anchors.
+
+    Blurred/unknown scene observations remain unknown. This connection is
+    useful for watching the source, not evidence of an action or actor.
+    """
+    coverage = window.get('coverage') or {}
+    rate = coverage.get('baseline_sample_fps')
+    if (coverage.get('native_pts_to_pixels_verified') is not True
+            or not _number(rate) or rate <= 0):
+        return []
+    for step in window.get('experiment_steps') or []:
+        if (not isinstance(step, dict) or not _bounds(step, window['start_ms'], window['end_ms'])
+                or step['start_ms'] < end and step['end_ms'] > start):
+            return []
+    observations = {row.get('frame_id'): row for row in window.get('frame_observations') or []
+                    if isinstance(row, dict) and isinstance(row.get('text'), str) and row['text'].strip()}
+    frames = [frame for frame in window.get('source_frames') or [] if isinstance(frame, dict)
+              and _number(frame.get('local_ms')) and start <= frame['local_ms'] <= end]
+    frames.sort(key=lambda row: (row['local_ms'], row.get('frame_id', '')))
+    if (len(frames) < 2 or frames[0]['local_ms'] != start or frames[-1]['local_ms'] != end
+            or any(not _frame_reference(frame) or frame.get('frame_id') not in observations for frame in frames)
+            or any(b['local_ms']-a['local_ms'] > min(15000, 1500/rate)
+                   for a, b in zip(frames, frames[1:], strict=False))):
+        return []
+    return [(frame, observations[frame['frame_id']]) for frame in frames]
+
+
+def _coherent_work(selected, windows, segment, clock):
     """Join only source-evidenced viewing context; keep every action separate."""
     by_window = {(w.get('input'), w.get('model_receipt')): w for w in windows if isinstance(w, dict)}
     groups = []
@@ -339,11 +367,28 @@ def _coherent_work(selected, windows, segment):
         if compatible and not observed:
             observed = _static_scene_context(window, previous['end_ms'], item['start_ms'], objects, category)
             context_kind = 'anchored_static_scene_context'
-        if (compatible and observed and not _other_activity(windows, previous['end_ms'], item['start_ms'],
-                                                           category, objects)):
+        viewing = (previous and item['activity_category'] == previous['activity_category'] == 'non_experiment'
+            and window is not None
+            and (evidence.get('input'), evidence.get('model_receipt')) == (prior.get('input'), prior.get('model_receipt'))
+            and 0 < item['start_ms']-previous['end_ms'] <= 15000
+            and 0 < capture_us(clock, item['start_ms'])-capture_us(clock, previous['end_ms']) <= 15000000
+            and all(isinstance(value, str) and value.strip()
+                    for value in (prior.get('after_state'), evidence.get('before_state'))))
+        if not observed and viewing:
+            observed = _work_viewing_context(window, previous['end_ms'], item['start_ms'])
+            if observed:
+                context_kind = 'device_work_viewing_context'
+        if (observed and (context_kind == 'device_work_viewing_context' or compatible and not _other_activity(
+                windows, previous['end_ms'], item['start_ms'], category, objects))):
             basis = _context_basis(window, context_kind, previous['end_ms'], item['start_ms'], observed,
                 objects=objects, work_category=evidence.get('work_category'),
                 preceding_after_state=prior.get('after_state'), following_before_state=evidence.get('before_state'))
+            if context_kind == 'device_work_viewing_context':
+                basis.update(basis='source_scene_viewing_context',
+                    preceding_objects=deepcopy(prior.get('objects') or []),
+                    same_object_identity='NOT_PROVEN', continuous_motion='NOT_PROVEN',
+                    actor_identity='NOT_PROVEN', scene_observations_may_be_uncertain=True,
+                    reason='连接同一原片中两个已观察工作范围，仅供连贯观看；模糊与未知画面仍未确认，不证明间隙动作、同一对象或人员身份。')
             if context_kind == 'anchored_static_scene_context':
                 basis.update(sampled_static_context_only=True, object_presence_during_gap='NOT_PROVEN',
                     continuous_motion='NOT_PROVEN', actual_input_gap_frame_count=len(observed),
@@ -493,7 +538,7 @@ def partition(segment, meaning, recording, context=None, *, segments=None):
                         and recording.get('recording_id', segment.get('recording_id')) == segment.get('recording_id'))
     windows = (meaning.get('windows') or []) if identity_matches else []
     chosen, uncertain, static = _actions(segment, windows, clock, valid_clock)
-    chosen = _coherent_work(chosen, windows, segment)
+    chosen = _coherent_work(chosen, windows, segment, clock)
     chosen.extend(_context_intervals(segment, context, clock, valid_clock))
     from ..device_day_coverage import value_assessment
     speech = ((recording.get('transcription') or {}).get('comments') or [])

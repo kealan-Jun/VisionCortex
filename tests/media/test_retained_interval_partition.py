@@ -63,7 +63,7 @@ def test_fifteen_minute_candidate_exports_only_25_plus_20_seconds_and_keeps_rest
     decision = disposition(segment, meaning, record)
     assert decision['selected_duration_ms'] == 45000 and decision['pending_duration_ms'] == 855000
     assert not decision['candidate_is_export_unit'] and result['default_padding_ms'] == 0
-    assert decision['selection_policy'] == 'visioncortex-value-only-derivatives/6'
+    assert decision['selection_policy'] == 'visioncortex-value-only-derivatives/7'
     assert decision['schema_version'] == 'visioncortex-derived-video-disposition/1'
     assert (segment, record, meaning) == before
 
