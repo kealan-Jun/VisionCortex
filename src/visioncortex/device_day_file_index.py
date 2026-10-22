@@ -215,7 +215,9 @@ def build_file_index(config, index, photos):
             'path_resolution': 'Resolve path against path_base; device_day may be replaced by your NAS mount of this archive.',
             'process_since_us': cutoff, 'photo_index_observed_at': photos.get('observed_at'),
             'photo_index_errors': photos.get('photo_errors', []),
-            'photo_index_status': 'available' if 'observed_at' in photos else 'pending',
+            'photo_index_status': ('unavailable' if photos.get('photo_errors') else
+                'available' if any(d.get('photos') for d in photos.get('devices', [])) else
+                'no_input' if 'observed_at' in photos else 'pending'),
             'recordings': recordings, 'streams': streams}
 
 
@@ -409,7 +411,8 @@ class FileIndexPublisher:
                         or any(record.get(k) != sealed.get(k) for k in fields)
                         or record.get('camera_key') != index['archive'][11:]):
                     raise ValueError('Selected-video source differs from the current admitted recording')
-                visual = read_json(folder/'vision.json')
+                from .application.retained_video import selection_visual
+                visual = selection_visual(folder/'vision.json')
                 prior_segments = {s['segment_id']: s for s in visual.get('segments', [])}
                 source_refs = [s.get('retained') for s in retained.get('sources', []) if s.get('kind') == 'video']
                 interval_fields = ('recording_id', 'source_ref', 'start_ms', 'end_ms', 'start_us', 'end_us', 'activity', 'json_path')
@@ -536,6 +539,27 @@ class FileIndexPublisher:
             failed('FieldRecognition', 'archive_discovery', exc)
             field_days = {}
         names.update(field_days)
+        # Split publication services also own photo discovery. Sparse photos
+        # do not require a video, a person binding, or the HTTP companion.
+        from .device_day_timeline import day_bounds
+        photo_root = Path(self.config.get('collection_ingest', {}).get('source_root', self.runtime))
+        for camera in self.config.get('collection_ingest', {}).get('camera_role_map', {}):
+            try:
+                directory = safe_child(photo_root, 'voice_photos/' + camera)
+                if not directory.is_dir():
+                    continue
+                for day in directory.iterdir():
+                    if day.is_symlink() or not day.is_dir():
+                        continue
+                    try:
+                        start, end = day_bounds(day.name)
+                        if in_processing_scope(self.config.get('device_day', {}),
+                                {'recording_start_us': start, 'recording_end_us': end}):
+                            names.add(archive_name(camera, start))
+                    except ValueError:
+                        continue
+            except (OSError, ValueError) as exc:
+                failed(camera, 'capture_photo_discovery', exc)
         requested = None if archives is None else tuple(dict.fromkeys(validate_archive_name(n) for n in archives))
         if requested is not None:
             names.intersection_update(requested)
@@ -566,6 +590,16 @@ class FileIndexPublisher:
             try:
                 photo_path = self.runtime/'CapturePhotos'/f'{name}.json'
                 photos = photo_indexes.get(name) or (read_json(photo_path) if photo_path.is_file() else {})
+                import time
+                if (name[11:] in self.config.get('collection_ingest', {}).get('camera_role_map', {})
+                        and time.time() - photos.get('observed_at', 0) >= 30):
+                    from .device_day_time_lookup import refresh_photo_index
+                    refresh_photo_index(self.config, name[11:], name[:10])
+                    photos = read_json(photo_path)
+                for device in photos.get('devices', []):
+                    stamps = [p['capture_us'] for p in device.get('photos', [])]
+                    if stamps:
+                        photo_starts[name] = min(stamps)
                 # A five-second photo heartbeat alone must not rewrite NAS indexes.
                 from .device_day_contract import digest
                 photo_version = digest({k: v for k, v in photos.items() if k != 'observed_at'})

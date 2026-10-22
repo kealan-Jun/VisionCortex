@@ -37,7 +37,7 @@ def exact_case(tmp_path, monkeypatch):
         calls.append((src, left, duration, encoder))
         durations[dst] = duration
         dst.write_bytes(f'exact interval: {left} to {left+duration}'.encode())
-    monkeypatch.setattr('visioncortex.video_io.extract_clip', extract)
+    monkeypatch.setattr('visioncortex.application.retained_video.source_stream_clip', extract)
     monkeypatch.setattr('visioncortex.video_io.probe_video',
                         lambda path: SimpleNamespace(duration_ms=durations[path], fps=30))
     config = {'storage': {'archive_root': str(tmp_path)}, 'device_day': {'derived_video_retention': True}}

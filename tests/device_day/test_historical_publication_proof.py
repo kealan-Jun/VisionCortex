@@ -20,7 +20,7 @@ def delivery(historical_case, monkeypatch):
         from types import SimpleNamespace
         def extract(_source, target, _start, _duration, _encoder):
             target.write_bytes(b'Synthetic exact one second video contract bytes')
-        monkeypatch.setattr('visioncortex.video_io.extract_clip', extract)
+        monkeypatch.setattr('visioncortex.application.retained_video.source_stream_clip', extract)
         monkeypatch.setattr('visioncortex.video_io.probe_video', lambda _: SimpleNamespace(duration_ms=1000, fps=30))
     observe(case.runner.runtime_root, {'recordings': [case.record]})
     assert case.runner.refresh_index(case.layout, recording_id=case.record['recording_id'])

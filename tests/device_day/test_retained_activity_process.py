@@ -78,7 +78,7 @@ def test_corrupt_audit_during_extraction_does_not_publish_process(evidence_case,
     def extract(source, target, start, duration, encoder):
         target.write_bytes(b'synthetic process video')
         path.write_bytes(path.read_bytes() + b' ')
-    monkeypatch.setattr('visioncortex.video_io.extract_clip', extract)
+    monkeypatch.setattr('visioncortex.application.retained_video.source_stream_clip', extract)
     result = publish_selected(case.config, case.index)
     assert result['materialized'] == 0 and result['pending'] == 1
     assert not list(case.layout.processed.glob('Clips/*/*.mp4'))

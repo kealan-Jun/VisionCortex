@@ -6,7 +6,8 @@ from ..device_day_contract import atomic_bytes, atomic_json, digest
 from ..device_day_narrative import effective_meaning
 from ..media_time import capture_us
 
-POLICY = 'visioncortex-value-only-derivatives/5'
+POLICY = 'visioncortex-value-only-derivatives/6'
+EXPORT_POLICY = 'visioncortex-source-stream-copy/1'
 
 
 def audited_process(segment):
@@ -548,6 +549,9 @@ def partition(segment, meaning, recording, context=None, *, segments=None):
             'context_basis': [], 'boundary_status': 'fine_audited_process_extent',
             'semantic_steps_define_video_boundaries': False,
             'physical_action_confirmed': False}]
+    for interval in intervals:
+        if interval['video_value'] == 'selected':
+            interval['export_policy'] = EXPORT_POLICY
     return {'schema_version': 'visioncortex-retention-interval-partition/1', 'selection_policy': POLICY,
         'candidate_segment_id': segment['segment_id'], 'source_ref': deepcopy(segment['source_ref']),
         'source_start_ms': left, 'source_end_ms': right, 'intervals': intervals,
