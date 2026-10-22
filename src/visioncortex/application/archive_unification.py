@@ -293,6 +293,24 @@ class ArchiveUnifier:
 
         for directory in ("ProcessedClips", "MultimodalUnderstanding"):
             evidence = self.layout.root / directory / ".Evidence"
+
+            def physical(relative):
+                if not relative.startswith(directory + "/"):
+                    raise ValueError(
+                        "Alias reconstruction crossed its owning directory"
+                    )
+                # Inspect physical destinations without consulting the broken
+                # alias file which this operation is repairing.
+                return safe_child(
+                    self.layout.root / directory, relative.removeprefix(directory + "/")
+                )
+
+            def verified(reference):
+                path = physical(reference["path"])
+                return verify_artifact_cached(
+                    path.parent, reference | {"path": path.name}
+                )
+
             existing = {
                 k: v
                 for k, v in aliases(self.layout.root).items()
@@ -341,7 +359,7 @@ class ArchiveUnifier:
                     raise ValueError(
                         "Cannot reconstruct aliases from an unowned relocation"
                     )
-                folder = safe_child(self.layout.root, target)
+                folder = physical(target)
                 if folder.is_dir():
                     mappings.setdefault(old, target)
                     preserved.append(folder)
@@ -350,7 +368,7 @@ class ArchiveUnifier:
                 target = groups.get(intent.get("source_unit"))
                 if target and intent.get("directory") == directory:
                     for old in (intent["from"], intent["to"]):
-                        safe_child(self.layout.root, old)
+                        physical(old)
                         if old != target:
                             mappings.setdefault(old, target)
             for path in sorted((evidence / "ClipFileRelocations").glob("*.json")):
@@ -362,9 +380,14 @@ class ArchiveUnifier:
                     raise ValueError(
                         "Cannot reconstruct aliases outside owned derived evidence"
                     )
-                actual = safe_child(self.layout.root, target)
+                actual = physical(target)
                 if verify_artifact_cached(actual.parent, intent["file"]):
                     mappings.setdefault(old, target)
+            # A returning category can have the same public name as a retired
+            # generation. Its actual current group must remain a physical
+            # destination, never an alias back into its own history.
+            for current_group in groups.values():
+                mappings.pop(current_group, None)
             if directory == "ProcessedClips":
                 for folder in preserved:
                     for path in clip_delivery._metadata_files(folder):
@@ -377,29 +400,23 @@ class ArchiveUnifier:
                         ):
                             continue
                         resolved = relocated(ref["path"], mappings)
-                        if verify_artifact_cached(
-                            self.layout.root, ref | {"path": resolved}
-                        ):
+                        if verified(ref | {"path": resolved}):
                             continue
                         matches = videos.get(
                             (ref.get("sha256"), ref.get("size_bytes")), []
                         )
-                        verified = [
-                            candidate
-                            for candidate in matches
-                            if verify_artifact_cached(self.layout.root, candidate)
+                        verified_matches = [
+                            candidate for candidate in matches if verified(candidate)
                         ]
-                        if verified:
-                            target = verified[0]["path"]
+                        if verified_matches:
+                            target = verified_matches[0]["path"]
                             for old in (ref["path"], resolved):
                                 if old != target:
                                     mappings[old] = target
-            for physical in groups.values():
-                mappings.pop(physical, None)
             if mappings != existing:
                 # Validate every chain before publishing the derived reader map.
                 for old in mappings:
-                    safe_child(self.layout.root, relocated(old, mappings))
+                    physical(relocated(old, mappings))
                 clip_delivery._publish_aliases(self.layout, directory, mappings)
 
     def _row(self, value):
