@@ -8,14 +8,17 @@ from zoneinfo import ZoneInfo
 from .device_day_contract import artifact, atomic_bytes, atomic_json, digest, media_interval_name, read_json
 
 
-def transcript_text(recording, source, comments, outcome):
+def transcript_text(recording, source, comments, outcome, *, audio=None):
     def clock(value):
         return datetime.fromtimestamp(value / 1e6, ZoneInfo('Asia/Shanghai')).isoformat(timespec='milliseconds')
     status = {'transcribed': '已自动生成语音转写。',
+              'no_usable_audio': '源录音仅含声明的补静音或中断区间，没有向识别模型提交音频；不能据此判断现场无人说话。',
               'no_speech': '语音活动检测未检测到语音，未生成转写；原录音仍保留。',
               'no_transcript': '识别模型未返回文字；这不证明原录音没有语音。'}[outcome]
+    basis = ('依据回放样本时间网格；原始录音时钟未经验证，缺失与中断标记见JSON。'
+             if (audio or {}).get('artifact_kind') == 'derived_replay' else '依据采集音频时钟；精确对齐未经验证。')
     lines = [f"录音：{recording['recording_id']}", f"原录音：{source['path']}",
-             f'识别状态：{outcome}；{status}', '时间：Asia/Shanghai，依据采集音频时钟；精确对齐未经验证。', '']
+             f'识别状态：{outcome}；{status}', '时间：Asia/Shanghai，' + basis, '']
     lines.extend(f"[{clock(row['start_us'])} – {clock(row['end_us'])}] {row['text'].strip()}" for row in comments)
     return '\n'.join(lines) + '\n'
 
@@ -28,6 +31,44 @@ def audio_windows(duration, maximum):
     if count > 1 and edges[-1] - edges[-2] < 1:
         edges[-2] = (edges[-3] + edges[-1]) / 2
     return list(zip(edges, edges[1:], strict=False))
+
+
+def usable_audio_windows(audio, duration, maximum):
+    """Skip placeholder spans; keep original partial audio in coherent chunks.
+
+    Small original outages remain quality ranges. Cutting at every dropped
+    packet would fragment spoken sentences and create tiny provider requests.
+    """
+    if audio.get('artifact_kind') != 'derived_replay':
+        return audio_windows(duration, maximum)
+    origin = audio.get('start_us')
+    if type(origin) is not int or not origin or type(audio.get('duration_us')) is not int:
+        raise ValueError('Derived replay audio has no verified sample origin')
+    duration = min(duration, audio['duration_us']/1000000)
+    gaps = []
+    for row in audio.get('quality_evidence', []):
+        if row.get('kind') != 'synthetic_silence':
+            continue
+        left, right = row.get('start_us'), row.get('end_us')
+        if type(left) is not int or type(right) is not int or left >= right:
+            raise ValueError('Derived replay audio has invalid quality ranges')
+        gaps.append((max(0, (left-origin)/1000000), min(duration, (right-origin)/1000000)))
+    windows, cursor = [], 0
+    for left, right in sorted(gaps):
+        if right <= cursor or left >= duration:
+            continue
+        if left > cursor:
+            windows.extend((cursor+a, cursor+b) for a, b in audio_windows(left-cursor, maximum))
+        cursor = max(cursor, right)
+    if cursor < duration:
+        windows.extend((cursor+a, cursor+b) for a, b in audio_windows(duration-cursor, maximum))
+    return windows
+
+
+def audio_quality_ranges(audio, left, right):
+    return [row for row in audio.get('quality_evidence', [])
+            if row.get('kind') in {'synthetic_silence', 'source_outage'}
+            and row['start_us'] < right and row['end_us'] > left]
 
 
 def transcribe(config, layout, retention, key):
@@ -60,7 +101,8 @@ def transcribe(config, layout, retention, key):
         raise ValueError("Audio is present but STT is disabled")
     runtime = speech.runtime_request(config)
     origin = recording["recording_start_us"] if embedded else audio.get("start_us")
-    time_basis = "embedded_media_start" if embedded else "recorder_audio_clock" if origin else "recording_start_estimate"
+    time_basis = ('derived_replay_sample_clock' if audio.get('artifact_kind') == 'derived_replay' else
+                  "embedded_media_start" if embedded else "recorder_audio_clock" if origin else "recording_start_estimate")
     sealed = {"folder": str(path.parent), "resolved_folder": str(path.parent.resolve()),
               "files": {path.name: {"size": source["retained"]["size_bytes"], "sha256": source["retained"]["sha256"]}},
               "audio_file": path.name, "start_global_us": origin, "playback_events": []}
@@ -74,8 +116,9 @@ def transcribe(config, layout, retention, key):
     from .device_day_content_paths import private_folder
     root = private_folder(layout, 'Comment', 'Recognition', recording['recording_id'], key)
     duration, maximum = info["duration_seconds"], runtime["max_audio_seconds"]
-    comments, artifacts, chunks, audit_artifacts = [], [], [], []
-    for ordinal, (start, end) in enumerate(audio_windows(duration, maximum)):
+    comments, artifacts, chunks, audit_artifacts, excluded = [], [], [], [], []
+    windows = usable_audio_windows(audio, duration, maximum)
+    for ordinal, (start, end) in enumerate(windows):
         check_yield(checkpoint=False)
         folder = root / media_interval_name(start * 1000, end * 1000)
         worker_folder = layout.receipts / recording["recording_id"] / "speech" / key / f"{ordinal:04d}"
@@ -123,12 +166,22 @@ def transcribe(config, layout, retention, key):
         for row in transcript["segments"]:
             left = (origin or recording["recording_start_us"]) + round(row["start_seconds"] * 1e6)
             right = (origin or recording["recording_start_us"]) + round(row["end_seconds"] * 1e6)
+            quality_ranges = audio_quality_ranges(audio, left, right)
+            if any(gap['start_us'] <= left and gap['end_us'] >= right for gap in quality_ranges):
+                excluded.append({'start_us': left, 'end_us': right, 'text': row['text'],
+                    'reason': 'provider_text_inside_declared_audio_gap', 'source_quality_ranges': quality_ranges,
+                    'transcript_path': layout.relative(folder/'Transcript.json')})
+                continue
             comments.append({"comment_id": "stt-" + digest([key, ordinal, row["id"]])[:24],
                              "recording_id": recording["recording_id"], "start_us": left, "end_us": right,
                              "text": row["text"], "source": "machine_transcribed_speech", "author": "STT",
                              "human_reviewed": False, "accuracy": "NOT_PROVEN", "physical_action_confirmed": False,
                              "model": receipt.get("model"),
                              "time_basis": time_basis, "time_alignment": "PARTIAL_EVIDENCE" if origin else "NOT_PROVEN",
+                             **({'capture_quality': audio.get('quality_status'),
+                                 'source_quality_flags': audio.get('quality_flags', []),
+                                 'source_quality_ranges': quality_ranges,
+                                 'source_clock_verified': False} if audio.get('artifact_kind') == 'derived_replay' else {}),
                              "audio_start_seconds": row["start_seconds"], "audio_end_seconds": row["end_seconds"],
                              "audio_ref": source["retained"], "transcript_path": layout.relative(folder / "Transcript.json"),
                              "words": row.get("words", [])})
@@ -140,15 +193,20 @@ def transcribe(config, layout, retention, key):
                     persist=lambda: sync_files(result_path, worker_folder/'receipt.json',
                     worker_folder/'execution.json', *[folder / name.capitalize() for name in receipt['artifacts']]))
     comment_path = root / "Comments.json"
-    outcome = "transcribed" if comments else "no_transcript" if any(c["outcome"] == "no_transcript" for c in chunks) else "no_speech"
+    outcome = ("no_usable_audio" if not windows else "transcribed" if comments else "no_transcript"
+               if excluded or any(c["outcome"] == "no_transcript" for c in chunks) else "no_speech")
     text_path = root / "Transcript.txt"
-    atomic_bytes(text_path, transcript_text(recording, source['retained'], comments, outcome).encode('utf-8'))
+    atomic_bytes(text_path, transcript_text(recording, source['retained'], comments, outcome, audio=audio).encode('utf-8'))
     text_ref = artifact(layout.root, text_path)
     atomic_json(comment_path, {"source": "machine_transcribed_speech", "comments": comments,
                                "audio_ref": source["retained"], "chunks": chunks,
                                "outcome": outcome, "transcript_file": text_ref})
     artifacts.extend([artifact(layout.root, comment_path), text_ref])
     return {"outcome": outcome, "comments": comments, "artifacts": artifacts,
+            **({'source_quality': {k: audio.get(k) for k in ('artifact_kind', 'quality_status', 'quality_flags',
+                'quality_evidence', 'capture_clock_verified')}, 'usable_audio_windows': windows,
+                'excluded_gap_transcripts': excluded}
+               if audio.get('artifact_kind') == 'derived_replay' else {}),
             "transcript_file": text_ref,
             "audit_artifacts": audit_artifacts,
             "audio_ref": source["retained"], "chunks": chunks, "accuracy": "NOT_PROVEN",
