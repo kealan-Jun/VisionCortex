@@ -92,6 +92,42 @@ def test_destination_failure_preserves_errno_and_atomic_operation(tmp_path, monk
     assert not list(target.parent.glob('*.partial'))
 
 
+def test_transient_cifs_rename_denial_retries_the_same_synced_file(tmp_path, monkeypatch):
+    import errno
+    config, volume, state = mocked_storage(tmp_path, monkeypatch)
+    target = volume/'Archive'/'Result.json'
+    original = guard_module.os.replace
+    attempts = []
+    def temporarily_denied(source, destination, **kwargs):
+        attempts.append((source, destination, kwargs['src_dir_fd']))
+        if len(attempts) < 3:
+            raise PermissionError(errno.EACCES, 'owned transient sharing lease')
+        return original(source, destination, **kwargs)
+    monkeypatch.setattr(guard_module.os, 'replace', temporarily_denied)
+    monkeypatch.setattr(guard_module.time, 'sleep', lambda _: None)
+    with guard_module.storage_guard(config):
+        atomic_json(target, {'safe': True})
+    assert len(attempts) == 3 and len(set(attempts)) == 1
+    assert read_json(target) == {'safe': True}
+    assert state['marker_verified'] >= 4
+
+
+def test_retry_revalidates_mount_before_trying_the_rename_again(tmp_path, monkeypatch):
+    import errno
+    config, volume, state = mocked_storage(tmp_path, monkeypatch)
+    attempts = []
+    def detached(*args, **kwargs):
+        attempts.append(True)
+        state['mounted'] = False
+        raise PermissionError(errno.EACCES, 'owned transient denial')
+    monkeypatch.setattr(guard_module.os, 'replace', detached)
+    monkeypatch.setattr(guard_module.time, 'sleep', lambda _: None)
+    with guard_module.storage_guard(config):
+        with pytest.raises(guard_module.NASUnavailable):
+            atomic_json(volume/'Archive'/'Result.json', {})
+    assert len(attempts) == 1
+
+
 def test_declared_storage_aliases_work_and_internal_artifact_symlinks_stay_rejected(tmp_path, monkeypatch):
     config, volume, _ = mocked_storage(tmp_path, monkeypatch)
     alias = tmp_path/'TrustedConfiguredAlias'

@@ -241,6 +241,7 @@ class ArchiveUnifier:
 
     def _recover_relocated(self):
         """Import only owned sidecars preserved by durable native move intents."""
+        self._recover_aliases()
         for directory in ("ProcessedClips", "MultimodalUnderstanding"):
             journals = self.layout.root / directory / ".Evidence/ClipRelocations"
             for journal in sorted(journals.glob("*.json")):
@@ -279,6 +280,127 @@ class ArchiveUnifier:
                         doc = bounded_document(path)
                         if doc.get("schema_version") != clip_delivery.VERSION:
                             self._read_understanding(path)
+
+    def _recover_aliases(self):
+        """Repair absent derived aliases from durable owned move intents.
+
+        Completed video publication can reclaim an owned redundant copy. Bind
+        such old addresses only to a currently verified identical artifact.
+        Never reconstruct a model receipt or change a recorder-owned path.
+        """
+        from ..device_day_content_paths import relocated
+        from ..device_day_verification import verify_artifact_cached
+
+        for directory in ("ProcessedClips", "MultimodalUnderstanding"):
+            evidence = self.layout.root / directory / ".Evidence"
+            existing = {
+                k: v
+                for k, v in aliases(self.layout.root).items()
+                if k.startswith(directory + "/")
+            }
+            mappings, preserved, groups, videos = dict(existing), [], {}, {}
+            parent = (
+                self.layout.processed / "Clips"
+                if directory == "ProcessedClips"
+                else self.layout.understanding
+            )
+            if parent.is_dir():
+                for folder in parent.iterdir():
+                    if not folder.is_dir() or folder.name.startswith("."):
+                        continue
+                    path = folder / (
+                        "Index.json"
+                        if directory == "ProcessedClips"
+                        else "Understanding.json"
+                    )
+                    header = bounded_document(path) if path.is_file() else {}
+                    if header.get("schema_version") != clip_delivery.VERSION:
+                        continue
+                    groups[header["source_unit"]] = self.layout.relative(folder)
+                    for row in header.get("intervals", []):
+                        ref = row.get("video")
+                        if ref:
+                            videos.setdefault(
+                                (ref["sha256"], ref["size_bytes"]), []
+                            ).append(ref)
+            for path in sorted((evidence / "ClipRelocations").glob("*.json")):
+                intent = bounded_document(path)
+                old, target = intent.get("from", ""), intent.get("to", "")
+                prefix = directory + (
+                    "/Clips/" if directory == "ProcessedClips" else "/"
+                )
+                if (
+                    intent.get("schema_version") != clip_delivery.VERSION
+                    or intent.get("operation") != "preserve_owned_derived_directory"
+                    or not old.startswith(prefix)
+                    or len(Path(old).parts) != len(Path(prefix).parts) + 1
+                    or not target.startswith(
+                        directory + "/.Evidence/LegacyPresentation/"
+                    )
+                ):
+                    raise ValueError(
+                        "Cannot reconstruct aliases from an unowned relocation"
+                    )
+                folder = safe_child(self.layout.root, target)
+                if folder.is_dir():
+                    mappings.setdefault(old, target)
+                    preserved.append(folder)
+            for path in sorted((evidence / "OriginalGroupRenames").glob("*.json")):
+                intent = bounded_document(path)
+                target = groups.get(intent.get("source_unit"))
+                if target and intent.get("directory") == directory:
+                    for old in (intent["from"], intent["to"]):
+                        safe_child(self.layout.root, old)
+                        if old != target:
+                            mappings.setdefault(old, target)
+            for path in sorted((evidence / "ClipFileRelocations").glob("*.json")):
+                intent = bounded_document(path)
+                old, target = intent.get("from", ""), intent.get("to", "")
+                if not old.startswith(directory + "/") or not target.startswith(
+                    directory + "/.Evidence/LegacyPresentation/"
+                ):
+                    raise ValueError(
+                        "Cannot reconstruct aliases outside owned derived evidence"
+                    )
+                actual = safe_child(self.layout.root, target)
+                if verify_artifact_cached(actual.parent, intent["file"]):
+                    mappings.setdefault(old, target)
+            if directory == "ProcessedClips":
+                for folder in preserved:
+                    for path in clip_delivery._metadata_files(folder):
+                        if not path.is_file():
+                            continue
+                        document = bounded_document(path)
+                        ref = document.get("video")
+                        if not ref or not ref.get("path", "").startswith(
+                            "ProcessedClips/"
+                        ):
+                            continue
+                        resolved = relocated(ref["path"], mappings)
+                        if verify_artifact_cached(
+                            self.layout.root, ref | {"path": resolved}
+                        ):
+                            continue
+                        matches = videos.get(
+                            (ref.get("sha256"), ref.get("size_bytes")), []
+                        )
+                        verified = [
+                            candidate
+                            for candidate in matches
+                            if verify_artifact_cached(self.layout.root, candidate)
+                        ]
+                        if verified:
+                            target = verified[0]["path"]
+                            for old in (ref["path"], resolved):
+                                if old != target:
+                                    mappings[old] = target
+            for physical in groups.values():
+                mappings.pop(physical, None)
+            if mappings != existing:
+                # Validate every chain before publishing the derived reader map.
+                for old in mappings:
+                    safe_child(self.layout.root, relocated(old, mappings))
+                clip_delivery._publish_aliases(self.layout, directory, mappings)
 
     def _row(self, value):
         reference = value.get("source_ref") or value.get("source_video")
