@@ -65,7 +65,7 @@ def test_sibling_publication_preserves_completed_exact_video_and_whole_day_parti
         exports.append((source, start, duration))
         target.write_bytes(b'owned exact interval in deterministic fixture')
 
-    monkeypatch.setattr('visioncortex.video_io.extract_clip', extract)
+    monkeypatch.setattr('visioncortex.application.retained_video.source_stream_clip', extract)
     monkeypatch.setattr('visioncortex.video_io.probe_video',
                         lambda _: SimpleNamespace(duration_ms=1000))
     models = WorkModels()
@@ -212,7 +212,7 @@ def _native_window_continuity(
         exports.append((source, start, duration))
         target.write_bytes(b'owned native-window exact selected fixture')
 
-    monkeypatch.setattr('visioncortex.video_io.extract_clip', extract)
+    monkeypatch.setattr('visioncortex.application.retained_video.source_stream_clip', extract)
     monkeypatch.setattr('visioncortex.video_io.probe_video',
                         lambda _: SimpleNamespace(duration_ms=1000))
     models = WindowModels()
@@ -259,7 +259,7 @@ def _native_window_continuity(
     outcome = publisher.tick(archives=[layout.name])
     assert not outcome['errors'], outcome
     calls = models.vision_calls, models.semantic_calls, len(exports)
-    monkeypatch.setattr('visioncortex.video_io.extract_clip', lambda *a, **k: pytest.fail('No repeated export'))
+    monkeypatch.setattr('visioncortex.application.retained_video.source_stream_clip', lambda *a, **k: pytest.fail('No repeated export'))
 
     def queues():
         values = {}

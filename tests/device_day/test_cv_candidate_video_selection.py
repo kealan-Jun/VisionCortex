@@ -100,7 +100,7 @@ def scan_case(default_config, tmp_path, monkeypatch):
     def forbidden_export(*args, **kwargs):
         exports.append((args, kwargs))
         pytest.fail('CV activity classification must never export a whole candidate video')
-    monkeypatch.setattr('visioncortex.video_io.extract_clip', forbidden_export)
+    monkeypatch.setattr('visioncortex.application.retained_video.source_stream_clip', forbidden_export)
     return case
 
 

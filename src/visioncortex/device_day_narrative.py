@@ -1,5 +1,6 @@
 """Human-readable evidence views; temporal overlap never proves causation."""
 from datetime import datetime
+import re
 from zoneinfo import ZoneInfo
 
 
@@ -74,6 +75,30 @@ def understanding_state(meaning, recording):
             '阶段状态': stage.get('status', 'pending'), '处理原因': reason}
 
 
+def _summary_time_issue(window):
+    """Reject impossible local extents, not source times or planned waits."""
+    summary = window.get('summary')
+    scope = window.get('parent_model_window') if window.get('projection_from_parent') else window
+    scope = scope or window
+    start, end = scope.get('start_ms'), scope.get('end_ms')
+    if not isinstance(summary, str) or not _finite_number(start) or not _finite_number(end) or end <= start:
+        return None
+    pattern = (r'(?<!此)(?<!之)(?<!提)(?:前|后|最初|最后|开头|末尾)\s*(?:约|大约)?\s*'
+               r'(\d+(?:\.\d+)?)\s*(小时|分钟|秒钟|秒)'
+               r'|\b(?:first|last|initial|final)\s+(\d+(?:\.\d+)?)\s*'
+               r'(hours?|minutes?|seconds?)\b')
+    for match in re.finditer(pattern, summary, re.IGNORECASE):
+        number, unit = (match[1], match[2]) if match[1] else (match[3], match[4].lower())
+        multiplier = 3600000 if unit in ('小时', 'hour', 'hours') else (
+            60000 if unit in ('分钟', 'minute', 'minutes') else 1000)
+        claimed = float(number) * multiplier
+        if claimed > end - start + 1000:
+            return {'reason': 'local_summary_duration_exceeds_model_window',
+                    'claim': match[0], 'claimed_duration_ms': claimed, 'window_duration_ms': end - start,
+                    'model_receipt': window.get('model_receipt'), 'input': window.get('input')}
+    return None
+
+
 def effective_meaning(meaning):
     """Exclude explicit placeholder rows, preserving original response evidence.
 
@@ -85,6 +110,14 @@ def effective_meaning(meaning):
         return meaning
     windows, changed = [], False
     for window in meaning.get('windows', []):
+        issue = _summary_time_issue(window)
+        if issue:
+            changed = True
+            window = window | {'summary': None, 'original_summary': window['summary'],
+                'summary_status': 'invalid_temporal_extent',
+                'invalid_narrative_content': [*(window.get('invalid_narrative_content') or []), issue],
+                'uncertainties': [*(window.get('uncertainties') or []),
+                    '概述中的局部时长超过实际模型窗口；保留原始回答，不作为该窗口的事实概述。']}
         rejected = []
         for row in window.get('work_activities', []):
             text = str(row.get('description') or '')
@@ -158,7 +191,10 @@ def segment_record(segment, meaning, recording, context=None, *, segments=None):
         observations.append({**scope, '内容': window.get('summary'), '活动类别': window.get('activity_kind', '旧版观察'),
                              '可见性': window.get('observability', 'unknown'),
                              '不确定性': window.get('uncertainties', []), '模型回执': window.get('model_receipt'),
-                             '无效结构化内容': window.get('invalid_structured_content', [])})
+                             '无效结构化内容': window.get('invalid_structured_content', []),
+                             **({'原始概述': window['original_summary'], '概述状态': window.get('summary_status'),
+                                 '概述质量问题': window.get('invalid_narrative_content', [])}
+                                if window.get('original_summary') else {})})
         for field, output in [('experiment_steps', steps), ('work_activities', work)]:
             for step in window.get(field, []):
                 left = step.get('start_us', origin + round(step['start_ms'] * 1000))
