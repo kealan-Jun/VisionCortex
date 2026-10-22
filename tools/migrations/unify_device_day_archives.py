@@ -325,7 +325,7 @@ def main():
     args.plan_root.mkdir(parents=True, exist_ok=True)
     if (
         shutil.disk_usage("/").free < 50 * 1024**3
-        or shutil.disk_usage("/srv/sentinel-data").free < 80 * 1024**3
+        or shutil.disk_usage(local_root).free < 80 * 1024**3
     ):
         raise ValueError("Local storage headroom is below the authorized floor")
     if (
