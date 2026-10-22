@@ -259,3 +259,42 @@ def test_api_projection_never_rewrites_or_substitutes_downloaded_json(archive, t
     original_response = client.get(f'/api/device-days/{archive.name}/files/ProcessedClips/Index.json')
     assert original_response.content == original
     assert hashlib.sha256(source.read_bytes()).digest() == hashlib.sha256(original).digest()
+
+
+def test_published_files_and_listing_survive_missing_cv_index(archive, tmp_path):
+    write(archive / 'Comment/TimeIndex.json', timeline(archive))
+    report = {'actual': 'available partial report'}
+    write(archive / 'LaboratoryDailyReport/LaboratoryDailyReport.json', report)
+    clip = archive / 'ProcessedClips/Clips/Example/ExperimentActivity.mp4'
+    clip.parent.mkdir(parents=True)
+    clip.write_bytes(b'fixture media bytes; not real-video quality evidence')
+    (archive / 'ProcessedClips/Index.json').unlink()
+    client = client_for(archive, tmp_path)
+    listing = client.get('/api/device-days').json()['archives']
+    assert [row['archive'] for row in listing] == [archive.name]
+    assert listing[0]['read_status'] == 'available'
+    base = f'/api/device-days/{archive.name}'
+    assert client.get(base + '/time-index').status_code == 200
+    assert client.get(base + '/files/LaboratoryDailyReport/LaboratoryDailyReport.json').json() == report
+    assert client.get(base + '/files/ProcessedClips/Clips/Example/ExperimentActivity.mp4').content == clip.read_bytes()
+    assert client.get(base + '/index').status_code == 503
+    assert not (archive / 'ProcessedClips/Index.json').exists()
+
+
+def test_missing_cv_index_never_uses_another_device_days_time_index(archive, tmp_path):
+    times = timeline(archive) | {'archive': '2026-10-19_another_cam'}
+    write(archive / 'Comment/TimeIndex.json', times)
+    write(archive / 'LaboratoryDailyReport/LaboratoryDailyReport.json', {'fixture': True})
+    (archive / 'ProcessedClips/Index.json').unlink()
+    client = client_for(archive, tmp_path)
+    response = client.get(f'/api/device-days/{archive.name}/files/LaboratoryDailyReport/LaboratoryDailyReport.json')
+    assert response.status_code == 503
+    assert client.get('/api/device-days').json()['archives'][0]['read_status'] == 'deferred'
+
+
+def test_missing_cv_index_does_not_admit_unpublished_directory(archive, tmp_path):
+    write(archive / 'LaboratoryDailyReport/LaboratoryDailyReport.json', {'fixture': True})
+    (archive / 'ProcessedClips/Index.json').unlink()
+    response = client_for(archive, tmp_path).get(
+        f'/api/device-days/{archive.name}/files/LaboratoryDailyReport/LaboratoryDailyReport.json')
+    assert response.status_code == 404
