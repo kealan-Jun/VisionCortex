@@ -1,9 +1,14 @@
 """Replay bounded standard publication journals without starting model work."""
 from contextlib import ExitStack
 from pathlib import Path
+from threading import Event
 import time
 
 from .device_day_contract import atomic_json, digest, read_json
+
+# Publication-only recipe: completed captures must be revisited after a
+# naming migration without invalidating model receipts or issuing paid work.
+READABLE_LAYOUT_POLICY = 'source-recording-full-extent-names/1'
 
 
 def local_change_hints(runtime_root, records, names):
@@ -35,7 +40,7 @@ def local_change_hints(runtime_root, records, names):
 class PublicationReplay:
     def __init__(self, *, field_fetch=None, stop=None):
         self.field_fetch = field_fetch
-        self.stop = stop
+        self.stop = stop if stop is not None else Event()
 
     def tick(self, runner):
         from .device_day import exclusive
@@ -48,7 +53,12 @@ class PublicationReplay:
                 return {'status': 'running_elsewhere', 'published': 0}
             # The standard replay owns per-record stage locks, validates every
             # receipt/artifact, prefers recent records and bounds each round.
-            published = reconcile(runner, stop=self.stop, limit=4)
+            from .runtime_control import execution_context
+            # Source verification and projection compose nested NAS readers.
+            # Give them one resumable job scope, as the readable publisher does.
+            with execution_context(job_id='publication-replay', source='retention_recovery',
+                    priority=20, background_fair=True, stop=self.stop, yield_signal=self.stop):
+                published = reconcile(runner, stop=self.stop, limit=4)
             pending = PublicationJournal(runner.runtime_root).pending(1, since_us=processing_cutoff(runner.settings))
             if self.stop is not None and self.stop.is_set():
                 return {'status': 'stopping', 'published': published, 'pending_publications': bool(pending)}
@@ -83,8 +93,10 @@ class ReadableReplay:
         hints = local_change_hints(runner.runtime_root, records, names)
         # A policy upgrade must revisit completed days even when producers
         # have no new model result. Persist this selective publication version.
-        return {name: digest(['readable-retention-policy/1', POLICY, EXPORT_POLICY,
-                             VERSION if enabled(getattr(runner, 'config', {})) else None, value])
+        source_groups = enabled(getattr(runner, 'config', {}))
+        return {name: digest(['readable-retention-policy/2', POLICY, EXPORT_POLICY,
+                             VERSION if source_groups else None,
+                             READABLE_LAYOUT_POLICY if source_groups else None, value])
                 for name, value in hints.items()}
 
     def tick(self, runner):
@@ -147,7 +159,8 @@ class ReadableReplay:
                 priority = (changed & recent) or changed or (eligible & recent)
                 lane = 'changed_or_live' if priority and self.turn % 3 else 'historical_fair_share'
                 pool = priority if lane == 'changed_or_live' else eligible
-                if runner.config.get('device_day', {}).get('latest_first', False) and changed:
+                if (runner.config.get('device_day', {}).get('latest_first', False) and changed
+                        and lane == 'changed_or_live'):
                     latest = {n: 0 for n in names}
                     for record in records:
                         key = archive_name(record['camera_key'], record['recording_start_us'])
