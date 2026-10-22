@@ -175,6 +175,10 @@ class ArchiveUnifier:
         self.current_groups = set()
         self.legacy_folders = set()
         self.public_video_inventory = public_video_inventory or []
+        self.original_source_keys = set(clip_delivery.original_units(self.layout, index, []))
+        self.unassigned = {}
+        self.orphan_frames = {}
+        self.retired_video_gaps = {}
 
     def _was_public_video(self, reference):
         from ..device_day_content_paths import relocated
@@ -204,8 +208,9 @@ class ArchiveUnifier:
                         for k, v in row.items()
                         if k not in {"record", "candidate", "unit"}
                     }
-                    for row in self.values
+                    for row in self.rows.values()
                 ],
+                "orphan_scene_frames": self.orphan_frames,
                 "legacy_folders": sorted(
                     self.layout.relative(p) for p in self.legacy_folders
                 ),
@@ -266,6 +271,15 @@ class ArchiveUnifier:
             ):
                 raise ValueError("Checkpoint contains an unowned retirement path")
             self.legacy_folders.add(self.layout.root / relative)
+        for relative, references in value.get("orphan_scene_frames", {}).items():
+            parts = Path(relative).parts
+            if parts[:2] != ("ProcessedClips", "Clips") or len(parts) != 3:
+                raise ValueError("Unbound frame checkpoint escapes owned clip folders")
+            for ref in references:
+                if not ref["path"].startswith(relative + "/SceneFrames/"):
+                    raise ValueError("Unbound frame checkpoint has another owner")
+                safe_child(self.layout.root, ref["path"])
+            self.orphan_frames[relative] = references
 
     def _recover_relocated(self):
         """Import only owned sidecars preserved by durable native move intents."""
@@ -587,10 +601,6 @@ class ArchiveUnifier:
         if video and row["category"] != "NoValueNoExperimentActivity":
             from ..device_day_verification import verify_artifact_cached
 
-            if not verify_artifact_cached(self.layout.root, video):
-                raise ValueError(
-                    "Existing historical video differs from its recorded checksum"
-                )
             public = (
                 self._was_public_video(video)
                 or selection.get("historical_public_materialization")
@@ -598,6 +608,25 @@ class ArchiveUnifier:
                 or not historical_hidden
                 and not selection.get("historical_format_migration_only")
             )
+            if not verify_artifact_cached(self.layout.root, video):
+                if public:
+                    raise ValueError(
+                        "Existing historical video differs from its recorded checksum"
+                    )
+                # This artifact is already retired and has no admission to
+                # the current video selection. Keep its original expected
+                # identity and report the gap; never publish or relabel its
+                # unchecked bytes as a valid current video.
+                gap = {"metadata": self.layout.relative(path), "expected_video": video,
+                       "reason": "unadmitted_retired_video_failed_verification",
+                       "integrity_evidence": "NOT_PROVEN", "published_as_current_video": False}
+                self.retired_video_gaps[digest(gap)] = gap
+                row["meaning"]["unavailable_retired_video_reference"] = video
+                if row["interval"]["video_value"] != "selected":
+                    row["segment"]["video"] = None
+                    row["interval"].update(video_value="pending", reason=gap["reason"])
+                row["meaning"]["prior_display_category"] = document.get("display_category")
+                return row
             row["meaning"]["historical_video_reference"] = video
             if public:
                 row["segment"]["video"] = video
@@ -647,6 +676,7 @@ class ArchiveUnifier:
 
     def discover(self):
         """Read public source-bound sidecars before any relocation happens."""
+        self.retired_video_gaps = {}
         self._recover_relocated()
         root = self.layout.root
         parent = self.layout.processed / "Clips"
@@ -679,6 +709,20 @@ class ArchiveUnifier:
                     row = self._row(segment)
                     if row:
                         row["segment"]["json_path"] = segment.get("json_path")
+                if not segments and not folder.is_symlink():
+                    from ..device_day_contract import artifact
+
+                    files = sorted(p for p in folder.rglob("*") if p.is_file())
+                    if files and all(
+                        not p.is_symlink()
+                        and re.fullmatch(r"SceneFrames/[0-9.-]+\.jpe?g", p.relative_to(folder).as_posix())
+                        for p in files
+                    ):
+                        relative = self.layout.relative(folder)
+                        self.orphan_frames[relative] = [
+                            artifact(p.parent, p) | {"path": self.layout.relative(p)} for p in files
+                        ]
+                        self.legacy_folders.add(folder)
             owned = False
             for path in paths:
                 owned = self._read_candidate(path) is not None or owned
@@ -713,15 +757,46 @@ class ArchiveUnifier:
             self.rows.values(), key=lambda r: (r["segment"]["start_us"], r["key"])
         )
         units = clip_delivery.original_units(self.layout, self.index, values)
+        units = {
+            key: unit for key, unit in units.items()
+            if key in self.original_source_keys
+            or (root / unit["observed_source"]).is_file()
+        }
+        assigned = []
+        self.unassigned = {}
         for row in values:
             key, _ = clip_delivery.source_unit(row["segment"]["source_ref"])
             if key not in units:
-                raise ValueError("Historical result has no owning original collection")
-        self.values, self.units = values, units
+                if (root / row["segment"]["source_ref"]["path"]).exists():
+                    raise ValueError("Historical result has no owning original collection")
+                self.unassigned[row["key"]] = {
+                    "recording_id": row["segment"]["recording_id"],
+                    "segment_id": row["segment"]["segment_id"],
+                    "source_ref": row["segment"]["source_ref"],
+                    "saved_documents": row["meaning"],
+                    "reason": "historical_original_unavailable",
+                    "original_available": False,
+                    "model_invoked": False,
+                }
+            else:
+                assigned.append(row)
+        self.values, self.units = assigned, units
+        for folder in self.current_groups:
+            header = bounded_document(folder / "Index.json")
+            if header.get("source_unit") not in units:
+                self.legacy_folders.add(folder)
+                paired = self.layout.understanding / folder.name
+                if paired.is_dir():
+                    other = bounded_document(paired / "Understanding.json")
+                    if other.get("source_unit") == header.get("source_unit"):
+                        self.legacy_folders.add(paired)
         return {
             "originals": len(units),
-            "intervals": len(values),
+            "intervals": len(assigned),
             "legacy_folders": len(self.legacy_folders),
+            "unassigned_source_intervals": len(self.unassigned),
+            "unbound_scene_frame_folders": len(self.orphan_frames),
+            "unadmitted_retired_video_gaps": len(self.retired_video_gaps),
         }
 
     def _document(self, index, root, segment, saved, interval, record, audio_entries):
@@ -838,13 +913,42 @@ class ArchiveUnifier:
     def publish(self, *, maximum_new_videos=128, maximum_video_bytes=8 * 1024**3):
         from ..device_day import copy_verified
         from ..device_day_content import content_index
+        from ..device_day_verification import verify_artifact_cached
+
+        gaps = {
+            "recipe": RECIPE, "archive": self.layout.name,
+            "scope": "historical source bindings and unadmitted retired video artifacts",
+            "unassigned_history_evidence": "PARTIAL_EVIDENCE" if self.unassigned or self.orphan_frames or self.retired_video_gaps else "PROVEN",
+            "unassigned_source_history": list(self.unassigned.values()),
+            "unbound_scene_frames": self.orphan_frames,
+            "unadmitted_retired_video_gaps": list(self.retired_video_gaps.values()),
+            "model_invoked": False, "original_media_changed": False,
+        }
+        atomic_json(private_folder(self.layout, "ProcessedClips", "ArchiveUnification",
+                                   "SourceGaps", digest(gaps) + ".json"), gaps)
+        atomic_json(private_folder(self.layout, "ProcessedClips", "ArchiveUnification",
+                                   "SourceGaps.json"), gaps)
 
         # Discovery and its durable checkpoint precede this call. The native
         # retirement owner retains exact bytes and aliases, including sidecars
         # larger than its ordinary publication fast-path inspection cap.
         for folder in sorted(self.legacy_folders):
             if folder.is_dir():
+                filename = "Index.json" if folder.parent.name == "Clips" else "Understanding.json"
+                header_path = folder / filename
+                header = bounded_document(header_path) if header_path.is_file() else {}
+                unit = self.units.get(header.get("source_unit"))
+                if header.get("schema_version") == clip_delivery.VERSION and unit and folder.name == unit["name"]:
+                    continue
                 clip_delivery._retire(self.layout, folder)
+        frame_aliases = {}
+        for references in self.orphan_frames.values():
+            for ref in references:
+                if not verify_artifact_cached(self.layout.root, ref):
+                    raise ValueError("Unbound historical scene frame failed byte verification")
+                frame_aliases[ref["path"]] = self.layout.relative(safe_child(self.layout.root, ref["path"]))
+        if frame_aliases:
+            clip_delivery._mapping(self.layout, "ProcessedClips", frame_aliases)
         index_path = self.layout.understanding / "Index.json"
         if index_path.is_file():
             from ..device_day_contract import file_hash
