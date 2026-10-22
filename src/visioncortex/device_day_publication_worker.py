@@ -78,7 +78,12 @@ class ReadableReplay:
     @staticmethod
     def _local_hints(runner, records, names):
         """Scheduling hints only; the owning publisher still verifies facts."""
-        return local_change_hints(runner.runtime_root, records, names)
+        from .media.retained_intervals import EXPORT_POLICY, POLICY
+        hints = local_change_hints(runner.runtime_root, records, names)
+        # A policy upgrade must revisit completed days even when producers
+        # have no new model result. Persist this selective publication version.
+        return {name: digest(['readable-retention-policy/1', POLICY, EXPORT_POLICY, value])
+                for name, value in hints.items()}
 
     def tick(self, runner):
         if self.stop.is_set():
@@ -140,7 +145,7 @@ class ReadableReplay:
                 priority = (changed & recent) or changed or (eligible & recent)
                 lane = 'changed_or_live' if priority and self.turn % 3 else 'historical_fair_share'
                 pool = priority if lane == 'changed_or_live' else eligible
-                if runner.settings.get('latest_first', False) and changed:
+                if runner.config.get('device_day', {}).get('latest_first', False) and changed:
                     latest = {n: 0 for n in names}
                     for record in records:
                         key = archive_name(record['camera_key'], record['recording_start_us'])
