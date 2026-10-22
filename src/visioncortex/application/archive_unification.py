@@ -166,6 +166,18 @@ def _time(value):
     )
 
 
+def _unbound_asset(relative):
+    """Only established native clip media paths, never arbitrary user files."""
+    from ..device_day_contract import PHYSICAL_ACTION_TYPES
+
+    classes = '|'.join(''.join(part.title() for part in action.split('_'))
+                       for action in sorted(PHYSICAL_ACTION_TYPES))
+    return bool(re.fullmatch(
+        r'(?:ExperimentActivity|NoExperimentActivity|ValuableNoExperimentActivity|'
+        r'NoValueNoExperimentActivity|Clip)\.mp4|SceneFrames/[0-9.-]+\.jpe?g|'
+        r'KeyFrames/(?:'+classes+r')/EVT-[A-Fa-f0-9]+/[0-9.-]+\.jpe?g', relative))
+
+
 class ArchiveUnifier:
     """Compose the existing publication owner with saved historical documents.
 
@@ -194,6 +206,7 @@ class ArchiveUnifier:
         self.original_source_keys = set(clip_delivery.original_units(self.layout, index, []))
         self.unassigned = {}
         self.orphan_frames = {}
+        self.orphan_assets = {}
         self.retired_video_gaps = {}
 
     def _was_public_video(self, reference):
@@ -227,6 +240,7 @@ class ArchiveUnifier:
                     for row in self.rows.values()
                 ],
                 "orphan_scene_frames": self.orphan_frames,
+                "orphan_legacy_assets": self.orphan_assets,
                 "legacy_folders": sorted(
                     self.layout.relative(p) for p in self.legacy_folders
                 ),
@@ -296,6 +310,17 @@ class ArchiveUnifier:
                     raise ValueError("Unbound frame checkpoint has another owner")
                 safe_child(self.layout.root, ref["path"])
             self.orphan_frames[relative] = references
+        for relative, references in value.get("orphan_legacy_assets", {}).items():
+            if (not re.fullmatch(r'ProcessedClips/Clips/\d{2}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_'
+                                 r'(?:ExperimentActivity|NoExperimentActivity|ValuableNoExperimentActivity|'
+                                 r'NoValueNoExperimentActivity)_[a-f0-9]{8}', relative)
+                    or not references or len(references) > 20000):
+                raise ValueError("Unbound media checkpoint lacks owned native provenance")
+            for ref in references:
+                if not ref['path'].startswith(relative+'/') or not _unbound_asset(ref['path'][len(relative)+1:]):
+                    raise ValueError("Unbound media checkpoint has another owner")
+                safe_child(self.layout.root, ref['path'])
+            self.orphan_assets[relative] = references
 
     def _recover_relocated(self):
         """Import only owned sidecars preserved by durable native move intents."""
@@ -728,7 +753,8 @@ class ArchiveUnifier:
                 if not segments and not folder.is_symlink():
                     from ..device_day_contract import artifact
 
-                    files = sorted(p for p in folder.rglob("*") if p.is_file())
+                    children = list(folder.rglob("*"))
+                    files = sorted(p for p in children if p.is_file())
                     if files and all(
                         not p.is_symlink()
                         and re.fullmatch(r"SceneFrames/[0-9.-]+\.jpe?g", p.relative_to(folder).as_posix())
@@ -738,6 +764,16 @@ class ArchiveUnifier:
                         self.orphan_frames[relative] = [
                             artifact(p.parent, p) | {"path": self.layout.relative(p)} for p in files
                         ]
+                        self.legacy_folders.add(folder)
+                    elif (files and len(files) <= 20000 and not any(p.is_symlink() for p in children) and re.fullmatch(
+                            r'\d{2}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_'
+                            r'(?:ExperimentActivity|NoExperimentActivity|ValuableNoExperimentActivity|'
+                            r'NoValueNoExperimentActivity)_[a-f0-9]{8}', folder.name)
+                          and all(not p.is_symlink() and _unbound_asset(p.relative_to(folder).as_posix())
+                                  for p in files)):
+                        relative = self.layout.relative(folder)
+                        self.orphan_assets[relative] = [
+                            artifact(p.parent, p) | {'path': self.layout.relative(p)} for p in files]
                         self.legacy_folders.add(folder)
             owned = False
             for path in paths:
@@ -812,6 +848,7 @@ class ArchiveUnifier:
             "legacy_folders": len(self.legacy_folders),
             "unassigned_source_intervals": len(self.unassigned),
             "unbound_scene_frame_folders": len(self.orphan_frames),
+            "unbound_legacy_asset_folders": len(self.orphan_assets),
             "unadmitted_retired_video_gaps": len(self.retired_video_gaps),
         }
 
@@ -938,9 +975,11 @@ class ArchiveUnifier:
         gaps = {
             "recipe": RECIPE, "archive": self.layout.name,
             "scope": "historical source bindings and unadmitted retired video artifacts",
-            "unassigned_history_evidence": "PARTIAL_EVIDENCE" if self.unassigned or self.orphan_frames or self.retired_video_gaps else "PROVEN",
+            "unassigned_history_evidence": "PARTIAL_EVIDENCE" if self.unassigned or self.orphan_frames or self.orphan_assets or self.retired_video_gaps else "PROVEN",
             "unassigned_source_history": list(self.unassigned.values()),
             "unbound_scene_frames": self.orphan_frames,
+            "unbound_legacy_assets": self.orphan_assets,
+            "unbound_legacy_assets_source_binding": "NOT_PROVEN" if self.orphan_assets else "not_applicable",
             "unadmitted_retired_video_gaps": list(self.retired_video_gaps.values()),
             "model_invoked": False, "original_media_changed": False,
         }
@@ -962,7 +1001,7 @@ class ArchiveUnifier:
                     continue
                 clip_delivery._retire(self.layout, folder)
         frame_aliases = {}
-        for references in self.orphan_frames.values():
+        for references in (*self.orphan_frames.values(), *self.orphan_assets.values()):
             for ref in references:
                 if not verify_artifact_cached(self.layout.root, ref):
                     raise ValueError("Unbound historical scene frame failed byte verification")

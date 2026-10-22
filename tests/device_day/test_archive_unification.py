@@ -648,3 +648,38 @@ def test_large_retired_cv_sidecar_resumes_with_exact_video_addresses(tmp_path):
         assert all(verify_artifact(layout.root, ref) for ref in refs)
         assert file_hash(safe_child(layout.root, layout.relative(metadata))) == checksum
     assert source.read_bytes() == original and layout.index.read_bytes() == canonical
+
+
+@pytest.mark.parametrize('unexpected', [False, True])
+def test_unbound_native_media_keeps_exact_bytes_without_inventing_an_original(tmp_path, unexpected):
+    from visioncortex.device_day_contract import read_json
+
+    layout, index, config, source, _ = case(tmp_path)
+    folder = layout.processed / 'Clips/11-24-10_11-24-11_ExperimentActivity_12345678'
+    references = []
+    for relative in ['ExperimentActivity.mp4', 'SceneFrames/00-00-01.000.jpg',
+                     'KeyFrames/ObjectMovement/EVT-1234ABCD/00-00-01.000.jpg']:
+        p = folder / relative
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b'synthetic-unbound-media-'+relative.encode())
+        references.append(artifact(layout.root, p))
+    if unexpected:
+        (folder / 'Unrecognized.txt').write_text('Keep unrelated files in place')
+    original = source.read_bytes()
+    unifier = ArchiveUnifier(config, layout.name, index)
+    assert unifier.discover()['unbound_legacy_asset_folders'] == (0 if unexpected else 1)
+    checkpoint = tmp_path / 'Checkpoint.json'
+    unifier.checkpoint(checkpoint)
+    unifier.publish()
+    assert folder.exists() == unexpected
+    assert all(verify_artifact(layout.root, ref) for ref in references)
+    if not unexpected:
+        gaps = read_json(layout.processed / '.Evidence/ArchiveUnification/SourceGaps.json')
+        assert gaps['unbound_legacy_assets_source_binding'] == 'NOT_PROVEN'
+        assert gaps['unbound_legacy_assets'][layout.relative(folder)] == sorted(references, key=lambda r: r['path'])
+        resumed = ArchiveUnifier(config, layout.name, read_json(layout.index))
+        resumed.restore(checkpoint)
+        assert resumed.discover()['originals'] == 1
+        resumed.publish()
+        assert all(verify_artifact(layout.root, ref) for ref in references)
+    assert source.read_bytes() == original
