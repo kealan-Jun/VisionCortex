@@ -432,3 +432,41 @@ def test_prefixed_capture_uses_its_own_metadata_and_preserves_physical_source_na
     ]
     assert unit["name"].startswith("11-24-10_11-26-22_")
     assert unit["observed_source"] == "MetaData/112410/hivebench_0001_rgb.mp4"
+
+
+def test_prefixed_flat_archive_uses_full_rgb_extent_before_partial_processing_window(tmp_path):
+    from visioncortex.application.clip_delivery import original_units
+
+    layout = DeviceDayLayout(tmp_path, "camera_cam01", 1792639450000000)
+    video = layout.root / "MetaVideo/11-24-09_11-26-30.mp4"
+    video.parent.mkdir(parents=True)
+    video.write_bytes(b"original")
+    reference = artifact(layout.root, video)
+    record = {"recording_id": "partial", "start_us": 1792639450000000,
+              "end_us": 1792639451000000,
+              "sources": [{"kind": "video", "retained": reference}]}
+    meta = video.parent / "Metadata" / video.stem / "Video/CodexProbePlainMeta.json"
+    atomic_json(meta, {"camera_key": "camera_cam01",
+                      "recording_window_first_valid_rgb_global_us": 1792639450000000,
+                      "recording_window_last_valid_rgb_global_us": 1792639582000000})
+    before = {p: p.read_bytes() for p in (video, meta)}
+    unit = next(iter(original_units(layout, {"recordings": [record]}, []).values()))
+    assert unit["name"].startswith("11-24-10_11-26-22_")
+    assert unit["time_basis"] == "recorded_rgb_frame_extent"
+    assert all(p.read_bytes() == content for p, content in before.items())
+    atomic_json(meta.with_name("AnotherMeta.json"), {"camera_key": "camera_cam01"})
+    with pytest.raises(ValueError, match="ambiguous"):
+        original_units(layout, {"recordings": [record]}, [])
+
+
+def test_prefixed_flat_archive_rejects_metadata_for_another_camera(tmp_path):
+    from visioncortex.application.clip_delivery import original_units
+
+    layout = DeviceDayLayout(tmp_path, "camera_cam01", 1792639450000000)
+    video = layout.root / "MetaVideo/11-24-09_11-26-30.mp4"
+    video.parent.mkdir(parents=True)
+    video.write_bytes(b"original")
+    atomic_json(video.parent / "Metadata" / video.stem / "Video/ProbeMeta.json",
+                {"camera_key": "other_cam02"})
+    with pytest.raises(ValueError, match="another device/camera"):
+        original_units(layout, {"recordings": []}, [])

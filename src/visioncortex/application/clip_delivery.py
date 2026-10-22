@@ -59,6 +59,15 @@ def _original_bounds(layout, unit):
     if len(parts) >= 3 or parts[0] == 'MetaVideo':
         if len(parts) == 2:
             meta = path.parent/'Metadata'/path.stem/'Video/Meta.json'
+            if not meta.is_file():
+                # Earlier archived captures retain their recorder prefix in
+                # PascalCase. Their frame extent still owns the whole file;
+                # a historical processing window can cover only part of it.
+                candidates = list(meta.parent.glob('*Meta.json'))
+                if len(candidates) > 1:
+                    raise ValueError('Archived recorder time metadata is ambiguous')
+                if candidates:
+                    meta = candidates[0]
         else:
             meta = path.parent/'meta.json'
             if not meta.is_file():
