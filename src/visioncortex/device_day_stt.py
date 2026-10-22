@@ -23,14 +23,26 @@ def transcript_text(recording, source, comments, outcome, *, audio=None):
     return '\n'.join(lines) + '\n'
 
 
-def audio_windows(duration, maximum):
+def audio_windows(duration, maximum, *, offset=0.0):
     count = math.ceil(duration / maximum)
     edges = [min(duration, index * maximum) for index in range(count + 1)]
     # Container padding can leave a millisecond tail after a nominal 15-minute
     # recording. Split the final two windows evenly, preserving every sample.
     if count > 1 and edges[-1] - edges[-2] < 1:
         edges[-2] = (edges[-3] + edges[-1]) / 2
-    return list(zip(edges, edges[1:], strict=False))
+    windows = []
+    for start, end in zip(edges, edges[1:], strict=False):
+        left, right = offset + start, offset + end
+        # Adding a fractional replay origin can make an exactly bounded
+        # window subtract to maximum + one ULP. Keep the conservative provider
+        # gate unchanged; move only that representation's upper edge inward.
+        # This does not change its microsecond or decoded audio-sample bound.
+        if right - left > maximum:
+            right = math.nextafter(right, left)
+        if not 0 < right - left <= maximum:
+            raise ValueError('Audio window cannot fit its configured budget')
+        windows.append((left, right))
+    return windows
 
 
 def usable_audio_windows(audio, duration, maximum):
@@ -58,10 +70,10 @@ def usable_audio_windows(audio, duration, maximum):
         if right <= cursor or left >= duration:
             continue
         if left > cursor:
-            windows.extend((cursor+a, cursor+b) for a, b in audio_windows(left-cursor, maximum))
+            windows.extend(audio_windows(left-cursor, maximum, offset=cursor))
         cursor = max(cursor, right)
     if cursor < duration:
-        windows.extend((cursor+a, cursor+b) for a, b in audio_windows(duration-cursor, maximum))
+        windows.extend(audio_windows(duration-cursor, maximum, offset=cursor))
     return windows
 
 
