@@ -96,6 +96,17 @@ def render_page(title, template, contract, contents, *, scope_label='单设备�
 <main><header><img src="{brand_logo_data_url()}" alt="VisionCortex"><h1>{text(title)}</h1><p>{text(scope_label)} · PARTIAL_EVIDENCE</p></header>{sections}<footer>{text(contract['template_id'])} · 模板 SHA-256：{text(contract['template_sha256'])}<p>本次页面排版不新增模型调用；片段理解与全天综合的实际调用及用量见各自回执。</p></footer></main></html>'''
 
 
+def _display_clips(index, segment):
+    return [row for row in (index.get('readable_content') or {}).get('multimodal', [])
+            if row.get('clip_delivery_version') and row.get('candidate_segment_id') == segment['segment_id']]
+
+
+def _display_label(index, segment):
+    clips = _display_clips(index, segment)
+    labels = sorted({row['display_label'] for row in clips})
+    return '、'.join(labels) if labels else segment['activity_label']
+
+
 def day_entries(index):
     """Pure persisted-window projection shared by the day publisher and proof."""
     from .device_day_narrative import effective_meaning, report_candidates
@@ -105,13 +116,14 @@ def day_entries(index):
     for segment in report_candidates(index):
         meaning = meanings.get(segment['segment_id'])
         recording = records.get(segment['recording_id'], {})
-        label = f'{clock(segment["start_us"])}—{clock(segment["end_us"])} · {segment["activity_label"]}'
+        label = f'{clock(segment["start_us"])}—{clock(segment["end_us"])} · {_display_label(index, segment)}'
         result.append({'segment_id': segment['segment_id'], 'label': label,
             'start_us': segment['start_us'], 'end_us': segment['end_us'],
             'understanding_status': (meaning or {}).get('status', 'completed' if meaning else 'pending'),
             'understanding': meaning, 'key_frames': segment['key_frames'], 'scene_frames': segment['scene_frames'],
             'source_ref': segment['source_ref'], 'segment_json': segment['json_path'],
-            'transcription': recording.get('transcription'), 'audio': recording.get('audio')})
+            'transcription': recording.get('transcription'), 'audio': recording.get('audio'),
+            **({'clips': _display_clips(index, segment)} if _display_clips(index, segment) else {})})
     return result
 
 
@@ -129,7 +141,15 @@ def day_document(layout, index, synthesis, *, readable=None, entries=None, repor
         'sections': day_template['sections'], 'input_index_digest': digest(index)}
 
 
-def render_day(layout, index):
+def publish_day(config, layout, index):
+    """Select output formats while retaining the legacy two-argument port."""
+    from .application.archive_documents import html_enabled
+    if html_enabled(config):
+        return render_day(layout, index)
+    return render_day(layout, index, html_enabled=False)
+
+
+def render_day(layout, index, *, html_enabled=True):
     from .device_day_narrative import day_record, effective_meaning, report_candidates
     readable = day_record(index, layout.root)
     segments = report_candidates(index)
@@ -143,12 +163,19 @@ def render_day(layout, index):
     by_recording = {item["recording_id"]: item for item in index["recordings"]}
     sections, briefs, context_rows, uncertainty_rows, execution_rows = [], [], [], [], []
     daily_entries = day_entries(index)
+    if not html_enabled:
+        from .application.archive_documents import retire_day_html
+        with defer_yield():
+            atomic_json(layout.reports/'LaboratoryDailyReport.json',
+                        day_document(layout, index, synthesis, readable=readable, entries=daily_entries))
+            retire_day_html(layout)
+        return
     provider_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
     usage_unknown = 0
     for segment in segments:
         check_yield(checkpoint=False)
         understanding = by_segment.get(segment["segment_id"])
-        label = f'{clock(segment["start_us"])}—{clock(segment["end_us"])} · {segment["activity_label"]}'
+        label = f'{clock(segment["start_us"])}—{clock(segment["end_us"])} · {_display_label(index, segment)}'
         paragraphs = []
         recording = by_recording.get(segment["recording_id"], {})
         for ref in recording.get("audio", {}).get("artifacts", []):
@@ -210,6 +237,11 @@ def render_day(layout, index):
             source_url = '../' + quote(segment['source_ref']['path'], safe='/')
             video_link = f'<a href="{source_url}#t={segment["start_ms"] / 1000},{segment["end_ms"] / 1000}">打开原片对应区间</a>'
         metadata_link = material_link(segment["json_path"], "片段JSON与素材索引")
+        delivered = _display_clips(index, segment)
+        if delivered:
+            video_link = ' · '.join(material_link(row['video'], row['display_label'])
+                                    for row in delivered if row.get('video')) or '当前区间没有已发布的留存视频'
+            metadata_link = ' · '.join(material_link(row['metadata'], row['display_label']+'记录') for row in delivered)
         sections.append(f'<article><h3>{text(label)}</h3>{"".join(paragraphs)}'
                         f'<div class="frames">{"".join(frames)}</div><p>{video_link} · {metadata_link}</p></article>')
         briefs.append(f'<article><h3>{text(label)}</h3>{"".join(paragraphs)}<p>{video_link} · {metadata_link}</p>'

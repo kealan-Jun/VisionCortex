@@ -79,10 +79,12 @@ class ReadableReplay:
     def _local_hints(runner, records, names):
         """Scheduling hints only; the owning publisher still verifies facts."""
         from .media.retained_intervals import EXPORT_POLICY, POLICY
+        from .application.clip_delivery import VERSION, enabled
         hints = local_change_hints(runner.runtime_root, records, names)
         # A policy upgrade must revisit completed days even when producers
         # have no new model result. Persist this selective publication version.
-        return {name: digest(['readable-retention-policy/1', POLICY, EXPORT_POLICY, value])
+        return {name: digest(['readable-retention-policy/1', POLICY, EXPORT_POLICY,
+                             VERSION if enabled(getattr(runner, 'config', {})) else None, value])
                 for name, value in hints.items()}
 
     def tick(self, runner):

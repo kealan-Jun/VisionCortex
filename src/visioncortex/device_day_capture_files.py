@@ -114,10 +114,10 @@ def publish_capture_catalog(runner, layout):
                         changed = True
             if changed:
                 atomic_json(layout.index, index)
-                from .device_day_reports import render_day
+                from .device_day_reports import publish_day
                 from .device_day_night_schedule import paused_stages
                 if 'report' not in paused_stages(runner.config):
-                    render_day(layout, index)
+                    publish_day(runner.config, layout, index)
     except BlockingIOError:
         return
 

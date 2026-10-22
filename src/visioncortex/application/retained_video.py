@@ -288,7 +288,8 @@ def published_material(layout, segment):
         reference = read_json(pointer).get('receipt')
         if not reference or not verify_artifact_cached(layout.root, reference):
             return None
-        value = read_json(safe_child(layout.root, reference['path']))
+        from ..device_day_content_paths import aliases, public_references
+        value = public_references(read_json(safe_child(layout.root, reference['path'])), aliases(layout.root))
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return None
     expected = {'source_ref': segment['source_ref'], 'source_start_ms': segment['start_ms'],
@@ -477,7 +478,8 @@ def publish_selected(config, index, *, recording_id=None, maximum_new_videos=1, 
                 with resource_slot(config, 'cpu'), resource_slot(config, 'storage'):
                     result = materialize(layout, source_path(layout, {'retained': child['source_ref']}),
                         child, meaning, record, index.get('context'), selection=selection, candidate=candidate,
-                        evidence_validator=evidence_validator)
+                        evidence_validator=evidence_validator,
+                        private_delivery=config.get('device_day', {}).get('clip_delivery') == 'source_recording_v2')
                 if not result.get('video') or not verify_artifact_cached(layout.root, result['video']):
                     raise ValueError('Selected interval lacks a verified publication artifact')
                 manifest = private_folder(layout, 'ProcessedClips', 'Retention', child['segment_id'],
@@ -515,7 +517,7 @@ def publish_selected(config, index, *, recording_id=None, maximum_new_videos=1, 
 
 
 def materialize(layout, source, segment, meaning, recording, context=None, *, segments=None,
-                extractor=None, selection=None, candidate=None, evidence_validator=None):
+                extractor=None, selection=None, candidate=None, evidence_validator=None, private_delivery=False):
     """The caller owns source resolution and verified storage admission.
 
     Only a positively selected interval creates a new derived video.
@@ -523,7 +525,6 @@ def materialize(layout, source, segment, meaning, recording, context=None, *, se
     """
     from ..video_io import probe_video
     from ..device_day_content_paths import clip_name, layout_contract, private_folder
-    from ..device_day_contract import safe_child
     from ..device_day_verification import verify_artifact_cached
     extractor = extractor or source_stream_clip
     source = Path(source)
@@ -575,7 +576,8 @@ def materialize(layout, source, segment, meaning, recording, context=None, *, se
     from ..device_day_write_guard import guarded_mkdir, verify_before_submission
     guarded_mkdir(folder)
     activity = layout_contract()['activities'][segment['activity']]
-    target = safe_child(layout.root, 'ProcessedClips/Clips/' + clip_name(segment) + '/' + activity + '.mp4')
+    from ..device_day_content_paths import producer_clip_folder
+    target = producer_clip_folder(layout, clip_name(segment), private=private_delivery)/(activity+'.mp4')
     if target.exists():
         # Recover only our exact, durable pre-rename intent. An arbitrary
         # existing clip or an unrelated source/window must never be adopted.

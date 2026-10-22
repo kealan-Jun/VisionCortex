@@ -909,7 +909,9 @@ class DeviceDayModels:
                         return datetime.fromtimestamp(capture_us(clock_mapping, value) / 1e6,
                                                       ZoneInfo(TIMEZONE)).strftime("%H-%M-%S")
                     folder_name = f"{clock_label(left)}_{clock_label(right)}_{ACTIVITY_FOLDERS[activity]}_{identifier[-8:]}"
-                    folder = layout.processed / "Clips" / folder_name
+                    from .application.clip_delivery import enabled as grouped_delivery
+                    from .device_day_content_paths import producer_clip_folder
+                    folder = producer_clip_folder(layout, folder_name, private=grouped_delivery(self.config))
                     count = max(3, self.settings.get("inactive_frames", 8))
                     frame_refs = self._frames(layout, source, left, right, count, folder / "SceneFrames", reader=reader)
                     for frame in frame_refs:

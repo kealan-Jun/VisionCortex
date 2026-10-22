@@ -360,6 +360,12 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError("Capture source deletion is suspended by user instruction")
     if type(settings.get('raw_originals_read_only', False)) is not bool:
         raise ValueError('raw_originals_read_only must be boolean')
+    if type(settings.get('archive_html_enabled', True)) is not bool:
+        raise ValueError('archive_html_enabled must be boolean')
+    if settings.get('clip_delivery') not in (None, 'source_recording_v2'):
+        raise ValueError('Unknown device_day.clip_delivery contract')
+    if type(settings.get('preserve_completed_on_recipe_change', False)) is not bool:
+        raise ValueError('preserve_completed_on_recipe_change must be boolean')
     for name in ("vision_workers", "stt_workers", "understanding_workers", "inactive_frames", "active_frames_per_window"):
         value = settings.get(name, 2 if name.endswith("workers") else 8)
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:

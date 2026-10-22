@@ -172,12 +172,19 @@ def summarize(name, index, config, *, report_exists=False, understanding_exists=
         {'segments': list(segments.values()), 'understandings': []}) if interval is not None]
     expected_paths = {child['segment_id']: ('ProcessedClips/Clips/' + clip_name(child) + '/'
         + layout_contract()['activities'][child['activity']] + '.mp4') for child, _ in views}
+    from .device_day_content_paths import aliases, relocated
+    mapping = aliases(root) if root is not None else {}
+    from .application.clip_delivery import enabled as grouped_delivery
+    expected_paths = {key: {relocated(path, mapping), *({relocated(path.replace(
+        'ProcessedClips/Clips/', 'ProcessedClips/.Evidence/NativeClips/', 1), mapping)}
+        if grouped_delivery(config) else set())} for key, path in expected_paths.items()}
     guarded = []
     for candidate in segments.values():
         rows = []
         for interval in candidate.get('retention_intervals', []):
             receipt = interval.get('receipt') or {}
-            valid = ((interval.get('video') or {}).get('path') == expected_paths.get(interval.get('segment_id'))
+            video_path = (interval.get('video') or {}).get('path')
+            valid = (video_path is not None and relocated(video_path, mapping) in expected_paths.get(interval.get('segment_id'), set())
                 and interval.get('processing_status') == 'completed'
                 and isinstance(receipt.get('path'), str) and receipt['path'].startswith('ProcessedClips/')
                 and receipt['path'].endswith('.json'))
@@ -193,10 +200,10 @@ def summarize(name, index, config, *, report_exists=False, understanding_exists=
         expected = expected_paths[child['segment_id']]
         available = (root is not None and interval['video_value'] == 'selected'
             and interval.get('processing_status') == 'completed' and proof.get('status') == 'PROVEN'
-            and (child.get('video') or {}).get('path') == expected)
+            and relocated((child.get('video') or {}).get('path') or '', mapping) in expected)
         reason = ('actual_files_not_checked' if root is None else
                   'processing_not_completed' if interval.get('processing_status') != 'completed' else
-                  'selected_path_not_frozen_clip' if (child.get('video') or {}).get('path') != expected else
+                  'selected_path_not_frozen_clip' if relocated((child.get('video') or {}).get('path') or '', mapping) not in expected else
                   proof.get('reason', 'exact_export_not_verified'))
         intervals.append({key: child.get(key) for key in ('segment_id', 'candidate_segment_id',
             'recording_id', 'start_us', 'end_us', 'start_ms', 'end_ms', 'source_ref', 'json_path', 'key_frames')} | {
@@ -361,8 +368,12 @@ class ArchiveOverview:
         data['archive_root'] = str(runner.archive_root.resolve())
         body = render(data).encode()
         atomic_json(runner.runtime_root / 'ArchiveOverview.json', data)
-        atomic_bytes(runner.runtime_root / 'ArchiveOverview.html', body)
-        atomic_bytes(runner.archive_root / 'Readme.html', body)
+        from .application.archive_documents import html_enabled, publish_guide
+        if html_enabled(runner.config):
+            atomic_bytes(runner.runtime_root / 'ArchiveOverview.html', body)
+            atomic_bytes(runner.archive_root / 'Readme.html', body)
+        else:
+            publish_guide(runner.config)
         # Rebuild one absent derived index from existing canonical receipts on
         # this independent worker. Never rerun a model or fabricate a completion.
         from .device_day_recovery import repair_missing_index

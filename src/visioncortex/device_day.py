@@ -298,6 +298,8 @@ class DeviceDayRunner:
         from .device_day_queue import DeviceDayQueue
         self.queues = {stage: DeviceDayQueue(self.runtime_root / f"queue-{stage}.sqlite3",
                                            latest_first=self.settings.get('latest_first', False),
+                                           preserve_completed_on_recipe_change=self.settings.get(
+                                               'preserve_completed_on_recipe_change', False),
                                            scheduling=self.settings.get('scheduling') if stage == 'understanding' else None)
                        for stage in STAGES}
         self.queue = self.queues["vision"]
@@ -767,7 +769,7 @@ class DeviceDayRunner:
                         # receipt. It never waits for this aggregate stage.
                         self.refresh_index(layout, recording_id=recording["recording_id"])
                         receipt = {"artifacts": [],
-                                   "report": layout.relative(layout.reports / "LaboratoryDailyReport.html")}
+                                   "report": layout.relative(layout.reports / ("LaboratoryDailyReport.html" if self.settings.get("archive_html_enabled", True) else "LaboratoryDailyReport.json"))}
                     receipt.update(schema_version=VERSION, key=key, stage=current, status="completed",
                                    recording_id=recording["recording_id"], completed_at=now(),
                                    wall_seconds=round(time.perf_counter() - started, 6))
@@ -883,7 +885,7 @@ class DeviceDayRunner:
             return self._guarded_refresh_index(layout, recording_id=recording_id)
 
     def _guarded_refresh_index(self, layout, *, recording_id=None):
-        from .device_day_reports import render_day
+        from .device_day_reports import publish_day
         from .receipt_projection import ProjectionDeferred, ProjectionGenerationChanged
         from .runtime_control import check_yield
         check_yield(checkpoint=False)
@@ -1047,6 +1049,13 @@ class DeviceDayRunner:
                         # before any whole-day synthesis or background scan.
                         index['readable_content'] = publish_content(self.config, publication_index)
                         publication_index['readable_content'] = index['readable_content']
+                        from .application.clip_delivery import enabled as clip_delivery_enabled
+                        if clip_delivery_enabled(self.config):
+                            # Relocation aliases preserve native receipts; file
+                            # consumers receive the actual current destinations.
+                            current_aliases = aliases(layout.root)
+                            index = public_references(index, current_aliases)
+                            publication_index = public_references(publication_index, current_aliases)
                     cached_path = self.runtime_root / 'DayTimeline' / f'{layout.name[:10]}.json'
                     if cached_path.is_file():
                         try:
@@ -1079,7 +1088,7 @@ class DeviceDayRunner:
                     published(self.config, published_records)
                     from .device_day_night_schedule import paused_stages
                     if 'report' not in paused_stages(self.config):
-                        render_day(layout, publication_index)
+                        publish_day(self.config, layout, publication_index)
                         from .application.field_event_consumer import consume_device_index
                         consume_device_index(self.config, index, layout.name)
                     return True

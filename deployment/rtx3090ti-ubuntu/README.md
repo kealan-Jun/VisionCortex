@@ -74,6 +74,17 @@ Web 与 worker 按配置的角色运行；认证、监听地址及跨机访问�
 
 ## 验收与回退
 
+2026-10-22 用户明确的归档规则通过 `device_day.clip_delivery: source_recording_v2`
+启用：一段原片对应一个 `ProcessedClips/Clips/<原片>/` 和一个
+`MultimodalUnderstanding/<原片>/`，多个区间是目录内的多个文件。
+新候选和导出中间文件写入隐藏证据区，公开目录由发布服务维护。
+`device_day.archive_html_enabled: false` 停止公开 HTML，根目录说明为
+`DataRetentionGuide.docx`，结果和日报使用 JSON。旧派生文件可恢复保留，采集原件不动。
+切换源码时通过逐回执的明确检查点保留已完成结果，并设置
+`preserve_completed_on_recipe_change: true` 保留同来源已完成队列的原修订和预算；
+此调度设置不会绕过实际来源、执行身份及产物校验，也不会重发未知付费请求。
+
+
 2026-10-22 用户明确的生产顺序是按采集时间倒序，最新就绪分片优先。
 `latest_first: true` 优先于相机轮转、等待时长和任务类别成本；文件发布及日报的有变更输入也按此顺序选择。
 连续 CV 服务保留有上限的执行池，每轮继续接纳新片段、接续空闲槽位，并保持每个运行任务的独立租约和心跳；关闭时先保存运行进度。

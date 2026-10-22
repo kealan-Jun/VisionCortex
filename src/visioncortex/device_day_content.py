@@ -424,9 +424,14 @@ def content_index(archive, directory, entries):
     if directory == 'MultimodalUnderstanding':
         from collections import Counter
         candidates = [row for row in entries if row.get('record_scope') != 'retention_interval']
+        if any(row.get('clip_delivery_version') for row in entries):
+            # Candidate execution is private; one or more public intervals
+            # still belong to that one original preprocessing candidate.
+            candidates = list({row['candidate_segment_id']: row for row in entries}.values())
         counts = Counter(row['status'] for row in candidates)
         summary = {'理解进度': {'片段总数': len(candidates),
-            '留存区间记录数': len(entries)-len(candidates), '已返回结果': counts['completed'],
+            '留存区间记录数': (len(entries) if any(row.get('clip_delivery_version') for row in entries)
+                             else len(entries)-len(candidates)), '已返回结果': counts['completed'],
             '部分返回': counts['partial'], '已提交待确认': counts['submitted_unknown'], '各状态片段数': dict(counts),
             '说明': '按下方 content 路径打开对应片段的 Understanding.json；只有实际返回的模型观察才展示步骤内容。'}}
     return {**summary, 'archive': archive, 'device': archive[11:], 'date': archive[:10],
@@ -450,8 +455,16 @@ def publish_content(config, index):
         if not record.get('start_us') or not record.get('end_us'):
             continue
         audio_entries.append(publish_transcript(config, index['archive'], record, index.get('context')))
+    from .application.clip_delivery import enabled as clip_delivery_enabled
+    clip_progress = None
+    if clip_delivery_enabled(config):
+        from .application.clip_delivery import publish
+        scoped = index | {'recordings': list(records.values()),
+            'segments': [row for row in index.get('segments', []) if row['recording_id'] in records]}
+        visual_entries, clip_progress = publish(config, scoped, audio_entries,
+            document_builder=segment_documents, writer=_write, entry_builder=visual_entry)
     from .device_day_retention_projection import interval_views
-    for segment, source_meaning, interval in interval_views(index):
+    for segment, source_meaning, interval in (() if clip_delivery_enabled(config) else interval_views(index)):
         if segment['recording_id'] not in records:
             continue
         from .device_day_content_paths import clip_name, understanding_relative
@@ -469,4 +482,5 @@ def publish_content(config, index):
         visual_entries.append(visual_entry(value, relative))
     for directory, entries in [('Comment', audio_entries), ('MultimodalUnderstanding', visual_entries)]:
         _write(root / directory / 'Index.json', content_index(index['archive'], directory, entries))
-    return {'audio': audio_entries, 'multimodal': visual_entries, 'digest': digest([audio_entries, visual_entries])}
+    return {'audio': audio_entries, 'multimodal': visual_entries, 'digest': digest([audio_entries, visual_entries]),
+            **({'clip_delivery': clip_progress} if clip_progress is not None else {})}
