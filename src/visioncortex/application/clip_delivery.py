@@ -51,6 +51,49 @@ def _display_category(kind):
     return 'NoExperimentActivity' if kind in {'ActivityPendingClassification', 'PendingValueReview'} else kind
 
 
+def _historical_camera_binding(layout, unit, meta, value):
+    """Verify the established LabVideo alias against its paired source receipts.
+
+    These old archives intentionally have a directory/view identity distinct
+    from the physical recorder. A similar name or a foreign camera alone is
+    never enough: both retained source descriptors must bind the same capture,
+    and the original recorder metadata must still match its recorded bytes.
+    """
+    alias = re.fullmatch(r'lab-video-([13])', layout.name[11:])
+    if not alias:
+        return None
+    from ..device_day_contract import artifact
+
+    for record in unit['recordings']:
+        videos = [s for s in record.get('sources', []) if s.get('kind') == 'video'
+                  and s.get('retained', {}).get('path') == unit['observed_source']]
+        for video in videos:
+            if any(video.get(k) != video['retained'].get(k) for k in ('sha256', 'size_bytes')):
+                continue
+            original = PurePosixPath(video.get('original_path', ''))
+            tail = original.parts[-4:]
+            if (len(tail) != 4 or tail[:2] != ('lab_video', layout.name[:10] + '-' + alias[1])
+                    or tail[3] != 'rgb.mp4' or not re.fullmatch(r'\d{6}', tail[2])):
+                continue
+            camera = value.get('camera_key')
+            if (not isinstance(camera, str)
+                    or value.get('recording_relative_path') != f'{camera}/{layout.name[:10]}/{tail[2]}'):
+                continue
+            for sidecar in record.get('sources', []):
+                reference = sidecar.get('retained', {})
+                if (sidecar.get('kind') != 'sidecar' or reference.get('path') != layout.relative(meta)
+                        or PurePosixPath(sidecar.get('original_path', '')) != original.with_name('meta.json')
+                        or any(sidecar.get(k) != reference.get(k) for k in ('sha256', 'size_bytes'))):
+                    continue
+                current = artifact(layout.root, meta)
+                if any(current.get(k) != reference.get(k) for k in ('path', 'size_bytes', 'sha256')):
+                    raise ValueError('Historical camera binding metadata checksum differs from its source receipt')
+                return {'recipe': 'lab-video-retained-source-camera-binding/1',
+                        'archive_camera_key': layout.name[11:], 'recorder_camera_key': camera,
+                        'metadata': current, 'recording_id': record['recording_id']}
+    return None
+
+
 def _original_bounds(layout, unit):
     """Actual recorder bounds, never the nominal segment end or selected action."""
     path = layout.root/unit['observed_source']
@@ -87,7 +130,10 @@ def _original_bounds(layout, unit):
             if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
                 raise ValueError('Recorder time metadata changed during projection')
             if value.get('camera_key') and value['camera_key'] != layout.name[11:]:
-                raise ValueError('Recorder time metadata belongs to another device/camera')
+                binding = _historical_camera_binding(layout, unit, meta, value)
+                if binding is None:
+                    raise ValueError('Recorder time metadata belongs to another device/camera')
+                unit['recorder_identity_binding'] = binding
             unit['capture_session_id'] = value.get('recording_session_id')
             unit['capture_segment_index'] = value.get('global_segment_index')
             start = value.get('recording_window_first_valid_rgb_global_us')
@@ -703,6 +749,7 @@ def publish(config, index, audio_entries, *, document_builder, writer, entry_bui
             'original_range_is_continuous_coverage': False,
             'capture_session_id': unit.get('capture_session_id'),
             'capture_segment_index': unit.get('capture_segment_index'),
+            'recorder_identity_binding': unit.get('recorder_identity_binding'),
             'processing_windows': [{'recording_id': r['recording_id'], 'start_us': r.get('start_us'),
                                     'end_us': r.get('end_us')} for r in unit['recordings']],
             'capture_name': unit['capture_name'], 'display_category': unit['category'],

@@ -23,6 +23,12 @@ Comment/
 原设备编号保存在 `recorder_camera_key` 和原生元数据中；视频时间、录音及 CSV 不改写。
 同一来源的第一／第三人称继续进入现有跨视角分析；不同实验室不会仅因会话号或时间相同而配对。
 
+历史归档的完整原片时间仍取自对应的原生元数据。读取物理设备号与
+`lab-video-1/3` 处理机位不同时，必须有同一原片的视频、元数据来源描述共同指向
+相同的日期／视角／采集目录，且元数据字节校验值与原留存记录一致。
+输出 JSON 保留 `recorder_identity_binding` 说明两种身份的关系；这不更改归档机位名，
+也不允许将普通设备日中的其他设备元数据用于命名。
+
 运行配置 `configs/rtx3090ti-ubuntu-production.yaml` 中：
 
 - `collection_ingest.additional_camera_directories` 将 `lab_video` 加入现有监控。
