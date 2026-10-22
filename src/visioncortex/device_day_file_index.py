@@ -547,7 +547,9 @@ class FileIndexPublisher:
         # do not require a video, a person binding, or the HTTP companion.
         from .device_day_timeline import day_bounds
         photo_root = Path(self.config.get('collection_ingest', {}).get('source_root', self.runtime))
-        for camera in self.config.get('collection_ingest', {}).get('camera_role_map', {}):
+        photo_cameras = set(self.config.get('collection_ingest', {}).get('camera_role_map', {}))
+        photo_cameras.update(name[11:] for name in names)
+        for camera in photo_cameras:
             try:
                 directory = safe_child(photo_root, 'voice_photos/' + camera)
                 if not directory.is_dir():
@@ -595,10 +597,15 @@ class FileIndexPublisher:
                 photo_path = self.runtime/'CapturePhotos'/f'{name}.json'
                 photos = photo_indexes.get(name) or (read_json(photo_path) if photo_path.is_file() else {})
                 import time
-                if (name[11:] in self.config.get('collection_ingest', {}).get('camera_role_map', {})
-                        and time.time() - photos.get('observed_at', 0) >= 30):
+                if name[11:] in photo_cameras and time.time() - photos.get('observed_at', 0) >= 30:
                     from .device_day_time_lookup import refresh_photo_index
-                    refresh_photo_index(self.config, name[11:], name[:10])
+                    # Known device/day identity authorizes photo lookup. A
+                    # photo reference needs neither a model view role nor a
+                    # person binding. This local catalog is not a role grant.
+                    from copy import deepcopy
+                    photo_config = deepcopy(self.config)
+                    photo_config['collection_ingest'].setdefault('camera_role_map', {}).setdefault(name[11:], None)
+                    refresh_photo_index(photo_config, name[11:], name[:10])
                     photos = read_json(photo_path)
                 for device in photos.get('devices', []):
                     stamps = [p['capture_us'] for p in device.get('photos', [])]

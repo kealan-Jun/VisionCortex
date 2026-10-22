@@ -64,3 +64,16 @@ def test_photo_scan_error_is_not_presented_as_missing_input(tmp_path):
     value = build_file_index(config, {'archive': NAME, 'recordings': [], 'segments': []},
                              {'observed_at': 1, 'devices': [], 'photo_errors': [{'error_type': 'OSError'}]})
     assert value['photo_index_status'] == 'unavailable'
+
+
+def test_observed_unbound_device_gets_photo_state_without_assigning_a_role(tmp_path):
+    config = settings(tmp_path)
+    config['collection_ingest']['camera_role_map'] = {}
+    runtime = Path(config['storage']['local_runtime_root'])/'device-day'
+    observe(runtime, {'recordings': [{'recording_id': 'slice', 'camera_key': CAMERA,
+        'recording_start_us': START, 'recording_end_us': START+10000000}]})
+    root = Path(config['storage']['archive_root'])/NAME
+    atomic_json(root/'ProcessedClips/Index.json', {'archive': NAME, 'recordings': [], 'segments': []})
+    assert not FileIndexPublisher(config).tick(archives=[NAME])['errors']
+    assert read_json(root/'Comment/TimeIndex.json')['photo_index_status'] == 'no_input'
+    assert config['collection_ingest']['camera_role_map'] == {}
