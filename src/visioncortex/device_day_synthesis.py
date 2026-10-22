@@ -302,7 +302,7 @@ def current_synthesis(layout, index):
     if index['archive'] != layout.name:
         return {'status': 'stale_inputs_changed', '说明': '日报与当前设备日身份不一致，不能替代当前相机观察。'}
     path = layout.reports/'LaboratoryDailyReport.json'
-    errors, history = [], []
+    errors, history, asof = [], [], None
     def rejected(candidate, exc):
         errors.append({'path': layout.relative(candidate), 'error_type': type(exc).__name__,
                        'reason': str(exc)[:200], 'automatic_action': 'try_older_verified_synthesis'})
@@ -341,12 +341,16 @@ def current_synthesis(layout, index):
                 saved['recovery_errors'] = list(errors)
             if value['input_digest'] == current_digest:
                 return saved
-            if value.get('context_archives') == [index['archive']]:
-                return saved | {'status': 'updating_for_new_inputs', 'current_input_digest': current_digest,
+            if asof is None and value.get('context_archives') == [index['archive']]:
+                asof = saved | {'status': 'updating_for_new_inputs', 'current_input_digest': current_digest,
                     'current_coverage': synthesis_coverage(index),
                     '说明': '新增片段正在补入综合；以下保留上一轮已完成结论，其覆盖范围见input_coverage，新增范围见current_coverage。'}
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
             rejected(candidate, exc)
+    if asof is not None:
+        if errors:
+            asof['recovery_errors'] = list(errors)
+        return asof
     if errors:
         return {'status': 'unverified_saved_synthesis', 'evidence_status': 'NOT_PROVEN',
                 'findings': [], 'recovery_errors': errors,

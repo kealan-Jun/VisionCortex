@@ -74,7 +74,12 @@ Web 与 worker 按配置的角色运行；认证、监听地址及跨机访问�
 
 ## 验收与回退
 
-拆分阶段的历史调度由 `device_day.backfill` 明确配置。`mode: idle` 保留空闲补跑；
+2026-10-22 用户明确的生产顺序是按采集时间倒序，最新就绪分片优先。
+`latest_first: true` 优先于相机轮转、等待时长和任务类别成本；文件发布及日报的有变更输入也按此顺序选择。
+连续 CV 服务保留有上限的执行池，每轮继续接纳新片段、接续空闲槽位，并保持每个运行任务的独立租约和心跳；关闭时先保存运行进度。
+这些调度行为不重写模型回执，不重发结果未知的付费请求。
+
+拆分阶段的历史调度由 `device_day.backfill` 明确配置。生产采用 `mode: idle`，优先当前新输入，历史从新到旧补跑；
 持续有新输入的站点可选择 `mode: fair`，并在 `stages` 列出
 `retention`、`vision`、`stt`、`understanding`、`report`。每阶段必须部署对应 worker。
 `fair_interval_seconds` 默认 60；`quantum_seconds` 在可恢复单位完成后让出，

@@ -9,6 +9,8 @@
 
 ## Architecture and task scope
 
+- User scheduling clarification, 2026-10-22: process ready captures in descending capture time, newest first, across CV, STT, understanding, publication and daily reporting. Historical backfill also progresses from newest history toward older history. Keep accepting new finalized slices while earlier work runs; camera rotation, wait age and class cost must not override `latest_first`. Preserve in-flight leases, resumable work and unknown paid-request safeguards.
+
 - Start from `docs/README.md` and `docs/reference/architecture.zh-CN.md` for current responsibilities. Select the relevant source and contract; historical task books do not define today's implementation.
 - Use native coding, file and local test tools for ordinary development. Apply skills for an explicitly requested workflow or a concrete capability needed by this task. Read relevant references on demand. Maintain customizations in project/global guidance, not generated plugin caches.
 - Continue authorized reversible work. Optional skill advice does not introduce approval gates or expand the task. Offline code changes, mocks and documentation require no new API key; preserve the user's selected provider. Actual external requests, secret creation/writes and live services retain their applicable safeguards.
