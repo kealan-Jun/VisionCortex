@@ -26,6 +26,7 @@ from visioncortex.config import load_config
 from visioncortex.device_day import exclusive
 from visioncortex.device_day_contract import (
     atomic_json,
+    digest,
     read_json,
     safe_child,
     validate_archive_name,
@@ -45,7 +46,7 @@ def visible(parent):
     )
 
 
-def run(config, archive, plan_root, stop, *, apply):
+def run(config, archive, plan_root, stop, *, apply, public_video_inventory=None):
     from visioncortex.device_day_contract import DeviceDayLayout
     from visioncortex.device_day_timeline import day_bounds
     from visioncortex.application import clip_delivery
@@ -168,6 +169,17 @@ def run(config, archive, plan_root, stop, *, apply):
             # A grouped view alone does not prove all saved older generations
             # were included. Recover their native journals on the first pass.
             current = False
+        inventory_digest = (
+            digest(public_video_inventory)
+            if public_video_inventory is not None
+            else None
+        )
+        if inventory_digest and (
+            not acceptance.is_file()
+            or read_json(acceptance).get("public_video_inventory_digest")
+            != inventory_digest
+        ):
+            current = False
         result = {
             "archive": archive,
             "recipe": RECIPE,
@@ -178,6 +190,7 @@ def run(config, archive, plan_root, stop, *, apply):
             "canonical_index_changed": False,
             "original_media_changed": False,
             "already_grouped": current,
+            "public_video_inventory_digest": inventory_digest,
         }
         if not apply:
             return result | {"status": "audited"}
@@ -190,7 +203,9 @@ def run(config, archive, plan_root, stop, *, apply):
         ):
             guarded_mkdir(directory)
         if not current:
-            unifier = ArchiveUnifier(config, archive, index)
+            unifier = ArchiveUnifier(
+                config, archive, index, public_video_inventory=public_video_inventory
+            )
             known = {r["recording_id"] for r in index["recordings"]}
             if checkpoint_path.is_file() and not read_json(checkpoint_path).get(
                 "completed"
@@ -319,6 +334,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--plan-root", required=True, type=Path)
+    parser.add_argument(
+        "--public-video-inventory",
+        type=Path,
+        help="Frozen initial public-video inventory; retired hidden videos remain private",
+    )
     parser.add_argument("--archive", action="append")
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()
@@ -339,6 +359,15 @@ def main():
     from visioncortex.local_storage import require_local_path
 
     require_local_path(args.plan_root)
+    inventories = {}
+    if args.public_video_inventory:
+        from visioncortex.application.archive_unification import bounded_document
+
+        require_local_path(args.public_video_inventory)
+        inventories = {
+            row["archive"]: row["files"]
+            for row in bounded_document(args.public_video_inventory)["archives"]
+        }
     local_root = Path(config["storage"]["local_runtime_root"]).resolve()
     if not args.plan_root.resolve().is_relative_to(local_root):
         raise ValueError(
@@ -387,7 +416,16 @@ def main():
             flush=True,
         )
         try:
-            result = run(config, name, args.plan_root, stop, apply=args.apply)
+            result = run(
+                config,
+                name,
+                args.plan_root,
+                stop,
+                apply=args.apply,
+                public_video_inventory=inventories.get(name, [])
+                if args.public_video_inventory
+                else None,
+            )
         except BlockingIOError:
             result = {"archive": name, "status": "busy_retry", "model_invoked": False}
         except Exception as exc:

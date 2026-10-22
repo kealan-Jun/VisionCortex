@@ -218,6 +218,24 @@ def test_native_move_journals_recover_a_legacy_interruption_without_a_checkpoint
     assert recovered.discover()["intervals"] == 2
     assert not recovered.publish()["pending"]
     assert all(verify_artifact(layout.root, ref) for ref in refs)
+    assert not list((layout.processed / "Clips").glob("*/*.mp4"))
+
+
+def test_initial_public_inventory_recovers_only_its_retired_materializations(tmp_path):
+    from visioncortex.application import clip_delivery
+
+    layout, index, config, source, refs = case(tmp_path)
+    for parent in (layout.processed / "Clips", layout.understanding):
+        for folder in list(parent.iterdir()):
+            if folder.is_dir():
+                clip_delivery._retire(layout, folder)
+    recovered = ArchiveUnifier(
+        config, layout.name, index, public_video_inventory=refs[:1]
+    )
+    recovered.discover()
+    assert not recovered.publish()["pending"]
+    assert len(list((layout.processed / "Clips").glob("*/*.mp4"))) == 1
+    assert all(verify_artifact(layout.root, ref) for ref in refs)
 
 
 def test_duplicate_public_generation_is_retired_even_if_row_was_recovered_first(

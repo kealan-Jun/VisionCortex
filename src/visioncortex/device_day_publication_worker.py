@@ -11,6 +11,111 @@ from .device_day_contract import atomic_json, digest, read_json
 READABLE_LAYOUT_POLICY = 'source-recording-full-extent-names/1'
 
 
+class FrozenReceiptKeyOwner:
+    """Ask the actual immutable producer for its keys; never alias a new hash.
+
+    Rendering changes may use another build. Its receipt keys still belong to
+    the frozen model producer, whose source/configuration is explicitly pinned.
+    No execution endpoint is exposed by this transport.
+    """
+    def __init__(self, setting):
+        import hashlib
+        import os
+        import subprocess
+        import sys
+        from threading import Lock
+        from .local_storage import require_local_path
+
+        if setting.get('schema_version') != 'visioncortex-frozen-receipt-key-owner/1':
+            raise ValueError('Unknown frozen receipt key owner contract')
+        source, config = Path(setting['source_root']), Path(setting['config_path'])
+        require_local_path(source)
+        require_local_path(config)
+        if (not config.is_file() or config.is_symlink() or config.stat().st_size > 8*1024**2
+                or subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=source, text=True).strip() != setting['source_sha']
+                or subprocess.check_output(['git', 'status', '--porcelain'], cwd=source, text=True).strip()
+                or hashlib.sha256(config.read_bytes()).hexdigest() != setting['config_sha256']):
+            raise ValueError('Frozen receipt owner source/configuration changed')
+        helper = Path(__file__).parents[2]/'tools/migrations/read_frozen_receipt_keys.py'
+        if not helper.is_file() or helper.is_symlink():
+            raise ValueError('Frozen receipt key transport is unavailable')
+        env = dict(os.environ, PYTHONPATH=str(source/'src'), PYTHONDONTWRITEBYTECODE='1')
+        # The old producer is a reader here, not a result of the rendering build.
+        env.pop('VISIONCORTEX_BUILD_MANIFEST', None)
+        self._lock = Lock()
+        self.process = subprocess.Popen([sys.executable, str(helper), str(config)], cwd=source,
+            env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+
+    def key(self, stage, recording, inputs, *, binding=True, context=None):
+        import json
+        import re
+        import select
+        encoded = (json.dumps({'stage': stage, 'record': recording, 'inputs': inputs,
+                               'binding': binding, 'context': context}, separators=(',', ':'))+'\n').encode()
+        if len(encoded) > 64*1024**2:
+            raise ValueError('Frozen receipt key request exceeds its bound')
+        with self._lock:
+            if self.process.poll() is not None:
+                raise ValueError('Frozen receipt key owner has stopped')
+            self.process.stdin.write(encoded)
+            self.process.stdin.flush()
+            if not select.select([self.process.stdout], [], [], 60)[0]:
+                self.close()
+                raise TimeoutError('Frozen receipt key owner exceeded its deadline')
+            line = self.process.stdout.readline(4097)
+            value = json.loads(line)
+            if set(value) != {'key'} or not re.fullmatch('[a-f0-9]{64}', value['key']):
+                raise ValueError('Frozen producer rejected receipt key verification')
+            return value['key']
+
+    def close(self):
+        import subprocess
+        try:
+            if self.process.poll() is None:
+                self.process.stdin.close()
+                try:
+                    self.process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.process.terminate()
+                    self.process.wait(timeout=5)
+        finally:
+            self.process.stdin.close()
+            self.process.stdout.close()
+
+
+def publication_runner(config):
+    """Compose a read-only producer-key port with the current publication owner."""
+    from .device_day import DeviceDayRunner
+    setting = config.get('device_day', {}).get('publication_receipt_key_owner')
+    if not setting:
+        return DeviceDayRunner(config)
+
+    class Reader(DeviceDayRunner):
+        def __init__(self):
+            super().__init__(config, backend=object())
+            self.receipt_key_owner = FrozenReceiptKeyOwner(setting)
+
+        def _key(self, stage, recording, inputs, *, _binding=True):
+            if _binding and self._completed_execution_bindings.historical_candidate(stage, recording):
+                # Historical read-only descriptors bind this rendering build
+                # through its exact approved reader profile as before.
+                return super()._key(stage, recording, inputs, _binding=_binding)
+            context = self._context(self.layout(recording), recording) if stage == 'report' and self.settings.get(
+                'derived_video_retention', False) else None
+            return self.receipt_key_owner.key(stage, recording, inputs, binding=_binding, context=context)
+
+        def _backend(self):
+            raise RuntimeError('Publication receipt readers cannot invoke models')
+
+        def process(self, *args, **kwargs):
+            raise RuntimeError('Publication receipt readers cannot execute stages')
+
+        def close(self):
+            self.receipt_key_owner.close()
+
+    return Reader()
+
+
 def local_change_hints(runtime_root, records, names):
     """Durable scheduling hints; consumers must still verify source evidence."""
     from .device_day_contract import archive_name, digest
@@ -191,7 +296,6 @@ class ReadableReplay:
 def serve(config_path, stop, *, readable=False):
     from .ai_settings import apply_active
     from .config import load_config
-    from .device_day import DeviceDayRunner
     replay = ReadableReplay(stop) if readable else PublicationReplay(stop=stop)
     directory = 'ReadablePublication' if readable else 'PublicationReplay'
     scope = 'readable_file_projection' if readable else 'standard_publication_journal'
@@ -209,7 +313,9 @@ def serve(config_path, stop, *, readable=False):
             roots = current_roots
             key = digest(config)
             if runner is None or key != generation:
-                runner, generation = DeviceDayRunner(config), key
+                if runner is not None and hasattr(runner, 'close'):
+                    runner.close()
+                runner, generation = publication_runner(config), key
             state_path = runner.runtime_root / directory / 'Service.json'
             initial = {'status': 'running', 'started_at': started,
                        'scope': scope, 'model_invoked': False, 'build': build}
@@ -239,6 +345,8 @@ def serve(config_path, stop, *, readable=False):
             final.update(checked=replay.checked, published_hints=replay.published_hints,
                          retry_at=replay.retry_at, fair_turn=replay.turn)
         atomic_json(state_path, final)
+    if runner is not None and hasattr(runner, 'close'):
+        runner.close()
 
 
 def main(argv=None):

@@ -391,3 +391,21 @@ def test_recovered_file_uses_its_own_recorded_rgb_extent_not_shared_window(exact
     assert unit['name'].startswith('11-38-41_11-39-34_')
     assert unit['time_basis'] == 'recorded_rgb_frame_extent'
     assert unit['capture_segment_index'] == 0
+
+
+def test_retirement_does_not_follow_a_reclaimed_history_alias_back_to_source(exact_case):
+    from visioncortex.device_day_contract import artifact, read_json
+
+    case = exact_case
+    source = case.layout.processed/'Clips'/'OwnedGroup'/'OwnedInterval.mp4'
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b'previous-verified-derived-video')
+    ref = artifact(case.layout.root, source)
+    hidden = f"ProcessedClips/.Evidence/LegacyPresentation/OwnedGroup/{ref['sha256']}/OwnedInterval.mp4"
+    clip_delivery._mapping(case.layout, 'ProcessedClips', {hidden: ref['path']})
+    clip_delivery._retire_file(case.layout, ref['path'], ref)
+    assert not source.exists()
+    assert (case.layout.root/hidden).read_bytes() == b'previous-verified-derived-video'
+    assert verify_artifact(case.layout.root, ref)
+    journals = list((case.layout.processed/'.Evidence/ClipFileRelocations').glob('*.json'))
+    assert all(read_json(p)['from'] != read_json(p)['to'] for p in journals)
