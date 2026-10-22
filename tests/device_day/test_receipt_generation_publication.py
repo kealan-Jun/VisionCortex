@@ -162,7 +162,7 @@ def test_generation_race_never_hides_unknown_claim_or_real_partial_failure_and_r
             raise error
     def extract(_source, target, *_args):
         target.write_bytes(b'owned exact selected partial window')
-    monkeypatch.setattr('visioncortex.video_io.extract_clip', extract)
+    monkeypatch.setattr('visioncortex.application.retained_video.source_stream_clip', extract)
     monkeypatch.setattr('visioncortex.video_io.probe_video', lambda _: SimpleNamespace(duration_ms=1000))
     backend = PartialModels()
     runner = DeviceDayRunner(device_config, backend)

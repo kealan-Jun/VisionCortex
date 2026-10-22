@@ -324,7 +324,7 @@ def test_understanding_publishes_non_experiment_video_without_report_stage(devic
     device_config['device_day']['derived_video_retention'] = True
     def extract(source, target, start, duration, encoder):
         target.write_bytes(b'derived')
-    monkeypatch.setattr('visioncortex.video_io.extract_clip', extract)
+    monkeypatch.setattr('visioncortex.application.retained_video.source_stream_clip', extract)
     monkeypatch.setattr('visioncortex.video_io.probe_video', lambda path: SimpleNamespace(duration_ms=1000))
     class WorkModels(FakeModels):
         def understand(self, layout, recording, vision, context, key):
@@ -375,7 +375,7 @@ def test_later_window_failure_keeps_completed_observations_and_selected_video(de
                                        readable_content_enabled=True)
     def extract(source, target, *args):
         target.write_bytes(b'derived')
-    monkeypatch.setattr('visioncortex.video_io.extract_clip', extract)
+    monkeypatch.setattr('visioncortex.application.retained_video.source_stream_clip', extract)
     monkeypatch.setattr('visioncortex.video_io.probe_video', lambda _: SimpleNamespace(duration_ms=1000))
     class PartialModels(FakeModels):
         def understand(self, layout, recording, vision, context, key):
@@ -445,7 +445,7 @@ def test_verified_publication_replays_without_model_or_report_and_backs_off_fail
     def extract(src, dst, *args):
         calls.append(src)
         dst.write_bytes(b'selected')
-    monkeypatch.setattr('visioncortex.video_io.extract_clip', extract)
+    monkeypatch.setattr('visioncortex.application.retained_video.source_stream_clip', extract)
     monkeypatch.setattr('visioncortex.video_io.probe_video', lambda _: SimpleNamespace(duration_ms=1000))
     # The pure materialization/retry port has explicit synthetic evidence;
     # strict actual request/response validation is covered separately.
@@ -505,7 +505,7 @@ def test_bad_attempt_is_preserved_and_isolated_while_another_selected_interval_p
     def extract(src, dst, *args):
         calls.append(src)
         dst.write_bytes(b'selected second interval')
-    monkeypatch.setattr('visioncortex.video_io.extract_clip', extract)
+    monkeypatch.setattr('visioncortex.application.retained_video.source_stream_clip', extract)
     monkeypatch.setattr('visioncortex.video_io.probe_video', lambda _: SimpleNamespace(duration_ms=1000))
     config = {'storage': {'archive_root': str(tmp_path)}, 'device_day': {'derived_video_retention': True}}
     def verified_fixture(*args):

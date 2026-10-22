@@ -1,5 +1,6 @@
 """Materialize a new derived generation, preserving originals and old outputs."""
 from pathlib import Path
+import json
 import math
 import time
 import uuid
@@ -14,6 +15,61 @@ class EvidenceUnverified(ValueError):
     """Keep an interval pending when its actual model evidence cannot be proven."""
 
 
+def selection_visual(path):
+    """Read source-bound candidates without hydrating dense detector diagnostics.
+
+    This view only admits file publication; it never replaces the native
+    receipt, its execution-key input, or its separately verified audit bytes.
+    """
+    from ..receipt_projection import projected_json
+    return projected_json(path, omit={('batches',), ('scan_reports',), ('audit_artifacts',),
+                                      ('segments', None, 'activity_audit')})
+
+
+def source_stream_clip(source, destination, start_ms, duration_ms, _encoder=None):
+    """Remux the selected display interval without encoding its video or audio.
+
+    The MP4 edit list hides decoder preroll before a non-keyframe boundary.
+    Stored packet counts can therefore exceed the number of displayed frames.
+    Unsupported sources fail rather than silently using a lossy fallback.
+    """
+    from ..video_io import _run
+    from ..media.retained_intervals import EXPORT_POLICY
+
+    def streams(path):
+        result = _run(['ffprobe', '-v', 'error', '-show_streams', '-of', 'json', str(path)], timeout=60)
+        if result.returncode:
+            raise ValueError('Cannot verify retained video stream parameters')
+        return [row for row in json.loads(result.stdout)['streams'] if row['codec_type'] in ('video', 'audio')]
+
+    original = streams(source)
+    original = [next(row for row in original if row['codec_type'] == 'video'),
+                *(row for row in original if row['codec_type'] == 'audio')]
+    command = ['ffmpeg', '-nostdin', '-v', 'error', '-n', '-ss', f'{start_ms / 1000:.6f}',
+               '-i', str(source), '-t', f'{duration_ms / 1000:.6f}', '-map', '0:v:0', '-map', '0:a?',
+               '-c', 'copy', '-movflags', '+faststart', '-use_editlist', '1', str(destination)]
+    result = _run(command)
+    if result.returncode:
+        raise ValueError('Source-preserving retained video remux failed: '
+                         + result.stderr.decode('utf-8', errors='replace')[-1000:])
+    exported = streams(destination)
+    fields = {'video': ('codec_name', 'profile', 'width', 'height', 'pix_fmt', 'r_frame_rate',
+                        'sample_aspect_ratio', 'field_order', 'color_range', 'color_space',
+                        'color_transfer', 'color_primaries'),
+              'audio': ('codec_name', 'profile', 'sample_fmt', 'sample_rate', 'channels', 'channel_layout')}
+    if len(original) != len(exported):
+        raise ValueError('Retained video lost source streams')
+    verified = []
+    for before, after in zip(original, exported, strict=True):
+        kind = before['codec_type']
+        if kind != after['codec_type'] or any(before.get(k) != after.get(k) for k in fields[kind]):
+            raise ValueError('Retained video changed source stream parameters')
+        verified.append({'codec_type': kind, **{k: before[k] for k in fields[kind] if k in before}})
+    return {'policy': EXPORT_POLICY, 'method': 'stream_copy', 'reencoded': False,
+            'display_boundary': 'mp4_edit_list', 'verified_streams': verified,
+            'packet_count_includes_decoder_preroll': True}
+
+
 def _validate_activity_process(layout, candidate, selection, meaning, recording, context):
     """Authenticate process selection independently of optional model/STT work."""
     from ..device_day_audit import AuditReader
@@ -25,7 +81,7 @@ def _validate_activity_process(layout, candidate, selection, meaning, recording,
             raise ValueError('Activity process belongs to a different recording')
         path = layout.receipts/candidate['recording_id']/'vision.json'
         snapshots = [(path, identity(path))]
-        visual = public_references(read_json(path), aliases(layout.root))
+        visual = public_references(selection_visual(path), aliases(layout.root))
         expected = ((recording.get('stages') or {}).get('vision') or {}).get('key')
         if (visual.get('stage') != 'vision' or visual.get('recording_id') != candidate['recording_id']
                 or visual.get('status') != 'completed' or not visual.get('key')
@@ -77,7 +133,7 @@ def validate_selection_evidence(layout, candidate, selection, meaning, recording
             raise ValueError('Understanding receipt identity/status is unverified')
         visual_path = stage_path.with_name('vision.json')
         snapshots[visual_path] = identity(visual_path)
-        visual = public_references(read_json(visual_path), mapping)
+        visual = public_references(selection_visual(visual_path), mapping)
         fields = ('segment_id', 'recording_id', 'source_ref', 'start_ms', 'end_ms', 'start_us', 'end_us', 'activity')
         if (visual.get('status') != 'completed' or stage.get('vision_key') != visual.get('key')
                 or not any(all(row.get(k) == candidate.get(k) for k in fields) for row in visual.get('segments', []))):
@@ -163,11 +219,14 @@ def child_segment(candidate, interval):
     fields = ('start_ms', 'end_ms', 'start_us', 'end_us', 'activity')
     values = {key: (int(interval[key]) if key != 'activity' and interval[key] == int(interval[key])
                     else interval[key]) for key in fields}
-    identifier = 'segment-' + digest([candidate['segment_id'], candidate['source_ref'],
-                                     *[values[k] for k in fields]])[:24]
+    recipe = [candidate['segment_id'], candidate['source_ref'], *[values[k] for k in fields]]
+    if interval.get('export_policy'):
+        recipe.append(interval['export_policy'])
+    identifier = 'segment-' + digest(recipe)[:24]
     child = {'segment_id': identifier, 'candidate_segment_id': candidate['segment_id'],
              'recording_id': candidate['recording_id'], 'source_ref': candidate['source_ref'],
              **values,
+             **({'export_policy': interval['export_policy']} if interval.get('export_policy') else {}),
              'activity_category': interval.get('activity_category', 'unknown'),
              'activity_label': ACTIVITY_LABELS[interval['activity']], 'key_frames': [], 'scene_frames': []}
     activity = 'ExperimentActivity' if child['activity'] == 'active' else 'NoExperimentActivity'
@@ -444,11 +503,11 @@ def materialize(layout, source, segment, meaning, recording, context=None, *, se
     Only a positively selected interval creates a new derived video.
     This function never deletes any input or replaces a historical generation.
     """
-    from ..video_io import extract_clip, probe_video
+    from ..video_io import probe_video
     from ..device_day_content_paths import clip_name, layout_contract, private_folder
     from ..device_day_contract import safe_child
     from ..device_day_verification import verify_artifact_cached
-    extractor = extractor or extract_clip
+    extractor = extractor or source_stream_clip
     source = Path(source)
     candidate = candidate or segment
     grouped = _selection_partition(candidate, meaning, recording, context)
@@ -525,7 +584,8 @@ def materialize(layout, source, segment, meaning, recording, context=None, *, se
             except (OSError, ValueError, KeyError, TypeError, AttributeError):
                 continue
             value = publish_disposition(folder, decision, video_present=True) | {
-                'video': video, 'source_mapping': mapping, 'prepared_receipt': artifact(layout.root, prepared)}
+                'video': video, 'source_mapping': mapping, 'prepared_receipt': artifact(layout.root, prepared),
+                **({'video_encoding': saved['video_encoding']} if saved.get('video_encoding') else {})}
             atomic_json(manifest, value)
             return value
         raise ValueError('Unbound clip output exists; refusing to overwrite historical media')
@@ -533,7 +593,7 @@ def materialize(layout, source, segment, meaning, recording, context=None, *, se
     temporary = target.parent / ('.' + uuid.uuid4().hex + '.mp4')
     try:
         verify_before_submission()
-        extractor(source, temporary, segment['start_ms'], segment['end_ms'] - segment['start_ms'], 'libx264')
+        encoding = extractor(source, temporary, segment['start_ms'], segment['end_ms'] - segment['start_ms'], 'copy')
         info = probe_video(temporary)
         expected = segment['end_ms'] - segment['start_ms']
         fps = getattr(info, 'fps', None)
@@ -554,10 +614,11 @@ def materialize(layout, source, segment, meaning, recording, context=None, *, se
             raise ValueError('Original source changed before exact video publication')
         # Publish immutable bytes/source intent before the atomic media rename.
         # A process death after rename can finish publication without extraction.
-        atomic_json(folder/'Prepared.json', decision | {'video': sealed, 'source_mapping': source_mapping})
+        encoded = {'video_encoding': encoding} if encoding else {}
+        atomic_json(folder/'Prepared.json', decision | {'video': sealed, 'source_mapping': source_mapping, **encoded})
         temporary.replace(target)
         value = publish_disposition(folder, decision, video_present=True) | {'video': artifact(layout.root, target),
-            'source_mapping': source_mapping}
+            'source_mapping': source_mapping, **encoded}
         atomic_json(manifest, value)
         return value
     finally:

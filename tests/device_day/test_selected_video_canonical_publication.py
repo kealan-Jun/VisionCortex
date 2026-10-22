@@ -46,7 +46,7 @@ def selected_case(device_config, monkeypatch):
     def extract(source, target, start, duration, *args):
         assert start == 0 and duration == 1000  # A 15-minute candidate contains one second of observed work.
         target.write_bytes(b'actual derived file in synthetic contract test')
-    monkeypatch.setattr('visioncortex.video_io.extract_clip', extract)
+    monkeypatch.setattr('visioncortex.application.retained_video.source_stream_clip', extract)
     monkeypatch.setattr('visioncortex.video_io.probe_video', lambda _: SimpleNamespace(duration_ms=1000))
     return device_config, runner, models, record, layout, original
 

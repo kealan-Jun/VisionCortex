@@ -73,7 +73,7 @@ def test_native_cold_ticks_leave_colliding_whole_candidate_as_history(exact_case
     observe(Path(case.config['storage']['local_runtime_root'])/'device-day', {'recordings': [{
         'recording_id': case.record['recording_id'], 'camera_key': case.layout.name[11:],
         'recording_start_us': case.candidate['start_us'], 'recording_end_us': case.candidate['end_us']}]})
-    monkeypatch.setattr('visioncortex.video_io.extract_clip', lambda *_a, **_k: pytest.fail('No repeated/full export'))
+    monkeypatch.setattr('visioncortex.application.retained_video.source_stream_clip', lambda *_a, **_k: pytest.fail('No repeated/full export'))
     monkeypatch.setattr('visioncortex.device_day.DeviceDayRunner._backend',
                         lambda *_a, **_k: pytest.fail('No model backend execution'))
     for _ in range(2):

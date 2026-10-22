@@ -39,7 +39,7 @@ def evidence_case(tmp_path, monkeypatch):
     def extract(src, target, start, duration, encoder):
         calls.append((start, duration))
         target.write_bytes(b'exact 1 second synthetic media')
-    monkeypatch.setattr('visioncortex.video_io.extract_clip', extract)
+    monkeypatch.setattr('visioncortex.application.retained_video.source_stream_clip', extract)
     monkeypatch.setattr('visioncortex.video_io.probe_video', lambda _: SimpleNamespace(duration_ms=1000, fps=30))
     return SimpleNamespace(layout=layout, source=source, candidate=candidate, meaning=meaning, stage=stage,
                            visual=visual, receipt=receipt, record=record, index=index, config=config, calls=calls)
@@ -112,7 +112,7 @@ def test_evidence_changed_during_extraction_is_never_published(evidence_case, mo
         case.calls.append((start, duration))
         target.write_bytes(b'exact 1 second synthetic media')
         path.write_bytes(path.read_bytes() + b' ')
-    monkeypatch.setattr('visioncortex.video_io.extract_clip', extract)
+    monkeypatch.setattr('visioncortex.application.retained_video.source_stream_clip', extract)
     result = publish_selected(case.config, case.index)
     assert result['materialized'] == 0 and result['pending'] == 1
     assert result['errors'][0]['reason'] == 'evidence_unverified'
