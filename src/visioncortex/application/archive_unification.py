@@ -144,6 +144,22 @@ def bounded_document(path, maximum_bytes=32 * 1024**2):
     return value
 
 
+def metadata_document(path):
+    """Project dense diagnostics without hydrating or rewriting their bytes."""
+    path = Path(path)
+    if file_identity(path)[2] <= 32 * 1024**2:
+        return bounded_document(path)
+    from ..receipt_projection import projected_json
+
+    value = projected_json(path, omit=(("activity_audit",),),
+                           max_resident_bytes=32 * 1024**2)
+    value["historical_metadata_projection"] = {
+        "omitted_from_readable_copy": ["activity_audit"],
+        "complete_original_document_preserved": True,
+    }
+    return value
+
+
 def _time(value):
     return datetime.fromtimestamp(value / 1e6, ZoneInfo("Asia/Shanghai")).isoformat(
         timespec="microseconds"
@@ -556,7 +572,7 @@ class ArchiveUnifier:
         return row
 
     def _read_candidate(self, path, *, historical_hidden=False):
-        document = bounded_document(path)
+        document = metadata_document(path)
         row = self._row(document)
         if row is None:
             return
@@ -806,7 +822,7 @@ class ArchiveUnifier:
         metadata = saved.get("metadata_document")
         if metadata:
             original = public_references(
-                bounded_document(safe_child(root, metadata)), aliases(root)
+                metadata_document(safe_child(root, metadata)), aliases(root)
             )
             for key in (
                 "key_frames",
@@ -877,6 +893,10 @@ class ArchiveUnifier:
             "existing_video_selection_revalidated": False,
             "saved_content_preserved": bool(relative),
         }
+        if metadata and original.get("historical_metadata_projection"):
+            value["historical_format_migration"]["metadata_projection"] = original[
+                "historical_metadata_projection"
+            ]
         retention = {
             "schema_version": "visioncortex-derived-video-disposition/1",
             "source_ref": segment["source_ref"],

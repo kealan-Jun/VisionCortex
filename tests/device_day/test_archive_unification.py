@@ -554,3 +554,29 @@ def test_unadmitted_retired_video_failure_is_reported_without_publishing_corrupt
     videos = list((layout.processed / "Clips").rglob("*.mp4"))
     assert len(videos) == 1 and videos[0].read_bytes() != before
     assert retired.read_bytes() == before and source.read_bytes() == original
+
+
+def test_large_cv_metadata_streams_dense_audit_without_changing_source_or_losing_frames(tmp_path):
+    import json
+    from visioncortex.application.archive_unification import metadata_document
+    from visioncortex.device_day_contract import file_hash
+
+    path = tmp_path / "LargeMetadata.json"
+    selected = {"source_ref": {"path": "MetaVideo/original.mp4", "sha256": "a" * 64},
+                "recording_id": "record", "start_ms": 1.25, "end_ms": 2.75,
+                "key_frames": [{"path": "selected.jpg", "confidence": 0.75}],
+                "scene_frames": [], "clock_ref": {"start_us": 1792639450000000}}
+    with path.open("w") as handle:
+        handle.write(json.dumps(selected)[:-1] + ',"activity_audit":[')
+        for i in range(33000):
+            if i:
+                handle.write(',')
+            handle.write(json.dumps("synthetic-diagnostic-" + "x" * 1024))
+        handle.write(']}')
+    before = file_hash(path)
+    assert path.stat().st_size > 32 * 1024**2
+    value = metadata_document(path)
+    assert all(value[key] == item for key, item in selected.items())
+    assert "activity_audit" not in value
+    assert value["historical_metadata_projection"]["complete_original_document_preserved"]
+    assert file_hash(path) == before
