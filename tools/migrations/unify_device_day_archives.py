@@ -285,6 +285,11 @@ def main():
     from visioncortex.local_storage import require_local_path
 
     require_local_path(args.plan_root)
+    local_root = Path(config["storage"]["local_runtime_root"]).resolve()
+    if not args.plan_root.resolve().is_relative_to(local_root):
+        raise ValueError(
+            "Migration plans must remain inside the configured local runtime root"
+        )
     args.plan_root.mkdir(parents=True, exist_ok=True)
     if (
         shutil.disk_usage("/").free < 50 * 1024**3
