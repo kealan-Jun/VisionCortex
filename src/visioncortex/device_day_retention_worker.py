@@ -555,6 +555,23 @@ class RetentionWorker:
                       'error_type': type(exc).__name__, 'message': str(exc)[:1000]}
         seconds = time.perf_counter() - started
         queue.finish(owner, record['recording_id'], result, seconds)
+        if result.get('formal_publication') == 'pending' and result.get('status') == 'completed':
+            # Wake the file owner from the durable local completion generation.
+            # No NAS scan or model retry belongs in this notification path.
+            try:
+                with queue.connect() as db:
+                    saved = db.execute("SELECT revision,completed_at FROM recordings WHERE recording_id=? "
+                                       "AND status='completed'", (record['recording_id'],)).fetchone()
+                if saved:
+                    from .publication_journal import PublicationJournal
+                    journal = PublicationJournal(runner.runtime_root)
+                    token = journal.ensure_pending(record)
+                    if token:
+                        journal.notice_output(record['recording_id'], token,
+                            digest(['native_stage_completed', self.stage, saved['revision'], saved['completed_at']]))
+            except (OSError, ValueError, sqlite3.Error) as exc:
+                import logging
+                logging.getLogger(__name__).warning('Publication completion hint deferred: %s', type(exc).__name__)
         if result.get('status') != 'completed' and not (
                 self.stage in {'vision', 'understanding'} and result.get('status') in {'paused_for_live', 'scheduled_checkpoint'}):
             self.deferred[record['recording_id']] = time.time() + self.failure_cooldown

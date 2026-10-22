@@ -78,3 +78,29 @@ def test_saturated_pool_enqueues_later_arrivals_and_retains_capacity(tmp_path, d
     finally:
         release.set()
         worker.close()
+
+
+def test_native_completion_wakes_publication_without_reading_nas(tmp_path, default_config):
+    from visioncortex.publication_journal import PublicationJournal
+    worker, runner, queue = runner_for(tmp_path, default_config,
+        lambda *args, **kwargs: {'status': 'completed', 'formal_publication': 'pending'}, capacity=1, jobs=1)
+    record = worker.candidates(runner)[1]
+    journal = PublicationJournal(runner.runtime_root)
+    token = journal.begin(record)
+    journal.defer(record['recording_id'], token, reason='vision_not_finished')
+    assert journal.pending(ready_only=True) == []
+    assert worker.tick(runner, Event())['recording_id'] == record['recording_id']
+    assert journal.pending(ready_only=True) == [(token, record)]
+    assert statuses(queue)[record['recording_id']]['status'] == 'completed'
+
+
+def test_failed_hint_does_not_revoke_actual_completed_stage(tmp_path, default_config, monkeypatch):
+    from visioncortex.publication_journal import PublicationJournal
+    worker, runner, queue = runner_for(tmp_path, default_config,
+        lambda *args, **kwargs: {'status': 'completed', 'formal_publication': 'pending'}, capacity=1, jobs=1)
+    def unavailable(*args):
+        raise OSError('local hint unavailable')
+    monkeypatch.setattr(PublicationJournal, 'ensure_pending', unavailable)
+    result = worker.tick(runner, Event())
+    assert result['result']['status'] == 'completed'
+    assert statuses(queue)['newest']['status'] == 'completed'
