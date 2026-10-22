@@ -129,9 +129,11 @@ def run(config, archive, plan_root, stop, *, apply, public_video_inventory=None)
                     break
                 h = read_json(p)
                 m = read_json(q)
-                if h.get("schema_version") != VERSION or m.get("source_unit") != h.get(
-                    "source_unit"
-                ):
+                if (h.get("schema_version") != VERSION
+                        or m.get("schema_version") != VERSION
+                        or m.get("source_unit") != h.get("source_unit")
+                        or h.get("source_folder") != name
+                        or m.get("source_folder") != name):
                     break
                 if h.get("source_unit") not in unit_catalog:
                     break
