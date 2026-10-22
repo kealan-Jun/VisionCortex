@@ -8,7 +8,7 @@ from .device_day_contract import atomic_json, digest, read_json
 
 # Publication-only recipe: completed captures must be revisited after a
 # naming migration without invalidating model receipts or issuing paid work.
-READABLE_LAYOUT_POLICY = 'source-recording-full-extent-names/1'
+READABLE_LAYOUT_POLICY = 'source-recording-full-extent-names/2'
 
 
 class FrozenReceiptKeyOwner:
@@ -217,6 +217,8 @@ class ReadableReplay:
         from .runtime_control import execution_context, resource_slot
         key = digest(runner.config)
         if self.publisher is None or self.generation != key:
+            if self.publisher is not None:
+                self.publisher.close()
             self.publisher, self.generation = FileIndexPublisher(runner.config), key
             state = runner.runtime_root / 'ReadablePublication' / 'Service.json'
             if state.is_file():
@@ -347,6 +349,8 @@ def serve(config_path, stop, *, readable=False):
         atomic_json(state_path, final)
     if runner is not None and hasattr(runner, 'close'):
         runner.close()
+    if readable and replay.publisher is not None:
+        replay.publisher.close()
 
 
 def main(argv=None):

@@ -322,6 +322,11 @@ class FileIndexPublisher:
         for entry in readers:
             self.historical_readers.setdefault(entry['archive'], []).append(entry)
 
+    def close(self):
+        if self._audio_runner is not None and hasattr(self._audio_runner, 'close'):
+            self._audio_runner.close()
+        self._audio_runner = None
+
     def _historical_publication(self, name, index=None):
         """Only explicit readers have an additional, byte-verified proof gate."""
         entries = self.historical_readers.get(name, [])
@@ -359,8 +364,8 @@ class FileIndexPublisher:
                 continue
             try:
                 if self._audio_runner is None:
-                    from .device_day import DeviceDayRunner
-                    self._audio_runner = DeviceDayRunner(self.config)
+                    from .device_day_publication_worker import publication_runner
+                    self._audio_runner = publication_runner(self.config)
                 value = verified_stt_projection(self._audio_runner, record)
                 if value is None:
                     continue
