@@ -422,9 +422,13 @@ class FileIndexPublisher:
                     current = db.execute('SELECT payload FROM observations WHERE id=?', (rid,)).fetchone()
                 if current is None or current['payload'] != row['payload']:
                     raise ValueError('Current inventory changed during publication admission')
-                token = PublicationJournal(self.runtime).ensure_pending(record)
+                journal = PublicationJournal(self.runtime)
+                token = journal.ensure_pending(record)
                 if token is None:
                     raise ValueError('An existing publication request owns a different source generation')
+                from .device_day_contract import digest
+                journal.notice_output(rid, token, digest([
+                    [s['segment_id'], s.get('video'), s.get('retention_intervals', [])] for s in segments]))
                 result['requested'] += 1
             except (OSError, ValueError, KeyError, TypeError, sqlite3.Error) as exc:
                 result['errors'].append({'archive': index['archive'], 'recording_id': rid,
