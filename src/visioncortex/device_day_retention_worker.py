@@ -78,7 +78,8 @@ class DeferredPrimaryPublicationRunner(DeviceDayRunner):
 class RetentionWorker:
     """Bounded concurrent claims; existing execution still validates every input."""
 
-    def __init__(self, *, stage='retention', failure_cooldown=60, recent_seconds=None, admission_cohort='live'):
+    def __init__(self, *, stage='retention', failure_cooldown=60, recent_seconds=None, admission_cohort='live',
+                 continuous_vision=False):
         if stage not in STAGES:
             raise ValueError('Unknown device/day stage')
         self.stage = stage
@@ -86,6 +87,41 @@ class RetentionWorker:
         self.recent_seconds = recent_seconds
         self.failure_cooldown = max(5, float(failure_cooldown))
         self.deferred = {}
+        self.continuous_vision = continuous_vision and stage == 'vision'
+        self._vision_pool = None
+        self._vision_futures = set()
+        self._vision_locks = None
+
+    def close(self):
+        """Drain owned resumable work before releasing the foreground owner."""
+        try:
+            if self._vision_pool is not None:
+                self._vision_pool.shutdown(wait=True)
+                for future in self._vision_futures:
+                    future.result()
+        finally:
+            self._vision_pool, self._vision_futures = None, set()
+            if self._vision_locks is not None:
+                self._vision_locks.close()
+                self._vision_locks = None
+
+    def _vision_completed(self):
+        completed = []
+        for future in tuple(self._vision_futures):
+            if future.done():
+                self._vision_futures.remove(future)
+                completed.append(future.result())
+        return completed
+
+    def _vision_result(self, completed, admitted):
+        return {'status': 'processed' if completed else 'processing' if self._vision_futures else 'waiting',
+                'admitted': admitted, 'inflight': len(self._vision_futures), 'results': completed,
+                'result': {'status': 'completed' if completed and all(
+                    r['result'].get('status') == 'completed' for r in completed) else 'partial'}}
+
+    def _vision_execute(self, runner, record, owner, stop):
+        with runner.queues['vision'].heartbeat(owner):
+            return self._execute_claimed(runner, record, owner, stop)
 
     def _input_available(self, runner, record, *, states=None):
         if states is None:
@@ -246,7 +282,7 @@ class RetentionWorker:
         # A camera contributes its newest ready slice; queue.claim retains
         # camera fairness and all running leases, including the main service's.
         scheduling = runner.queues[self.stage].scheduling
-        if scheduling['enabled']:
+        if scheduling['enabled'] and not runner.settings.get('latest_first', False):
             with connection(runner.queues[self.stage].path, readonly=True) as db:
                 costs = {(r['kind'], r['identity']): r['seconds'] for r in db.execute('SELECT * FROM dispatch_costs')}
             def fair_order(item):
@@ -528,6 +564,7 @@ class RetentionWorker:
     def tick(self, runner, stop):
         from .device_day import exclusive
         from .device_day_night_schedule import paused_stages, stage_admitted
+        completed = self._vision_completed() if self.continuous_vision else []
         if self.stage in paused_stages(runner.config):
             return {'status': 'paused_by_user'}
         from .device_day_admission import admission_status
@@ -536,7 +573,8 @@ class RetentionWorker:
             return hold
         with ExitStack() as locks:
             try:
-                locks.enter_context(exclusive(runner.runtime_root / 'locks' / f'{self.stage}-worker.lock'))
+                if self._vision_locks is None:
+                    locks.enter_context(exclusive(runner.runtime_root / 'locks' / f'{self.stage}-worker.lock'))
             except BlockingIOError:
                 return {'status': 'running_elsewhere'}
             recovery = self.recover_expired(runner)
@@ -559,6 +597,8 @@ class RetentionWorker:
                 except (OSError, ValueError, KeyError, TypeError):
                     self.deferred[record['recording_id']] = time.time() + self.failure_cooldown
             if not admitted or stop.is_set():
+                if self.continuous_vision:
+                    return self._vision_result(completed, len(admitted)) | recovery_fields
                 return {'status': 'waiting', 'admitted': len(admitted)} | recovery_fields
             queue = runner.queues[self.stage]
             # The main service may have failed a candidate during admission.
@@ -588,6 +628,23 @@ class RetentionWorker:
                 jobs = live_vision_capacity(runner.config)
                 if jobs > 1:
                     camera_limit = 1
+            if self.continuous_vision:
+                # Retain the foreground owner, but return to admission every
+                # tick. A slow slice cannot hold otherwise empty camera slots.
+                if self._vision_locks is None:
+                    self._vision_locks = locks.pop_all()
+                if self._vision_pool is None:
+                    self._vision_pool = ThreadPoolExecutor(max_workers=jobs, thread_name_prefix='device-vision')
+                for _ in range(max(0, jobs-len(self._vision_futures))):
+                    owner = 'vision-worker-' + uuid.uuid4().hex
+                    record = queue.claim(owner, retry=True, allowed=admitted, camera_serial=True,
+                                         camera_limit=camera_limit,
+                                         max_attempts=runner.settings.get('failure_retry_limit') or 3)
+                    if record is None:
+                        break
+                    self._vision_futures.add(self._vision_pool.submit(
+                        copy_context().run, self._vision_execute, runner, record, owner, stop))
+                return self._vision_result(completed, len(admitted)) | recovery_fields
             with queue.heartbeat(owner):
                 records = []
                 for _ in range(jobs):
@@ -621,7 +678,8 @@ def serve(config_path, stop, *, stage='retention'):
     from .device_day_consumers import WorkerStatus
     # Preserve the recent admission lane. History uses its own bounded
     # scheduling policy and shares this runner's models, never its stage lock.
-    worker = RetentionWorker(stage=stage, recent_seconds=14400 if stage in {'vision', 'understanding', 'report'} else None)
+    worker = RetentionWorker(stage=stage, recent_seconds=14400 if stage in {'vision', 'understanding', 'report'} else None,
+                             continuous_vision=stage == 'vision')
     runner, generation, roots, status_path, consumer = None, None, None, None, None
     backfill = BackfillSupervisor(stage, stop) if stage in SUPPORTED_STAGES else None
     from .device_day_synthesis_worker import DaySynthesisSupervisor
@@ -652,6 +710,7 @@ def serve(config_path, stop, *, stage='retention'):
                 if backfill is not None and (not enabled or generation != key):
                     backfill.request_yield()
                 if runner is None or generation != key:
+                    worker.close()
                     runner_type = (DeferredPrimaryPublicationRunner if defer_publication and stage in {
                         'retention', 'vision', 'stt'} else DeviceDayRunner)
                     if fair and stage == 'vision':
@@ -718,6 +777,7 @@ def serve(config_path, stop, *, stage='retention'):
                 atomic_json(status_path, status)
             stop.wait(delay)
     finally:
+        worker.close()
         if transcripts is not None:
             transcripts.close()
         if synthesis is not None:

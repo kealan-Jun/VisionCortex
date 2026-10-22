@@ -309,7 +309,7 @@ class DeviceDayQueue:
                     ordering = ("CASE WHEN json_extract(r.payload,'$.archive_urgent') THEN 0 "
                                 "WHEN json_extract(r.payload,'$.archive_aged') THEN 1 ELSE 2 END,"
                                 "COALESCE(json_extract(r.payload,'$.archive_deadline'),9e99),r.queued_at," + ordering)
-            if camera_serial and not latest_over_camera:
+            if camera_serial and not latest_over_camera and not self.latest_first:
                 ordering += ("COALESCE((SELECT last_claim FROM camera_dispatch "
                              "WHERE camera_key=json_extract(r.payload,'$.camera_key')),0),")
             if self.latest_first:
@@ -318,14 +318,14 @@ class DeviceDayQueue:
                 ordering += ("CASE WHEN COALESCE(json_extract(r.payload,'$.processing_priority'),0)<0 "
                              "THEN -COALESCE(json_extract(r.payload,'$.recording_start_us'),0) "
                              "ELSE COALESCE(json_extract(r.payload,'$.recording_start_us'),0) END,")
-            if camera_serial and latest_over_camera:
+            if camera_serial and (latest_over_camera or self.latest_first):
                 # Scoped CV explicitly prefers physical time. Camera rotation
                 # breaks equal-time ties, while occupied camera slots remain
                 # excluded above and every original lease is preserved.
                 ordering += ("COALESCE((SELECT last_claim FROM camera_dispatch "
                              "WHERE camera_key=json_extract(r.payload,'$.camera_key')),0),")
             ordering += "r.queued_at,r.recording_id"
-            if self.scheduling['enabled'] and self.path.stem != 'queue-retention':
+            if self.scheduling['enabled'] and not self.latest_first and self.path.stem != 'queue-retention':
                 # Resource seconds, rather than task counts, determine the
                 # next class/device. Waiting age is an independent escape.
                 shares = json.dumps(self.scheduling['resource_shares'])

@@ -140,7 +140,15 @@ class ReadableReplay:
                 priority = (changed & recent) or changed or (eligible & recent)
                 lane = 'changed_or_live' if priority and self.turn % 3 else 'historical_fair_share'
                 pool = priority if lane == 'changed_or_live' else eligible
-                name = min(pool, key=lambda n: (self.checked.get(n, 0), -int(n[:10].replace('-', '')), n))
+                if runner.settings.get('latest_first', False) and changed:
+                    latest = {n: 0 for n in names}
+                    for record in records:
+                        key = archive_name(record['camera_key'], record['recording_start_us'])
+                        latest[key] = max(latest.get(key, 0), record['recording_start_us'])
+                    pool, lane = changed, 'latest_changed_input'
+                    name = min(pool, key=lambda n: (-latest.get(n, 0), self.checked.get(n, 0), n))
+                else:
+                    name = min(pool, key=lambda n: (self.checked.get(n, 0), -int(n[:10].replace('-', '')), n))
                 self.checked[name] = time.time()
                 try:
                     with resource_slot(runner.config, 'cpu'), slot(runner.config):

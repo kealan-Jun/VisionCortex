@@ -31,14 +31,14 @@ def test_old_token_cannot_reset_backoff_after_source_generation_replacement(tmp_
     assert journal.pending(ready_only=True) == []
 
 
-def test_changed_output_wakes_old_day_ahead_of_live_but_same_output_preserves_backoff(tmp_path):
+def test_changed_output_wakes_fifo_publication_but_same_output_preserves_backoff(tmp_path):
     journal = PublicationJournal(tmp_path)
     old = {'recording_id': 'old', 'recording_start_us': 1}
     live = {'recording_id': 'live', 'recording_start_us': 1000000}
     first, second = journal.begin(old), journal.begin(live)
     journal.defer('old', first, reason='old-source-failure')
     assert journal.notice_output('old', first, 'new-sealed-video')
-    assert journal.pending(1, prefer_since_us=999999, latest_first=True, ready_only=True) == [(first, old)]
+    assert journal.pending(1, ready_only=True) == [(first, old)]
     journal.defer('old', first, reason='still-unverified')
     assert not journal.notice_output('old', first, 'new-sealed-video')
     assert journal.pending(1, ready_only=True) == [(second, live)]
@@ -57,3 +57,12 @@ def test_output_notice_is_bound_to_existing_source_generation_and_completes_once
     assert not journal.notice_output('r', token, 'new-output')
     with sqlite3.connect(journal.path) as db:
         assert db.execute('SELECT COUNT(*) FROM outputs').fetchone()[0] == 0
+
+
+def test_latest_first_publication_keeps_capture_order_ahead_of_old_output_notice(tmp_path):
+    journal = PublicationJournal(tmp_path)
+    old = {'recording_id': 'old', 'recording_start_us': 1}
+    new = {'recording_id': 'new', 'recording_start_us': 2}
+    first, second = journal.begin(old), journal.begin(new)
+    journal.notice_output('old', first, 'old-video-ready')
+    assert journal.pending(1, latest_first=True, ready_only=True) == [(second, new)]
