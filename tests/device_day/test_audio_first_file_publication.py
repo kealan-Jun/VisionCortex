@@ -67,6 +67,27 @@ def test_audio_coverage_preserves_missing_time_and_status():
         assert result['录音时间线'] == []
 
 
+def test_independent_audio_uses_the_explicit_publication_receipt_owner(audio_first, monkeypatch):
+    from visioncortex import device_day_publication_worker
+
+    config, folder, original, models, runner = audio_first
+    config['device_day']['readable_content_enabled'] = True
+    (folder/'rgb.mp4').unlink()
+    stable(folder)
+    record = inspect(config)
+    assert runner.process(record, stage='stt')['status'] == 'completed'
+    observe(runner.runtime_root, {'recordings': [record]})
+    calls = []
+    monkeypatch.setattr(device_day_publication_worker, 'publication_runner',
+                        lambda settings: calls.append(settings) or runner)
+    publisher = FileIndexPublisher(config)
+    assert publisher.tick()['published'] == 1
+    assert calls == [config]
+    assert read_json(runner.layout(record).comments/'TimeIndex.json')['streams']['audio'][0]['transcription']['status'] == 'completed'
+    assert models.speech_calls == 1 and models.vision_calls == models.semantic_calls == 0
+    publisher.close()
+
+
 def test_unverified_collector_audio_keeps_source_gap_without_verified_stream(device_config):
     from visioncortex.device_day_file_index import build_file_index
     sources = [{'kind': 'audio', 'original_path': '/collector/device/day/MetaData/120000/audio.opus',
