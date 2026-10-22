@@ -334,9 +334,21 @@ def migrate_display_layout(runner, layout, *, max_bytes=536870912, max_files=200
     entries = []
     for source, destination, files in batches:
         old, new = layout.relative(source), layout.relative(destination)
+        directory = old.split('/')[0]
         copied, single_file = [], source.is_file()
+        version_aliases = {}
         for path, before in files:
             target = destination if single_file else destination / path.relative_to(source)
+            if target.exists():
+                if target.is_symlink() or not target.is_file():
+                    raise ValueError('Display history destination is not a regular file')
+                checksum = file_hash(path)
+                if target.stat().st_size != before[1] or file_hash(target) != checksum:
+                    # Old public analysis may have gained billing annotations
+                    # after its earlier private copy. Preserve both actual
+                    # byte versions; do not overwrite an immutable old result.
+                    target = private_folder(layout, directory, 'LegacyVersions', checksum, path.name)
+                    version_aliases[layout.relative(path)] = layout.relative(target)
             reference = copy_verified(path, target)
             copied.append({'from': layout.relative(path), 'to': layout.relative(target), **reference})
             stat = path.stat()
@@ -350,11 +362,20 @@ def migrate_display_layout(runner, layout, *, max_bytes=536870912, max_files=200
             if ((stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns) != before
                     or file_hash(path) != reference['sha256']):
                 raise ValueError('Display source changed before alias publication')
-        directory = old.split('/')[0]
         mapping = {k: v for k, v in aliases(layout.root).items() if k.startswith(directory + '/')}
+        if single_file:
+            new = copied[0]['to']
         mapping[old] = new
+        # An exact file mapping takes precedence over the container prefix.
+        # Refresh a returning file's existing exact mapping as well.
+        for ref in copied:
+            if ref['from'] in version_aliases or ref['from'] in mapping:
+                mapping[ref['from']] = ref['to']
         _publish_aliases(layout, directory, mapping)
-        backup = private_folder(layout, directory, 'LegacyCopies', digest([old, new])[:24])
+        stat = source.stat()
+        backup = private_folder(layout, directory, 'LegacyCopies',
+                                digest([old, new, [stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns],
+                                        [(layout.relative(p), before) for p, before in files]])[:24])
         if backup.exists() and (not single_file or not backup.is_dir() or any(backup.iterdir())):
             raise ValueError('Display migration backup exists; preserve both copies')
         backup.parent.mkdir(parents=True, exist_ok=True)

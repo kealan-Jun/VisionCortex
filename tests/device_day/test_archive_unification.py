@@ -470,3 +470,87 @@ def test_prefixed_flat_archive_rejects_metadata_for_another_camera(tmp_path):
                 {"camera_key": "other_cam02"})
     with pytest.raises(ValueError, match="another device/camera"):
         original_units(layout, {"recordings": []}, [])
+
+
+def test_missing_historical_original_keeps_saved_results_without_inventing_a_source_group(tmp_path):
+    from visioncortex.device_day_contract import read_json, safe_child
+
+    layout, index, config, source, _ = case(tmp_path)
+    missing = {"path": "MetaVideo/missing.mp4", "size_bytes": 10, "sha256": "a" * 64}
+    index["recordings"].append({"recording_id": "missing", "sources": [],
+                                "stages": {"retention": {"status": "failed"}}})
+    folder = layout.processed / "Clips/11-24-20_11-24-21_NoExperimentActivity_12345678"
+    segment = dict(index["segments"][0], recording_id="missing", segment_id="missing-segment",
+                   source_ref=missing, video=None, start_ms=10000, end_ms=11000,
+                   start_us=index["segments"][0]["start_us"] + 10000000,
+                   end_us=index["segments"][0]["start_us"] + 11000000)
+    atomic_json(folder / "NoExperimentActivity.json", segment)
+    meaning = layout.understanding / "11-24-20.000000_11-24-21.000000/Understanding.json"
+    atomic_json(meaning, dict(segment, source_video=missing, status="completed",
+                             experiment_steps=[{"description": "saved synthetic model response"}]))
+    saved = artifact(layout.root, meaning)
+    atomic_json(layout.index, index)
+    canonical, original = layout.index.read_bytes(), source.read_bytes()
+    unifier = ArchiveUnifier(config, layout.name, index)
+    found = unifier.discover()
+    assert found["originals"] == 1 and found["unassigned_source_intervals"] == 1
+    checkpoint = tmp_path / "Checkpoint.json"
+    unifier.checkpoint(checkpoint)
+    unifier.publish()
+    assert verify_artifact(layout.root, saved)
+    assert safe_child(layout.root, saved["path"]).read_bytes()
+    gaps = read_json(layout.processed / ".Evidence/ArchiveUnification/SourceGaps.json")
+    assert gaps["unassigned_history_evidence"] == "PARTIAL_EVIDENCE"
+    assert gaps["unassigned_source_history"][0]["source_ref"] == missing
+    assert len([p for p in (layout.processed / "Clips").iterdir() if p.is_dir()]) == 1
+    assert not (layout.root / missing["path"]).exists()
+    resumed = ArchiveUnifier(config, layout.name, read_json(layout.index))
+    resumed.restore(checkpoint)
+    assert resumed.discover()["unassigned_source_intervals"] == 1
+    resumed.publish()
+    assert verify_artifact(layout.root, saved)
+    assert layout.index.read_bytes() == canonical and source.read_bytes() == original
+
+
+def test_scene_frame_only_legacy_folder_is_preserved_with_exact_links_across_resume(tmp_path):
+    from visioncortex.device_day_contract import read_json
+
+    layout, index, config, _, _ = case(tmp_path)
+    frame = layout.processed / "Clips/11-24-10_11-24-11_NoExperimentActivity_12345678/SceneFrames/00-00-01.000.jpg"
+    frame.parent.mkdir(parents=True)
+    frame.write_bytes(b"synthetic-scene-frame")
+    ref = artifact(layout.root, frame)
+    unifier = ArchiveUnifier(config, layout.name, index)
+    assert unifier.discover()["unbound_scene_frame_folders"] == 1
+    checkpoint = tmp_path / "Checkpoint.json"
+    unifier.checkpoint(checkpoint)
+    unifier.publish()
+    assert not frame.exists() and verify_artifact(layout.root, ref)
+    resumed = ArchiveUnifier(config, layout.name, read_json(layout.index))
+    resumed.restore(checkpoint)
+    resumed.discover()
+    resumed.publish()
+    assert verify_artifact(layout.root, ref)
+    assert len([p for p in (layout.processed / "Clips").iterdir() if p.is_dir()]) == 1
+
+
+def test_unadmitted_retired_video_failure_is_reported_without_publishing_corrupt_bytes(tmp_path):
+    from visioncortex.application.clip_delivery import _retire
+    from visioncortex.device_day_contract import read_json, safe_child
+
+    layout, index, config, source, refs = case(tmp_path)
+    original = source.read_bytes()
+    folder = (layout.root / refs[0]["path"]).parent
+    _retire(layout, folder)
+    retired = safe_child(layout.root, refs[0]["path"])
+    retired.write_bytes(b"synthetic-preexisting-corrupt-retired-video")
+    before = retired.read_bytes()
+    unifier = ArchiveUnifier(config, layout.name, index, public_video_inventory=[])
+    assert unifier.discover()["unadmitted_retired_video_gaps"] == 1
+    unifier.publish()
+    gaps = read_json(layout.processed / ".Evidence/ArchiveUnification/SourceGaps.json")
+    assert gaps["unadmitted_retired_video_gaps"][0]["expected_video"] == refs[0]
+    assert not gaps["unadmitted_retired_video_gaps"][0]["published_as_current_video"]
+    videos = list((layout.processed / "Clips").rglob("*.mp4"))
+    assert len(videos) == 1 and videos[0].read_bytes() != before
+    assert retired.read_bytes() == before and source.read_bytes() == original

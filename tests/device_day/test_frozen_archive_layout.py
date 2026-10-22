@@ -183,6 +183,27 @@ def test_bounded_relocation_keeps_original_evidence_and_old_receipts_valid(tmp_p
     assert migrate_display_layout(None, layout)['moved'] == []
 
 
+def test_mutable_public_report_annotations_preserve_each_immutable_history_version(tmp_path):
+    layout = DeviceDayLayout(tmp_path, 'camera_cam01', 1792376825000000)
+    private = layout.reports/'.Evidence/Analysis/DayContext/context/Part0000/Result.json'
+    public = layout.reports/'Analysis/DayContext/context/Part0000/Result.json'
+    atomic_json(private, {'observation': 'synthetic', 'usage_reservation': None})
+    old_private = artifact(layout.root, private)
+    atomic_json(public, {'observation': 'synthetic', 'usage_reservation': 'reserved'})
+    current = artifact(layout.root, public)
+    migrate_display_layout(None, layout)
+    assert verify_artifact(layout.root, old_private) and verify_artifact(layout.root, current)
+    version = artifact(layout.root, safe_child(layout.root, current['path']))
+    assert 'LegacyVersions' in version['path']
+    assert not public.exists() and migrate_display_layout(None, layout)['moved'] == []
+    atomic_json(public, {'observation': 'synthetic', 'usage_reservation': None})
+    # Measure the returning physical writer, not its older reader alias.
+    latest = artifact(public.parent, public) | {'path': layout.relative(public)}
+    migrate_display_layout(None, layout)
+    assert verify_artifact(layout.root, latest)
+    assert verify_artifact(layout.root, version) and verify_artifact(layout.root, old_private)
+
+
 def test_historical_selected_video_is_visible_in_clip_directory_without_reencoding(tmp_path):
     _, index = fixture(tmp_path)
     layout = DeviceDayLayout(tmp_path, 'camera_cam01', 1792376825000000)
