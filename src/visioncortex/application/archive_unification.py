@@ -1,0 +1,555 @@
+"""Format-only migration of historical device-day results; never runs models.
+
+The canonical producer index and recorder-owned files remain unchanged.  Old
+payloads retain their byte identities in evidence while public collections use
+the existing one-original layout.  The native archive implementation is an
+explicit port so a migration can verify historical receipts with its frozen
+runtime without declaring the new migration code to be that producer.
+"""
+
+from pathlib import Path
+import json
+import re
+import sys
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+from ..device_day_contract import DeviceDayLayout, atomic_json, digest, safe_child
+from ..device_day_content_paths import aliases, public_references, private_folder
+from . import clip_delivery
+
+
+RECIPE = "visioncortex-historical-format-unification/1"
+RECORD_FIELDS = {
+    "recording_id",
+    "camera_key",
+    "start_us",
+    "end_us",
+    "sources",
+    "stages",
+    "capture_complete",
+    "capture_issues",
+    "clock_ref",
+}
+SEGMENT_FIELDS = {
+    "segment_id",
+    "recording_id",
+    "candidate_segment_id",
+    "source_ref",
+    "json_path",
+    "start_us",
+    "end_us",
+    "start_ms",
+    "end_ms",
+    "activity",
+    "video",
+}
+
+
+def file_identity(path):
+    stat = path.stat()
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("Migration requires regular files")
+    return [stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns]
+
+
+def read_source_projection(
+    path,
+    *,
+    events,
+    checkpoint=lambda: None,
+    maximum_bytes=2 * 1024**3,
+    maximum_memory=64 * 1024**2,
+):
+    """Read only ownership/clocks, not dense frames or model diagnostics.
+
+    This intentionally incomplete object is a migration plan, never a producer
+    index or replacement for one. Unknown canonical fields stay in the original.
+    """
+    from ijson.common import ObjectBuilder
+
+    path = Path(path)
+    before = file_identity(path)
+    if before[2] > maximum_bytes:
+        raise ValueError("Canonical index exceeds the bounded migration input")
+
+    def include(parts):
+        if not parts:
+            return True
+        if parts[0] not in {"archive", "schema_version", "recordings", "segments"}:
+            return False
+        if len(parts) < 3:
+            return True
+        return parts[2] in (
+            RECORD_FIELDS if parts[0] == "recordings" else SEGMENT_FIELDS
+        )
+
+    builder, stack, memory = ObjectBuilder(), [], 0
+    with path.open("rb") as handle:
+        for count, (event, value) in enumerate(events(handle)):
+            if count % 4096 == 0:
+                checkpoint()
+            parent = stack[-1] if stack else None
+            child = (
+                ()
+                if parent is None
+                else parent["path"] + ((parent["key"],) if parent["map"] else (None,))
+            )
+            if event == "map_key":
+                parent["key"] = value
+                keep = not parent["omit"] and include(parent["path"] + (value,))
+            elif event in {"start_map", "start_array"}:
+                skip = bool(parent and parent["omit"]) or not include(child)
+                stack.append(
+                    {
+                        "path": child,
+                        "map": event == "start_map",
+                        "key": None,
+                        "omit": skip,
+                    }
+                )
+                keep = not skip
+            elif event in {"end_map", "end_array"}:
+                keep = not stack.pop()["omit"]
+            else:
+                keep = not (parent and parent["omit"]) and include(child)
+            if keep:
+                memory += 2 * (sys.getsizeof(value) + 64)
+                if memory > maximum_memory:
+                    raise ValueError(
+                        "Migration ownership projection exceeds its memory bound"
+                    )
+                builder.event(event, value)
+    if file_identity(path) != before:
+        raise ValueError("Canonical index changed during migration planning")
+    if not isinstance(builder.value, dict):
+        raise ValueError("Canonical index is not an object")
+    value = builder.value
+    value.setdefault("recordings", [])
+    value.setdefault("segments", [])
+    return value
+
+
+def bounded_document(path, maximum_bytes=32 * 1024**2):
+    path = Path(path)
+    before = file_identity(path)
+    if before[2] > maximum_bytes:
+        raise ValueError(
+            "Historical sidecar exceeds the bounded migration document size"
+        )
+    with path.open(encoding="utf-8") as handle:
+        value = json.load(handle)
+    if file_identity(path) != before or not isinstance(value, dict):
+        raise ValueError("Historical sidecar changed or is not an object")
+    return value
+
+
+def _time(value):
+    return datetime.fromtimestamp(value / 1e6, ZoneInfo("Asia/Shanghai")).isoformat(
+        timespec="microseconds"
+    )
+
+
+class ArchiveUnifier:
+    """Compose the existing publication owner with saved historical documents.
+
+    There is no model backend, queue admission, selection inference or original
+    file writer in this service. A historical video keeps its old selection;
+    its presence is never presented as newly proven value or physical action.
+    """
+
+    def __init__(self, config, name, index):
+        from ..device_day_timeline import day_bounds
+
+        self.config, self.index = config, index
+        start, _ = day_bounds(name[:10])
+        self.layout = DeviceDayLayout(
+            Path(config["storage"]["archive_root"]),
+            name[11:],
+            start,
+            read_only_originals=True,
+        )
+        self.rows = {}
+        self.by_id = {s["segment_id"]: s for s in index["segments"]}
+        self.records = {r["recording_id"]: r for r in index["recordings"]}
+        self.current_groups = set()
+        self.legacy_folders = set()
+
+    def _row(self, value):
+        reference = value.get("source_ref") or value.get("source_video")
+        if not isinstance(reference, dict) or not reference.get("path"):
+            return None
+        clip_delivery.source_unit(reference)
+        if len(str(reference.get("sha256", ""))) != 64:
+            raise ValueError("Historical interval lacks a source content identity")
+        rid = value.get("recording_id")
+        if not isinstance(rid, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", rid):
+            raise ValueError(
+                "Historical recording identity is not a safe archive identifier"
+            )
+        fields = {key: value.get(key) for key in SEGMENT_FIELDS}
+        fields.update(
+            source_ref=reference,
+            start_ms=value.get("start_ms", value.get("source_start_ms")),
+            end_ms=value.get("end_ms", value.get("source_end_ms")),
+        )
+        if not rid or any(
+            type(fields[k]) not in (int, float)
+            for k in ("start_us", "end_us", "start_ms", "end_ms")
+        ):
+            raise ValueError("Historical interval lacks an exact source/time binding")
+        if not (
+            fields["start_us"] < fields["end_us"]
+            and fields["start_ms"] < fields["end_ms"]
+        ):
+            raise ValueError("Historical interval has invalid bounds")
+        if rid not in self.records:
+            # Old presentation generations may retain an earlier producer ID.
+            # Preserve it; this descriptor is not admitted as a new recording.
+            record = {
+                "recording_id": rid,
+                "camera_key": self.layout.name[11:],
+                "start_us": fields["start_us"],
+                "end_us": fields["end_us"],
+                "sources": [{"kind": "video", "retained": reference}],
+                "stages": {},
+                "historical_format_descriptor_only": True,
+            }
+            self.records[rid] = record
+            self.index["recordings"].append(record)
+        times = [fields[k] for k in ("start_ms", "end_ms", "start_us", "end_us")]
+        times = [int(v) if v == int(v) else v for v in times]
+        key = digest([clip_delivery.VERSION, rid, reference, *times])
+        fields["segment_id"] = fields.get("segment_id") or "historical-" + key[:24]
+        fields["recording_id"] = rid
+        fields["activity"] = fields.get("activity") or "inactive"
+        existing = self.rows.get(key)
+        if existing is not None:
+            return existing
+
+        def stamp(v):
+            return datetime.fromtimestamp(v / 1e6, ZoneInfo("Asia/Shanghai")).strftime(
+                "%H-%M-%S"
+            )
+
+        row = {
+            "key": key,
+            "segment": fields,
+            "record": self.records[rid],
+            "candidate": fields,
+            "meaning": {},
+            "category": "PendingValueReview",
+            "label": clip_delivery.LABELS["PendingValueReview"],
+            "source_segment_ids": [fields["segment_id"]],
+            "interval": {
+                **{
+                    k: fields[k]
+                    for k in ("start_ms", "end_ms", "start_us", "end_us", "activity")
+                },
+                "video_value": "pending",
+                "reason": "historical_value_not_revalidated",
+                "historical_format_migration_only": True,
+            },
+            "_stamp": f"{stamp(fields['start_us'])}_{stamp(fields['end_us'])}",
+        }
+        self.rows[key] = row
+        return row
+
+    def _read_candidate(self, path):
+        document = bounded_document(path)
+        row = self._row(document)
+        if row is None:
+            return
+        row["meaning"].setdefault("metadata_document", self.layout.relative(path))
+        row["segment"]["json_path"] = self.layout.relative(path)
+        retention = document.get("retention") or {}
+        selection = (
+            document.get("selection_interval")
+            or retention.get("selection_interval")
+            or {}
+        )
+        if (
+            selection.get("video_value") == "confirmed_no_value"
+            or retention.get("no_value_proven") is True
+        ):
+            row["category"] = "NoValueNoExperimentActivity"
+            row["interval"].update(
+                video_value="confirmed_no_value",
+                reason="preserved_historical_no_value_decision",
+            )
+        video = document.get("video") or selection.get("historical_existing_video")
+        folder = path.parent
+        if not video:
+            candidate = next(iter(folder.glob("*.mp4")), None)
+            if candidate is not None and folder not in self.current_groups:
+                from ..device_day_contract import artifact
+
+                video = artifact(self.layout.root, candidate)
+                row["meaning"]["historical_video_had_no_sidecar_reference"] = True
+        if video and row["category"] != "NoValueNoExperimentActivity":
+            from ..device_day_verification import verify_artifact_cached
+
+            if not verify_artifact_cached(self.layout.root, video):
+                raise ValueError(
+                    "Existing historical video differs from its recorded checksum"
+                )
+            row["segment"]["video"] = video
+            row["interval"].update(
+                video_value="selected",
+                reason="existing_historical_materialization_preserved",
+                selection_revalidated=False,
+                historical_existing_video=video,
+            )
+            row["meaning"]["historical_selection_only"] = True
+        prior = document.get("display_category")
+        row["meaning"]["prior_display_category"] = prior
+
+    def _read_understanding(self, path):
+        document = bounded_document(path)
+        row = self._row(document)
+        if row is None:
+            return
+        previous = row["meaning"].get("understanding_document")
+        if previous:
+            old = bounded_document(safe_child(self.layout.root, previous))
+            rank = {"completed": 3, "partial": 2, "submitted_unknown": 1}
+            if rank.get(old.get("status"), 0) > rank.get(document.get("status"), 0):
+                return
+        row["meaning"]["understanding_document"] = self.layout.relative(path)
+        # Preserve a saved model's classification only when there is actual
+        # returned content. CV activity without a returned observation remains
+        # pending and never becomes an experiment claim during migration.
+        prior = document.get("display_category")
+        observed = document.get("understanding") or document.get("experiment_steps")
+        if observed and prior in {"ExperimentActivity", "ValuableNoExperimentActivity"}:
+            row["category"] = prior
+        elif observed and row["meaning"].get("prior_display_category") in {
+            "ExperimentActivity",
+            "ValuableNoExperimentActivity",
+        }:
+            row["category"] = row["meaning"]["prior_display_category"]
+
+    def discover(self):
+        """Read public source-bound sidecars before any relocation happens."""
+        root = self.layout.root
+        parent = self.layout.processed / "Clips"
+        for folder in sorted(parent.iterdir()) if parent.is_dir() else []:
+            if not folder.is_dir() or folder.name.startswith("."):
+                continue
+            group = folder / "Index.json"
+            header = bounded_document(group) if group.is_file() else {}
+            if header.get("schema_version") == clip_delivery.VERSION:
+                self.current_groups.add(folder)
+                for entry in header.get("intervals", []):
+                    relative = entry.get("metadata")
+                    if relative and safe_child(root, relative).is_file():
+                        self._read_candidate(safe_child(root, relative))
+                continue
+            paths = [
+                folder / (kind + ".json")
+                for kind in (*clip_delivery.LABELS, "NoExperimentActivity", "Clip")
+            ]
+            paths = [p for p in paths if p.is_file()]
+            if not paths:
+                segments = [
+                    s
+                    for s in self.index["segments"]
+                    if s.get("json_path", "").startswith(
+                        self.layout.relative(folder) + "/"
+                    )
+                ]
+                for segment in segments:
+                    row = self._row(segment)
+                    if row:
+                        row["segment"]["json_path"] = segment.get("json_path")
+            for path in paths:
+                self._read_candidate(path)
+            self.legacy_folders.add(folder)
+        for folder in (
+            sorted(self.layout.understanding.iterdir())
+            if self.layout.understanding.is_dir()
+            else []
+        ):
+            if not folder.is_dir() or folder.name.startswith("."):
+                continue
+            path = folder / "Understanding.json"
+            if not path.is_file():
+                continue
+            value = bounded_document(path)
+            if value.get("schema_version") == clip_delivery.VERSION:
+                for entry in value.get("intervals", []):
+                    relative = entry.get("content")
+                    if relative and safe_child(root, relative).is_file():
+                        self._read_understanding(safe_child(root, relative))
+            else:
+                self._read_understanding(path)
+                self.legacy_folders.add(folder)
+        for row in self.rows.values():
+            kind = row["category"]
+            row.update(
+                name=f"{row['_stamp']}_{clip_delivery._display_category(kind)}_{row['key'][:8]}",
+                label=clip_delivery.LABELS[kind],
+            )
+        values = sorted(
+            self.rows.values(), key=lambda r: (r["segment"]["start_us"], r["key"])
+        )
+        units = clip_delivery.original_units(self.layout, self.index, values)
+        for row in values:
+            key, _ = clip_delivery.source_unit(row["segment"]["source_ref"])
+            if key not in units:
+                raise ValueError("Historical result has no owning original collection")
+        self.values, self.units = values, units
+        return {
+            "originals": len(units),
+            "intervals": len(values),
+            "legacy_folders": len(self.legacy_folders),
+        }
+
+    def _document(self, index, root, segment, saved, interval, record, audio_entries):
+        relative = saved.get("understanding_document")
+        value = bounded_document(safe_child(root, relative)) if relative else {}
+        value = public_references(value, aliases(root))
+        metadata = saved.get("metadata_document")
+        if metadata:
+            original = public_references(
+                bounded_document(safe_child(root, metadata)), aliases(root)
+            )
+            for key in (
+                "key_frames",
+                "scene_frames",
+                "clock_ref",
+                "sampling_coverage",
+                "visibility",
+                "uncertainties",
+            ):
+                if key in original:
+                    segment[key] = original[key]
+            if segment["activity"] == "inactive":
+                segment["key_frames"] = []
+                segment["scene_frames"] = [
+                    dict(frame, frame_kind="scene_sample")
+                    for frame in segment.get("scene_frames", [])
+                ]
+        status = value.get("status") or "not_processed"
+        narrative = {
+            key: val
+            for key, val in (value.get("内容记录") or {}).items()
+            if key not in {"实际模型输入", "模型原始响应", "frames", "windows"}
+        }
+        # The group header is a bounded reading index. Full old payloads remain
+        # in each interval's JSON, never expanded once more into every header.
+        for key in list(narrative):
+            if len(json.dumps(narrative[key], ensure_ascii=False, default=str)) > 8192:
+                narrative[key] = "详见本区间的详细记录，原有内容完整保留。"
+        narrative.update(
+            开始时间=_time(segment["start_us"]),
+            结束时间=_time(segment["end_us"]),
+            状态说明=value.get("message") or status,
+            阶段状态={"历史理解": status},
+            处理原因="仅统一历史文件格式，未重新调用模型",
+            原有步骤数量=len(value.get("experiment_steps") or []),
+        )
+        value.update(
+            schema_version="visioncortex-readable-understanding/1",
+            archive=self.layout.name,
+            device=self.layout.name[11:],
+            date=self.layout.name[:10],
+            timezone="Asia/Shanghai",
+            path_base="device_day",
+            timestamp_unit="unix_microseconds",
+            physical_action_confirmed=False,
+            recording_id=segment["recording_id"],
+            segment_id=segment["segment_id"],
+            start_us=segment["start_us"],
+            end_us=segment["end_us"],
+            source_start_ms=segment["start_ms"],
+            source_end_ms=segment["end_ms"],
+            source_video=segment["source_ref"],
+            video=segment.get("video"),
+            activity=segment["activity"],
+            status=status,
+            video_status="available" if segment.get("video") else "not_materialized",
+            record_scope="retention_interval",
+            candidate_segment_id=segment.get(
+                "candidate_segment_id", segment["segment_id"]
+            ),
+        )
+        value["内容记录"] = narrative
+        value["historical_format_migration"] = {
+            "recipe": RECIPE,
+            "model_invoked": False,
+            "prior_document": relative,
+            "prior_metadata": metadata,
+            "classification_revalidated": False,
+            "existing_video_selection_revalidated": False,
+            "saved_content_preserved": bool(relative),
+        }
+        retention = {
+            "schema_version": "visioncortex-derived-video-disposition/1",
+            "source_ref": segment["source_ref"],
+            "start_us": segment["start_us"],
+            "end_us": segment["end_us"],
+            "selection_interval": interval,
+            "video": segment.get("video"),
+            "no_value_proven": interval["video_value"] == "confirmed_no_value",
+            "historical_format_migration": value["historical_format_migration"],
+        }
+        return value, retention
+
+    @staticmethod
+    def _entry(value, relative):
+        return {
+            **{
+                k: value[k]
+                for k in (
+                    "recording_id",
+                    "segment_id",
+                    "start_us",
+                    "end_us",
+                    "activity",
+                    "status",
+                    "candidate_segment_id",
+                    "record_scope",
+                    "video_status",
+                )
+            },
+            "开始时间": value["内容记录"]["开始时间"],
+            "结束时间": value["内容记录"]["结束时间"],
+        }
+
+    def publish(self, *, maximum_new_videos=16, maximum_video_bytes=512 * 1024**2):
+        from ..device_day import copy_verified
+        from ..device_day_content import content_index
+
+        index_path = self.layout.understanding / "Index.json"
+        if index_path.is_file():
+            from ..device_day_contract import file_hash
+
+            checksum = file_hash(index_path)
+            backup = private_folder(
+                self.layout,
+                "MultimodalUnderstanding",
+                "ArchiveUnification",
+                "PriorIndexes",
+                checksum + ".json",
+            )
+            if not backup.is_file():
+                copy_verified(index_path, backup)
+        entries, progress = clip_delivery.publish(
+            self.config,
+            self.index,
+            [],
+            document_builder=self._document,
+            writer=atomic_json,
+            entry_builder=self._entry,
+            source_views=self.values,
+            source_units=self.units,
+            maximum_retired=20000,
+            maximum_new_videos=maximum_new_videos,
+            maximum_video_bytes=maximum_video_bytes,
+        )
+        atomic_json(
+            index_path,
+            content_index(self.layout.name, "MultimodalUnderstanding", entries),
+        )
+        return progress
