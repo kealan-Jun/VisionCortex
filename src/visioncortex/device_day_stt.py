@@ -32,7 +32,7 @@ def audio_windows(duration, maximum, *, offset=0.0):
         edges[-2] = (edges[-3] + edges[-1]) / 2
     windows = []
     for start, end in zip(edges, edges[1:], strict=False):
-        left, right = offset + start, offset + end
+        left, right = (offset + start, offset + end) if offset else (start, end)
         # Adding a fractional replay origin can make an exactly bounded
         # window subtract to maximum + one ULP. Keep the conservative provider
         # gate unchanged; move only that representation's upper edge inward.

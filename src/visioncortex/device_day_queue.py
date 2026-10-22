@@ -52,6 +52,10 @@ class DeviceDayQueue:
                        'recording_id TEXT NOT NULL, source_signature TEXT NOT NULL, revision TEXT NOT NULL, '
                        'snapshot TEXT NOT NULL, superseded_at REAL NOT NULL, '
                        'PRIMARY KEY(recording_id,source_signature,revision))')
+            db.execute('CREATE TABLE IF NOT EXISTS reanalysis_authorizations ('
+                       'recording_id TEXT NOT NULL, revision TEXT NOT NULL, authorization_id TEXT NOT NULL, '
+                       'maximum_attempts INTEGER NOT NULL, previous_row TEXT NOT NULL, proof TEXT NOT NULL, '
+                       'authorized_at REAL NOT NULL, PRIMARY KEY(recording_id,revision))')
             db.execute("""CREATE TABLE IF NOT EXISTS retry_authorizations (
                 recording_id TEXT NOT NULL, revision TEXT NOT NULL, repair_id TEXT NOT NULL,
                 authorized_at REAL NOT NULL, previous_attempts INTEGER NOT NULL,
@@ -191,10 +195,58 @@ class DeviceDayQueue:
         """Keep expensive background audits behind ready stage work."""
         with self.connect() as db:
             return db.execute(
-                "SELECT 1 FROM recordings WHERE input_status='ready' AND "
-                "(status IN ('queued','running') OR (status='failed' AND attempts<MAX(?,retry_limit))) LIMIT 1",
+                "SELECT 1 FROM recordings r WHERE input_status='ready' AND "
+                "(status IN ('queued','running') OR (status='failed' AND attempts<MAX(?,retry_limit))) "
+                "AND (r.status='running' OR NOT EXISTS(SELECT 1 FROM reanalysis_authorizations a WHERE "
+                "a.recording_id=r.recording_id AND a.revision=r.revision AND r.attempts>=a.maximum_attempts)) LIMIT 1",
                 (max_attempts,),
             ).fetchone() is not None
+
+    def authorize_reanalysis(self, expected, revision, proof):
+        """One explicit operator-authorized attempt, retaining the uncertain past.
+
+        The caller must verify current inputs/parents and hold the recording's
+        execution locks. This is never called by automatic retry repair and
+        does not resolve billing or bypass the per-request usage ledger.
+        """
+        from .device_day_contract import digest
+        import re
+        record = json.loads(expected['payload'])
+        if (self.path.stem != 'queue-understanding' or expected.get('status') != 'blocked'
+                or expected.get('blocked_reason') not in {'submitted_unknown', 'result_unknown'}
+                or expected.get('lease_owner') or expected.get('lease_until')
+                or not re.fullmatch('[0-9a-f]{64}', revision)
+                or not re.fullmatch('[0-9a-f]{64}', str(proof.get('authorization_id', '')))
+                or proof.get('potential_duplicate_billing_accepted') is not True
+                or proof.get('recording_id') != record['recording_id']
+                or not record.get('source_signature')
+                or proof.get('source_signature') != record.get('source_signature')
+                or proof.get('current_source_verified') != 'PROVEN'
+                or proof.get('prior_results_checked') != 'PROVEN'
+                or proof.get('prerequisites_verified') != 'PROVEN'):
+            raise ValueError('Reanalysis requires explicit exact-source operator authorization')
+        current = time.time()
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT * FROM recordings WHERE recording_id=?', (record['recording_id'],)).fetchone()
+            if row is None or dict(row) != expected:
+                return False
+            if db.execute('SELECT 1 FROM reanalysis_authorizations WHERE recording_id=?',
+                          (record['recording_id'],)).fetchone():
+                return False  # A failed/unknown reanalysis requires a new human decision.
+            db.execute('INSERT INTO reanalysis_authorizations VALUES(?,?,?,?,?,?,?)',
+                       (record['recording_id'], revision, proof['authorization_id'], row['attempts']+1,
+                        json.dumps(expected), json.dumps(proof), current))
+            result = {'status': 'queued', 'reason': 'user_authorized_reanalysis',
+                      'authorization_id': proof['authorization_id'], 'potential_duplicate_billing': True}
+            db.execute("UPDATE recordings SET revision=?,status='queued',blocked_reason=NULL,result=?,"
+                       "completed_at=NULL,updated_at=? WHERE recording_id=?",
+                       (revision, json.dumps(result), current, record['recording_id']))
+            from .task_events import append
+            append(db, record['recording_id'], 'unknown_reanalysis_authorized', revision=revision,
+                   attempt=row['attempts'], data={'proof_sha256': digest(proof), 'additional_attempts': 1,
+                   'old_revision': row['revision'], 'old_outcome_preserved': True})
+        return True
 
     def revise_verified_completion(self, recording, previous_revision, revision):
         """Keep completion only after the caller revalidates the current receipt.
@@ -224,6 +276,15 @@ class DeviceDayQueue:
 
     def recover_expired(self, expected, result, proof):
         """CAS one expired lease; retain its exact prior row and attempt count."""
+        return self._recover_outcome(expected, result, proof, blocked=False)
+
+    def reconcile_completed_unknown(self, expected, result, proof):
+        """Restore an independently verified completion, with no new model call."""
+        if result.get('status') != 'completed':
+            raise ValueError('Blocked recovery requires a verified completed receipt')
+        return self._recover_outcome(expected, result, proof, blocked=True)
+
+    def _recover_outcome(self, expected, result, proof, *, blocked):
         from .device_day_contract import digest
         status = result.get('status')
         record = json.loads(expected['payload'])
@@ -238,7 +299,12 @@ class DeviceDayQueue:
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             row = db.execute('SELECT * FROM recordings WHERE recording_id=?', (expected['recording_id'],)).fetchone()
-            if row is None or dict(row) != expected or row['status'] != 'running' or (row['lease_until'] or 0) >= current:
+            if row is None or dict(row) != expected:
+                return False
+            eligible = (row['status'] == 'blocked' and not row['lease_owner'] and not row['lease_until']
+                        and row['blocked_reason'] in {'submitted_unknown', 'result_unknown'}) if blocked else (
+                        row['status'] == 'running' and (row['lease_until'] or 0) < current)
+            if not eligible:
                 return False
             db.execute('CREATE TABLE IF NOT EXISTS lease_recoveries('
                        'recovery_id TEXT PRIMARY KEY,recording_id TEXT,revision TEXT,previous_row TEXT,'
@@ -254,7 +320,8 @@ class DeviceDayQueue:
                        ('completed' if completed else 'blocked', None if completed else 'result_unknown',
                         json.dumps(published), current if completed else row['completed_at'], current, row['recording_id']))
             from .task_events import append
-            append(db, row['recording_id'], 'expired_lease_recovered', revision=row['revision'], attempt=row['attempts'],
+            append(db, row['recording_id'], 'blocked_receipt_recovered' if blocked else 'expired_lease_recovered',
+                   revision=row['revision'], attempt=row['attempts'],
                    data={'recovery_id': recovery, 'outcome': status, 'proof_sha256': digest(proof),
                          'previous_lease_owner': row['lease_owner'], 'model_invoked': False})
         return True
@@ -276,6 +343,9 @@ class DeviceDayQueue:
                           + (" OR (r.status='failed' AND (? IS NULL OR r.attempts<MAX(?,r.retry_limit))))" if retry else ")")]
             conditions.append("r.input_status='ready'")
             conditions.append('r.blocked_reason IS NULL')
+            conditions.append('NOT EXISTS(SELECT 1 FROM reanalysis_authorizations a WHERE '
+                              'a.recording_id=r.recording_id AND a.revision=r.revision '
+                              'AND r.attempts>=a.maximum_attempts)')
             parameters = [] if self.requires_expired_reconciliation else [current]
             if retry:
                 parameters.extend([max_attempts, max_attempts])

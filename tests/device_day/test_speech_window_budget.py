@@ -50,3 +50,9 @@ def test_fractional_window_passes_actual_adapter_budget_without_loosening_gate(t
     with pytest.raises(ValueError, match='exceeds its budget'):
         qwen.invoke(tmp_path/'rejected', request)
     assert len(calls) == 1
+
+
+def test_zero_origin_preserves_existing_request_json_number_types():
+    import json
+    assert json.dumps(audio_windows(360, 180)) == '[[0, 180], [180, 360]]'
+    assert json.dumps(audio_windows(360.0, 180.0)) == '[[0.0, 180.0], [180.0, 360.0]]'
