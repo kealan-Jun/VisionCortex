@@ -54,10 +54,14 @@ def recorder_audio(video: Path, metadata: dict, ready: dict, now: float, settle:
     copyable = stable and not mismatches
     files = [{"kind": kind, "path": str(path)} for kind, path in paths.items()
              if path.is_file() and copyable and (kind != "audio" or state == "provided")]
-    return {"status": state, "files": files, "source_signature": digest(snapshots),
+    replay = ({'artifact_kind': 'derived_replay', 'quality_flags': meta.get('quality_flags', []),
+               'quality_evidence': meta.get('quality_evidence', []), 'capture_clock_verified': False}
+              if meta.get('artifact_kind') == 'derived_replay' else {})
+    return {"status": state, "files": files, "source_signature": digest(snapshots), **replay,
             "quality_status": (meta | published).get("quality_status"),
             "capture_complete": (meta | published).get("audio_valid"),
             "start_us": meta.get("first_audio_global_us"), "end_us": meta.get("last_audio_global_us"),
             "duration_us": meta.get("audio_duration_us"), "association_issues": mismatches,
-            "time_basis": "recorder_audio_metadata" if meta.get("first_audio_global_us") else "unknown",
+            "time_basis": ('derived_replay_sample_clock' if replay else
+                           "recorder_audio_metadata" if meta.get("first_audio_global_us") else "unknown"),
             "transcription_status": "pending" if state == "provided" else "awaiting_audio"}
