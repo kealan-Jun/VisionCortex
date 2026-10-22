@@ -89,6 +89,40 @@ def test_bounded_turn_resumes_next_child_without_reextracting_published_one(exac
     assert retained_video.child_segment(case.candidate, numeric)['segment_id'] == first_row['segment_id']
 
 
+def test_latest_export_budget_uses_newest_child_but_keeps_time_index_order(exact_case):
+    case = exact_case
+    case.config['device_day']['latest_first'] = True
+    result = retained_video.publish_selected(case.config, case.index, evidence_validator=case.validator)
+    assert result['materialized'] == result['pending'] == 1
+    assert [(row[1], row[2]) for row in case.calls] == [(540000, 20000)]
+    assert [row['start_ms'] for row in case.candidate['retention_intervals']] == [0, 130000, 155000, 540000, 560000]
+    assert [row['start_ms'] for row in result['selected_intervals']] == [130000, 540000]
+    assert not result['selected_intervals'][0].get('video') and result['selected_intervals'][1]['video']
+
+
+def test_latest_export_budget_prefers_newer_capture_without_reordering_index(exact_case, monkeypatch):
+    case = exact_case
+    case.config['device_day']['latest_first'] = True
+    shift = 1000000000
+    newer = deepcopy(case.candidate) | {'segment_id': 'newer-candidate', 'recording_id': 'newer-recording',
+        'start_us': case.candidate['start_us']+shift, 'end_us': case.candidate['end_us']+shift}
+    record = deepcopy(case.record) | {'recording_id': newer['recording_id'],
+        'start_us': newer['start_us'], 'end_us': newer['end_us']}
+    grouped = deepcopy(case.grouped) | {'candidate_segment_id': newer['segment_id']}
+    for interval in grouped['intervals']:
+        interval['start_us'] += shift
+        interval['end_us'] += shift
+    groups = {case.candidate['segment_id']: case.grouped, newer['segment_id']: grouped}
+    monkeypatch.setattr(retained_video, 'partition', lambda candidate, *args: deepcopy(groups[candidate['segment_id']]))
+    case.index['segments'].append(newer)
+    case.index['recordings'].append(record)
+    result = retained_video.publish_selected(case.config, case.index, evidence_validator=case.validator)
+    completed, = [row for row in result['selected_intervals'] if row.get('video')]
+    assert completed['recording_id'] == newer['recording_id'] and completed['start_ms'] == 540000
+    assert [row['segment_id'] for row in case.index['segments']] == [case.candidate['segment_id'], newer['segment_id']]
+    assert [(row[1], row[2]) for row in case.calls] == [(540000, 20000)]
+
+
 @pytest.mark.parametrize('change', [{'start_ms': 0}, {'end_ms': 900000}, {'evidence': []}, {'video_value': 'pending'}])
 def test_explicit_selection_cannot_forge_or_expand_a_positive_interval(exact_case, change):
     case = exact_case

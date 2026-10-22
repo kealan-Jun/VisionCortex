@@ -381,7 +381,15 @@ def publish_selected(config, index, *, recording_id=None, maximum_new_videos=1, 
     root = Path(config['storage']['archive_root'])
     report = {'materialized': 0, 'pending': 0, 'errors': [], 'selected_intervals': []}
     new_attempts = 0
-    for candidate in index.get('segments', []):
+    latest = config.get('device_day', {}).get('latest_first', False)
+    candidates = index.get('segments', [])
+    interval_collections = []
+    if latest:
+        def capture_time(row):
+            value = row.get('start_us')
+            return value if type(value) in (int, float) and math.isfinite(value) else float('-inf')
+        candidates = sorted(candidates, key=capture_time, reverse=True)
+    for candidate in candidates:
         record = records.get(candidate['recording_id'])
         if not record or not candidate.get('start_us') or not candidate.get('end_us'):
             continue
@@ -408,7 +416,11 @@ def publish_selected(config, index, *, recording_id=None, maximum_new_videos=1, 
                 'selection_status': 'historical_retained_not_revalidated_for_exact_selection'}
         rows = []
         candidate['retention_intervals'] = rows
-        for selection in grouped['intervals']:
+        interval_collections.append(rows)
+        selections = grouped['intervals']
+        if latest:
+            selections = sorted(selections, key=lambda row: row['start_us'], reverse=True)
+        for selection in selections:
             child = child_segment(candidate, selection)
             row = selection | child | {'child_id': child['segment_id'],
                 'understanding_path': understanding_relative(child) + '/Understanding.json',
@@ -493,6 +505,12 @@ def publish_selected(config, index, *, recording_id=None, maximum_new_videos=1, 
                 retry_at = _defer_attempt(attempt_path, previous_attempt, decision_key, error)
                 row.update(processing_status='failed', error=error, retry_at=retry_at)
     report['selected_intervals'] = [row for row in report['selected_intervals'] if row['video_value'] == 'selected']
+    if latest:
+        # Export budget follows processing priority. Persisted partitions and
+        # readable results retain their ordinary chronological presentation.
+        for rows in interval_collections:
+            rows.sort(key=lambda row: row['start_ms'])
+        report['selected_intervals'].sort(key=lambda row: row['start_us'])
     return report
 
 
