@@ -454,6 +454,8 @@ class ArchiveUnifier:
                         physical(old)
                         if old != target:
                             mappings.setdefault(old, target)
+                            clip_delivery.preserve_alias_descendants(
+                                self.layout, directory, old, target, mappings)
             for path in sorted((evidence / "ClipFileRelocations").glob("*.json")):
                 intent = bounded_document(path)
                 old, target = intent.get("from", ""), intent.get("to", "")

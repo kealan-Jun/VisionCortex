@@ -296,6 +296,37 @@ def _group_header(folder, filename, key=None):
     return None
 
 
+def preserve_alias_descendants(layout, directory, old, new, mapping):
+    """Keep implicit child addresses when a former directory name returns.
+
+    A retired child can have an exact alias beneath the previous directory.
+    Dropping a returning directory's prefix alias must not lose those children.
+    Existing physical current files and explicit bindings always take precedence.
+    """
+    prefix = {'ProcessedClips': 'ProcessedClips/Clips/',
+              'MultimodalUnderstanding': 'MultimodalUnderstanding/'}.get(directory)
+    if not prefix or any(not path.startswith(prefix)
+                         or len(PurePosixPath(path).parts) != len(PurePosixPath(prefix).parts)+1
+                         for path in (old, new)):
+        raise ValueError('Collection child alias lacks an owned public directory')
+    if old == new:
+        return
+    parent = layout.root/directory
+    for key in list(mapping):
+        if not key.startswith(old+'/'):
+            continue
+        target = relocated(key, mapping)
+        child = new+key[len(old):]
+        if child in mapping or target == child:
+            continue
+        if not all(value.startswith(directory+'/') for value in (child, target)):
+            raise ValueError('Collection child alias crossed its owning directory')
+        physical_child = safe_child(parent, child.removeprefix(directory+'/'))
+        physical_target = safe_child(parent, target.removeprefix(directory+'/'))
+        if not physical_child.exists() and physical_target.exists():
+            mapping[child] = target
+
+
 def _complete_group_rename(layout, intent, journal):
     """Rename an owned group once; replay after a crash without copying video."""
     from ..device_day_write_guard import verify_before_submission
@@ -320,6 +351,7 @@ def _complete_group_rename(layout, intent, journal):
     if digest(_group_header(target, filename, intent['source_unit'])) != intent['header_digest']:
         raise ValueError('Renamed original group failed ownership verification')
     mapping = {k: v for k, v in aliases(layout.root).items() if k.startswith(directory+'/')}
+    preserve_alias_descendants(layout, directory, old, new, mapping)
     # Flatten old destinations and remove a returning category's directory
     # alias before binding the previous display name to the new physical name.
     flattened = {}
@@ -344,6 +376,16 @@ def rename_original_groups(layout, units):
             intent = read_json(journal)
             if intent.get('status') != 'completed':
                 _complete_group_rename(layout, intent, journal)
+            else:
+                unit = units.get(intent.get('source_unit'))
+                if unit and _group_header(parent/unit['name'], filename, unit['key']):
+                    mapping = {k: v for k, v in aliases(layout.root).items() if k.startswith(directory+'/')}
+                    previous = dict(mapping)
+                    for old in (intent['from'], intent['to']):
+                        preserve_alias_descendants(layout, directory, old,
+                                                   layout.relative(parent/unit['name']), mapping)
+                    if mapping != previous:
+                        _publish_aliases(layout, directory, mapping)
         if not parent.is_dir():
             continue
         for source in list(parent.iterdir()):

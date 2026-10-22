@@ -717,3 +717,41 @@ def test_native_cli_repairs_headers_left_by_an_interrupted_collection_rename(tmp
                 assert read_json(folder/filename)['source_folder'] == folder.name
     assert all(verify_artifact(layout.root, ref) for ref in refs)
     assert source.read_bytes() == original and layout.index.read_bytes() == canonical
+
+
+def test_returning_category_preserves_retired_children_and_recovers_old_completed_renames(tmp_path):
+    from pathlib import Path
+    from visioncortex.application import clip_delivery
+    from visioncortex.device_day_contract import read_json, safe_child
+
+    layout, index, config, source, refs = case(tmp_path)
+    original, canonical = source.read_bytes(), layout.index.read_bytes()
+    unifier = ArchiveUnifier(config, layout.name, index)
+    unifier.discover()
+    unifier.publish()
+    folder = next(p for p in (layout.processed/'Clips').iterdir() if p.is_dir())
+    reference = read_json(folder/'Index.json')['intervals'][0]['video']
+    units = clip_delivery.original_units(layout, index, [])
+    original_name = next(iter(units.values()))['name']
+    for unit in units.values():
+        unit['name'] = unit['name'].replace('NoExperimentActivity', 'ExperimentActivity')
+    clip_delivery.rename_original_groups(layout, units)
+    renamed = next(iter(units.values()))['name']
+    relocated_video = 'ProcessedClips/Clips/'+renamed+'/'+Path(reference['path']).name
+    clip_delivery._retire_file(layout, relocated_video, reference)
+    assert verify_artifact(layout.root, reference)
+    for unit in units.values():
+        unit['name'] = original_name
+    clip_delivery.rename_original_groups(layout, units)
+    assert verify_artifact(layout.root, reference)
+    # Recover pre-fix completed journals too: the physical file remains private,
+    # while the former prefix-only address has lost its derived child mapping.
+    mappings = {k:v for k,v in aliases(layout.root).items() if k.startswith('ProcessedClips/')}
+    mappings.pop(reference['path'])
+    clip_delivery._publish_aliases(layout, 'ProcessedClips', mappings)
+    assert not verify_artifact(layout.root, reference)
+    clip_delivery.rename_original_groups(layout, units)
+    assert verify_artifact(layout.root, reference)
+    assert safe_child(layout.root, reference['path']).read_bytes()
+    assert all(verify_artifact(layout.root, ref) for ref in refs)
+    assert source.read_bytes() == original and layout.index.read_bytes() == canonical
