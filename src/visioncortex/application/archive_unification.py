@@ -420,6 +420,7 @@ class ArchiveUnifier:
             row["meaning"]["historical_selection_only"] = True
         prior = document.get("display_category")
         row["meaning"]["prior_display_category"] = prior
+        return row
 
     def _read_understanding(self, path):
         document = bounded_document(path)
@@ -482,17 +483,10 @@ class ArchiveUnifier:
                     row = self._row(segment)
                     if row:
                         row["segment"]["json_path"] = segment.get("json_path")
-            count = len(self.rows)
+            owned = False
             for path in paths:
-                self._read_candidate(path)
-            if paths and (
-                len(self.rows) > count
-                or any(
-                    r["meaning"].get("metadata_document") == self.layout.relative(p)
-                    for p in paths
-                    for r in self.rows.values()
-                )
-            ):
+                owned = self._read_candidate(path) is not None or owned
+            if owned:
                 self.legacy_folders.add(folder)
         for folder in (
             sorted(self.layout.understanding.iterdir())

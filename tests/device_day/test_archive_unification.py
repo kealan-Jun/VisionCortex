@@ -220,6 +220,29 @@ def test_native_move_journals_recover_a_legacy_interruption_without_a_checkpoint
     assert all(verify_artifact(layout.root, ref) for ref in refs)
 
 
+def test_duplicate_public_generation_is_retired_even_if_row_was_recovered_first(
+    tmp_path,
+):
+    from visioncortex.application import clip_delivery
+    from visioncortex.device_day_contract import read_json
+
+    layout, index, config, source, refs = case(tmp_path)
+    folder = (layout.root / refs[0]["path"]).parent
+    original = read_json(folder / "ExperimentActivity.json")
+    clip_delivery._retire(layout, folder)
+    folder = folder.with_name(folder.name + "_another_generation")
+    atomic_json(
+        folder / "ExperimentActivity.json",
+        original | {"dense_legacy_audit": "x" * (4 * 1024**2)},
+    )
+    unifier = ArchiveUnifier(config, layout.name, index)
+    unifier.discover()
+    assert folder in unifier.legacy_folders
+    assert not unifier.publish()["pending"]
+    assert not folder.exists()
+    assert all(verify_artifact(layout.root, ref) for ref in refs)
+
+
 def test_separate_no_value_retention_outranks_stale_model_classification(tmp_path):
     from visioncortex.device_day_contract import read_json
 
