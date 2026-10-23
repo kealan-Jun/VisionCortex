@@ -86,16 +86,19 @@ def test_reinspection_preserves_alias_and_unknown_view_does_not_inherit_old_role
 
 
 def test_monitor_discovers_new_lab_date_in_the_existing_service(config):
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
     from visioncortex.device_day_monitor import CameraMonitor
     from visioncortex.device_day_service import DeviceDayService
     from visioncortex.observed_inventory import read_inventory
-    capture(config, 'lab_video/2026-09-15-1/161156', closed=False)
+    today = datetime.now(ZoneInfo('Asia/Shanghai')).date()
+    capture(config, f'lab_video/{today - timedelta(days=1)}-1/161156', closed=False)
     service = DeviceDayService(lambda: config, threading.Lock())
     stop = threading.Event()
     monitor = CameraMonitor(config, stop, service.observe)
     try:
         monitor.poll()
-        capture(config, 'lab_video/2026-09-16-3/162103')
+        capture(config, f'lab_video/{today}-3/162103')
         deadline = time.monotonic()+4
         while len(monitor.records) < 2 or monitor.dirty or sum(r['processable'] for r in monitor.records.values()) != 1:
             assert time.monotonic() < deadline

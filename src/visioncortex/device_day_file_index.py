@@ -500,7 +500,8 @@ class FileIndexPublisher:
             from .device_day_timeline import day_bounds
             start, _ = day_bounds(name[:10])
             layout = DeviceDayLayout(root.parent, name[11:], max(start, 1))
-            for unit in clip_delivery.original_units(layout, index).values():
+            for unit in clip_delivery.original_units(layout, index, directory_bindings=(
+                    self.config.get('collection_ingest', {}).get('directory_camera_bindings') or ())).values():
                 paths.extend(root/'ProcessedClips/Clips'/unit['name']/filename
                              for filename in ('Index.json', 'Retention.json'))
                 paths.append(root/'MultimodalUnderstanding'/unit['name']/'Understanding.json')

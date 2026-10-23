@@ -631,16 +631,16 @@ def scan_recordings(config: dict[str, Any], *, on_record=None, skip_folders=()) 
         for folder, directories, files in os.walk(camera, followlinks=False, onerror=scan_error):
             current = Path(folder)
             depth = len(current.relative_to(camera).parts)
-            max_depth = min(8, int(settings.get("max_scan_depth", 6))) if allow_plain or camera.name in RAW_DIRECTORIES else 2
+            max_depth = min(8, int(settings.get("max_scan_depth", 6 if allow_plain or camera.name in RAW_DIRECTORIES else 2)))
             directories[:] = sorted(
                 (
                     name
                     for name in directories
                     if not name.startswith((".", "#"))
                     and str(current / name) not in skip_folders
-                    and not (depth == 0 and re.fullmatch(r"\d{4}-\d{2}-\d{2}", name)
-                             and ((settings.get("capture_date") and name != settings["capture_date"])
-                                  or (settings.get("capture_since_date") and name < settings["capture_since_date"])))
+                    and not (depth == 0 and re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:-[A-Za-z0-9]+)?", name)
+                             and ((settings.get("capture_date") and name[:10] != settings["capture_date"])
+                                  or (settings.get("capture_since_date") and name[:10] < settings["capture_since_date"])))
                     and not (current / name).is_symlink()
                     and (current / name).resolve() not in excluded
                 ),

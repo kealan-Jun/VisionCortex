@@ -203,7 +203,8 @@ class ArchiveUnifier:
         self.current_groups = set()
         self.legacy_folders = set()
         self.public_video_inventory = public_video_inventory or []
-        self.original_source_keys = set(clip_delivery.original_units(self.layout, index, []))
+        self.original_source_keys = set(clip_delivery.original_units(self.layout, index, [], directory_bindings=(
+            config.get('collection_ingest', {}).get('directory_camera_bindings') or ())))
         self.unassigned = {}
         self.orphan_frames = {}
         self.orphan_assets = {}
@@ -810,7 +811,8 @@ class ArchiveUnifier:
         values = sorted(
             self.rows.values(), key=lambda r: (r["segment"]["start_us"], r["key"])
         )
-        units = clip_delivery.original_units(self.layout, self.index, values)
+        units = clip_delivery.original_units(self.layout, self.index, values, directory_bindings=(
+            self.config.get('collection_ingest', {}).get('directory_camera_bindings') or ()))
         units = {
             key: unit for key, unit in units.items()
             if key in self.original_source_keys
