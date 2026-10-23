@@ -114,7 +114,7 @@ def _original_bounds(layout, unit, directory_bindings=()):
     path = layout.root/unit['observed_source']
     value = {}
     parts = PurePosixPath(unit['observed_source']).parts
-    if len(parts) >= 3 or parts[0] == 'MetaVideo':
+    if len(parts) >= 3 or parts[0] in {'MetaData', 'MetaVideo'}:
         if len(parts) == 2:
             meta = path.parent/'Metadata'/path.stem/'Video/Meta.json'
             if not meta.is_file():
@@ -147,6 +147,12 @@ def _original_bounds(layout, unit, directory_bindings=()):
             if value.get('camera_key') and value['camera_key'] != layout.name[11:]:
                 binding = _historical_camera_binding(layout, unit, meta, value, directory_bindings)
                 if binding is None:
+                    if (len(parts) == 2 and not unit['recordings']
+                            and re.fullmatch(r'lab-video-[13]', layout.name[11:])):
+                        # A newly retained legacy file can precede its canonical
+                        # source receipts. Do not assign its physical recorder's
+                        # clock to the laboratory alias until that binding arrives.
+                        return None, None, 'time_pending'
                     raise ValueError('Recorder time metadata belongs to another device/camera')
                 unit['recorder_identity_binding'] = binding
             unit['capture_session_id'] = value.get('recording_session_id')
@@ -190,7 +196,8 @@ def original_units(layout, index, values=None, *, directory_bindings=()):
         for folder in children:
             if folder.is_symlink() or folder.name.startswith('.'):
                 continue
-            capture = (folder.is_dir() and (root_name == 'MetaData' or (folder/'rgb.mp4').is_file()))
+            capture = (folder.is_dir() and folder.name not in {'Audio', 'Metadata'}
+                       and (root_name == 'MetaData' or (folder/'rgb.mp4').is_file()))
             if capture:
                 reference = {'path': layout.relative(folder/'rgb.mp4')}
             elif folder.is_file() and folder.suffix.lower() == '.mp4':
@@ -503,6 +510,22 @@ def retire_native(layout, index, public_names, *, source_units=(), maximum=64):
             if source.name in public_names or source.name.startswith('.') or not source.is_dir():
                 continue
             owned = False
+            header = source / ('Understanding.json' if directory == 'MultimodalUnderstanding' else 'Index.json')
+            if header.is_file() and not header.is_symlink() and header.stat().st_size <= 64*1024:
+                value = read_json(header)
+                reserved = value.get('source_unit')
+                if (value.get('schema_version') == VERSION and value.get('source_folder') == source.name
+                        and reserved in {'MetaData/Audio', 'MetaData/Metadata'}
+                        and value.get('original_source', {}).get('path') == reserved + '/rgb.mp4'
+                        and not safe_child(layout.root, reserved + '/rgb.mp4').exists()
+                        and value.get('interval_count') == 0 and value.get('available_video_count') == 0
+                        and value.get('recording_ids') == [] and value.get('intervals') == []
+                        and all(p.is_file() and not p.is_symlink() and p.name in {
+                            'Index.json', 'Retention.json', 'Understanding.json'} for p in source.iterdir())):
+                    # Earlier flat-legacy projections mistook these ancillary
+                    # roots for captures. Preserve only their empty owned JSON
+                    # privately; they never own an original or selected video.
+                    owned = True
             if not owned:
                 documents = _metadata_files(source)
                 for document in documents:
