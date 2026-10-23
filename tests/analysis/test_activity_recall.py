@@ -138,3 +138,11 @@ def test_only_complete_recall_between_two_fine_processes_can_close_sample_edges(
 def test_two_prompt_names_for_one_object_do_not_supply_two_laboratory_anchors():
     actors, objects = observations([box('gloved_hand', .4), box('beaker', .44), box('container', .44)])
     assert len(objects) == 1 and actors == []
+
+
+@pytest.mark.parametrize('start,end', [(10, 10), (20, 10), (-1, 10), (0, float('nan')), (0, 1001)])
+def test_invalid_source_windows_cannot_report_completed_negative_evidence(tmp_path, start, end):
+    config = {'device_day': {'local_activity_recall': {'enabled': True}}}
+    with pytest.raises(ValueError, match='real available source window'):
+        review(None, SimpleNamespace(duration_ms=1000), [], start, end, config,
+               source_ref={}, cache_directory=tmp_path)

@@ -59,6 +59,10 @@ def review(view, info, active, start, end, config, *, source_ref, cache_director
     setting = options(config)
     if setting is None:
         return [], {'status': 'disabled', 'recipe': RECIPE}
+    if (not all(isinstance(t, (int, float)) and not isinstance(t, bool) and math.isfinite(t)
+                for t in (start, end)) or not 0 <= start < end
+            or info is not None and end > info.duration_ms+1e-6):
+        raise ValueError('Local activity recall requires a real available source window')
     model = config.get('models', {}).get('open_vocabulary_key_frame') or {}
     import re
     if (not model.get('enabled') or not re.fullmatch('[a-f0-9]{64}', str(source_ref.get('sha256', '')))
