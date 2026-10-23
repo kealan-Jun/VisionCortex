@@ -91,7 +91,7 @@ def test_review_uses_native_pts_caches_success_and_never_repeats_a_paid_call(tmp
               'models': {'open_vocabulary_key_frame': {'enabled': True}}}
     kwargs = {'source_ref': {'sha256': 'a'*64, 'size_bytes': 10}, 'cache_directory': tmp_path/'Cache',
               'infer': infer, 'frames': frames, 'source_origin_ms': 100}
-    view = SimpleNamespace(view_id='camera', role=ViewRole.THIRD_PERSON)
+    view = SimpleNamespace(view_id='camera', role=ViewRole.THIRD_PERSON, video=tmp_path/'Source.mp4')
     intervals, report = review(view, None, [], 0, 10000, config, **kwargs)
     assert intervals == [(0, 9000)] and len(calls) == 10 and report['paid_requests'] == 0
     assert review(view, None, [], 0, 10000, config, **kwargs)[0] == intervals and len(calls) == 10
@@ -99,3 +99,42 @@ def test_review_uses_native_pts_caches_success_and_never_repeats_a_paid_call(tmp
     saved.write_text(saved.read_text().replace('fake-local-boundary', 'changed'))
     with pytest.raises(ValueError, match='cache changed'):
         review(view, None, [], 0, 10000, config, **kwargs)
+
+
+@pytest.mark.parametrize('gap', [False, True])
+def test_only_complete_recall_between_two_fine_processes_can_close_sample_edges(tmp_path, gap):
+    calls = []
+    image = np.zeros((8, 8, 3), dtype=np.uint8)
+    def frames(*args, **kwargs):
+        for n in range(10):
+            native = SourceFrameIdentity(source_path=tmp_path/'Source.mp4', source_size_bytes=10,
+                source_mtime_ns=1, status='resolved', packet_position=n, source_pts=n*1000+1250,
+                time_base='1/1000', decoded_pixels_sha256=sha256(image.tobytes()).hexdigest())
+            yield SampledFrame(n, n*1000+1000, image, native)
+    def infer(*args):
+        n = len(calls)
+        calls.append(n)
+        boxes = [box('beaker', .44), box('container', .3)]
+        if not (gap and n == 4):
+            boxes.append(box('gloved_hand', .4+n*.005))
+        return boxes, {'status': 'executed'}
+    config = {'device_day': {'local_activity_recall': {'enabled': True}},
+              'models': {'open_vocabulary_key_frame': {'enabled': True}}}
+    view = SimpleNamespace(view_id='camera', role=ViewRole.THIRD_PERSON, video=tmp_path/'Source.mp4')
+    selected, report = review(view, None, [(0, 1000), (11000, 12000)], 0, 12000, config,
+        source_ref={'sha256': 'a'*64, 'size_bytes': 10}, cache_directory=tmp_path/'Cache',
+        infer=infer, frames=frames, source_origin_ms=0)
+    if gap:
+        assert len(selected) == 2
+        assert all('edge_context' not in d for d in report['windows'][0]['decisions'])
+    else:
+        assert selected == [(1000, 11000)]
+        decision, = report['windows'][0]['decisions']
+        assert decision['observed_start_ms'] == 1250 and decision['observed_end_ms'] == 10250
+        assert decision['edge_context']['ranges'] == [[1000, 1250], [10250, 11000]]
+        assert decision['physical_action_confirmed'] is False
+
+
+def test_two_prompt_names_for_one_object_do_not_supply_two_laboratory_anchors():
+    actors, objects = observations([box('gloved_hand', .4), box('beaker', .44), box('container', .44)])
+    assert len(objects) == 1 and actors == []

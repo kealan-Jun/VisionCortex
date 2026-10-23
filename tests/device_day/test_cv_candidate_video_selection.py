@@ -175,3 +175,40 @@ def test_exact_historical_checkpoint_retains_whole_video_and_receipt_bytes_witho
     assert case.exports == []
     for filename, original in original_bytes.items():
         assert filename.read_bytes() == original
+
+
+@pytest.mark.parametrize('coarse_candidates', [False, True])
+def test_unselected_lab_work_recall_reaches_native_segments_without_inventing_key_events(scan_case, monkeypatch, coarse_candidates):
+    from visioncortex.analysis.activity_recall import RECIPE
+    case = scan_case
+    case.active = False
+    case.config['device_day']['local_activity_recall'] = {'enabled': True}
+    case.model.config['device_day']['local_activity_recall'] = {'enabled': True}
+    if not coarse_candidates:
+        monkeypatch.setattr(case.model, '_plan', lambda *_: ([], [], {}, {}))
+    calls = []
+    def review(view, info, active, start, end, config, **kwargs):
+        calls.append((active, start, end, kwargs['source_ref']))
+        return [(100, 900)], {'status': 'completed', 'recipe': RECIPE, 'sample_count': 4,
+            'windows': [], 'paid_requests': 0, 'physical_action_confirmed': False, 'formal_events_mutated': False}
+    monkeypatch.setattr('visioncortex.analysis.activity_recall_runtime.review', review)
+    result = case.model.vision(case.layout, case.retained, 'new-recall-key')
+    assert calls == [([], 0, 1000, case.retained['sources'][0]['retained'])]
+    assert [(s['start_ms'], s['end_ms'], s['activity']) for s in result['segments']] == [
+        (0, 100, 'inactive'), (100, 900, 'active'), (900, 1000, 'inactive')]
+    assert all(s['key_frames'] == [] and s['physical_action_confirmed'] is False for s in result['segments'])
+    assert case.exports == []
+    audit = read_json(case.layout.backend_root/result['segments'][1]['activity_audit_ref']['path'])
+    assert audit['selected_activity_intervals'] == [[100, 900]]
+    assert audit['coarse_only_can_label_activity'] is False
+    assert audit.get('selected_key_events', []) == []
+
+
+def test_local_recall_options_change_vision_recipe_without_changing_parent_configuration(scan_case):
+    case = scan_case
+    before = DeviceDayRunner(case.config, backend=object())
+    after_config = deepcopy(case.config)
+    after_config['device_day']['local_activity_recall'] = {'enabled': True, 'sample_fps': 1}
+    after = DeviceDayRunner(after_config, backend=object())
+    assert before._key('vision', case.record, visual_input(case.retained)) != after._key('vision', case.record, visual_input(case.retained))
+    assert before._key('retention', case.record, case.record) == after._key('retention', case.record, case.record)

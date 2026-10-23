@@ -34,6 +34,15 @@ def observations(boxes, *, confidence=.25, maximum_gap=.12):
               and .0001 <= area(b) <= .10]
     objects = [b for b in boxes if b['class_name'] in OBJECTS and b['confidence'] >= confidence
                and .0001 <= area(b) <= .40]
+    distinct = []
+    for box in sorted(objects, key=lambda b: b['confidence'], reverse=True):
+        def same_region(other):
+            a, b = box['xyxy_norm'], other['xyxy_norm']
+            intersection = max(0, min(a[2], b[2])-max(a[0], b[0]))*max(0, min(a[3], b[3])-max(a[1], b[1]))
+            return intersection/max(1e-9, area(box)+area(other)-intersection) > .8
+        if not any(same_region(other) for other in distinct):
+            distinct.append(box)
+    objects = distinct
     # Multiple visible laboratory anchors supply scene context, not a claim
     # that any particular 2-D overlap proves contact or object identity.
     actors = [a for a in actors if len(objects) >= 2 and any(gap(a, b) <= maximum_gap for b in objects)]

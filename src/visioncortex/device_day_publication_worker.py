@@ -94,6 +94,8 @@ def publication_runner(config):
         def __init__(self):
             super().__init__(config, backend=object())
             self.receipt_key_owner = FrozenReceiptKeyOwner(setting)
+            vision = self.settings.get('publication_vision_key_owner')
+            self.vision_key_owner = FrozenReceiptKeyOwner(vision) if vision else None
 
         def _key(self, stage, recording, inputs, *, _binding=True):
             if _binding and self._completed_execution_bindings.historical_candidate(stage, recording):
@@ -102,6 +104,18 @@ def publication_runner(config):
                 return super()._key(stage, recording, inputs, _binding=_binding)
             context = self._context(self.layout(recording), recording) if stage == 'report' and self.settings.get(
                 'derived_video_retention', False) else None
+            if stage == 'vision' and self.vision_key_owner is not None:
+                current = self.vision_key_owner.key(stage, recording, inputs, binding=_binding)
+                path = self._receipt(self.layout(recording), recording, 'vision')
+                # The stage still belongs to an actual pinned producer. An
+                # observed key only chooses which producer to ask; _load must
+                # independently authenticate the complete receipt and bytes.
+                if path.is_file():
+                    import ijson
+                    with path.open('rb') as handle:
+                        actual = next(ijson.items(handle, 'key'), None)
+                    if actual == current:
+                        return current
             return self.receipt_key_owner.key(stage, recording, inputs, binding=_binding, context=context)
 
         def _backend(self):
@@ -112,6 +126,8 @@ def publication_runner(config):
 
         def close(self):
             self.receipt_key_owner.close()
+            if self.vision_key_owner is not None:
+                self.vision_key_owner.close()
 
     return Reader()
 

@@ -876,9 +876,21 @@ class DeviceDayModels:
                 with timings.measure("fine_activity_audit_seconds"):
                     fine_candidates, audited_intervals, audit, key_frame_choices = self._audit_fine(
                         view, info, fine, fine_index_report, candidates, coarse_windows)
-            # Coarse positives remain in the audit ledger. Only the existing
-            # fine audit and experiment-boundary logic may publish activity.
+            # Recheck only the fine audit's unselected ranges. Local lab-work
+            # recall selects video context without admitting physical events.
+            from .analysis.activity_recall_runtime import review, options
+            classification_basis = 'existing_fine_audit_and_device_boundaries_not_ground_truth'
             active = merge_intervals(audited_intervals, start, end)
+            if options(self.config) is not None:
+                with timings.measure('local_activity_recall_seconds'):
+                    recalled, recall_report = review(view, info, active, start, end, self.config,
+                        source_ref=main['retained'], cache_directory=layout.receipts/recording['recording_id']/
+                        'YOLO'/key/f'{ordinal:04d}'/'LocalActivityReview')
+                active = merge_intervals([*active, *recalled], start, end)
+                classification_basis = 'fine_audit_or_local_lab_work_review_not_ground_truth'
+                audit.update(local_activity_recall=recall_report, selected_activity_intervals=active,
+                    scope='single_device_activity_not_cross_view_experiment_confirmation',
+                    coarse_only_can_label_activity=False, physical_action_confirmed=False)
             intervals = []
             previous = start
             for left, right in active:
@@ -956,7 +968,7 @@ class DeviceDayModels:
                               "wall_time_basis": clock_mapping["basis"], "clock_ref": clock["retained"],
                               "source_ref": main["retained"], "video": None, "key_frames": key_refs, "scene_frames": frame_refs,
                               "evidence_status": "PARTIAL_EVIDENCE", "physical_action_confirmed": False,
-                              "classification_basis": "existing_fine_audit_and_device_boundaries_not_ground_truth",
+                              "classification_basis": classification_basis,
                               "activity_audit": audit_summary, "activity_audit_ref": audit_reference,
                               "sampling_coverage": coverage,
                               "visibility": "dark_or_obscured" if all(f["brightness"] < 5 for f in frame_refs) else "sampled_images_available",

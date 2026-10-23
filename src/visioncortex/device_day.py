@@ -390,7 +390,7 @@ class DeviceDayRunner:
         # force unrelated stages to rerun when camera capacity changes.
         stage_settings = {"schema_version": self.settings.get("schema_version", VERSION),
                           "timezone": self.settings.get("timezone", "Asia/Shanghai")}
-        semantic_keys = {"vision": ("chunk_seconds", "inactive_frames"),
+        semantic_keys = {"vision": ("chunk_seconds", "inactive_frames", "local_activity_recall"),
                          "understanding": ("inactive_frames", "active_frames_per_window", "active_window_seconds")}
         stage_settings.update({k: self.settings.get(k) for k in semantic_keys.get(stage, ())})
         if stage == 'report':
