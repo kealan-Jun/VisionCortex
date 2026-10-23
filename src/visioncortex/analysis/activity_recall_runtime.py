@@ -52,6 +52,7 @@ def review(view, info, active, start, end, config, *, source_ref, cache_director
     """
     from ..device_day_contract import atomic_json, digest, read_json
     from ..runtime_control import check_yield
+    from ..stage_dependencies import stage_source_manifest
     from fractions import Fraction
     setting = options(config)
     if setting is None:
@@ -85,12 +86,14 @@ def review(view, info, active, start, end, config, *, source_ref, cache_director
     fallback = settings.get('grounding_dino_fallback') or {}
     fallback.setdefault('prompt_map', {}).update({'gloved hand': 'gloved_hand', 'bare hand': 'hand'})
     settings['grounding_dino_fallback'] = fallback
+    consumer_sources = stage_source_manifest('vision')
     for number, (left, right) in enumerate(negatives):
         rate = rates[number]
         period = 1000/rate
         identity = {'recipe': RECIPE, 'source': source_ref, 'view': view.view_id,
             'role': view.role.value, 'start_ms': left, 'end_ms': right,
-            'options': setting, 'effective_sample_fps': rate, 'models': settings}
+            'options': setting, 'effective_sample_fps': rate, 'models': settings,
+            'consumer_sources': consumer_sources}
         path = Path(cache_directory)/(digest(identity)+'.json')
         saved = read_json(path) if path.is_file() else {}
         if saved and (saved.get('identity') != identity or saved.get('checksum') != digest(saved.get('samples'))):
@@ -144,7 +147,7 @@ def review(view, info, active, start, end, config, *, source_ref, cache_director
             observed = [r['local_ms'] for r in rows]
             covered = (bool(observed) and observed[0] <= left+period
                 and observed[-1] >= right-period*1.5
-                and all(0 < b-a <= period*1.1 for a, b in zip(observed, observed[1:])))
+                and all(0 < b-a <= period*1.1 for a, b in zip(observed, observed[1:], strict=False)))
             if len(rows) < required or not covered or any(r['status'] != 'completed' for r in rows):
                 raise ValueError('Local activity recall has incomplete source/model coverage')
             atomic_json(path, {'identity': identity, 'samples': rows,
