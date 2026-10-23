@@ -51,7 +51,7 @@ def _display_category(kind):
     return 'NoExperimentActivity' if kind in {'ActivityPendingClassification', 'PendingValueReview'} else kind
 
 
-def _historical_camera_binding(layout, unit, meta, value):
+def _historical_camera_binding(layout, unit, meta, value, directory_bindings=()):
     """Verify the established LabVideo alias against its paired source receipts.
 
     These old archives intentionally have a directory/view identity distinct
@@ -71,13 +71,28 @@ def _historical_camera_binding(layout, unit, meta, value):
             if any(video.get(k) != video['retained'].get(k) for k in ('sha256', 'size_bytes')):
                 continue
             original = PurePosixPath(video.get('original_path', ''))
-            tail = original.parts[-4:]
-            if (len(tail) != 4 or tail[:2] != ('lab_video', layout.name[:10] + '-' + alias[1])
-                    or tail[3] != 'rgb.mp4' or not re.fullmatch(r'\d{6}', tail[2])):
+            roots = [i for i, part in enumerate(original.parts) if part == 'lab_video']
+            if len(roots) != 1:
+                continue
+            tail = original.parts[roots[0]:]
+            if (len(tail) not in {4, 5} or tail[-1] != 'rgb.mp4'
+                    or not re.fullmatch(r'\d{6}', tail[-2])
+                    or tail[1][:10] != layout.name[:10]
+                    or len(tail) == 5 and tail[2] != layout.name[:10]):
+                continue
+            standard = len(tail) == 4 and tail[1] == layout.name[:10] + '-' + alias[1]
+            explicit = False
+            if directory_bindings:
+                from ..capture_layout import bind_camera
+                bound = bind_camera({'additional_camera_directories': ['lab_video'],
+                                     'directory_camera_bindings': list(directory_bindings)},
+                                    {'relative_path': PurePosixPath(*tail).as_posix(), 'camera_key': value.get('camera_key')})
+                explicit = bound.get('camera_key') == layout.name[11:] and bound.get('camera_binding_status') == 'configured'
+            if not (standard or explicit):
                 continue
             camera = value.get('camera_key')
             if (not isinstance(camera, str)
-                    or value.get('recording_relative_path') != f'{camera}/{layout.name[:10]}/{tail[2]}'):
+                    or value.get('recording_relative_path') != f'{camera}/{layout.name[:10]}/{tail[-2]}'):
                 continue
             for sidecar in record.get('sources', []):
                 reference = sidecar.get('retained', {})
@@ -94,7 +109,7 @@ def _historical_camera_binding(layout, unit, meta, value):
     return None
 
 
-def _original_bounds(layout, unit):
+def _original_bounds(layout, unit, directory_bindings=()):
     """Actual recorder bounds, never the nominal segment end or selected action."""
     path = layout.root/unit['observed_source']
     value = {}
@@ -130,7 +145,7 @@ def _original_bounds(layout, unit):
             if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
                 raise ValueError('Recorder time metadata changed during projection')
             if value.get('camera_key') and value['camera_key'] != layout.name[11:]:
-                binding = _historical_camera_binding(layout, unit, meta, value)
+                binding = _historical_camera_binding(layout, unit, meta, value, directory_bindings)
                 if binding is None:
                     raise ValueError('Recorder time metadata belongs to another device/camera')
                 unit['recorder_identity_binding'] = binding
@@ -158,7 +173,7 @@ def _original_bounds(layout, unit):
     return None, None, 'time_pending'
 
 
-def original_units(layout, index, values=None):
+def original_units(layout, index, values=None, *, directory_bindings=()):
     """Project source inventory; creating a status folder never admits a model.
 
     Immediate recorder directory names include slices still being finalized.
@@ -211,7 +226,7 @@ def original_units(layout, index, values=None):
         kind = next((v for v in ('ExperimentActivity', 'ValuableNoExperimentActivity',
                                  'ActivityPendingClassification', 'PendingValueReview') if v in kinds),
                     'NoValueNoExperimentActivity' if kinds else 'PendingValueReview')
-        start, end, basis = _original_bounds(layout, unit)
+        start, end, basis = _original_bounds(layout, unit, directory_bindings)
         unit.update(start_us=start, end_us=end, time_basis=basis, category=kind)
         times = f'{_stamp(start)}_{_stamp(end)}' if start and end else 'TimePending_TimePending'
         unit['name'] = f"{times}_{_display_category(kind)}_{digest(['source-recording-display/1', unit['key']])[:8]}"
@@ -702,7 +717,8 @@ def publish(config, index, audio_entries, *, document_builder, writer, entry_bui
     # A format-only historical migration supplies existing, source-bound
     # materializations. Normal producers retain the same selection owner.
     values = views(index) if source_views is None else source_views
-    units = original_units(layout, index, values) if source_units is None else source_units
+    units = original_units(layout, index, values, directory_bindings=(
+        config.get('collection_ingest', {}).get('directory_camera_bindings') or ())) if source_units is None else source_units
     grouped = {key: [] for key in units}
     for row in values:
         key, _ = source_unit(row['segment']['source_ref'])

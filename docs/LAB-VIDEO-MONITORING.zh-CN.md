@@ -39,13 +39,34 @@ Comment/
 重新检查输入及断点恢复应用相同映射。已关闭 partial 分片按实际时长处理；
 仍在写入的分片等待完成标记。录音与真实 STT 结果保留在自己的设备日目录。
 
-当前阶段开关为：归档、视频预处理、STT 自动执行；`understanding`、`report` 暂停。
+当前付费视频理解按用户要求暂停；归档、视频预处理、STT 和已配置的发布流程继续执行。
 视频预处理每机位允许两个独立分片并发，共用原模型池和全局资源上限；
 同一分片仍通过队列租约及文件锁防重，设备日索引继续原子发布。
 目录命名不影响这些阶段的算法或输入契约，阶段暂停属于全局运行设置。
 采集视频软链接替换仍关闭。
 
-后台服务仍为 `visioncortex-analysis.service`。接入后在原页面的 NAS 监控及设备日
-列表中查看 `lab-video-1`、`lab-video-3`。发现状态记录在原本地运行根的
-`state/nas-recording-monitor.json`，处理回执仍在 `device-day` 的既有阶段队列。
+新采集使用独立的 `visioncortex-live-discovery.service`，其 `metadata_only`
+范围不包含旧的 `lab_video` 目录。显式启用的旧来源通过
+`python -m visioncortex.device_day_legacy_ingest --config <已验证的运行配置>` 接入，
+不扩大新采集监控的范围，也不启动模型。配置中的 `device_day.legacy_ingest`
+必须声明 `enabled: true`、`directories: [lab_video]`，以及实际留存执行器的
+`retention_source_root`、`retention_source_sha`、`retention_source_digest`。
+留存执行器固定为生产原有不可变源码；仅通过有界留存端口处理明确绑定的旧来源。
+端口先校验来源目录、视角、NAS 身份和源文件，再以既有校验复制算法补齐
+该设备日的新留存文件，原文件不移动、不删除、不改写。全局原片只读设置不变。
+留存完成后才写入既有观察清单，由现有 CV、STT、日报和发布服务继续处理。
+已完成输入通过来源版本检查点复用；失败只延后对应原片。扫描按最新时间优先，
+每 60 秒检查新日期和新增分片。状态保存在本地
+`device-day/LegacyIntake/Service.json`，不会覆盖实时监控的调度状态。
+
+旧来源最多检查三层目录，兼容 `<日期>-3/<日期>/<时分秒>` 的额外日期层；
+该布局仍须配置独立的 `directory_camera_bindings`。用户已确认
+`lab_video/2026-10-20/<时分秒>` 为第三人称，使用精确日期规则绑定
+`lab-video-3`；其他没有视角的日期不自动继承这条绑定。
+查阅入口仍是一段原片对应一个完整起止时间目录，多个筛选区间放在目录内部，
+模型理解目录与之对应。目录身份与完整时间必须同时通过来源视频、原始元数据
+及其留存校验值验证；显式绑定不能绕过字节校验。公开结果不用 HTML。
+
+接入后在原设备日列表查看 `lab-video-1`、`lab-video-3`，
+处理回执仍在 `device-day` 的既有阶段队列。
 监控间隔不是处理完成时延；模型调用、真实视频质量与完整链路分别以实际回执验收。

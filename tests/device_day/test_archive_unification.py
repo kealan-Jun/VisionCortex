@@ -513,6 +513,35 @@ def test_historical_lab_alias_requires_paired_unchanged_recorder_sources(tmp_pat
     assert all(p.read_bytes() == content for p, content in before.items())
 
 
+@pytest.mark.parametrize('source_folder', ['2026-10-22-3/2026-10-22/112409', '2026-10-22/112409'])
+def test_lab_alternate_layout_requires_explicit_binding_and_paired_source_bytes(tmp_path, source_folder):
+    from visioncortex.application.clip_delivery import original_units
+
+    layout = DeviceDayLayout(tmp_path, 'lab-video-3', 1792639450000000)
+    video = layout.root / 'MetaVideo/11-24-09_11-26-30.mp4'
+    video.parent.mkdir(parents=True)
+    video.write_bytes(b'original-video')
+    meta = video.parent / 'Metadata' / video.stem / 'Video/Meta.json'
+    atomic_json(meta, {'camera_key': 'physical_cam01',
+                       'recording_relative_path': 'physical_cam01/2026-10-22/112409',
+                       'recording_window_first_valid_rgb_global_us': 1792639450000000,
+                       'recording_window_last_valid_rgb_global_us': 1792639582000000})
+    original = '/historical/nas/lab_video/' + source_folder + '/'
+    sources = [dict(artifact(layout.root, p), kind=kind, original_path=original+name,
+                    retained=artifact(layout.root, p)) for p, kind, name in
+               [(video, 'video', 'rgb.mp4'), (meta, 'sidecar', 'meta.json')]]
+    index = {'recordings': [{'recording_id': 'retained', 'sources': sources}]}
+    rule = {'directory_glob': 'lab_video/' + source_folder.rsplit('/', 1)[0] + '/*', 'camera_key': 'lab-video-3'}
+    with pytest.raises(ValueError, match='another device/camera'):
+        original_units(layout, index, [])
+    unit = next(iter(original_units(layout, index, [], directory_bindings=[rule]).values()))
+    assert unit['name'].startswith('11-24-10_11-26-22_')
+    assert unit['recorder_identity_binding']['recorder_camera_key'] == 'physical_cam01'
+    meta.write_text(meta.read_text() + ' ')
+    with pytest.raises(ValueError, match='checksum'):
+        original_units(layout, index, [], directory_bindings=[rule])
+
+
 def test_missing_historical_original_keeps_saved_results_without_inventing_a_source_group(tmp_path):
     from visioncortex.device_day_contract import read_json, safe_child
 

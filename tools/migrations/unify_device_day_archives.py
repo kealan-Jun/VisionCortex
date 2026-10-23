@@ -118,7 +118,8 @@ def run(config, archive, plan_root, stop, *, apply, public_video_inventory=None)
             except ValueError:
                 row["historical_json_path"] = row.get("json_path")
                 row["json_path"] = None
-        unit_catalog = clip_delivery.original_units(layout, index, [])
+        unit_catalog = clip_delivery.original_units(layout, index, [], directory_bindings=(
+            config.get('collection_ingest', {}).get('directory_camera_bindings') or ()))
         a, b = visible(layout.processed / "Clips"), visible(layout.understanding)
         headers = []
         if a == b and len(a) == len(unit_catalog):
