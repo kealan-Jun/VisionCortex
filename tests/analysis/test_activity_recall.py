@@ -146,3 +146,25 @@ def test_invalid_source_windows_cannot_report_completed_negative_evidence(tmp_pa
     with pytest.raises(ValueError, match='real available source window'):
         review(None, SimpleNamespace(duration_ms=1000), [], start, end, config,
                source_ref={}, cache_directory=tmp_path)
+
+
+def test_actor_crop_needs_a_fresh_detection_and_maps_it_to_the_actual_source_pixels():
+    from visioncortex.analysis.activity_recall_runtime import recover_actor_crop
+    image = np.zeros((1000, 1000, 3), dtype=np.uint8)
+    previous = [box('gloved_hand', .4)]
+    objects = [box('beaker', .44), box('container', .3)]
+    calls = []
+    def infer(crop, settings):
+        calls.append(crop.shape)
+        return [{'class_name': 'gloved_hand', 'confidence': .8,
+                 'xyxy_norm': [.4, .4, .6, .6]}], {'status': 'executed'}
+    actors, receipts = recover_actor_crop(image, previous, objects, {}, infer,
+                                         confidence=.25, maximum_gap=.12)
+    assert len(actors) == 1 and len(calls) == 1
+    assert all(170 <= size <= 190 for size in calls[0][:2])
+    assert actors[0]['xyxy_norm'][0] > .3 and actors[0]['xyxy_norm'][2] < .6
+    assert receipts[0]['prior_label_propagated'] is False
+    assert receipts[0]['crop_pixels_sha256'] == sha256(np.zeros(calls[0], dtype=np.uint8).tobytes()).hexdigest()
+    empty, _ = recover_actor_crop(image, previous, objects, {}, lambda *_: ([], {'status': 'executed'}),
+                                  confidence=.25, maximum_gap=.12)
+    assert empty == []
