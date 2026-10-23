@@ -327,6 +327,38 @@ def _group_header(folder, filename, key=None):
     return None
 
 
+def _guard_inflight_reanalysis(layout, units, grouped):
+    """Keep the last published generation until its replacement completes.
+
+    This admits no old receipt as a new result and exports no media. A bounded
+    read of the actual running receipt prevents an empty projection from
+    retiring already published video/understanding while CV is still working.
+    New originals and completed empty results follow ordinary publication.
+    """
+    from ..receipt_projection import ProjectionGenerationChanged
+    parent = layout.processed/'Clips'
+    if layout.backend_root is None or not parent.is_dir():
+        return
+    for key, unit in units.items():
+        if grouped[key]:
+            continue
+        for record in unit['recordings']:
+            rid = record['recording_id']
+            path = layout.receipts/rid/'vision.json'
+            if not path.is_file() or path.is_symlink() or path.stat().st_size > 64*1024:
+                continue
+            current = read_json(path)
+            if (current.get('recording_id') != rid or current.get('stage') != 'vision'
+                    or current.get('status') not in {'running', 'paused_for_live', 'scheduled_checkpoint'}):
+                continue
+            suffix = digest(['source-recording-display/1', key])[:8]
+            for folder in parent.glob('*_'+suffix):
+                header = _group_header(folder, 'Index.json', key)
+                if (header and header.get('source_folder') == folder.name
+                        and rid in header.get('recording_ids', []) and header.get('interval_count', 0) > 0):
+                    raise ProjectionGenerationChanged(rid, digest(header), digest(current))
+
+
 def preserve_alias_descendants(layout, directory, old, new, mapping):
     """Keep implicit child addresses when a former directory name returns.
 
@@ -758,6 +790,7 @@ def publish(config, index, audio_entries, *, document_builder, writer, entry_bui
             raise ValueError('Selected interval has no owning original-capture unit')
         row['unit'] = units[key]
         grouped[key].append(row)
+    _guard_inflight_reanalysis(layout, units, grouped)
     _recover_files(layout)
     rename_original_groups(layout, units)
     progress = retire_native(layout, index, {unit['name'] for unit in units.values()},

@@ -456,3 +456,28 @@ def test_retirement_does_not_follow_a_reclaimed_history_alias_back_to_source(exa
     assert verify_artifact(case.layout.root, ref)
     journals = list((case.layout.processed/'.Evidence/ClipFileRelocations').glob('*.json'))
     assert all(read_json(p)['from'] != read_json(p)['to'] for p in journals)
+
+
+@pytest.mark.parametrize('status', ['running', 'paused_for_live', 'scheduled_checkpoint'])
+def test_reanalysis_cannot_replace_published_video_and_understanding_with_empty_groups(exact_case, status):
+    from visioncortex.receipt_projection import ProjectionGenerationChanged
+    case = exact_case
+    case.layout.backend_root = case.layout.root.parent/'Backend'
+    case.config['storage']['local_cache_root'] = str(case.layout.backend_root)
+    case.config['device_day']['clip_delivery'] = 'source_recording_v2'
+    retained_video.publish_selected(case.config, case.index, maximum_new_videos=2, evidence_validator=case.validator)
+    publish_content(case.config, case.index)
+    parents = (case.layout.processed/'Clips'/public_name(case), case.layout.understanding/public_name(case))
+    before = {p: p.read_bytes() for folder in parents for p in folder.iterdir() if p.is_file()}
+    record = case.index['recordings'][0]
+    record['sources'] = [{'kind': 'video', 'retained': case.candidate['source_ref']}]
+    case.index.update(segments=[], understandings=[])
+    atomic_json(case.layout.receipts/record['recording_id']/'vision.json',
+                {'stage': 'vision', 'status': status, 'recording_id': record['recording_id'], 'key': 'new-key'})
+    with pytest.raises(ProjectionGenerationChanged):
+        publish_content(case.config, case.index)
+    assert before and all(p.is_file() and p.read_bytes() == content for p, content in before.items())
+    # A genuinely completed empty new result may replace the previous view.
+    atomic_json(case.layout.receipts/record['recording_id']/'vision.json',
+                {'stage': 'vision', 'status': 'completed', 'recording_id': record['recording_id'], 'key': 'new-key'})
+    publish_content(case.config, case.index)
