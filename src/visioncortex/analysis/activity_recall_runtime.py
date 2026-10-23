@@ -7,6 +7,43 @@ from pathlib import Path
 from .activity_recall import RECIPE, observations, selected_runs
 
 
+def recover_actor_crop(image, previous, objects, settings, infer, *, confidence, maximum_gap):
+    """Re-detect a missed hand on this frame; never propagate an old label."""
+    from hashlib import sha256
+    from .activity_recall import ACTORS
+    height, width = image.shape[:2]
+    recovered, receipts = [], []
+    if len(objects) < 2:
+        return recovered, receipts
+    for actor in previous[:2]:
+        a, b, c, d = actor['xyxy_norm']
+        cx, cy = (a+c)/2, (b+d)/2
+        half_w, half_h = max(.09, c-a), max(.09, d-b)
+        x1, x2 = max(0, int((cx-half_w)*width)), min(width, math.ceil((cx+half_w)*width))
+        y1, y2 = max(0, int((cy-half_h)*height)), min(height, math.ceil((cy+half_h)*height))
+        if x2-x1 < 32 or y2-y1 < 32:
+            continue
+        crop = image[y1:y2, x1:x2]
+        boxes, receipt = infer(crop, settings)
+        if receipt.get('status') != 'executed':
+            raise ValueError('Local recall actor crop did not complete')
+        mapped = []
+        for box in boxes:
+            if box['class_name'] not in ACTORS:
+                continue
+            q, r, s, t = box['xyxy_norm']
+            mapped.append(box | {'xyxy_norm': [(x1+q*(x2-x1))/width, (y1+r*(y2-y1))/height,
+                (x1+s*(x2-x1))/width, (y1+t*(y2-y1))/height], 'local_recall_origin': 'current_frame_actor_crop'})
+        actors, _ = observations([*objects, *mapped], confidence=confidence, maximum_gap=maximum_gap)
+        recovered.extend(actors)
+        receipts.append({'invocation': receipt, 'source_crop_xyxy_pixels': [x1, y1, x2, y2],
+                         'crop_pixels_sha256': sha256(crop.tobytes()).hexdigest(),
+                         'accepted_actor_count': len(actors), 'prior_label_propagated': False})
+        if actors:
+            break
+    return recovered, receipts
+
+
 def options(config):
     value = config.get('device_day', {}).get('local_activity_recall') or {}
     if not isinstance(value, dict) or type(value.get('enabled', False)) is not bool:
@@ -154,6 +191,12 @@ def review(view, info, active, start, end, config, *, source_ref, cache_director
                             calls['grounding_dino_actor_recovery'] = invocation
                             actors, objects = observations(boxes, confidence=setting['actor_confidence'],
                                 maximum_gap=setting['laboratory_context_gap_norm'])
+                        if (not actors and rows and rows[-1].get('actors')
+                                and 0 < row['local_ms']-rows[-1]['local_ms'] <= period*1.1):
+                            actors, crop_receipts = recover_actor_crop(image, rows[-1]['actors'], objects,
+                                settings, infer, confidence=setting['actor_confidence'],
+                                maximum_gap=setting['laboratory_context_gap_norm'])
+                            calls['yolo_world_current_frame_actor_crops'] = crop_receipts
                         row.update(actors=actors, objects=objects, model_receipts=calls,
                                    status='completed', physical_action_confirmed=False)
                     rows.append(row)
