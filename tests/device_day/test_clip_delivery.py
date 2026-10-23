@@ -35,6 +35,53 @@ def test_cv_activity_never_names_an_experiment_and_no_value_has_no_video(monkeyp
     assert clip_delivery.category(candidate, {}, record, interval) == 'ExperimentActivity'
 
 
+@pytest.mark.parametrize('change,expected', [
+    ({}, 'ExperimentActivity'),
+    ({'video_value': 'pending'}, 'PendingValueReview'),
+    ({'video_value': 'confirmed_no_value'}, 'NoValueNoExperimentActivity'),
+    ({'selection_owner': 'motion_only'}, 'ActivityPendingClassification'),
+    ({'reason': 'motion_detected'}, 'ActivityPendingClassification'),
+    ({'activity_category': 'non_experiment'}, 'ActivityPendingClassification'),
+])
+def test_audited_experiment_selection_survives_paused_semantics(monkeypatch, change, expected):
+    candidate = {'activity': 'active',
+        'classification_basis': 'existing_fine_audit_and_device_boundaries_not_ground_truth',
+        'activity_audit_ref': {'path': 'ActivityAudit.json', 'size_bytes': 100,
+                               'sha256': 'a'*64, 'storage_root': 'local_cache_root'}}
+    interval = {'video_value': 'selected', 'start_ms': 0, 'end_ms': 219300,
+        'reason': 'existing_fine_audited_activity_process',
+        'selection_owner': 'audited_device_activity', 'activity_category': 'experiment'}
+    monkeypatch.setattr('visioncortex.media.retained_intervals.observed_categories', lambda *args: [])
+    record = {'stages': {'understanding': {'status': 'paused_by_user'}}}
+    assert clip_delivery.category(candidate, None, record, interval | change) == expected
+    # Neither an unaudited activity label nor an invalid audit reference suffices.
+    for replacement in ({}, candidate | {'activity_audit_ref': {}},
+                        candidate | {'classification_basis': 'motion_only'}):
+        assert clip_delivery.category(replacement, None, record, interval) == 'ActivityPendingClassification'
+    monkeypatch.setattr('visioncortex.media.retained_intervals.observed_categories', lambda *args: ['non_experiment'])
+    assert clip_delivery.category(candidate, {'status': 'completed'}, record, interval) == 'ValuableNoExperimentActivity'
+    assert clip_delivery.category(candidate, {'status': 'partial'}, record, interval) == 'ActivityPendingClassification'
+
+
+def test_audited_selected_process_publishes_matching_experiment_groups_without_semantics(exact_case):
+    case = exact_case
+    case.config['device_day']['clip_delivery'] = 'source_recording_v2'
+    case.candidate.update(classification_basis='existing_fine_audit_and_device_boundaries_not_ground_truth',
+        activity_audit_ref={'path': 'ActivityAudit.json', 'size_bytes': 100,
+                            'sha256': 'a'*64, 'storage_root': 'local_cache_root'})
+    case.intervals[1].update(reason='existing_fine_audited_activity_process',
+        selection_owner='audited_device_activity', physical_action_confirmed=False)
+    retained_video.publish_selected(case.config, case.index, maximum_new_videos=2, evidence_validator=case.validator)
+    result = publish_content(case.config, case.index)
+    chosen, = [row for row in result['multimodal'] if row['display_category'] == 'ExperimentActivity']
+    assert chosen['video'] and case.index['understandings'] == []
+    name = public_name(case)
+    assert '_ExperimentActivity_' in name
+    for parent in (case.layout.processed/'Clips', case.layout.understanding):
+        assert [p.name for p in parent.iterdir() if p.is_dir() and not p.name.startswith('.')] == [name]
+    assert case.intervals[1]['physical_action_confirmed'] is False
+
+
 def test_multiple_intervals_share_original_folder_and_native_receipts_remain_readable(exact_case):
     case = exact_case
     case.config['device_day']['clip_delivery'] = 'source_recording_v2'

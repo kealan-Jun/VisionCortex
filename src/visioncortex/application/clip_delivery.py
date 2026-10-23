@@ -11,7 +11,7 @@ from ..device_day_verification import verify_artifact_cached
 
 VERSION = 'visioncortex-source-recording-delivery/2'
 LABELS = {
-    'ExperimentActivity': '实验片段（模型观察）',
+    'ExperimentActivity': '实验活动片段（筛选候选，物理动作未确认）',
     'ValuableNoExperimentActivity': '有价值的非实验片段',
     'NoValueNoExperimentActivity': '无价值的非实验记录',
     'ActivityPendingClassification': '活动片段，实验类型待判断',
@@ -241,8 +241,8 @@ def original_units(layout, index, values=None, *, directory_bindings=()):
 
 
 def category(candidate, meaning, record, interval):
-    """CV activity alone cannot name an experimental clip."""
-    from ..media.retained_intervals import observed_categories
+    """Use the existing audited selection owner; raw motion is insufficient."""
+    from ..media.retained_intervals import audited_process, observed_categories
     value = interval.get('video_value')
     if value == 'confirmed_no_value':
         return 'NoValueNoExperimentActivity'
@@ -258,6 +258,15 @@ def category(candidate, meaning, record, interval):
                 or ((meaning or {}).get('status') or (record.get('stages', {}).get('understanding') or {}).get('status'))
                    == 'completed'):
             return 'ValuableNoExperimentActivity'
+        return 'ActivityPendingClassification'
+    if (interval.get('reason') == 'existing_fine_audited_activity_process'
+            and interval.get('selection_owner') == 'audited_device_activity'
+            and interval.get('activity_category') == 'experiment'
+            and audited_process(candidate)):
+        # These are the established CV-selected process clips, not claims of
+        # confirmed micro-actions. Pausing semantic narration must not relabel
+        # their selected experimental candidates as non-experimental video.
+        return 'ExperimentActivity'
     return 'ActivityPendingClassification'
 
 
