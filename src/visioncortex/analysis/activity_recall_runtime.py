@@ -18,13 +18,17 @@ def recover_actor_crop(image, previous, objects, settings, infer, *, confidence,
     for actor in previous[:2]:
         a, b, c, d = actor['xyxy_norm']
         cx, cy = (a+c)/2, (b+d)/2
-        half_w, half_h = max(.09, c-a), max(.09, d-b)
+        # Include the existing tracker's .10 source-coordinate association
+        # radius plus hand extent, rather than clipping a hand that moved
+        # between adjacent observations.
+        half_w, half_h = max(.16, c-a), max(.16, d-b)
         x1, x2 = max(0, int((cx-half_w)*width)), min(width, math.ceil((cx+half_w)*width))
         y1, y2 = max(0, int((cy-half_h)*height)), min(height, math.ceil((cy+half_h)*height))
         if x2-x1 < 32 or y2-y1 < 32:
             continue
         crop = image[y1:y2, x1:x2]
-        boxes, receipt = infer(crop, settings)
+        crop_settings = dict(settings, grounded_actor_maximum_box_area_norm=.85)
+        boxes, receipt = infer(crop, crop_settings)
         if receipt.get('status') != 'executed':
             raise ValueError('Local recall actor crop did not complete')
         mapped = []

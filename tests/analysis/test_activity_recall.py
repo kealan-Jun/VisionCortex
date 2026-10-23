@@ -161,7 +161,7 @@ def test_actor_crop_needs_a_fresh_detection_and_maps_it_to_the_actual_source_pix
     actors, receipts = recover_actor_crop(image, previous, objects, {}, infer,
                                          confidence=.25, maximum_gap=.12)
     assert len(actors) == 1 and len(calls) == 1
-    assert all(170 <= size <= 190 for size in calls[0][:2])
+    assert all(300 <= size <= 330 for size in calls[0][:2])
     assert actors[0]['xyxy_norm'][0] > .3 and actors[0]['xyxy_norm'][2] < .6
     assert receipts[0]['prior_label_propagated'] is False
     assert receipts[0]['crop_pixels_sha256'] == sha256(np.zeros(calls[0], dtype=np.uint8).tobytes()).hexdigest()
