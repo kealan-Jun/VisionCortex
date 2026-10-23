@@ -542,6 +542,38 @@ def test_lab_alternate_layout_requires_explicit_binding_and_paired_source_bytes(
         original_units(layout, index, [], directory_bindings=[rule])
 
 
+def test_flat_metadata_retention_has_one_original_and_no_ancillary_capture_groups(tmp_path):
+    from visioncortex.application.clip_delivery import original_units, retire_native, VERSION
+    from visioncortex.device_day_content_paths import aliases, relocated
+
+    layout = DeviceDayLayout(tmp_path, 'physical_cam01', 1792639450000000)
+    video = layout.root / 'MetaData/11-24-09_11-26-30.mp4'
+    video.parent.mkdir(parents=True)
+    video.write_bytes(b'unchanged-original')
+    (video.parent / 'Audio').mkdir()
+    meta = video.parent / 'Metadata' / video.stem / 'Video/Meta.json'
+    atomic_json(meta, {'camera_key': 'physical_cam01',
+                       'recording_window_first_valid_rgb_global_us': 1792639450000000,
+                       'recording_window_last_valid_rgb_global_us': 1792639582000000})
+    before = {p: p.read_bytes() for p in (video, meta)}
+    units = original_units(layout, {'recordings': []}, [])
+    assert len(units) == 1
+    assert next(iter(units.values()))['name'].startswith('11-24-10_11-26-22_')
+    for directory, filename in [('ProcessedClips/Clips', 'Index.json'), ('MultimodalUnderstanding', 'Understanding.json')]:
+        group = layout.root / directory / 'TimePending_TimePending_NoExperimentActivity_12345678'
+        header = {'schema_version': VERSION, 'source_unit': 'MetaData/Audio', 'source_folder': group.name,
+                  'original_source': {'path': 'MetaData/Audio/rgb.mp4'}, 'interval_count': 0,
+                  'available_video_count': 0, 'recording_ids': [], 'intervals': []}
+        atomic_json(group / filename, header)
+    retired = retire_native(layout, {'segments': []}, set(), source_units=set(units))
+    assert retired['retired'] == 2
+    for directory, filename in [('ProcessedClips/Clips', 'Index.json'), ('MultimodalUnderstanding', 'Understanding.json')]:
+        original = directory + '/TimePending_TimePending_NoExperimentActivity_12345678/' + filename
+        assert not (layout.root / original).exists()
+        assert (layout.root / relocated(original, aliases(layout.root))).is_file()
+    assert all(p.read_bytes() == content for p, content in before.items())
+
+
 def test_missing_historical_original_keeps_saved_results_without_inventing_a_source_group(tmp_path):
     from visioncortex.device_day_contract import read_json, safe_child
 
