@@ -139,12 +139,16 @@ def test_retention_port_copies_only_its_bound_legacy_source_and_keeps_stage_key(
     before = deepcopy(settings)
     result = module.retain(settings, record)
     assert result['status'] == 'completed' and result['stage'] == 'retention'
+    assert result['vision_admitted'] is True
     assert all(p.read_bytes() == content for p, content in originals.items())
     assert settings == before and settings['device_day']['raw_originals_read_only'] is True
     scoped = deepcopy(settings)
     scoped['device_day']['raw_originals_read_only'] = False
     assert DeviceDayRunner(settings, backend=object())._key('retention', record, {}) == DeviceDayRunner(
         scoped, backend=object())._key('retention', record, {})
+    runner = DeviceDayRunner(settings, backend=object())
+    assert runner.queues['vision'].admissions()[record['recording_id']] == record['source_signature']
+    assert runner.queues['understanding'].pending() == []
     for invalid in [record | {'input_layout': 'visioncortex-recorder-metadata/1'},
                     record | {'relative_path': 'other/rgb.mp4'}, record | {'camera_key': 'physical_cam01'}]:
         with pytest.raises(ValueError):

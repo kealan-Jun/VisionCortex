@@ -17,6 +17,8 @@ import time
 
 from .device_day_contract import atomic_json, digest, read_json
 
+CHECKPOINT_RECIPE = 'legacy-intake-ready-admission/2'
+
 
 def intake_config(config):
     from .capture_layout import validate
@@ -122,7 +124,8 @@ class LegacyIntake:
                 continue
             try:
                 check_record(self.config, record)
-                if self.saved['records'].get(rid, {}).get('signature') == signature:
+                previous = self.saved['records'].get(rid, {})
+                if previous.get('signature') == signature and previous.get('recipe') == CHECKPOINT_RECIPE:
                     reused += 1
                 else:
                     if self.deferred.get(rid, 0) > time.time():
@@ -134,7 +137,8 @@ class LegacyIntake:
                     result = self.retain(record)
                     if result.get('status') != 'completed' or result.get('stage') != 'retention':
                         raise ValueError('Legacy retention has not completed')
-                    self.saved['records'][rid] = {'signature': signature, 'result': result, 'at': time.time()}
+                    self.saved['records'][rid] = {'signature': signature, 'recipe': CHECKPOINT_RECIPE,
+                                                 'result': result, 'at': time.time()}
                     atomic_json(self.path, self.saved)
                     self.deferred.pop(rid, None)
                     retained += 1

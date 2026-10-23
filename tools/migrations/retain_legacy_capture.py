@@ -44,7 +44,17 @@ def retain(config, record):
             # The unchanged primary publisher owns canonical indices.
             return False
 
-    return RetentionOnly(scoped, backend=object()).process(record, stage='retention')
+    runner = RetentionOnly(scoped, backend=object())
+    result = runner.process(record, stage='retention')
+    if result.get('status') == 'completed':
+        # The user requested this exact old source now. Admit its ready CV
+        # work through the native source-bound recovery cohort, so a busy
+        # live-only history selector cannot leave it undiscovered again.
+        # The existing worker still owns claims, priorities, input verification,
+        # retry limits and actual model execution. No paid visual stage is admitted.
+        from visioncortex.device_day_retention_worker import RetentionWorker
+        result['vision_admitted'] = RetentionWorker(stage='vision', admission_cohort='current_recovery').admit(runner, record)
+    return result
 
 
 def main():
