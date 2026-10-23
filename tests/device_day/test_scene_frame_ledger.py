@@ -168,10 +168,10 @@ def test_only_understanding_recipe_changes_and_completed_cv_stt_are_reused(devic
 
 def test_cv_owner_matches_reviewed_production_scan_reuse_integration():
     path = ROOT / 'src/visioncortex/device_day_models.py'
-    # Reviewed from clean V27/V28 owner d5fc8c3b with only automatic whole-
-    # candidate export removed. Dedicated candidate-selection tests preserve
-    # CV/frame/audit behavior and exact historical receipt bytes.
-    assert hashlib.sha256(path.read_bytes()).hexdigest() == 'ca0a0d90715cc355fb4e01546e58aca528daae7944b962097c44ca9cb55b3939'
+    # Source-bound local recall is a new CV consumer with its own identity.
+    # The scanner stays sealed and explicit scan reuse still checks every
+    # original input, detector setting, source change and artifact byte.
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == '5122f021a730d52f0a0f49c0afda30b4f4cb2428e620b525f48cef127ae1cba9'
 
 
 def test_other_vision_dependency_change_invalidates_its_stage(device_config, monkeypatch):

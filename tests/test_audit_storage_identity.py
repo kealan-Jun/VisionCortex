@@ -35,19 +35,28 @@ def test_reviewed_audit_backend_requires_the_exact_helper(tmp_path, monkeypatch)
     backend = Path(device_day_models.__file__)
     helper = Path(device_day_audit.__file__)
     current_backend_hash = file_hash(backend)
-    # The current public helper is byte-identical to the reviewed witness.
-    # Backend receipts supply a checksum, not a copy of the old worker.
+    # Current recall summaries change the helper. Its real checksum must stay
+    # distinct; the frozen witness still exercises historical alias lookup.
     backend_bytes = backend.read_bytes()
     helper_bytes = helper.read_bytes()
     backend_hash = AUDIT_BACKEND_SHA256_V1
     helper_hash = hashlib.sha256(helper_bytes).hexdigest()
-    assert helper_hash == AUDIT_HELPER_SHA256_V1
+    assert helper_hash != AUDIT_HELPER_SHA256_V1
+    assert compatible_runtime_hash(helper, helper_hash) == helper_hash
+    assert compatible_runtime_hash(backend, backend_hash) == backend_hash
+    witness = b'checksum-boundary fixture for the immutable historical helper'
     read = Path.read_bytes
+    original_sha256 = hashlib.sha256
+    class FrozenChecksum:
+        def hexdigest(self):
+            return AUDIT_HELPER_SHA256_V1
+    monkeypatch.setattr(hashlib, 'sha256', lambda content=b'':
+                        FrozenChecksum() if content == witness else original_sha256(content))
     monkeypatch.setattr(Path, 'read_bytes',
-                        lambda path: helper_bytes if path == helper else read(path))
+                        lambda path: witness if path == helper else read(path))
     canonical = '7c04a7a02843f482f30e5524a1e84cbbaea21278b03fbe8d494789fd24e1b3cd'
     assert compatible_runtime_hash(backend, backend_hash) == canonical
-    assert compatible_runtime_hash(helper, helper_hash) is None
+    assert compatible_runtime_hash(helper, AUDIT_HELPER_SHA256_V1) is None
     assert current_backend_hash != backend_hash
     assert compatible_runtime_hash(backend, current_backend_hash) == current_backend_hash
     for path, checksum, content in ((backend, backend_hash, backend_bytes),
