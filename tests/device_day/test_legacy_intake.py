@@ -16,7 +16,7 @@ def settings(default_config, tmp_path):
     config['runtime']['local_only'] = True
     config['device_day'].update(enabled=True, start_date=None, raw_originals_read_only=True,
                                inplace_preprocessing=True, camera_lanes=True,
-                               legacy_ingest={'enabled': True, 'directories': ['lab_video']})
+                               legacy_ingest={'enabled': True, 'directories': ['lab_video'], 'max_imports_per_turn': 2})
     source = tmp_path / 'source'
     config['storage'].update(archive_root=str(source / 'archive'), local_cache_root=str(tmp_path / 'cache'),
                              local_runtime_root=str(tmp_path / 'runtime'))
@@ -106,6 +106,24 @@ def test_failed_retention_does_not_admit_models_or_block_other_inputs(settings):
     result = LegacyIntake(settings, retain, lambda c, i: observed.extend(i['recordings'])).tick()
     assert result['status'] == 'degraded' and len(result['errors']) == 1
     assert len(observed) == 1 and '2026-10-19-1' in observed[0]['relative_path']
+
+
+def test_bounded_turn_rescans_newest_arrival_before_older_backlog(settings):
+    settings['device_day']['legacy_ingest']['max_imports_per_turn'] = 1
+    capture(settings, 'lab_video/2026-10-19-1/113833', start=1792390000000000)
+    capture(settings, 'lab_video/2026-10-20/113833')
+    imported = []
+
+    def retain(record):
+        imported.append(record['relative_path'])
+        return {'status': 'completed', 'stage': 'retention'}
+
+    worker = LegacyIntake(settings, retain, lambda c, i: None)
+    first = worker.tick()
+    assert first['imports_attempted'] == 1 and first['retained'] == 1
+    capture(settings, 'lab_video/2026-10-21-1/113833', start=1792570000000000)
+    worker.tick()
+    assert imported == ['lab_video/2026-10-20/113833/rgb.mp4', 'lab_video/2026-10-21-1/113833/rgb.mp4']
 
 
 def test_retention_port_copies_only_its_bound_legacy_source_and_keeps_stage_key(settings):

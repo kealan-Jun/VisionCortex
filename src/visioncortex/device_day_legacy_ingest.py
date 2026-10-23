@@ -30,6 +30,9 @@ def intake_config(config):
             or any(not isinstance(name, str) or name not in allowed for name in directories)
             or len(set(directories)) != len(directories)):
         raise ValueError('Legacy intake requires explicit additional source directories')
+    limit = options.get('max_imports_per_turn', 1)
+    if type(limit) is not int or not 1 <= limit <= 8:
+        raise ValueError('Legacy intake requires a bounded import turn')
     ingest.update(discovery_mode='legacy_and_metadata', discover_recorder_metadata=False,
                   discover_plain_video_csv=False, camera_directories=directories,
                   max_scan_depth=3, max_recordings_per_camera=0)
@@ -97,6 +100,7 @@ class LegacyIntake:
         self.root = Path(config['storage']['local_runtime_root']) / 'device-day/LegacyIntake'
         self.path = self.root / 'Checkpoint.json'
         self.saved = read_json(self.path) if self.path.is_file() else {'records': {}}
+        self.deferred = {}
 
     def tick(self, *, stop=None, scan=None):
         from .nas_recordings import scan_recordings
@@ -105,7 +109,8 @@ class LegacyIntake:
         verify_storage(self.config)
         inventory = (scan or scan_recordings)(self.config)
         errors = list(inventory.get('errors') or [])
-        retained = reused = waiting = 0
+        retained = reused = waiting = attempted = 0
+        limit = self.config['device_day']['legacy_ingest'].get('max_imports_per_turn', 1)
         for record in sorted(inventory['recordings'], key=lambda r: (r['recording_start_us'], r['relative_path']), reverse=True):
             if stop is not None and stop.is_set():
                 break
@@ -120,22 +125,30 @@ class LegacyIntake:
                 if self.saved['records'].get(rid, {}).get('signature') == signature:
                     reused += 1
                 else:
+                    if self.deferred.get(rid, 0) > time.time():
+                        continue
+                    if attempted >= limit:
+                        break
+                    attempted += 1
                     self.status('retaining', inventory, errors, current=record['relative_path'])
                     result = self.retain(record)
                     if result.get('status') != 'completed' or result.get('stage') != 'retention':
                         raise ValueError('Legacy retention has not completed')
                     self.saved['records'][rid] = {'signature': signature, 'result': result, 'at': time.time()}
                     atomic_json(self.path, self.saved)
+                    self.deferred.pop(rid, None)
                     retained += 1
                 # Existing queue admission, leases, inference and publication
                 # remain the sole owners after a verified original is present.
                 self.observe(self.config, {'recordings': [record], 'discovery': {rid: {
                     'observed_at': time.time(), 'cohort': 'historical_backfill'}}})
             except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                self.deferred[rid] = time.time() + 60
                 errors.append({'path': record['relative_path'], 'error_type': type(exc).__name__,
                                'message': 'Legacy intake deferred; original source preserved'})
-        return self.status('degraded' if errors or inventory.get('truncated') else 'watching', inventory, errors,
-                           retained_this_turn=retained, reused_this_turn=reused, waiting_for_capture=waiting)
+        return self.status('degraded' if errors or self.deferred or inventory.get('truncated') else 'watching', inventory, errors,
+                           retained_this_turn=retained, reused_this_turn=reused, waiting_for_capture=waiting,
+                           imports_attempted=attempted, deferred_count=len(self.deferred))
 
     def status(self, status, inventory, errors, **extra):
         value = {'status': status, 'updated_at': time.time(), 'source_directories':
@@ -161,10 +174,11 @@ def serve(config_path, stop):
     with exclusive(worker.root.parent / 'locks/legacy-intake.lock'):
         while not stop.is_set():
             try:
-                worker.tick(stop=stop)
+                result = worker.tick(stop=stop)
             except (OSError, ValueError) as exc:
                 worker.status('retrying', {'recordings': []}, [{'error_type': type(exc).__name__}])
-            stop.wait(60)
+                result = {}
+            stop.wait(1 if result.get('imports_attempted') else 60)
 
 
 def main(argv=None):
