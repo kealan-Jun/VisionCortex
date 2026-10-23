@@ -7,7 +7,7 @@ from pathlib import Path
 from .activity_recall import RECIPE, observations, selected_runs
 
 
-def recover_actor_crop(image, previous, objects, settings, infer, *, confidence, maximum_gap):
+def recover_actor_crop(image, previous, objects, settings, infer, *, confidence, maximum_gap, actor_fallback=None):
     """Re-detect a missed hand on this frame; never propagate an old label."""
     from hashlib import sha256
     from .activity_recall import ACTORS
@@ -31,16 +31,25 @@ def recover_actor_crop(image, previous, objects, settings, infer, *, confidence,
         boxes, receipt = infer(crop, crop_settings)
         if receipt.get('status') != 'executed':
             raise ValueError('Local recall actor crop did not complete')
-        mapped = []
-        for box in boxes:
-            if box['class_name'] not in ACTORS:
-                continue
-            q, r, s, t = box['xyxy_norm']
-            mapped.append(box | {'xyxy_norm': [(x1+q*(x2-x1))/width, (y1+r*(y2-y1))/height,
-                (x1+s*(x2-x1))/width, (y1+t*(y2-y1))/height], 'local_recall_origin': 'current_frame_actor_crop'})
-        actors, _ = observations([*objects, *mapped], confidence=confidence, maximum_gap=maximum_gap)
+        def mapped_actors(boxes):
+            mapped = []
+            for box in boxes:
+                if box['class_name'] not in ACTORS:
+                    continue
+                q, r, s, t = box['xyxy_norm']
+                mapped.append(box | {'xyxy_norm': [(x1+q*(x2-x1))/width, (y1+r*(y2-y1))/height,
+                    (x1+s*(x2-x1))/width, (y1+t*(y2-y1))/height], 'local_recall_origin': 'current_frame_actor_crop'})
+            return observations([*objects, *mapped], confidence=confidence, maximum_gap=maximum_gap)[0]
+        actors = mapped_actors(boxes)
+        fallback_receipt = None
+        if not actors and actor_fallback is not None:
+            boxes, fallback_receipt = actor_fallback(crop, ACTORS, crop_settings)
+            if fallback_receipt.get('status') != 'executed':
+                raise ValueError('Local recall grounded actor crop did not complete')
+            actors = mapped_actors(boxes)
         recovered.extend(actors)
         receipts.append({'invocation': receipt, 'source_crop_xyxy_pixels': [x1, y1, x2, y2],
+                         'grounding_dino_invocation': fallback_receipt,
                          'crop_pixels_sha256': sha256(crop.tobytes()).hexdigest(),
                          'accepted_actor_count': len(actors), 'prior_label_propagated': False})
         if actors:
@@ -199,7 +208,8 @@ def review(view, info, active, start, end, config, *, source_ref, cache_director
                                 and 0 < row['local_ms']-rows[-1]['local_ms'] <= period*1.1):
                             actors, crop_receipts = recover_actor_crop(image, rows[-1]['actors'], objects,
                                 settings, infer, confidence=setting['actor_confidence'],
-                                maximum_gap=setting['laboratory_context_gap_norm'])
+                                maximum_gap=setting['laboratory_context_gap_norm'],
+                                actor_fallback=actor_fallback if fallback.get('enabled') else None)
                             calls['yolo_world_current_frame_actor_crops'] = crop_receipts
                         row.update(actors=actors, objects=objects, model_receipts=calls,
                                    status='completed', physical_action_confirmed=False)

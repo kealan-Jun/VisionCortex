@@ -168,3 +168,19 @@ def test_actor_crop_needs_a_fresh_detection_and_maps_it_to_the_actual_source_pix
     empty, _ = recover_actor_crop(image, previous, objects, {}, lambda *_: ([], {'status': 'executed'}),
                                   confidence=.25, maximum_gap=.12)
     assert empty == []
+
+
+def test_crop_fallback_recovers_only_a_new_locally_grounded_actor():
+    from visioncortex.analysis.activity_recall_runtime import recover_actor_crop
+    calls = []
+    def fallback(crop, classes, settings):
+        calls.append(classes)
+        return [{'class_name': 'gloved_hand', 'confidence': .8,
+                 'xyxy_norm': [.4, .4, .6, .6]}], {'status': 'executed'}
+    actors, receipts = recover_actor_crop(np.zeros((1000, 1000, 3), dtype=np.uint8),
+        [box('gloved_hand', .4)], [box('beaker', .44), box('container', .3)], {},
+        lambda *_: ([], {'status': 'executed'}), confidence=.25, maximum_gap=.12,
+        actor_fallback=fallback)
+    assert actors and calls == [frozenset({'hand', 'gloved_hand'})]
+    assert receipts[0]['grounding_dino_invocation']['status'] == 'executed'
+    assert receipts[0]['prior_label_propagated'] is False
