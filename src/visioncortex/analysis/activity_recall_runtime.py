@@ -9,6 +9,8 @@ from .activity_recall import RECIPE, observations, selected_runs
 
 def options(config):
     value = config.get('device_day', {}).get('local_activity_recall') or {}
+    if not isinstance(value, dict) or type(value.get('enabled', False)) is not bool:
+        raise ValueError('local_activity_recall.enabled must be a boolean')
     if not value.get('enabled', False):
         return None
     result = {'sample_fps': value.get('sample_fps', 1.),
@@ -58,7 +60,9 @@ def review(view, info, active, start, end, config, *, source_ref, cache_director
     if setting is None:
         return [], {'status': 'disabled', 'recipe': RECIPE}
     model = config.get('models', {}).get('open_vocabulary_key_frame') or {}
-    if not model.get('enabled') or not source_ref.get('sha256') or not source_ref.get('size_bytes'):
+    import re
+    if (not model.get('enabled') or not re.fullmatch('[a-f0-9]{64}', str(source_ref.get('sha256', '')))
+            or type(source_ref.get('size_bytes')) is not int or source_ref['size_bytes'] <= 0):
         raise ValueError('Local activity recall requires pinned models and a sealed source')
     if infer is None:
         from ..coarse_recall import _yolo_world_detections
@@ -103,6 +107,9 @@ def review(view, info, active, start, end, config, *, source_ref, cache_director
             previous = {r['requested_ms']: r for r in rows if r.get('status') == 'completed'}
             rows = []
             receipt = {}
+            def checkpoint(status):
+                atomic_json(path, {'identity': identity, 'samples': rows,
+                                   'checksum': digest(rows), 'status': status})
             with closing(frames(view, info, left, right, rate, setting['image_size'],
                                 None, False, 2, receipt=receipt)) as decoded:
                 for item in decoded:
@@ -116,6 +123,9 @@ def review(view, info, active, start, end, config, *, source_ref, cache_director
                     row = {'requested_ms': requested, 'local_ms': requested, 'actors': [], 'objects': [],
                            'source_verified': False, 'status': 'source_unverified'}
                     if native is not None and native.status == 'resolved' and not native.terminal_frame_hold:
+                        if (native.source_path.resolve() != Path(view.video).resolve()
+                                or native.source_size_bytes != source_ref['size_bytes']):
+                            raise ValueError('Local review native frame belongs to a different sealed source')
                         row['source_frame'] = native.model_dump(mode='json')
                         # Match the decoder's recorded BGR image, never a seek
                         # target or a repeated terminal frame.
@@ -127,11 +137,15 @@ def review(view, info, active, start, end, config, *, source_ref, cache_director
                         if not start <= row['local_ms'] < end:
                             raise ValueError('Local review native PTS escaped its available source window')
                         boxes, invocation = infer(image, settings)
+                        if invocation.get('status') != 'executed':
+                            raise ValueError('Local recall model invocation did not complete')
                         actors, objects = observations(boxes, confidence=setting['actor_confidence'],
                             maximum_gap=setting['laboratory_context_gap_norm'])
                         calls = {'yolo_world': invocation}
                         if not actors and fallback.get('enabled'):
                             extra, invocation = actor_fallback(image, {'hand', 'gloved_hand'}, settings)
+                            if invocation.get('status') != 'executed':
+                                raise ValueError('Local recall actor recovery did not complete')
                             boxes = boxes + extra
                             calls['grounding_dino_actor_recovery'] = invocation
                             actors, objects = observations(boxes, confidence=setting['actor_confidence'],
@@ -139,10 +153,11 @@ def review(view, info, active, start, end, config, *, source_ref, cache_director
                         row.update(actors=actors, objects=objects, model_receipts=calls,
                                    status='completed', physical_action_confirmed=False)
                     rows.append(row)
-                    # Persist small sample results incrementally; source video
-                    # and decoded images are never copied into this cache.
-                    atomic_json(path, {'identity': identity, 'samples': rows,
-                                       'checksum': digest(rows), 'status': 'partial'})
+                    # Bound NAS checkpoint writes and lost work to 16 local
+                    # samples. Never copy source video or decoded images.
+                    if len(rows) % 16 == 0:
+                        checkpoint('partial')
+            checkpoint('partial')
             required = math.floor((right-left)/period+1e-8)
             observed = [r['local_ms'] for r in rows]
             covered = (bool(observed) and observed[0] <= left+period
@@ -154,6 +169,19 @@ def review(view, info, active, start, end, config, *, source_ref, cache_director
                                'checksum': digest(rows), 'status': 'completed'})
         selected, decisions = selected_runs(rows, period_ms=period,
             motion_threshold=setting['motion_threshold_norm'], minimum_observations=setting['minimum_observations'])
+        # A completely observed working run between two existing fine-audited
+        # process anchors closes only the sub-sample edge context. Unknown
+        # samples or a missing adjacent process never authorize a bridge.
+        if (len(selected) == 1 and decisions[0]['sample_count'] == len(rows)
+                and any(abs(b-left) < 1e-6 for _, b in active)
+                and any(abs(a-right) < 1e-6 for a, _ in active)):
+            observed = selected[0]
+            selected = [(left, right)]
+            decisions[0].update(start_ms=left, end_ms=right,
+                observed_start_ms=observed[0], observed_end_ms=observed[1],
+                edge_context={'basis': 'adjacent_fine_process_continuity',
+                              'ranges': [[left, observed[0]], [observed[1], right]],
+                              'maximum_edge_ms': period*1.5})
         intervals.extend(selected)
         reports.append({'window_index': number, 'start_ms': left, 'end_ms': right,
             'samples': rows, 'decisions': decisions, 'selected_intervals': selected,

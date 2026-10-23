@@ -75,6 +75,38 @@ class DeferredPrimaryPublicationRunner(DeviceDayRunner):
         return super().refresh_index(layout, recording_id=recording_id)
 
 
+def vision_runner(config, runner_type, *, backend=None):
+    """Execute only new CV; its prerequisite retains its frozen producer key.
+
+    A CV rollout must not recopy source media, rerun STT, or pretend the new
+    build produced an old receipt. The key-only port cannot execute anything.
+    """
+    setting = config.get('device_day', {}).get('vision_prerequisite_key_owner')
+    if not setting:
+        return runner_type(config, backend=backend)
+    from .device_day_publication_worker import FrozenReceiptKeyOwner
+
+    class VisionRunner(runner_type):
+        def __init__(self):
+            super().__init__(config, backend=backend)
+            self.prerequisite_owner = FrozenReceiptKeyOwner(setting)
+
+        def _key(self, stage, recording, inputs, *, _binding=True):
+            if stage == 'retention':
+                return self.prerequisite_owner.key(stage, recording, inputs, binding=_binding)
+            return super()._key(stage, recording, inputs, _binding=_binding)
+
+        def process(self, recording, *, stage='all', **kwargs):
+            if stage != 'vision':
+                raise ValueError('Vision-only rollout cannot execute another producer')
+            return super().process(recording, stage=stage, **kwargs)
+
+        def close(self):
+            self.prerequisite_owner.close()
+
+    return VisionRunner()
+
+
 class RetentionWorker:
     """Bounded concurrent claims; existing execution still validates every input."""
 
@@ -698,6 +730,7 @@ def serve(config_path, stop, *, stage='retention'):
     worker = RetentionWorker(stage=stage, recent_seconds=14400 if stage in {'vision', 'understanding', 'report'} else None,
                              continuous_vision=stage == 'vision')
     runner, generation, roots, status_path, consumer = None, None, None, None, None
+    retired_runners = []
     backfill = BackfillSupervisor(stage, stop) if stage in SUPPORTED_STAGES else None
     from .device_day_synthesis_worker import DaySynthesisSupervisor
     synthesis = DaySynthesisSupervisor(stop) if stage == 'report' else None
@@ -728,11 +761,17 @@ def serve(config_path, stop, *, stage='retention'):
                     backfill.request_yield()
                 if runner is None or generation != key:
                     worker.close()
+                    if runner is not None and hasattr(runner, 'close'):
+                        # A yielding history task may still read its parent
+                        # key. Close this key-only port after that task drains.
+                        retired_runners.append(runner)
                     runner_type = (DeferredPrimaryPublicationRunner if defer_publication and stage in {
                         'retention', 'vision', 'stt'} else DeviceDayRunner)
                     if fair and stage == 'vision':
                         from .device_day_fair_backend import create_backend
-                        runner = runner_type(config, backend=create_backend(config))
+                        runner = vision_runner(config, runner_type, backend=create_backend(config))
+                    elif stage == 'vision':
+                        runner = vision_runner(config, runner_type)
                     else:
                         runner = runner_type(config)
                     generation = key
@@ -801,6 +840,9 @@ def serve(config_path, stop, *, stage='retention'):
             synthesis.close()
         if backfill is not None:
             backfill.close()
+        for retired in [*retired_runners, runner]:
+            if retired is not None and hasattr(retired, 'close'):
+                retired.close()
         if consumer is not None:
             consumer.__exit__(None, None, None)
         if status_path is not None:

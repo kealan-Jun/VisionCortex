@@ -35,6 +35,9 @@ def persist(layout, recording_id, key, ordinal, audit):
     summary.update(detail_storage='verified_activity_audit_reference',
                    event_count=len(audit.get('events', [])),
                    rejected_count=len(audit.get('rejected', [])))
+    if 'local_activity_recall' in audit:
+        summary['local_activity_recall'] = {k: audit['local_activity_recall'][k]
+            for k in ('status', 'recipe', 'sample_count', 'paid_requests', 'physical_action_confirmed')}
     return summary, reference
 
 

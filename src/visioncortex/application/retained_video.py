@@ -99,6 +99,15 @@ def _validate_activity_process(layout, candidate, selection, meaning, recording,
         if (audit.get('scope') != 'single_device_activity_not_cross_view_experiment_confirmation'
                 or audit.get('coarse_only_can_label_activity') is not False):
             raise ValueError('Activity process lacks actual fine-audit evidence')
+        if saved['classification_basis'] == 'fine_audit_or_local_lab_work_review_not_ground_truth':
+            from ..analysis.activity_recall import RECIPE
+            review = audit.get('local_activity_recall') or {}
+            if (review.get('recipe') != RECIPE or review.get('status') != 'completed'
+                    or review.get('physical_action_confirmed') is not False
+                    or review.get('formal_events_mutated') is not False
+                    or any(w.get('sample_coverage') != 'complete' for w in review.get('windows', []))
+                    or [saved['start_ms'], saved['end_ms']] not in audit.get('selected_activity_intervals', [])):
+                raise ValueError('Local process recall lacks its complete source-bound audit')
         if selection not in _selection_partition(saved, meaning, recording, context)['intervals']:
             raise ValueError('Process selection differs from the owning fine-audited interval')
         if any(identity(p) != before for p, before in snapshots):

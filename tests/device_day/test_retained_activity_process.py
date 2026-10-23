@@ -82,3 +82,30 @@ def test_corrupt_audit_during_extraction_does_not_publish_process(evidence_case,
     result = publish_selected(case.config, case.index)
     assert result['materialized'] == 0 and result['pending'] == 1
     assert not list(case.layout.processed.glob('Clips/*/*.mp4'))
+
+
+@pytest.mark.parametrize('damage', [None, 'coverage', 'bounds', 'action_claim'])
+def test_local_recall_process_requires_complete_owned_audit(evidence_case, monkeypatch, damage):
+    from visioncortex.analysis.activity_recall import RECIPE
+    case = evidence_case
+    install_process(case, monkeypatch)
+    review = {'status': 'completed', 'recipe': RECIPE, 'sample_count': 10, 'paid_requests': 0,
+              'physical_action_confirmed': False, 'formal_events_mutated': False,
+              'windows': [{'sample_coverage': 'complete'}]}
+    audit = {'scope': 'single_device_activity_not_cross_view_experiment_confirmation',
+             'coarse_only_can_label_activity': False, 'local_activity_recall': review,
+             'selected_activity_intervals': [[0, 50100]]}
+    if damage == 'coverage':
+        review['windows'][0]['sample_coverage'] = 'partial'
+    elif damage == 'bounds':
+        audit['selected_activity_intervals'] = [[0, 50000]]
+    elif damage == 'action_claim':
+        review['physical_action_confirmed'] = True
+    summary, reference = persist(case.layout, 'recording', 'vision-key', 1, audit)
+    case.candidate.update(classification_basis='fine_audit_or_local_lab_work_review_not_ground_truth',
+                          activity_audit=summary, activity_audit_ref=reference)
+    case.visual['segments'] = [deepcopy(case.candidate)]
+    atomic_json(case.receipt.with_name('vision.json'), case.visual)
+    result = publish_selected(case.config, case.index)
+    assert result['materialized'] == (1 if damage is None else 0)
+    assert bool(case.calls) is (damage is None)

@@ -19,7 +19,9 @@ def audited_process(segment):
     """
     reference = segment.get('activity_audit_ref') or {}
     return (segment.get('activity') == 'active'
-        and segment.get('classification_basis') == 'existing_fine_audit_and_device_boundaries_not_ground_truth'
+        and segment.get('classification_basis') in {
+            'existing_fine_audit_and_device_boundaries_not_ground_truth',
+            'fine_audit_or_local_lab_work_review_not_ground_truth'}
         and isinstance(reference, dict) and _frame_reference(reference)
         and reference.get('storage_root') == 'local_cache_root')
 
