@@ -196,7 +196,7 @@ def original_units(layout, index, values=None, *, directory_bindings=()):
         for folder in children:
             if folder.is_symlink() or folder.name.startswith('.'):
                 continue
-            capture = (folder.is_dir() and folder.name not in {'Audio', 'Metadata'}
+            capture = (folder.is_dir() and folder.name not in {'Audio', 'Metadata', 'Photos'}
                        and (root_name == 'MetaData' or (folder/'rgb.mp4').is_file()))
             if capture:
                 reference = {'path': layout.relative(folder/'rgb.mp4')}
@@ -556,7 +556,7 @@ def retire_native(layout, index, public_names, *, source_units=(), maximum=64):
                 value = read_json(header)
                 reserved = value.get('source_unit')
                 if (value.get('schema_version') == VERSION and value.get('source_folder') == source.name
-                        and reserved in {'MetaData/Audio', 'MetaData/Metadata'}
+                        and reserved in {'MetaData/Audio', 'MetaData/Metadata', 'MetaData/Photos'}
                         and value.get('original_source', {}).get('path') == reserved + '/rgb.mp4'
                         and not safe_child(layout.root, reserved + '/rgb.mp4').exists()
                         and value.get('interval_count') == 0 and value.get('available_video_count') == 0
