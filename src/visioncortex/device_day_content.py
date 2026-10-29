@@ -263,7 +263,7 @@ def publish_transcript(config, archive, record, context=None):
     """Publish one completed recording without walking or rewriting the day."""
     root = Path(config['storage']['archive_root']) / archive
     value, data = transcript_documents(archive, record, context)
-    relative = 'Comment/' + time_folder(value['start_us'], value['end_us'])
+    relative = 'Comment/Audio/' + time_folder(value['start_us'], value['end_us'])
     _write(safe_child(root, relative + '/Transcript.json'), value)
     target = safe_child(root, relative + '/Transcript.txt')
     if not target.is_file() or target.read_bytes() != data:
@@ -480,7 +480,7 @@ def publish_content(config, index):
                 'selection_interval': interval, 'projection_from_candidate': True,
                 'model_invoked': False, 'physical_action_confirmed': False})
         visual_entries.append(visual_entry(value, relative))
-    for directory, entries in [('Comment', audio_entries), ('MultimodalUnderstanding', visual_entries)]:
+    for directory, entries in [('Comment/Audio', audio_entries), ('MultimodalUnderstanding', visual_entries)]:
         _write(root / directory / 'Index.json', content_index(index['archive'], directory, entries))
     return {'audio': audio_entries, 'multimodal': visual_entries, 'digest': digest([audio_entries, visual_entries]),
             **({'clip_delivery': clip_progress} if clip_progress is not None else {})}

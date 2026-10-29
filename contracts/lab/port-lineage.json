@@ -176,6 +176,13 @@
       "ported_sha256": "e296feef3bdc25d30bf949d5b6c70c59a9eed9565fbefe652914374af61e4e56"
     },
     {
+      "path": "src/visioncortex/lab/field_unified_sink.py",
+      "upstream_module": null,
+      "original_sha256": null,
+      "ported_sha256": "abcbe232020ae2489cb338af9b093c4aab9a752314af10e704b478c8fdfd9877",
+      "origin": "unified_project_integration"
+    },
+    {
       "path": "src/visioncortex/lab/fields.py",
       "upstream_module": "fields.py",
       "original_sha256": "7f43079d920ca08c142868f309617fdb7d048a2e7dc6f693f38060cf1e1914f1",
@@ -336,6 +343,13 @@
       "original_sha256": null,
       "origin": "new_person_evidence_projection",
       "ported_sha256": "918cd7998aaf1a58a481119dab6c60dc4b8239a5efe3387bf473c2bd561a95e6"
+    },
+    {
+      "path": "src/visioncortex/lab/photo_ingress.py",
+      "upstream_module": null,
+      "original_sha256": null,
+      "ported_sha256": "0f38362d8c452566154850623098b4c1c64a2f414376f735a1366ec19c7ff337",
+      "origin": "unified_project_integration"
     },
     {
       "path": "src/visioncortex/lab/processing.py",
@@ -601,6 +615,7 @@
       "src/visioncortex/lab/equipment.py",
       "src/visioncortex/lab/existing_archive_binding.py",
       "src/visioncortex/lab/field_source.py",
+      "src/visioncortex/lab/field_unified_sink.py",
       "src/visioncortex/lab/fields.py",
       "src/visioncortex/lab/gauge.py",
       "src/visioncortex/lab/importer.py",
@@ -627,6 +642,7 @@
       "src/visioncortex/lab/operator_scan.py",
       "src/visioncortex/lab/panel_vision.py",
       "src/visioncortex/lab/person_report.py",
+      "src/visioncortex/lab/photo_ingress.py",
       "src/visioncortex/lab/processing.py",
       "src/visioncortex/lab/producer_ingress.py",
       "src/visioncortex/lab/projections.py",

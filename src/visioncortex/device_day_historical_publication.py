@@ -150,10 +150,10 @@ def snapshot(config, entry, index=None, *, anchors=None):
         return value
 
     mu_index = json_file('MultimodalUnderstanding/Index.json')
-    comment_index = json_file('Comment/Index.json')
+    comment_index = json_file('Comment/Audio/Index.json')
     report = json_file('LaboratoryDailyReport/LaboratoryDailyReport.json')
-    time_index = json_file('Comment/TimeIndex.json')
-    for directory, document in [('Comment', comment_index), ('MultimodalUnderstanding', mu_index)]:
+    time_index = json_file('Comment/Audio/TimeIndex.json')
+    for directory, document in [('Comment/Audio', comment_index), ('MultimodalUnderstanding', mu_index)]:
         _require(document == content_index(entry['archive'], directory, document['entries']),
                  'readable_content_index_metadata_or_progress_changed')
     files['ProcessedClips/Index.json'] = stable_reference('ProcessedClips/Index.json')
@@ -203,7 +203,7 @@ def snapshot(config, entry, index=None, *, anchors=None):
                      and clip.get('selection_interval') == interval, 'child_clips_projection_changed')
     # A no-audio status file is allowed; no raw audio or spoken text is made up.
     audio_start, audio_end = transcript_interval(record)
-    audio_folder = 'Comment/'+time_folder(audio_start, audio_end)
+    audio_folder = 'Comment/Audio/'+time_folder(audio_start, audio_end)
     _require(len(audio_entries) == 1, 'readable_native_transcript_index_missing_or_duplicated')
     entry_audio, = audio_entries
     stt = record.get('transcription') or {}

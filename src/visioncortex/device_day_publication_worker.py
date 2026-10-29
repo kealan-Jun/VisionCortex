@@ -8,7 +8,7 @@ from .device_day_contract import atomic_json, digest, read_json
 
 # Publication-only recipe: completed captures must be revisited after a
 # naming migration without invalidating model receipts or issuing paid work.
-READABLE_LAYOUT_POLICY = 'source-recording-full-extent-names/8'
+READABLE_LAYOUT_POLICY = 'source-recording-full-extent-names/9-comment-audio-ocr'
 
 
 class FrozenReceiptKeyOwner:

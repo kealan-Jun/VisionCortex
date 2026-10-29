@@ -1,6 +1,6 @@
 {
   "schema_version": "vc-lab-rule-bundle/1",
-  "revision": "vc-lab-unified-20261029.13",
+  "revision": "vc-lab-unified-20261029.14",
   "components_sha256": "5be51d3c237058c97919072431ed203e6a8f6dd207137f204fb241b1d71f5af5",
   "files": [
     {
@@ -183,6 +183,10 @@
       "sha256": "e296feef3bdc25d30bf949d5b6c70c59a9eed9565fbefe652914374af61e4e56"
     },
     {
+      "path": "src/visioncortex/lab/field_unified_sink.py",
+      "sha256": "abcbe232020ae2489cb338af9b093c4aab9a752314af10e704b478c8fdfd9877"
+    },
+    {
       "path": "src/visioncortex/lab/fields.py",
       "sha256": "35abb605d432df2d31e0f974a9f55e9969fb08e282a0f547c0ab2f0ea874b3a3"
     },
@@ -285,6 +289,10 @@
     {
       "path": "src/visioncortex/lab/person_report.py",
       "sha256": "918cd7998aaf1a58a481119dab6c60dc4b8239a5efe3387bf473c2bd561a95e6"
+    },
+    {
+      "path": "src/visioncortex/lab/photo_ingress.py",
+      "sha256": "0f38362d8c452566154850623098b4c1c64a2f414376f735a1366ec19c7ff337"
     },
     {
       "path": "src/visioncortex/lab/processing.py",
@@ -513,5 +521,5 @@
       "sha256": "a3c78f7837195851f74868009d1d14db34f8629ca31457371d8056a1c3c31a73"
     }
   ],
-  "source_lineage_sha256": "020bec650d020d279b16a648630255bd6e774268c479c4ca7d1d50f702c0f9f1"
+  "source_lineage_sha256": "423d17c38640db64e9fd8901d9c5e1ea0ad1a590c5fd342ca8a320e8a298b06e"
 }

@@ -237,9 +237,9 @@ def publish_file_index(config, index, photos=None):
     field_reference = verified_field_events_reference(config, index, root)
     if field_reference:
         value['field_events_file'] = field_reference
-    atomic_json(root/'Comment'/'TimeIndex.json', value)
+    atomic_json(root/'Comment/Audio'/'TimeIndex.json', value)
     # This is a mutable projection, so do not advertise an immutable content hash.
-    index['time_index'] = {'path': 'Comment/TimeIndex.json', 'schema_version': value['schema_version']}
+    index['time_index'] = {'path': 'Comment/Audio/TimeIndex.json', 'schema_version': value['schema_version']}
     return value
 
 
@@ -250,7 +250,7 @@ def verified_field_events_reference(config, index, root):
     from .device_day_contract import digest
     from .device_day_verification import verify_artifact_cached
     from .application.field_archive_context import snapshot
-    path = root/'Comment/FieldEvents.json'
+    path = root/'Comment/OCR/FieldEvents.json'
     try:
         if not path.is_file() or path.stat().st_size > 8*1024*1024:
             return None
@@ -272,7 +272,7 @@ def verified_field_events_reference(config, index, root):
         saved_value, saved_observed = snapshot(saved)
         if saved_value != value:
             return None
-        reference = observed | {'path': 'Comment/FieldEvents.json'}
+        reference = observed | {'path': 'Comment/OCR/FieldEvents.json'}
         saved_ref = saved_observed | {'path': saved_relative}
         if verify_artifact_cached(root, reference) and verify_artifact_cached(root, saved_ref, backend_root=backend):
             return reference | {'path_base': 'device_day'}
@@ -490,7 +490,7 @@ class FileIndexPublisher:
         from .device_day_content import time_folder, transcript_interval
         for record in index.get('recordings', []):
             if record.get('start_us') and record.get('end_us'):
-                relative = 'Comment/' + time_folder(*transcript_interval(record))
+                relative = 'Comment/Audio/' + time_folder(*transcript_interval(record))
                 paths.extend(root/relative/name for name in ('Transcript.json', 'Transcript.txt'))
         paths.extend(root/understanding_relative(s)/'Understanding.json'
                      for s in index.get('segments', []) if s.get('start_us') and s.get('end_us'))
