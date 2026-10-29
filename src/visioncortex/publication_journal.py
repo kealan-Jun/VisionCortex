@@ -150,10 +150,10 @@ def revalidate_remounted_seals(runner, record):
             snapshots = []
             for source in updated['sources']:
                 original = Path(source['original_path'])
+                mount, _ = guard.source_mount_for(original)
                 if not original.exists():
                     continue  # Normal publication verifies the surviving archive.
                 observed = identity(original)
-                mount, _ = guard.mount_for(original)
                 cifs = mount is not None and mount.snapshot.get('filesystem') == 'cifs'
                 if (observed[2:] != source['identity'][2:]
                         or observed[1] != source['identity'][1] and not cifs
@@ -174,6 +174,7 @@ def revalidate_remounted_seals(runner, record):
         for path, saved, _updated, snapshots in updates:
             if read_json(path) != saved or any(identity(p) != stamp for p, stamp in snapshots):
                 raise ValueError('Capture or input seal changed during remount recovery')
+        guard.validate()
         for path, saved, updated, _snapshots in updates:
             previous = digest(saved)
             durable_json(path.parent / 'history' / f'{path.stem}-{previous}.json', saved)

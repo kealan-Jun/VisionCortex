@@ -103,8 +103,8 @@ def test_verified_cifs_inode_refresh_rehashes_bytes_and_preserves_content_bindin
     from visioncortex import device_day_inputs
     from visioncortex.device_day_write_guard import PublicationGuard
     originals = {Path(s['original_path']) for seal in previous.values() for s in seal['sources']}
-    mount_for = PublicationGuard.mount_for
-    monkeypatch.setattr(PublicationGuard, 'mount_for',
+    mount_for = PublicationGuard.source_mount_for
+    monkeypatch.setattr(PublicationGuard, 'source_mount_for',
         lambda self, path: (SimpleNamespace(snapshot={'filesystem': 'cifs'}), path)
         if path in originals else mount_for(self, path))
     original, calls = device_day_inputs.verify_content, []
@@ -130,8 +130,8 @@ def test_cifs_inode_refresh_rejects_different_bytes_before_any_seal_update(remou
     runner, record, _, _, previous = remounted
     from visioncortex.device_day_write_guard import PublicationGuard
     originals = {Path(s['original_path']) for seal in previous.values() for s in seal['sources']}
-    mount_for = PublicationGuard.mount_for
-    monkeypatch.setattr(PublicationGuard, 'mount_for',
+    mount_for = PublicationGuard.source_mount_for
+    monkeypatch.setattr(PublicationGuard, 'source_mount_for',
         lambda self, path: (SimpleNamespace(snapshot={'filesystem': 'cifs'}), path)
         if path in originals else mount_for(self, path))
     path = input_path(runner, record, 'vision')
@@ -156,3 +156,50 @@ def test_invalid_second_seal_cannot_partially_rebind_the_first(remounted):
     with pytest.raises(ValueError):
         revalidate_remounted_seals(runner, record)
     assert input_path(runner, record, 'vision').read_bytes() == first
+
+
+@pytest.mark.parametrize('lose_mount', [False, True])
+def test_production_revalidation_reads_capture_mount_without_publishing_to_it(remounted, monkeypatch, lose_mount):
+    runner, record, layout, backend, previous = remounted
+    from visioncortex import device_day_write_guard as guards
+    output = layout.root.parent
+    capture_root = Path(runner.config['collection_ingest']['source_root'])
+    original = Path(record['video_path'])
+    snapshot = {'mount_id': 'owned-output-mount', 'device': output.stat().st_dev,
+                'filesystem': 'cifs', 'source': '//synthetic.invalid/verified-share'}
+    mounts = {output: snapshot, capture_root: snapshot | {'mount_id': 'owned-capture-mount'}}
+    monkeypatch.setattr(guards, 'mount_snapshot', lambda: dict(mounts))
+    monkeypatch.setattr('visioncortex.device_day_recovery_worker.verify_storage', lambda _: None)
+    runner.config['runtime']['local_only'] = False
+    runner.config['device_day']['publication_storage_checks'] = [
+        {'mount_path': str(output), 'filesystem': 'cifs', 'source': snapshot['source']}]
+    receipt_paths = [runner._receipt(layout, record, stage) for stage in ('retention', 'vision', 'stt')]
+    before = [path.read_bytes() for path in receipt_paths]
+    original_bytes = original.read_bytes()
+    if lose_mount:
+        from visioncortex import device_day_inputs
+        verify = device_day_inputs.verify_content
+        def detached(path, reference):
+            result = verify(path, reference)
+            mounts.pop(capture_root, None)
+            return result
+        monkeypatch.setattr(device_day_inputs, 'verify_content', detached)
+        seals = [input_path(runner, record, stage) for stage in ('vision', 'stt')]
+        old_seals = [path.read_bytes() for path in seals]
+        with pytest.raises(guards.NASUnavailable):
+            revalidate_remounted_seals(runner, record)
+        assert [path.read_bytes() for path in seals] == old_seals
+        assert [path.read_bytes() for path in receipt_paths] == before
+        assert backend.vision_calls == 1 and backend.semantic_calls == 0
+        return
+    assert revalidate_remounted_seals(runner, record) == 2
+    assert [path.read_bytes() for path in receipt_paths] == before
+    assert original.read_bytes() == original_bytes
+    assert all(binding(read_json(input_path(runner, record, stage))) == binding(old)
+               for stage, old in previous.items())
+    assert backend.vision_calls == 1 and backend.semantic_calls == 0
+    with guards.storage_guard(runner.config) as guard:
+        guard.source_mount_for(original)
+        with pytest.raises(guards.NASUnavailable):
+            atomic_json(original.parent/'Forbidden.json', {})
+    assert not (original.parent/'Forbidden.json').exists()

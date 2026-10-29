@@ -186,6 +186,84 @@ def test_unverified_destination_and_symlink_parents_are_rejected(tmp_path, monke
     assert not (outside/'Result.json').exists()
 
 
+def source_storage(tmp_path, monkeypatch):
+    config, volume, state = mocked_storage(tmp_path, monkeypatch)
+    capture = tmp_path/'CaptureTree'
+    capture.mkdir()
+    alias = tmp_path/'ConfiguredCaptureAlias'
+    alias.symlink_to(capture, target_is_directory=True)
+    config['collection_ingest'] = {'source_root': str(alias)}
+    source = capture/'lab_video'
+    source.mkdir()
+    original = source/'rgb.mp4'
+    original.write_bytes(b'owned synthetic input')
+    snapshot = guard_module.mount_snapshot()[volume]
+    mounts = {volume: snapshot, source: snapshot | {'mount_id': 'owned-source-mount'}}
+    monkeypatch.setattr(guard_module, 'mount_snapshot', lambda: dict(mounts))
+    return config, volume, state, alias, original, mounts
+
+
+def test_source_reader_accepts_configured_alias_without_granting_writes(tmp_path, monkeypatch):
+    config, volume, _, alias, original, _ = source_storage(tmp_path, monkeypatch)
+    before = original.read_bytes()
+    with guard_module.storage_guard(config) as guard:
+        mount, resolved = guard.source_mount_for(alias/'lab_video'/'rgb.mp4')
+        assert resolved == original and mount.snapshot['filesystem'] == 'cifs'
+        assert guard.source_mount_for(original)[0] is mount
+        assert len(guard.source_mounts) == 1
+        with pytest.raises(guard_module.NASUnavailable):
+            atomic_json(original.parent/'Forbidden.json', {})
+        with pytest.raises(guard_module.NASUnavailable):
+            atomic_json(alias/'lab_video'/'AlsoForbidden.json', {})
+        atomic_json(volume/'Archive'/'Result.json', {'safe': True})
+        descriptor = mount.descriptor
+    with pytest.raises(OSError):
+        os.fstat(descriptor)
+    assert original.read_bytes() == before
+    assert not list(original.parent.glob('*.json'))
+    assert read_json(volume/'Archive'/'Result.json') == {'safe': True}
+
+
+@pytest.mark.parametrize('change', ['missing', 'wrong_share', 'local_fallback', 'nested_mount'])
+def test_capture_reader_rejects_unverified_source_storage(tmp_path, monkeypatch, change):
+    config, _, _, alias, original, mounts = source_storage(tmp_path, monkeypatch)
+    snapshot = mounts[original.parent]
+    if change == 'missing':
+        mounts.pop(original.parent)
+    elif change == 'wrong_share':
+        mounts[original.parent] = snapshot | {'source': '//synthetic.invalid/other-share'}
+    elif change == 'local_fallback':
+        mounts[original.parent] = snapshot | {'filesystem': 'ext4'}
+    else:
+        mounts[original] = snapshot | {'mount_id': 'unapproved-nested-mount', 'source': 'other'}
+    with guard_module.storage_guard(config) as guard:
+        with pytest.raises(guard_module.NASUnavailable):
+            guard.source_mount_for(alias/'lab_video'/'rgb.mp4')
+
+
+def test_capture_reader_rejects_alias_escape_and_changed_mount(tmp_path, monkeypatch):
+    config, volume, _, alias, original, mounts = source_storage(tmp_path, monkeypatch)
+    escape = original.parent/'Outside'
+    escape.symlink_to(volume, target_is_directory=True)
+    with guard_module.storage_guard(config) as guard:
+        with pytest.raises(guard_module.NASUnavailable, match='escaped'):
+            guard.source_mount_for(alias/'lab_video'/'Outside'/'Fake.mp4')
+        guard.source_mount_for(original)
+        mounts[original.parent] = mounts[original.parent] | {'mount_id': 'replaced-source-mount'}
+        with pytest.raises(guard_module.NASUnavailable, match='disappeared or changed'):
+            guard.validate(volume=False)
+
+
+def test_capture_reader_rejects_retargeted_configured_root(tmp_path, monkeypatch):
+    config, volume, _, alias, original, _ = source_storage(tmp_path, monkeypatch)
+    with guard_module.storage_guard(config) as guard:
+        guard.source_mount_for(original)
+        alias.unlink()
+        alias.symlink_to(volume, target_is_directory=True)
+        with pytest.raises(guard_module.NASUnavailable, match='capture storage alias changed'):
+            guard.validate(volume=False)
+
+
 def test_paid_response_survives_flight_mount_loss_and_replays_without_payment(default_config, tmp_path, monkeypatch):
     private, volume, state = mocked_storage(tmp_path, monkeypatch)
     config, metadata, _, _ = setup_window(default_config, tmp_path)
