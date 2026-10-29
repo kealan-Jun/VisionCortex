@@ -63,6 +63,7 @@ def build_sidecar(*, archive, customer_id, revision, snapshot_fingerprint, rules
             text=activity.get('text_content'),text_is_untrusted_evidence_data=True,model_revision=activity.get('model_revision'),
             operator_scan_event=payload.get('operator_scan_event'),operator_context=payload.get('operator_context'),
             comment_transition=payload.get('comment_transition'),retained_clip=payload.get('retained_clip'),
+            value_candidate=payload.get('value_candidate'),
             original_source_spans=payload.get('original_source_spans', []),fields=payload.get('fields', []),
             association_revisions=activity.get('association_revisions', []),person_roles=by_activity.get(activity['id'], []))))
     result = dict(schema_version=SCHEMA,archive=archive,day=day,camera_key=camera,customer_id=str(customer_id),

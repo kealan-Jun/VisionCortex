@@ -41,6 +41,12 @@ class TimelineViews:
         return dict(activities=self._activities(conn, activity_ids=ids[:100]) if ids else [],
                     truncated=len(ids)>100, attribution='customer_pending_time_not_assigned_to_requested_day_or_range')
 
+    def _untimed_values(self, conn):
+        from .value_candidates import project
+        ids = [r['id'] for r in conn.execute("SELECT id FROM hj_activity WHERE customer_id=%s AND start_at IS NULL AND payload ? 'value_candidate' ORDER BY created_at DESC,id LIMIT 101", (self.customer,)).fetchall()]
+        return dict(candidates=project(self._activities(conn, activity_ids=ids[:100])) if ids else [],
+                    truncated=len(ids)>100, attribution='customer_pending_time_not_assigned_to_requested_day_or_range')
+
     def _evidence(self, conn, ids):
         return conn.execute('SELECT e.*,m.kind,m.stream_key,m.session_key,m.start_at AS media_start_at,m.duration_seconds,a.verified_sha256,a.evidence_status FROM evidence_ref e JOIN hj_timeline_media m USING(customer_id,media_id) JOIN media_asset a ON a.customer_id=e.customer_id AND a.id=e.media_id WHERE e.customer_id=%s AND e.id=ANY(%s) ORDER BY e.media_id,e.start_seconds,e.id', (self.customer, ids)).fetchall() if ids else []
 
@@ -89,7 +95,10 @@ class TimelineViews:
                     gaps.append(dict(start_at=cursor, end_at=end, status='no_indexed_recording'))
                 coverage.append(dict(stream_key=stream, gaps=gaps, overlaps=overlaps))
             unknown = conn.execute('SELECT media_id,stream_key FROM hj_timeline_media WHERE customer_id=%s AND start_at IS NULL ORDER BY media_id LIMIT 100', (self.customer,)).fetchall()
-            return clean(dict(start_at=start, end_at=end, media=media, activities=self._activities(conn, start, end),
+            from .value_candidates import project
+            activities = self._activities(conn, start, end)
+            return clean(dict(start_at=start, end_at=end, media=media, activities=activities,
+                              video_value_candidates=project(activities), unknown_time_video_value_candidates=self._untimed_values(conn),
                               indexed_coverage=coverage, unknown_time_media=unknown,
                               unknown_time_temporal_activities=self._untimed_temporal(conn),
                               context_evidence=context_evidence(conn,self.customer,start,end),
@@ -164,6 +173,7 @@ class TimelineViews:
         pending=self._activities(conn,activity_ids=pending_ids) if pending_ids else []
         people=person_timelines(conn,self.core,activities,runs,pending)
         jobs = conn.execute('SELECT t.kind,t.status,count(*) AS count FROM hj_timeline_task t JOIN hj_timeline_media m USING(customer_id,media_id) WHERE t.customer_id=%s AND m.start_at<%s AND m.end_at>=%s GROUP BY t.kind,t.status ORDER BY t.kind,t.status', (self.customer, end, start)).fetchall()
+        from .value_candidates import project
         return clean(dict(schema_version='vc-lab-evidence-daily-report/1', day=str(start.date()), timezone='Asia/Shanghai',
                           experiments=experiments, experiment_count=len(experiments), activity_count=len(activities),
                           activity_count_basis='stored_observations_not_distinct_physical_actions',
@@ -171,6 +181,7 @@ class TimelineViews:
                           unassigned_activities=[a for a in activities if not a['run_ids']],
                           readouts=[self._readout(conn, s['session_id']) for s in sessions],
                           unknown_time_temporal_activities=self._untimed_temporal(conn),
+                          video_value_candidates=project(activities), unknown_time_video_value_candidates=self._untimed_values(conn),
                           context_evidence=context_evidence(conn,self.customer,start,end),
                           quality='NOT_PROVEN', coverage='partial',
                           scope='evidence_recording_and_traceability', raw_evidence_preserved=True))

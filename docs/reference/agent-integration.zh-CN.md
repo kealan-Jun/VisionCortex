@@ -96,3 +96,11 @@ NAS按[统一留存契约](unified-retention.zh-CN.md)保存原始证据和处�
 ## 交付边界
 
 这次提交提供可整合的源代码、通用规则、迁移、测试和接口说明。实际模型消费、现场时钟、主动扫码入口、口述联动、材料归属、读数质量和NAS发布仍须用真实链路验收。不能把fixture通过、旧模型测量或源码上传当成这些门槛已经通过。
+
+## 从已留存扫码证据接入
+
+鉴权命令 `timeline-consume-scan` 接收 `key`、已完成照片 QR `job_id`、明确 `intent`（`operator_scan` 或 `background_qr`）、`scan_kind`（`equipment` 或 `material`）、`actor`、`reason`，以及已有的可选 `person_id`、`run_id`、`batch_id`。设备二维码沿用登记的永久 UUID，不要求改印为旧演示 JSON。相机与事件时间取原收据，不能由调用者覆盖；未校准时钟不会获得当前人的身份。
+
+自动采集的原 `CaptureReceipt.json` 可携带同样结构的 `scan_intent`（不含 `key`、`job_id`）；QR worker 完成后，既有 timeline tick 自动消费。采集方必须提供真实主动扫码意图，被动视频帧不填此字段。当前 live Receiver 默认路径仍不是这种主动事件的证明；配置和数据路由须单独验收。
+
+`/internal/status` 的 `timeline.scan_intake` 给出设备激活计数、已存扫码计数、来源配置与发布开关，`field_scan_acceptance` 保持独立于 API 健康检查。ASR、价值候选、未决记录与原生日报自动刷新能力见[状态说明](lab-vision-status.zh-CN.md)。

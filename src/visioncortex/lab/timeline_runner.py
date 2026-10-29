@@ -43,6 +43,10 @@ class TimelineRunner:
     def run_once(self):
         if self.settings.processing_profile != 'timeline-v1':
             return dict(enabled=False)
+        from .comment_intake import CommentIntake
+        intake = CommentIntake(self.core).consume_ready()
+        if intake['processed']:
+            return dict(status='comment_intake_processed', comment_intake=intake)
         with self.core.db.transaction(readonly=True) as conn:
             scope = conn.execute('SELECT data_scope FROM customer_instance WHERE id=%s', (self.customer,)).fetchone()['data_scope']
             selected_only=self.timeline.policies.video_input_unit=='complete_retained_clip'
@@ -157,6 +161,14 @@ class TimelineRunner:
             with timing.stage('result_commit'):
                 value=self.tasks._submit('runner-submit:' + str(job['lease_token']), job['task_id'], job['lease_token'], model['model_revision'], result,
                                           local_provider_fingerprint=provider_fingerprint)
+            if kind == 'transcription':
+                # The task is already committed. A failed Comment consumer must
+                # resume from persisted speech, never repeat successful ASR.
+                from .comment_intake import CommentIntake
+                try:
+                    value['comment_intake'] = CommentIntake(self.core).consume_ready(task_id=job['task_id'])
+                except Exception as exc:
+                    value['comment_intake'] = dict(status='pending_retry', error_code=type(exc).__name__)
             return value
         except Exception as exc:
             try:
@@ -285,13 +297,19 @@ class TimelineRunner:
                 if lo <= start < hi:
                     selected.append(dict(text=unit['text'], start_seconds=str(start), end_seconds=str(end)))
             if selected:
+                from .comment_intake import transcript_candidate
+                spans=[dict(media_id=ref['media_id'], start_seconds=selected[0]['start_seconds'], end_seconds=selected[-1]['end_seconds'])]
                 events.append(dict(kind='speech', text=' '.join(u['text'] for u in selected),
-                                   spans=[dict(media_id=ref['media_id'], start_seconds=selected[0]['start_seconds'], end_seconds=selected[-1]['end_seconds'])],
+                                   spans=spans,
                                    payload=dict(aligned_units=selected, time_basis=result.get('time_basis'),
-                                                alignment_revision=result.get('alignment_revision'), interpretation='verbatim_transcript_not_confirmed_experiment_command')))
+                                                alignment_revision=result.get('alignment_revision'), interpretation='verbatim_transcript_not_confirmed_experiment_command',
+                                                comment_candidate=transcript_candidate(ref,spans,execution,aligned=True,original_asr_text=result.get('text')))))
             elif result.get('text') and not units:
+                from .comment_intake import transcript_candidate
+                spans=[dict(media_id=ref['media_id'], start_seconds=ref['start_seconds'], end_seconds=ref['end_seconds'])]
                 events.append(dict(kind='speech', text=result['text'], spans=[dict(media_id=ref['media_id'], start_seconds=ref['start_seconds'], end_seconds=ref['end_seconds'])],
-                                   payload=dict(time_basis='whole_input_only_alignment_unavailable', contains_context=True)))
+                                   payload=dict(time_basis='whole_input_only_alignment_unavailable', contains_context=True,
+                                                comment_candidate=transcript_candidate(ref,spans,execution,aligned=False,original_asr_text=result.get('text')))))
         return events, receipts
 
     def _video(self, client, model, window, folder,*,request=None):
@@ -316,7 +334,12 @@ class TimelineRunner:
                   f'只记录输入 {primary} 的第 {lo} 至 {hi} 秒内可见的活动；其余为上下文。'
                   '不猜测看不清的读数、样品身份、配方、SOP结论或实际实验是否完成。'
                   '保留不确定性。休息、闲聊、等待分别标记，不得把无可见证据写成无实验。'
-                  '输出JSON对象，唯一属性events为数组，每项仅含kind、text、start_seconds、end_seconds。'
+                  '输出JSON对象，唯一属性events为数组，每项含kind、text、start_seconds、end_seconds；'
+                  '并尽量提供experiment_status（experimental/non_experimental/unknown）、'
+                  'value_status（valuable/no_value/unknown）及reason（直接证据）。实验与工作价值分别判断。'
+                  '可选boundary_uncertainty为start/end各两个边界秒数字符串。'
+                  '等待可能属于实验；维护、交接、参数讨论可能有工作价值。'
+                  '无声、静态、模糊、动作少、身份未知均不能推出无价值或非实验，证据不足写unknown。'
                   f'kind只能是{sorted(KINDS - {"speech"})}；秒数为该输入从零开始的字符串，相交活动截到上述范围。'
                   '只描述有证据的动作；无可见事件时events为空。')
         if prior:
@@ -333,16 +356,39 @@ class TimelineRunner:
         if set(parsed) != {'events'} or not isinstance(parsed['events'], list) or len(parsed['events']) > 100:
             raise ValueError('Invalid bounded VLM observations')
         events = []
+        from .value_candidates import MODEL_FIELDS, attach, pending_event
         for event in parsed['events']:
-            if set(event) != {'kind', 'text', 'start_seconds', 'end_seconds'} or event['kind'] not in KINDS - {'speech'}:
+            required = {'kind', 'text', 'start_seconds', 'end_seconds'}
+            if not required <= set(event) <= required | MODEL_FIELDS or event['kind'] not in KINDS - {'speech'}:
                 raise ValueError('Invalid VLM event semantics')
             start, end = seconds(event['start_seconds']), seconds(event['end_seconds'])
             if not lo <= start < end <= hi:
                 raise ValueError('VLM event escaped the owned core window')
-            events.append(dict(kind=event['kind'], text=event['text'],
+            observed = dict(kind=event['kind'], text=event['text'],
                                spans=[dict(media_id=ref['media_id'], start_seconds=str(seconds(ref['start_seconds']) + start), end_seconds=str(seconds(ref['start_seconds']) + end))],
                                run_ids=((request or {}).get('retained_clip') or {}).get('run_ids',[]),
-                               payload=dict(visible_observation=True, context_continuity_issues=window['continuity_issues'],prior_context_activity_ids=[p['activity_id'] for p in prior])))
+                               payload=dict(visible_observation=True, context_continuity_issues=window['continuity_issues'],prior_context_activity_ids=[p['activity_id'] for p in prior]))
+            value = {key: event[key] for key in MODEL_FIELDS if key in event}
+            if 'boundary_uncertainty' in value:
+                uncertainty = value['boundary_uncertainty']
+                if not isinstance(uncertainty, dict) or set(uncertainty) != {'start', 'end'}:
+                    raise ValueError('Invalid VLM value boundary uncertainty')
+                shifted = {}
+                for edge, pair in uncertainty.items():
+                    if not isinstance(pair, list) or len(pair) != 2:
+                        raise ValueError('Invalid VLM value boundary range')
+                    bounds = [seconds(v) for v in pair]
+                    if not lo <= bounds[0] <= bounds[1] <= hi:
+                        raise ValueError('VLM value boundary range escaped the owned core')
+                    shifted[edge] = [str(seconds(ref['start_seconds']) + v) for v in bounds]
+                value['boundary_uncertainty'] = shifted
+            if value:
+                value.setdefault('reason', event['text'] or 'Insufficient visible evidence to resolve video value.')
+            events.append(attach(observed, value or None, allowed_spans=window['input_spans']))
+        if not events:
+            events = [pending_event([dict(media_id=ref['media_id'],
+                start_seconds=str(seconds(window['core']['start_seconds'])),
+                end_seconds=str(seconds(window['core']['end_seconds'])))])]
         receipt.update(execution='local_vllm_response', model_weights_verification='deployment_manifest_only',
                        frame_consumption_verification='server_configuration_only_not_per_request_attestation')
         return events, [dict(derivations=derivations, execution=receipt)]

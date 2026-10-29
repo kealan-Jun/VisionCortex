@@ -31,7 +31,9 @@ def test_camera_sidecars_from_real_snapshot_preserve_native_main_and_late_revisi
     assert {o['activity_id'] for o in index['fixture-camera-0']['observations']}=={a['id'],active['activity_id']}
     assert {o['activity_id'] for o in index['fixture-camera-1']['observations']}=={other['id']}
     assert all(v['native_entry_refresh_status']=='pending_native_publication' for v in index.values())
-    assert NativeDelivery(s['core'],settings).tick()=={'created':0,'dependencies_ready':0,'profile':'timeline-v1'}
+    delivery=NativeDelivery(s['core'],settings).tick()
+    assert delivery['created']==delivery['dependencies_ready']==delivery['reports']==0
+    assert delivery['native_refresh']['pending']==2  # No existing native index is fabricated.
     assert not list(archive.glob('*/LaboratoryDailyReport/LaboratoryDailyReport.json'))
     assert not list(archive.glob('*/MultimodalUnderstanding/*/Understanding.json'))
     assert publication.tick() is None

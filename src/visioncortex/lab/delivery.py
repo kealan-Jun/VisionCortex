@@ -12,7 +12,13 @@ class NativeDelivery:
 
     def tick(self,limit=20):
         if self.settings.processing_profile == 'timeline-v1':
-            return dict(created=0, dependencies_ready=0, profile='timeline-v1')
+            result=dict(created=0, dependencies_ready=0, profile='timeline-v1')
+            if self.settings.timeline_publish:
+                from .native_refresh import NativeRefresh
+                result['native_refresh']=NativeRefresh(self.core,self.settings).tick(limit)
+                result['reports']=result['native_refresh']['refreshed']
+                result['errors']=result['native_refresh']['errors']
+            return result
         rules=Rules().identity()
         try:
             revision=ModelRegistry(self.settings).descriptor('understanding')['revision']

@@ -63,6 +63,13 @@
       "ported_sha256": "2442b8e02d9e8d1ceeaf6b853cfe14f030cc840513c1baf383021b7f47733523"
     },
     {
+      "path": "src/visioncortex/lab/comment_intake.py",
+      "upstream_module": null,
+      "original_sha256": null,
+      "ported_sha256": "259939dfbbce8776fbe57b3085a3cea238c86a2ceb03b21ae7be5a415c01c060",
+      "origin": "unified_project_integration"
+    },
+    {
       "path": "src/visioncortex/lab/comment_transition.py",
       "upstream_module": null,
       "original_sha256": null,
@@ -97,7 +104,7 @@
       "path": "src/visioncortex/lab/delivery.py",
       "upstream_module": "delivery.py",
       "original_sha256": "5e37b9026b4901bfb32719380f0e35a9216064a0490c554a82685a0caf71abbb",
-      "ported_sha256": "5e37b9026b4901bfb32719380f0e35a9216064a0490c554a82685a0caf71abbb"
+      "ported_sha256": "4d5a9392ad58f21d2f5c0edec68946bd64b4c0eeebe49db3885fbf694238df88"
     },
     {
       "path": "src/visioncortex/lab/display_pixels.py",
@@ -245,11 +252,18 @@
       "ported_sha256": "e530c75fa3addea121ba8a1607d03ad8cf49cb35cfe7b8df67175b9d9bdb315a"
     },
     {
+      "path": "src/visioncortex/lab/native_refresh.py",
+      "upstream_module": null,
+      "original_sha256": null,
+      "ported_sha256": "856897fa2fa551bd9352e20cb111dd384c78254af46d3c1cb65ecd6d1a614547",
+      "origin": "unified_project_integration"
+    },
+    {
       "path": "src/visioncortex/lab/native_timeline_links.py",
       "upstream_module": null,
       "original_sha256": null,
       "origin": "new_neutral_native_association_adapter",
-      "ported_sha256": "72876d48da8a32a17b337b038dc45df479b23fea130ca1f7f9cce9a1d8358e12"
+      "ported_sha256": "14f8351e08fc556c01658f9171e471ac3def670121b843fdeae1d18bf21d4d4e"
     },
     {
       "path": "src/visioncortex/lab/native_video.py",
@@ -344,6 +358,13 @@
       "ported_sha256": "73680dccc75c8ed16c42ac69482f54fb7448b29c3d7e03f7f8bd7e2c3842ddf2"
     },
     {
+      "path": "src/visioncortex/lab/scan_intake.py",
+      "upstream_module": null,
+      "original_sha256": null,
+      "ported_sha256": "47468da2360944bcc98e94dd573746dd10895425196c9e028eb8c07ea842ad70",
+      "origin": "unified_project_integration"
+    },
+    {
       "path": "src/visioncortex/lab/speech_candidates.py",
       "upstream_module": "speech_candidates.py",
       "original_sha256": "f5099da31ebae7d00a2fe88ee1a8ab448f76bbcdaedcd7dd0294a1c98012c99f",
@@ -389,7 +410,7 @@
       "path": "src/visioncortex/lab/timeline_commands.py",
       "upstream_module": "timeline_commands.py",
       "original_sha256": "0ab2f4b7b4d2e1215f7c39bc3d341d58d6dc00053d1e625a2da1d9b0f03ee231",
-      "ported_sha256": "d8b0f1f952ba700c1b28ac5cf9f492229847cad82050c215597608d450654f9e"
+      "ported_sha256": "54c19c10c55de7dc99d5d99ebcd149770def28143b5a8c1b26fe9660a4b93dea"
     },
     {
       "path": "src/visioncortex/lab/timeline_metrics.py",
@@ -419,25 +440,25 @@
       "path": "src/visioncortex/lab/timeline_report.py",
       "upstream_module": "timeline_report.py",
       "original_sha256": "7d3a173f07a1164b0ab4a418a0e8a66cf470a7dff2b32646bd53e753afb1c5d5",
-      "ported_sha256": "dc04b0374044b2e53eb2b6b472fa169271acb3173b2c7aa25084c141eacc2d34"
+      "ported_sha256": "9e02578a1ee1a321ca6f3229f301652b5839017771ad066ddba1a986aed3026d"
     },
     {
       "path": "src/visioncortex/lab/timeline_runner.py",
       "upstream_module": "timeline_runner.py",
       "original_sha256": "8186ab1fbcd133583b867df6e7384cf33c3ad53412408fa5c15101950cf8374d",
-      "ported_sha256": "5c3f298fd777e800c7444f155a3e40b2d43c0e155ddfcc7b20f41b3ca7644060"
+      "ported_sha256": "d55f9c7313f39d717ca0a2da4eab536fe6ae3c775131e453ea2aa1e20c073622"
     },
     {
       "path": "src/visioncortex/lab/timeline_runtime.py",
       "upstream_module": "timeline_runtime.py",
       "original_sha256": "a2ace8b44faea89eef9c7b7feb5d56f7c0d3d277079b3a84e1a9cf13313ec5d8",
-      "ported_sha256": "312e444e6ff0d9ffa1992de1276aa4114ff4fdf358c30e284a870b84d58e15b0"
+      "ported_sha256": "cb278e7ec844757b06c7055c661c03f9c963cd3ec37f68db2e4eb4386bfce0de"
     },
     {
       "path": "src/visioncortex/lab/timeline_tasks.py",
       "upstream_module": "timeline_tasks.py",
       "original_sha256": "9358fcacc7c7ab35dee0958081f147229bf54bdc9c33eb975028885aa4093691",
-      "ported_sha256": "16f8ef4f986435920bf3919622f3087a5dd70d2fbadc3ce47ddf98a0dd117774"
+      "ported_sha256": "06a09fb2adeb23e980220e90e841e4a9489d1efa4ac8a564888af5a6a341a2fc"
     },
     {
       "path": "src/visioncortex/lab/timeline_timing.py",
@@ -449,13 +470,20 @@
       "path": "src/visioncortex/lab/timeline_views.py",
       "upstream_module": "timeline_views.py",
       "original_sha256": "84cd53f9136656fb10d87038a58bb201ab028ab2f2ca63307f9dde1417f030e6",
-      "ported_sha256": "f35c09edfde38f1fab378be5eacdff66f8d4ffd6de46ed81ac8ff3ab93498dd3"
+      "ported_sha256": "21cb8f39e01277ec640d9c2860c720bbc036bce2689fb2918c11a22bdc8efe40"
     },
     {
       "path": "src/visioncortex/lab/training.py",
       "upstream_module": "training.py",
       "original_sha256": "d27ceb7f8df0aac86aee1e66843a6ed9ec4df939d2a2cd23d7f2d7787c19ebdd",
       "ported_sha256": "15cffbeef54200e66bfd39c69676f300d3dbb66ff5d3e42ebd20ba9a872f6c01"
+    },
+    {
+      "path": "src/visioncortex/lab/value_candidates.py",
+      "upstream_module": null,
+      "original_sha256": null,
+      "ported_sha256": "9ab164dfb3fd0fb5b7871765127ab75714c257636b3b67100cba7a40c7191318",
+      "origin": "unified_project_integration"
     }
   ],
   "legacy_business_table_prefix": "hj_ retained for technical SQL compatibility; no customer instance rows included",
@@ -478,6 +506,7 @@
       "src/visioncortex/lab/cli.py",
       "src/visioncortex/lab/coarse_fine_native.py",
       "src/visioncortex/lab/coarse_fine_research.py",
+      "src/visioncortex/lab/comment_intake.py",
       "src/visioncortex/lab/comment_transition.py",
       "src/visioncortex/lab/components.py",
       "src/visioncortex/lab/config.py",
@@ -508,6 +537,7 @@
       "src/visioncortex/lab/native_linked_layout.py",
       "src/visioncortex/lab/native_ocr.py",
       "src/visioncortex/lab/native_pipeline.py",
+      "src/visioncortex/lab/native_refresh.py",
       "src/visioncortex/lab/native_timeline_links.py",
       "src/visioncortex/lab/native_video.py",
       "src/visioncortex/lab/native_vision.py",
@@ -524,6 +554,7 @@
       "src/visioncortex/lab/retained_frame_map.py",
       "src/visioncortex/lab/retention.py",
       "src/visioncortex/lab/rules.py",
+      "src/visioncortex/lab/scan_intake.py",
       "src/visioncortex/lab/speech_candidates.py",
       "src/visioncortex/lab/storage.py",
       "src/visioncortex/lab/subprocesses.py",
@@ -542,7 +573,8 @@
       "src/visioncortex/lab/timeline_tasks.py",
       "src/visioncortex/lab/timeline_timing.py",
       "src/visioncortex/lab/timeline_views.py",
-      "src/visioncortex/lab/training.py"
+      "src/visioncortex/lab/training.py",
+      "src/visioncortex/lab/value_candidates.py"
     ],
     "profiles": [
       "archive-layout-v2.json",

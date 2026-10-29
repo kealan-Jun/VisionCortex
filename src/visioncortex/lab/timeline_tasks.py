@@ -338,6 +338,13 @@ class TimelineTasks:
                         field.update(reading_status=field['status'],association_status=context['association_status'],dynamic_context=context)
                 payload = dict(item.get('payload', {}), fields=fields, task_id=str(task['id']),
                                accuracy='NOT_PROVEN', execution_verification=execution)
+                if task['kind'] == 'video_understanding':
+                    from .value_candidates import candidate
+                    payload['value_candidate'] = candidate(payload.get('value_candidate'), spans,
+                        allowed_spans=allowed, model_revision=model_revision,
+                        input_fingerprint=task['request']['input_fingerprint'], execution_verification=execution)
+                elif 'value_candidate' in payload:
+                    raise ValueError('Video value candidates require a video understanding task')
                 if temporal:
                     # Output-supplied flags cannot upgrade the source clock or
                     # cross the registration's semantic/physical boundary.
@@ -359,7 +366,10 @@ class TimelineTasks:
                             instrument_id=item.get('instrument_id'), person_id=item.get('person_id'), tag_id=item.get('tag_id'),
                             model_revision=model_revision, payload=payload)
                 ids.append(value['id'])
-            outcome = 'partial_declared_coverage' if set(covered) != expected else 'empty_observations_not_verified_absence' if not events else 'candidate_observations'
+            value_only = events and all((event.get('payload') or {}).get('value_candidate', {}).get('value_assessment_only') is True for event in events)
+            outcome = ('partial_declared_coverage' if set(covered) != expected else
+                       'empty_observations_not_verified_absence' if not events else
+                       'pending_value_assessments_not_physical_actions' if value_only else 'candidate_observations')
             stored = dict(result, activity_ids=ids, outcome=outcome, accuracy='NOT_PROVEN', execution_verification=execution, execution_receipts=receipts)
             conn.execute("UPDATE hj_timeline_task SET status='completed',result=%s,completed_at=%s WHERE customer_id=%s AND id=%s", (Jsonb(clean(stored)), at, self.customer, task['id']))
             conn.execute("UPDATE hj_timeline_task_attempt SET outcome='completed',finished_at=%s WHERE customer_id=%s AND token=%s", (at, self.customer, ident(lease_token)))

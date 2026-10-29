@@ -1,6 +1,6 @@
 {
   "schema_version": "vc-lab-rule-bundle/1",
-  "revision": "vc-lab-unified-20261029.8",
+  "revision": "vc-lab-unified-20261029.11",
   "components_sha256": "5be51d3c237058c97919072431ed203e6a8f6dd207137f204fb241b1d71f5af5",
   "files": [
     {
@@ -107,6 +107,10 @@
       "sha256": "2442b8e02d9e8d1ceeaf6b853cfe14f030cc840513c1baf383021b7f47733523"
     },
     {
+      "path": "src/visioncortex/lab/comment_intake.py",
+      "sha256": "259939dfbbce8776fbe57b3085a3cea238c86a2ceb03b21ae7be5a415c01c060"
+    },
+    {
       "path": "src/visioncortex/lab/comment_transition.py",
       "sha256": "5ae358dc716951c990adaf7d09bf7d80a9245b336ed5162574c9a7316f4a3dbc"
     },
@@ -128,7 +132,7 @@
     },
     {
       "path": "src/visioncortex/lab/delivery.py",
-      "sha256": "5e37b9026b4901bfb32719380f0e35a9216064a0490c554a82685a0caf71abbb"
+      "sha256": "4d5a9392ad58f21d2f5c0edec68946bd64b4c0eeebe49db3885fbf694238df88"
     },
     {
       "path": "src/visioncortex/lab/display_pixels.py",
@@ -227,8 +231,12 @@
       "sha256": "e530c75fa3addea121ba8a1607d03ad8cf49cb35cfe7b8df67175b9d9bdb315a"
     },
     {
+      "path": "src/visioncortex/lab/native_refresh.py",
+      "sha256": "856897fa2fa551bd9352e20cb111dd384c78254af46d3c1cb65ecd6d1a614547"
+    },
+    {
       "path": "src/visioncortex/lab/native_timeline_links.py",
-      "sha256": "72876d48da8a32a17b337b038dc45df479b23fea130ca1f7f9cce9a1d8358e12"
+      "sha256": "14f8351e08fc556c01658f9171e471ac3def670121b843fdeae1d18bf21d4d4e"
     },
     {
       "path": "src/visioncortex/lab/native_video.py",
@@ -291,6 +299,10 @@
       "sha256": "73680dccc75c8ed16c42ac69482f54fb7448b29c3d7e03f7f8bd7e2c3842ddf2"
     },
     {
+      "path": "src/visioncortex/lab/scan_intake.py",
+      "sha256": "47468da2360944bcc98e94dd573746dd10895425196c9e028eb8c07ea842ad70"
+    },
+    {
       "path": "src/visioncortex/lab/speech_candidates.py",
       "sha256": "f5099da31ebae7d00a2fe88ee1a8ab448f76bbcdaedcd7dd0294a1c98012c99f"
     },
@@ -320,7 +332,7 @@
     },
     {
       "path": "src/visioncortex/lab/timeline_commands.py",
-      "sha256": "d8b0f1f952ba700c1b28ac5cf9f492229847cad82050c215597608d450654f9e"
+      "sha256": "54c19c10c55de7dc99d5d99ebcd149770def28143b5a8c1b26fe9660a4b93dea"
     },
     {
       "path": "src/visioncortex/lab/timeline_metrics.py",
@@ -340,19 +352,19 @@
     },
     {
       "path": "src/visioncortex/lab/timeline_report.py",
-      "sha256": "dc04b0374044b2e53eb2b6b472fa169271acb3173b2c7aa25084c141eacc2d34"
+      "sha256": "9e02578a1ee1a321ca6f3229f301652b5839017771ad066ddba1a986aed3026d"
     },
     {
       "path": "src/visioncortex/lab/timeline_runner.py",
-      "sha256": "5c3f298fd777e800c7444f155a3e40b2d43c0e155ddfcc7b20f41b3ca7644060"
+      "sha256": "d55f9c7313f39d717ca0a2da4eab536fe6ae3c775131e453ea2aa1e20c073622"
     },
     {
       "path": "src/visioncortex/lab/timeline_runtime.py",
-      "sha256": "312e444e6ff0d9ffa1992de1276aa4114ff4fdf358c30e284a870b84d58e15b0"
+      "sha256": "cb278e7ec844757b06c7055c661c03f9c963cd3ec37f68db2e4eb4386bfce0de"
     },
     {
       "path": "src/visioncortex/lab/timeline_tasks.py",
-      "sha256": "16f8ef4f986435920bf3919622f3087a5dd70d2fbadc3ce47ddf98a0dd117774"
+      "sha256": "06a09fb2adeb23e980220e90e841e4a9489d1efa4ac8a564888af5a6a341a2fc"
     },
     {
       "path": "src/visioncortex/lab/timeline_timing.py",
@@ -360,11 +372,15 @@
     },
     {
       "path": "src/visioncortex/lab/timeline_views.py",
-      "sha256": "f35c09edfde38f1fab378be5eacdff66f8d4ffd6de46ed81ac8ff3ab93498dd3"
+      "sha256": "21cb8f39e01277ec640d9c2860c720bbc036bce2689fb2918c11a22bdc8efe40"
     },
     {
       "path": "src/visioncortex/lab/training.py",
       "sha256": "15cffbeef54200e66bfd39c69676f300d3dbb66ff5d3e42ebd20ba9a872f6c01"
+    },
+    {
+      "path": "src/visioncortex/lab/value_candidates.py",
+      "sha256": "9ab164dfb3fd0fb5b7871765127ab75714c257636b3b67100cba7a40c7191318"
     }
   ],
   "migration_files": [
@@ -449,5 +465,5 @@
       "sha256": "a3c78f7837195851f74868009d1d14db34f8629ca31457371d8056a1c3c31a73"
     }
   ],
-  "source_lineage_sha256": "471e55ae1080f56cb4511128b3b61e3c09733a50bef46a1eec02254dce797c93"
+  "source_lineage_sha256": "398ec2334b1b473414149bef3c3128a9c06025e690e39b7f61186c4ff9e718bf"
 }

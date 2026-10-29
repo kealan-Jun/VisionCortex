@@ -88,6 +88,14 @@ def render_report(report):
             values = ', '.join(str(v.get('value')) for v in field['candidates'])
             lines.append(f'    {field["field_key"]} / {field.get("role", "未定角色")} / {field.get("channel", "")}：{values} {field.get("unit") or "单位未明确"}；{field["status"]}。')
     lines += ['', '处理状态：']
+    pending_values = report.get('unknown_time_video_value_candidates', {})
+    if pending_values.get('candidates'):
+        lines += ['时刻未知的视频价值候选：以下为全局待定记录，未归入本日或任何已知实验。']
+        for item in pending_values['candidates']:
+            value = item['candidate']
+            lines.append(f'  活动 {item["activity_id"]}：{value["category_candidate"]}；{value["reason"]}；仅候选，原生留存选择未改变。')
+        if pending_values.get('truncated'):
+            lines.append('  仅列最近100条待定价值记录。')
     for job in report['analysis_jobs']:
         lines.append(f'  {job["kind"]}：{job["status"]}，{job["count"]} 项。')
     lines += ['完整性：仅覆盖当前已入库证据，不能证明全天记录完整。',
@@ -99,6 +107,12 @@ def render_report(report):
 def activity_lines(activity):
     source = {'video': '视频观察', 'speech': '录音转写', 'ocr': '面板识别', 'reviewed_note': '人工复核'}[activity['source_type']]
     lines = [f'  {time_text(activity["start_at"])}—{time_text(activity["end_at"])} [{source}/{activity["kind"]}] {activity["text_content"]}']
+    value = activity.get('payload', {}).get('value_candidate')
+    if value:
+        lines.append(f'    视频价值候选 {value["category_candidate"]}；实验轴 {value["experiment_status"]}；价值轴 {value["value_status"]}；{value["status"]}。')
+        lines.append('    依据：' + value['reason'] + '；未确认物理动作，未修改原生留存选择或片段边界。')
+        if value.get('value_assessment_only'):
+            lines.append('    此条仅为待定价值评估，不能计为已观察到的物理动作或已证实无活动。')
     for field in activity.get('payload', {}).get('fields', []):
         temporal = field.get('temporal_display')
         if not isinstance(temporal, dict):

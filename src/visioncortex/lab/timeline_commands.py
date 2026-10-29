@@ -9,6 +9,7 @@ def command_methods(runtime):
             return method(**body)
         return invoke
     return {
+        'timeline-consume-scan': runtime.scan_intake.consume,
         'timeline-operator-scan': runtime.operator_scans.record,
         'timeline-comment-transition': runtime.comment_transitions.apply,
         'timeline-operator-context': runtime.operator_scans.context,
