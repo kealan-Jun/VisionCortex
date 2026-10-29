@@ -96,6 +96,10 @@ def publication_runner(config):
             self.receipt_key_owner = FrozenReceiptKeyOwner(setting)
             vision = self.settings.get('publication_vision_key_owner')
             self.vision_key_owner = FrozenReceiptKeyOwner(vision) if vision else None
+            stt = self.settings.get('publication_stt_key_owner')
+            self.stt_key_owner = FrozenReceiptKeyOwner(stt) if stt else None
+            report = self.settings.get('publication_report_key_owner')
+            self.report_key_owner = FrozenReceiptKeyOwner(report) if report else None
 
         def _key(self, stage, recording, inputs, *, _binding=True):
             if _binding and self._completed_execution_bindings.historical_candidate(stage, recording):
@@ -104,9 +108,11 @@ def publication_runner(config):
                 return super()._key(stage, recording, inputs, _binding=_binding)
             context = self._context(self.layout(recording), recording) if stage == 'report' and self.settings.get(
                 'derived_video_retention', False) else None
-            if stage == 'vision' and self.vision_key_owner is not None:
-                current = self.vision_key_owner.key(stage, recording, inputs, binding=_binding)
-                path = self._receipt(self.layout(recording), recording, 'vision')
+            owner = {'vision': self.vision_key_owner, 'stt': self.stt_key_owner,
+                     'report': self.report_key_owner}.get(stage)
+            if owner is not None:
+                current = owner.key(stage, recording, inputs, binding=_binding, context=context)
+                path = self._receipt(self.layout(recording), recording, stage)
                 # The stage still belongs to an actual pinned producer. An
                 # observed key only chooses which producer to ask; _load must
                 # independently authenticate the complete receipt and bytes.
@@ -128,6 +134,10 @@ def publication_runner(config):
             self.receipt_key_owner.close()
             if self.vision_key_owner is not None:
                 self.vision_key_owner.close()
+            if self.stt_key_owner is not None:
+                self.stt_key_owner.close()
+            if self.report_key_owner is not None:
+                self.report_key_owner.close()
 
     return Reader()
 

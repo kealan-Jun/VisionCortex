@@ -195,6 +195,7 @@ class ArchiveUnifier:
             Path(config["storage"]["archive_root"]),
             name[11:],
             start,
+            Path(config["storage"]["local_cache_root"]),
             read_only_originals=True,
         )
         self.rows = {}

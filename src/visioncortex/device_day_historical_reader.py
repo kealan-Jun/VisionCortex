@@ -269,7 +269,7 @@ def read_bundle(config, entry, layout, *, context_reader, recording=None):
             if not isinstance(value.get('artifacts'), list):
                 raise ValueError('Historical artifact manifest is unavailable')
             for reference in value['artifacts']:
-                if not verify_artifact_cached(layout.root, reference):
+                if not verify_artifact_cached(layout.root, reference, backend_root=layout.backend_root):
                     raise ValueError('Historical archive artifact is missing or changed')
             for reference in value.get('audit_artifacts', []):
                 if reference.get('storage_root') != 'local_cache_root' or not verify_artifact_cached(layout.backend_root, reference):

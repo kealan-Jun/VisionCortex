@@ -263,15 +263,18 @@ def verified_field_events_reference(config, index, root):
             'association_basis': 'same_camera_actual_interval_overlap_not_action_confirmation'}
         if value != expected:
             return None
-        saved = root/'Comment/.Evidence/FieldRecognition'/(digest(value)+'.json')
+        from .comment_evidence import resolve
+        saved_relative = 'Comment/.Evidence/FieldRecognition/'+digest(value)+'.json'
+        backend = Path(config['storage']['local_cache_root'])
+        saved = resolve(root, saved_relative, backend)
         if not saved.is_file() or saved.stat().st_size > 8*1024*1024:
             return None
         saved_value, saved_observed = snapshot(saved)
         if saved_value != value:
             return None
         reference = observed | {'path': 'Comment/FieldEvents.json'}
-        saved_ref = saved_observed | {'path': saved.relative_to(root).as_posix()}
-        if verify_artifact_cached(root, reference) and verify_artifact_cached(root, saved_ref):
+        saved_ref = saved_observed | {'path': saved_relative}
+        if verify_artifact_cached(root, reference) and verify_artifact_cached(root, saved_ref, backend_root=backend):
             return reference | {'path_base': 'device_day'}
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return None
@@ -499,7 +502,8 @@ class FileIndexPublisher:
             from .device_day_contract import DeviceDayLayout
             from .device_day_timeline import day_bounds
             start, _ = day_bounds(name[:10])
-            layout = DeviceDayLayout(root.parent, name[11:], max(start, 1))
+            layout = DeviceDayLayout(root.parent, name[11:], max(start, 1),
+                                    Path(self.config['storage']['local_cache_root']))
             for unit in clip_delivery.original_units(layout, index, directory_bindings=(
                     self.config.get('collection_ingest', {}).get('directory_camera_bindings') or ())).values():
                 paths.extend(root/'ProcessedClips/Clips'/unit['name']/filename
@@ -667,7 +671,8 @@ class FileIndexPublisher:
                     if not path.is_file() and (name in photo_starts or name in field_days or audio_version):
                         # Independent events never create recorder-owned raw directories.
                         start = photo_starts.get(name, field_days.get(name)) or audio_records[0]['recording_start_us']
-                        layout = DeviceDayLayout(Path(self.config['storage']['archive_root']), name[11:], start)
+                        layout = DeviceDayLayout(Path(self.config['storage']['archive_root']), name[11:], start,
+                            Path(self.config['storage']['local_cache_root']))
                         from .device_day_write_guard import guarded_mkdir
                         for folder in (layout.processed, layout.understanding, layout.reports, layout.comments):
                             guarded_mkdir(folder)

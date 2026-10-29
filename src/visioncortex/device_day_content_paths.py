@@ -58,7 +58,11 @@ def private_folder(layout, directory, kind, *parts):
     from .device_day_contract import safe_child
     if directory not in {'ProcessedClips', 'MultimodalUnderstanding', 'LaboratoryDailyReport', 'Comment'}:
         raise ValueError('Evidence has no owning archive directory')
-    return safe_child(layout.root, '/'.join((directory, layout_contract()['private_evidence_directory'], kind, *parts)))
+    relative = '/'.join((directory, layout_contract()['private_evidence_directory'], kind, *parts))
+    if directory == 'Comment':
+        from .comment_evidence import backend_path
+        return backend_path(layout.root, relative, layout.backend_root)
+    return safe_child(layout.root, relative)
 
 
 def producer_clip_folder(layout, name, *, private=False):
@@ -108,6 +112,10 @@ def aliases(root):
             except FileNotFoundError:
                 continue
             result.update(_read(str(path), stat.st_mtime_ns, stat.st_size))
+    path = root/'ProcessedClips/.Evidence/CommentLegacyPaths.json'
+    if path.is_file():
+        stat = path.stat()
+        result.update(_read(str(path), stat.st_mtime_ns, stat.st_size))
     return result
 
 
@@ -115,7 +123,11 @@ def _publish_aliases(layout, directory, mapping):
     from .device_day import copy_verified
     from .device_day_contract import atomic_json, file_hash
     legacy = layout.root/directory/'LegacyPaths.json'
-    atomic_json(private_folder(layout, directory, 'LegacyPaths.json'), {
+    # The tiny legacy resolver stays with the existing publication aliases;
+    # Comment itself contains no machine bookkeeping or redirect directory.
+    alias_path = (private_folder(layout, 'ProcessedClips', 'CommentLegacyPaths.json')
+                  if directory == 'Comment' else private_folder(layout, directory, 'LegacyPaths.json'))
+    atomic_json(alias_path, {
         'schema_version': 'visioncortex-content-aliases/1', 'aliases': mapping})
     if legacy.is_file():
         checksum = file_hash(legacy)
@@ -479,14 +491,14 @@ def migrate_stt(runner, layout):
                 raise ValueError('Legacy STT recording does not match its device/day')
             with exclusive(runner.runtime_root/'locks'/f'{folder.name}.stt.lock'):
                 relative = 'Comment/.Evidence/Recognition/' + folder.name
-                destination = layout.root / relative
+                destination = private_folder(layout, 'Comment', 'Recognition', folder.name)
                 copied = []
                 for path in sorted(folder.rglob('*')):
                     if path.is_symlink():
                         raise ValueError('Legacy STT symlink cannot be relocated')
                     if path.is_file():
                         target = destination/path.relative_to(folder)
-                        copied.append({'path': target.relative_to(layout.root).as_posix(), **copy_verified(path, target)})
+                        copied.append({'path': layout.relative(target), **copy_verified(path, target)})
                 old = 'Comment/Stt/' + folder.name
                 mapping[old] = relative
                 _publish_aliases(layout, 'Comment', mapping)

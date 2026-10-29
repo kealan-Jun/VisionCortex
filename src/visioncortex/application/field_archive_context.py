@@ -127,7 +127,9 @@ def publish_context(config, index):
              'association_basis': 'same_camera_actual_interval_overlap_not_action_confirmation'}
     root = safe_child(Path(config['storage']['archive_root']), name + '/Comment')
     revision = digest(value)
-    saved = root/'.Evidence/FieldRecognition'/(revision + '.json')
+    from ..comment_evidence import backend_path
+    saved = backend_path(root.parent, 'Comment/.Evidence/FieldRecognition/'+revision+'.json',
+                         Path(config['storage']['local_cache_root']))
     if saved.is_file():
         if digest(read_json(saved)) != revision:
             raise ValueError('Saved FieldRecognition context evidence identity changed')

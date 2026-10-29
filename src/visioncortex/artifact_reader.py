@@ -3,7 +3,7 @@ import stat
 from .device_day_contract import safe_child
 
 
-def resolve(root, relative, *, directories=None, suffixes=None, historical=False):
+def resolve(root, relative, *, directories=None, suffixes=None, historical=False, backend_root=None):
     if historical:
         # Offline archives historically allow links that resolve within their
         # archive. Preserve that reader without relaxing recorder v1 paths.
@@ -11,8 +11,10 @@ def resolve(root, relative, *, directories=None, suffixes=None, historical=False
         if not path.is_relative_to(root.resolve()):
             raise ValueError('Artifact escapes archive')
     else:
-        path = safe_child(root, relative)
-    if directories and path.relative_to(root).parts[0] not in directories:
+        from .comment_evidence import resolve as evidence_path
+        path = evidence_path(root, relative, backend_root)
+    logical = path if historical else safe_child(root, relative)
+    if directories and logical.relative_to(root).parts[0] not in directories:
         raise ValueError('Unsupported archive directory')
     if suffixes and path.suffix.lower() not in suffixes:
         raise ValueError('Unsupported artifact type')
