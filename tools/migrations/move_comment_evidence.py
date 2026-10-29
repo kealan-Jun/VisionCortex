@@ -5,19 +5,92 @@ are deployed. No model execution, queue admission or raw-media cleanup occurs.
 """
 import argparse
 from contextlib import ExitStack
+import errno
 import json
+import os
 from pathlib import Path
 import re
 import sqlite3
 
-from visioncortex.comment_evidence import PREFIXES
+from visioncortex.comment_evidence import PREFIXES, backend_path
 from visioncortex.comment_evidence_migration import inventory, migrate
 from visioncortex.config import load_config
 from visioncortex.device_day import exclusive
-from visioncortex.device_day_contract import DeviceDayLayout, validate_archive_name
+from visioncortex.device_day_contract import DeviceDayLayout, atomic_json, file_hash, read_json, safe_child, validate_archive_name
 from visioncortex.device_day_recovery_worker import verify_storage
 from visioncortex.device_day_timeline import day_bounds
 from visioncortex.device_day_write_guard import storage_guard, verify_before_submission
+
+
+def finish_cross_mount(layout, *, max_files, max_bytes):
+    """Keep a verified rollback tree on the archive's own pinned mount.
+
+    Separate bind mounts cannot rename across each other even on one NAS.
+    Active evidence stays in the backend; its recovery copy is atomically
+    retired into the archive's existing private publication directory.
+    """
+    completed = False
+    for prefix in PREFIXES:
+        target = backend_path(layout.root, prefix.rstrip('/'), layout.backend_root)
+        journal = target.parent/'Migration.json'
+        if not journal.is_file():
+            continue
+        if journal.stat().st_size > 128*1024**2:
+            raise ValueError('Comment retirement journal exceeds its bound')
+        value = read_json(journal)
+        if value.get('status') != 'verified':
+            continue
+        if (value.get('archive') != layout.name or value.get('source') != prefix.rstrip('/')
+                or value.get('backend') != target.relative_to(layout.backend_root).as_posix()):
+            raise ValueError('Comment retirement journal crossed its owner')
+        source = safe_child(layout.root, value['source'])
+        if not source.exists() and not value.get('retirement_copy') and (target.parent/'RetiredEvidence').is_dir():
+            continue  # The original same-mount coordinator owns this recovery.
+        relative = 'ProcessedClips/.Evidence/CommentRetirements/'+prefix.split('/.Evidence')[0].replace('/', '')
+        backup = safe_child(layout.root, relative)
+        expected = {'storage_root': 'archive', 'path': relative}
+        if value.get('retirement_copy', expected) != expected:
+            raise ValueError('Comment retirement copy crossed its owner')
+        if source.exists() == backup.exists():
+            raise ValueError('Comment retirement has ambiguous source/recovery copies')
+        original = source if source.exists() else backup
+        if original.is_symlink() or not original.is_dir():
+            raise ValueError('Comment retirement copy is not an owned directory')
+        observed = inventory(original, max_files=max_files, max_bytes=max_bytes)
+        references = value['files']
+        if [name for name, _ in observed] != [ref['path'] for ref in references]:
+            raise ValueError('Comment retirement file membership changed')
+        for ref in references:
+            verify_before_submission()
+            for base in (original, target):
+                path = safe_child(base, ref['path'])
+                if path.stat().st_size != ref['size_bytes'] or file_hash(path) != ref['sha256']:
+                    raise ValueError('Comment retirement bytes differ from verified copy')
+        value['retirement_copy'] = expected
+        atomic_json(journal, value)
+        if source.exists():
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            verify_before_submission()
+            os.rename(source, backup)
+        value['status'] = 'completed'
+        atomic_json(journal, value)
+        completed = True
+    return completed
+
+
+def migrate_compatible(layout, *, max_files, max_bytes):
+    finish_cross_mount(layout, max_files=max_files, max_bytes=max_bytes)
+    for _ in PREFIXES:
+        try:
+            return migrate(layout, max_files=max_files, max_bytes=max_bytes,
+                           checkpoint=verify_before_submission)
+        except OSError as exc:
+            if exc.errno != errno.EXDEV:
+                raise
+            if not finish_cross_mount(layout, max_files=max_files, max_bytes=max_bytes):
+                raise
+    return migrate(layout, max_files=max_files, max_bytes=max_bytes,
+                   checkpoint=verify_before_submission)
 
 
 def run(config, archive, *, apply=False, max_files=200000, max_bytes=32*1024**3):
@@ -43,8 +116,7 @@ def run(config, archive, *, apply=False, max_files=200000, max_bytes=32*1024**3)
             for stage in ('all', 'retention', 'vision', 'stt', 'understanding', 'report'):
                 locks.enter_context(exclusive(runtime/'locks'/f'{rid}.{stage}.lock'))
         if apply:
-            return migrate(layout, max_files=max_files, max_bytes=max_bytes,
-                           checkpoint=verify_before_submission)
+            return migrate_compatible(layout, max_files=max_files, max_bytes=max_bytes)
         return [{'source': prefix.rstrip('/'), 'files': len(inventory(
             layout.root/prefix, max_files=max_files, max_bytes=max_bytes))}
             for prefix in PREFIXES if (layout.root/prefix).is_dir()]
