@@ -7,7 +7,7 @@ not become a reviewed command or a forced word alignment.
 from __future__ import annotations
 
 from datetime import timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -33,6 +33,34 @@ def _provenance(core, activities):
         tasks = conn.execute('SELECT id,kind,status,model_revision,request,result FROM hj_timeline_task WHERE customer_id=%s AND id=ANY(%s)',
                              (core.customer, list(ids))).fetchall() if ids else []
     return {str(t['id']): clean(t) for t in tasks}
+
+
+def _ocr_leaf(activity, sources, identity, known_event_time):
+    """FR's readable time + safe event-token grammar, without clock promotion."""
+    from field_recognition.archive.archive_browse import token
+    moment = instant(activity['start_at']) if known_event_time else None
+    basis = 'verified_capture_time' if moment else 'unknown_capture_time_with_receipt_day_partition'
+    if moment is None:
+        reported = []
+        for media_id, source in sources.items():
+            if not source.get('source_reported_at'):
+                continue
+            try:
+                offsets = [Decimal(str(e.get('start_seconds', 0))) for e in activity.get('evidence', [])
+                           if str(e['media_id']) == media_id]
+                offset = min(offsets) if offsets else Decimal(0)
+                if not offset.is_finite() or offset < 0:
+                    continue
+                reported.append(instant(source['source_reported_at']) + timedelta(microseconds=int(offset * 1000000)))
+            except (ValueError, TypeError, InvalidOperation, OverflowError):
+                continue
+        if reported:
+            moment = min(reported)
+            basis = 'source_reported_display_only_uncalibrated'
+    stamp = moment.astimezone(ZoneInfo('Asia/Shanghai')).strftime('%H-%M-%S.%f')[:-3] if moment else 'UnknownTime'
+    # Preserve distinct immutable activity/content generations. This token is
+    # not a capture/measurement ID and never a printed equipment QR identity.
+    return stamp + '_' + token(activity['id'] + '-' + identity[:12]), basis
 
 
 def artifact_documents(core, *, archive, camera, activities, media_sources, rules):
@@ -73,7 +101,11 @@ def artifact_documents(core, *, archive, camera, activities, media_sources, rule
             physical_action_confirmed=False, source_text_is_untrusted_evidence=True))
         if activity['source_type'] == 'ocr':
             category = 'VideoReadings' if any(e.get('kind') == 'video' for e in activity.get('evidence', [])) else 'VoicePhotoReadings'
-            folder = f'{archive}/Comment/OCR/{category}/{stamp}_timeline-{activity["id"][:8]}-{identity[:12]}'
+            leaf, folder_basis = _ocr_leaf(activity,sources,identity,known_event_time)
+            folder = f'{archive}/Comment/OCR/{category}/{leaf}'
+            legacy = f'{archive}/Comment/OCR/{category}/{stamp}_timeline-{activity["id"][:8]}-{identity[:12]}'
+            common.update(folder_time_basis=folder_basis,
+                folder_event_identifier_basis='timeline_activity_and_content_revision_not_equipment_or_capture_identity')
             source_cards, photos = [], {}
             for source in sources.values():
                 asset = dict(path=source.get('source_relative_path'), sha256=source.get('source_sha256'),
@@ -120,7 +152,9 @@ def artifact_documents(core, *, archive, camera, activities, media_sources, rule
                     status='needs_review', aggregation='per_source_candidates_not_merged', readings=unbound,
                     evidence=folder + '/Evidence.json')
             references.append(dict(activity_id=activity['id'], source_type='ocr', readings=folder + '/Readings.json',
-                evidence=folder + '/Evidence.json', unbound_readings=folder + '/UnboundReadings.json' if unbound or not readings else None))
+                evidence=folder + '/Evidence.json', unbound_readings=folder + '/UnboundReadings.json' if unbound or not readings else None,
+                naming=dict(grammar='fr_readable_time_safe_event_token',folder_time_basis=folder_basis,
+                    legacy_style_path_candidate=legacy,legacy_candidate_is_not_an_installed_alias=True)))
         else:
             folder = f'{archive}/Comment/Audio/{stamp}_timeline-{activity["id"][:8]}-{identity[:12]}'
             units = payload.get('aligned_units') or []
