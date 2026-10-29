@@ -18,6 +18,28 @@ def public_name(case):
     return clip_delivery.original_units(case.layout, case.index)['MetaData/capture']['name']
 
 
+def test_native_photo_root_never_becomes_a_video_collection(exact_case):
+    case = exact_case
+    photo = case.layout.root/'MetaData'/'Photos'/'12-00-00'/'20261029_120000.jpg'
+    photo.parent.mkdir(parents=True)
+    photo.write_bytes(b'original photo bytes')
+    units = clip_delivery.original_units(case.layout, case.index)
+    assert 'MetaData/Photos' not in units
+    old = 'TimePending_TimePending_NoExperimentActivity_oldphotos'
+    header = {'schema_version': clip_delivery.VERSION, 'source_unit': 'MetaData/Photos',
+              'source_folder': old, 'original_source': {'path': 'MetaData/Photos/rgb.mp4'},
+              'interval_count': 0, 'available_video_count': 0, 'recording_ids': [], 'intervals': []}
+    for parent, filename in [(case.layout.processed/'Clips', 'Index.json'),
+                             (case.layout.understanding, 'Understanding.json')]:
+        atomic_json(parent/old/filename, header)
+    result = clip_delivery.retire_native(case.layout, case.index,
+        {unit['name'] for unit in units.values()}, source_units=units)
+    assert result['retired'] == 2
+    assert photo.read_bytes() == b'original photo bytes'
+    assert not (case.layout.processed/'Clips'/old).exists()
+    assert not (case.layout.understanding/old).exists()
+
+
 def test_cv_activity_never_names_an_experiment_and_no_value_has_no_video(monkeypatch):
     candidate = {'segment_id': 'candidate'}
     record = {'stages': {'understanding': {'status': 'completed'}}}
