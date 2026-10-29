@@ -41,6 +41,10 @@ VLM环境使用已有vLLM。轻量业务工程安装不自动安装这三套推�
   当前处理器支持 medium 检查点；模型 YAML 名称、处理器、字典及 ONNX 输入/输出形状须匹配。
   检测为零不回退为伪造全图检测框；字段模式不声称自动定位了仪器/面板。超过识别预算直接拒绝本次结果，
   检测候选检查范围保留在响应中。此实现是明确记录预处理的本地 ONNX 路径，不宣称完整 PaddleOCR SDK 或 native/ONNX 数值等价。
+- OCR 提供者配置可显式附加 `models.ocr.display_rules`，复用已有 FR 显示类型规则。
+  规则包含 `instrument_type`、`measurement_name`、`unit`、`decimal_places`、`fixed_decimal_display` 与 `confirmed_by_user`；不包含相机或仪器 ID。
+  未配置或规则冲突时不套用固定小数位；未绑定照片仍执行整图识别，未知字段保留原文。
+  规则随提供者指纹及窗口回执固定，规范化保留原值，不能把格式规则当作识别准确性证明。
 - VLM：`checkpoint`、`served_model_name`、`gpu_memory_utilization`、`max_model_len`和`cuda_visible_devices`。
 - VLM 可显式选择 `engine=joyai-hf`，复用 JoyAI-VL-Interaction 的本地权重。与默认 vLLM 环境分开，使用已核对的官方 Transformers 4.57.3、PyTorch、Flash Attention 2 和 PyAV 依赖；配置 `device=cuda:0`、`do_resize=false`、`do_sample_frames=false`、`attention=flash_attention_2`、`cache_implementation=offloaded`、`served_model_name`，并明确所有帧数、时长、媒体/请求/解码字节、像素、上下文、输出、超时及显存上限。具体边界由 [`joyai_vlm.py`](../../tools/inference/joyai_vlm.py) 的配置校验给出。保留处理器支持的全部输入张量，包括多模态位置类型；未知参数拒绝，不悄悄丢弃。不能将其它 Transformers 环境的兼容性视为已经验证。
 

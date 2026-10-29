@@ -1,7 +1,8 @@
-"""Customer field semantics layered over raw OCR; never invent missing decimals."""
+"""Field semantics over raw OCR, reusing explicit FR display-type rules."""
 from __future__ import annotations
 
 from decimal import Decimal
+import json
 import re
 
 from .gauge import exact
@@ -9,6 +10,18 @@ from .gauge import exact
 NUMBER = re.compile(r'([+-]?\d+(?:\.\d+)?)\s*([^\d\s.+-].*)?')
 ROLES = {'displayed_value', 'process_value', 'setpoint', 'program_parameter',
          'status', 'clock', 'gauge_indication', 'requires_customer_confirmation'}
+
+
+def _fr_rule(region, value, texts, display_rules, issue):
+    """Reuse FR's explicitly confirmed display-type rule, without identity."""
+    if (display_rules is None or region.get('unit') != 'g'
+            or not (region.get('quantity_kind') == 'mass'
+                    or str(region.get('field_key', '')).casefold() in {'mass','weight','质量','重量'})):
+        return None
+    from field_recognition.recognition.vision_display_rules import configured_rules, apply_rule
+    rules = configured_rules(json.dumps(display_rules,ensure_ascii=False,allow_nan=False))
+    return apply_rule(dict(label='质量',unit='g',text=' | '.join(texts),value=value,
+        **({'quality_issue':issue} if issue else {})),rules)
 
 
 def validate_registration(document, source_sha256):
@@ -57,7 +70,7 @@ def tokens(result):
         texts, scores = page.get('rec_texts', []), page.get('rec_scores', [])
         if len(texts) != len(scores) or len(texts) > 4096:
             raise ValueError('Malformed or unbounded raw OCR tokens')
-        for text, score in zip(texts, scores):
+        for text, score in zip(texts, scores, strict=False):
             numeric_score = Decimal(str(score))
             if not isinstance(text, str) or len(text) > 4096 or not numeric_score.is_finite() or not 0 <= numeric_score <= 1:
                 raise ValueError('Invalid raw OCR token')
@@ -65,13 +78,15 @@ def tokens(result):
     return output
 
 
-def field_candidate(region, result):
+def field_candidate(region, result, *, display_rules=None):
     raw = tokens(result)
     texts = [t['text'].strip().replace('−', '-') for t in raw if t['text'].strip()]
     issues = []
     low_score = any(Decimal(t['score']) < exact(region.get('minimum_score', '0.8')) for t in raw)
     value, unit = None, region.get('unit')
     dtype = region.get('data_type', 'number')
+    normalization = None
+    raw_value = None
     if not texts:
         issues.append('blank_or_unreadable')
     elif dtype in {'text', 'clock'}:
@@ -101,6 +116,12 @@ def field_candidate(region, result):
                     issues.append('ambiguous_sign')
                 else:
                     value = signs[0] + value
+            raw_value = value
+            normalization = _fr_rule(region,value,texts,display_rules,
+                issues[0] if issues else 'low_ocr_score' if low_score else None)
+            if normalization and normalization.get('display_rule'):
+                value = normalization['value']
+                issues.extend(normalization.get('quality_issues',[]))
             numeric = exact(value)
             if region.get('min_value') is not None and numeric < exact(region['min_value']):
                 issues.append('outside_verified_range')
@@ -108,15 +129,22 @@ def field_candidate(region, result):
                 issues.append('outside_verified_range')
         else:
             issues.append('ambiguous_or_non_numeric_tokens')
-        # No fixed decimal, scale multiplier, Hz->rpm or pressure conversion.
+        # Only FR's explicit confirmed template may place a decimal. Never
+        # infer a scale multiplier, Hz->rpm or pressure conversion.
     if low_score:
         issues.append('low_ocr_score')
     candidate = value if not issues else None
-    return dict(field_key=region['field_key'], role=region['role'], channel=region.get('channel', ''),
+    candidate_result = dict(field_key=region['field_key'], role=region['role'], channel=region.get('channel', ''),
                 value=candidate, tentative_value=value, unit=unit, unit_basis=region.get('unit_basis'),
                 status='candidate' if candidate is not None else 'needs_review', issues=sorted(set(issues)),
                 raw_tokens=raw, source_box=region['box'], data_type=dtype,
                 use_as_capture_time=False, accuracy='NOT_PROVEN')
+    if normalization is not None:
+        candidate_result['raw_value'] = raw_value
+    if normalization and normalization.get('display_rule'):
+        candidate_result.update({k:normalization[k] for k in
+            ('display_rule','normalization','raw_value','normalized_value') if k in normalization})
+    return candidate_result
 
 
 def consensus(fields):

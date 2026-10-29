@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 from .components import pipeline_module
 from .domain import clean, fingerprint, instant
 from .timeline_clock import source_clock_supported
+from .readable_readings import project_readings
 
 
 def _epoch(at):
@@ -138,19 +139,21 @@ def artifact_documents(core, *, archive, camera, activities, media_sources, rule
                 reading.update(job_id=payload.get('task_id'), capture_id=next(iter(sources.values())).get('capture_id') if len(sources) == 1 else None,
                     raw_text=reading.get('text', activity.get('text_content')), raw_value=reading.get('value'),
                     raw_unit=reading.get('unit'))
+            readings, readable = project_readings(readings,field_mapping=payload.get('field_mapping'))
             evidence = dict(common, schema='field-recognition-event/2', derived_view=True, category=category,
                 status='observations_retained', sources=source_cards, photos=photos, measurements=[], measurement_files=[],
                 observations=[dict(activity=activity, task=task)], decision=None,
                 six_field_measurements_generated=False, current_equipment_used_for_panel_identity=False)
             files[folder + '/Readings.json'] = dict(common, schema='field-numeric-observations/1',
-                aggregation='per_source_field_or_raw_token_not_merged', readings=readings, evidence='Evidence.json')
+                aggregation='per_source_field_or_raw_token_not_merged', readings=readings, evidence='Evidence.json',中文摘要=readable)
             files[folder + '/Evidence.json'] = evidence
             unbound = [r for r in readings if r['instrument_id'] is None]
             if unbound or not readings:
+                _, unbound_readable = project_readings(unbound,field_mapping=payload.get('field_mapping'))
                 files[folder + '/UnboundReadings.json'] = dict(common, schema='field-unbound-readings/1',
                     derived_view=True, title='未绑定读数候选（非正式测量结果）', instrument_id=None, qr_hash=None,
                     status='needs_review', aggregation='per_source_candidates_not_merged', readings=unbound,
-                    evidence=folder + '/Evidence.json')
+                    evidence=folder + '/Evidence.json',中文摘要=unbound_readable)
             references.append(dict(activity_id=activity['id'], source_type='ocr', readings=folder + '/Readings.json',
                 evidence=folder + '/Evidence.json', unbound_readings=folder + '/UnboundReadings.json' if unbound or not readings else None,
                 naming=dict(grammar='fr_readable_time_safe_event_token',folder_time_basis=folder_basis,

@@ -12,11 +12,19 @@ from .needle_vision import detect_dials, detect_needle
 from .display_pixels import active_display, active_tokens, guard_decimal
 
 
+def _decimal_region(region,candidate):
+    rule=candidate.get('display_rule') or {}
+    if ('decimal_places' not in region and candidate.get('normalization')
+            and rule.get('confirmed_by_user') is True and rule.get('fixed_decimal_display') is True):
+        return dict(region,decimal_places=rule['decimal_places'])
+    return region
+
+
 class AutomaticReadout:
     def __init__(self, profiles):
         self.profiles=profiles
 
-    def run(self, image, source_sha256, infer, *, instrument_id=None, instrument_resolver=None):
+    def run(self, image, source_sha256, infer, *, instrument_id=None, instrument_resolver=None,display_rules=None):
         located=self.profiles.locate(image)
         if located['status']!='candidate':
             return dict(status=located['status'],fields=[],registration=located,invocations=[],
@@ -41,13 +49,14 @@ class AutomaticReadout:
             if not ok or not 0<encoded.size<=12*1024**2:
                 raise ValueError('Rectified OCR field exceeds payload bound')
             raw=encoded.tobytes();result,receipt=infer(raw)
-            value=field_candidate(region,result)
+            value=field_candidate(region,result,display_rules=display_rules)
             views=[dict(view='rectified_color',candidate=value)]
             extra=[]
             if region.get('display_color'):
                 pixels,foreground=active_display(patch,region['display_color'])
                 filtered, excluded = active_tokens(result, pixels)
-                value=guard_decimal(field_candidate(region,filtered),pixels,region)
+                value=field_candidate(region,filtered,display_rules=display_rules)
+                value=guard_decimal(value,pixels,_decimal_region(region,value))
                 value['excluded_tokens']=excluded
                 views[0]['candidate']=value
                 if foreground is None:
@@ -57,7 +66,8 @@ class AutomaticReadout:
                     if not ok:
                         raise ValueError('LED foreground encoding failed')
                     second,second_receipt=infer(binary.tobytes())
-                    alternative=guard_decimal(field_candidate(region,second),pixels,region)
+                    alternative=field_candidate(region,second,display_rules=display_rules)
+                    alternative=guard_decimal(alternative,pixels,_decimal_region(region,alternative))
                     views.append(dict(view='active_led_pixels',candidate=alternative))
                     valid=[v['candidate'] for v in views if v['candidate']['value'] is not None]
                     distinct={str(Decimal(v['value']).normalize()) for v in valid}

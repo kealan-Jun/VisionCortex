@@ -169,7 +169,15 @@ class TimelinePublication:
 
     @staticmethod
     def _json(value):
-        return (json.dumps(clean(value), ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False)+'\n').encode()
+        encoded = json.dumps(clean(value), ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False)
+        if isinstance(value, dict) and '中文摘要' in value:
+            # Keep the readable candidate view first. Canonicalize all nested
+            # keys exactly as before, without changing other document types.
+            document = json.loads(encoded)
+            summary = document.pop('中文摘要')
+            encoded = json.dumps({'中文摘要': summary, **document}, ensure_ascii=False,
+                                 indent=2, allow_nan=False)
+        return (encoded+'\n').encode()
 
     @staticmethod
     def _read_bytes(root, relative, guard):

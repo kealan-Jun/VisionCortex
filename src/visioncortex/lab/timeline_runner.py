@@ -141,6 +141,8 @@ class TimelineRunner:
                     receipt = dict(schema_version='vc-lab-local-window-execution/1', provider_fingerprint=provider_fingerprint,
                                    window_index=window['index'], invocations=receipts, accuracy='NOT_PROVEN',
                                    data_scope=scope, source_inputs=window['input_spans'])
+                    if kind == 'ocr' and 'display_rules' in model:
+                        receipt['ocr_display_rules'] = model['display_rules']
                     if len(json.dumps(dict(normalized=normalized, receipt=receipt), ensure_ascii=False)) > 8*1024**2:
                         raise ValueError('Window evidence exceeds the result bound')
                     with timing.stage('checkpoint_commit',window=window['index']),self.core.db.transaction() as conn:
@@ -237,7 +239,8 @@ class TimelineRunner:
                     if resolved.get('status')=='resolved' and (resolved.get('target') or {}).get('kind')=='instrument':
                         instruments.add(resolved['target_id'])
                 return next(iter(instruments)) if len(instruments)==1 else None
-            automatic=AutomaticReadout(profiles).run(image,digest,lambda raw:client.infer(raw,ref['source_kind']),instrument_resolver=resolve_instrument)
+            automatic=AutomaticReadout(profiles).run(image,digest,lambda raw:client.infer(raw,ref['source_kind']),instrument_resolver=resolve_instrument,
+                display_rules=model.get('display_rules'))
             instrument_id=automatic.get('instrument_id')
             if not automatic['raw_fallback_required']:
                 return [dict(kind='reading',text='自动定位面板读数候选',spans=[dict(media_id=ref['media_id'],start_seconds='0',end_seconds='0')],
@@ -251,7 +254,7 @@ class TimelineRunner:
             result, execution = client.infer(raw, ref['source_kind'])
             receipts.append(dict(derivation=derivation, execution=execution))
             if region:
-                fields.append(field_candidate(region, result))
+                fields.append(field_candidate(region, result,display_rules=model.get('display_rules')))
             else:
                 raw_results = tokens(result)
         for gauge in registration.get('gauges', []) if registration else []:
