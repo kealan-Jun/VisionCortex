@@ -109,7 +109,12 @@ def run(config, archive, *, apply=False, max_files=200000, max_bytes=32*1024**3)
         for prefix in PREFIXES:
             recognition = layout.root/prefix/'Recognition'
             if recognition.is_dir():
-                ids.update(p.name for p in recognition.iterdir() if p.is_dir())
+                # Historical time labels are folders, not global recording IDs.
+                # Actual IDs from the authoritative projection above retain
+                # their locks even when a legacy ID happens to look like time.
+                time_label = re.compile(r'^\d{2}-\d{2}-\d{2}(?:\.\d{3,6})?_\d{2}-\d{2}-\d{2}(?:\.\d{3,6})?$')
+                ids.update(p.name for p in recognition.iterdir()
+                           if p.is_dir() and not time_label.fullmatch(p.name))
         for rid in sorted(ids):
             if not re.fullmatch(r'[A-Za-z0-9_.-]{1,128}', rid):
                 raise ValueError('Invalid recording lock identity')
