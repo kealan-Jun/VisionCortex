@@ -12,6 +12,7 @@ from psycopg.types.json import Jsonb
 
 from .domain import Conflict, Missing, clean, fingerprint, ident, instant
 from .timeline_policy import RecordPolicy, TimelinePolicies, ZONE
+from .timeline_clock import source_clock_supported
 
 VERSION = 'vc-lab-timeline/1'
 KINDS = {'loading', 'start', 'settings', 'transfer', 'reading', 'unloading', 'end',
@@ -62,6 +63,16 @@ class Timeline:
         days = {at.astimezone(ZONE).date() for at in times if at is not None}
         for day in days:
             conn.execute('INSERT INTO hj_timeline_dirty_day(customer_id,day) VALUES(%s,%s) ON CONFLICT DO NOTHING', (self.customer, day))
+
+    def _dirty_untimed_sources(self, conn, evidence_ids):
+        # Receipt day is a publication partition only. Keep physical event time
+        # null: receiving a late file does not date its activity or its wearer.
+        rows = conn.execute('''SELECT DISTINCT c.received_at FROM evidence_ref e
+            JOIN hj_timeline_media m USING(customer_id,media_id)
+            JOIN capture c ON c.customer_id=m.customer_id AND c.id=m.capture_id
+            WHERE e.customer_id=%s AND e.id=ANY(%s)''',
+            (self.customer, list(evidence_ids))).fetchall()
+        self._dirty(conn, *(r['received_at'] for r in rows))
 
     def _touch(self, conn, run_id, start, end):
         row = conn.execute('UPDATE hj_experiment_record SET first_observed_at=LEAST(first_observed_at,%s),last_observed_at=GREATEST(last_observed_at,%s),revision=revision+1 WHERE customer_id=%s AND id=%s RETURNING *', (start, end, self.customer, ident(run_id))).fetchone()
@@ -266,6 +277,8 @@ class Timeline:
         duration = seconds(receipt.get('end_seconds') or 0)
         # Native receipt times refer to media zero; evidence ranges are not durations.
         start = instant(receipt['captured_at']) if receipt.get('captured_at') else None
+        if not source_clock_supported(receipt['time_basis'], receipt.get('source_kind')):
+            start = None
         end = offset_time(start, duration)
         if kind != 'photo' and not duration:
             start = end = None  # Unknown duration cannot establish time coverage.
@@ -276,6 +289,10 @@ class Timeline:
         for worker in kinds:
             conn.execute('INSERT INTO hj_timeline_task(customer_id,id,media_id,kind) VALUES(%s,%s,%s,%s)', (self.customer, ident(), media_id, worker))
         self._dirty(conn, start, end)
+        if start is None:
+            received = conn.execute('SELECT received_at FROM capture WHERE customer_id=%s AND id=%s',
+                                    (self.customer, capture_id)).fetchone()
+            self._dirty(conn, received['received_at'])
         return row
 
     def _spans(self, conn, spans):
@@ -285,7 +302,12 @@ class Timeline:
         uncertainty = 0
         unknown = False
         for span in spans:
-            media = conn.execute('SELECT m.*,a.version AS media_version FROM hj_timeline_media m JOIN media_asset a ON a.customer_id=m.customer_id AND a.id=m.media_id WHERE m.customer_id=%s AND m.media_id=%s', (self.customer, ident(span['media_id']))).fetchone()
+            media = conn.execute('''SELECT m.*,a.version AS media_version,i.payload->>'source_kind' AS source_kind
+                FROM hj_timeline_media m JOIN media_asset a ON a.customer_id=m.customer_id AND a.id=m.media_id
+                JOIN capture c ON c.customer_id=m.customer_id AND c.id=m.capture_id
+                JOIN inbox i ON i.customer_id=c.customer_id AND i.source_id=c.source_id
+                    AND i.event_id=c.source_capture_id AND i.revision=c.source_revision
+                WHERE m.customer_id=%s AND m.media_id=%s''', (self.customer, ident(span['media_id']))).fetchone()
             if not media:
                 raise Missing('Evidence media outside this customer timeline')
             raw_uncertainty = media['time_basis'].get('uncertainty_us', 0)
@@ -298,7 +320,7 @@ class Timeline:
             eid = ident()
             conn.execute('INSERT INTO evidence_ref(customer_id,id,media_id,media_version,start_seconds,end_seconds) VALUES(%s,%s,%s,%s,%s,%s)', (self.customer, eid, media['media_id'], media['media_version'], start, end))
             refs.append(eid)
-            if media['start_at'] is None:
+            if media['start_at'] is None or not source_clock_supported(media['time_basis'], media['source_kind']):
                 unknown = True
             else:
                 starts.append(offset_time(media['start_at'], start))
@@ -358,6 +380,8 @@ class Timeline:
                 if kind in {'end', 'unloading'} and end:
                     self._archive(conn, rid, end, 'spoken_end' if source_type == 'speech' else 'visible_end_activity', refs)
             self._dirty(conn, start, end)
+            if start is None:
+                self._dirty_untimed_sources(conn, refs)
             self.core._emit(conn, 'experiment_activity', aid, 1, dict(row, run_ids=runs, occurred_at=start))
             return dict(row, run_ids=runs)
         return self._command(key, 'add_activity', dict(kind=kind, source_type=source_type, text=text, spans=spans, run_ids=run_ids, sample_id=sample_id, instrument_id=instrument_id, person_id=person_id, tag_id=tag_id, model_revision=model_revision, payload=payload), action)
@@ -382,6 +406,8 @@ class Timeline:
         for rid in set([ident(x) for x in run_ids] + [x['run_id'] for x in previous]):
             self._recalculate(conn, rid)
         self._dirty(conn, activity['start_at'], activity['end_at'])
+        if activity['start_at'] is None:
+            self._dirty_untimed_sources(conn, activity['evidence_ids'])
         self.core._emit(conn, 'activity_association_revision', row['id'], revision, dict(row, occurred_at=activity['start_at']))
         return row
 

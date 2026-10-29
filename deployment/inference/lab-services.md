@@ -33,6 +33,7 @@ VLM环境使用已有vLLM。轻量业务工程安装不自动安装这三套推�
 - 公共字段：`python`、`port`。解释器未显式提供时使用该运行根下对应`envs/<kind>/bin/python`。
 - ASR 默认 `engine=qwen3-asr`：`checkpoint`与`aligner_checkpoint`，使用实际已具备的识别／对齐检查点。
 - ASR 可显式选择 `engine=faster-whisper`，并提供 `checkpoint`、`device`、`cpu_threads`、`compute_type`，可选 `language`。例如既有 small 权重可使用 CPU、2线程、int8；不自动换后端或下载模型。该路径返回模型原生词／段相对时间，`alignment_revision=null`，不能标成独立强制对齐结果。
+- ASR 还可显式选择 `engine=qwen3-asr-hf`，使用 `Qwen/Qwen3-ASR-0.6B-hf` 的本地检查点与兼容的独立 Transformers 环境。配置 `checkpoint`、`device`、`dtype`、`cpu_threads`，以及生成时长、输入时长、输出 token 和 CUDA 显存预算。该路径没有加载强制对齐器，只能保存实际输入范围及 `alignment_unknown`；重复退化或输出达到上限保留待处理，不能当作可靠口述结束指令。
 - OCR：`detection_checkpoint`、`recognition_checkpoint`、`detection_model_name`、
   `recognition_model_name`和`device`。本次升级显式选用 PP-OCRv6；旧 PaddleOCR 后端仍兼容历史 PP-OCRv5 配置，不自动修改运行中的服务。
 - PP-OCRv6 ONNX：选择 `engine=ppocr-onnx`、`device=cpu`、明确的检测/识别模型名与对应检查点，
@@ -41,6 +42,7 @@ VLM环境使用已有vLLM。轻量业务工程安装不自动安装这三套推�
   检测为零不回退为伪造全图检测框；字段模式不声称自动定位了仪器/面板。超过识别预算直接拒绝本次结果，
   检测候选检查范围保留在响应中。此实现是明确记录预处理的本地 ONNX 路径，不宣称完整 PaddleOCR SDK 或 native/ONNX 数值等价。
 - VLM：`checkpoint`、`served_model_name`、`gpu_memory_utilization`、`max_model_len`和`cuda_visible_devices`。
+- VLM 可显式选择 `engine=joyai-hf`，复用 JoyAI-VL-Interaction 的本地权重。与默认 vLLM 环境分开，使用已核对的官方 Transformers 4.57.3、PyTorch、Flash Attention 2 和 PyAV 依赖；配置 `device=cuda:0`、`do_resize=false`、`do_sample_frames=false`、`attention=flash_attention_2`、`cache_implementation=offloaded`、`served_model_name`，并明确所有帧数、时长、媒体/请求/解码字节、像素、上下文、输出、超时及显存上限。具体边界由 [`joyai_vlm.py`](../../tools/inference/joyai_vlm.py) 的配置校验给出。保留处理器支持的全部输入张量，包括多模态位置类型；未知参数拒绝，不悄悄丢弃。不能将其它 Transformers 环境的兼容性视为已经验证。
 
 在完整源码检出中执行，以下路径变量由部署方提供：
 
@@ -74,3 +76,5 @@ ASR／OCR 的 health 与结果另提供 `execution_identity`，固定实际校�
 VLM使用本机vLLM及其鉴权协议，保留原服务的有界图像输入设置。
 图像请求与完整视频片段策略分别记录；不能把该入口的图像窗口当作原视频全帧消费证明。
 真实模型调用、现场效果、夜间多路成本及端到端NAS回读仍需使用明确输入另行验收。
+
+`joyai-hf` 使用同一鉴权的聊天完成协议，接收受限的完整视频 data URL。逐帧解码与实际模型网格核对后才执行，只允许为 patch 对齐增加右/下黑边；超出容量直接失败，不能悄悄抽帧、缩小或重切。执行回执记录源字节、解码帧、模型输入摘要、实际生成、资源与错误栈。视频模型仍须返回原 Timeline 的唯一 `events` 根对象；有效 JSON、HTTP 成功、模型确实消费帧和业务解析/内容正确是不同门槛，格式错误保留原答并隔离，不能包装成已完成理解。

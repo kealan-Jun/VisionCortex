@@ -16,7 +16,7 @@ from .rules import Rules
 from .timeline import Timeline
 
 SCHEMA = 'vc-lab-comment-transition/1'
-INTERPRETATIONS = {'stage_complete', 'next_stage_plan', 'experiment_complete'}
+INTERPRETATIONS = {'stage_start', 'stage_complete', 'next_stage_plan', 'experiment_complete'}
 
 
 class CommentTransitions:
@@ -177,12 +177,15 @@ class CommentTransitions:
                 review_activity_sha256=fingerprint(review) if review else None,
                 semantic_authority='persisted_upstream_review_not_independent_asr_semantic_verification',
                 speaker_attribution='not_inferred_from_wearer_or_operator_context',
-                planned_stage_started=False, equipment_released=False, quantity_ledger_written=False,
+                planned_stage_started=False, declared_stage_started=status == 'applied_reviewed_interpretation' and interpretation == 'stage_start',
+                equipment_released=False, quantity_ledger_written=False,
                 whole_experiment_completed=status == 'applied_reviewed_interpretation' and interpretation == 'experiment_complete',
                 text_is_untrusted_evidence_data=True, original_media_bytes_reverified=False))
             activity_id = declaration_activity(conn, self.core, text=text, at=effective_at, evidence_ids=evidence,
                 payload=payload, run_id=run_id, sample_id=sample_id, person_id=person_id,
                 kind='end' if payload['whole_experiment_completed'] else 'settings')
+            from .operation_segments import mark_operation_reports_dirty
+            mark_operation_reports_dirty(conn, self.customer, effective_at)
             if payload['whole_experiment_completed']:
                 self.timeline._archive(conn, run_id, at, 'explicit_reviewed_whole_experiment_comment', evidence)
             return dict(activity_id=activity_id, status=status, snapshot=payload)

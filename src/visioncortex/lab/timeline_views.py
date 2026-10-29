@@ -8,6 +8,7 @@ from .timeline import Timeline, day_bounds, offset_time
 from .ocr_fields import consensus
 from .context_views import context_evidence
 from .person_report import person_timelines, empty_person
+from .timeline_clock import source_clock_supported, source_clock_sql
 
 
 class TimelineViews:
@@ -33,13 +34,31 @@ class TimelineViews:
                 row['current_association_status'] = row['association_status']
                 row['current_label_resolution'] = row['label_resolution']
             row['evidence'] = [by_evidence[eid] for eid in row['evidence_ids']]
+            if any(not source_clock_supported(e['time_basis'], e['source_kind']) for e in row['evidence']):
+                row['source_reported_interval'] = dict(start_at=row['start_at'], end_at=row['end_at'],
+                                                      authority='unverified_source_not_physical_event_time')
+                row['start_at'] = row['end_at'] = None
             row['time_interval_semantics'] = 'evidence_extent_not_continuous_activity_proof'
-        return rows
+        return [r for r in rows if r['start_at'] is not None] if start is not None or end is not None else rows
 
     def _untimed_temporal(self, conn):
         ids = [row['id'] for row in conn.execute("SELECT id FROM hj_activity WHERE customer_id=%s AND start_at IS NULL AND payload->>'temporal_world_clock_status'='uncalibrated' ORDER BY created_at DESC,id LIMIT 101", (self.customer,)).fetchall()]
         return dict(activities=self._activities(conn, activity_ids=ids[:100]) if ids else [],
                     truncated=len(ids)>100, attribution='customer_pending_time_not_assigned_to_requested_day_or_range')
+
+    def _untimed_activities(self, conn):
+        clock = source_clock_sql('em', 'ei')
+        ids = [row['id'] for row in conn.execute(f'''SELECT a.id FROM hj_activity a WHERE a.customer_id=%s
+            AND (a.start_at IS NULL OR EXISTS(SELECT 1 FROM evidence_ref e
+                JOIN hj_timeline_media em USING(customer_id,media_id)
+                JOIN capture c ON c.customer_id=em.customer_id AND c.id=em.capture_id
+                JOIN inbox ei ON ei.customer_id=c.customer_id AND ei.source_id=c.source_id
+                    AND ei.event_id=c.source_capture_id AND ei.revision=c.source_revision
+                WHERE e.customer_id=a.customer_id AND e.id=ANY(a.evidence_ids) AND NOT COALESCE({clock},false)))
+            ORDER BY a.created_at DESC,a.id LIMIT 101''', (self.customer,)).fetchall()]
+        return dict(activities=self._activities(conn, activity_ids=ids[:100]) if ids else [],
+                    truncated=len(ids)>100, attribution='customer_pending_time_not_assigned_to_requested_day_or_range',
+                    receipt_day_is_archive_partition_only=True)
 
     def _untimed_values(self, conn):
         from .value_candidates import project
@@ -48,7 +67,15 @@ class TimelineViews:
                     truncated=len(ids)>100, attribution='customer_pending_time_not_assigned_to_requested_day_or_range')
 
     def _evidence(self, conn, ids):
-        return conn.execute('SELECT e.*,m.kind,m.stream_key,m.session_key,m.start_at AS media_start_at,m.duration_seconds,a.verified_sha256,a.evidence_status FROM evidence_ref e JOIN hj_timeline_media m USING(customer_id,media_id) JOIN media_asset a ON a.customer_id=e.customer_id AND a.id=e.media_id WHERE e.customer_id=%s AND e.id=ANY(%s) ORDER BY e.media_id,e.start_seconds,e.id', (self.customer, ids)).fetchall() if ids else []
+        return conn.execute('''SELECT e.*,m.kind,m.stream_key,m.session_key,m.start_at AS media_start_at,
+            m.duration_seconds,m.time_basis,i.payload->>'source_kind' AS source_kind,
+            a.verified_sha256,a.evidence_status FROM evidence_ref e
+            JOIN hj_timeline_media m USING(customer_id,media_id)
+            JOIN media_asset a ON a.customer_id=e.customer_id AND a.id=e.media_id
+            JOIN capture c ON c.customer_id=m.customer_id AND c.id=m.capture_id
+            JOIN inbox i ON i.customer_id=c.customer_id AND i.source_id=c.source_id
+                AND i.event_id=c.source_capture_id AND i.revision=c.source_revision
+            WHERE e.customer_id=%s AND e.id=ANY(%s) ORDER BY e.media_id,e.start_seconds,e.id''', (self.customer, ids)).fetchall() if ids else []
 
     def clip_index(self, run_id, *, include_low_priority=False):
         with self.core.db.transaction(readonly=True) as conn:
@@ -75,7 +102,11 @@ class TimelineViews:
         if end <= start or (end - start).total_seconds() > 7 * 86400:
             raise ValueError('Trace range must be positive and at most seven days')
         with self.core.db.transaction(readonly=True) as conn:
-            media = conn.execute("SELECT m.*,EXISTS(SELECT 1 FROM media_derivation d WHERE d.customer_id=m.customer_id AND d.child_id=m.media_id AND d.transform->>'schema_version'='vc-lab-retained-clip/1') AS retained_derivative FROM hj_timeline_media m WHERE m.customer_id=%s AND m.start_at<%s AND m.end_at>=%s ORDER BY m.stream_key,m.start_at,m.media_id", (self.customer, end, start)).fetchall()
+            clock = source_clock_sql()
+            joined = '''FROM hj_timeline_media m JOIN capture c ON c.customer_id=m.customer_id AND c.id=m.capture_id
+                JOIN inbox i ON i.customer_id=c.customer_id AND i.source_id=c.source_id
+                    AND i.event_id=c.source_capture_id AND i.revision=c.source_revision'''
+            media = conn.execute(f"SELECT m.*,EXISTS(SELECT 1 FROM media_derivation d WHERE d.customer_id=m.customer_id AND d.child_id=m.media_id AND d.transform->>'schema_version'='vc-lab-retained-clip/1') AS retained_derivative {joined} WHERE m.customer_id=%s AND COALESCE({clock},false) AND m.start_at<%s AND m.end_at>=%s ORDER BY m.stream_key,m.start_at,m.media_id", (self.customer, end, start)).fetchall()
             streams = {}
             for item in media:
                 streams.setdefault(item['stream_key'], []).append(item)
@@ -94,13 +125,14 @@ class TimelineViews:
                 if cursor < end:
                     gaps.append(dict(start_at=cursor, end_at=end, status='no_indexed_recording'))
                 coverage.append(dict(stream_key=stream, gaps=gaps, overlaps=overlaps))
-            unknown = conn.execute('SELECT media_id,stream_key FROM hj_timeline_media WHERE customer_id=%s AND start_at IS NULL ORDER BY media_id LIMIT 100', (self.customer,)).fetchall()
+            unknown = conn.execute(f'SELECT m.media_id,m.stream_key {joined} WHERE m.customer_id=%s AND (m.start_at IS NULL OR NOT COALESCE({clock},false)) ORDER BY m.media_id LIMIT 100', (self.customer,)).fetchall()
             from .value_candidates import project
             activities = self._activities(conn, start, end)
             return clean(dict(start_at=start, end_at=end, media=media, activities=activities,
                               video_value_candidates=project(activities), unknown_time_video_value_candidates=self._untimed_values(conn),
                               indexed_coverage=coverage, unknown_time_media=unknown,
                               unknown_time_temporal_activities=self._untimed_temporal(conn),
+                              unknown_time_activities=self._untimed_activities(conn),
                               context_evidence=context_evidence(conn,self.customer,start,end),
                               coverage='unknown' if not media else 'partial',
                               coverage_reason='indexed_files_do_not_prove_capture_or_upload_completeness'))
@@ -169,20 +201,35 @@ class TimelineViews:
                                     instrument_completion_time=None, result_file_status='not_collected',
                                     closure_is_not_instrument_completion=True))
         sessions = conn.execute("SELECT DISTINCT c.session_id FROM hj_timeline_media m JOIN capture c ON c.customer_id=m.customer_id AND c.id=m.capture_id WHERE m.customer_id=%s AND m.kind='photo' AND m.start_at>=%s AND m.start_at<%s AND c.session_id IS NOT NULL ORDER BY c.session_id", (self.customer, start, end)).fetchall()
-        pending_ids=[r['id'] for r in conn.execute('SELECT id FROM hj_activity WHERE customer_id=%s AND start_at IS NULL ORDER BY created_at DESC,id LIMIT 101',(self.customer,)).fetchall()]
-        pending=self._activities(conn,activity_ids=pending_ids) if pending_ids else []
+        pending = self._untimed_activities(conn)['activities']
         people=person_timelines(conn,self.core,activities,runs,pending)
         jobs = conn.execute('SELECT t.kind,t.status,count(*) AS count FROM hj_timeline_task t JOIN hj_timeline_media m USING(customer_id,media_id) WHERE t.customer_id=%s AND m.start_at<%s AND m.end_at>=%s GROUP BY t.kind,t.status ORDER BY t.kind,t.status', (self.customer, end, start)).fetchall()
         from .value_candidates import project
+        from .operation_segments import operation_segments
+        clock = source_clock_sql()
+        publication_media = conn.execute(f'''SELECT m.media_id FROM hj_timeline_media m
+            JOIN capture c ON c.customer_id=m.customer_id AND c.id=m.capture_id
+            JOIN inbox i ON i.customer_id=c.customer_id AND i.source_id=c.source_id
+                AND i.event_id=c.source_capture_id AND i.revision=c.source_revision
+            WHERE m.customer_id=%s AND ((m.start_at IS NOT NULL AND COALESCE({clock},false)
+                AND m.start_at<%s AND m.end_at>=%s)
+                OR ((m.start_at IS NULL OR NOT COALESCE({clock},false))
+                    AND c.received_at>=%s AND c.received_at<%s)) ORDER BY m.media_id LIMIT 4097''',
+            (self.customer, end, start, start, end)).fetchall()
+        if len(publication_media)>4096:
+            raise ValueError('Daily publication source set exceeds 4096 media bound')
         return clean(dict(schema_version='vc-lab-evidence-daily-report/1', day=str(start.date()), timezone='Asia/Shanghai',
+                          publication_media_ids=[r['media_id'] for r in publication_media],
                           experiments=experiments, experiment_count=len(experiments), activity_count=len(activities),
                           activity_count_basis='stored_observations_not_distinct_physical_actions',
                           analysis_jobs=jobs, person_timelines=people,
                           unassigned_activities=[a for a in activities if not a['run_ids']],
                           readouts=[self._readout(conn, s['session_id']) for s in sessions],
                           unknown_time_temporal_activities=self._untimed_temporal(conn),
+                          unknown_time_activities=self._untimed_activities(conn),
                           video_value_candidates=project(activities), unknown_time_video_value_candidates=self._untimed_values(conn),
                           context_evidence=context_evidence(conn,self.customer,start,end),
+                          operation_segments=operation_segments(conn,self.customer,start,end,self.timeline.policies),
                           quality='NOT_PROVEN', coverage='partial',
                           scope='evidence_recording_and_traceability', raw_evidence_preserved=True))
 

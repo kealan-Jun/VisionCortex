@@ -54,7 +54,7 @@ def _text(value, name, limit=128):
 
 
 def validate_registration(document, *, media=None, asset=None):
-    if (not isinstance(document, dict) or document.get('schema_version') != SCHEMA
+    if (not isinstance(document, dict) or document.get('schema_version') not in {SCHEMA, 'vc-lab-video-qr/2'}
             or document.get('enabled') is not True):
         raise VideoQRRejected('Explicit enabled video QR registration required')
     if len(json.dumps(document, allow_nan=False).encode()) > 64 * 1024:
@@ -62,6 +62,13 @@ def validate_registration(document, *, media=None, asset=None):
     allowed = {'schema_version','enabled','revision','source_sha256','media_version',
                'source_stream_key','source_session_key','rotation_degrees_clockwise',
                'orientation_basis','time_basis','world_clock_status','source_intervals'}
+    raw_only = document['schema_version'] == 'vc-lab-video-qr/2'
+    if raw_only:
+        allowed |= {'persistence', 'authorization_key'}
+        if (document.get('persistence') != 'bounded_raw_qr_only'
+                or document.get('authorization_key') is None):
+            raise VideoQRRejected('Server-pinned bounded raw QR persistence required')
+        _text(document['authorization_key'], 'server authorization key', 128)
     if set(document) - allowed:
         raise VideoQRRejected('Video QR cannot supply fields, panels, identities or executable configuration')
     _text(document.get('revision'), 'QR registration revision', 48)
@@ -100,6 +107,9 @@ def validate_registration(document, *, media=None, asset=None):
         known = (media['start_at'] is not None and bool(basis.get('basis'))
                  and type(basis.get('uncertainty_us')) is int and basis['uncertainty_us'] == 0
                  and basis.get('clock_sync_valid') is not False)
+        if raw_only:
+            from .scan_intake import verified_clock
+            known = media['start_at'] is not None and verified_clock(basis)
         if known != (document['world_clock_status'] == 'verified'):
             raise VideoQRRejected('QR world clock status differs from actual source clock verification')
     if asset is not None and (asset['version'] != document['media_version']
@@ -266,7 +276,11 @@ class VideoQR:
                       revision='video-qr:' + fingerprint(dict(registration=registration, window=window_index))[:32],
                       max_frames=max_frames, batch_frames=8, max_buffer_bytes=BUFFER_BYTES // 2,
                       max_seconds=MAX_SECONDS, panels=[])
-        producer = DynamicVideo(DynamicContext(self.core), ref['media_id'], registration['source_session_key'],
+        context = DynamicContext(self.core)
+        if registration['schema_version'] == 'vc-lab-video-qr/2':
+            from .capture_equipment_intake import BoundedQRContext
+            context = BoundedQRContext(self.core, ref, registration)
+        producer = DynamicVideo(context, ref['media_id'], registration['source_session_key'],
                                 dict(sha256=ref['sha256'],media_version=ref['media_version'],
                                      start_seconds=ref['start_seconds'],end_seconds=ref['end_seconds']), config)
         provider = dict(schema_version='vc-lab-temporal-video-provider/1',enabled=True,

@@ -7,6 +7,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from . import __version__
 from .domain import Conflict, Core, Missing, clean, ident
+from .equipment import equipment_details
 from .media import Media
 from .material_batch import MaterialBatch
 from .projections import Projections
@@ -68,6 +69,10 @@ def create_app(core: Core, settings):
     @app.get("/internal/materials/{material_id}")
     def material(material_id: str):
         return core.balance(material_id)
+
+    @app.get('/internal/equipment/{device_id}')
+    def equipment(device_id: str, as_of: str | None = None):
+        return equipment_details(core, device_id, as_of=as_of)
 
     @app.get("/internal/materials/source-lots/{lot_id}/summary")
     def source_lot_summary(lot_id: str):

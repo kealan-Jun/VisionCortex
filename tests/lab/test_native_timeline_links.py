@@ -1,5 +1,6 @@
 """Native pure-builder/sole-writer bridge; synthetic local evidence, no models."""
 from copy import deepcopy
+from contextlib import contextmanager
 from datetime import datetime
 import hashlib
 import json
@@ -13,7 +14,7 @@ from visioncortex.lab.components import ROOT
 from visioncortex.lab.native_comment_layout import module as original
 from visioncortex.lab.native_linked_layout import module, bind_source
 from visioncortex.lab.native_timeline_links import (association_path, association_revision, attach_day,
-    attach_segment, build_sidecar, MAX_BYTES)
+    attach_segment, build_sidecar, MAX_BYTES, _selected, verified_committed_association)
 from visioncortex.lab.rules import Rules
 from visioncortex.lab.timeline_publication import TimelinePublication
 
@@ -47,13 +48,28 @@ def publish(f,revision=1,*,camera=None,activity=None,fingerprint=None):
     return path,value
 
 
+@contextmanager
+def committed_fixture(f):
+    # Pure fixture only: explicit receipt input, not a claim of database commit.
+    selected = _selected(f['root'], f['archive'])
+    if selected is None:
+        yield
+    else:
+        ref = selected[1]
+        receipt = dict(relative_path=f['archive']+'/'+ref['sidecar'],sha256=ref['sha256'],byte_size=ref['byte_size'])
+        with verified_committed_association(f['root'],f['archive'],customer_id=f['customer'],receipt=receipt):
+            yield
+
+
 def day(f,loader=module):
-    return loader('device_day_reports').day_document(SimpleNamespace(root=f['root'],name=f['archive']),f['index'],
-        {'status':'pending','findings':[]},readable={'视频留存统计':{},'全天时间线':[]},entries=[],report_generated_at='fixture-clock')
+    with committed_fixture(f):
+        return loader('device_day_reports').day_document(SimpleNamespace(root=f['root'],name=f['archive']),f['index'],
+            {'status':'pending','findings':[]},readable={'视频留存统计':{},'全天时间线':[]},entries=[],report_generated_at='fixture-clock')
 
 
 def segment(f,loader=module):
-    return loader('device_day_content').segment_documents(f['index'],f['root'],f['segment'],None,None,f['record'],[])
+    with committed_fixture(f):
+        return loader('device_day_content').segment_documents(f['index'],f['root'],f['segment'],None,None,f['record'],[])
 
 
 def test_no_sidecar_keeps_native_builder_fields_and_serialized_bytes(fixture):
@@ -80,9 +96,10 @@ def test_linked_main_preserves_actual_pending_understanding_and_all_old_fields(f
 
 def test_late_revision_changes_original_trigger_and_preserves_r1(fixture):
     f=fixture;config={'storage':{'archive_root':str(f['root'].parent)}}
-    first,_=publish(f);raw=first.read_bytes();before=module('device_day_content').content_revision(config,f['index'])
+    first,_=publish(f);raw=first.read_bytes()
+    with committed_fixture(f):before=module('device_day_content').content_revision(config,f['index'])
     after_activity=dict(f['activity'],id=str(uuid4()));publish(f,2,activity=after_activity)
-    after=module('device_day_content').content_revision(config,f['index'])
+    with committed_fixture(f):after=module('device_day_content').content_revision(config,f['index'])
     assert before!=after and first.read_bytes()==raw
     assert day(f)['关联时间线']['snapshot_revision']==2
     assert segment(f)[0]['关联时间线']['segment_evidence_links'][0]['activity_id']==after_activity['id']

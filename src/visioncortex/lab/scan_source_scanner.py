@@ -8,7 +8,9 @@ No class monkeypatch, duplicate scanning algorithm, or new HTTP protocol is used
 from __future__ import annotations
 
 import copy
+from contextlib import asynccontextmanager
 import hashlib
+import math
 import os
 import threading
 import time
@@ -138,8 +140,119 @@ def attach_to_runtime(runtime):
 
     publisher = load_publisher_from_environment()
     if publisher is not None:
-        attach_to_scanner(runtime["live_scanner"], publisher)
+        if publisher.mode == 'camera_equipment':
+            _attach_camera_observer(runtime, publisher)
+        else:
+            attach_to_scanner(runtime["live_scanner"], publisher)
     return runtime
+
+
+class CameraEquipmentObserver:
+    """Thin original receiver/decoder port; never calls FR's binding policy.
+
+    Construction is inert. A source-process lifespan owns its sole polling
+    thread, while ``step`` also permits deterministic finite transport tests.
+    """
+    def __init__(self, camera, publisher):
+        if publisher.mode != 'camera_equipment' or camera.target not in publisher.cameras:
+            raise ValueError('Explicit camera_equipment source and allowed camera required')
+        self.camera, self.publisher = camera, publisher
+        self.shutdown = threading.Event()
+        self.worker = None
+        self.lock = threading.RLock()
+        self.previous = None
+        self.frames = 0
+        self.last_result = self.last_error = None
+        self.service_status = None
+
+    def observe_service(self, status):
+        # Unlike LiveScanner.observe_service this has no SQLite/binder access.
+        with self.lock:
+            self.service_status = copy.deepcopy(status)
+
+    def step(self):
+        from field_recognition.capture.live_scan import frame_key
+        from field_recognition.capture.qr_decode import decode_qr
+
+        acquired = time.monotonic()
+        frame, metadata = self.camera.frame()
+        age = metadata.get('frame_age_ms')
+        if (type(age) not in {int, float} or not math.isfinite(age) or age < 0
+                or age / 1000 + time.monotonic() - acquired > 1):
+            return dict(status='stale_or_unknown_frame_age', published=False)
+        key = (frame_key(metadata), metadata.get('device_boot_id'), metadata.get('media_session_id'))
+        with self.lock:
+            if key == self.previous:
+                return dict(status='same_native_frame', published=False)
+            # The original decoder sees the unmodified receiver pixels.
+            decoded = decode_qr(frame)
+            if age / 1000 + time.monotonic() - acquired > 1:
+                return dict(status='frame_expired_during_decode', published=False)
+            result = self.publisher.publish(frame,
+                dict(metadata, source_camera_key=self.camera.target), None, decoded)
+            self.previous = key
+            self.frames += 1
+            self.last_result = result
+            return result
+
+    def _run(self):
+        while not self.shutdown.is_set():
+            try:
+                self.step()
+            except (OSError, ValueError) as exc:
+                # Receiver unavailable is observable; it never becomes a clock,
+                # identity or an operation. Resource/immutable conflicts stop.
+                self.last_error = dict(code=type(exc).__name__, reason=str(exc)[:512])
+            except Exception as exc:
+                self.last_error = dict(code=type(exc).__name__, reason=str(exc)[:512])
+                self.shutdown.set()
+            self.shutdown.wait(self.publisher.config['poll_interval_ms'] / 1000)
+
+    def start(self):
+        with self.lock:
+            if self.worker is not None:
+                raise ValueError('Camera observer already started')
+            self.worker = threading.Thread(target=self._run, name='camera-equipment-observer', daemon=True)
+            self.worker.start()
+
+    def close(self):
+        self.shutdown.set()
+        if self.worker is not None:
+            self.worker.join(timeout=5)
+            if self.worker.is_alive():
+                raise RuntimeError('Camera observer did not stop within its deadline')
+
+
+def _attach_camera_observer(runtime, publisher):
+    camera = runtime.get('receiver_camera')
+    if (camera is None or runtime.get('RUNTIME_ENABLED')
+            or runtime.get('SERVICE_ROLE') not in {'capture', 'combined'}
+            or runtime.get('camera_equipment_observer') is not None):
+        raise ValueError('Natural QR source requires an owning local capture runtime before startup')
+    scanner = runtime.get('live_scanner')
+    if scanner is not None and getattr(scanner, 'session', None):
+        raise ValueError('Attach natural source only to a fresh runtime without manual sessions')
+    # The original lifecycle starts SQLite binding recovery, automatic/OCR and
+    # archive workers. None belongs to this independent source-only process.
+    observer = CameraEquipmentObserver(camera, publisher)
+    camera.on_service_status = observer.observe_service
+    runtime['camera_equipment_observer'] = observer
+
+    @asynccontextmanager
+    async def lifespan(application):
+        try:
+            camera.start()
+            observer.start()
+            yield
+        finally:
+            runtime['stopping'].set()
+            try:
+                observer.close()
+            finally:
+                runtime.close()
+
+    runtime['lifespan'] = lifespan
+    return observer
 
 
 def create_runtime(*args, **kwargs):
@@ -253,7 +366,21 @@ def app_factory():
     try:
         if enabled:
             attach_to_runtime(runtime)
-        return create_app(runtime)
+        application = create_app(runtime)
+        if runtime.get('camera_equipment_observer') is not None:
+            # Keep the original preview/static interface, but source-only mode
+            # must not expose the legacy manual SQLite binding/OCR commands.
+            from fastapi.responses import JSONResponse
+
+            @application.middleware('http')
+            async def source_only(request, call_next):
+                path = request.url.path
+                readable = (path == '/' or path.startswith('/static/') or path.startswith('/health/')
+                            or path == '/api/camera/preview.mjpg' and request.query_params.get('recognition', 'false') == 'false')
+                if request.method not in {'GET', 'HEAD'} or not readable:
+                    return JSONResponse({'detail': 'camera_equipment source-only process'}, status_code=409)
+                return await call_next(request)
+        return application
     except BaseException:
         runtime.close()
         raise

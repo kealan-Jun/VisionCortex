@@ -95,7 +95,7 @@ class CommentIntake:
                                     run_id=declared.get('run_id'), sample_id=declared.get('sample_id'),
                                     batch_id=declared.get('batch_id'), source_activity_id=str(source_id),
                                     source_text_sha256=digest, source_evidence_ids=list(source['evidence_ids']),
-                                    text=text, occurred_at=source['end_at'], actor='automatic-comment-intake',
+                                    text=text, occurred_at=source['start_at'] if declared.get('interpretation') == 'stage_start' else source['end_at'], actor='automatic-comment-intake',
                                     reason='consume persisted source-pinned upstream interpretation',
                                     person_id=declared.get('person_id'), camera_id=declared.get('camera_id'),
                                     review_activity_id=str(review_id))

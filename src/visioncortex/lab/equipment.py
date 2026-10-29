@@ -107,6 +107,59 @@ def retire_equipment(core, key, device_id, *, at, actor, reason):
     return core.command(key, dict(action='retire_equipment', device_id=device_id, at=at, actor=actor, reason=reason), action)
 
 
+def equipment_details(core, device_id, *, as_of=None):
+    """Read the scoped registry without activating a UUID or declaring an operation.
+
+    Effective activation/retirement clocks support historical status. Reservation
+    time and metadata revisions are absent from this schema; neither is invented.
+    """
+    if device_id is None:
+        raise ValueError('Explicit permanent equipment UUID required')
+    uid = ident(device_id)
+    requested = instant(as_of) if as_of is not None else None
+    with core.db.transaction(readonly=True) as conn:
+        conn.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ')
+        row = conn.execute('SELECT * FROM equipment_identity WHERE customer_id=%s AND device_id=%s',
+                           (core.customer, uid)).fetchone()
+        if row is None:
+            raise Missing('Equipment UUID outside current customer scope')
+        at = requested if requested is not None else conn.execute('SELECT now() AS at').fetchone()['at']
+        instrument = conn.execute("SELECT id,code FROM entity WHERE customer_id=%s AND id=%s AND kind='instrument'",
+                                  (core.customer, uid)).fetchone()
+        label = conn.execute("SELECT id,code FROM entity WHERE customer_id=%s AND code=%s AND kind='tag'",
+                             (core.customer, str(uid))).fetchone()
+        assignments = []
+        if label:
+            assignments = conn.execute('''SELECT id,target_id,valid_from,valid_to,version FROM tag_assignment
+                WHERE customer_id=%s AND tag_id=%s AND valid_from<=%s AND (valid_to IS NULL OR valid_to>%s)
+                ORDER BY version LIMIT 2''', (core.customer, label['id'], at, at)).fetchall()
+        if row['retired_at'] is not None and at >= row['retired_at']:
+            state = 'retired'
+        elif row['verified_at'] is not None and at >= row['verified_at']:
+            state = 'active'
+        else:
+            state = 'not_activated'
+        certain = (state == 'active' and instrument is not None and len(assignments) == 1
+                   and assignments[0]['target_id'] == uid)
+        return clean(dict(schema_version='vc-lab-equipment-details/1', customer_id=core.customer,
+            permanent_uuid=uid, device_code=row['device_code'], name=row['metadata'].get('name'),
+            registered_metadata=row['metadata'], provenance=row['provenance'],
+            metadata_time_basis='current_registered_snapshot_not_historical_as_of', historical_metadata_available=False,
+            current_state=row['state'], as_of=at, as_of_mode='explicit' if requested is not None else 'transaction_current_time',
+            state_as_of=state, lifecycle_time_basis='currently_recorded_activation_and_retirement_effective_times',
+            verified_at=row['verified_at'], retired_at=row['retired_at'], reserved_at=None,
+            reservation_time_status='not_recorded_cannot_establish_reservation_existence_at_historical_time',
+            instrument_entity_id=instrument['id'] if instrument else None,
+            label_entity_id=label['id'] if label else None,
+            entity_id_time_basis='current_registry_entities_not_proof_of_existence_at_as_of',
+            qr=dict(payload=str(uid), payload_format='bare_uuid', identity_scheme='device-uuid/1',
+                    label_entity_id_is_separate_from_payload=True, reprint_required=False),
+            label_assignment_as_of=dict(association_status='explicit' if certain else 'needs_review',
+                target_id=uid if certain else None, assignments=assignments),
+            physical_presence_or_operation_proven=False, read_only=True,
+            snapshot_isolation='repeatable read', activation_performed=False, binding_modified=False))
+
+
 def resolve_qr(core, value, at):
     with core.db.transaction(readonly=True) as conn:
         device = None

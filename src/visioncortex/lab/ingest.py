@@ -126,7 +126,14 @@ class Ingest:
             result = dict(capture_id=capture_id, media_id=media_id, evidence_id=evidence_id, job_ids=jobs, source_kind=source_kind, duplicate=False)
             if self.settings.processing_profile == 'timeline-v1':
                 from .timeline import Timeline
-                Timeline(self.core).admit(conn, capture_id, media_id, receipt)
+                admitted = Timeline(self.core).admit(conn, capture_id, media_id, receipt)
+                from .capture_equipment_intake import admit as admit_equipment_qr
+                original_path = safe_path(self.settings.incoming if copied['storage'] == 'incoming' else self.settings.cache,
+                                          copied['relative_path'])
+                authorization = admit_equipment_qr(conn, self.core, self.settings, admitted, receipt,
+                                                   verified_path=original_path)
+                if authorization is not None:
+                    result['automatic_equipment_qr'] = authorization
                 result['processing_profile'] = 'timeline-v1'
             self.core._emit(conn, "capture", capture_id, 1, result)
             return clean(result)
@@ -171,19 +178,56 @@ class Ingest:
         return results
 
     def directory_photo(self, path):
-        if self.settings.photo_batch_mode != 'directory_triplet':
+        from .capture_equipment_intake import policy
+        configured = policy(self.settings)
+        automatic = self.settings.processing_profile == 'timeline-v1' and configured.get('enabled') and configured.get('photo')
+        if not automatic and self.settings.photo_batch_mode != 'directory_triplet':
             raise ValueError('Bare directories require an explicit directory_triplet configuration')
         require_finished_upload(self.settings.incoming, path)
         location = photo_location(path.relative_to(self.settings.incoming).as_posix())
-        if location.camera not in self.settings.photo_cameras:
+        if not automatic and location.camera not in self.settings.photo_cameras:
             raise ValueError('Photo camera is not explicitly registered for directory intake')
         env = {k: v for k, v in os.environ.items() if k in {'PATH', 'LANG', 'LD_LIBRARY_PATH', 'VC_LAB_NAS_MARKER_SHA256', 'VC_LAB_STORAGE_MANIFEST'}}
         env['FIELD_DEMO_DATA'] = str(self.settings.runtime_root / 'field-context')
         request = dict(root=str(self.settings.incoming), path=str(path), camera=location.camera, zone=self.settings.photo_timezone, max_bytes=min(self.settings.max_capture_bytes, 16*1024**2), batch_mode='directory_triplet')
+        # Natural capture mode reuses FR's original stable reader/path grammar.
+        # A directory is not proof of a planned three-shot burst. More than three
+        # members are read individually with no invented grouping/context.
+        members = [p for p in path.parent.iterdir() if p.suffix.lower() in {'.png','.jpg','.jpeg'}] if automatic else []
+        if automatic and len(members) > 3 and not (path.parent / 'PhotoReceipt.json').exists():
+            if time.time() - path.stat().st_mtime < .5:
+                raise Conflict('Bare photograph is still within the original FR stable-write wait')
+            request.update(batch_mode='receipt_only', require_receipt=False)
         loaded = json.loads(run_bounded([sys.executable, '-B', str(ROOT / 'src/visioncortex/lab/field_source.py')], json.dumps(request), env=env, timeout=8))
         if loaded.get('error'):
             raise Conflict('Original FR directory admission: ' + loaded['error'] + ': ' + loaded.get('reason', ''))
         group = loaded['receipt']
+        if automatic and loaded.get('receipt_basis') != 'nas_photo_receipt':
+            if group is None:
+                from .media import hash_file
+                sha, _ = hash_file(path, min(self.settings.max_capture_bytes, 16*1024**2))
+                stamp = datetime.strptime(Path(location.filename).stem[:15], '%Y%m%d_%H%M%S')
+                from zoneinfo import ZoneInfo
+                group = dict(photos=[dict(filename=path.name, capture_id=location.identity,
+                    captured_at=stamp.replace(tzinfo=ZoneInfo(self.settings.photo_timezone)).isoformat(), sha256=sha)])
+            results = []
+            for photo in group['photos']:
+                receipt = dict(capture_id=photo['capture_id'], source_instance='photo:' + location.camera,
+                    source_revision='1', camera_id=location.camera, session_id=None, kind='photo',
+                    relative_path=(path.parent / photo['filename']).relative_to(self.settings.incoming).as_posix(),
+                    captured_at=photo['captured_at'], sha256=photo['sha256'], source_kind=self.settings.source_kind,
+                    group_expected_photos=None, batch_basis='directory_membership_unknown_without_producer_receipt',
+                    time_basis=dict(basis='nas_filename_local_time_not_hardware_verified', raw=photo['captured_at'],
+                                    clock_sync_valid=False))
+                with self.core.db.transaction(readonly=True) as conn:
+                    old = conn.execute('''SELECT i.payload FROM inbox i JOIN source_instance s
+                        ON s.customer_id=i.customer_id AND s.id=i.source_id
+                        WHERE i.customer_id=%s AND s.name=%s AND i.event_id=%s AND i.revision='1' ''',
+                        (self.core.customer, receipt['source_instance'], receipt['capture_id'])).fetchone()
+                if old:
+                    receipt = dict(old['payload'], relative_path=receipt['relative_path'])
+                results.append(self.accept(receipt))
+            return results
         if loaded.get('receipt_basis') != 'configured_directory_triplet':
             return self.photo_receipt(path.parent / 'PhotoReceipt.json')
         results = []
@@ -202,7 +246,11 @@ class Ingest:
         truncated = False
         excluded = {'示例_留存格式', '示例_真实设备一天', '.System', 'ProcessedClips', 'MultimodalUnderstanding', 'LaboratoryDailyReport', 'Comment', 'VoicePhotoReadings', 'VideoReadings', 'PhotoReadings', 'Bindings', 'DailyReport'}
         root = self.settings.incoming
-        for directory, dirs, names in os.walk(root, followlinks=False):
+        from .capture_equipment_intake import newest_candidates, policy
+        automatic = self.settings.processing_profile == 'timeline-v1' and policy(self.settings).get('enabled')
+        if automatic:
+            files, truncated = newest_candidates(root, excluded, include_bare_photos=policy(self.settings)['photo'])
+        for directory, dirs, names in ([] if automatic else os.walk(root, followlinks=False)):
             dirs[:] = sorted(d for d in dirs if d not in excluded and not Path(directory, d).is_symlink())
             for name in sorted(names):
                 path = Path(directory, name)
@@ -220,7 +268,12 @@ class Ingest:
                         break
             if truncated:
                 break
-        files.sort(key=lambda p: p.stat().st_mtime_ns, reverse=True)
+        if automatic:
+            # NAS receive mtime is a scheduling hint, never an event clock; keep
+            # the validated native day/path order ahead of older backfill.
+            files.sort(key=lambda p: (p.relative_to(root).parts[0], p.parent.as_posix(), p.name), reverse=True)
+        else:
+            files.sort(key=lambda p: p.stat().st_mtime_ns, reverse=True)
         summary = {"processed": 0, "skipped": 0, "errors": [], "coverage": "partial" if truncated or len(files) > limit else "unknown"}
         for path in files:
             if summary['processed'] + len(summary['errors']) >= limit:

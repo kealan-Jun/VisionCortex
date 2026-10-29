@@ -20,7 +20,8 @@ from .archive_layout import verify_archive_contract
 from .domain import fingerprint
 from .media import safe_path
 from .native_linked_layout import module
-from .native_timeline_links import _selected, attach_day, attach_segment
+from .native_timeline_links import (PendingCommittedAssociation, association_revision,
+    attach_day, attach_segment, verified_committed_association)
 from .rules import Rules
 from .storage import is_nas, publication_config
 
@@ -281,17 +282,15 @@ class NativeRefresh:
 
     def _refresh(self, root, archive, committed, guard, budget=MAX_OUTPUT_BYTES):
         day_root = root / archive
-        selected = _selected(day_root, archive)
-        if selected is None:
+        try:
+            with verified_committed_association(day_root, archive,
+                    customer_id=self.core.customer, receipt=committed) as selected:
+                return self._refresh_verified(root, archive, selected[1], guard, budget)
+        except PendingCommittedAssociation:
             return dict(archive=archive, status="pending_committed_association")
-        sidecar, reference = selected
-        if (
-            sidecar["customer_id"] != str(self.core.customer)
-            or reference["sha256"] != committed["sha256"]
-            or reference["byte_size"] != committed["byte_size"]
-            or archive + "/" + reference["sidecar"] != committed["relative_path"]
-        ):
-            return dict(archive=archive, status="pending_committed_association")
+
+    def _refresh_verified(self, root, archive, reference, guard, budget):
+        day_root = root / archive
         source = _read(day_root, "ProcessedClips/Index.json", guard)
         if source is None:
             return dict(archive=archive, status="pending_native_index")
@@ -397,6 +396,7 @@ class NativeRefresh:
                 raise ValueError("Native retained JSON cache bound reached")
             written += size
         # Recheck inputs before any mutable native output is refreshed.
+        association_revision(day_root, archive)
         if _read(day_root, "ProcessedClips/Index.json", guard)[1] != source_sha:
             raise OSError("Native index changed before refresh")
         for main in mains:

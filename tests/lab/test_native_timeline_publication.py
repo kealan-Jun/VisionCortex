@@ -5,6 +5,7 @@ import json
 from visioncortex.lab.archive_layout import contract_bytes
 from visioncortex.lab.delivery import NativeDelivery
 from visioncortex.lab.native_linked_layout import module
+from visioncortex.lab.native_timeline_links import verified_committed_association
 from visioncortex.lab.timeline_publication import TimelinePublication
 
 from .test_person_report import scene,media,event,report
@@ -24,7 +25,8 @@ def test_camera_sidecars_from_real_snapshot_preserve_native_main_and_late_revisi
     settings=replace(s['settings'],source_root=archive,unified_archive_required=True,timeline_publish=True)
     publication=TimelinePublication(s['runtime'],settings)
     first=publication.tick();assert first['revision']==snapshot['revision']
-    paths=[archive/r['relative_path'] for r in first['files'] if '/Associations/' in r['relative_path']]
+    paths=[archive/r['relative_path'] for r in first['files']
+           if '/Associations/' in r['relative_path'] and '/Associations/Bindings/' not in r['relative_path']]
     assert len(paths)==2
     before={str(p):p.read_bytes() for p in paths}
     index={json.loads(p.read_text())['camera_key']:json.loads(p.read_text()) for p in paths}
@@ -43,9 +45,11 @@ def test_camera_sidecars_from_real_snapshot_preserve_native_main_and_late_revisi
     assert all(p.read_bytes()==before[str(p)] for p in paths)
     from types import SimpleNamespace
     root=archive/'2026-10-29_fixture-camera-0'
-    document=module('device_day_reports').day_document(SimpleNamespace(root=root,name=root.name),
-        {'archive':root.name,'recordings':[],'segments':[],'understandings':[]},
-        {'status':'pending'},readable={'视频留存统计':{}},entries=[],report_generated_at='fixture')
+    committed=next(r for r in second['files'] if r['relative_path'].startswith(root.name+'/LaboratoryDailyReport/Timeline/Associations/r'))
+    with verified_committed_association(root,root.name,customer_id=s['core'].customer,receipt=committed):
+        document=module('device_day_reports').day_document(SimpleNamespace(root=root,name=root.name),
+            {'archive':root.name,'recordings':[],'segments':[],'understandings':[]},
+            {'status':'pending'},readable={'视频留存统计':{}},entries=[],report_generated_at='fixture')
     assert document['关联时间线']['snapshot_revision']==revised['revision']
     assert document['关联时间线']['native_entry_refresh_status']=='included_by_native_builder'
     assert document['全天综合理解']['status']=='pending'

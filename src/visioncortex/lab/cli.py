@@ -19,6 +19,7 @@ from .cache import CachePruner
 from .delivery import NativeDelivery
 from .live import ReceiverSupervisor
 from .material_batch import MaterialBatch
+from .equipment import equipment_details
 from .timeline_runtime import TimelineRuntime
 
 
@@ -43,9 +44,12 @@ def main(argv=None):
     commands.add_parser("publish")
     commands.add_parser("tick")
     runner = commands.add_parser("run")
-    runner.add_argument("--role", choices=["all", "ingest", "worker", "index", "retention", "cache", "delivery", "receiver", "timeline", "timeline-model", "timeline-publication"], default="all")
+    runner.add_argument("--role", choices=["all", "ingest", "worker", "index", "retention", "cache", "delivery", "receiver", "timeline", "timeline-model", "timeline-publication", "producer-ingress"], default="all")
     commands.add_parser("schedule-models")
     commands.add_parser("status")
+    equipment = commands.add_parser('equipment-details')
+    equipment.add_argument('uuid')
+    equipment.add_argument('--as-of')
     batch_summary = commands.add_parser("material-batch-summary")
     batch_summary.add_argument("kind", choices=["source-lot", "process-batch"])
     batch_summary.add_argument("id")
@@ -80,6 +84,9 @@ def main(argv=None):
         print(json.dumps(Core.customer_instance(db, settings.customer_code, scope=args.scope)))
         return
     core = runtime(settings)
+    if args.command == 'equipment-details':
+        print(json.dumps(equipment_details(core, args.uuid, as_of=args.as_of), ensure_ascii=False))
+        return
     if args.command == "material-batch-summary":
         batches = MaterialBatch(core)
         result = batches.source_lot(args.id) if args.kind == "source-lot" else batches.process_batch(args.id)
@@ -134,6 +141,9 @@ def main(argv=None):
                     stop.wait(settings.poll_seconds)
             receiver = ReceiverSupervisor(core,settings)
             actions = {"ingest": ingest.discover_once, "worker": worker.run_once, "index": index.tick, "retention": Retention(core, settings).tick, "cache": CachePruner(core, settings).tick, "delivery":NativeDelivery(core,settings).tick, 'receiver':receiver.tick, 'timeline': timeline.tick, 'timeline-model': timeline.runner.run_once, 'timeline-publication': timeline.publication.tick}
+            if args.role == 'producer-ingress':
+                from .producer_ingress import ProducerIngress
+                actions = {'producer-ingress': ProducerIngress(core, settings).tick}
             threads = [threading.Thread(target=loop, args=(role, action), name="vc-lab-" + role, daemon=True) for role, action in actions.items() if args.role in {"all", role}]
             for thread in threads:
                 thread.start()

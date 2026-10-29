@@ -194,9 +194,18 @@ class TimelineTasks:
             for row in expired:
                 conn.execute("UPDATE hj_timeline_task_attempt SET outcome='lease_expired',finished_at=%s WHERE customer_id=%s AND task_id=%s AND outcome='leased'", (at, self.customer, row['id']))
             selected_only=kind=='video_understanding' and self.timeline.policies.video_input_unit=='complete_retained_clip'
-            task = conn.execute("SELECT t.*,m.kind AS media_kind,m.capture_id,m.stream_key,m.session_key,m.start_at,m.end_at,m.duration_seconds,m.time_basis FROM hj_timeline_task t JOIN hj_timeline_media m USING(customer_id,media_id) WHERE t.customer_id=%s AND t.kind=%s AND t.status='awaiting_provider' AND t.next_attempt_at<=%s AND t.attempts<3 AND (m.kind='photo' OR m.duration_seconds>0) AND (NOT %s OR EXISTS(SELECT 1 FROM media_derivation d WHERE d.customer_id=t.customer_id AND d.child_id=t.media_id AND d.transform->>'schema_version'='vc-lab-retained-clip/1')) ORDER BY t.created_at,t.id FOR UPDATE OF t SKIP LOCKED LIMIT 1", (self.customer, kind, at,selected_only)).fetchone()
+            prior_enabled = kind == 'video_understanding' and self.timeline.policies.document.get('multimodal_prior_context', {}).get('enabled') is True
+            candidates = conn.execute("SELECT t.*,m.kind AS media_kind,m.capture_id,m.stream_key,m.session_key,m.start_at,m.end_at,m.duration_seconds,m.time_basis FROM hj_timeline_task t JOIN hj_timeline_media m USING(customer_id,media_id) WHERE t.customer_id=%s AND t.kind=%s AND t.status='awaiting_provider' AND t.next_attempt_at<=%s AND t.attempts<3 AND (m.kind='photo' OR m.duration_seconds>0) AND (NOT %s OR EXISTS(SELECT 1 FROM media_derivation d WHERE d.customer_id=t.customer_id AND d.child_id=t.media_id AND d.transform->>'schema_version'='vc-lab-retained-clip/1')) ORDER BY t.created_at,t.id FOR UPDATE OF t SKIP LOCKED LIMIT %s", (self.customer, kind, at,selected_only,32 if prior_enabled else 1)).fetchall()
+            task, blocked = None, []
+            for candidate in candidates:
+                waiting = self._pending_priors(conn, candidate) if prior_enabled else []
+                if waiting:
+                    blocked.append(dict(task_id=str(candidate['id']), pending_prior_task_ids=[str(r['id']) for r in waiting]))
+                else:
+                    task = candidate
+                    break
             if not task:
-                return dict(task=None)
+                return dict(task=None, **({'pending_prior_channels': blocked} if blocked else {}))
             media = dict(task, kind=task['media_kind'])
             pending = task.get('request') or {}
             request = self.plan(conn, media, kind, temporal_registration=pending.get('temporal_display'), qr_registration=pending.get('video_qr'))
@@ -217,6 +226,45 @@ class TimelineTasks:
             conn.execute("INSERT INTO hj_timeline_timing(customer_id,attempt_token,stage,started_at,finished_at,elapsed_seconds) VALUES(%s,%s,'queue_wait',%s,%s,%s)",(self.customer,token,task['created_at'],at,Decimal(str(wait))))
             return dict(task_id=task['id'], lease_token=token, lease_until=until, model_revision=model_revision, request=request)
         return self.timeline._command(key, 'claim_model_task', dict(kind=kind, model_revision=model_revision, lease_seconds=lease_seconds, now=now), action)
+
+    def _pending_priors(self, conn, task):
+        """Wait for existing overlapping channels; never invent missing channels.
+
+        The original receipt camera (not an audio/photo channel prefix) scopes
+        dependencies. A failed channel is explicit missing evidence, not a
+        reason to retry a successful video model or fabricate a transcript.
+        """
+        return conn.execute('''SELECT d.id FROM hj_timeline_task d
+            JOIN hj_timeline_media dm ON dm.customer_id=d.customer_id AND dm.media_id=d.media_id
+            JOIN capture dc ON dc.customer_id=dm.customer_id AND dc.id=dm.capture_id
+            JOIN inbox di ON di.customer_id=dc.customer_id AND di.source_id=dc.source_id
+              AND di.event_id=dc.source_capture_id AND di.revision=dc.source_revision
+            JOIN capture vc ON vc.customer_id=d.customer_id AND vc.id=%s
+            JOIN inbox vi ON vi.customer_id=vc.customer_id AND vi.source_id=vc.source_id
+              AND vi.event_id=vc.source_capture_id AND vi.revision=vc.source_revision
+            WHERE d.customer_id=%s AND d.kind IN ('transcription','ocr','qr')
+              AND d.status IN ('awaiting_provider','leased') AND d.id<>%s
+              AND di.payload->>'camera_id'=vi.payload->>'camera_id'
+              AND di.payload->>'camera_id' IS NOT NULL
+              AND dm.time_basis->'uncertainty_us'='0'::jsonb
+              AND dm.time_basis->'clock_sync_verified' IS DISTINCT FROM 'false'::jsonb
+              AND dm.time_basis->'clock_sync_valid' IS DISTINCT FROM 'false'::jsonb
+              AND (dm.time_basis->'clock_sync_verified'='true'::jsonb
+                OR dm.time_basis->'clock_sync_valid'='true'::jsonb
+                OR (di.payload->>'source_kind'='fixture'
+                    AND dm.time_basis->>'basis' IN ('synthetic_fixture_clock','fixture_receipt')))
+              AND dm.time_basis=di.payload->'time_basis'
+              AND vi.payload#>'{time_basis,uncertainty_us}'='0'::jsonb
+              AND vi.payload#>'{time_basis,clock_sync_verified}' IS DISTINCT FROM 'false'::jsonb
+              AND vi.payload#>'{time_basis,clock_sync_valid}' IS DISTINCT FROM 'false'::jsonb
+              AND (vi.payload#>'{time_basis,clock_sync_verified}'='true'::jsonb
+                OR vi.payload#>'{time_basis,clock_sync_valid}'='true'::jsonb
+                OR (vi.payload->>'source_kind'='fixture'
+                    AND vi.payload#>>'{time_basis,basis}' IN ('synthetic_fixture_clock','fixture_receipt')))
+              AND dm.start_at<%s AND (dm.end_at>%s OR (dm.start_at=dm.end_at AND dm.start_at>=%s))
+            ORDER BY d.created_at,d.id LIMIT 101''',
+            (task['capture_id'], self.customer, task['id'],
+             task['end_at'], task['start_at'], task['start_at'])).fetchall()
 
     def submit(self, key, task_id, lease_token, model_revision, result, *, now=None):
         return self._submit(key, task_id, lease_token, model_revision, result, now=now)

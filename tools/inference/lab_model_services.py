@@ -102,7 +102,9 @@ class ModelServices:
             with socket.socket() as probe:
                 probe.bind(('127.0.0.1', port))
         python = str(self.interpreter(name))
-        if name == 'vlm':
+        if name == 'vlm' and settings.get('engine', 'vllm') not in {'vllm', 'joyai-hf'}:
+            raise ValueError('Unknown explicit VLM engine')
+        if name == 'vlm' and settings.get('engine', 'vllm') == 'vllm':
             source, _ = self.source.checkpoint(self.root, settings.get('checkpoint', 'Qwen3.5-9B'), self.config)
             args = [python, '-m', 'vllm.entrypoints.cli.main', 'serve', str(source),
                 '--host', '127.0.0.1', '--port', str(port),

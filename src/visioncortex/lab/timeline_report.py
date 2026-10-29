@@ -12,6 +12,16 @@ def render_report(report):
              f'已关联实验记录：{report["experiment_count"]}；证据观察：{report["activity_count"]}条。',
              '观察条数不代表独立物理动作次数。归档仅代表记录收尾，不能证明设备实际完成。', '']
     people=report.get('person_timelines',{})
+    operations = report.get('operation_segments', {})
+    if operations.get('enabled'):
+        lines += ['扫码与口述锚定的操作阶段：15分钟分包不结束阶段；以下是证据包络，不能证明期间持续操作。']
+        for phase in operations.get('segments', []):
+            lines.append(f'  {time_text(phase["start_at"])}—{time_text(phase["end_at"])} 设备 {phase["equipment_id"]}；{phase["status"]}；阶段 {phase["segment_id"]}。')
+            lines.append(f'    跨上日：{phase["continues_from_previous_day"]}；待续：{phase["continues_after_day"]}；缺少锚点：{", ".join(phase["missing_anchors"]) or "无"}。')
+            for span in phase.get('source_spans', []):
+                lines.append(f'    原片 {span["media_id"]} {span["start_seconds"]}—{span["end_seconds"]}秒；回放范围已索引，未据此声称已生成裁剪文件。')
+        if operations.get('status') == 'needs_attention':
+            lines.append('  阶段投影待处理：' + operations['reason'])
     if people:
         lines += ['实验员时间线：仅列已知事件与关系，不能证明全天连续轨迹、位置或动作次数。']
         labels={'direct_operator_declaration':'主动操作声明','explicit_activity_person_association':'明确证据关联（非说话人证明）',
@@ -53,7 +63,7 @@ def render_report(report):
         lines.extend(activity_lines(activity))
     if not report['unassigned_activities']:
         lines.append('  当前无已存储的未归属观察；不代表数据完整。')
-    pending_time = report.get('unknown_time_temporal_activities', {})
+    pending_time = report.get('unknown_time_activities', report.get('unknown_time_temporal_activities', {}))
     if pending_time.get('activities'):
         lines += ['', '时间未校准的观察：以下仅为待定时记录，不归入本日或上述实验。']
         for activity in pending_time['activities']:

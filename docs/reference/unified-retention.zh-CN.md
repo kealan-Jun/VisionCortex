@@ -21,6 +21,7 @@ VisionCortex 使用一个工程和一个配置的归档根，视频处理与 Fie
     ├── ProcessedClips/              已留存片段、索引与选择证据
     ├── Comment/
     │   ├── Audio/                   转写、时间索引及执行证据
+    │   ├── Bindings.json            当前二维码、设备阶段及批次关联视图
     │   └── OCR/
     │       ├── VoicePhotoReadings/   照片/连拍事件的读数与证据
     │       └── VideoReadings/        视频触发事件的读数与证据
@@ -29,6 +30,10 @@ VisionCortex 使用一个工程和一个配置的归档根，视频处理与 Fie
 ```
 
 四个结果目录是 `ProcessedClips`、`Comment`、`MultimodalUnderstanding`、`LaboratoryDailyReport`。录音结果固定在 `Comment/Audio`，读数结果固定在 `Comment/OCR`；不能再把 `VoicePhotoReadings` 或 `VideoReadings` 新建为并行顶层结果根。
+
+日常查看二维码关联直接打开 `Comment/Bindings.json`。其中保留原码观察、已成立的操作声明、未决原因、操作阶段、实验/目标批次以及读数/转写入口；看到码但身份或时间不足时仍为候选。它是数据库版本化关系的最新文件视图，不是第二套账本。发布器核对不可变副本与数据库版本高水位，原子更新这个入口；历史版本保留在 `LaboratoryDailyReport/Timeline/Associations/Bindings`，日常查看无需进入历史目录。已有同名外部文件或损坏/回退的视图拒绝覆盖。
+
+Timeline 的 OCR 正文进入 `Comment/OCR/VoicePhotoReadings/<事件>/Readings.json` 或 `VideoReadings/<事件>/Readings.json`，保留 `Evidence.json` 和必要的 `UnboundReadings.json`。转写正文进入 `Comment/Audio/<事件>/Transcript.json` 与 `Transcript.txt`。这些来源固定的候选产物不覆盖原生产者事件，不在缺少面板证据时制造逐仪器 `Result.json`，也不把没有对齐的转写伪装成逐词对齐。
 
 规范口述是 Comment 的业务证据。`Comment/Audio` 不只是附件目录：转写正文、词/段时间索引及原音引用与扫码历史、视觉动作、OCR 共同支撑实验记录。原始录音仍在生产者原件目录，语音产物通过精确偏移回指，不再重复保存一份被误认为新采集的原音。
 
@@ -43,6 +48,8 @@ VisionCortex 使用一个工程和一个配置的归档根，视频处理与 Fie
 原生录像按既有格式整体检查 RGB、配对时间 CSV、会话、关闭/完成信息和可处理状态。音频保留独立原件及实际关联；没有音频输入或没有实际转写时，不能生成成功转写正文。生产者声明部分完整的数据继续标为 partial，不因封存完成就变成完整采集。
 
 照片入口保留原拍摄与连拍身份。显式 `PhotoReceipt` 或已启用的目录连拍模式决定成员关系、期望张数和完成状态；第三张晚到可修订同一组，不把另一时刻照片拼入。祖先 `.uploading`、文件不稳定、回执成员不符或字节变化都阻塞接入。裸图模式必须有明确相机范围，不能扫描任意目录后自动建业务记录。
+
+新照片的推荐位置是 `YYYY-MM-DD_<camera_key>/MetaData/Photos/HH-MM-SS/<原文件名>`，按已有回执协议完成提交；旧的 `MetaData/<时间>/` 等已登记原件仍兼容读取，不搬移。录像、录音与原时间文件继续按既有封存包发送，不为了分类浏览拆散原包。处理服务不提供一个供采集端猜测的通用 HTTP 上传地址。
 
 跨兼容路径的同一照片只有字节及其它不可变元数据一致，才补充来源位置并去重。不同相机即使图片字节相同也仍是不同来源。既有 `MetaVideo`、时间文件和封存包不为浏览美观拆散成新的强制发送协议。
 
@@ -94,6 +101,8 @@ VisionCortex 使用一个工程和一个配置的归档根，视频处理与 Fie
 录音 `Index.json`、`TimeIndex.json`、转写和执行回执同步引用 `Comment/Audio`；OCR 的事件组与逐仪器结果同步引用 `Comment/OCR`。历史冻结发布计划可继续按原路径重放，不自动改写旧档。
 
 历史留存说明中的四个结果目录、逐片段 `Understanding.json` 与相机 `LaboratoryDailyReport.json` 继续由原生发布器维护。统一数据库的跨相机／人员日报与相机日报是不同范围，版本化 `Timeline` 索引不能冒充已经生成的原生步骤理解、全天模型综合或真实筛选视频。没有相应模型结果或视频时保留 pending；关联信息的发布状态与原生主入口的刷新状态分别核对。
+
+原生主入口只消费已有数据库提交回执所固定的关联侧车。目录里存在 JSON 不代表出版事务成功；直接调用纯文档构建器不会自行纳入未提交侧车。刷新期间出现更高但未提交的版本时保持 pending，保留原主文件，等其正式提交后再刷新。日报快照固定自己的原媒体 ID 集合，新到数据进入下一版，不能改变失败恢复时的旧版不可变内容。
 
 ## 存储与私有部署配置
 

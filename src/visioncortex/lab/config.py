@@ -44,6 +44,7 @@ class Settings:
     timeline_policy_path: Path | None = None
     timeline_providers_path: Path | None = None
     timeline_publish: bool = False
+    producer_ingress_manifest: Path | None = None
 
     def __post_init__(self):
         if self.processing_profile not in {'native', 'timeline-v1'}:
@@ -76,7 +77,8 @@ class Settings:
                    processing_profile=os.environ.get('VC_LAB_PROCESSING_PROFILE', 'native'),
                    timeline_policy_path=Path(os.environ['VC_LAB_TIMELINE_POLICY']).absolute() if os.environ.get('VC_LAB_TIMELINE_POLICY') else None,
                    timeline_providers_path=Path(os.environ['VC_LAB_TIMELINE_PROVIDERS']).absolute() if os.environ.get('VC_LAB_TIMELINE_PROVIDERS') else None,
-                   timeline_publish=os.environ.get('VC_LAB_TIMELINE_PUBLISH') == '1')
+                   timeline_publish=os.environ.get('VC_LAB_TIMELINE_PUBLISH') == '1',
+                   producer_ingress_manifest=Path(os.environ['VC_LAB_PRODUCER_INGRESS_MANIFEST']).absolute() if os.environ.get('VC_LAB_PRODUCER_INGRESS_MANIFEST') else None)
 
     @property
     def incoming(self) -> Path:

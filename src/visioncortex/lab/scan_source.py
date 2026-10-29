@@ -26,6 +26,7 @@ from .retention import encoded
 from .storage import is_nas, storage_binding, verify_root
 
 SCHEMA = "vc-lab-scan-source/1"
+CAMERA_SCHEMA = "vc-lab-scan-source/2"
 ENV = "VC_LAB_SCAN_SOURCE_MANIFEST"
 MAX_STATE_BYTES = 2 * 1024**2
 
@@ -78,7 +79,7 @@ def load_publisher_from_environment():
     document = _json(raw)
     if (
         type(document) is not dict
-        or document.get("schema_version") != SCHEMA
+        or document.get("schema_version") not in {SCHEMA, CAMERA_SCHEMA}
         or type(document.get("enabled")) is not bool
     ):
         raise ValueError("Explicit versioned scan source manifest required")
@@ -101,13 +102,21 @@ class ScanSourcePublisher:
             "source_kind",
             "cameras",
         }
+        camera_mode = type(document) is dict and document.get('schema_version') == CAMERA_SCHEMA
+        if camera_mode:
+            required |= {'mode', 'poll_interval_ms', 'presence_interval_seconds'}
         if (
             type(document) is not dict
             or set(document) != required
-            or document.get("schema_version") != SCHEMA
+            or document.get("schema_version") not in {SCHEMA, CAMERA_SCHEMA}
             or document.get("enabled") is not True
         ):
             raise ValueError("Complete opt-in scan source configuration required")
+        if camera_mode and (document.get('mode') != 'camera_equipment'
+                or type(document['poll_interval_ms']) is not int or not 15 <= document['poll_interval_ms'] <= 1000
+                or type(document['presence_interval_seconds']) is not int or not 1 <= document['presence_interval_seconds'] <= 300):
+            raise ValueError('Explicit bounded camera_equipment observation mode required')
+        self.mode = 'camera_equipment' if camera_mode else 'manual'
         for name, low, high in [
             ("max_bytes", 1024, 64 * 1024**2),
             ("max_frame_bytes", 1024, 16 * 1024**2),
@@ -142,6 +151,7 @@ class ScanSourcePublisher:
                 type(camera) is not dict
                 or set(camera) != {"camera_id", "source_instance", "scan_kind"}
                 or camera.get("scan_kind") not in {"equipment", "material"}
+                or camera_mode and camera.get('scan_kind') != 'equipment'
             ):
                 raise ValueError(
                     "Each source requires its own explicit camera and scan kind"
@@ -277,12 +287,14 @@ class ScanSourcePublisher:
     def publish(self, frame_bgr, metadata, session, decoded):
         # The callback is only reached from the explicitly started LiveScanner.
         # A wearer label never becomes a PostgreSQL person identity.
-        if session.get("owner") in {None, "", "automation"}:
+        automatic = self.mode == 'camera_equipment'
+        session = session or {}
+        if not automatic and session.get("owner") in {None, "", "automation"}:
             return dict(status="not_manual_session", published=False)
-        camera = session.get("camera_id")
+        camera = metadata.get('source_camera_key') if automatic else session.get("camera_id")
         if camera not in self.cameras:
             return dict(status="camera_not_allowed", published=False)
-        session_id = str(UUID(session["session_id"]))
+        session_id = None if automatic else str(UUID(session["session_id"]))
         if (
             metadata.get("source_camera_key") != camera
             or type(metadata.get("decoded_frame_id")) is not int
@@ -291,7 +303,7 @@ class ScanSourcePublisher:
             raise ValueError(
                 "Exact source camera and stable native frame identity required"
             )
-        if (
+        if not automatic and (
             type(session.get("operator")) is not str
             or not session["operator"].strip()
             or len(session["operator"].encode()) > 320
@@ -346,8 +358,12 @@ class ScanSourcePublisher:
             for k in ("device_boot_id", "media_session_id")
             if stable[k] is not None
         }
+        if automatic:
+            # Identity comes from the configured camera and original source epoch,
+            # never a browser owner, typed person or 15-minute recording filename.
+            session_id = str(UUID(hex=fingerprint(dict(camera=camera, epoch=epoch, mode=self.mode))[:32]))
         physical = fingerprint(dict(session_id=session_id, camera=camera, frame=stable))
-        session_key = fingerprint(dict(session_id=session_id, camera=camera))
+        session_key = fingerprint(dict(mode=self.mode, camera=camera)) if automatic else fingerprint(dict(session_id=session_id, camera=camera))
         rgb_sha = hashlib.sha256(
             cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB).tobytes()
         ).hexdigest()
@@ -392,7 +408,7 @@ class ScanSourcePublisher:
         receipt = dict(
             capture_id=physical,
             source_instance=source["source_instance"],
-            source_revision="1",
+            source_revision='camera-equipment/1' if automatic else "1",
             camera_id=camera,
             session_id=session_id,
             kind="photo",
@@ -401,13 +417,13 @@ class ScanSourcePublisher:
             source_kind=self.config["source_kind"],
             sha256=digest,
             scan_intent=dict(
-                intent="operator_scan",
+                intent='camera_equipment_presence' if automatic else "operator_scan",
                 scan_kind=source["scan_kind"],
-                actor="manual LiveScanner session",
-                reason="explicit non-automation scan session",
+                actor='configured camera QR observer' if automatic else "manual LiveScanner session",
+                reason='explicit camera_equipment source policy' if automatic else "explicit non-automation scan session",
             ),
             scan_source=dict(
-                schema_version=SCHEMA,
+                schema_version=CAMERA_SCHEMA if automatic else SCHEMA,
                 config_sha256=self.config_sha256,
                 physical_source_key=physical,
                 frame_metadata=stable,
@@ -416,13 +432,17 @@ class ScanSourcePublisher:
                 original_rgb_sha256=rgb_sha,
                 png_sha256=digest,
                 decoded_values=values,
-                operator_label_unverified=session["operator"],
-                session_owner=session["owner"],
+                operator_label_unverified=None if automatic else session["operator"],
+                session_owner=None if automatic else session["owner"],
                 person_id=None,
                 wearer_is_not_person=True,
                 decoder_result_is_authoritative=False,
             ),
         )
+        if automatic:
+            receipt['scan_source'].update(mode=self.mode, manual_session_required=False,
+                intent_authority='configured_camera_equipment_presence_not_manual_scan',
+                visible_QR_is_not_panel_geometry=True, experiment_end_implied=False)
         with self.lock, self._state() as state:
             old = state["captures"].get(physical)
             was_committed = bool(old and old.get("committed"))
@@ -455,11 +475,12 @@ class ScanSourcePublisher:
                 and previous["values"] == values
                 and previous["epoch"] == epoch
             ):
-                return dict(
-                    status="same_code_in_session",
-                    published=False,
-                    capture_id=previous["capture_id"],
-                )
+                elapsed = (global_us - previous['global_timestamp_us']) / 1000000 if (
+                    automatic and captured_at is not None and type(previous.get('global_timestamp_us')) is int) else None
+                clock_promoted = automatic and captured_at is not None and previous.get('global_timestamp_us') is None
+                if not automatic or elapsed is None and not clock_promoted or elapsed is not None and 0 <= elapsed < self.config['presence_interval_seconds']:
+                    return dict(status='same_code_presence_rate_limited' if automatic else "same_code_in_session",
+                                published=False, capture_id=previous['capture_id'])
             total = len(raw) + len(body)
             if old is None and (
                 len(state["captures"]) >= self.config["max_events"]
@@ -518,6 +539,14 @@ class ScanSourcePublisher:
                 state["sessions"][session_key] = dict(
                     values=values, epoch=epoch, capture_id=physical
                 )
+                if automatic:
+                    # A late frame is retained as historical evidence, while the
+                    # rate-limit frontier keeps the latest known source clock.
+                    if (previous and captured_at is not None and type(previous.get('global_timestamp_us')) is int
+                            and global_us < previous['global_timestamp_us']):
+                        state['sessions'][session_key] = previous
+                    else:
+                        state['sessions'][session_key]['global_timestamp_us'] = global_us if captured_at is not None else None
             return dict(
                 status="duplicate"
                 if was_committed

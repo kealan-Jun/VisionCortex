@@ -1,0 +1,32 @@
+{
+  "schema_version": "vc-lab-timeline-policy/2",
+  "video_input_unit": "complete_retained_clip",
+  "preceding_context_seconds": 600,
+  "multimodal_prior_context": {
+    "enabled": true,
+    "max_items": 16,
+    "max_utf8_bytes": 8192,
+    "lookback_seconds": 1800
+  },
+  "operation_segments": {
+    "enabled": true,
+    "anchor_pairing_seconds": 120
+  },
+  "automatic_equipment_qr": {
+    "enabled": true,
+    "revision": "camera-source-v1",
+    "photo": true,
+    "video": true,
+    "video_window_seconds": 10,
+    "max_packet_seconds": 900,
+    "max_packet_tasks": 90,
+    "max_admissions_per_tick": 4,
+    "max_observations_per_tick": 600,
+    "rotation_degrees_clockwise": 0,
+    "orientation_basis": "original camera pixels; QR decoder handles code orientation; no OCR orientation implied",
+    "source_kinds": [
+      "customer_capture"
+    ],
+    "presence_interval_seconds": 60
+  }
+}

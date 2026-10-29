@@ -11,7 +11,7 @@ from psycopg.types.json import Jsonb
 
 from .domain import Conflict, Missing, clean, fingerprint, ident
 from .media import Media
-from .operator_scan import OperatorScans, _text, declaration_activity
+from .operator_scan import CAMERA_INTENT, OperatorScans, _text, declaration_activity
 from .timeline import Timeline
 
 SCHEMA = 'vc-lab-scan-intake/1'
@@ -38,7 +38,7 @@ def verified_clock(basis):
 def _declaration(raw):
     if (type(raw) is not dict or set(raw) - _FIELDS
             or not {'intent', 'scan_kind', 'actor', 'reason'} <= set(raw)
-            or raw.get('intent') != 'operator_scan'
+            or raw.get('intent') not in {'operator_scan', CAMERA_INTENT}
             or type(raw.get('scan_kind')) is not str or raw['scan_kind'] not in {'equipment', 'material'}):
         raise ValueError('Unsupported explicit producer scan declaration')
     result = dict(raw)
@@ -49,6 +49,9 @@ def _declaration(raw):
             if type(result[key]) is not str:
                 raise ValueError('Explicit scan identity must be a UUID string')
             result[key] = str(ident(result[key]))
+    if result['intent'] == CAMERA_INTENT and (result['scan_kind'] != 'equipment'
+            or any(result.get(k) is not None for k in ('person_id', 'run_id', 'batch_id'))):
+        raise ValueError('Camera equipment presence cannot infer person/run/batch or declare material use')
     return result
 
 
@@ -73,9 +76,12 @@ class ScanIntake:
 
     def consume(self, key, *, job_id, intent, scan_kind, actor, reason,
                 person_id=None, run_id=None, batch_id=None):
-        if (type(intent) is not str or intent not in {'operator_scan', 'background_qr'}
+        if (type(intent) is not str or intent not in {'operator_scan', 'background_qr', CAMERA_INTENT}
                 or type(scan_kind) is not str or scan_kind not in {'equipment', 'material'}):
             raise ValueError('Explicit scan intent and equipment/material kind required')
+        if intent == CAMERA_INTENT:
+            _declaration(dict(intent=intent, scan_kind=scan_kind, actor=actor, reason=reason,
+                              person_id=person_id, run_id=run_id, batch_id=batch_id))
         _text(actor, 'scan source actor')
         _text(reason, 'scan source reason')
         request = clean(dict(schema_version=SCHEMA, job_id=job_id, intent=intent, scan_kind=scan_kind,
@@ -103,6 +109,17 @@ class ScanIntake:
             if location['status'] != 'available' or location['version'] != job['version']:
                 raise Conflict('Original QR evidence is unavailable or changed')
             camera_code = job['receipt'].get('camera_id')
+            if intent == CAMERA_INTENT:
+                saved = _declaration(job['receipt'].get('scan_intent'))
+                source = job['receipt'].get('scan_source', {})
+                if (saved != dict(intent=intent, scan_kind=scan_kind, actor=actor, reason=reason)
+                        or source.get('schema_version') != 'vc-lab-scan-source/2'
+                        or source.get('mode') != 'camera_equipment'
+                        or source.get('manual_session_required') is not False
+                        or source.get('intent_authority') != 'configured_camera_equipment_presence_not_manual_scan'
+                        or source.get('png_sha256') != job['verified_sha256']
+                        or not isinstance(source.get('config_sha256'), str) or len(source['config_sha256']) != 64):
+                    raise Conflict('Explicit camera_equipment source receipt does not match the requested authority')
             camera = conn.execute("SELECT id FROM entity WHERE customer_id=%s AND kind='capture_device' AND code=%s",
                                   (self.core.customer, camera_code)).fetchone()
             if camera is None:
@@ -131,13 +148,24 @@ class ScanIntake:
                     actor=actor, reason=reason, person_id=person_id, camera_id=str(camera['id']),
                     run_id=run_id, batch_id=batch_id)
                 return dict(status=scan['status'], scan=scan, evidence=pins)
+            resolution = None
+            if intent == CAMERA_INTENT and len(unique) == 1:
+                ops = OperatorScans(self.core)
+                resolution = ops._camera_resolution(conn, unique[0], at)
+                if resolution['status'] == 'declared_equipment':
+                    scan = ops.record('scan-media-camera:' + str(job['id']), intent=intent, scan_kind='equipment',
+                        qr_value=unique[0], occurred_at=clean(at), evidence_ids=list(map(str, evidence)),
+                        actor=actor, reason=reason, camera_id=str(camera['id']), source_job_id=str(job['id']))
+                    return dict(status=scan['status'], scan=scan, evidence=pins)
             status = ('passive_observation' if intent == 'background_qr' else
-                      'no_qr_decoded' if not unique else 'ambiguous_multiple_qr')
+                      'no_qr_decoded' if not unique else 'ambiguous_multiple_qr' if len(unique) > 1 else resolution['status'])
             activity = declaration_activity(conn, self.core, text='扫码证据：' + status, at=at,
                 evidence_ids=evidence, payload=dict(scan_intake=pins, status=status,
                     operator_context_changed=False, actor=actor, reason=reason,
                     origin='saved_qr_machine_evidence', human_review_performed=False,
-                    source_type_presentation='machine_qr_observation'))
+                    source_type_presentation='machine_qr_observation',
+                    **(dict(camera_equipment_resolution=resolution, experiment_end_implied=False,
+                            material_quantity_written=False) if intent == CAMERA_INTENT else {})))
             return dict(status=status, activity_id=activity, evidence=pins, operator_context_changed=False)
 
         return self.core.command(key, request, lambda conn:
@@ -168,7 +196,7 @@ class ScanIntake:
                         ('scan-intake-failure:'||j.id::text||':1','scan-intake-failure:'||j.id::text||':2')
                     ORDER BY r.key DESC LIMIT 1) retry ON true
                 WHERE j.customer_id=%s AND j.worker_kind='qr' AND j.status='completed' AND c.kind='photo'
-                    AND i.payload->'scan_intent'->>'intent'='operator_scan'
+                    AND i.payload->'scan_intent'->>'intent' IN ('operator_scan','camera_equipment_presence')
                     AND NOT EXISTS(SELECT 1 FROM command_receipt r WHERE r.customer_id=j.customer_id
                         AND r.key IN ('scan-intake:'||j.id::text,'scan-media-source:'||j.id::text))
                 ''' + where + ' ORDER BY ' + order + ' LIMIT %s', params).fetchall()
@@ -283,4 +311,7 @@ class ScanIntake:
                         reason='earlier_exact_scope_declarations_pending', source_or_scan_snapshot_changed=False))
                     continue
             consume(job)
-        return dict(enabled=True, consumed=spent, scheduling='latest_first_with_exact_scope_causal_dependencies', outcomes=outcomes)
+        from .capture_equipment_intake import CaptureEquipmentIntake
+        generic = CaptureEquipmentIntake(self.core, self.settings).tick()
+        return dict(enabled=True, consumed=spent, scheduling='latest_first_with_exact_scope_causal_dependencies',
+                    outcomes=outcomes, automatic_equipment_qr=generic)

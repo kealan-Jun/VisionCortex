@@ -220,6 +220,10 @@ def inference_identity(kind, config, verified):
         if engine == 'faster-whisper':
             selected = faster_whisper_settings(config)
             names = [settings.get('checkpoint', 'faster-whisper-small')]
+        elif engine == 'qwen3-asr-hf':
+            from qwen3_asr import runtime_identity
+            selected = runtime_identity(settings)
+            names = [settings.get('checkpoint', 'Qwen3-ASR-0.6B-hf')]
         elif engine == 'qwen3-asr':
             selected = dict(engine=engine, dtype='bfloat16', device_map='cuda:0', attention='sdpa',
                             max_inference_batch_size=1, max_new_tokens=1024)
@@ -227,6 +231,11 @@ def inference_identity(kind, config, verified):
                      settings.get('aligner_checkpoint', 'Qwen3-ForcedAligner-0.6B')]
         else:
             raise ValueError('Unknown explicit ASR engine')
+    elif kind == 'vlm':
+        from joyai_vlm import runtime_identity
+        selected = runtime_identity(settings)
+        selected['service_source_sha256'] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+        names = [settings.get('checkpoint', 'JoyAI-VL-Interaction')]
     else:
         raise ValueError('Unknown inference kind')
     selected['cuda_visible_devices'] = settings.get('cuda_visible_devices', '0')
@@ -239,6 +248,11 @@ def make_asr(root, config, verified=None):
     engine = service_settings(config, 'asr').get('engine', 'qwen3-asr')
     if engine == 'faster-whisper':
         return make_faster_whisper(root, config, verified)
+    if engine == 'qwen3-asr-hf':
+        from qwen3_asr import make_backend
+        settings = service_settings(config, 'asr')
+        source, revision = checkpoint(root, settings.get('checkpoint', 'Qwen3-ASR-0.6B-hf'), config, verified)
+        return make_backend(source, settings, decode_audio_bounded), revision
     if engine != 'qwen3-asr':
         raise ValueError('Unknown explicit ASR engine')
     import torch
@@ -323,7 +337,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--runtime-root', type=Path, required=True)
     parser.add_argument('--config', type=Path, required=True)
-    parser.add_argument('--kind', choices=['asr', 'ocr'], required=True)
+    parser.add_argument('--kind', choices=['asr', 'ocr', 'vlm'], required=True)
     parser.add_argument('--port', type=int, required=True)
     args = parser.parse_args(argv)
     root = runtime_root(args.runtime_root)
@@ -342,6 +356,18 @@ def main(argv=None):
     from starlette.concurrency import run_in_threadpool
     import uvicorn
     verified = {}
+    if args.kind == 'vlm':
+        from joyai_vlm import application, make_backend
+        settings = service_settings(config, 'vlm')
+        if settings.get('engine') != 'joyai-hf':
+            raise ValueError('Explicit JoyAI HF engine required for this VLM service')
+        source, revision = checkpoint(root, settings.get('checkpoint', 'JoyAI-VL-Interaction'), config, verified)
+        infer, loaded = make_backend(source, settings)
+        identity = inference_identity('vlm', config, verified)
+        receipts = private_directory(root, 'runtime/receipts/vlm')
+        uvicorn.run(application(infer, settings, token, revision, identity, receipts, loaded),
+                    host='127.0.0.1', port=args.port, access_log=False)
+        return
     infer, revision = make_asr(root, config, verified) if args.kind == 'asr' else make_ocr(root, config, verified)
     execution_identity = inference_identity(args.kind, config, verified)
     runtime_revision = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()

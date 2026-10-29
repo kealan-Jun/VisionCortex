@@ -1,0 +1,19 @@
+{
+  "schema_version": "vc-lab-camera-operation-rules/1",
+  "default_activation": false,
+  "equipment_trigger": "unique registered active equipment decoded from camera pixels under explicit camera-equipment source policy",
+  "manual_scan_required": false,
+  "repeated_same_equipment": "presence evidence; never an end toggle",
+  "equipment_switch": "new operation phase, not whole-experiment completion",
+  "operation_boundaries": "QR and source-pinned reviewed oral stage anchors; missing or ambiguous anchor stays explicit",
+  "sender_packet_boundary_ends_operation": false,
+  "unbound_activity": "independent experimental/value/unknown classification; speech or static pixels alone are insufficient",
+  "model_context": "bounded historical prior and contemporaneous ASR/OCR/source-QR evidence in actual model input; source and knowledge clocks pinned",
+  "current_input_dependencies": "wait for already submitted overlapping, calibrated, same-camera ASR/OCR/QR tasks; missing channels not fabricated",
+  "daily_report": "versioned database projection with evidence references; prior reports are derived history, never new physical actions",
+  "panel_assignment_from_current_equipment": false,
+  "material_visibility_is_usage": false,
+  "automatic_inventory_debit": false,
+  "physical_field_acceptance": "NOT_PROVEN",
+  "production_archive_switch": false
+}
