@@ -62,6 +62,10 @@ def test_late_explicit_role_releases_pipeline_with_unchanged_stt_and_originals(c
     assert models.vision_calls == models.semantic_calls == models.stt_calls == 1
     assert runner._receipt(layout, fresh, 'input-stt').read_bytes() == old_stt_seal
     assert runner._receipt(layout, fresh, 'stt').read_bytes() == old_stt
+    from visioncortex.publication_journal import revalidate_remounted_seals
+    assert revalidate_remounted_seals(runner, fresh) == 0
+    assert runner._receipt(layout, fresh, 'input-stt').read_bytes() == old_stt_seal
+    assert runner._receipt(layout, fresh, 'stt').read_bytes() == old_stt
     from visioncortex.input_availability import IntegrityMonitor, revalidated_input_seals
     with revalidated_input_seals(runner, fresh) as proof:
         assert proof['verified_seals'] == 2 and proof['changed_seals'] == []
@@ -109,5 +113,8 @@ def test_role_supplement_rejects_known_view_change_or_unproven_source(config, ch
     current = DeviceDayRunner(config, models)
     result = current.process(fresh, stage='vision')
     assert result['status'] == 'failed' and result['error_type'] == 'InputChanged'
+    from visioncortex.publication_journal import revalidate_remounted_seals
+    with pytest.raises(ValueError):
+        revalidate_remounted_seals(current, fresh)
     assert all(path.read_bytes() == prior for path, prior in before.items())
     assert models.vision_calls == models.semantic_calls == 0
