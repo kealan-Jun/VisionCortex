@@ -1,0 +1,42 @@
+{
+  "schema_version": "vc-lab-automatic-readout-rules/1",
+  "revision": "20261027.1",
+  "enabled_by_default": false,
+  "activation": "explicit_local_ocr_provider_with_pinned_profile_and_reference_images",
+  "research_profiles_allowed_for_customer": false,
+  "appearance_assigns_physical_instrument": false,
+  "automatic_instrument_identity": "unique_capture_time_registered_instrument_qr_in_profile_attached_qr_region",
+  "registration": {
+    "algorithm": "stable_feature_homography",
+    "dynamic_readings_and_qr_excluded_from_template_features": true,
+    "minimum_inliers": 12,
+    "minimum_inlier_ratio": 0.5,
+    "minimum_template_hull_coverage": 0.15,
+    "minimum_occupied_quadrants": 3,
+    "competing_profile_score_margin": 0.12,
+    "maximum_image_pixels": 16000000,
+    "maximum_profiles": 32,
+    "maximum_fields_per_profile": 128,
+    "no_unique_match": "unmapped_raw_ocr_fallback"
+  },
+  "numeric_fields": {
+    "units_and_fixed_display_precision_require_explicit_basis": true,
+    "never_insert_decimal_or_convert_units": true,
+    "led_undotted_integer_without_verified_display_precision": "needs_review",
+    "cross_view_numeric_disagreement": "needs_review_including_rejected_view_tentative_numbers",
+    "absence_of_detected_decimal_is_not_proof_of_integer": true,
+    "minimum_native_field_height_pixels": 12,
+    "upsampling_adds_no_evidence": true,
+    "automatic_evidence_budget_bytes": 3145728
+  },
+  "gauge": {
+    "needle_algorithm": "radial_continuity_long_tip_with_competing_direction_rejection",
+    "needle_candidate_is_not_manually_verified_geometry": true,
+    "verified_instrument_calibration_required_for_value": true,
+    "maximum_axis_separation_fraction_of_needle_reach": 0.01,
+    "no_verified_calibration": "retain_needle_candidate_without_pressure_value",
+    "no_pressure_reference_conversion_or_physical_completion_inference": true
+  },
+  "customer_accuracy": "NOT_PROVEN",
+  "raw_evidence_and_existing_component_bytes_unchanged": true
+}

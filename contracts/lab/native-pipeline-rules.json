@@ -1,0 +1,31 @@
+{
+  "schema_version": "vc-lab-native-pipeline-rules/1",
+  "source_sha256": "7f88c7a72c5f48ae0bb178c92e17835d4537db979e08e8ee3517f8ecceacea43",
+  "settings": {
+    "device_day": {
+      "readable_content_enabled": false,
+      "understanding_coverage_since_us": 1,
+      "experiment_steps_since_us": 1,
+      "understanding_frames_per_request": 48,
+      "understanding_window_seconds": 30,
+      "inactive_sample_seconds": 1,
+      "understanding_requests_per_turn": 1,
+      "understanding_active_fps": 4,
+      "understanding_event_fps": 10,
+      "understanding_inactive_window_limit": 64,
+      "derived_video_retention": true,
+      "day_synthesis": {
+        "enabled": true,
+        "minimum_update_seconds": 60,
+        "retry_output_tokens": 32768
+      }
+    }
+  },
+  "operational_bindings_excluded": [
+    "old_queues",
+    "old_start_dates",
+    "old_credentials",
+    "old_completed_receipt_bindings",
+    "old_storage_paths"
+  ]
+}

@@ -1,89 +1,102 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="360" viewBox="0 0 1280 360" role="img" aria-labelledby="title description">
-  <title id="title">VisionCortex — multi-view wet-lab video, traceable evidence</title>
-  <desc id="description">A dark blue banner with the VisionCortex wordmark. Three abstract camera views converge on a shared timeline and connect to an evidence document.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="440" viewBox="0 0 1440 440" role="img" aria-labelledby="title description">
+  <title id="title">VisionCortex — Visual evidence. Connected.</title>
+  <desc id="description">Video, display readings, identity events and oral comments join a shared time axis, then connect to an inspectable evidence record. An abstract illustration, with no real device identities or data.</desc>
   <defs>
-    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#122b38"/>
-      <stop offset="1" stop-color="#091b29"/>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#0b1728"/>
+      <stop offset="1" stop-color="#162e40"/>
     </linearGradient>
-    <linearGradient id="flow" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="#4d9db5"/>
-      <stop offset="1" stop-color="#64d4bf"/>
+    <radialGradient id="glow" cx=".82" cy=".47" r=".6">
+      <stop stop-color="#63d9bf" stop-opacity=".09"/>
+      <stop offset="1" stop-color="#63d9bf" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="wire" x1="0" y1="0" x2="1" y2="0">
+      <stop stop-color="#46667f"/>
+      <stop offset="1" stop-color="#82ddc5"/>
     </linearGradient>
-    <pattern id="grid" width="28" height="28" patternUnits="userSpaceOnUse">
-      <circle cx="1" cy="1" r="1" fill="#92b7c7" opacity=".12"/>
+    <pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse">
+      <circle cx="1" cy="1" r=".8" fill="#c3dbed" opacity=".1"/>
     </pattern>
   </defs>
 
-  <rect width="1280" height="360" rx="20" fill="url(#background)"/>
-  <rect x="710" y="28" width="542" height="304" fill="url(#grid)"/>
-  <path d="M712 44v272" stroke="#356073" stroke-opacity=".45"/>
+  <rect width="1440" height="440" rx="24" fill="url(#bg)"/>
+  <rect width="1440" height="440" rx="24" fill="url(#glow)"/>
+  <rect x="704" y="32" width="704" height="376" fill="url(#grid)"/>
+  <rect x=".5" y=".5" width="1439" height="439" rx="23.5" fill="none" stroke="#6b8ba5" stroke-opacity=".2"/>
 
   <g font-family="Inter, Segoe UI, Arial, sans-serif">
-    <rect x="64" y="60" width="28" height="4" rx="2" fill="#64d4bf"/>
-    <text x="106" y="70" fill="#91b7c8" font-size="16" font-weight="600" letter-spacing="2.4">FROM VIDEO TO EVIDENCE</text>
-    <text x="60" y="158" fill="#f3f9fc" font-size="72" font-weight="700" letter-spacing="-2.6">VisionCortex</text>
-    <text x="64" y="208" fill="#c0d3de" font-size="24">Multi-view wet-lab video.</text>
-    <text x="64" y="243" fill="#c0d3de" font-size="24">Traceable evidence, connected in time.</text>
+    <rect x="64" y="56" width="30" height="3" rx="1.5" fill="#88e3c6"/>
+    <text x="109" y="63" fill="#a5bdce" font-size="13" font-weight="600" letter-spacing="3">VISUAL EVIDENCE. CONNECTED.</text>
+    <text x="59" y="166" fill="#f2f6f7" font-size="78" font-weight="650" letter-spacing="-3.6">VisionCortex</text>
+    <text x="64" y="225" fill="#cee0e8" font-size="26" font-weight="400">One timeline.</text>
+    <text x="64" y="262" fill="#cee0e8" font-size="26" font-weight="400">Every observation in context.</text>
 
-    <g fill="#96b7c7" font-size="17">
-      <circle cx="68" cy="302" r="4" fill="#64d4bf"/>
-      <text x="84" y="308">Observe</text>
-      <path d="M188 294v17" stroke="#426374"/>
-      <circle cx="220" cy="302" r="4" fill="#64d4bf"/>
-      <text x="236" y="308">Align</text>
-      <path d="M310 294v17" stroke="#426374"/>
-      <circle cx="342" cy="302" r="4" fill="#64d4bf"/>
-      <text x="358" y="308">Review</text>
+    <path d="M64 310h544" stroke="#829fb4" stroke-opacity=".22"/>
+    <g fill="#92afc2" font-size="13" font-weight="500" letter-spacing="1.6">
+      <text x="64" y="347">VIDEO</text>
+      <text x="149" y="347">OCR</text>
+      <text x="215" y="347">QR</text>
+      <text x="270" y="347">COMMENT</text>
+      <text x="397" y="347">BATCH</text>
     </g>
+    <text x="64" y="384" fill="#607e96" font-size="12" letter-spacing=".6">Observe / Associate / Trace</text>
   </g>
 
-  <!-- Three viewpoints converge on a common time axis. -->
-  <g fill="none" stroke="url(#flow)" stroke-width="2" stroke-linecap="round">
-    <path d="M852 93h30c57 0 29 87 86 87h22" opacity=".7"/>
-    <path d="M852 180h138"/>
-    <path d="M852 267h30c57 0 29-87 86-87h22" opacity=".7"/>
-    <path d="M1034 180h42"/>
+  <!-- Abstract source cards: no payloads, model output or field data. -->
+  <g fill="#172d40" stroke="#36516a" stroke-width="1.25">
+    <rect x="752" y="60" width="162" height="82" rx="12"/>
+    <rect x="752" y="175" width="162" height="82" rx="12"/>
+    <rect x="752" y="290" width="162" height="82" rx="12"/>
+  </g>
+  <g font-family="Inter, Segoe UI, Arial, sans-serif" fill="#93b1c6" font-size="10" font-weight="600" letter-spacing="1.6">
+    <text x="771" y="81">VISUAL</text>
+    <text x="771" y="196">IDENTITY</text>
+    <text x="771" y="311">COMMENT</text>
+  </g>
+  <g fill="none" stroke="#9abbd0" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="772" y="95" width="39" height="27" rx="4"/>
+    <path d="m811 103 12-6v23l-12-6"/>
+    <path d="M841 102h50 M841 114h32" opacity=".65"/>
+    <!-- Open corner marks suggest a scan without encoding an actual QR. -->
+    <path d="M773 225v-12h12 M805 213h12v12 M817 235v5h-12 M785 240h-12v-5"/>
+    <path d="M786 221h19 M786 231h11 M841 220h50 M841 232h32" opacity=".65"/>
+    <path d="M773 336h5l4-7 5 21 5-29 5 35 5-20 4 8h5 M841 332h50 M841 344h32"/>
   </g>
 
-  <g stroke="#467489" stroke-width="1.5">
-    <rect x="756" y="60" width="96" height="66" rx="10" fill="#183746"/>
-    <rect x="756" y="147" width="96" height="66" rx="10" fill="#183746"/>
-    <rect x="756" y="234" width="96" height="66" rx="10" fill="#183746"/>
+  <g fill="none" stroke="url(#wire)" stroke-width="1.6">
+    <path d="M914 101h28c40 0 23 115 65 115h21"/>
+    <path d="M914 216h114"/>
+    <path d="M914 331h28c40 0 23-115 65-115h21"/>
+    <path d="M1068 216h52"/>
   </g>
-  <g fill="none" stroke="#89c6d0" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M779 82h27v22h-27z M806 88l13-6v22l-13-6"/>
-    <path d="M779 169h27v22h-27z M806 175l13-6v22l-13-6"/>
-    <path d="M779 256h27v22h-27z M806 262l13-6v22l-13-6"/>
-  </g>
-  <g fill="#64d4bf">
-    <circle cx="838" cy="74" r="3"/>
-    <circle cx="838" cy="161" r="3"/>
-    <circle cx="838" cy="248" r="3"/>
+  <rect x="1028" y="116" width="40" height="200" rx="20" fill="#183b45" stroke="#538c8c"/>
+  <path d="M1048 139v154" stroke="#6ab8aa" stroke-opacity=".45"/>
+  <g fill="#91e1c6" stroke="#183b45" stroke-width="4">
+    <circle cx="1048" cy="159" r="6"/>
+    <circle cx="1048" cy="216" r="8"/>
+    <circle cx="1048" cy="273" r="6"/>
   </g>
 
-  <rect x="990" y="111" width="44" height="138" rx="12" fill="#153b48" stroke="#548e9b" stroke-width="1.5"/>
-  <path d="M1012 129v102" fill="none" stroke="#478292" stroke-width="2"/>
-  <g fill="#64d4bf" stroke="#153b48" stroke-width="4">
-    <circle cx="1012" cy="142" r="7"/>
-    <circle cx="1012" cy="180" r="7"/>
-    <circle cx="1012" cy="218" r="7"/>
+  <!-- A document represents provenance, not a quality score. -->
+  <rect x="1120" y="106" width="240" height="220" rx="16" fill="#1b3445" stroke="#4b6c80" stroke-width="1.25"/>
+  <path d="M1120 153h240" stroke="#4b6c80" stroke-opacity=".6"/>
+  <g font-family="Inter, Segoe UI, Arial, sans-serif">
+    <text x="1141" y="134" fill="#dce8ec" font-size="12" font-weight="600" letter-spacing="1.8">EVIDENCE RECORD</text>
+    <text x="1141" y="182" fill="#92b2c6" font-size="10" letter-spacing="1.3">SOURCE</text>
+    <text x="1141" y="223" fill="#92b2c6" font-size="10" letter-spacing="1.3">TIME</text>
+    <text x="1141" y="264" fill="#92b2c6" font-size="10" letter-spacing="1.3">CONTEXT</text>
   </g>
-
-  <!-- The document represents inspectable evidence, rather than a quality score. -->
-  <rect x="1076" y="104" width="136" height="152" rx="14" fill="#193c49" stroke="#548e9b" stroke-width="1.5"/>
-  <path d="M1097 128h34 M1097 139h18" stroke="#a9d7db" stroke-width="3" stroke-linecap="round"/>
-  <g fill="#28576a">
-    <rect x="1097" y="160" width="31" height="30" rx="4"/>
-    <rect x="1133" y="160" width="31" height="30" rx="4"/>
-    <rect x="1169" y="160" width="22" height="30" rx="4"/>
+  <g fill="none" stroke-linecap="round">
+    <path d="M1141 193h157 M1141 234h91 M1141 275h132" stroke="#a0b8c7" stroke-width="3" opacity=".55"/>
+    <path d="M1141 301h199" stroke="#4b6c80"/>
   </g>
-  <g fill="none" stroke="#7fc0cb" stroke-width="2" stroke-linecap="round">
-    <path d="M1103 182l8-10 11 10 M1139 182l9-13 10 13 M1175 182l5-8 5 8"/>
-    <path d="M1097 210h94 M1097 224h68 M1097 238h82" opacity=".7"/>
+  <g fill="#91e1c6">
+    <circle cx="1329" cy="180" r="3"/>
+    <circle cx="1329" cy="221" r="3"/>
+    <circle cx="1329" cy="262" r="3"/>
   </g>
-  <g font-family="Inter, Segoe UI, Arial, sans-serif" fill="#96b7c7" font-size="16" text-anchor="middle">
-    <text x="1012" y="284">Timeline</text>
-    <text x="1144" y="284">Evidence</text>
+  <g font-family="Inter, Segoe UI, Arial, sans-serif" fill="#7f9eb3" font-size="11" letter-spacing="1.4" text-anchor="middle">
+    <text x="1048" y="359">TIME</text>
+    <text x="1240" y="359">PROVENANCE</text>
   </g>
 </svg>

@@ -1,0 +1,22 @@
+{
+  "schema_version": "vc-lab-complete-clip-rules/1",
+  "revision": "20261027.1",
+  "opt_in_policy": "vc-lab-timeline-policy/2",
+  "video_input_unit": "one_registered_complete_retained_clip",
+  "raw_sender_packets_are_not_retained_clips": true,
+  "sampling": false,
+  "resize": false,
+  "padding": "black_bottom_right_to_checkpoint_patch_stride_only",
+  "padding_validation": "all_decoded_original_pixels_equal_after_removing_black_padding",
+  "capacity_exceeded": "needs_attention_without_repeated_identical_requests",
+  "maximum_input_payload_bytes": 67108864,
+  "source_mapping": "immutable_customer_scoped_source_intervals_and_versions",
+  "unrecorded_gaps_may_be_concatenated": false,
+  "prior_context": "bounded_evidence_references_for_same_explicit_experiment_only",
+  "context_can_be_recorded_as_new_current_observation": false,
+  "timing": "actual_attempt_and_stage_clocks; overlapping_stages_not_summed_as_wall_time",
+  "nightly_acceptance": "complete_combined_device_batch_and_quality_before_next_shift",
+  "day_eta_from_tiny_or_incomplete_sample": null,
+  "default_customer_activation": false,
+  "customer_accuracy": "NOT_PROVEN"
+}

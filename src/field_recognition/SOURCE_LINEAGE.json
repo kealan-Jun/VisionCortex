@@ -1,0 +1,845 @@
+{
+  "schema_version": "vc-lab-source-lineage/1",
+  "owner_package": "field_recognition",
+  "source_kind": "verified_vendored_python_source",
+  "excluded": [
+    "standalone_app",
+    "private_configuration",
+    "production_data",
+    "documentation",
+    "models",
+    "web_assets"
+  ],
+  "files": [
+    {
+      "path": "src/field_recognition/__init__.py",
+      "upstream_path": "field_recognition/__init__.py",
+      "upstream_sha256": "295c68764384dbe3a7dd0cc4e3e13e0435759949f46219c6516420043bd0d4f5",
+      "sha256": "295c68764384dbe3a7dd0cc4e3e13e0435759949f46219c6516420043bd0d4f5",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/__main__.py",
+      "upstream_path": "field_recognition/__main__.py",
+      "upstream_sha256": "628ad2f3f5d5cf8ad1846d8bb0366ffbfbe849c0d6be938feb31268a4bb777ef",
+      "sha256": "628ad2f3f5d5cf8ad1846d8bb0366ffbfbe849c0d6be938feb31268a4bb777ef",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/api/__init__.py",
+      "upstream_path": "field_recognition/api/__init__.py",
+      "upstream_sha256": "3ad662f648a118bf95d62a32942989e76c23df31b501cc7b943824d9c05b030a",
+      "sha256": "3ad662f648a118bf95d62a32942989e76c23df31b501cc7b943824d9c05b030a",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/api/agent_client.py",
+      "upstream_path": "field_recognition/api/agent_client.py",
+      "upstream_sha256": "d688a0b394ff6cf37d923419dd237cdfc5ad3767cb5e663cb8726d5324bc0edb",
+      "sha256": "d688a0b394ff6cf37d923419dd237cdfc5ad3767cb5e663cb8726d5324bc0edb",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/api/agent_tools.py",
+      "upstream_path": "field_recognition/api/agent_tools.py",
+      "upstream_sha256": "50e69b96004e06682d1e4a5bbd257f7f0dc8bc5c8562737dbb31f3b32940c6af",
+      "sha256": "50e69b96004e06682d1e4a5bbd257f7f0dc8bc5c8562737dbb31f3b32940c6af",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/api/api_v1.py",
+      "upstream_path": "field_recognition/api/api_v1.py",
+      "upstream_sha256": "064b03edaf5e3ef1de9511201b01ba486c494fa03ad7ea5c2e6ee70dc7368d86",
+      "sha256": "064b03edaf5e3ef1de9511201b01ba486c494fa03ad7ea5c2e6ee70dc7368d86",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/api/application.py",
+      "upstream_path": "field_recognition/api/application.py",
+      "upstream_sha256": "e4f46c5ecebef1a16bb8067f7df85032d7e589f54887768447ffa1d63feca685",
+      "sha256": "e4f46c5ecebef1a16bb8067f7df85032d7e589f54887768447ffa1d63feca685",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/api/bindings_routes.py",
+      "upstream_path": "field_recognition/api/bindings_routes.py",
+      "upstream_sha256": "7b8f2aea47b84b837abb0d90012e821d856c22b63d6fb3de64b773396dbc28c8",
+      "sha256": "7b8f2aea47b84b837abb0d90012e821d856c22b63d6fb3de64b773396dbc28c8",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/api/catalog.py",
+      "upstream_path": "field_recognition/api/catalog.py",
+      "upstream_sha256": "1e5716283174de6cb02aef5edbf2e869c869e077667e0d37431b39757d00d64c",
+      "sha256": "1e5716283174de6cb02aef5edbf2e869c869e077667e0d37431b39757d00d64c",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/api/dashboard.py",
+      "upstream_path": "field_recognition/api/dashboard.py",
+      "upstream_sha256": "d85d0bc03b581a83e26349ec1ebf2eb3cac64efd4a3480422835eefbed13a79b",
+      "sha256": "d85d0bc03b581a83e26349ec1ebf2eb3cac64efd4a3480422835eefbed13a79b",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/api/measurements_routes.py",
+      "upstream_path": "field_recognition/api/measurements_routes.py",
+      "upstream_sha256": "7b83468ed633b3c96c1f41db5f8d4cf72df2775355bf1c5cdda16b08cd475111",
+      "sha256": "7b83468ed633b3c96c1f41db5f8d4cf72df2775355bf1c5cdda16b08cd475111",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/api/models.py",
+      "upstream_path": "field_recognition/api/models.py",
+      "upstream_sha256": "d6de65aa27660687d8964329abbd95228adeb1b96322687a0951d3ee31ea039c",
+      "sha256": "d6de65aa27660687d8964329abbd95228adeb1b96322687a0951d3ee31ea039c",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/api/production_routes.py",
+      "upstream_path": "field_recognition/api/production_routes.py",
+      "upstream_sha256": "733f40f26f9d3f9a2e7b43ae85bea4d16516ea6d825dd8fde53c50f040001793",
+      "sha256": "733f40f26f9d3f9a2e7b43ae85bea4d16516ea6d825dd8fde53c50f040001793",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/api/readouts.py",
+      "upstream_path": "field_recognition/api/readouts.py",
+      "upstream_sha256": "aad33999bc945d6c31f5b98e2a3f4a9d041543d968b0ac9087276151a553543f",
+      "sha256": "aad33999bc945d6c31f5b98e2a3f4a9d041543d968b0ac9087276151a553543f",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/api/security.py",
+      "upstream_path": "field_recognition/api/security.py",
+      "upstream_sha256": "bf373118be1069709ba60102ffef7b7334010b6d53ab44ce7a723c56068492c4",
+      "sha256": "bf373118be1069709ba60102ffef7b7334010b6d53ab44ce7a723c56068492c4",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/archive/__init__.py",
+      "upstream_path": "field_recognition/archive/__init__.py",
+      "upstream_sha256": "2320e06fccff3bc328eb2edee8275d1af0f01e5db42ca6a213ac09c9b2bc708f",
+      "sha256": "2320e06fccff3bc328eb2edee8275d1af0f01e5db42ca6a213ac09c9b2bc708f",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/archive/archive_browse.py",
+      "upstream_path": "field_recognition/archive/archive_browse.py",
+      "upstream_sha256": "ab7e3bf672e7ae00751d7e75715d54781c666a0cc6c875ffd591b0fc576bd4a3",
+      "sha256": "ab7e3bf672e7ae00751d7e75715d54781c666a0cc6c875ffd591b0fc576bd4a3",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/archive/archive_catalog.py",
+      "upstream_path": "field_recognition/archive/archive_catalog.py",
+      "upstream_sha256": "1f3d31318c9136ca1cf90e2228e596fc625199dfd04509b5bccfddc39b9ae1a1",
+      "sha256": "1f3d31318c9136ca1cf90e2228e596fc625199dfd04509b5bccfddc39b9ae1a1",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/archive/archive_events.py",
+      "upstream_path": "field_recognition/archive/archive_events.py",
+      "upstream_sha256": "3915d17d7e18bfeeeca652d9abb667ed9168fe4fb796465e84846ab8a57e680c",
+      "sha256": "3915d17d7e18bfeeeca652d9abb667ed9168fe4fb796465e84846ab8a57e680c",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/archive/archive_integrity.py",
+      "upstream_path": "field_recognition/archive/archive_integrity.py",
+      "upstream_sha256": "6af2f5109442341fe20e4399581a4dba83e270de80219c1d34a28aa319c0c4e9",
+      "sha256": "6af2f5109442341fe20e4399581a4dba83e270de80219c1d34a28aa319c0c4e9",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/archive/archive_layout.py",
+      "upstream_path": "field_recognition/archive/archive_layout.py",
+      "upstream_sha256": "9d4e8dbd598f82e0da69516534228b848848cd62e637db610d43c7fe855dfc36",
+      "sha256": "9d4e8dbd598f82e0da69516534228b848848cd62e637db610d43c7fe855dfc36",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/archive/archive_manager.py",
+      "upstream_path": "field_recognition/archive/archive_manager.py",
+      "upstream_sha256": "a33e8eb9e5f23aa55a76ccfa715720953106c91fded057f25fcff0d6860620bb",
+      "sha256": "a33e8eb9e5f23aa55a76ccfa715720953106c91fded057f25fcff0d6860620bb",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/archive/archive_migration.py",
+      "upstream_path": "field_recognition/archive/archive_migration.py",
+      "upstream_sha256": "58e5a7c7315123990d99dfb1753abaffa52f514e7aba072f1a8406c2bbd1d07a",
+      "sha256": "58e5a7c7315123990d99dfb1753abaffa52f514e7aba072f1a8406c2bbd1d07a",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/archive/archive_paths.py",
+      "upstream_path": "field_recognition/archive/archive_paths.py",
+      "upstream_sha256": "5beadbb4a8fa3631be66740c6367d1cacd30d0bfc1fbeb1e8aaf8974e937cc50",
+      "sha256": "5beadbb4a8fa3631be66740c6367d1cacd30d0bfc1fbeb1e8aaf8974e937cc50",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/archive/archive_progress.py",
+      "upstream_path": "field_recognition/archive/archive_progress.py",
+      "upstream_sha256": "5cf39bc619692271090565a11b3eeec91df219fc63e1e20110757f21acd15d85",
+      "sha256": "5cf39bc619692271090565a11b3eeec91df219fc63e1e20110757f21acd15d85",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/archive/archive_readable.py",
+      "upstream_path": "field_recognition/archive/archive_readable.py",
+      "upstream_sha256": "b6bfb4bba88ff00847c24f05e80d98289365a2ff7842ade92979964bc7c02c37",
+      "sha256": "b6bfb4bba88ff00847c24f05e80d98289365a2ff7842ade92979964bc7c02c37",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/archive/archive_recovery.py",
+      "upstream_path": "field_recognition/archive/archive_recovery.py",
+      "upstream_sha256": "d0ed8c61d3a729d7e1b5c5b3f377da10906922a031c6736ff1f1a55bfbf07866",
+      "sha256": "d0ed8c61d3a729d7e1b5c5b3f377da10906922a031c6736ff1f1a55bfbf07866",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/archive/archive_store.py",
+      "upstream_path": "field_recognition/archive/archive_store.py",
+      "upstream_sha256": "d23fb71eb97393d101633b5b804f11018ad2c8e203e762dec3fae4c042f3cbd6",
+      "sha256": "d23fb71eb97393d101633b5b804f11018ad2c8e203e762dec3fae4c042f3cbd6",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/archive/source_layout.py",
+      "upstream_path": "field_recognition/archive/source_layout.py",
+      "upstream_sha256": "0c3bcdd2cbbe6aa78d3f1210205be2ce0e24c2dee659675a175f500678baf2c8",
+      "sha256": "0c3bcdd2cbbe6aa78d3f1210205be2ce0e24c2dee659675a175f500678baf2c8",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/bindings/__init__.py",
+      "upstream_path": "field_recognition/bindings/__init__.py",
+      "upstream_sha256": "cc340c4ab6b39484a83a81941a5f97c58640e67f5154bd28a890c53c018f9920",
+      "sha256": "cc340c4ab6b39484a83a81941a5f97c58640e67f5154bd28a890c53c018f9920",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/bindings/binding_actions.py",
+      "upstream_path": "field_recognition/bindings/binding_actions.py",
+      "upstream_sha256": "0b2e89c4d92bf1e94a8f5ced92da52d75b4e2a4418aa31245f557cad9dcb3a45",
+      "sha256": "0b2e89c4d92bf1e94a8f5ced92da52d75b4e2a4418aa31245f557cad9dcb3a45",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/bindings/binding_operator.py",
+      "upstream_path": "field_recognition/bindings/binding_operator.py",
+      "upstream_sha256": "200bc56c8468dc566ee7d45090fbb6e074e31cb2bbb0a3521f658cb6ff57507d",
+      "sha256": "200bc56c8468dc566ee7d45090fbb6e074e31cb2bbb0a3521f658cb6ff57507d",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/bindings/binding_policy.py",
+      "upstream_path": "field_recognition/bindings/binding_policy.py",
+      "upstream_sha256": "79154b5ca75df1719a4726217bf8ea54c2cdbcd63139ad35f10b7de7997c42c8",
+      "sha256": "79154b5ca75df1719a4726217bf8ea54c2cdbcd63139ad35f10b7de7997c42c8",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/bindings/camera_registry.py",
+      "upstream_path": "field_recognition/bindings/camera_registry.py",
+      "upstream_sha256": "3de85c89e7d6065803f803e62c08244aaf00a1e9283ff09940f0111b3d857f55",
+      "sha256": "3de85c89e7d6065803f803e62c08244aaf00a1e9283ff09940f0111b3d857f55",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/bindings/handoff_actions.py",
+      "upstream_path": "field_recognition/bindings/handoff_actions.py",
+      "upstream_sha256": "aafa365dcf14ae1ee3276182a84f29f4118e6d8eefd151e57587da93a9208cdd",
+      "sha256": "aafa365dcf14ae1ee3276182a84f29f4118e6d8eefd151e57587da93a9208cdd",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/bindings/handoff_service.py",
+      "upstream_path": "field_recognition/bindings/handoff_service.py",
+      "upstream_sha256": "6647c4a8423b6e9ff588e49e8778e55af2a766482e0e4c3116a564aee8d57ec7",
+      "sha256": "6647c4a8423b6e9ff588e49e8778e55af2a766482e0e4c3116a564aee8d57ec7",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/bindings/instrument_config.py",
+      "upstream_path": "field_recognition/bindings/instrument_config.py",
+      "upstream_sha256": "8ee1e69d5a753c61243d1c3ee699e9074213557065fa69b4cbe2220858dad527",
+      "sha256": "8ee1e69d5a753c61243d1c3ee699e9074213557065fa69b4cbe2220858dad527",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/bindings/instrument_ownership.py",
+      "upstream_path": "field_recognition/bindings/instrument_ownership.py",
+      "upstream_sha256": "52d53cc4b437ed8c9eb6fc7dd8ccf85c0b7f5acbe48d3d2eff3ace9eda3d6281",
+      "sha256": "52d53cc4b437ed8c9eb6fc7dd8ccf85c0b7f5acbe48d3d2eff3ace9eda3d6281",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/bindings/scene_binding.py",
+      "upstream_path": "field_recognition/bindings/scene_binding.py",
+      "upstream_sha256": "00476c6b602ec176ffc78bb0f1bf2af21ea74c9ad6e45a26a63133fc848cc0b0",
+      "sha256": "00476c6b602ec176ffc78bb0f1bf2af21ea74c9ad6e45a26a63133fc848cc0b0",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/capture/__init__.py",
+      "upstream_path": "field_recognition/capture/__init__.py",
+      "upstream_sha256": "2dfe653ab0e8cf8642603792b8a521934f5b5223dc138c10c8f708b8d3c183b0",
+      "sha256": "2dfe653ab0e8cf8642603792b8a521934f5b5223dc138c10c8f708b8d3c183b0",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/capture/automation.py",
+      "upstream_path": "field_recognition/capture/automation.py",
+      "upstream_sha256": "253341143a970cea0fd1b242c3a2b6e4ad168ac2956150f57bd030c77f495728",
+      "sha256": "253341143a970cea0fd1b242c3a2b6e4ad168ac2956150f57bd030c77f495728",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/capture/capture_actions.py",
+      "upstream_path": "field_recognition/capture/capture_actions.py",
+      "upstream_sha256": "583b92f1f10fc4e4cfcbaf107e6f9ead29f264daff5069d87e51538ff3136d16",
+      "sha256": "583b92f1f10fc4e4cfcbaf107e6f9ead29f264daff5069d87e51538ff3136d16",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/capture/capture_adapter.py",
+      "upstream_path": "field_recognition/capture/capture_adapter.py",
+      "upstream_sha256": "7b0c85be29bd929a66021bf63dbbf9d1dc89f56742ed4e9a6913cea604166b67",
+      "sha256": "7b0c85be29bd929a66021bf63dbbf9d1dc89f56742ed4e9a6913cea604166b67",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/capture/live_scan.py",
+      "upstream_path": "field_recognition/capture/live_scan.py",
+      "upstream_sha256": "650707cec73223eaedc0b55c9633c179be93cd900002a8ad27830fb647d5a3d9",
+      "sha256": "650707cec73223eaedc0b55c9633c179be93cd900002a8ad27830fb647d5a3d9",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/capture/photo_sources.py",
+      "upstream_path": "field_recognition/capture/photo_sources.py",
+      "upstream_sha256": "567d807cc8f229c423307839b65a9f2b0b4ffc31aecb43713e8fcf3a56c0c4b6",
+      "sha256": "567d807cc8f229c423307839b65a9f2b0b4ffc31aecb43713e8fcf3a56c0c4b6",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/capture/photo_watch.py",
+      "upstream_path": "field_recognition/capture/photo_watch.py",
+      "upstream_sha256": "1375ff501ac2acf71345b0bc2f4a9d06cccc6cfc03b5575869969922e01ecd55",
+      "sha256": "1375ff501ac2acf71345b0bc2f4a9d06cccc6cfc03b5575869969922e01ecd55",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/capture/qr_decode.py",
+      "upstream_path": "field_recognition/capture/qr_decode.py",
+      "upstream_sha256": "b8d65a217c124950f82b77c3dbf76e83d5ab7eef436e22c648fcc3993b18f2d5",
+      "sha256": "b8d65a217c124950f82b77c3dbf76e83d5ab7eef436e22c648fcc3993b18f2d5",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/capture/receiver.py",
+      "upstream_path": "field_recognition/capture/receiver.py",
+      "upstream_sha256": "2860dd9c4fe809e2f9bb9bad08aa4d9f4f7f6d7b3565df304eff6365f39de341",
+      "sha256": "2860dd9c4fe809e2f9bb9bad08aa4d9f4f7f6d7b3565df304eff6365f39de341",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/capture/recognition_preview.py",
+      "upstream_path": "field_recognition/capture/recognition_preview.py",
+      "upstream_sha256": "d0923756ac948510ca9b1b1b6cd0c3159c58a9d4a12fad022e0f08703c8a0ee2",
+      "sha256": "d0923756ac948510ca9b1b1b6cd0c3159c58a9d4a12fad022e0f08703c8a0ee2",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/capture/saved_photo.py",
+      "upstream_path": "field_recognition/capture/saved_photo.py",
+      "upstream_sha256": "7860d8a8903c2ec2fc034dd0cac7056d18f3b07cebacd85e1d29674d7b5cc1a3",
+      "sha256": "7860d8a8903c2ec2fc034dd0cac7056d18f3b07cebacd85e1d29674d7b5cc1a3",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/capture/video_ocr.py",
+      "upstream_path": "field_recognition/capture/video_ocr.py",
+      "upstream_sha256": "5112988d8edca80b201d473bf0437a180abba282f808986f3d13bd480681ea4a",
+      "sha256": "5112988d8edca80b201d473bf0437a180abba282f808986f3d13bd480681ea4a",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/measurements/__init__.py",
+      "upstream_path": "field_recognition/measurements/__init__.py",
+      "upstream_sha256": "42ffc79950cf72b2383c8bf77a3014e3180861030a27f39e64ce23f1083c3ff9",
+      "sha256": "42ffc79950cf72b2383c8bf77a3014e3180861030a27f39e64ce23f1083c3ff9",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/measurements/activity.py",
+      "upstream_path": "field_recognition/measurements/activity.py",
+      "upstream_sha256": "8462a479da47fa3f3fe26b5885e42fe38a40259807a5eca36f1c88f05d2266dd",
+      "sha256": "8462a479da47fa3f3fe26b5885e42fe38a40259807a5eca36f1c88f05d2266dd",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/measurements/event_feed.py",
+      "upstream_path": "field_recognition/measurements/event_feed.py",
+      "upstream_sha256": "41adcd4f2a4e38de587cfdbca17424d8c72a1167af8f527f75d94d1a9edd3dd9",
+      "sha256": "41adcd4f2a4e38de587cfdbca17424d8c72a1167af8f527f75d94d1a9edd3dd9",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/measurements/evidence_timeline.py",
+      "upstream_path": "field_recognition/measurements/evidence_timeline.py",
+      "upstream_sha256": "00301bbbd6716eb1285298d3fef799d02ec504c4a93d819212e49077972d74ee",
+      "sha256": "00301bbbd6716eb1285298d3fef799d02ec504c4a93d819212e49077972d74ee",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/measurements/history_records.py",
+      "upstream_path": "field_recognition/measurements/history_records.py",
+      "upstream_sha256": "d76ab67fa57012f74626c5818960249e8931db4414771ddeb8487afb2b0241c3",
+      "sha256": "d76ab67fa57012f74626c5818960249e8931db4414771ddeb8487afb2b0241c3",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/measurements/measurement_actions.py",
+      "upstream_path": "field_recognition/measurements/measurement_actions.py",
+      "upstream_sha256": "d8a8189c29f1d490fbf26e5eccb5d8c4cea717b718e80a2594f3c77b9a747aff",
+      "sha256": "d8a8189c29f1d490fbf26e5eccb5d8c4cea717b718e80a2594f3c77b9a747aff",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/measurements/measurement_records.py",
+      "upstream_path": "field_recognition/measurements/measurement_records.py",
+      "upstream_sha256": "edd405c4cf10fa2e45833416bc069dfe40dda9f207e2a8a5b53499144238f937",
+      "sha256": "edd405c4cf10fa2e45833416bc069dfe40dda9f207e2a8a5b53499144238f937",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/measurements/measurement_state.py",
+      "upstream_path": "field_recognition/measurements/measurement_state.py",
+      "upstream_sha256": "6514816763a4589a9b4cf7b9ffc8beb43b6d71d3fa455854916b15b768517e11",
+      "sha256": "6514816763a4589a9b4cf7b9ffc8beb43b6d71d3fa455854916b15b768517e11",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/measurements/panel_confirmation.py",
+      "upstream_path": "field_recognition/measurements/panel_confirmation.py",
+      "upstream_sha256": "4671042a8af13befef6e4f84424f790cf3067f3a436a6a0c057caafd6845329e",
+      "sha256": "4671042a8af13befef6e4f84424f790cf3067f3a436a6a0c057caafd6845329e",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/measurements/photo_experiment_context.py",
+      "upstream_path": "field_recognition/measurements/photo_experiment_context.py",
+      "upstream_sha256": "4cf9349d84c280b2f3d4ddd9d4248545ebae7fe509c66224b169bb11f37af5b8",
+      "sha256": "4cf9349d84c280b2f3d4ddd9d4248545ebae7fe509c66224b169bb11f37af5b8",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/measurements/photo_measurements.py",
+      "upstream_path": "field_recognition/measurements/photo_measurements.py",
+      "upstream_sha256": "474e6e31b76ba0ea733e3fe5d7e4e9238bb6c61dac6ec6958298c50ac5574ae9",
+      "sha256": "474e6e31b76ba0ea733e3fe5d7e4e9238bb6c61dac6ec6958298c50ac5574ae9",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/measurements/reading_results.py",
+      "upstream_path": "field_recognition/measurements/reading_results.py",
+      "upstream_sha256": "9bc984ee7c7e4fc38cca750693b82411d40831fb80ccc2835b48d2120f649451",
+      "sha256": "9bc984ee7c7e4fc38cca750693b82411d40831fb80ccc2835b48d2120f649451",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/measurements/readout_context.py",
+      "upstream_path": "field_recognition/measurements/readout_context.py",
+      "upstream_sha256": "918dfa22ca6a7d13a5b5df7b8f30e9dc44ae660b922284baaff9af3617785ae0",
+      "sha256": "918dfa22ca6a7d13a5b5df7b8f30e9dc44ae660b922284baaff9af3617785ae0",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/measurements/readout_rules.py",
+      "upstream_path": "field_recognition/measurements/readout_rules.py",
+      "upstream_sha256": "60f7e48edfc4ecbe3cc4481d605852f9f3192a67162366bdda3016a1ee2d76ab",
+      "sha256": "60f7e48edfc4ecbe3cc4481d605852f9f3192a67162366bdda3016a1ee2d76ab",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/measurements/readout_timing.py",
+      "upstream_path": "field_recognition/measurements/readout_timing.py",
+      "upstream_sha256": "e2ede1b5457808e698abf068dd88245b0e3fecc66401ee5ed7cca544ecc6e84e",
+      "sha256": "e2ede1b5457808e698abf068dd88245b0e3fecc66401ee5ed7cca544ecc6e84e",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/measurements/result_reprocessing.py",
+      "upstream_path": "field_recognition/measurements/result_reprocessing.py",
+      "upstream_sha256": "d4c0f1e2d53d6946263542b48aacb8830acd5fae7a184e534c0b7323d3fd92e8",
+      "sha256": "d4c0f1e2d53d6946263542b48aacb8830acd5fae7a184e534c0b7323d3fd92e8",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/measurements/workbench_records.py",
+      "upstream_path": "field_recognition/measurements/workbench_records.py",
+      "upstream_sha256": "8d2d8bd6745972ca406262f36c9bed1eb5d4fb276192abf1110af2a4cc881608",
+      "sha256": "8d2d8bd6745972ca406262f36c9bed1eb5d4fb276192abf1110af2a4cc881608",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/recognition/__init__.py",
+      "upstream_path": "field_recognition/recognition/__init__.py",
+      "upstream_sha256": "265609d33feff9d62ae9caaacbe5b30a27864fa1da91956a85d3b0cba079d1a9",
+      "sha256": "265609d33feff9d62ae9caaacbe5b30a27864fa1da91956a85d3b0cba079d1a9",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/recognition/aliyun_vision.py",
+      "upstream_path": "field_recognition/recognition/aliyun_vision.py",
+      "upstream_sha256": "18e55635e852b64db336be40b61ee2445580535506be538a80d79e3d85f63ca5",
+      "sha256": "18e55635e852b64db336be40b61ee2445580535506be538a80d79e3d85f63ca5",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/recognition/config.py",
+      "upstream_path": "field_recognition/recognition/config.py",
+      "upstream_sha256": "943106ec4a080c206722e44edc4436f48849f6e4c02bbf9ce9dd9467ca905b88",
+      "sha256": "943106ec4a080c206722e44edc4436f48849f6e4c02bbf9ce9dd9467ca905b88",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/recognition/digit_regions.py",
+      "upstream_path": "field_recognition/recognition/digit_regions.py",
+      "upstream_sha256": "ed5865a3f7737db7a5702846179cdda82d557bc00b848e335e3280195e496a87",
+      "sha256": "ed5865a3f7737db7a5702846179cdda82d557bc00b848e335e3280195e496a87",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/recognition/lcd_digits.py",
+      "upstream_path": "field_recognition/recognition/lcd_digits.py",
+      "upstream_sha256": "f19f2f38ac7372b045befee40a5b0e7d4e10d166a5896216a5f56571d607d0d1",
+      "sha256": "f19f2f38ac7372b045befee40a5b0e7d4e10d166a5896216a5f56571d607d0d1",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/recognition/led_digits.py",
+      "upstream_path": "field_recognition/recognition/led_digits.py",
+      "upstream_sha256": "2950228742e641144d39f0171b5ad6e5b12a29b9a8fda492a2fae427c4e7a9b0",
+      "sha256": "2950228742e641144d39f0171b5ad6e5b12a29b9a8fda492a2fae427c4e7a9b0",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/recognition/ocr_runtime.py",
+      "upstream_path": "field_recognition/recognition/ocr_runtime.py",
+      "upstream_sha256": "92eabe08f8b025991a9c668258fcd9ec4ee07c4dc33b61717bc51f99a5dff5ec",
+      "sha256": "92eabe08f8b025991a9c668258fcd9ec4ee07c4dc33b61717bc51f99a5dff5ec",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/recognition/panel_detector.py",
+      "upstream_path": "field_recognition/recognition/panel_detector.py",
+      "upstream_sha256": "64e23c5acde96e8d1b423df7753e780669c32f29b9293e0c626e8c8d729fdf1f",
+      "sha256": "64e23c5acde96e8d1b423df7753e780669c32f29b9293e0c626e8c8d729fdf1f",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/recognition/panel_layout.py",
+      "upstream_path": "field_recognition/recognition/panel_layout.py",
+      "upstream_sha256": "f3c551cab79c8cc45cdb14c5b5de53bb335e3169fc3d12b8ac7a5dcb42ae54b2",
+      "sha256": "f3c551cab79c8cc45cdb14c5b5de53bb335e3169fc3d12b8ac7a5dcb42ae54b2",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/recognition/panel_readout.py",
+      "upstream_path": "field_recognition/recognition/panel_readout.py",
+      "upstream_sha256": "f399a7009b8056075d51716fec51fd325a461f53ee69c05441302e56c06d88f8",
+      "sha256": "f399a7009b8056075d51716fec51fd325a461f53ee69c05441302e56c06d88f8",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/recognition/panel_recovery.py",
+      "upstream_path": "field_recognition/recognition/panel_recovery.py",
+      "upstream_sha256": "51f7b6e348e29b7d749750f1a4766eee7bb8a5e3d2ea9fbc397aa49f1e93f17f",
+      "sha256": "51f7b6e348e29b7d749750f1a4766eee7bb8a5e3d2ea9fbc397aa49f1e93f17f",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/recognition/panel_regions.py",
+      "upstream_path": "field_recognition/recognition/panel_regions.py",
+      "upstream_sha256": "1a1a8acbc4513ac04c1bac485f0e8ab3ad090cdeba83ce322a5fe5703b2ddd21",
+      "sha256": "1a1a8acbc4513ac04c1bac485f0e8ab3ad090cdeba83ce322a5fe5703b2ddd21",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/recognition/parallel_photo.py",
+      "upstream_path": "field_recognition/recognition/parallel_photo.py",
+      "upstream_sha256": "b8738c9fd3205812d9d0f699e46dee1faaeadfe7826c7f7e7d8078387084c1a9",
+      "sha256": "b8738c9fd3205812d9d0f699e46dee1faaeadfe7826c7f7e7d8078387084c1a9",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/recognition/photo_orientation.py",
+      "upstream_path": "field_recognition/recognition/photo_orientation.py",
+      "upstream_sha256": "d7f27970b545792ac8a8cacc58b60b3c85e158425653e5e700930505c47039bb",
+      "sha256": "d7f27970b545792ac8a8cacc58b60b3c85e158425653e5e700930505c47039bb",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/recognition/pipeline_context.py",
+      "upstream_path": "field_recognition/recognition/pipeline_context.py",
+      "upstream_sha256": "38f7dec6e12e9929e2e0e3c20e48540637be996fba53b6f717f326d02372b8be",
+      "sha256": "38f7dec6e12e9929e2e0e3c20e48540637be996fba53b6f717f326d02372b8be",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/recognition/red_geometry.py",
+      "upstream_path": "field_recognition/recognition/red_geometry.py",
+      "upstream_sha256": "70ec219a41828f90a71d5749bd744def35c4276582fdb293815a0fc251593055",
+      "sha256": "70ec219a41828f90a71d5749bd744def35c4276582fdb293815a0fc251593055",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/recognition/red_segments.py",
+      "upstream_path": "field_recognition/recognition/red_segments.py",
+      "upstream_sha256": "de836d1556f219c6129c142c5d448c40251d0c607582fb96eb549cbe46090537",
+      "sha256": "de836d1556f219c6129c142c5d448c40251d0c607582fb96eb549cbe46090537",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/recognition/remote_ocr.py",
+      "upstream_path": "field_recognition/recognition/remote_ocr.py",
+      "upstream_sha256": "8121386849a0bf3d6be6073a33b9ab26c6311532dde687f6ddf251433c29e41b",
+      "sha256": "8121386849a0bf3d6be6073a33b9ab26c6311532dde687f6ddf251433c29e41b",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/recognition/service.py",
+      "upstream_path": "field_recognition/recognition/service.py",
+      "upstream_sha256": "5c66e0e9f702602376ed3815e296e02327f8944ebd72c23442375f2dc8d7f95b",
+      "sha256": "5c66e0e9f702602376ed3815e296e02327f8944ebd72c23442375f2dc8d7f95b",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/recognition/vision_display_rules.py",
+      "upstream_path": "field_recognition/recognition/vision_display_rules.py",
+      "upstream_sha256": "fc7f9188dea6d3035bbdab7e77dabffffb1fef02803ec6f537363d4185de4113",
+      "sha256": "fc7f9188dea6d3035bbdab7e77dabffffb1fef02803ec6f537363d4185de4113",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/runtime/__init__.py",
+      "upstream_path": "field_recognition/runtime/__init__.py",
+      "upstream_sha256": "6057161b4673ca8ca5fe80f5a521d6de38bafd0d8428298e6516a97c086470d4",
+      "sha256": "6057161b4673ca8ca5fe80f5a521d6de38bafd0d8428298e6516a97c086470d4",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/runtime/app_production.py",
+      "upstream_path": "field_recognition/runtime/app_production.py",
+      "upstream_sha256": "00a8fd148b63d67edc78ad4c086eab676174d0a15c22adbc04d23514288bef31",
+      "sha256": "00a8fd148b63d67edc78ad4c086eab676174d0a15c22adbc04d23514288bef31",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/runtime/archive_worker.py",
+      "upstream_path": "field_recognition/runtime/archive_worker.py",
+      "upstream_sha256": "49f105c3bcebce0b8efd0d31e9ffc31b904ab2efff5171aad8f8c205d8daed0c",
+      "sha256": "49f105c3bcebce0b8efd0d31e9ffc31b904ab2efff5171aad8f8c205d8daed0c",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/runtime/auth.py",
+      "upstream_path": "field_recognition/runtime/auth.py",
+      "upstream_sha256": "247165969b4448b1a9a6e8b982e20eecf778a46396f6a32896d1c1217b4a3e20",
+      "sha256": "247165969b4448b1a9a6e8b982e20eecf778a46396f6a32896d1c1217b4a3e20",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/runtime/bootstrap.py",
+      "upstream_path": "field_recognition/runtime/bootstrap.py",
+      "upstream_sha256": "56af78bb79e09deced5275423bfcffff26bbdcc8a5d17c8d33f7d8f9bd47a3ec",
+      "sha256": "56af78bb79e09deced5275423bfcffff26bbdcc8a5d17c8d33f7d8f9bd47a3ec",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/runtime/camera_supervisor.py",
+      "upstream_path": "field_recognition/runtime/camera_supervisor.py",
+      "upstream_sha256": "12824d3c1da0a7dda2c3d821499686c6881a7cc8a11f641f17ee03ee5e720a50",
+      "sha256": "12824d3c1da0a7dda2c3d821499686c6881a7cc8a11f641f17ee03ee5e720a50",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/runtime/capture_worker.py",
+      "upstream_path": "field_recognition/runtime/capture_worker.py",
+      "upstream_sha256": "fbbbe9c910f7a8e262783bac680f47d80682afd327e5eafd77e0aadd53666c44",
+      "sha256": "fbbbe9c910f7a8e262783bac680f47d80682afd327e5eafd77e0aadd53666c44",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/runtime/components.py",
+      "upstream_path": "field_recognition/runtime/components.py",
+      "upstream_sha256": "e297a60cfaa0421d08179de85d855f867a3e90311eb4aca8860c0405e2c9ec65",
+      "sha256": "e297a60cfaa0421d08179de85d855f867a3e90311eb4aca8860c0405e2c9ec65",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/runtime/context.py",
+      "upstream_path": "field_recognition/runtime/context.py",
+      "upstream_sha256": "7766628873a4680ce461aaf83bdbb55f8155f3ba8f2979e7af12a06af4a7304e",
+      "sha256": "7766628873a4680ce461aaf83bdbb55f8155f3ba8f2979e7af12a06af4a7304e",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/runtime/database.py",
+      "upstream_path": "field_recognition/runtime/database.py",
+      "upstream_sha256": "c66660ab08aae84a53036dd71e8011e85b35de06c68897c468aa0d8f8e2fb132",
+      "sha256": "f22afb2dd6b045593d7e2baa780611ed916134caf330fe9a0282cccc0bbe15d6",
+      "changes": [
+        "Removed two historical installation-specific UUID UPDATE statements; generic type creation preserved"
+      ]
+    },
+    {
+      "path": "src/field_recognition/runtime/enable_production.py",
+      "upstream_path": "field_recognition/runtime/enable_production.py",
+      "upstream_sha256": "71a4e2b4cac597ca62fb720738d830441f1b308b9eb7854f8c7690939e3ea608",
+      "sha256": "71a4e2b4cac597ca62fb720738d830441f1b308b9eb7854f8c7690939e3ea608",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/runtime/environment.py",
+      "upstream_path": "field_recognition/runtime/environment.py",
+      "upstream_sha256": "55ab664337cce7d2fc0e5124978ec90398f57a81031c79667541e3981cfa233a",
+      "sha256": "55ab664337cce7d2fc0e5124978ec90398f57a81031c79667541e3981cfa233a",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/runtime/factory.py",
+      "upstream_path": "field_recognition/runtime/factory.py",
+      "upstream_sha256": "8fdbc4251824d8c806aab4ffe08a718257c6fc25dd4d1e9e5b041e796881b5f2",
+      "sha256": "8fdbc4251824d8c806aab4ffe08a718257c6fc25dd4d1e9e5b041e796881b5f2",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/runtime/legacy_adapter.py",
+      "upstream_path": "field_recognition/runtime/legacy_adapter.py",
+      "upstream_sha256": "ac98df918c36ba9498c64238a55c896057a43515f1d8f042a2476d8ee786439c",
+      "sha256": "ac98df918c36ba9498c64238a55c896057a43515f1d8f042a2476d8ee786439c",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/runtime/lifecycle.py",
+      "upstream_path": "field_recognition/runtime/lifecycle.py",
+      "upstream_sha256": "c401f748e4fbd11297d1f9f0ebcbc212e9dff74ad5d30b3bc84a14b4fbcbe0f9",
+      "sha256": "c401f748e4fbd11297d1f9f0ebcbc212e9dff74ad5d30b3bc84a14b4fbcbe0f9",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/runtime/migrate_db.py",
+      "upstream_path": "field_recognition/runtime/migrate_db.py",
+      "upstream_sha256": "8efb4d8845d7df7e43eecf1ae996e9ee556d30466212b54f1ca096cde543b711",
+      "sha256": "8efb4d8845d7df7e43eecf1ae996e9ee556d30466212b54f1ca096cde543b711",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/runtime/monitoring.py",
+      "upstream_path": "field_recognition/runtime/monitoring.py",
+      "upstream_sha256": "5b8aa66c4713fdbfe3ebc3defb4b3dd2363f858f4f9904420158626797a2bf25",
+      "sha256": "5b8aa66c4713fdbfe3ebc3defb4b3dd2363f858f4f9904420158626797a2bf25",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/runtime/ocr_worker.py",
+      "upstream_path": "field_recognition/runtime/ocr_worker.py",
+      "upstream_sha256": "84cd97b6c963ac083fc4dec763f4550fc965fa5252beb0cbe1e28122a2f0403b",
+      "sha256": "84cd97b6c963ac083fc4dec763f4550fc965fa5252beb0cbe1e28122a2f0403b",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/runtime/panel_detector_worker.py",
+      "upstream_path": "field_recognition/runtime/panel_detector_worker.py",
+      "upstream_sha256": "592e02be414f98af44d71e0dab1bfff35494f14ccbb94342c6ae267cf8131c1d",
+      "sha256": "592e02be414f98af44d71e0dab1bfff35494f14ccbb94342c6ae267cf8131c1d",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/runtime/paths.py",
+      "upstream_path": "field_recognition/runtime/paths.py",
+      "upstream_sha256": "552dd4a6ac4615a0c03e3acd1ad9b826dd546340cbad6055b8a0adb0b731cdaa",
+      "sha256": "7726424058487e3f7c2566c2b1358eec5200b26e63119ace9ce0ba897c8fef08",
+      "changes": [
+        "Relocated package source/resource resolution to the single main repository"
+      ]
+    },
+    {
+      "path": "src/field_recognition/runtime/photo_job_queue.py",
+      "upstream_path": "field_recognition/runtime/photo_job_queue.py",
+      "upstream_sha256": "4fdf8cea57072403cd0d49e7119af637cbfbab86278db6f9261b314537dd3db8",
+      "sha256": "4fdf8cea57072403cd0d49e7119af637cbfbab86278db6f9261b314537dd3db8",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/runtime/prepare_runtime.py",
+      "upstream_path": "field_recognition/runtime/prepare_runtime.py",
+      "upstream_sha256": "01e90aba6a2f6dc8b6c19b657d1fa9de3d5214dd1feb00c803e914ad225da554",
+      "sha256": "01e90aba6a2f6dc8b6c19b657d1fa9de3d5214dd1feb00c803e914ad225da554",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/runtime/production_bootstrap.py",
+      "upstream_path": "field_recognition/runtime/production_bootstrap.py",
+      "upstream_sha256": "80c8fb9f500875d52ab0910ffdeda6af17ec822a4d1e501cd5dceb29777b66ed",
+      "sha256": "80c8fb9f500875d52ab0910ffdeda6af17ec822a4d1e501cd5dceb29777b66ed",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/runtime/production_config.py",
+      "upstream_path": "field_recognition/runtime/production_config.py",
+      "upstream_sha256": "8cc8af3c24beadaaaf699b2d9d7afa7d2a5b3a74436a3f988b800457fd329ae7",
+      "sha256": "8cc8af3c24beadaaaf699b2d9d7afa7d2a5b3a74436a3f988b800457fd329ae7",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/runtime/runtime_prepare.py",
+      "upstream_path": "field_recognition/runtime/runtime_prepare.py",
+      "upstream_sha256": "58fbd0b364a016de8e40e76d9347d0240154d8d78773462166366bf4c61173f2",
+      "sha256": "58fbd0b364a016de8e40e76d9347d0240154d8d78773462166366bf4c61173f2",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/runtime/runtime_rpc.py",
+      "upstream_path": "field_recognition/runtime/runtime_rpc.py",
+      "upstream_sha256": "aec50852a81816732538c21b4938c43ce8d92f4fa91181fbbda28bda4aa1d418",
+      "sha256": "aec50852a81816732538c21b4938c43ce8d92f4fa91181fbbda28bda4aa1d418",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/runtime/server.py",
+      "upstream_path": "field_recognition/runtime/server.py",
+      "upstream_sha256": "f17cc373559b872bfe864e0dc04a54257d4f9bc5ae7a992a1bcfc82235e9f1ab",
+      "sha256": "f17cc373559b872bfe864e0dc04a54257d4f9bc5ae7a992a1bcfc82235e9f1ab",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/runtime/source_io.py",
+      "upstream_path": "field_recognition/runtime/source_io.py",
+      "upstream_sha256": "680ba460cf477cc73586a8e4dbebe85d601b8bae3ba53288cfa759df9135dd92",
+      "sha256": "680ba460cf477cc73586a8e4dbebe85d601b8bae3ba53288cfa759df9135dd92",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/runtime/task_queue.py",
+      "upstream_path": "field_recognition/runtime/task_queue.py",
+      "upstream_sha256": "41742abf4b2c62b9c24887a3f28e9b0984a906be7f3a291dd7cd294439bc7691",
+      "sha256": "41742abf4b2c62b9c24887a3f28e9b0984a906be7f3a291dd7cd294439bc7691",
+      "changes": []
+    },
+    {
+      "path": "src/field_recognition/runtime/worker_support.py",
+      "upstream_path": "field_recognition/runtime/worker_support.py",
+      "upstream_sha256": "675c05d5916a42f11aea2cb7c9ee97e730bc876f6e3c98336f48842d8f8c54b3",
+      "sha256": "675c05d5916a42f11aea2cb7c9ee97e730bc876f6e3c98336f48842d8f8c54b3",
+      "changes": []
+    }
+  ]
+}

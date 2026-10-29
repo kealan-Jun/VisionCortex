@@ -6,6 +6,9 @@
 
 | 路径 | 责任与边界 |
 | --- | --- |
+| `src/visioncortex/lab/` | 同项目的PostgreSQL实验时间线、主动扫码／动态绑定、时序OCR、材料批次、证据查询和兼容发布；统一入口为 `visioncortex lab` |
+| `src/field_recognition/` | 已核对的FR读数、帧筛选及内部结果规则，单一源码所有者；不复制生产数据库、客户清单或另装一个项目 |
+| `components/lab/`、`contracts/lab/`、`migrations/lab/` | 显式隔离的已钉住兼容组件、通用规则与PostgreSQL迁移；兼容namespace不替换宿主 `visioncortex`，详见[集成说明](agent-integration.zh-CN.md) |
 | `src/visioncortex/analysis/` | 逐帧观察、候选、运动召回、跨视角审查、分段、最终事件同步和扫描规划/执行 |
 | `src/visioncortex/media/` | 实验片段、关键素材、参与对象定位；模型/写入端口由调用方传入 |
 | `src/visioncortex/evidence/` | 轻量布局、序列化、归档缓存、结构产物、语义复核/修订和最终封包 |

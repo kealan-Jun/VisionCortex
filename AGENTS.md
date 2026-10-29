@@ -2,6 +2,11 @@
 
 ## Scope and authority
 
+- This is one unified project for video, FieldRecognition, display OCR, QR operation context, oral Comment, material batches and evidence retention. A private local directory may use a customer name; Git remains customer-neutral. Keep site identity catalogues, real UUIDs/batches, media, paths, addresses and runtime evidence outside Git. Preserve the unified `Comment/Audio` and `Comment/OCR` contract without moving recorder originals.
+- Intentional operator equipment scans declare operation from their event time. Passive QR visibility does not. Switching current equipment preserves the sample/batch experiment history and does not end earlier runs or release equipment. Material scan association is distinct from confirmed usage and ledger consumption.
+- Existing VisionCortex and FieldRecognition weights and analysis services are authorized for reuse through private, explicitly fingerprinted local manifests. Do not require separate customer weights solely because the local deployment has a customer name. Keep binaries, concrete paths and credentials outside Git; model reuse does not establish field accuracy.
+- Keep remote branches short lived. The normal shared line is `main`; archive recoverable historical refs privately before authorized retirement, retain active local execution worktrees, and do not publish a new branch for every runtime snapshot. No automatic CI or service activation is implied by code synchronization.
+
 - This file applies to the entire repository and supplements user-level instructions.
 - Treat the checked-out code, configuration, tests, and current Git state as implementation truth. Historical work-item documents are evidence for their recorded SHA only.
 - Read `README.md` and `docs/RELEASE-POLICY.md` before changing delivery, runtime, evidence, or release behavior.

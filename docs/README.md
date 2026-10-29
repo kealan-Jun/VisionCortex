@@ -6,6 +6,7 @@
 
 | 阅读目标 | 维护入口 |
 | --- | --- |
+| 统一实验链路与Agent整合 | [接口与完整闭环](reference/agent-integration.zh-CN.md) · [算法与业务逻辑](reference/lab-vision-algorithms.zh-CN.md) · [统一留存](reference/unified-retention.zh-CN.md) · [实现与验收边界](reference/lab-vision-status.zh-CN.md) |
 | 快速使用 | [10 分钟操作指南](VisionCortex-普通用户10分钟操作指南.md) · [本地启动](guides/local-development.zh-CN.md) |
 | 结果阅读 | [产物与结果](guides/results.zh-CN.md) · [设备使用手册](VisionCortex-设备使用交付手册.md) |
 | 部署运维 | [自动采集与服务](operations/automation.zh-CN.md) · [设备日总览](DEVICE-DAY-OPERATIONS-OVERVIEW.zh-CN.md) · [Ubuntu 部署](../deployment/rtx3090ti-ubuntu/README.md) · [Windows 4060 节点](../deployment/rtx4060/README.md) |

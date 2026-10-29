@@ -1,0 +1,35 @@
+{
+  "schema_version": "vc-lab-material-batch-summary-rules/1",
+  "revision": "material-batch-summary/1",
+  "scope": "read_only_existing_postgresql_business_ledger",
+  "identity": {
+    "equipment_qr": "existing_permanent_device_uuid",
+    "material_qr": "issued_permanent_material_identity_or_time_resolved_reusable_label",
+    "category_is_not_material_instance": true,
+    "source_lot_is_not_target_process_batch": true,
+    "current_label_binding_is_not_historical_binding": true,
+    "equipment_reprint_preserves_original_uuid": true
+  },
+  "quantities": {
+    "arithmetic": "decimal_base_units_separated_by_dimension",
+    "authority": "Core.operate_existing_quantity_ledger",
+    "unknown_opening": "unknown_balance_with_explicit_known_subtotal_and_coverage",
+    "source_lot_membership": "explicit_registered_metadata_only",
+    "target_batch_membership": "explicit_operation_batch_id_only",
+    "operation_kinds": "separate_business_flows_not_indiscriminate_input_sum",
+    "split_and_transfer": "not_experimental_consumption",
+    "return": "separate_flow_without_assumed_refund_to_a_prior_consumption",
+    "correction": "retain_ledger_reversals_and_effective_replacement_without_double_counting",
+    "mixed_or_unallocated_descendants": "preserve_lineage_and_unknown_attribution_no_inferred_recipe_share",
+    "recognition_candidate": "does_not_write_or_debit_ledger"
+  },
+  "printing": {
+    "equipment_source": "config/site-equipment-catalogue.json",
+    "material_category_reference": "config/site-material-categories.json",
+    "reference_catalogue_is_not_identity_issuance": true,
+    "no_new_label_issuance_or_physical_activation_from_audit": true,
+    "changing_batch_quantity_person_location_not_encoded_as_mutable_qr_payload": true
+  },
+  "customer_runtime_activation": false,
+  "inventory_initialization": false
+}

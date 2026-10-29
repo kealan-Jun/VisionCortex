@@ -1,0 +1,63 @@
+{
+  "schema_version": "vc-lab-temporal-display-rules/1",
+  "enabled_by_default": false,
+  "input": {
+    "registration_required": true,
+    "original_decoded_pts_required": true,
+    "nominal_capture_fps_is_not_a_timestamp": true,
+    "source_pixels_and_orientation_transform_recorded": true,
+    "permitted_explicit_rotation_degrees_clockwise": [
+      0,
+      180
+    ],
+    "original_media_mutation": false
+  },
+  "isolation_keys": [
+    "device_id",
+    "screen_id",
+    "field_id",
+    "track_session_id"
+  ],
+  "window_frame_candidates": [
+    3,
+    5,
+    8,
+    15,
+    30
+  ],
+  "max_window_span_seconds": 1,
+  "roi_cache_bytes": 67108864,
+  "roi_cache_retention_seconds": 86400,
+  "task_output_limit_bytes": 134217728,
+  "trust": {
+    "statuses": [
+      "confirmed",
+      "uncertain",
+      "unreadable"
+    ],
+    "confirmed_meaning": "visual evidence gates only, never a business confirmation",
+    "segment_states": [
+      "ON",
+      "OFF",
+      "UNKNOWN"
+    ],
+    "dark_is_not_automatically_off": true,
+    "local_observation_opportunity_required_for_off": true,
+    "unknown_strokes_not_inferred_from_legal_templates": true,
+    "same_text_alone_is_not_confirmation": true,
+    "content_state_ambiguity_stops_fusion": true,
+    "unsupported_decimal_sign_unit_not_inserted": true,
+    "historical_value_not_a_current_reading": true,
+    "unmeasured_quality_is_not_calibrated_probability": true
+  },
+  "reset_on": [
+    "source_or_identity_switch",
+    "track_loss",
+    "registration_failure",
+    "scene_change",
+    "pts_gap_or_disorder"
+  ],
+  "original_components_changed": false,
+  "customer_source_activation": false,
+  "production_service_switch": false
+}

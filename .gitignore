@@ -23,6 +23,12 @@ tmp/
 *.pth
 .coverage
 .env
+# Site-specific laboratory configuration and private source/evidence data.
+/configs/lab/local.*
+/configs/lab/private/
+*.sqlite3*
+*.dump
+*.bundle
 configs/trust/.visioncortex-root-id
 # Windows-style runtime roots accidentally created by cross-platform tests.
 /[A-Za-z]:/

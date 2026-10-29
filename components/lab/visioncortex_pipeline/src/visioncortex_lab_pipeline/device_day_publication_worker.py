@@ -1,0 +1,249 @@
+"""Replay bounded standard publication journals without starting model work."""
+from contextlib import ExitStack
+from pathlib import Path
+import time
+
+from .device_day_contract import atomic_json, digest, read_json
+
+
+def local_change_hints(runtime_root, records, names):
+    """Durable scheduling hints; consumers must still verify source evidence."""
+    from .device_day_contract import archive_name, digest
+    from .sqlite_store import connection
+    grouped = {name: [] for name in names}
+    owners = {r['recording_id']: archive_name(r['camera_key'], r['recording_start_us']) for r in records}
+    path = runtime_root / 'timeline-invalidations.sqlite3'
+    if path.is_file():
+        with connection(path, readonly=True) as db:
+            for row in db.execute('SELECT archive,digest FROM inputs ORDER BY archive'):
+                if row['archive'] in grouped:
+                    grouped[row['archive']].append(['canonical', row['digest']])
+    for stage in ('retention', 'vision', 'stt', 'understanding', 'report'):
+        path = runtime_root / f'queue-{stage}.sqlite3'
+        if not path.is_file():
+            continue
+        with connection(path, readonly=True) as db:
+            for row in db.execute("SELECT recording_id,revision,updated_at,status FROM recordings "
+                    "WHERE status='completed' OR json_extract(result,'$.status') IN "
+                    "('partial','paused_for_live','scheduled_checkpoint') ORDER BY recording_id"):
+                owner = owners.get(row['recording_id'])
+                if owner in grouped:
+                    grouped[owner].append([stage, row['recording_id'], row['revision'], row['updated_at'], row['status']])
+    return {name: digest(values) for name, values in grouped.items() if values}
+
+
+class PublicationReplay:
+    def __init__(self, *, field_fetch=None, stop=None):
+        self.field_fetch = field_fetch
+        self.stop = stop
+
+    def tick(self, runner):
+        from .device_day import exclusive
+        from .publication_journal import PublicationJournal, reconcile
+        from .device_day_schedule import processing_cutoff
+        with ExitStack() as locks:
+            try:
+                locks.enter_context(exclusive(runner.runtime_root / 'locks' / 'publication-replay.lock'))
+            except BlockingIOError:
+                return {'status': 'running_elsewhere', 'published': 0}
+            # The standard replay owns per-record stage locks, validates every
+            # receipt/artifact, prefers recent records and bounds each round.
+            published = reconcile(runner, stop=self.stop, limit=4)
+            pending = PublicationJournal(runner.runtime_root).pending(1, since_us=processing_cutoff(runner.settings))
+            if self.stop is not None and self.stop.is_set():
+                return {'status': 'stopping', 'published': published, 'pending_publications': bool(pending)}
+            field_settings = runner.settings.get('field_recognition') or {}
+            field_result = {'status': 'no_input', 'consumer_wired': False, 'model_invoked': False}
+            if field_settings.get('enabled', False):
+                from .application.field_event_consumer import FieldEventConsumer
+                options = {'fetch_json': self.field_fetch} if self.field_fetch is not None else {}
+                try:
+                    consumer = FieldEventConsumer(runner.runtime_root, field_settings,
+                                                  timezone=runner.settings.get('timezone', 'Asia/Shanghai'), **options)
+                    field_result = consumer.tick()
+                except (OSError, ValueError, KeyError, TypeError) as exc:
+                    field_result = {'status': 'blocked', 'error_type': type(exc).__name__,
+                                    'reason': getattr(exc, 'reason', 'field_event_consumer_unavailable'),
+                                    'consumer_wired': True, 'model_invoked': False, 'business_accepted': False}
+            return {'status': 'completed', 'published': published, 'pending_publications': bool(pending),
+                    'field_events': field_result}
+
+
+class ReadableReplay:
+    """Publish through the owning file-index service without private glue scripts."""
+    def __init__(self, stop):
+        self.stop, self.checked, self.publisher, self.generation = stop, {}, None, None
+        self.published_hints, self.retry_at, self.turn = {}, {}, 0
+
+    @staticmethod
+    def _local_hints(runner, records, names):
+        """Scheduling hints only; the owning publisher still verifies facts."""
+        from .media.retained_intervals import EXPORT_POLICY, POLICY
+        from .application.clip_delivery import VERSION, enabled
+        hints = local_change_hints(runner.runtime_root, records, names)
+        # A policy upgrade must revisit completed days even when producers
+        # have no new model result. Persist this selective publication version.
+        return {name: digest(['readable-retention-policy/1', POLICY, EXPORT_POLICY,
+                             VERSION if enabled(getattr(runner, 'config', {})) else None, value])
+                for name, value in hints.items()}
+
+    def tick(self, runner):
+        if self.stop.is_set():
+            return {'status': 'stopping'}
+        from .device_day import exclusive
+        from .device_day_contract import archive_name, read_json
+        from .device_day_file_index import FileIndexPublisher
+        from .device_day_recovery_worker import verify_storage
+        from .device_day_write_guard import storage_guard
+        from .device_day_io import slot
+        from .observed_inventory import read_inventory
+        from .runtime_control import execution_context, resource_slot
+        key = digest(runner.config)
+        if self.publisher is None or self.generation != key:
+            self.publisher, self.generation = FileIndexPublisher(runner.config), key
+            state = runner.runtime_root / 'ReadablePublication' / 'Service.json'
+            if state.is_file():
+                saved = read_json(state)
+                self.checked = saved.get('checked', {})
+                self.published_hints = saved.get('published_hints', {})
+                self.retry_at = saved.get('retry_at', {})
+                self.turn = saved.get('fair_turn', 0)
+        with exclusive(runner.runtime_root / 'locks' / 'readable-file-publication-consumer.lock'):
+            verify_storage(runner.config)
+            with storage_guard(runner.config), execution_context(job_id='readable-publication',
+                    source='retention_recovery', priority=20, background_fair=True,
+                    stop=self.stop, yield_signal=self.stop):
+                records = read_inventory(runner.runtime_root)['recordings']
+                names = {archive_name(r['camera_key'], r['recording_start_us']) for r in records}
+                from .application.field_archive_context import archive_days
+                field_discovery = None
+                try:
+                    names.update(archive_days(runner.config))
+                except (OSError, ValueError) as exc:
+                    field_discovery = {'status': 'unavailable', 'error_type': type(exc).__name__,
+                        'automatic_action': 'retry_field_archive_discovery', 'other_publication_continues': True}
+                self.checked = {name: stamp for name, stamp in self.checked.items() if name in names}
+                self.published_hints = {n: h for n, h in self.published_hints.items() if n in names}
+                self.retry_at = {n: stamp for n, stamp in self.retry_at.items() if n in names}
+                if not names or self.stop.is_set():
+                    return {'status': 'waiting_for_inventory' if not names else 'stopping'} | (
+                        {'field_archive_discovery': field_discovery} if field_discovery else {})
+                import sqlite3
+                hint_error = None
+                try:
+                    hints = self._local_hints(runner, records, names)
+                except (OSError, ValueError, sqlite3.Error) as exc:
+                    hints = {}
+                    hint_error = {'status': 'unavailable', 'error_type': type(exc).__name__}
+                now = time.time()
+                eligible = {n for n in names if self.retry_at.get(n, 0) <= now}
+                if not eligible:
+                    return {'status': 'publication_backoff', 'retry_at': min(self.retry_at.values())}
+                changed = {n for n in eligible if n in hints and hints[n] != self.published_hints.get(n)}
+                cutoff = (now - runner.config.get('device_day', {}).get('live_priority_seconds', 14400)) * 1e6
+                recent = {archive_name(r['camera_key'], r['recording_start_us']) for r in records
+                          if max(r.get('recording_start_us', 0), r.get('recording_end_us', 0)) >= cutoff}
+                self.turn += 1
+                priority = (changed & recent) or changed or (eligible & recent)
+                lane = 'changed_or_live' if priority and self.turn % 3 else 'historical_fair_share'
+                pool = priority if lane == 'changed_or_live' else eligible
+                if runner.config.get('device_day', {}).get('latest_first', False) and changed:
+                    latest = {n: 0 for n in names}
+                    for record in records:
+                        key = archive_name(record['camera_key'], record['recording_start_us'])
+                        latest[key] = max(latest.get(key, 0), record['recording_start_us'])
+                    pool, lane = changed, 'latest_changed_input'
+                    name = min(pool, key=lambda n: (-latest.get(n, 0), self.checked.get(n, 0), n))
+                else:
+                    name = min(pool, key=lambda n: (self.checked.get(n, 0), -int(n[:10].replace('-', '')), n))
+                self.checked[name] = time.time()
+                try:
+                    with resource_slot(runner.config, 'cpu'), slot(runner.config):
+                        result = self.publisher.tick(archives=[name])
+                except Exception:
+                    self.retry_at[name] = time.time() + 30
+                    raise
+                if (result.get('status') == 'completed' and not result.get('busy') and not result.get('errors')
+                        and (result.get('published', 0) or result.get('unchanged', 0))):
+                    if name in hints:
+                        self.published_hints[name] = hints[name]
+                    self.retry_at.pop(name, None)
+                else:
+                    self.retry_at[name] = time.time() + 30
+                return {'status': 'published', 'archive': name, 'result': result, 'scheduling_lane': lane} | (
+                    {'field_archive_discovery': field_discovery} if field_discovery else {}) | (
+                    {'local_change_hints': hint_error} if hint_error else {})
+
+
+def serve(config_path, stop, *, readable=False):
+    from .ai_settings import apply_active
+    from .config import load_config
+    from .device_day import DeviceDayRunner
+    replay = ReadableReplay(stop) if readable else PublicationReplay(stop=stop)
+    directory = 'ReadablePublication' if readable else 'PublicationReplay'
+    scope = 'readable_file_projection' if readable else 'standard_publication_journal'
+    from .build_identity import identity
+    build = identity()
+    runner, generation, roots, state_path = None, None, None, None
+    while not stop.is_set():
+        started = time.time()
+        try:
+            config = apply_active(load_config(Path(config_path)))
+            current_roots = {key: config['storage'].get(key) for key in
+                             ('local_runtime_root', 'local_cache_root', 'archive_root')}
+            if roots is not None and roots != current_roots:
+                raise ValueError('Publication replay storage roots changed')
+            roots = current_roots
+            key = digest(config)
+            if runner is None or key != generation:
+                runner, generation = DeviceDayRunner(config), key
+            state_path = runner.runtime_root / directory / 'Service.json'
+            initial = {'status': 'running', 'started_at': started,
+                       'scope': scope, 'model_invoked': False, 'build': build}
+            if readable:
+                saved = read_json(state_path) if state_path.is_file() else {}
+                initial.update(checked=replay.checked or saved.get('checked', {}),
+                    published_hints=replay.published_hints or saved.get('published_hints', {}),
+                    retry_at=replay.retry_at or saved.get('retry_at', {}),
+                    fair_turn=replay.turn or saved.get('fair_turn', 0))
+            atomic_json(state_path, initial)
+            result = replay.tick(runner)
+            status = {'status': 'watching', 'started_at': started, 'updated_at': time.time(),
+                      'last_result': result, 'scope': scope, 'model_invoked': False, 'build': build}
+        except Exception as exc:
+            status = {'status': 'failed', 'started_at': started, 'updated_at': time.time(),
+                      'error_type': type(exc).__name__, 'scope': scope, 'model_invoked': False, 'build': build}
+        if state_path is not None:
+            if readable:
+                status.update(checked=replay.checked, published_hints=replay.published_hints,
+                              retry_at=replay.retry_at, fair_turn=replay.turn)
+            atomic_json(state_path, status)
+        stop.wait(5)
+    if state_path is not None:
+        final = {'status': 'stopped', 'updated_at': time.time(),
+                 'scope': scope, 'model_invoked': False, 'build': build}
+        if readable:
+            final.update(checked=replay.checked, published_hints=replay.published_hints,
+                         retry_at=replay.retry_at, fair_turn=replay.turn)
+        atomic_json(state_path, final)
+
+
+def main(argv=None):
+    import argparse
+    import signal
+    import threading
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--config', required=True)
+    parser.add_argument('--readable', action='store_true', help='Publish existing readable file views without models')
+    args = parser.parse_args(argv)
+    stop = threading.Event()
+    previous = {sig: signal.signal(sig, lambda *_: stop.set()) for sig in (signal.SIGTERM, signal.SIGINT)}
+    try:
+        serve(args.config, stop, readable=args.readable)
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
+if __name__ == '__main__':
+    main()

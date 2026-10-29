@@ -1,0 +1,962 @@
+{
+  "schema_version": "vc-lab-frozen-rules/1",
+  "stage": "pipeline",
+  "source_sha256": "7f88c7a72c5f48ae0bb178c92e17835d4537db979e08e8ee3517f8ecceacea43",
+  "settings": {
+    "models": {
+      "first_person": {
+        "customer_binding": ".models.first_person"
+      },
+      "third_person": {
+        "customer_binding": ".models.third_person"
+      },
+      "first_person_engine": {
+        "customer_binding": ".models.first_person_engine"
+      },
+      "third_person_engine": {
+        "customer_binding": ".models.third_person_engine"
+      },
+      "expected_class_count": 21,
+      "confidence": 0.25,
+      "iou": 0.7,
+      "max_detections": 300,
+      "open_vocabulary_key_frame": {
+        "cuda_oom_fallback_cpu": true,
+        "grounding_dino_fallback": {
+          "cuda_oom_fallback_cpu": true,
+          "enabled": true,
+          "model_path": {
+            "customer_binding": ".models.open_vocabulary_key_frame.grounding_dino_fallback.model_path"
+          },
+          "model_repository": {
+            "customer_binding": ".models.open_vocabulary_key_frame.grounding_dino_fallback.model_repository"
+          },
+          "model_revision": {
+            "customer_binding": ".models.open_vocabulary_key_frame.grounding_dino_fallback.model_revision"
+          },
+          "model_sha256": {
+            "customer_binding": ".models.open_vocabulary_key_frame.grounding_dino_fallback.model_sha256"
+          },
+          "device": "cuda",
+          "box_threshold": 0.12,
+          "text_threshold": 0.12,
+          "maximum_box_area_norm": 0.5,
+          "maximum_class_box_area_norm": {
+            "balance": 0.4,
+            "pipette": 0.2,
+            "spearhead": 0.08,
+            "tube": 0.05,
+            "tube_rack": 0.15,
+            "paper": 0.12,
+            "bottle_cap": 0.08,
+            "tube_cap": 0.05
+          },
+          "pipette_minimum_aspect_ratio": 1.4,
+          "temporal_rescue_enabled": true,
+          "temporal_rescue_max_actor_gap_norm": 0.02,
+          "temporal_rescue_sample_interval_ms": 500,
+          "temporal_rescue_max_frames_per_view": 12,
+          "prompt_map": {
+            "blue gloved hand": "gloved_hand",
+            "digital weighing scale": "balance",
+            "white handheld electronic pipette": "pipette",
+            "pipette tip": "spearhead",
+            "orange cap centrifuge tube": "tube",
+            "centrifuge tube": "tube",
+            "tube rack": "tube_rack",
+            "white weighing paper": "paper",
+            "laboratory beaker": "beaker",
+            "glass reagent bottle": "reagent_bottle",
+            "brown reagent bottle": "reagent_bottle",
+            "brown bottle": "reagent_bottle",
+            "sample bottle": "sample_bottle",
+            "transparent laboratory container": "container",
+            "closed bottle": "container",
+            "capped bottle": "container",
+            "red bottle cap": "bottle_cap",
+            "blue bottle cap": "bottle_cap",
+            "bottle cap": "bottle_cap",
+            "orange centrifuge tube cap": "tube_cap",
+            "centrifuge tube cap": "tube_cap"
+          }
+        },
+        "enabled": true,
+        "model_path": {
+          "customer_binding": ".models.open_vocabulary_key_frame.model_path"
+        },
+        "model_sha256": {
+          "customer_binding": ".models.open_vocabulary_key_frame.model_sha256"
+        },
+        "model_download_url": {
+          "customer_binding": ".models.open_vocabulary_key_frame.model_download_url"
+        },
+        "clip_model_path": {
+          "customer_binding": ".models.open_vocabulary_key_frame.clip_model_path"
+        },
+        "clip_model_sha256": {
+          "customer_binding": ".models.open_vocabulary_key_frame.clip_model_sha256"
+        },
+        "clip_model_download_url": {
+          "customer_binding": ".models.open_vocabulary_key_frame.clip_model_download_url"
+        },
+        "device": 0,
+        "image_size": 1280,
+        "confidence": 0.03,
+        "iou": 0.5,
+        "max_actor_object_gap_norm": 0.02,
+        "manipulated_object_max_actor_gap_norm": 0.08,
+        "pipette_minimum_aspect_ratio": 1.7,
+        "pipette_center_must_overlap_actor": true,
+        "pipette_maximum_actor_iou": 0.65,
+        "minimum_manipulated_object_confidence": {
+          "balance": 0.15,
+          "pipette": 0.1,
+          "spearhead": 0.1,
+          "tube": 0.12
+        },
+        "state_container_max_actor_gap_norm": 0.08,
+        "state_container_max_closure_gap_norm": 0.03,
+        "closure_max_actor_gap_norm": 0.01,
+        "closure_minimum_confidence": 0.12,
+        "grounded_actor_maximum_box_area_norm": 0.15,
+        "grounded_actor_confidence_ratio": 0.75,
+        "opening_container_prompts": [
+          "open glass jar"
+        ],
+        "closing_container_prompts": [
+          "closed bottle",
+          "capped bottle"
+        ],
+        "prompt_map": {
+          "gloved hand": "gloved_hand",
+          "bare hand": "hand",
+          "white handheld electronic pipette": "pipette",
+          "electronic pipette in gloved hand": "pipette",
+          "automatic micropipette": "pipette",
+          "pipette tip held in gloved hand": "spearhead",
+          "pipette tip": "spearhead",
+          "weighing paper held in gloved hand": "paper",
+          "white weighing paper": "paper",
+          "centrifuge tube held in gloved hand": "tube",
+          "centrifuge tube": "tube",
+          "centrifuge tube rack held by hand": "tube_rack",
+          "laboratory balance touched by hand": "balance",
+          "laboratory beaker held by hand": "beaker",
+          "glass reagent bottle held by hand": "reagent_bottle",
+          "brown reagent bottle held by hand": "reagent_bottle",
+          "sample bottle held by hand": "sample_bottle",
+          "transparent laboratory container held by hand": "container",
+          "glass jar": "container",
+          "open glass jar": "container",
+          "open vial": "container",
+          "closed bottle": "container",
+          "capped bottle": "container",
+          "glass vial": "container",
+          "laboratory vial": "container",
+          "small bottle": "container",
+          "red bottle cap": "bottle_cap",
+          "bottle cap": "bottle_cap"
+        }
+      },
+      "confidence_by_role": {
+        "first_person": 0.225
+      },
+      "class_names_by_role": {
+        "first_person": [
+          "balance",
+          "beaker",
+          "gloved_hand",
+          "lab_coat",
+          "paper",
+          "reagent_bottle",
+          "sample_bottle",
+          "sample_bottle_blue",
+          "spatula",
+          "tube",
+          "tube_cap",
+          "spearhead",
+          "pipette",
+          "container",
+          "PPE_Storage",
+          "hand",
+          "reagent_bottle_open",
+          "bottle_cap",
+          "magnetic_stirrer",
+          "tube_rack",
+          "magnetic_stir_bar",
+          "pipette_rack",
+          "pipette_tip_box"
+        ],
+        "third_person": [
+          "balance",
+          "beaker",
+          "gloved_hand",
+          "lab_coat",
+          "paper",
+          "reagent_bottle",
+          "sample_bottle",
+          "sample_bottle_blue",
+          "spatula",
+          "tube",
+          "tube_cap",
+          "spearhead",
+          "pipette",
+          "container",
+          "PPE_Storage",
+          "hand",
+          "reagent_bottle_open",
+          "bottle_cap",
+          "magnetic_stirrer",
+          "tube_rack",
+          "magnetic_stir_bar",
+          "pipette_rack",
+          "pipette_tip_box"
+        ]
+      },
+      "duplicate_suppression_iou_by_role": {
+        "third_person": 0.7
+      },
+      "first_person_coarse_engine": {
+        "customer_binding": ".models.first_person_coarse_engine"
+      },
+      "third_person_coarse_engine": {
+        "customer_binding": ".models.third_person_coarse_engine"
+      },
+      "temporal_participant_segmentation": {
+        "enabled": true,
+        "required_for_final_key_material": true,
+        "backend": "SAM2VideoPredictor",
+        "model": "sam2.1_hiera_base_plus",
+        "model_config": "configs/sam2.1/sam2.1_hiera_b+.yaml",
+        "checkpoint_path": {
+          "customer_binding": ".models.temporal_participant_segmentation.checkpoint_path"
+        },
+        "checkpoint_sha256": {
+          "customer_binding": ".models.temporal_participant_segmentation.checkpoint_sha256"
+        },
+        "checkpoint_download_url": {
+          "customer_binding": ".models.temporal_participant_segmentation.checkpoint_download_url"
+        },
+        "source_revision": {
+          "customer_binding": ".models.temporal_participant_segmentation.source_revision"
+        },
+        "device": "cuda",
+        "vos_optimized": false,
+        "apply_postprocessing": false,
+        "offload_video_to_cpu": true,
+        "offload_state_to_cpu": false,
+        "maximum_frames_per_clip": 9,
+        "jpeg_quality": 95,
+        "minimum_presence_ratio": 0.34,
+        "minimum_presence_ratio_by_action": {
+          "liquid_movement": 0.55,
+          "container_state_change": 0.45,
+          "pipette_transfer_operation": 0.45,
+          "object_movement": 0.34,
+          "hand_object_contact": 0.34,
+          "device_panel_operation": 0.34
+        },
+        "minimum_seed_box_iou": 0.35,
+        "maximum_seed_area_expansion_ratio": 1.35,
+        "enabled_actions": [
+          "hand_object_contact",
+          "object_movement",
+          "liquid_movement",
+          "container_state_change",
+          "device_panel_operation",
+          "pipette_transfer_operation"
+        ]
+      },
+      "liquid_semantic_sidecar": {
+        "enabled": true,
+        "required_for_selected_actions": true,
+        "backend": "LabPics-PSPNet-ResNet101",
+        "checkpoint_path": {
+          "customer_binding": ".models.liquid_semantic_sidecar.checkpoint_path"
+        },
+        "checkpoint_sha256": {
+          "customer_binding": ".models.liquid_semantic_sidecar.checkpoint_sha256"
+        },
+        "source_archive_path": {
+          "customer_binding": ".models.liquid_semantic_sidecar.source_archive_path"
+        },
+        "source_archive_url": {
+          "customer_binding": ".models.liquid_semantic_sidecar.source_archive_url"
+        },
+        "source_archive_sha256": {
+          "customer_binding": ".models.liquid_semantic_sidecar.source_archive_sha256"
+        },
+        "source_archive_member": "logs/TrainedModelWeiht1m_steps_Semantic_TrainedWithLabPicsAndCOCO_AllSets.torch",
+        "source_record": {
+          "customer_binding": ".models.liquid_semantic_sidecar.source_record"
+        },
+        "license": "CC-BY-4.0",
+        "device": "cuda",
+        "half": true,
+        "maximum_image_size": 640,
+        "mask_threshold": 0.5,
+        "enabled_actions": [
+          "liquid_movement",
+          "container_state_change",
+          "pipette_transfer_operation"
+        ]
+      }
+    },
+    "performance": {
+      "preprocessing_budget_seconds": 1200,
+      "device": 0,
+      "half": true,
+      "tensor_rt": "required",
+      "batch_size": 16,
+      "coarse_batch_size": 16,
+      "coarse_first_person_views": 1,
+      "coarse_third_person_views": 1,
+      "coarse_refinement_association_margin_seconds": 30.0,
+      "coarse_refinement_min_candidates": 2,
+      "coarse_refinement_min_span_seconds": 30.0,
+      "coarse_quarantine_objectless_unconfirmed_motion": true,
+      "coarse_shared_motion_probe_enabled": false,
+      "coarse_frame_index_enabled": false,
+      "coarse_coverage_gate_enabled": false,
+      "coarse_minimum_coverage_ratio": 0.98,
+      "coarse_maximum_gap_periods": 4.0,
+      "candidate_discovery_quality_gate_enabled": true,
+      "coarse_semantic_association_enabled": true,
+      "coarse_semantic_cluster_margin_seconds": 3.0,
+      "coarse_max_boundary_expansion_seconds": 15.0,
+      "coarse_spatial_relation_enabled": true,
+      "coarse_hand_object_gap_norm": 0.08,
+      "coarse_hand_object_approach_gap_norm": 0.16,
+      "coarse_hand_object_approach_delta_norm": 0.025,
+      "coarse_micro_action_guard_enabled": true,
+      "coarse_micro_action_min_confidence": 0.72,
+      "coarse_micro_action_window_seconds": 4.0,
+      "coarse_rolling_motion_threshold_enabled": true,
+      "coarse_rolling_motion_window_seconds": 600.0,
+      "coarse_tracker_motion_prediction_enabled": true,
+      "coarse_tracker_maximum_center_distance": 0.18,
+      "coarse_open_vocabulary_recall_enabled": true,
+      "coarse_open_vocabulary_adaptive_selection_enabled": true,
+      "coarse_open_vocabulary_diversity_bucket_seconds": 600.0,
+      "coarse_open_vocabulary_max_frames_per_hour_per_view": 8,
+      "coarse_open_vocabulary_maximum_error_rate": 0.1,
+      "fine_batch_size": 4,
+      "fine_chunk_seconds": 120,
+      "fine_active_decode_slots": 6,
+      "fine_first_person_decode_workers": 4,
+      "fine_third_person_decode_workers": 6,
+      "fine_decode_prefetch_frames": 48,
+      "fine_decode_prefetch_max_bytes": 67108864,
+      "decode_queue_max_bytes": 67108864,
+      "fine_persistent_segment_decode": true,
+      "fine_persistent_session_max_gap_seconds": null,
+      "fine_group_local_recall_enabled": true,
+      "fine_group_recall_min_unresolved_anchors": 3,
+      "fine_group_recall_padding_seconds": 0.0,
+      "fine_group_recall_max_rounds": 5,
+      "fine_group_recall_cluster_gap_seconds": 10.0,
+      "fine_group_recall_zero_prior_quality_fallback": true,
+      "fine_frame_index_enabled": true,
+      "fine_coverage_gate_enabled": true,
+      "fine_minimum_coverage_ratio": 0.98,
+      "fine_maximum_gap_periods": 4.0,
+      "fine_streaming_candidates_enabled": true,
+      "fine_state_max_entries": 4096,
+      "fine_instance_association_enabled": true,
+      "fine_instance_appearance_enabled": true,
+      "fine_instance_minimum_cosine_similarity": 0.25,
+      "fine_instance_cross_view_conflict_quarantine_enabled": true,
+      "fine_track_stitching_enabled": true,
+      "fine_track_stitch_max_gap_seconds": 2.5,
+      "fine_track_stitch_max_center_distance": 0.12,
+      "fine_contact_state_enabled": true,
+      "fine_affine_object_motion_enabled": true,
+      "fine_roi_open_vocabulary_recall_enabled": true,
+      "fine_roi_open_vocabulary_max_frames_per_window": 2,
+      "fine_roi_open_vocabulary_hand_padding_norm": 0.2,
+      "fine_roi_open_vocabulary_maximum_error_rate": 0.1,
+      "fine_tracker_motion_prediction_enabled": true,
+      "fine_tracker_maximum_center_distance": 0.18,
+      "audit_constrained_clustering_enabled": true,
+      "audit_local_alignment_enabled": true,
+      "audit_explainable_scoring_enabled": true,
+      "audit_formal_admission_status_enabled": true,
+      "audit_core_interval_enabled": true,
+      "audit_stable_event_ids_enabled": true,
+      "audit_sqlite_candidate_index_enabled": true,
+      "audit_max_cluster_span_seconds": 30.0,
+      "audit_core_start_quantile": 0.5,
+      "audit_core_end_quantile": 0.5,
+      "audit_independent_view_bonus": 0.04,
+      "audit_dual_role_bonus": 0.04,
+      "audit_maximum_independence_bonus": 0.12,
+      "audit_maximum_alignment_penalty": 0.08,
+      "audit_liquid_spatial_context_enabled": true,
+      "audit_liquid_context_hand_object_gap_norm": 0.08,
+      "audit_liquid_context_minimum_frames": 2,
+      "audit_liquid_sequence_formal_gate_enabled": true,
+      "action_state_observed_timestamps_enabled": true,
+      "fine_progressive_cross_view": true,
+      "fine_initial_third_person_views": 0,
+      "fine_supplemental_view_batch_size": 3,
+      "fine_preferred_third_person_views": [],
+      "fine_progressive_audit_margin_seconds": 5.0,
+      "fine_progressive_anchor_cluster_gap_seconds": 10.0,
+      "fine_dynamic_cross_view_scout": false,
+      "fine_scout_fps": 1.0,
+      "fine_scout_image_size": 416,
+      "fine_scout_batch_size": 8,
+      "fine_scout_keyframes_only": false,
+      "fine_scout_anchor_radius_seconds": 3.0,
+      "fine_scout_peak_dedup_tolerance_seconds": 0.25,
+      "fine_scout_peak_cluster_gap_seconds": 60.0,
+      "fine_scout_representatives_per_cluster": 1,
+      "fine_progressive_anchor_padding_seconds": 10.0,
+      "image_size": 640,
+      "coarse_detection_fps": 2.0,
+      "coarse_image_size": 416,
+      "coarse_keyframes_only": false,
+      "detection_fps": 20.0,
+      "fine_window_padding_seconds": 75.0,
+      "fine_window_merge_gap_seconds": 0.0,
+      "motion_burst_percentile": 90.0,
+      "motion_burst_merge_gap_seconds": 16.0,
+      "motion_burst_min_observations": 2,
+      "max_gpu_memory_fraction": 0.9,
+      "ffmpeg_hwaccel": "cuda",
+      "cuda_decode_process_limit": 6,
+      "cuda_decode_device": 0,
+      "ffmpeg_cuda_scale": false,
+      "ffmpeg_video_encoder": "h264_nvenc",
+      "workers": 2,
+      "decode_workers": 6,
+      "concurrent_role_scanners": true,
+      "chunk_seconds": 600,
+      "checkpoint_every_chunks": 1,
+      "frame_queue_size": 64,
+      "decode_queue_depth": 64,
+      "motion_probe_fps": 0.1,
+      "motion_probe_max_width": 416,
+      "motion_probe_keyframes_only": true,
+      "motion_probe_sparse_strategy": "auto",
+      "motion_probe_run_yolo": true,
+      "coarse_reuse_motion_probe": true,
+      "motion_probe_first_person_views": 1,
+      "motion_probe_third_person_views": 0,
+      "motion_probe_percentile": 85.0,
+      "motion_probe_burst_merge_gap_seconds": 45.0,
+      "motion_probe_min_observations": 2,
+      "motion_probe_merge_gap_seconds": 45.0,
+      "motion_probe_min_views": 1,
+      "motion_probe_primary_min_seconds": 45.0,
+      "motion_probe_window_padding_seconds": 90.0,
+      "motion_probe_affine_compensation_enabled": true,
+      "motion_probe_max_rotation_degrees": 8.0,
+      "motion_probe_max_scale_delta": 0.12,
+      "motion_probe_rolling_threshold_enabled": true,
+      "motion_probe_rolling_window_seconds": 600.0,
+      "motion_probe_legacy_raw_union_enabled": true,
+      "motion_probe_max_cluster_seconds": 300.0,
+      "motion_probe_fallback_peaks_per_hour": 8,
+      "motion_probe_fallback_separation_seconds": 120.0,
+      "motion_probe_fallback_window_seconds": 60.0,
+      "motion_probe_segment_workers": 1,
+      "motion_probe_sparse_benchmark_seconds": 60.0,
+      "motion_probe_indexed_segment_workers": 4,
+      "motion_probe_sequential_segment_workers": 6,
+      "motion_signature_size": [
+        64,
+        36
+      ],
+      "coarse_decode_lanes": [
+        "cuda"
+      ],
+      "fine_decode_lanes": [
+        "cuda"
+      ],
+      "cpu_decode_threads": 2,
+      "source_workers": 12,
+      "yolo_inference_workers": 3,
+      "inference_batch_wait_ms": 25,
+      "materialization_workers": 3,
+      "reuse_experiment_clips_for_key_materials": true,
+      "io_workers": 6,
+      "synchronized_segment_waves": false,
+      "segment_wave_timeout_seconds": 3600,
+      "preflight_probe_workers": 16,
+      "preflight_prefer_clock_metadata": true,
+      "media_pipeline_preflight_enabled": true,
+      "media_pipeline_preflight_seconds": 1.0,
+      "source_stat_workers": 32,
+      "source_stat_cache_ttl_seconds": 120,
+      "profile": "rtx3090ti-24gb-ubuntu-dynamic-multiview",
+      "motion_probe_batch_size": 16,
+      "fine_min_third_person_views": null,
+      "motion_probe_all_views": false,
+      "motion_probe_camera_motion_compensation": true,
+      "motion_probe_camera_motion_min_response": 0.15,
+      "motion_probe_camera_motion_max_shift_ratio": 0.35,
+      "motion_probe_first_person_quality_fallback": true,
+      "motion_probe_first_person_raw_motion_weight": 0.25,
+      "coarse_all_views": true,
+      "coarse_full_timeline_scan": false,
+      "coarse_comprehensive_candidate_union": true,
+      "coarse_open_vocabulary_motion_percentile": 90.0,
+      "coarse_open_vocabulary_frames_per_hour_per_view": 2,
+      "coarse_open_vocabulary_candidate_window_seconds": 4.0,
+      "coarse_open_vocabulary_max_actor_object_gap_norm": 0.08,
+      "fine_risk_window_expansion_enabled": true,
+      "fine_risk_extra_padding_seconds": 30.0,
+      "fine_risk_low_confidence_threshold": 0.7,
+      "fine_risk_conflict_gap_seconds": 15.0,
+      "fine_risk_action_types": [
+        "liquid_movement",
+        "container_state_change",
+        "device_panel_operation"
+      ],
+      "fine_low_alignment_extra_padding_enabled": true,
+      "fine_low_alignment_confidence_threshold": 0.8,
+      "fine_low_alignment_extra_padding_seconds": 30.0,
+      "auto_exhaustive_short_timeline_enabled": true,
+      "auto_exhaustive_short_timeline_seconds": 600,
+      "engine_batch_size": 4,
+      "fine_inference_workers_per_role": 3,
+      "shared_inference_enabled": true,
+      "shared_inference_contexts_per_pool": 3,
+      "coarse_inference_batch_wait_ms": 500,
+      "coarse_cuda_max_concurrent_sources": 2,
+      "key_material_frame_reader_max_open": 2,
+      "overlap_aligned_experiment_clips": false,
+      "aligned_experiment_clip_workers": 2,
+      "overlap_aligned_key_materials": true,
+      "aligned_key_material_workers": 2,
+      "derived_media_cache_enabled": true
+    },
+    "alignment": {
+      "reference_view": "first_person",
+      "reference_strategy": "best_clock_quality",
+      "reference_preference_bonus": 0.15,
+      "nearest_tolerance_ms": 120.0,
+      "visual_anchor_search_seconds": 5.0,
+      "visual_anchor_fps": 4.0,
+      "max_drift_ppm": 2500.0,
+      "minimum_match_ratio": 0.6,
+      "cross_view_event_tolerance_ms": 750.0,
+      "cross_view_event_max_tolerance_ms": 2500.0,
+      "visual_anchor_count": 3,
+      "visual_anchor_duration_seconds": 10.0,
+      "visual_audit_csv_confidence_threshold": 0.8,
+      "visual_audit_search_seconds": 1.0,
+      "visual_audit_anchor_count": 3,
+      "visual_audit_duration_seconds": 2.0,
+      "visual_audit_fps": 2.0,
+      "mandatory_visual_audit": true,
+      "aligned_timestamps_fps": 2.0,
+      "max_csv_points_per_view": 30000,
+      "csv_sampling_mode": "bounded_sparse",
+      "csv_samples_per_segment": 5,
+      "csv_bounded_full_read_limit_bytes": 2097152,
+      "csv_read_workers": 12,
+      "clock_jump_threshold_ms": 500.0,
+      "clock_rate_error_ppm": 10000.0,
+      "maximum_segment_clock_shift_ms": 300000.0,
+      "minimum_alignment_uncertainty_ms": 25.0,
+      "maximum_alignment_uncertainty_ms": 5000.0,
+      "local_timeline_fallback_enabled": true,
+      "local_timeline_confidence_cap": 0.65,
+      "local_timeline_uncertainty_ms": 1000.0,
+      "allow_local_timeline_formal_evidence": false,
+      "allow_uncertain_segment_formal_evidence": false,
+      "quality_gate_enabled": true,
+      "minimum_required_role_overlap_ms": 1000.0,
+      "view_coverage_warning_ratio": 0.999,
+      "csv_segment_endpoints_only": true
+    },
+    "segmentation": {
+      "min_experiment_seconds": 5.0,
+      "experiment_gap_seconds": 30.0,
+      "experiment_gap_seconds_by_action": {
+        "liquid_movement": 45.0,
+        "pipette_transfer_operation": 45.0,
+        "device_panel_operation": 60.0
+      },
+      "identity_idle_bridge_enabled": true,
+      "identity_idle_bridge_max_gap_seconds": 300.0,
+      "identity_idle_bridge_min_shared_identities": 2,
+      "experiment_pre_roll_seconds": 2.0,
+      "experiment_post_roll_seconds": 3.0,
+      "boundary_context_activation_gap_seconds": 30.0,
+      "boundary_context_bridge_confidence": 0.5,
+      "boundary_context_min_confidence": 0.65,
+      "boundary_context_max_gap_seconds": 10.0,
+      "boundary_context_max_extension_seconds": 90.0,
+      "rejected_boundary_context_enabled": true,
+      "rejected_boundary_context_max_formal_segments": 3,
+      "rejected_boundary_context_min_confidence": 0.3,
+      "rejected_boundary_context_strong_confidence": 0.65,
+      "rejected_boundary_context_max_gap_seconds": 10.0,
+      "rejected_boundary_context_max_extension_seconds": 180.0,
+      "rejected_boundary_context_weak_fringe_seconds": 10.5,
+      "rejected_boundary_context_evidence_overflow_seconds": 15.0,
+      "recalled_boundary_start_snap_seconds": 60.0,
+      "recalled_boundary_start_bridge_gap_seconds": 30.0,
+      "recalled_boundary_membership_recovery_enabled": true,
+      "recalled_boundary_membership_max_step_gap_seconds": 30.0,
+      "recalled_boundary_membership_single_role_min_confidence": 0.78,
+      "recalled_boundary_membership_action_types": [
+        "hand_object_contact",
+        "object_movement",
+        "container_state_change",
+        "device_panel_operation"
+      ],
+      "boundary_tail_context_max_gap_seconds": 30.0,
+      "boundary_tail_context_min_shared_objects": 2,
+      "liquid_start_anchor_required_objects": [
+        "pipette"
+      ],
+      "movement_opener_corroboration_seconds": 30.0,
+      "key_clip_pre_seconds": 2.0,
+      "key_clip_post_seconds": 3.0,
+      "event_merge_gap_seconds": 1.25,
+      "min_event_duration_seconds": 0.5,
+      "min_event_observations": 3,
+      "min_view_action_density_per_minute": 0.3,
+      "long_experiment_sparse_view_enabled": true,
+      "long_experiment_sparse_view_min_duration_seconds": 120.0,
+      "long_experiment_sparse_view_min_events": 2,
+      "long_experiment_sparse_view_min_evidence_seconds": 1.0,
+      "single_view_accept_confidence": 0.78,
+      "single_view_action_accept_confidence": {
+        "container_state_change": 0.7,
+        "liquid_movement": 0.6
+      },
+      "semantic_review_cross_role_context_enabled": true,
+      "semantic_review_cross_role_context_min_confidence": {
+        "liquid_movement": 0.5,
+        "container_state_change": 0.38,
+        "device_panel_operation": 0.45
+      },
+      "semantic_review_cross_role_context_support_min_confidence": 0.55,
+      "movement_threshold_norm": 0.025,
+      "movement_window_ms": 250,
+      "movement_window_threshold_norm": 0.01,
+      "movement_visual_verification": {
+        "enabled": true,
+        "max_pairs_per_candidate": 3,
+        "max_candidates": 2048,
+        "max_wall_seconds": 600,
+        "workers": 2,
+        "frame_cache_size": 512
+      },
+      "camera_motion_compensation_min_anchors": 2,
+      "suppress_stationary_device_movement": true,
+      "contact_distance_norm": 0.035,
+      "liquid_motion_threshold": 6.0,
+      "liquid_transfer_max_sequence_gap_seconds": 20.0,
+      "liquid_transfer_min_contact_observations": 2,
+      "liquid_transfer_min_contact_duration_seconds": 0.2,
+      "require_both_roles": true,
+      "allow_strong_single_role_actions": true,
+      "accepted_leading_context_enabled": true,
+      "accepted_leading_context_max_gap_seconds": 10.0,
+      "accepted_leading_context_max_extension_seconds": 90.0,
+      "semantic_review_requires_dual_role_movement_anchor": true
+    },
+    "action_state_machine": {
+      "enabled": true,
+      "enforce_publish_gate": false,
+      "minimum_phase_completeness": 0.75,
+      "occlusion_grace_seconds": 1.5,
+      "release_hold_seconds": 0.3,
+      "fragment_identity_gap_seconds": 1.5
+    },
+    "continuity": {
+      "max_gap_seconds": 300.0,
+      "require_shared_third_view": false,
+      "minimum_shared_objects": 2,
+      "minimum_shared_object_identities": 1,
+      "preparation_bridge_max_gap_seconds": 20.0,
+      "preparation_segment_max_seconds": 20.0,
+      "preparation_segment_max_events": 2,
+      "preparation_following_min_seconds": 30.0,
+      "atomic_fragment_merge_max_gap_seconds": 20.0,
+      "atomic_fragment_min_shared_objects": 2,
+      "atomic_fragment_min_shared_object_identities": 1,
+      "atomic_fragment_max_events_per_side": 3,
+      "atomic_fragment_repeated_primary_actions": [
+        "liquid_movement",
+        "pipette_transfer_operation",
+        "container_state_change",
+        "device_panel_operation"
+      ],
+      "atomic_sequence_split_min_gap_seconds": 9.0,
+      "atomic_sequence_split_min_gap_seconds_by_action": {
+        "liquid_movement": 9.0,
+        "pipette_transfer_operation": 9.0,
+        "container_state_change": 6.0,
+        "device_panel_operation": 12.0
+      },
+      "atomic_sequence_split_min_events_per_side": 4,
+      "quarantined_atomic_bridge_max_step_gap_seconds": 60.0,
+      "quarantined_atomic_bridge_max_span_seconds": 180.0,
+      "quarantined_context_bridge_min_events": 2,
+      "quarantined_context_bridge_min_shared_objects": 2,
+      "quarantined_cross_boundary_bridge_enabled": true,
+      "quarantined_cross_boundary_bridge_max_span_seconds": 90.0,
+      "quarantined_cross_boundary_bridge_max_step_gap_seconds": 15.0,
+      "quarantined_cross_boundary_bridge_min_events": 4,
+      "stable_identity_max_gap_seconds": 10.0
+    },
+    "key_materials": {
+      "minimum_separation_seconds": 1.5,
+      "duplicate_interval_overlap_ratio": 0.5,
+      "max_per_action_type_per_atomic_experiment": 12,
+      "max_per_experiment_group": 50,
+      "adaptive_coverage_budget_enabled": true,
+      "adaptive_budget_step_seconds": 600.0,
+      "adaptive_per_action_type_additional_per_step": 2,
+      "adaptive_per_group_additional_per_step": 10,
+      "max_per_action_type_ceiling": 48,
+      "max_per_experiment_group_ceiling": 240,
+      "coverage_time_bucket_seconds": 300.0,
+      "coverage_critical_action_types": [
+        "container_state_change",
+        "device_panel_operation",
+        "pipette_transfer_operation"
+      ],
+      "semantic_relabel_min_confidence": 0.7,
+      "selective_verification": {
+        "enabled": true,
+        "mode": "ambiguous_or_high_risk",
+        "minimum_closed_set_confidence": 0.45,
+        "high_risk_actions": [
+          "liquid_movement",
+          "container_state_change",
+          "pipette_transfer_operation"
+        ],
+        "max_events_per_run": 120,
+        "max_views_per_event": 2,
+        "max_wall_seconds_per_run": 900
+      }
+    },
+    "liquid_state": {
+      "enabled": false,
+      "backend": "disabled",
+      "model_path": null,
+      "device": 0,
+      "half": true,
+      "sample_fps": 2.0,
+      "burst_fps": 10.0,
+      "confidence_threshold": 0.65,
+      "container_roi_padding_fraction": 0.1,
+      "max_runtime_seconds": 200.0
+    },
+    "capture_quality": {
+      "enabled": true,
+      "sample_windows": 4,
+      "sample_seconds": 3
+    },
+    "archive": {
+      "create_xlsx": true,
+      "create_side_by_side_video": true,
+      "keep_debug_candidates": true,
+      "include_empty_action_categories": false
+    },
+    "daily_report": {
+      "enabled": true,
+      "template_id": "VC-LAB-DAILY-REPORT-V2",
+      "timezone": "Asia/Shanghai",
+      "generate_pdf": true,
+      "additional_mllm_calls": false
+    },
+    "device_day": {
+      "schema_version": "visioncortex-device-day/1",
+      "chunk_seconds": 900,
+      "timezone": "Asia/Shanghai",
+      "inactive_frames": 8,
+      "active_frames_per_window": 12,
+      "active_window_seconds": 30,
+      "delete_capture_sources": false,
+      "raw_originals_read_only": true,
+      "clip_delivery": "source_recording_v2",
+      "archive_html_enabled": false,
+      "preserve_completed_on_recipe_change": true
+    },
+    "speech_recognition": {
+      "language": "zh",
+      "max_audio_seconds": 180,
+      "max_source_bytes": 134217728,
+      "context_max_segments": 80,
+      "context_max_characters": 8000,
+      "provider": "aliyun_qwen",
+      "model": "fun-asr-flash-2026-06-15"
+    },
+    "mllm": {
+      "enabled": true,
+      "compact_scene_metadata": true,
+      "scene_daily_attempt_limit": null,
+      "scene_daily_token_limit": null,
+      "model": "glm-5.3-flashx",
+      "timeout_seconds": 180,
+      "max_retries": 1,
+      "retry_max_seconds": 30,
+      "keepalive_expiry_seconds": 60,
+      "http2": false,
+      "max_output_tokens": 16384,
+      "max_images_per_event": 8,
+      "max_images_per_event_by_action": {
+        "liquid_movement": 18
+      },
+      "use_key_clip_temporal_samples": true,
+      "temporal_samples_per_view": 3,
+      "liquid_primary_samples": 15,
+      "liquid_context_samples": 3,
+      "candidate_review_max_events": 120,
+      "candidate_review_include_rejected": true,
+      "candidate_review_rejected_min_confidence": 0.75,
+      "candidate_review_stratified_queue_enabled": true,
+      "candidate_review_time_bucket_seconds": 1800,
+      "storyboard_pairs_per_group": 4,
+      "storyboard_pairs_per_group_max": 12,
+      "storyboard_seconds_per_pair": 300,
+      "boundary_review": {
+        "enabled": true,
+        "maximum_gap_seconds": 120,
+        "context_seconds": 12,
+        "maximum_pairs": 20,
+        "minimum_confidence": 0.85,
+        "tail_window_seconds": 90,
+        "maximum_tail_windows": 8
+      },
+      "max_images_per_group": 12,
+      "group_workers": 4,
+      "operation_review": {
+        "enabled": true
+      },
+      "workers": 1,
+      "response_language": "zh-CN",
+      "fail_run_on_incomplete": false,
+      "failure_circuit_breaker_threshold": 2,
+      "request_image_max_edge": 768,
+      "request_image_jpeg_quality": 82,
+      "compact_aligned_temporal_actions": [
+        "hand_object_contact",
+        "object_movement"
+      ],
+      "temporal_samples_per_view_by_action": {
+        "liquid_movement": 15
+      },
+      "provider": "nianfeng",
+      "api_protocol": "chat_completions",
+      "quality_mode": "quality",
+      "local_receipt_max_bytes": 134217728,
+      "local_receipt_total_bytes": 2147483648
+    }
+  },
+  "customer_bindings": {
+    ".models.first_person": {
+      "kind": "path",
+      "source_value_sha256": "5f51a42b6ca2e873917e05680dbaf53a26e909c867a843b793b974642b27d866"
+    },
+    ".models.third_person": {
+      "kind": "path",
+      "source_value_sha256": "fe8c66e5992386f0435e47cf22b06914feff9181f50368b6c9f96f20478890e7"
+    },
+    ".models.first_person_engine": {
+      "kind": "path",
+      "source_value_sha256": "8c0468ef231515e59fd1c34fe101a504434723c94d11d8608e21f1115418dffe"
+    },
+    ".models.third_person_engine": {
+      "kind": "path",
+      "source_value_sha256": "1bd744c38224d7003d787dcd3ed7ca7b61800bd7cbde9b2c68e9bb85593a7ae8"
+    },
+    ".models.open_vocabulary_key_frame.grounding_dino_fallback.model_path": {
+      "kind": "path",
+      "source_value_sha256": "b2eeb0df80456f6bfd618b945a84411c207ca27162920230cf80934878f6879f"
+    },
+    ".models.open_vocabulary_key_frame.grounding_dino_fallback.model_repository": {
+      "kind": "asset_identity",
+      "source_value_sha256": "2a6ea78f918f2689bbd93133d2457c50ebb99f0ab8a8c148bd4fef1b67f00683"
+    },
+    ".models.open_vocabulary_key_frame.grounding_dino_fallback.model_revision": {
+      "kind": "asset_identity",
+      "source_value_sha256": "9b848fd9c05683a04c480f728acae3ef7a32462df0663853d89d53a872c92327"
+    },
+    ".models.open_vocabulary_key_frame.grounding_dino_fallback.model_sha256": {
+      "kind": "asset_identity",
+      "source_value_sha256": "30e0475eec8f0cb811752c0a15c9e03610ec98d681063c960da7064591a6e255"
+    },
+    ".models.open_vocabulary_key_frame.model_path": {
+      "kind": "path",
+      "source_value_sha256": "c8cf30122ef7172d5a5e0b95abed2f0ab44b573cea805aa50813fd14e23591ab"
+    },
+    ".models.open_vocabulary_key_frame.model_sha256": {
+      "kind": "asset_identity",
+      "source_value_sha256": "c225c8e25e421d66bb9d22f8ec5aa48275e8b4894dc7c1b6005050ee91facc0f"
+    },
+    ".models.open_vocabulary_key_frame.model_download_url": {
+      "kind": "asset_identity",
+      "source_value_sha256": "d79e4dc2d05170817fee551bf2bba7501bc31909f4d36755707ec91811c760b1"
+    },
+    ".models.open_vocabulary_key_frame.clip_model_path": {
+      "kind": "path",
+      "source_value_sha256": "2fa8a98ff14cd31b77d2848ea6537c6ef1c5394ae0391ccf9cbf20d6db229716"
+    },
+    ".models.open_vocabulary_key_frame.clip_model_sha256": {
+      "kind": "asset_identity",
+      "source_value_sha256": "427bef61a01e05e9ec6472bfb05169ecdad4af2d5b147b22687ca10c630e6c95"
+    },
+    ".models.open_vocabulary_key_frame.clip_model_download_url": {
+      "kind": "asset_identity",
+      "source_value_sha256": "d5692ff02050530489c3af37e3aada2a4bd117f50c24d68cbe7ced52492df279"
+    },
+    ".models.first_person_coarse_engine": {
+      "kind": "path",
+      "source_value_sha256": "7dd905875f81743819586149c669a91025f0eb7fada81aa4de8e6074becf1398"
+    },
+    ".models.third_person_coarse_engine": {
+      "kind": "path",
+      "source_value_sha256": "97f84964e7a8444c8736a1327ae51a0dec0670e8d5b43e88b585a0c92c68b91f"
+    },
+    ".models.temporal_participant_segmentation.checkpoint_path": {
+      "kind": "path",
+      "source_value_sha256": "5cdf90bfdab53ec595a3e23259e04858438e25b05200eca6a2b55cc7c8cf3bc6"
+    },
+    ".models.temporal_participant_segmentation.checkpoint_sha256": {
+      "kind": "asset_identity",
+      "source_value_sha256": "c03f840047ffc676e04f8b99ec05ba7e3743fd2dfa00cfebc0f6e2d56ccbf373"
+    },
+    ".models.temporal_participant_segmentation.checkpoint_download_url": {
+      "kind": "asset_identity",
+      "source_value_sha256": "9db056099e47d507624d6fd53a431675dc3a2e50e936fe02c8363d86acc7c822"
+    },
+    ".models.temporal_participant_segmentation.source_revision": {
+      "kind": "asset_identity",
+      "source_value_sha256": "42f14eeebad38bf84bdfacc216cc15abb82d8d528ccef76cdc165e6abbbb841b"
+    },
+    ".models.liquid_semantic_sidecar.checkpoint_path": {
+      "kind": "path",
+      "source_value_sha256": "c6aea15b77ef4ed0437ae12909a238372b5ef005d5557bf5b46647eea5ad80b3"
+    },
+    ".models.liquid_semantic_sidecar.checkpoint_sha256": {
+      "kind": "asset_identity",
+      "source_value_sha256": "ba2904a51f408ef6bdcea39d5ca332aed07b242099fdc996082fdbc85ee35294"
+    },
+    ".models.liquid_semantic_sidecar.source_archive_path": {
+      "kind": "path",
+      "source_value_sha256": "49f9c9990eb58ee83fd76c2cdfb314444540c1499e8c35ed1e9ce7cad14b311a"
+    },
+    ".models.liquid_semantic_sidecar.source_archive_url": {
+      "kind": "asset_identity",
+      "source_value_sha256": "cd34c1daf1c8ccd68f6a22ea4e4fb3e92039f7596a71cadd1e9159a464ea9207"
+    },
+    ".models.liquid_semantic_sidecar.source_archive_sha256": {
+      "kind": "asset_identity",
+      "source_value_sha256": "4f6dd6947420338017e1ddfbbccfba71c0e1c106fc8dd7a49883442426a645b8"
+    },
+    ".models.liquid_semantic_sidecar.source_record": {
+      "kind": "asset_identity",
+      "source_value_sha256": "70a326a2436939ea04b89b166be860318c98536734bd555084715c24e630ba14"
+    }
+  }
+}

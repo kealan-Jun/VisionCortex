@@ -1,0 +1,18 @@
+{
+  "schema_version": "vc-lab-material-observation-rules/1",
+  "default_enabled": false,
+  "status": "candidate_evidence_not_consumption",
+  "identity_authority": "existing_Core_entities_tag_assignment_container_content_binding",
+  "ledger_authority": "existing_Core.operate_and_Core.confirm_usage",
+  "seen_or_handled_causes_consumption": false,
+  "recognition_writes_quantity_ledger": false,
+  "source_lot_equals_target_batch": false,
+  "old_media_binding": "original_event_interval_and_immutable_resolution_snapshot",
+  "unverified_clock_fallback_to_current": false,
+  "deduplication": "explicit_occurrence_and_command_key_never_quantity_alone",
+  "unknown_opening_balance": null,
+  "maximum_observed_labels": 32,
+  "maximum_evidence_refs": 128,
+  "maximum_snapshot_bytes": 262144,
+  "production_activation": false
+}

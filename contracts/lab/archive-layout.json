@@ -1,0 +1,88 @@
+{
+  "schema_version": "vc-lab-unified-archive/1",
+  "revision": "20261026.1",
+  "project": "VisionCortex",
+  "timezone": "Asia/Shanghai",
+  "grouping": "capture_date_and_capture_device",
+  "device_day": "YYYY-MM-DD_<camera_key>",
+  "camera_identity": "exact_validated_vc_camera_key_no_hash_or_truncation",
+  "partition_by_processing_project": false,
+  "preferred_raw_directory": "MetaData",
+  "existing_raw_directory_aliases": [
+    "MetaVideo"
+  ],
+  "directories": {
+    "MetaData": {
+      "owner": "capture_producer",
+      "content": "original_video_audio_photos_and_capture_receipts",
+      "mutable_by_processing": false
+    },
+    "ProcessedClips": {
+      "owner": "processing",
+      "content": "existing_screened_clips_index_and_evidence"
+    },
+    "VoicePhotoReadings": {
+      "owner": "processing",
+      "content": "existing_photo_burst_readings_results_and_evidence"
+    },
+    "VideoReadings": {
+      "owner": "processing",
+      "content": "existing_video_triggered_readings_results_and_evidence"
+    },
+    "Comment": {
+      "owner": "processing",
+      "content": "existing_audio_transcripts_and_time_references"
+    },
+    "MultimodalUnderstanding": {
+      "owner": "processing",
+      "content": "existing_understanding_documents"
+    },
+    "LaboratoryDailyReport": {
+      "owner": "processing",
+      "content": "existing_daily_report_and_immutable_versions"
+    }
+  },
+  "control_directory": ".System",
+  "contract_path": ".System/ArchiveContract.json",
+  "result_contract": {
+    "instrument_fields": [
+      "wearer_id",
+      "device_model",
+      "device_no",
+      "qr_hash",
+      "photo_time",
+      "values"
+    ],
+    "instrument_format_owner": "existing_FR_standard_records",
+    "native_format_owner": "existing_VC_DeviceDayLayout_and_publishers",
+    "same_capture_different_results": "relative_evidence_references_no_duplicate_full_source_copy",
+    "unknown_values": null,
+    "unknown_capture_time_folder_basis": "receipt_date_with_explicit_unknown_capture_time",
+    "source_timestamps": "preserve_original_time_and_basis",
+    "history": "immutable_receipts_and_versions_separate_from_latest_views",
+    "physical_action_confirmed_by_recognition": false
+  },
+  "business_database": "PostgreSQL_on_local_SSD",
+  "business_identity": "laboratory_device_UUID_material_and_batch_links_in_database",
+  "runtime_state": "queues_locks_environments_current_weights_on_local_SSD",
+  "storage_policy": {
+    "raw_originals_deleted_by_processing": false,
+    "completed_outputs_deleted_automatically": false,
+    "working_media_cache_max_bytes": 2147483648,
+    "working_media_cache_ttl_seconds": 86400,
+    "cache_eviction_requires_verified_original_and_no_running_reader": true,
+    "nas_unavailable": "stop_and_retry_without_local_fallback"
+  },
+  "legacy_archives": "preserve_existing_paths_and_frozen_publication_plans",
+  "source_projects": [
+    {
+      "name": "VisionCortex",
+      "vision_commit": "4f7caa18d2b8fe9be65be453ce3112c63826390e",
+      "pipeline_commit": "521849d27d0ef4ca4c4e1f9bed8e05e99f9946d5"
+    },
+    {
+      "name": "FieldRecognition",
+      "commit": "9611eba0f1c4abb20cfa4268641fef2ac8745be8"
+    }
+  ]
+}

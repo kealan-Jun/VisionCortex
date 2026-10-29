@@ -1,0 +1,6 @@
+{
+  "schema_version": "visioncortex-device-registry/1",
+  "registry_id": "default-empty",
+  "devices": {},
+  "experiment_role_overrides": {}
+}

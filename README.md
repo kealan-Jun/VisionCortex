@@ -1,228 +1,203 @@
 <p align="center">
-  <img src="docs/assets/visioncortex-banner.svg" alt="VisionCortex：多视角湿实验视频与可追溯证据" width="100%">
+  <img src="docs/assets/visioncortex-banner.svg" alt="VisionCortex — 视频、读数、扫码与口述，连接到可追溯的实验时间线" width="100%">
 </p>
 
 <p align="center">
-  <strong>多视角湿实验视频证据流水线</strong><br>
-  从第一人称与第三人称录像，到可回看的实验片段、操作步骤与报告。
+  <strong>把实验现场，连接成可追溯的记录。</strong><br>
+  视频理解 · 屏幕 OCR · 二维码 · 口述 Comment · 材料批次
 </p>
 
 <p align="center">
-  <a href="pyproject.toml"><img src="https://img.shields.io/badge/Python-3.11%20%7C%203.12-3776AB?style=flat-square&amp;logo=python&amp;logoColor=white" alt="Python 3.11 或 3.12"></a>
-  <a href="#使用方式"><img src="https://img.shields.io/badge/Interface-Web%20%7C%20CLI%20%7C%20API-178C88?style=flat-square" alt="Web、CLI 与 API"></a>
-  <a href="docs/DEVICE-DAY-ARCHIVE-CONTRACT.zh-CN.md"><img src="https://img.shields.io/badge/Archive-Device--day%20v1-4C7A9C?style=flat-square" alt="设备日归档契约 v1"></a>
-</p>
-
-<p align="center">
-  <a href="#核心能力">核心能力</a> ·
-  <a href="#快速开始">快速开始</a> ·
-  <a href="#产物与追溯">产物与追溯</a> ·
-  <a href="#文档导航">文档导航</a> ·
-  <a href="#证据与验证">证据与验证</a>
+  <a href="#快速开始">快速开始</a> &nbsp; / &nbsp;
+  <a href="#能力地图">能力地图</a> &nbsp; / &nbsp;
+  <a href="#一条完整链路">完整链路</a> &nbsp; / &nbsp;
+  <a href="#留存即接口">留存格式</a> &nbsp; / &nbsp;
+  <a href="#按角色阅读">文档导航</a>
 </p>
 
 ---
 
-VisionCortex 面向化学与湿实验的长视频分析，将多机位画面、采集时钟和录音组织到
-可追溯的实验记录中。它保留从原始媒体、候选事件、跨视角审查，到关键素材、
-步骤理解和报告的来源链，让每个结果都能回到对应画面与时间位置。
+**VisionCortex 将视频分析与 FieldRecognition 合为同一个工程。** 多路采集、主动扫码、
+屏幕读数和口述围绕同一物理时间线关联，在 PostgreSQL 中保留操作上下文、实验与材料批次历史，
+并按既定 NAS 格式留存片段、理解、Comment 和日报。结果连同源媒体、时刻、版本与修订关系一起保存，供回看、查询和业务系统使用。
 
-浏览器上传、离线清单与 NAS 自动采集共用分析核心；研究人员通过页面阅读结果，
-工程团队通过 CLI 和 API 接入任务、恢复处理并检索证据。
+现有 VC／FR 模型与权重可通过显式配置复用，无须另建项目；
+模型文件、现场身份、原始数据、存储地址与凭据均由私有部署提供。
+本仓库提供 Web、CLI 和 API，Agent 界面由集成方对接现有鉴权接口。
 
-## 核心能力
-
-| 能力 | 可以做什么 |
-| :--- | :--- |
-| **多视角时间对齐** | 结合视频与 CSV 时钟，记录逐路可用区间、误差和隔离分片，统一定位第一人称与第三人称画面。 |
-| **有界实验发现** | 用检测、跟踪和跨视角审查提出实验候选，保留边界复核、接受理由及未确认区间。 |
-| **关键素材与步骤** | 组织动作关键帧、关键片段和事件引用，结合多模态模型生成有来源的步骤理解。 |
-| **录音与转写** | 配对原始录音，保存字幕、时间映射与执行回执，支持文字检索、回听和有界重算。 |
-| **持久任务与恢复** | 提供分块上传、持久队列、输入封存和校验后的断点恢复，记录阶段进度、耗时与实际 Token 用量。 |
-| **归档、检索与报告** | 发布设备日索引、实验素材、日报及 PDF；检索结果可以追溯到源媒体、事件与产物哈希。 |
-
-检测框、分割掩码和模型共识用于构建候选证据；物理动作结论仍须经过适用的审查与质量门。
-
-## 处理流程
-
-```mermaid
-flowchart TB
-    A[视频 · CSV · 录音] --> B[来源封存与时钟核验]
-    B --> C[对齐与实验候选]
-    C --> D[关键素材与跨视角审查]
-    B --> E[可选录音转写与时间映射]
-    D --> F[多模态步骤理解]
-    E --> F
-    F --> G{质量检查}
-    G -->|满足适用门禁| H[正式归档与报告]
-    G -->|证据仍有缺口| I[阶段成果与缺口记录]
-
-    classDef input fill:#eef6fb,stroke:#548bab,color:#16344a
-    classDef process fill:#edf8f5,stroke:#39988b,color:#153e38
-    classDef output fill:#f4f5fa,stroke:#7b88a5,color:#28344b
-    class A,B input
-    class C,D,E,F process
-    class G,H,I output
-```
-
-这是处理关系示意，跨视角审查按适用输入执行，录音转写可选。
-设备日的预处理、索引、多模态理解和日报分别发布状态与回执，
-已完成的分片预处理不等待整日理解或报告完成。
+> **当前边界：** 统一模块、接口与选定专项测试已实现；实际模型调用、现场识别质量、
+> 跨模态完整闭环和正式 NAS 发布分别验收。保存了原片或生成了报告，都不等于识别已经通过。
+> 详见[实现与验收状态](docs/reference/lab-vision-status.zh-CN.md)。
 
 ## 快速开始
 
-### 1. 克隆并安装
-
-准备 **Git、Python 3.11 或 3.12**。将 `REPOSITORY_URL` 替换为你正在访问的
-本仓库克隆地址，创建独立环境后安装基础依赖。
-
-**Linux / macOS**
+**先启动本地工作台。** 准备 Git 与 Python 3.11／3.12，在完整源码目录中执行：
 
 ```bash
-git clone "REPOSITORY_URL" VisionCortex
+git clone https://github.com/RealityLoopAI/VisionCortex.git
 cd VisionCortex
 python3.11 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e .
-```
-
-**Windows PowerShell**
-
-```powershell
-git clone "REPOSITORY_URL" VisionCortex
-cd VisionCortex
-py -3.11 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e .
-```
-
-使用 Python 3.12 时，将创建环境命令中的 `3.11` 换成 `3.12`。
-基础安装提供本地页面，不安装 PyTorch、CUDA、YOLO 或 TensorRT，也不需要 API 密钥。
-开发检查再用同一环境的 Python 安装 `".[dev]"`；详细命令与故障排查见
-[本地启动指南](docs/guides/local-development.zh-CN.md)。
-
-### 2. 检查并打开页面
-
-**Linux / macOS**
-
-```bash
 ./start-visioncortex.sh --check-only
 ./start-visioncortex.sh
 ```
 
-**Windows PowerShell**
+打开 **[localhost:8000](http://127.0.0.1:8000/#/home)**。
+默认[本地配置](configs/development-local.yaml)关闭 NAS 自动采集与模型调用，附带空采集索引；
+首次启动无需 GPU、权重或 API 密钥。真实分析需按所选部署配置 FFmpeg、模型及数据来源。
+
+<details>
+<summary><strong>Windows PowerShell</strong></summary>
 
 ```powershell
+git clone https://github.com/RealityLoopAI/VisionCortex.git
+cd VisionCortex
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e .
 .\Start-VisionCortex.bat -CheckOnly
 .\Start-VisionCortex.bat
 ```
 
-Windows 也可双击 `Start-VisionCortex.bat`；macOS 可双击 `Start-VisionCortex.command`。
-启动后打开 **[http://127.0.0.1:8000/#/home](http://127.0.0.1:8000/#/home)**。
-端口被占用时，使用 `--port 8010`（Windows：`-Port 8010`）。
+也可双击 `Start-VisionCortex.bat`；macOS 可使用 `Start-VisionCortex.command`。
+端口冲突时传入 `--port 8010`，Windows 使用 `-Port 8010`。
+Python 3.12 对应替换创建环境命令中的版本号。
 
-默认使用 [development-local.yaml](configs/development-local.yaml)，关闭 NAS 自动采集与
-多模态调用；仓库附带的空采集索引不包含实验记录。首次页面用于查看功能和配置，
-真实视频分析需要另行配置模型、权重、FFmpeg 与所选服务，见
-[交付手册](docs/VisionCortex-端到端视频分析交付手册.md)。使用管理员已部署的服务时，按
-[普通用户 10 分钟操作指南](docs/VisionCortex-普通用户10分钟操作指南.md)提交任务。
+</details>
+
+**接入统一实验模块。** 使用同一环境安装可选依赖，再查看命令和核验冻结资源：
+
+```bash
+python -m pip install -e ".[lab]"
+visioncortex lab --help
+visioncortex lab verify-components
+visioncortex lab verify-rules
+```
+
+也支持 `python -m visioncortex.lab`。上述核验不启用采集、模型或数据库服务。
+实际业务接入需专用 PostgreSQL 和显式部署配置，见[集成指南](docs/reference/agent-integration.zh-CN.md)。
+更多安装、预检与故障排查见[本地开发指南](docs/guides/local-development.zh-CN.md)；
+已部署服务的使用者直接阅读 [10 分钟操作指南](docs/VisionCortex-普通用户10分钟操作指南.md)。
+
+## 能力地图
+
+| 能力 | 工程提供 | 结果如何约束 |
+| :--- | :--- | :--- |
+| **视频与价值切分** | 多视角对齐、检测与跟踪、候选边界、关键素材及多模态步骤理解 | 实验、非实验价值与证据未知分开；等待不自动判无价值，未分析区间明确保留。 |
+| **连续屏幕与指针读数** | 时序缓冲、稳定结构配准、局部像素融合、OCR 适配与已标定指针换算 | 字段与设备隔离；缺笔画、小数点、单位或标定时保留候选，不补造数值。 |
+| **二维码与操作上下文** | 主动扫码立即建立当时设备上下文；解析历史标签、容器与材料来源 | 被动入镜只记录观察；设备切换不等于实验结束，主操作设备不代替所有面板归属。 |
+| **口述 Comment** | 原音、转写、时间范围与结构化阶段解释；记录已完成步骤和后续计划 | 完成当前步骤与完成整个实验分开；说话人、时钟和跨模态冲突保留来源。 |
+| **材料与批次账本** | 区分来源批次与制备批次；Decimal 数量、单位、修订和全局只读汇总 | 材料关联不扣库存；明确业务才入账，未知余额不当作零，分装不重复计消耗。 |
+| **任务、查询与留存** | 持久队列、租约、检查点、晚到证据、鉴权 API、设备日报与版本化发布 | 原始证据不覆盖；阶段结果与正式发布分开，重试和夜间成本依据实际回执。 |
+
+[算法与业务逻辑](docs/reference/lab-vision-algorithms.zh-CN.md)详述各路径的门控与限制。
+新价值分类消费入口、自动 ASR 语义接入及真实跨模态联动仍有待集成或现场验证，
+不以单次模型返回或合成测试替代。
+
+## 一条完整链路
+
+```mermaid
+flowchart LR
+    A[采集来源<br/>佩戴关系 · 原始时间] --> B[身份与操作上下文<br/>主动扫码 · 空间绑定历史]
+    A --> C[有来源的观察<br/>视频价值 · OCR · ASR / Comment]
+    B --> D[PostgreSQL 时间线<br/>实验 · 样品 · 材料批次]
+    C --> D
+    D --> E[既定设备日留存<br/>片段 · 理解 · Comment · 日报]
+    E --> F[查询与协作<br/>鉴权 API · 同事 Agent]
+    F -->|有权限的确认与修订| D
+
+    classDef source fill:#edf2f8,stroke:#7b91af,color:#223850
+    classDef evidence fill:#eaf7f3,stroke:#529d8a,color:#174d41
+    classDef store fill:#f6f0e5,stroke:#b39765,color:#614a28
+    class A,B source
+    class C,D evidence
+    class E,F store
+```
+
+口述是有语义的 Comment：与原音及转写范围一起参与溯源。
+“此处配制完成，接下来去下一设备”保留同一样品／批次，只完成当前阶段并记录计划；
+到下一设备主动扫码后再切换当前操作上下文。只有明确的整体完成声明才进入实验完成流程。
+上游结构化解释通过现有接口接入，自动 ASR／语义消费仍需集成验证。
+
+晚到的录音、读数和绑定以修订追加；时间邻近不自动证明属于同一实验，
+采集佩戴者也不自动等于说话人。单个模型窗口、文件切点或设备切换不重定义实验边界。
 
 <details>
-<summary>可选：生成结构与契约示例</summary>
+<summary><strong>代码导航与现有模型复用</strong></summary>
+
+| 位置 | 职责 |
+| :--- | :--- |
+| [`src/visioncortex`](src/visioncortex) | 视频分析、任务、查询与 Web／CLI 入口。 |
+| [`src/field_recognition`](src/field_recognition) | FieldRecognition 实现。 |
+| [`src/visioncortex/lab`](src/visioncortex/lab) | 统一时间线、主动扫码、时序读数、Comment 与材料批次。 |
+| [`components/lab`](components/lab) · [`contracts/lab`](contracts/lab) · [`migrations/lab`](migrations/lab) | 兼容组件、版本规则与 PostgreSQL 迁移。 |
+| [`tools/inference`](tools/inference) | 本地模型服务源码；配置与运行见[服务指南](deployment/inference/lab-services.md)。 |
+
+VC／FR 现有权重以私有路径、版本和文件指纹显式绑定。
+源码安装不下载或启动模型，也不会切换已有服务与生产配置；复用权重仍需核验适用数据与质量。
+
+</details>
+
+## 留存即接口
+
+一个设备日保留采集端原名与四个结果目录。视频、语音、照片读数共用来源关系与时间线：
+
+```text
+<日期>_<相机>/
+├── MetaData/                         采集端原始目录；MetaVideo/ 存在时同样原位保留
+├── ProcessedClips/                   所选片段、覆盖记录与原片时间映射
+├── MultimodalUnderstanding/          对应片段的步骤理解与来源引用
+├── LaboratoryDailyReport/            设备日报与关联记录
+└── Comment/
+    ├── Audio/                       原音／转写的兼容关联与时间索引
+    └── OCR/
+        ├── VoicePhotoReadings/
+        └── VideoReadings/
+```
+
+OCR 保持固定六字段：`wearer_id`、`device_model`、`device_no`、`qr_hash`、`photo_time`、`values`。
+多源引用、源时钟、模型／规则版本与历史修订通过证据关系关联，不用改写这六字段承载。
+原始目录、原音和历史格式保留兼容，正式公开留存采用既定 JSON 与媒体结构。
+目录细节见[统一留存](docs/reference/unified-retention.zh-CN.md)、
+[设备日契约](docs/DEVICE-DAY-ARCHIVE-CONTRACT.zh-CN.md)与 [Schema](docs/contracts/device-day-v1.schema.json)。
+
+既有离线多视角入口继续保留 `Experiment-Clips`、`JSON-Config-Files`、`Key-Materials`、
+`Lab-Daily-Reports` 和 `Professional-PDFs`，见[产出参考](docs/FEATURES-AND-OPERATIONS.zh-CN.md#产出)。
+
+## 按角色阅读
+
+| 你要做什么 | 从这里开始 |
+| :--- | :--- |
+| **使用已部署工作台** | [10 分钟操作](docs/VisionCortex-普通用户10分钟操作指南.md) · [结果阅读](docs/guides/results.zh-CN.md) · [功能与操作](docs/FEATURES-AND-OPERATIONS.zh-CN.md) |
+| **部署与配置服务** | [端到端交付](docs/VisionCortex-端到端视频分析交付手册.md) · [后台服务](deployment/rtx3090ti-ubuntu/README.md#服务与存储) · [RTX 4060](deployment/rtx4060/README.md) · [本地模型服务](deployment/inference/lab-services.md) |
+| **对接业务与 Agent** | [鉴权接口与完整闭环](docs/reference/agent-integration.zh-CN.md) · [机器 API／GPU worker](deployment/inference/README.md) · [统一任务与检索契约](docs/UNIFIED-TASK-RETRIEVAL-CONTRACT.md) |
+| **维护采集与恢复** | [设备日运维](docs/DEVICE-DAY-OPERATIONS-OVERVIEW.zh-CN.md) · [NAS 原位预处理](docs/NAS-INPLACE-PREPROCESSING.zh-CN.md) · [LabVideo](docs/LAB-VIDEO-MONITORING.zh-CN.md) · [运行层](docs/UNIFIED-RUNTIME-WORK.md) · [阶段恢复](docs/STAGE-RECOVERY.md) |
+| **开发、模型与标注** | [本地开发](docs/guides/local-development.zh-CN.md) · [模块职责](docs/reference/architecture.zh-CN.md) · [标注与训练](docs/PROJECT-ANNOTATION-TRAINING.zh-CN.md) · [框真值契约](docs/YOLO-Box-Ground-Truth-and-Annotation-Contract.zh-CN.md) |
+| **核对交付与验收** | [实现状态](docs/reference/lab-vision-status.zh-CN.md) · [验收单模板](docs/VisionCortex-交付验收单模板.md) · [全部文档](docs/README.md) |
+
+CLI 分析使用[输入清单示例](examples/manifest.example.yaml)与[输入说明](docs/FEATURES-AND-OPERATIONS.zh-CN.md#输入清单)。
+模型、媒体、运行证据与密钥留在受控外部存储中，现场配置不进入 Git。
+
+## 如何判断结果可信
+
+| 层次 | 能说明什么 |
+| :--- | :--- |
+| **软件实现与专项测试** | 指定规则、接口、事务与异常路径按相应测试工作。 |
+| **实际模型执行** | 固定输入和模型确实被调用，保留执行回执；不单独证明内容正确。 |
+| **真实验收与交付** | 适用现场的质量、覆盖、时钟、归属、运行成本及发布链路逐项通过。 |
+
+证据不足时保留 `PARTIAL_EVIDENCE` 或 `NOT_PROVEN`；`PROVEN` 只覆盖对应回执明确支持的范围。
+夜间完成能力依据完整批次的阶段墙钟、质量与次班积压判断，缺失耗时保持未知。
+长期记忆四路研究的最终核验与归档仍未闭合，不能作为已交付容量承诺。
+
+<details>
+<summary><strong>可选：查看合成结构示例</strong></summary>
 
 ```bash
 visioncortex dry-run --config configs/development-local.yaml --output outputs/dry-run
 ```
 
-`dry-run` 使用合成数据验证目录、JSON 契约和评估结构，不能证明真实模型调用或实验准确率。
+此命令只用合成数据检查目录与契约，不证明真实模型或实验识别效果。
+开发变更按[本地指南](docs/guides/local-development.zh-CN.md)运行相关检查；交付时按验收单记录固定源码、配置、实际回执与缺口。
 
 </details>
-
-## 使用方式
-
-| 入口 | 适用场景 | 从这里开始 |
-| :--- | :--- | :--- |
-| **Web 工作台** | 上传录像、选择采集批次、查看进度、回看步骤与素材 | [用户指南](docs/VisionCortex-普通用户10分钟操作指南.md) |
-| **CLI** | 使用视频与时钟清单，固定配置运行或复验档案 | [输入清单](examples/manifest.example.yaml) · [操作参考](docs/FEATURES-AND-OPERATIONS.zh-CN.md#输入清单) |
-| **机器 API** | 跨机认证提交、范围隔离、幂等恢复与结果查询 | [机器 API 与 GPU worker](deployment/inference/README.md) |
-| **后台采集** | 接收已就绪的采集分片，独立推进设备日处理与发布 | [设备日运维总览](docs/DEVICE-DAY-OPERATIONS-OVERVIEW.zh-CN.md) |
-
-已预配主机的自动处理服务包、局域网账号与 HTTPS、本机 AI 服务设置和独立体验实例，
-集中在[功能与操作参考](docs/FEATURES-AND-OPERATIONS.zh-CN.md)。
-
-## 产物与追溯
-
-### NAS 自动采集：设备日原始数据与四类结果
-
-```text
-<日期>_<相机>/
-├── MetaData/ 或 MetaVideo/     采集端拥有的原生目录、原视频、原录音与元数据
-├── ProcessedClips/             精确筛选片段、全部时段记录与原片映射
-├── MultimodalUnderstanding/    对应片段的实际步骤理解、画面与来源
-├── LaboratoryDailyReport/      同一设备同一天的日报
-└── Comment/                    备注、参考材料、实际转写与 OCR 关联
-```
-
-目录拼写与 v1 语义由[设备日归档契约](docs/DEVICE-DAY-ARCHIVE-CONTRACT.zh-CN.md)
-和 [JSON Schema](docs/contracts/device-day-v1.schema.json) 固定。
-`MetaData` 与 `MetaVideo` 均按现场实际路径原位读取；同日两者并存时都保留。
-`metadata_only` 兼容这两种采集端设备日原始目录，关闭外部旧相机目录的发现入口；
-已入队任务继续处理，不要求采集端改名或改变格式。
-`key_frames` 保留给五类物理动作的选定事件；无活动区间使用 `scene_frames`，
-不会以普通场景抽帧充当动作关键帧。录音及 STT 保留在实际设备、实际日期下。
-用户所说的 protocol 是片段 `Understanding.json` 中实际观察到的动作步骤，不以提供 SOP 为前提。
-历史 `Comment/Protocol.json` 继续表示参考材料，不替代实际步骤理解。
-
-### 离线多视角实验
-
-既有实验入口保留 `Experiment-Clips`、`JSON-Config-Files`、`Key-Materials`、
-`Lab-Daily-Reports` 与 `Professional-PDFs` 布局，完整结构见[产出参考](docs/FEATURES-AND-OPERATIONS.zh-CN.md#产出)。
-两种入口共用分析与来源追溯逻辑，保留各自归档契约及历史读取兼容。
-
-产物记录源文件身份、时间范围、事件引用及 SHA-256。检索索引由归档数据派生，
-可以重建；阶段成果保留质量缺口和版本记录，供后续回看与恢复。
-
-## 文档导航
-
-| 目标 | 文档 |
-| :--- | :--- |
-| **使用已部署服务** | [10 分钟操作指南](docs/VisionCortex-普通用户10分钟操作指南.md) |
-| **安装与交付** | [端到端交付手册](docs/VisionCortex-端到端视频分析交付手册.md) · [后台服务安装](deployment/rtx3090ti-ubuntu/README.md#web-lifecycle) |
-| **配置与功能细节** | [功能与操作参考](docs/FEATURES-AND-OPERATIONS.zh-CN.md) |
-| **开发结构与全部文档** | [文档导航](docs/README.md) · [模块职责](docs/reference/architecture.zh-CN.md) |
-| **采集与设备日处理** | [运维总览](docs/DEVICE-DAY-OPERATIONS-OVERVIEW.zh-CN.md) · [原位预处理](docs/NAS-INPLACE-PREPROCESSING.zh-CN.md) · [LabVideo](docs/LAB-VIDEO-MONITORING.zh-CN.md) |
-| **任务、检索与恢复** | [统一任务与检索契约](docs/UNIFIED-TASK-RETRIEVAL-CONTRACT.md) · [运行层](docs/UNIFIED-RUNTIME-WORK.md) · [阶段恢复](docs/STAGE-RECOVERY.md) |
-| **模型与人工标注** | [标注与训练](docs/PROJECT-ANNOTATION-TRAINING.zh-CN.md) · [框真值契约](docs/YOLO-Box-Ground-Truth-and-Annotation-Contract.zh-CN.md) |
-| **真实运行与验收** | [验收单模板](docs/VisionCortex-交付验收单模板.md) |
-| **RTX 4060 部署** | [安装与运行说明](deployment/rtx4060/README.md) |
-
-## 证据与验证
-
-阅读结果时，以对应运行的回执和证据等级为准：
-
-| 标记 | 含义 |
-| :--- | :--- |
-| `PROVEN` | 指定范围的结论有对应、可复查的证据支持。 |
-| `PARTIAL_EVIDENCE` | 已保留阶段成果，但仍存在明确的质量或覆盖缺口。 |
-| `NOT_PROVEN` | 尚缺少支持该项结论的适用证据。 |
-
-确定性测试、合成界面示例、实际模型调用、真实视频质量、浏览器交付和正式发布资格
-分别验证。每次交付使用[验收单](docs/VisionCortex-交付验收单模板.md)记录固定源码 SHA、
-配置、实际回执和已知限制；既有运行结果不代表任意新版本已完成验收。
-
-本次生产关闭原片删除、清理和软链接替换，采集目录及原视频、录音、CSV 保持不动。
-具体边界见[设备日归档契约](docs/DEVICE-DAY-ARCHIVE-CONTRACT.zh-CN.md)。
-
-## 开发与参与
-
-修改前阅读[模块职责](docs/reference/architecture.zh-CN.md)，核对相关代码、配置和契约。
-模型、引擎、原始媒体、运行产物及密钥放在受控的外部存储中。
-
-在已配置的开发环境中，可以运行针对性检查，例如：
-
-```bash
-python -m pytest tests/test_unified_runtime.py
-git diff --check
-```
-
-提交时说明变更范围、检查结果与证据边界。真实运行使用固定源码 SHA、已核验的
-环境和输入清单；执行节点规则以相应任务书为准。

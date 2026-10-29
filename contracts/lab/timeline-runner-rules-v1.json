@@ -1,0 +1,46 @@
+{
+  "schema_version": "vc-lab-timeline-runner-rules/1",
+  "revision": "20261027.1",
+  "local_endpoint_policy": "explicit_loopback_no_proxy_no_redirect",
+  "enabled_by_default": false,
+  "max_task_attempts": 3,
+  "retry_backoff_seconds": [
+    5,
+    10,
+    20
+  ],
+  "expired_lease_cannot_renew_or_submit": true,
+  "window_checkpoints": "immutable_request_and_provider_fingerprint",
+  "workspace_max_bytes": 268435456,
+  "workspace_ttl_seconds": 86400,
+  "local_data_free_floor_bytes": 85899345920,
+  "input_window_max_seconds": 180,
+  "video": {
+    "temporal_sampling": false,
+    "default_max_edge": 768,
+    "spatial_resize_and_encoding_loss_explicit": true,
+    "all_frame_server_decoder_requires_verified_configuration": true,
+    "per_request_frame_consumption_attestation": "not_available"
+  },
+  "ocr": {
+    "max_frame_regions": 128,
+    "default_minimum_token_score": "0.8",
+    "mapping_requires_source_sha256_registration": true,
+    "roles_channels_units_instruments_separate": true,
+    "never_invent_decimal_or_unit_conversion": true,
+    "burst_agreement_is_not_confirmation": true
+  },
+  "gauge": {
+    "verified_calibration_and_source_pinned_rectified_needle_tip_required": true,
+    "counterweight_not_a_verified_tip": true,
+    "extrapolation": false,
+    "pressure_reference_conversion": false,
+    "visual_needle_detection_included": false
+  },
+  "reports": {
+    "text_rendering": "deterministic_evidence_only",
+    "publication": "opt_in_existing_categories_immutable_versions",
+    "no_raw_original_relocation": true
+  },
+  "customer_accuracy": "NOT_PROVEN"
+}

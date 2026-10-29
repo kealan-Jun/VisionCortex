@@ -1,0 +1,15 @@
+{
+  "schema_version": "vc-lab-fr-rules/1",
+  "source_commit": "9611eba0f1c4abb20cfa4268641fef2ac8745be8",
+  "measurement_rule": "instrument-measurement/6",
+  "archive_layout": "metadata",
+  "source_owned_originals": true,
+  "no_digits_seconds": 5.0,
+  "customer_registry_required": true,
+  "display_rules": [],
+  "grouping": "producer_receipt_or_explicit_directory_triplet_only",
+  "single_value": "binding_and_region_evidence_required_no_voting",
+  "video_observation_minimum_seconds": 2,
+  "photo_tasks_first": true,
+  "external_provider_enabled": false
+}

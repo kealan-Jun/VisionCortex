@@ -1,0 +1,701 @@
+"""Independent capture preprocessing and archive publication, with legacy routing.
+
+Only local receipt inspection occurs at scheduling time. Model outputs retain
+canonical retained source references from their first execution; physical read paths
+are never part of a new stage's content identity.
+"""
+from __future__ import annotations
+
+from contextlib import ExitStack, contextmanager
+from copy import deepcopy
+from pathlib import Path
+import time
+
+from .device_day_contract import VERSION, digest, read_json, safe_child, validate_segment
+from .device_day_activity import phase
+from .device_day_inputs import (
+    InputChanged, binding, copy_sealed, durable_json, identity, input_path, input_context,
+    processing_input, seal_input, validate_after, validate_snapshot, verify_content,
+    stage_input_ready,
+)
+from .device_day_io import slot
+
+
+PRIMARY = ('vision', 'stt', 'retention')
+
+
+def marker(runner, record):
+    from .device_day_contract import archive_name
+    name = archive_name(record['camera_key'], record['recording_start_us'])
+    return safe_child(runner.backend_root, f'device-day-receipts/{name}/{record["recording_id"]}/input-state.json')
+
+
+def active(runner, record, *, initialize=False):
+    path = marker(runner, record)
+    if path.is_file():
+        return True
+    if not runner.settings.get('inplace_preprocessing', False):
+        return False
+    # Preserve any historical execution, including incomplete model checkpoints.
+    # A queued record with no execution is migrated in place without clearing it.
+    if has_legacy_execution(path):
+        return False
+    if not initialize:
+        return True
+    from .device_day import exclusive
+    try:
+        with ExitStack() as locks:
+            for stage in ('all', *PRIMARY):
+                locks.enter_context(exclusive(runner.runtime_root / 'locks' / f'{record["recording_id"]}.{stage}.lock'))
+            if path.is_file():
+                return True
+            if has_legacy_execution(path):
+                return False
+            old = path.with_name('retention.json')
+            if old.is_file():
+                durable_json(path.parent / 'history' / f'legacy-retention-{digest(read_json(old))}.json', read_json(old))
+            durable_json(path, {'schema_version': 'visioncortex-inplace-input/1', 'recording_id': record['recording_id'],
+                                'recording': record, 'created_at': first_queued_at(runner, record),
+                                'retention_policy': retention_policy(runner, record)})
+            return True
+    except BlockingIOError:
+        # Another new stage may be committing the short local mode marker.
+        # Reuse that decision instead of deferring its independent input.
+        for _ in range(10):
+            if path.is_file():
+                return True
+            time.sleep(.01)
+        return False
+
+
+def retention_policy(runner, record):
+    policy = runner.settings.get('capture_retention') or {}
+    policy = policy | policy.get('cameras', {}).get(record['camera_key'], {})
+    media = [('video', record, record['recording_end_us'])]
+    if record.get('audio', {}).get('status') == 'provided':
+        media.append(('audio', record['audio'], record['audio'].get('end_us')))
+    sources = []
+    for kind, metadata, ended in media:
+        rule = policy | policy.get('by_kind', {}).get(kind, {})
+        deadline = metadata.get('source_expires_at')
+        if deadline is None and rule.get('seconds') is not None and ended is not None:
+            deadline = ended / 1e6 + rule['seconds']
+        sources.append({'kind': kind, 'deadline': deadline,
+                        'status': 'known' if deadline is not None else 'unknown',
+                        'cleanup_risk': bool(metadata.get('source_cleanup_risk', rule.get('cleanup_risk', False))),
+                        'safety_margin_seconds': rule.get('safety_margin_seconds', 3600)})
+    deadlines = [s['deadline'] for s in sources if s['deadline'] is not None]
+    return {'deadline': min(deadlines) if deadlines else None,
+            'status': 'known' if all(s['status'] == 'known' for s in sources) else 'unknown',
+            'cleanup_risk': any(s['cleanup_risk'] for s in sources), 'sources': sources,
+            'safety_margin_seconds': max(s['safety_margin_seconds'] for s in sources),
+            'basis': 'explicit_operator_policy' if deadlines or any(s['cleanup_risk'] for s in sources)
+                     else 'external_collector_policy_not_supplied'}
+
+
+def archive_priority(runner, record, created):
+    policy = retention_policy(runner, record)
+    urgent = policy['cleanup_risk'] or (policy['deadline'] is not None and
+                                       time.time() >= policy['deadline'] - policy['safety_margin_seconds'])
+    aged = time.time() - created >= runner.settings.get('archive_max_wait_seconds', 900)
+    return urgent, aged
+
+
+def receipt(runner, record, stage):
+    path = runner._receipt(runner.layout(record), record, stage)
+    return read_json(path) if path.is_file() else {}
+
+
+def enqueue(runner, record, stage):
+    """Return admission without reading media or changing historical completions."""
+    if (not stage_input_ready(record, stage)
+            or stage not in {'retention', 'stt'} and record.get('configured_role') not in {'first_person', 'third_person'}):
+        return False
+    if not active(runner, record, initialize=True):
+        return False
+    if stage not in PRIMARY:
+        # Legacy downstream executor is used only after both inputs are archived
+        # and their independent model receipts are formally published.
+        if receipt(runner, record, 'publication').get('status') != 'completed':
+            return False
+        return None
+    state = read_json(marker(runner, record))
+    policy = retention_policy(runner, record)
+    if state.get('retention_policy') != policy:
+        update_state(runner, record, retention_policy=policy)
+    urgent, aged = archive_priority(runner, record, state['created_at'])
+    visual = receipt(runner, record, 'vision')
+    from .capture_layout import METADATA_LAYOUT
+    native = record.get('input_layout') == METADATA_LAYOUT
+    admitted = not (stage == 'retention' and not (native or urgent or aged or visual.get('status') in {'completed', 'failed'}))
+    if stage == 'stt' and record.get('audio', {}).get('status') in {'pending_publication', 'association_mismatch'}:
+        admitted = False
+    record = record | {'archive_date': runner.layout(record).name[:10],
+                       'archive_deadline': policy['deadline'], 'source_retention_status': policy['status'],
+                       'archive_urgent': urgent, 'archive_aged': aged}
+    # Scheduling only: model/configuration provenance remains in the executable
+    # stage key. Preserve an old queue row until its original model receipt is
+    # validated by process(); never bulk erase queues or completed caches.
+    inputs = ([record['source_signature'], record.get('audio', {}).get('source_signature')] if stage == 'retention' else
+              record.get('audio', {}).get('source_signature') if stage == 'stt' else record['source_signature'])
+    revision = digest(['inplace-queue/1', stage, record['recording_id'], inputs, runner._key(stage, record, {})])
+    runner.queues[stage].enqueue(record, revision)
+    archived = receipt(runner, record, 'retention')
+    if (archived.get('status') == 'completed' and archived.get('input_binding_version') == 1
+            and archived.get('recording', {}).get('source_signature') == record.get('source_signature')):
+        # Local receipt only admits a verification attempt. process() still
+        # verifies archived bytes before models or publication may consume them.
+        with runner.queues[stage].connect() as db:
+            db.execute("UPDATE recordings SET input_status='ready' WHERE recording_id=? AND revision=? "
+                       "AND status!='running'", (record['recording_id'], revision))
+    runner.queues[stage].resume_prerequisite(record['recording_id'], revision)
+    return admitted
+
+
+def verified_archive(runner, record):
+    saved = receipt(runner, record, 'retention')
+    if saved.get('status') != 'completed':
+        return None
+    if saved.get('recording', {}).get('source_signature') != record.get('source_signature'):
+        raise InputChanged('Discovery source version differs from archived input')
+    if saved.get('input_binding_version') != 1:
+        raise InputChanged('Unrecognized archive binding')
+    layout = runner.layout(record)
+    with slot(runner.config, copy=True), phase('archive_hash_seconds'):
+        if not all(verify_content(safe_child(layout.root, s['retained']['path']), s['retained']) for s in saved['sources']):
+            raise InputChanged('Archived originals failed verification')
+    if saved['recording'].get('configured_role') != record.get('configured_role'):
+        from .device_day_inputs import supplement_archive_role
+        return supplement_archive_role(runner, record, saved)
+    return saved
+
+
+def _archive(runner, record, layout):
+    from .capture_layout import METADATA_LAYOUT
+    direct = record.get('input_layout') == METADATA_LAYOUT
+    state = read_json(marker(runner, record))
+    urgent, _ = archive_priority(runner, record, state['created_at'])
+    seals, sources = [], {}
+    # Copy each independently sealed media set before touching the next one.
+    # A disappearing audio sidecar must not prevent saving an expiring video.
+    for stage in ('vision', 'stt'):
+        if stage == 'stt' and (record.get('audio', {}).get('status') in {'pending_publication', 'association_mismatch'}
+                or record.get('audio', {}).get('status') == 'provided' and not stage_input_ready(record, 'stt')):
+            continue
+        with slot(runner.config, copy=True, urgent=urgent), phase('input_validation_seconds'):
+            seal = seal_input(runner, record, stage)
+            if direct:
+                # Here source and retained artifact are the same physical file.
+                # Keep the sealed inode/mtime identity gate as well as its hash.
+                validate_snapshot(seal)
+            seals.append(seal)
+            update_state(runner, record, input_ready={stage: 'ready'})
+        with slot(runner.config, copy=True, urgent=urgent, whole_copy=True):
+            for source in seal['sources']:
+                key = source['retained']['path']
+                if key in sources and sources[key]['sha256'] != source['sha256']:
+                    raise InputChanged('Video/audio seals refer to different source versions')
+                if key not in sources:
+                    copy_sealed(runner.config, source, safe_child(layout.root, key), urgent=urgent)
+                sources[key] = source
+    if direct:
+        for seal in seals:
+            validate_snapshot(seal)
+    audio = dict(seals[-1]['audio']) if len(seals) > 1 else dict(record.get('audio', {}))
+    audio.pop('files', None)
+    audio['artifacts'] = [s['retained'] | {'kind': s['kind']} for s in sources.values() if s['kind'].startswith('audio_')]
+    speech_seal = next((seal for seal in seals if seal['stage'] == 'input-stt'), None)
+    if speech_seal is None:
+        audio['input_verification'] = {'status': 'waiting_for_input_verification',
+            'reasons': record.get('stt_readiness_reasons') or record.get('audio', {}).get('association_issues')
+                       or ['audio_not_independently_ready'], 'stt_binding_granted': False}
+        audio['collector_sources'] = [{'kind': source['kind'], 'original_path': source['path'],
+            'verification_status': 'unverified', 'ownership': 'collector'}
+            for source in record.get('audio', {}).get('files', [])]
+    return {'input_binding_version': 1, 'recording': record, 'capture_root': runner.config['collection_ingest']['source_root'],
+            'sources': list(sources.values()), 'artifacts': [s['retained'] for s in sources.values()], 'audio': audio,
+            'input_bindings': {s['stage'].removeprefix('input-'): binding(s) for s in seals},
+            **({'stt_recording': speech_seal['recording']} if speech_seal else {}),
+            **({'independent_audio_identity': speech_seal['independent_audio_identity']}
+               if speech_seal and speech_seal.get('independent_audio_identity') else {}),
+            'capture_deletion': 'disabled_by_user'}
+
+
+def execute(runner, layout, record, *, stage, retry):
+    """Called under the existing stage OS lock and queue lease."""
+    from .device_day import now, visual_input
+    from .stage_execution import StageExecutor
+    from .publication_journal import PublicationJournal
+    from .runtime_control import ExecutionYielded
+    if stage == 'all':
+        # Explicit sequential CLI execution prefers preprocessing; service
+        # workers remain independent and retention can preempt for risk/age.
+        order = ('retention', 'vision', 'stt') if archive_priority(runner, record, read_json(marker(runner, record))['created_at'])[0] else PRIMARY
+        results = [runner.process(record, stage=s, retry=retry) for s in order]
+        failed = next((r for r in results if r['status'] != 'completed'), None)
+        if failed:
+            return failed
+        for downstream in ('understanding', 'report'):
+            result = runner.process(record, stage=downstream, retry=retry)
+            if result.get('status') != 'completed':
+                return result
+        return result
+    if stage not in PRIMARY:
+        if receipt(runner, record, 'publication').get('status') != 'completed':
+            return {'status': 'waiting_for_publication', 'recording_id': record['recording_id']}
+        return runner._process(layout, record, stage=stage, retry=retry)
+    journal = PublicationJournal(runner.runtime_root)
+    journal.begin(record)
+    path = runner._receipt(layout, record, stage)
+    started = time.perf_counter()
+    key = None
+    try:
+        prior_archive = receipt(runner, record, 'retention')
+        audio_revised = (prior_archive.get('status') == 'completed'
+            and prior_archive.get('recording', {}).get('source_signature') == record.get('source_signature')
+            and prior_archive.get('recording', {}).get('audio', {}).get('source_signature')
+                != record.get('audio', {}).get('source_signature'))
+        archived = (None if audio_revised or stage == 'stt' and record.get('audio', {}).get('status') == 'provided'
+                    else verified_archive(runner, record))
+        if stage == 'retention':
+            audio_signature = record.get('audio', {}).get('source_signature')
+            requires_audio = record.get('audio', {}).get('status') == 'provided' and stage_input_ready(record, 'stt')
+            if (archived and archived['recording'].get('audio', {}).get('source_signature') == audio_signature
+                    and (not requires_audio or archived.get('input_bindings', {}).get('stt'))):
+                result = archived
+            else:
+                result = _archive(runner, record, layout)
+            key = runner._key('retention', record, record)
+        else:
+            with slot(runner.config), phase('input_validation_seconds'):
+                seal = seal_input(runner, record, stage)
+                if stage == 'stt' and record.get('audio', {}).get('status') == 'provided':
+                    from .device_day_inputs import verified_stt_archive
+                    archived = verified_stt_archive(runner, record, seal)
+                update_state(runner, record, input_ready={stage: 'ready'})
+                if archived and archived.get('input_bindings', {}).get(stage) != binding(seal):
+                    archived = None  # Late independent audio has not been copied yet.
+                value = processing_input(layout, seal, archived)
+                before = {ref: (identity(p), str(p.resolve())) for ref, p in layout.capture_sources.items()}
+            inputs = visual_input(value) if stage == 'vision' else value
+            key = runner._key(stage, record, inputs)
+            previous = runner._load(path, key, layout)
+            if previous and previous.get('input_binding') == binding(seal):
+                result = previous
+            else:
+                old = read_json(path) if path.is_file() else {}
+                if old.get('status') == 'failed' and old.get('key') == key and not retry:
+                    return old
+                if old:
+                    durable_json(path.parent / 'history' / f'{stage}-{digest(old)}.json', old)
+                durable_json(path, {'status': 'running', 'stage': stage, 'key': key,
+                                    'recording_id': record['recording_id'], 'input_binding': binding(seal)})
+                with slot(runner.config), phase('decode_inference_seconds'), input_context(seal):
+                    validate_after(layout.capture_sources, before)
+                    function = runner._backend().vision if stage == 'vision' else runner._backend().transcribe
+                    result = StageExecutor(runner.config).run(stage, function, layout, value, key)
+                    validate_after(layout.capture_sources, before)
+                if stage == 'vision':
+                    if not result.get('segments'):
+                        raise ValueError('A completed recording requires activity or inactivity records')
+                    for segment in result['segments']:
+                        validate_segment(segment)
+                    result |= {'vision_input_digest': digest(visual_input(value))}
+                result |= {'input_binding': binding(seal), 'input_binding_version': 1}
+        # A reviewed checkpoint remains evidence of its original execution.
+        # The fresh source/artifact checks above permit reuse, not relabelling
+        # a detector or transcription result as a new build's invocation.
+        checkpoint = (stage != 'retention' and result.get('status') == 'completed'
+                      and runner._completed_stage_receipts.accepts(result, key))
+        if not checkpoint and (result.get('status') != 'completed' or result.get('key') != key):
+            import os
+            from .device_day_inputs import sync_directory
+            references = [(layout.root, r) for r in result.get('artifacts', [])]
+            for reference in result.get('audit_artifacts', []):
+                if reference.get('storage_root') != 'local_cache_root':
+                    raise ValueError('Unknown audit artifact storage root')
+                references.append((runner.backend_root, reference))
+            for root, reference in references:
+                output = safe_child(root, reference['path'])
+                with output.open('rb') as handle:
+                    os.fsync(handle.fileno())
+                sync_directory(output.parent)
+            if stage == 'retention' and path.is_file():
+                previous = read_json(path)
+                if previous.get('status') == 'completed' and previous.get('key') != key:
+                    # Verified archived bytes may survive a recipe change, but
+                    # their old receipt must remain available under its own key.
+                    durable_json(path.parent / 'history' / f'{stage}-{digest(previous)}.json', previous)
+            result |= {'schema_version': VERSION, 'status': 'completed', 'stage': stage, 'key': key,
+                       'recording_id': record['recording_id'], 'completed_at': now(),
+                       'wall_seconds': time.perf_counter() - started}
+            durable_json(path, result)
+        update_state(runner, record, **({'archive': 'completed'} if stage == 'retention' else
+                                       {'preprocessing': {stage: 'completed'}}))
+        # Queue completion describes this stage only. Publication failures retain
+        # the journal and never revoke a successful model or archive receipt.
+        from .receipt_projection import ProjectionGenerationChanged
+        publication_pending = {}
+        try:
+            published = publish(runner, record)
+        except ProjectionGenerationChanged as exc:
+            published = False
+            publication_pending = exc.details()
+        except ExecutionYielded:
+            # A complete stage remains complete when live work defers its
+            # independent publication. The journal retains the pending output.
+            published = False
+        except (OSError, ValueError):
+            published = False
+        return {'schema_version': VERSION, 'recording_id': record['recording_id'], 'archive': layout.name,
+                'stage': stage, 'status': 'completed', 'formal_publication': 'completed' if published else 'pending',
+                'message': '预处理完成，等待归档' if stage == 'vision' and not archived else '阶段结果已持久保存',
+                'capture_deletion': 'disabled_by_user', **publication_pending}
+    except ExecutionYielded as exc:
+        if path.is_file():
+            previous = read_json(path)
+            if previous.get('status') == 'running':
+                durable_json(path, previous | {'status': 'paused_for_live'})
+        return {'schema_version': VERSION, 'recording_id': record['recording_id'],
+                'stage': stage, 'status': 'paused_for_live', 'reason': exc.reason,
+                'error_type': type(exc).__name__, 'message': str(exc)}
+    except Exception as exc:
+        failure = {'schema_version': VERSION, 'input_binding_version': 1, 'stage': stage, 'key': key, 'status': 'failed',
+                   'recording_id': record['recording_id'], 'error_type': type(exc).__name__, 'message': str(exc)[:1000]}
+        # Preserve the last completed checkpoint even when a source check fails.
+        if path.is_file() and read_json(path).get('status') == 'completed':
+            durable_json(path.parent / 'history' / f'{stage}-{digest(read_json(path))}.json', read_json(path))
+        durable_json(path.with_name(stage + '-attempt.json'), failure)
+        if not path.is_file() or read_json(path).get('status') != 'completed':
+            durable_json(path, failure)
+        durable_json(path.with_name('publication.json'), failure | {'stage': 'publication', 'status': 'blocked'})
+        update_state(runner, record, publication='blocked', last_failure=failure)
+        from .runtime_control import ExecutionCancelled
+        if isinstance(exc, ExecutionCancelled):
+            return failure | {'status': 'cancelled'}
+        if stage == 'stt':
+            from .device_day_provider_gate import ProviderGate
+            from .provider_control import ProviderUnavailable, classify
+            ProviderGate(runner.config).record_failure({'error': str(exc)})
+            if isinstance(exc, ProviderUnavailable) or classify(exc):
+                return failure | {'status': 'waiting_for_provider'}
+        return failure
+
+
+def verified_stt_projection(runner, record):
+    """Read verified independent audio/STT without requiring visual retention.
+
+    Returns a standard device/day recording view or None. This port never
+    invokes a model, creates an input seal, or grants video/retention completion.
+    """
+    if (record.get('audio', {}).get('status') != 'provided' or not stage_input_ready(record, 'stt')):
+        return None
+    layout = runner.layout(record)
+    path = runner._receipt(layout, record, 'stt')
+    seal_path = input_path(runner, record, 'stt')
+    if not path.is_file() or not seal_path.is_file():
+        return None
+    stt, saved = read_json(path), read_json(seal_path)
+    if stt.get('status') != 'completed' or saved.get('audio', {}).get('status') != 'provided':
+        return None
+    seal = seal_input(runner, record, 'stt')  # Existing seal only; revalidate current producer identity/clock.
+    from .device_day_inputs import independent_transcript_span, verified_stt_archive
+    archived = verified_stt_archive(runner, record, seal)
+    if archived is None:
+        validate_snapshot(seal, hashes=True)
+    # Raw ownership is frozen. Missing retained originals are not repaired by
+    # making another raw directory or copying a source for convenience.
+    if not all(verify_content(safe_child(layout.root, source['retained']['path']), source['retained'])
+               for source in seal['sources']):
+        raise InputChanged('Independent audio is not readable at its frozen source reference')
+    value = processing_input(layout, seal, archived)
+    expected = runner._key('stt', record, value)
+    verified = runner._load(path, expected, layout)
+    if verified is None or verified.get('input_binding') != binding(seal):
+        raise InputChanged('Independent STT execution/artifacts do not bind the actual sealed audio')
+    return {'recording_id': record['recording_id'], 'camera_key': record['camera_key'],
+        'start_us': record['recording_start_us'], 'end_us': record['recording_end_us'],
+        'source_signature': record['source_signature'],
+        'stt_source_signature': record.get('stt_source_signature'),
+        'capture_complete': record.get('capture_complete'), 'capture_issues': record.get('issues', []),
+        'audio': value['audio'], 'sources': value['sources'], 'transcription': verified,
+        'processing': {'status': 'waiting_for_capture' if not stage_input_ready(record, 'vision') else 'pending'},
+        'stages': {'stt': {k: verified.get(k) for k in ('status', 'key', 'completed_at', 'message')}},
+        'independent_audio_verified': True, 'video_processing_complete': False,
+        **({'transcript_span': independent_transcript_span(seal)}
+           if seal.get('independent_audio_identity') else {})}
+
+
+def _publish_independent_stt(runner, record):
+    projection = verified_stt_projection(runner, record)
+    if projection is None:
+        return False
+    from .device_day_content import publish_transcript
+    from .device_day_contract import artifact
+    layout = runner.layout(record)
+    published = publish_transcript(runner.config, layout.name, projection)
+    seal_path = input_path(runner, record, 'stt')
+    stage_path = runner._receipt(layout, record, 'stt')
+    value = {'schema_version': 'visioncortex-independent-stt-publication/1', 'status': 'completed',
+        'recording_id': record['recording_id'], 'input_binding': binding(read_json(seal_path)),
+        'stt_receipt': layout.backend_artifact(stage_path), 'input_seal': layout.backend_artifact(seal_path),
+        'artifacts': [artifact(layout.root, safe_child(layout.root, published[name])) for name in ('content', 'text')],
+        'retention_status': 'not_granted', 'vision_status': 'not_granted', 'model_invoked': False}
+    target = runner._receipt(layout, record, 'stt-publication')
+    if not target.is_file() or read_json(target) != value:
+        durable_json(target, value)
+    return True
+
+
+def _publish(runner, record):
+    """No inference: bind completed outputs, then atomically publish the index."""
+    from .device_day import exclusive, visual_input
+    layout = runner.layout(record)
+    with exclusive(runner.runtime_root / 'locks' / f'{record["recording_id"]}.publication.lock'):
+        try:
+            _publish_independent_stt(runner, record)
+        except (OSError, ValueError) as exc:
+            target = runner._receipt(layout, record, 'stt-publication-attempt')
+            failure = {'stage': 'stt-publication', 'status': 'waiting_for_verified_evidence',
+                'recording_id': record['recording_id'], 'error_type': type(exc).__name__,
+                'reason': str(exc)[:500], 'automatic_action': 'recheck_owning_audio_and_stt_artifacts',
+                'model_invoked': False}
+            if not target.is_file() or read_json(target) != failure:
+                durable_json(target, failure)
+        if not stage_input_ready(record, 'vision'):
+            return False
+        archived = verified_archive(runner, record)
+        if not archived:
+            return False
+        visual = receipt(runner, record, 'vision')
+        if visual.get('status') != 'completed':
+            return False
+        if (visual.get('input_binding') != archived['input_bindings'].get('vision') or
+                visual.get('vision_input_digest') != digest(visual_input(archived))):
+            raise InputChanged('Preprocessing and archive bind different input versions')
+        if not runner._load(runner._receipt(layout, record, 'vision'), runner._key('vision', record, visual_input(archived)), layout):
+            raise InputChanged('Preprocessing artifacts or execution identity failed verification')
+        for stage in ('vision', 'stt'):
+            seal_path = input_path(runner, record, stage)
+            if not seal_path.is_file():
+                continue
+            seal = read_json(seal_path)
+            if stage == 'stt' and archived.get('input_bindings', {}).get('stt') != binding(seal):
+                continue  # An old/invalid audio generation does not own this visual publication.
+            # Existing captures must still be the sealed versions. A missing
+            # capture is recoverable only after independently verified archival.
+            for source in seal['sources']:
+                p = Path(source['original_path'])
+                if p.exists() and (identity(p) != source['identity'] or
+                                   str(p.resolve()) != source.get('resolved_path', str(p.resolve()))):
+                    raise InputChanged('Capture was replaced after preprocessing')
+        # Keep the CV receipt's original retention provenance byte-identical.
+        # The verified visual input binding above proves reuse; publication.json
+        # separately binds this current archive generation, including late audio.
+        stt = receipt(runner, record, 'stt')
+        stt_ready = (stt.get('status') == 'completed' and stt.get('input_binding') == archived['input_bindings'].get('stt'))
+        if stt_ready:
+            if not runner._load(runner._receipt(layout, record, 'stt'), runner._key('stt', record, archived), layout):
+                raise InputChanged('Transcription artifacts or execution identity failed verification')
+        publication = {'status': 'publishing', 'recording_id': record['recording_id'],
+                       'retention_digest': digest(archived), 'vision_digest': digest(visual),
+                       'stt_digest': digest(stt) if stt_ready else None, 'at': time.time()}
+        path = runner._receipt(layout, record, 'publication')
+        durable_json(path, publication)
+        with phase('formal_publication_seconds'):
+            from .receipt_projection import ProjectionGenerationChanged
+            try:
+                if not runner.refresh_index(layout, recording_id=record['recording_id']):
+                    return False
+            except ProjectionGenerationChanged as exc:
+                # Still hold this record's publication lock: a later stage
+                # cannot seal success between this pending state and its cause.
+                deferred = {'stage': 'publication', 'recording_id': record['recording_id'],
+                            **exc.details(), 'at': time.time()}
+                update_state(runner, record, publication='pending', publication_defer=deferred)
+                raise
+        from .device_day_inputs import sync_directory
+        sync_directory(layout.index.parent)
+        sync_directory(layout.comments)
+        durable_json(path, publication | {'status': 'completed', 'completed_at': time.time()})
+        update_state(runner, record, publication='completed', publication_defer=None)
+        from .capture_link_cleanup import submit_after_preprocessing
+        submit_after_preprocessing(runner, layout, record)
+        return True
+
+
+def publication_filter(runner, layout, stages):
+    """The index may reference only a verified, bound publication generation."""
+    retained = stages.get('retention') or {}
+    if retained.get('input_binding_version') != 1:
+        return stages
+    record = retained.get('recording')
+    if (retained.get('status') != 'completed' or not isinstance(record, dict)
+            or not record.get('recording_id') or not record.get('camera_key')
+            or not record.get('recording_start_us')):
+        # Failed/running retention attempts have no sealed recording object.
+        # Preserve their status, but never publish downstream material from
+        # that entry or let it block other completed recordings in the day.
+        return {stage: value for stage, value in stages.items()
+                if stage not in {'vision', 'stt', 'understanding', 'report'}}
+    state = receipt(runner, record, 'publication')
+    result = deepcopy(stages)
+    if (state.get('status') not in {'publishing', 'completed'} or state.get('retention_digest') != digest(retained)
+            or state.get('vision_digest') != digest(stages.get('vision'))):
+        result.pop('vision', None)
+        result.pop('stt', None)
+    elif state.get('stt_digest') != digest(stages.get('stt')):
+        result.pop('stt', None)
+    return result
+
+
+def update_state(runner, record, **changes):
+    """Small local lifecycle projection, independent of large model receipts."""
+    path = marker(runner, record)
+    with state_lock(runner.runtime_root / 'locks' / f'{record["recording_id"]}.state.lock'):
+        state = read_json(path)
+        for key, value in changes.items():
+            state[key] = state[key] | value if isinstance(state.get(key), dict) and isinstance(value, dict) else value
+        state['updated_at'] = time.time()
+        durable_json(path, state)
+
+
+def record_timings(runner, record, stage, measured):
+    if not marker(runner, record).is_file():
+        return
+    timing = dict(measured)
+    if stage in runner.queues:
+        with runner.queues[stage].connect() as db:
+            row = db.execute('SELECT queued_at,started_at FROM recordings WHERE recording_id=?', (record['recording_id'],)).fetchone()
+            if row and row['started_at'] is not None:
+                timing['queue_wait_seconds'] = max(0, row['started_at'] - row['queued_at'])
+    update_state(runner, record, timings={stage: timing})
+
+
+def progress(config):
+    """Local metadata only; no archive/capture stats or model receipts."""
+    if not config.get('storage', {}).get('local_cache_root'):
+        return []
+    root = Path(config['storage']['local_cache_root']) / 'device-day-receipts'
+    rows = []
+    for path in root.glob('*/*/input-state.json'):
+        state = read_json(path)
+        record = state['recording']
+        visual = state.get('preprocessing', {}).get('vision', 'pending')
+        archive = state.get('archive', 'pending')
+        publication = state.get('publication', 'pending')
+        label = ('发布受阻，保留可恢复结果' if publication == 'blocked' else
+                 '阶段结果已保存，等待回执稳定后发布' if publication == 'pending' and state.get('publication_defer') else
+                 '预处理完成，等待归档' if visual == 'completed' and archive != 'completed' else
+                 '正式索引已发布' if publication == 'completed' else
+                 '归档已完成，等待预处理或发布' if archive == 'completed' else '等待输入或预处理')
+        rows.append({'recording_id': record['recording_id'], 'archive': path.parent.parent.name,
+                     'input_ready': state.get('input_ready', {}), 'preprocessing': state.get('preprocessing', {}),
+                     'archive_status': archive, 'publication_status': publication, 'label': label,
+                     **({'publication_defer': state['publication_defer']} if state.get('publication_defer') else {}),
+                     'retention_policy': state['retention_policy'], 'timings': state.get('timings', {})})
+    return rows
+
+
+@contextmanager
+def state_lock(path):
+    from .device_day import exclusive
+    deadline = time.monotonic() + 10
+    while True:
+        lock = exclusive(path)
+        try:
+            lock.__enter__()
+            break
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(.01)
+    try:
+        yield
+    finally:
+        import sys
+        lock.__exit__(*sys.exc_info())
+
+
+def validate_settings(settings):
+    import math
+    if not isinstance(settings.get('inplace_preprocessing', False), bool):
+        raise ValueError('inplace_preprocessing must be boolean')
+    for name, default in (('nas_io_slots', 3), ('archive_copy_workers', 1)):
+        value = settings.get(name, default)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f'{name} must be a positive integer')
+    for name, default in (('archive_max_wait_seconds', 900), ('nas_io_timeout_seconds', 3600),
+                          ('archive_copy_bytes_per_second', 8 * 1024 * 1024)):
+        value = settings.get(name, default)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+            raise ValueError(f'{name} must be finite and positive')
+    policy = settings.get('capture_retention') or {}
+    policies = [policy, *policy.get('cameras', {}).values()]
+    policies += [rule for item in policies for rule in item.get('by_kind', {}).values()]
+    for item in policies:
+        if not isinstance(item.get('cleanup_risk', False), bool):
+            raise ValueError('capture_retention.cleanup_risk must be boolean')
+        for name in ('seconds', 'safety_margin_seconds'):
+            value = item.get(name)
+            if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))
+                                      or not math.isfinite(value) or value < 0 or name == 'seconds' and value == 0):
+                raise ValueError(f'capture_retention.{name} must be a finite valid interval or null')
+
+
+def has_legacy_execution(path):
+    if any(path.with_name(stage + '.json').exists() for stage in ('vision', 'stt')):
+        return True
+    retained = path.with_name('retention.json')
+    return retained.is_file() and read_json(retained).get('status') == 'completed'
+
+
+def publish(runner, record):
+    from .receipt_projection import ProjectionGenerationChanged
+    try:
+        return _publish(runner, record)
+    except ProjectionGenerationChanged as exc:
+        from .publication_journal import PublicationJournal
+        import json
+        journal = PublicationJournal(runner.runtime_root)
+        token = journal.ensure_pending(record)
+        if token:
+            journal.defer(record['recording_id'], token, reason=json.dumps(exc.details(), sort_keys=True))
+        raise
+    except BlockingIOError:
+        return False
+    except (OSError, ValueError) as exc:
+        failure = {'stage': 'publication', 'status': 'blocked', 'recording_id': record['recording_id'],
+                   'error_type': type(exc).__name__, 'message': str(exc)[:1000], 'at': time.time()}
+        durable_json(runner._receipt(runner.layout(record), record, 'publication'), failure)
+        update_state(runner, record, publication='blocked', last_failure=failure)
+        raise
+
+
+def execution_identity():
+    """Cover the new execution boundary without hashing queue/UI scheduling."""
+    import ast
+    from .ast_identity import dump_python312
+    tree = ast.parse(Path(__file__).read_text(encoding='utf-8'))
+    names = {'execute', '_archive', 'verified_archive', '_publish', 'publish', 'publication_filter'}
+    fingerprint = digest([dump_python312(node) for node in tree.body
+                          if isinstance(node, ast.FunctionDef) and node.name in names])
+    # Exact publication-only correction: incomplete sibling retention receipts
+    # cannot publish downstream material or block a completed slice. Successful
+    # source/model execution and its existing receipts remain unchanged.
+    return ('3bb8ceaea6c91571b0f6304c697ab870319ab6805125988ae8bde79d3e819c3a'
+            if fingerprint in {'89063cb18457ef74f6c196ee43d169cdfc5936463341843705d6b241185e5cc2',
+                               # Exact idle-backfill yield handling. Successful
+                               # receipt, input and publication bytes are unchanged.
+                               '0672c774de57cc42959b468e95c5bea7e20ed8b03cba1bf1ef84bff1d7d782d7'}
+            else fingerprint)
+
+
+def first_queued_at(runner, record):
+    observed = time.time()
+    for stage in PRIMARY:
+        with runner.queues[stage].connect() as db:
+            row = db.execute('SELECT queued_at FROM recordings WHERE recording_id=?', (record['recording_id'],)).fetchone()
+            if row:
+                observed = min(observed, row['queued_at'])
+    return observed

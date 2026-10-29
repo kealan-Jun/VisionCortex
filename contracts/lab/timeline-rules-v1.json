@@ -1,0 +1,21 @@
+{
+  "schema_version": "vc-lab-timeline-rules/1",
+  "opt_in_profile": "timeline-v1",
+  "experiment_boundaries": "attributable_binding_speech_and_observed_activity",
+  "detector_dependency": false,
+  "raw_originals_read_only": true,
+  "label_resolution_clock": "capture_event_time",
+  "default_record_policy": {
+    "daily_archive": true,
+    "inactivity_seconds": null,
+    "arrival_grace_seconds": 0,
+    "handover": "independent"
+  },
+  "default_window_seconds": 30,
+  "default_context_seconds": 2,
+  "window_boundaries_are_experiment_boundaries": false,
+  "record_archive_proves_instrument_completion": false,
+  "model_outputs_are_confirmed_facts": false,
+  "computer_start_end_and_results_required": false,
+  "agent_and_hardware_integration": "outside_this_change"
+}

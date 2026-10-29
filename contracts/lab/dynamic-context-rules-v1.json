@@ -1,0 +1,25 @@
+{
+  "schema_version": "vc-lab-dynamic-context-rules/1",
+  "default_enabled": false,
+  "status": "research_not_customer_accepted",
+  "identity": "registered_identity_plus_verified_attached_qr_panel_geometry",
+  "focus": "persistent_candidate_not_confirmed_physical_operation",
+  "camera_binding": "source_and_wearer_are_not_instrument_or_actual_operator",
+  "threshold_status": "development_parameters_not_real_transfer_calibrated",
+  "experiment_end_on_switch": false,
+  "material_reset_on_switch": false,
+  "ocr_partition": [
+    "source_stream",
+    "source_session",
+    "original_media",
+    "instrument_or_unresolved_track",
+    "panel",
+    "field",
+    "track_epoch"
+  ],
+  "late_evidence": "new_immutable_revision_event_order_replay_with_knowledge_time",
+  "maximum_source_events": 2048,
+  "maximum_append_frames": 128,
+  "maximum_projection_bytes": 8388608,
+  "production_activation": false
+}

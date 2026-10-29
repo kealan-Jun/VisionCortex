@@ -103,6 +103,17 @@ from .yolo_world_calibration import calibrate_yolo_world_prompts
 app = typer.Typer(no_args_is_help=True, help="多视角化学实验视频证据流水线")
 
 
+@app.command(
+    "lab",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True, "help_option_names": []},
+)
+def laboratory(ctx: typer.Context) -> None:
+    """统一实验数据服务：二维码、时序OCR、绑定、材料账本及兼容留存。"""
+    from .lab.cli import main
+
+    main(list(ctx.args))
+
+
 @app.command("process-device-days")
 def process_device_days(
     config: Annotated[Path, typer.Option("--config", exists=True)],
