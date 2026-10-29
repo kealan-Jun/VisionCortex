@@ -103,4 +103,12 @@ NAS按[统一留存契约](unified-retention.zh-CN.md)保存原始证据和处�
 
 自动采集的原 `CaptureReceipt.json` 可携带同样结构的 `scan_intent`（不含 `key`、`job_id`）；QR worker 完成后，既有 timeline tick 自动消费。采集方必须提供真实主动扫码意图，被动视频帧不填此字段。当前 live Receiver 默认路径仍不是这种主动事件的证明；配置和数据路由须单独验收。
 
+可选的 [`scan_source_scanner.py`](../../src/visioncortex/lab/scan_source_scanner.py) 为原 FR `LiveScanner` 提供实例级端口：在原匹配器过滤二维码前，保存人工扫码会话选中的原像素及原始解码诊断，再由原接入队列、QR worker 独立解码，进入同一 Core 的 `ScanIntake`。它支持已登记的永久 UUID；无需改印为旧演示 JSON。原 FR 组件字节和默认启动器不变，后台自动会话不声明主动操作，预览线程不能串用另一帧。
+
+该来源需私有 `VC_LAB_SCAN_SOURCE_MANIFEST` 明确启用，固定相机、来源实例、设备或材料类型、归档输入根和本地容量。无清单时不启动来源。原图先完整写入，`CaptureReceipt.json` 最后提交；中断恢复及同会话去重不生成第二次操作。相机自报时间但没有可核对的时钟不确定度时，仍保留未知事件时间；接收日期只用于文件分区，不作实验发生时刻。来源桥接的软件验证与实机扫码、实物激活、人员/时间依据和 NAS 发布分别验收。
+
+原 FR HTTP 来源入口为 `visioncortex.lab.scan_source_scanner:app_factory`，需用私有 `VC_LAB_SCAN_LAUNCHER_MANIFEST`（`vc-lab-scan-launcher/1`）固定已有 FR 静态资源及首页 SHA、独立本地运行目录、容量、`source_enabled` 与允许的 `field_config`。它复用原路由，不在统一仓库复制一套界面。关闭来源时 `field_config` 必须为空，并且不继承环境中旧的接收器、模型或归档开关；启用来源时必须显式给 Receiver、相机及发布清单。本地资源缺失时明确拒绝，不默认指向某个现场目录。
+
+自动消费保持新任务优先。未指定目标的材料扫码会先完成同一精确 scope 内已到达且事件时间更早的目标声明，受同一次预算约束；依赖尚未完成则等待。失败项有持久退避和次数上限，不能用一个坏记录永远挡住后续来源，也不能在晚到目标出现后偷偷改挂旧材料。
+
 `/internal/status` 的 `timeline.scan_intake` 给出设备激活计数、已存扫码计数、来源配置与发布开关，`field_scan_acceptance` 保持独立于 API 健康检查。ASR、价值候选、未决记录与原生日报自动刷新能力见[状态说明](lab-vision-status.zh-CN.md)。

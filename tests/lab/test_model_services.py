@@ -163,3 +163,124 @@ def test_cache_identity_changes_with_verified_weights_or_effective_parameters(tm
     stable = identity()
     config['token_file'] = '/not-read-here/private-token'
     assert identity() == stable
+
+
+def test_ppv6_onnx_service_explicit_names_and_backend_identity(tmp_path, monkeypatch):
+    from io import BytesIO
+    from PIL import Image
+    source = load('lab_model_service')
+    backend = load('ppocr_onnx')
+    monkeypatch.setitem(sys.modules, 'ppocr_onnx', backend)
+    root, _, _, _, config, _ = setup(tmp_path)
+    config['services']['ocr'].update(engine='ppocr-onnx', device='cpu', input_mode='field_roi', cpu_threads=1,
+        detection_model_name='PP-OCRv6_medium_det', recognition_model_name='PP-OCRv6_medium_rec')
+    observed = []
+    class Fake:
+        def __init__(self, det, rec, settings):
+            observed.append((det, rec, dict(settings)))
+        def predict(self, pixels):
+            assert pixels.shape == (12, 20, 3)
+            return dict(results=[dict(rec_texts=['12?'], rec_scores=[.8], rec_polys=[])])
+    monkeypatch.setattr(backend, 'PPOCRONNX', Fake)
+    verified = {}
+    infer, _ = source.make_ocr(root, config, verified)
+    assert observed[0][2]['recognition_model_name'] == 'PP-OCRv6_medium_rec'
+    raw = BytesIO()
+    Image.new('RGB', (20, 12)).save(raw, format='PNG')
+    assert infer(raw.getvalue())['results'][0]['rec_texts'] == ['12?']
+    identity = source.inference_identity('ocr', config, verified)
+    helper = tmp_path / 'changed-helper.py'
+    helper.write_text('changed backend source')
+    monkeypatch.setattr(backend, '__file__', str(helper))
+    assert source.inference_identity('ocr', config, verified) != identity
+
+
+@pytest.mark.parametrize('mode,polygons,expected', [('field_roi', [], 1), ('full_image', [], 0),
+    ('full_image', [[[0, 0], [4, 0], [4, 4], [0, 4]]], 1)])
+def test_onnx_field_is_explicit_and_zero_detection_never_falls_back(mode, polygons, expected):
+    import numpy as np
+    source = load('ppocr_onnx')
+    model = source.PPOCRONNX.__new__(source.PPOCRONNX)
+    model.np = np
+    model.configuration = source.settings(dict(input_mode=mode, device='cpu',
+        detection_model_name='PP-OCRv6_medium_det', recognition_model_name='PP-OCRv6_medium_rec'))
+    model.configs = dict(det=dict(PostProcess={'fixture': True}))
+    model.detect = lambda pixels: polygons
+    model.crop = lambda pixels, polygon: pixels
+    seen = []
+    def recognize(pixels):
+        seen.append(pixels.copy())
+        return '0?5', .3
+    model.recognize = recognize
+    output = model.predict(np.zeros((8, 12, 3), np.uint8))
+    assert len(seen) == expected
+    assert output['results'][0]['rec_texts'] == ['0?5'] * expected
+    assert output['onnx_execution']['detection_invoked'] == (mode == 'full_image')
+    assert not output['onnx_execution']['complete_paddleocr_sdk_pipeline']
+
+
+@pytest.mark.parametrize('settings', [dict(device='cpu'), dict(input_mode='field_roi', device='gpu:0'),
+    dict(input_mode='field_roi', device='cpu', cpu_threads=True)])
+def test_onnx_engine_rejects_implicit_geometry_device_or_thread_budget(settings):
+    source = load('ppocr_onnx')
+    with pytest.raises(ValueError):
+        source.settings(settings)
+
+
+def test_onnx_ctc_keeps_unknown_characters_and_only_removes_blank_and_repeat():
+    import numpy as np
+    source = load('ppocr_onnx')
+    model = source.PPOCRONNX.__new__(source.PPOCRONNX)
+    model.np = np
+    model.cv = SimpleNamespace(resize=lambda pixels, size: np.zeros((size[1], size[0], 3), np.uint8))
+    model.characters = ['blank', '1', '?']
+    model._run = lambda kind, tensor: np.asarray([[[.05, .9, .05], [.05, .9, .05], [.9, .05, .05], [.1, .1, .8]]])
+    text, score = model.recognize(np.zeros((20, 40, 3), np.uint8))
+    assert text == '1?' and score == pytest.approx(.85)
+
+
+def test_onnx_recognition_capacity_fails_before_any_recognition():
+    import numpy as np
+    source = load('ppocr_onnx')
+    model = source.PPOCRONNX.__new__(source.PPOCRONNX)
+    model.np = np
+    model.configuration = dict(input_mode='full_image', max_recognitions=2)
+    model.detect = lambda pixels: [[[0, 0]] * 4] * 3
+    model.recognize = lambda pixels: pytest.fail('Capacity rejection must precede recognition')
+    with pytest.raises(ValueError, match='capacity exceeded'):
+        model.predict(np.zeros((8, 12, 3), np.uint8))
+
+
+@pytest.mark.parametrize('failure', ['missing_names', 'wrong_name', 'unsupported_processor'])
+def test_onnx_model_identity_and_known_processor_are_required(failure):
+    source = load('ppocr_onnx')
+    if failure == 'missing_names':
+        with pytest.raises(ValueError, match='model names'):
+            source.settings(dict(input_mode='field_roi', device='cpu'))
+        return
+    config = dict(Global=dict(model_name='PP-OCRv6_medium_rec'),
+        PreProcess=dict(transform_ops=[dict(DecodeImage=dict(channel_first=False, img_mode='BGR')),
+            dict(MultiLabelEncode={}), dict(RecResizeImg=dict(image_shape=[3, 48, 320])), dict(KeepKeys={})]),
+        PostProcess=dict(name='CTCLabelDecode', character_dict=['1', '?']))
+    if failure == 'wrong_name':
+        config['Global']['model_name'] = 'PP-OCRv5_mobile_rec'
+    else:
+        config['PreProcess']['transform_ops'][2]['RecResizeImg']['image_shape'] = [3, 32, 320]
+    with pytest.raises(ValueError):
+        source.validate_model_configuration(config, 'rec', 'PP-OCRv6_medium_rec')
+
+
+def test_onnx_contour_limit_reports_unexamined_regions(monkeypatch):
+    import numpy as np
+    source = load('ppocr_onnx')
+    monkeypatch.setitem(sys.modules, 'pyclipper', SimpleNamespace())
+    model = source.PPOCRONNX.__new__(source.PPOCRONNX)
+    model.np = np
+    model.cv = SimpleNamespace(resize=lambda pixels, size: np.zeros((size[1], size[0], 3), np.uint8),
+        findContours=lambda *args: ([None] * 5, None), RETR_LIST=1, CHAIN_APPROX_SIMPLE=1)
+    model.configs = dict(det=dict(PostProcess=dict(max_candidates=3, thresh=.2)))
+    model._run = lambda kind, tensor: np.zeros((1, 1, 32, 32), np.float32)
+    model._mini = lambda contour: (None, 0)
+    assert model.detect(np.zeros((8, 12, 3), np.uint8)) == []
+    assert model.detection_info == dict(total_contours=5, examined_contours=3,
+        unexamined_contours=2, contour_limit=3, coverage='partial_unexamined_contours')

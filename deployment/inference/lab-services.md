@@ -34,7 +34,12 @@ VLM环境使用已有vLLM。轻量业务工程安装不自动安装这三套推�
 - ASR 默认 `engine=qwen3-asr`：`checkpoint`与`aligner_checkpoint`，使用实际已具备的识别／对齐检查点。
 - ASR 可显式选择 `engine=faster-whisper`，并提供 `checkpoint`、`device`、`cpu_threads`、`compute_type`，可选 `language`。例如既有 small 权重可使用 CPU、2线程、int8；不自动换后端或下载模型。该路径返回模型原生词／段相对时间，`alignment_revision=null`，不能标成独立强制对齐结果。
 - OCR：`detection_checkpoint`、`recognition_checkpoint`、`detection_model_name`、
-  `recognition_model_name`和`device`。可以配置现有PP-OCRv5；必须匹配实际权重及PaddleOCR版本。
+  `recognition_model_name`和`device`。本次升级显式选用 PP-OCRv6；旧 PaddleOCR 后端仍兼容历史 PP-OCRv5 配置，不自动修改运行中的服务。
+- PP-OCRv6 ONNX：选择 `engine=ppocr-onnx`、`device=cpu`、明确的检测/识别模型名与对应检查点，
+  并设置 `input_mode=full_image`（检测后识别）或 `field_roi`（仅对上游已给定字段区域识别）、`cpu_threads` 与有界 `max_recognitions`。
+  当前处理器支持 medium 检查点；模型 YAML 名称、处理器、字典及 ONNX 输入/输出形状须匹配。
+  检测为零不回退为伪造全图检测框；字段模式不声称自动定位了仪器/面板。超过识别预算直接拒绝本次结果，
+  检测候选检查范围保留在响应中。此实现是明确记录预处理的本地 ONNX 路径，不宣称完整 PaddleOCR SDK 或 native/ONNX 数值等价。
 - VLM：`checkpoint`、`served_model_name`、`gpu_memory_utilization`、`max_model_len`和`cuda_visible_devices`。
 
 在完整源码检出中执行，以下路径变量由部署方提供：
@@ -59,6 +64,8 @@ faster-whisper 路径有界解码为16kHz单声道，保留原音字节摘要；
 结果保留源字节SHA、模型及服务源码版本、耗时、实际调用／缓存命中，不能把缓存命中计作新模型执行。
 ASR／OCR 的 health 与结果另提供 `execution_identity`，固定实际校验的完整权重清单及有效后端、设备、精度和线程参数。业务层 `vc-lab-local-providers/1` 可显式固定该64位摘要，健康检查和每次响应都核对；摘要变化应更新提供者配置身份。旧清单仍兼容，但回执明确其未固定服务配置。
 未知读数和物理动作不能由服务返回直接确认，质量标记仍是`NOT_PROVEN`。
+
+业务层准备 Opus 等原音时，容器长度与实际音频样本范围分别核对。已证明的编码预跳过或尾部非样本范围可保留在覆盖回执中，不能通过任意放宽时长容差吞掉内部缺口。转写时间从实际样本起点映回原音。模型返回的零时长词保留原文与点时刻；需要区间的事件使用已返回的有效段，缺少有效对齐则只保留实际输入样本范围和 `alignment_unavailable`，不人为扩展词长。
 
 传输、媒体、像素、单结果和回执容量有显式上限；忙碌返回429，容量耗尽停止接纳。
 回执保存在本地运行根，由上层按既有发布合同转入NAS；本HTTP服务不自行写客户NAS或数据库。

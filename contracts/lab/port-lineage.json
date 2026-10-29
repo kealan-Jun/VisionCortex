@@ -24,7 +24,14 @@
       "path": "src/visioncortex/lab/archive_layout.py",
       "upstream_module": "archive_layout.py",
       "original_sha256": "371dd02f81ac7c2029a675dc4e680979b2c6462f8ff2804a31864f76f3e1dc6a",
-      "ported_sha256": "ce4d66bae782fc8b65d4fb33fdb5f8008175a112f8e45d8cfd67482dbb90b92e"
+      "ported_sha256": "05d7235818a962b67c876e511635748a3c782d73f881e909a4aa81ee546e5d23"
+    },
+    {
+      "path": "src/visioncortex/lab/audio_source.py",
+      "upstream_module": null,
+      "original_sha256": null,
+      "ported_sha256": "6a07dad6609c8d582dac9190e045616bd6afce532e45c1ff64bcd0d92ed1bfb6",
+      "origin": "unified_project_integration"
     },
     {
       "path": "src/visioncortex/lab/automatic_readout.py",
@@ -149,6 +156,13 @@
       "ported_sha256": "15c3410c87589b886a6240a5bea30384454f13a91c652242005e17ebe27cf150"
     },
     {
+      "path": "src/visioncortex/lab/existing_archive_binding.py",
+      "upstream_module": null,
+      "original_sha256": null,
+      "origin": "unified_project_integration",
+      "ported_sha256": "c83f7b816a2d7407ba0e537fc7e4e6331c6d0bae2aa487d4357e14c4dc2690ca"
+    },
+    {
       "path": "src/visioncortex/lab/field_source.py",
       "upstream_module": "field_source.py",
       "original_sha256": "598086d415b1a3232b5b8d20493bf12fbde0e228c923b414b64ac7e24e982e50",
@@ -200,7 +214,7 @@
       "path": "src/visioncortex/lab/local_provider.py",
       "upstream_module": "local_provider.py",
       "original_sha256": "8e755e983b3011176a4a52e096950a0db2c30e8a14f2d09f1e0214b381fe3a80",
-      "ported_sha256": "87b20ba2bb016c6f95cd0249cd766150cd768a0009bd01f63aaf9c78744f7ff4"
+      "ported_sha256": "4177eb49afd0dd3285e0013e9baf4a36fb966c97674a06e4f04a19474fe78431"
     },
     {
       "path": "src/visioncortex/lab/material_batch.py",
@@ -361,7 +375,21 @@
       "path": "src/visioncortex/lab/scan_intake.py",
       "upstream_module": null,
       "original_sha256": null,
-      "ported_sha256": "47468da2360944bcc98e94dd573746dd10895425196c9e028eb8c07ea842ad70",
+      "ported_sha256": "b3dd5f75e42dd4845e56ddb8c0cd8abbb844cdff86a2d50a768ef6d9abc41984",
+      "origin": "unified_project_integration"
+    },
+    {
+      "path": "src/visioncortex/lab/scan_source.py",
+      "upstream_module": null,
+      "original_sha256": null,
+      "ported_sha256": "fc1f4bbbbec262dc0c35f66c3842096fd5281f25d6fe1710bbf3ffb69e737cdc",
+      "origin": "unified_project_integration"
+    },
+    {
+      "path": "src/visioncortex/lab/scan_source_scanner.py",
+      "upstream_module": null,
+      "original_sha256": null,
+      "ported_sha256": "4e0085c3a6ecec6d06c67ea49cf5948c476d4a0089cbbf4a5e450e1db2faf557",
       "origin": "unified_project_integration"
     },
     {
@@ -440,13 +468,13 @@
       "path": "src/visioncortex/lab/timeline_report.py",
       "upstream_module": "timeline_report.py",
       "original_sha256": "7d3a173f07a1164b0ab4a418a0e8a66cf470a7dff2b32646bd53e753afb1c5d5",
-      "ported_sha256": "9e02578a1ee1a321ca6f3229f301652b5839017771ad066ddba1a986aed3026d"
+      "ported_sha256": "3762a54c5aca724f42dbdc72af931b60d1f40cbb26cc8703da2ef8764af0d1e7"
     },
     {
       "path": "src/visioncortex/lab/timeline_runner.py",
       "upstream_module": "timeline_runner.py",
       "original_sha256": "8186ab1fbcd133583b867df6e7384cf33c3ad53412408fa5c15101950cf8374d",
-      "ported_sha256": "d55f9c7313f39d717ca0a2da4eab536fe6ae3c775131e453ea2aa1e20c073622"
+      "ported_sha256": "fb551389be25a212881a3cb759745068a28ea189a5637d919c54169e4eb5720c"
     },
     {
       "path": "src/visioncortex/lab/timeline_runtime.py",
@@ -500,6 +528,7 @@
       "src/visioncortex/lab/__main__.py",
       "src/visioncortex/lab/api.py",
       "src/visioncortex/lab/archive_layout.py",
+      "src/visioncortex/lab/audio_source.py",
       "src/visioncortex/lab/automatic_readout.py",
       "src/visioncortex/lab/cache.py",
       "src/visioncortex/lab/capture_context.py",
@@ -520,6 +549,7 @@
       "src/visioncortex/lab/dynamic_vision.py",
       "src/visioncortex/lab/engine_process.py",
       "src/visioncortex/lab/equipment.py",
+      "src/visioncortex/lab/existing_archive_binding.py",
       "src/visioncortex/lab/field_source.py",
       "src/visioncortex/lab/fields.py",
       "src/visioncortex/lab/gauge.py",
@@ -555,6 +585,8 @@
       "src/visioncortex/lab/retention.py",
       "src/visioncortex/lab/rules.py",
       "src/visioncortex/lab/scan_intake.py",
+      "src/visioncortex/lab/scan_source.py",
+      "src/visioncortex/lab/scan_source_scanner.py",
       "src/visioncortex/lab/speech_candidates.py",
       "src/visioncortex/lab/storage.py",
       "src/visioncortex/lab/subprocesses.py",

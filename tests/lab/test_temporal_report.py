@@ -2,6 +2,13 @@
 from visioncortex.lab.timeline_report import activity_lines
 
 
+def test_passive_scan_record_is_not_displayed_as_human_review():
+    item = dict(source_type='reviewed_note', start_at=None, end_at=None, kind='settings',
+                text_content='无码，未关联设备', payload={'scan_intake': {'declared_intent': 'background_qr'}}, evidence=[])
+    text = '\n'.join(activity_lines(item))
+    assert '扫码证据（未作操作确认）' in text and '人工复核' not in text
+
+
 def activity(status, value):
     return dict(source_type='ocr', start_at=None, end_at=None, kind='reading',
                 text_content='时序面板候选', evidence=[], payload=dict(fields=[dict(

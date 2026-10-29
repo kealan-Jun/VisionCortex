@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import base64
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
+from fractions import Fraction
 import fcntl
 import json
 from pathlib import Path
@@ -282,19 +283,59 @@ class TimelineRunner:
                 continue
             lo, hi = seconds(core['start_seconds']), seconds(core['end_seconds'])
             origin, limit = seconds(ref['start_seconds']), seconds(ref['end_seconds'])
-            units = result.get('words') or result.get('segments') or []
-            if not isinstance(units, list) or len(units) > 10000:
-                raise ValueError('Invalid bounded ASR alignment')
+            coverage = derivation.get('transform', {}).get('source_sample_coverage')
+            if coverage is not None:
+                from .audio_source import decimal_time
+                requested, support = coverage['requested_range'], coverage['actual_sample_range']
+                a, b = Fraction(support['start_seconds']), Fraction(support['end_seconds'])
+                if (coverage.get('schema_version') != 'vc-lab-audio-sample-coverage/1'
+                        or coverage.get('continuous_sample_clocks_verified') is not True
+                        or (Fraction(requested['start_seconds']), Fraction(requested['end_seconds'])) != (Fraction(origin), Fraction(limit))
+                        or not Fraction(origin) <= a < b <= Fraction(limit)
+                        or Fraction(coverage['prepared_zero_to_source_seconds']) != a):
+                    raise ValueError('ASR preparation lacks verified original sample support')
+                origin, limit = Decimal(decimal_time(a)), Decimal(decimal_time(b))
+            def validate_units(units, origin=origin, limit=limit):
+                if not isinstance(units, list) or len(units) > 10000:
+                    raise ValueError('Invalid bounded ASR alignment')
+                checked, previous_start = [], origin
+                for unit in units:
+                    start, end = origin + offset(unit['start_seconds']), origin + offset(unit['end_seconds'])
+                    if not origin <= start <= end <= limit:
+                        raise ValueError('ASR alignment escaped the decoded source window')
+                    if start < previous_start or not isinstance(unit.get('text'), str):
+                        raise ValueError('ASR units must follow source order')
+                    previous_start = start
+                    checked.append((unit, start, end))
+                return checked
+
+            words = result.get('words') or []
+            checked = validate_units(words)
+            point_indices = [i for i, (_, a, b) in enumerate(checked) if a == b]
+            alignment = dict(selected_unit='words', zero_duration_word_indices=point_indices)
+            if point_indices:
+                # A point-word is a real model observation, not an interval.
+                # Retain it verbatim, then use independently returned segments
+                # or whole-input support without inventing a word duration.
+                alignment.update(original_word_observations=words,
+                    source_word_observations=[dict(text=u['text'], start_seconds=str(a), end_seconds=str(b)) for u, a, b in checked],
+                    fallback_reason='point_words_have_no_interval_support')
+            if not checked or point_indices:
+                checked = validate_units(result.get('segments') or [])
+                alignment['selected_unit'] = 'segments'
+                if any(a == b for _, a, b in checked):
+                    checked = []
+                if not checked:
+                    alignment['selected_unit'] = 'whole_input_alignment_unavailable'
             selected = []
-            previous_start = origin
-            for unit in units:
-                start, end = origin + offset(unit['start_seconds']), origin + offset(unit['end_seconds'])
-                if not origin <= start < end <= limit:
-                    raise ValueError('ASR alignment escaped the decoded source window')
-                if start < previous_start or not isinstance(unit.get('text'), str):
-                    raise ValueError('ASR units must follow source order')
-                previous_start = start
+            for unit, start, end in checked:
                 if lo <= start < hi:
+                    # Storage uses microseconds. Round support inwards so no
+                    # published span claims a sample outside the exact proof.
+                    start = start.quantize(Decimal('0.000001'), rounding=ROUND_CEILING)
+                    end = end.quantize(Decimal('0.000001'), rounding=ROUND_FLOOR)
+                    if not start < end:
+                        raise ValueError('ASR unit is shorter than source timestamp precision')
                     selected.append(dict(text=unit['text'], start_seconds=str(start), end_seconds=str(end)))
             if selected:
                 from .comment_intake import transcript_candidate
@@ -303,12 +344,20 @@ class TimelineRunner:
                                    spans=spans,
                                    payload=dict(aligned_units=selected, time_basis=result.get('time_basis'),
                                                 alignment_revision=result.get('alignment_revision'), interpretation='verbatim_transcript_not_confirmed_experiment_command',
+                                                source_sample_coverage=coverage,
+                                                asr_alignment=alignment,
                                                 comment_candidate=transcript_candidate(ref,spans,execution,aligned=True,original_asr_text=result.get('text')))))
-            elif result.get('text') and not units:
+            elif result.get('text') and not checked:
                 from .comment_intake import transcript_candidate
-                spans=[dict(media_id=ref['media_id'], start_seconds=ref['start_seconds'], end_seconds=ref['end_seconds'])]
-                events.append(dict(kind='speech', text=result['text'], spans=[dict(media_id=ref['media_id'], start_seconds=ref['start_seconds'], end_seconds=ref['end_seconds'])],
+                a = origin.quantize(Decimal('0.000001'), rounding=ROUND_CEILING) if coverage else origin
+                b = limit.quantize(Decimal('0.000001'), rounding=ROUND_FLOOR) if coverage else limit
+                if not a < b:
+                    raise ValueError('ASR support is shorter than source timestamp precision')
+                spans=[dict(media_id=ref['media_id'], start_seconds=str(a), end_seconds=str(b))]
+                events.append(dict(kind='speech', text=result['text'], spans=spans,
                                    payload=dict(time_basis='whole_input_only_alignment_unavailable', contains_context=True,
+                                                source_sample_coverage=coverage,
+                                                asr_alignment=alignment,
                                                 comment_candidate=transcript_candidate(ref,spans,execution,aligned=False,original_asr_text=result.get('text')))))
         return events, receipts
 

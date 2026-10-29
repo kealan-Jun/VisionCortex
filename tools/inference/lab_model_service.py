@@ -209,6 +209,11 @@ def inference_identity(kind, config, verified):
         rec = settings.get('recognition_model_name', 'PP-OCRv5_mobile_rec')
         selected = dict(detection_model_name=det, recognition_model_name=rec,
                         device=settings.get('device', 'gpu:0'))
+        if settings.get('engine') == 'ppocr-onnx':
+            from ppocr_onnx import settings as onnx_settings
+            selected.update(onnx_settings(settings), service_source_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest())
+        elif settings.get('engine', 'paddleocr') != 'paddleocr':
+            raise ValueError('Unknown explicit OCR engine')
         names = [settings.get('detection_checkpoint', det), settings.get('recognition_checkpoint', rec)]
     elif kind == 'asr':
         engine = settings.get('engine', 'qwen3-asr')
@@ -270,16 +275,23 @@ def make_asr(root, config, verified=None):
 def make_ocr(root, config, verified=None):
     import numpy as np
     from PIL import Image
-    from paddleocr import PaddleOCR
     settings = service_settings(config, 'ocr')
+    engine = settings.get('engine', 'paddleocr')
     det_name = settings.get('detection_model_name', 'PP-OCRv5_mobile_det')
     rec_name = settings.get('recognition_model_name', 'PP-OCRv5_mobile_rec')
     det, det_revision = checkpoint(root, settings.get('detection_checkpoint', det_name), config, verified)
     rec, rec_revision = checkpoint(root, settings.get('recognition_checkpoint', rec_name), config, verified)
-    model = PaddleOCR(device=settings.get('device', 'gpu:0'), cpu_threads=2, enable_mkldnn=False,
-        text_detection_model_name=det_name, text_recognition_model_name=rec_name,
-        text_detection_model_dir=str(det), text_recognition_model_dir=str(rec),
-        use_doc_orientation_classify=False, use_doc_unwarping=False, use_textline_orientation=False)
+    if engine == 'ppocr-onnx':
+        from ppocr_onnx import PPOCRONNX
+        model = PPOCRONNX(det, rec, settings)
+    elif engine == 'paddleocr':
+        from paddleocr import PaddleOCR
+        model = PaddleOCR(device=settings.get('device', 'gpu:0'), cpu_threads=2, enable_mkldnn=False,
+            text_detection_model_name=det_name, text_recognition_model_name=rec_name,
+            text_detection_model_dir=str(det), text_recognition_model_dir=str(rec),
+            use_doc_orientation_classify=False, use_doc_unwarping=False, use_textline_orientation=False)
+    else:
+        raise ValueError('Unknown explicit OCR engine')
     def infer(raw):
         try:
             with Image.open(io.BytesIO(raw)) as image:
@@ -288,6 +300,9 @@ def make_ocr(root, config, verified=None):
                 pixels = np.asarray(image.convert('RGB'))[:, :, ::-1]
         except (OSError, Image.DecompressionBombError) as exc:
             raise ValueError('Unsupported or invalid image') from exc
+        if engine == 'ppocr-onnx':
+            return dict(model.predict(pixels), recognition_revision=rec_revision,
+                        accuracy='NOT_PROVEN', physical_action_confirmed=False)
         results = []
         for result in model.predict(pixels):
             item = {}

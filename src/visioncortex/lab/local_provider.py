@@ -223,7 +223,17 @@ class PreparedMedia:
             # repeatedly decoding from media zero for each later window.
             command = ['ffmpeg', '-v', 'error', '-nostdin', '-y', '-ss', str(start), '-accurate_seek', '-i', str(path), '-t', str(end-start)]
             if kind == 'transcription':
-                command += ['-map', '0:a:0', '-vn', '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le']
+                from .audio_source import decimal_time, probe_audio
+                coverage = probe_audio(path, start, end)
+                sample_range = coverage['actual_sample_range']
+                # Preserve decoded native PTS through the bounded seek, then
+                # trim exact source support before rebasing the model input.
+                command = ['ffmpeg', '-v', 'error', '-nostdin', '-y', '-copyts',
+                           '-ss', decimal_time(max(0, start-2)), '-seek_timestamp', '1', '-accurate_seek', '-i', str(path)]
+                command += ['-map', '0:a:0', '-vn', '-af',
+                            f"atrim=start={decimal_time(sample_range['start_seconds'])}:end={decimal_time(sample_range['end_seconds'])},asetpts=PTS-STARTPTS",
+                            '-t', decimal_time(Fraction(coverage['prepared_duration_seconds'])),
+                            '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le']
                 mime, transform = 'audio/wav', dict(kind='audio_decode', rate=16000, channels=1)
             else:
                 edge = model.get('video_max_edge', 768)
@@ -235,16 +245,20 @@ class PreparedMedia:
                 run_bounded(command, '', env={'PATH': os.environ.get('PATH', '/usr/bin:/bin')}, timeout=180, max_bytes=128*1024)
                 if output.stat().st_size >= bound - 1024:
                     raise ValueError('Derived media reached its bound; refusing a truncated input')
-                probe = json.loads(run_bounded(['ffprobe', '-v', 'error', '-show_entries', 'format=duration:stream=avg_frame_rate,nb_frames', '-of', 'json', str(output)], '',
-                                               env={'PATH': os.environ.get('PATH', '/usr/bin:/bin')}, timeout=30, max_bytes=32*1024))
-                decoded_duration = seconds(probe['format']['duration'])
-                frame_rate = probe['streams'][0].get('avg_frame_rate', '0/1')
-                fps = float(Fraction(frame_rate)) if frame_rate != '0/0' else 0
-                tolerance = Decimal('0.01') if kind == 'transcription' else Decimal(str(min(1, 1.1/fps) if fps > 0 else .1))
-                if abs(decoded_duration - (end - start)) > tolerance:
-                    raise ValueError('Decoded media does not cover the requested interval')
-                transform.update(decoded_duration_seconds=str(decoded_duration), decoded_frame_count=probe['streams'][0].get('nb_frames'),
-                                 duration_tolerance_seconds=str(tolerance))
+                if kind == 'transcription':
+                    from .audio_source import verify_prepared_wave
+                    transform.update(verify_prepared_wave(output, coverage))
+                else:
+                    probe = json.loads(run_bounded(['ffprobe', '-v', 'error', '-show_entries', 'format=duration:stream=avg_frame_rate,nb_frames', '-of', 'json', str(output)], '',
+                                                   env={'PATH': os.environ.get('PATH', '/usr/bin:/bin')}, timeout=30, max_bytes=32*1024))
+                    decoded_duration = seconds(probe['format']['duration'])
+                    frame_rate = probe['streams'][0].get('avg_frame_rate', '0/1')
+                    fps = float(Fraction(frame_rate)) if frame_rate != '0/0' else 0
+                    tolerance = Decimal(str(min(1, 1.1/fps) if fps > 0 else .1))
+                    if abs(decoded_duration - (end - start)) > tolerance:
+                        raise ValueError('Decoded media does not cover the requested interval')
+                    transform.update(decoded_duration_seconds=str(decoded_duration), decoded_frame_count=probe['streams'][0].get('nb_frames'),
+                                     duration_tolerance_seconds=str(tolerance))
                 raw = output.read_bytes()
             finally:
                 output.unlink(missing_ok=True)

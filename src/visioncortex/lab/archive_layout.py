@@ -14,7 +14,7 @@ from uuid import uuid4
 from .components import ROOT, pipeline_module
 from .domain import Conflict, instant
 from .media import hash_file, safe_path
-from .storage import is_nas, publication_config, _mount_info, _REMOTE_FS
+from .storage import is_nas, publication_config, verify_root, _mount_info, _REMOTE_FS
 
 CONTRACT_PATH = '.System/ArchiveContract.json'
 
@@ -118,9 +118,15 @@ def _compatible_contract(root, path, actual, size, expected):
 
 
 def verify_archive_contract(root):
-    root = Path(root)
-    path = safe_path(root, CONTRACT_PATH)
+    root = verify_root(Path(root))
     expected = contract_bytes()
+    try:
+        path = safe_path(root, CONTRACT_PATH)
+    except FileNotFoundError:
+        if not os.environ.get('VC_LAB_ARCHIVE_COMPATIBILITY_MANIFEST'):
+            raise
+        from .existing_archive_binding import verify_existing_native_root
+        return verify_existing_native_root(root, expected)
     actual, size = hash_file(path, 128 * 1024)
     if size == len(expected) and actual == hashlib.sha256(expected).hexdigest():
         return path
@@ -182,6 +188,12 @@ def prepare_archive(settings):
     guide = archive_guide(contract)
     guard = pipeline_module('device_day_write_guard')
     with guard.storage_guard(publication_config(writable)):
+        from .existing_archive_binding import _read
+        active = guard.CURRENT.get()
+        active.mkdir(root)
+        if (_read(root, CONTRACT_PATH, 128 * 1024, active, optional=True) is None
+                and _read(root, 'DataRetentionGuide.docx', 2 * 1024**2, active, optional=True) is not None):
+            raise Conflict('Existing native guide requires explicit read-only root binding; empty bootstrap is forbidden')
         refs = [_immutable_write(safe_path(root, CONTRACT_PATH, must_exist=False), contract_bytes(), guard),
                 _immutable_write(safe_path(root, 'README.txt', must_exist=False), guide.encode(), guard)]
     verify_archive_contract(root)

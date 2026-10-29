@@ -55,7 +55,7 @@ def render_report(report):
         lines.append('  当前无已存储的未归属观察；不代表数据完整。')
     pending_time = report.get('unknown_time_temporal_activities', {})
     if pending_time.get('activities'):
-        lines += ['', '时间未校准的时序读数：以下仅为客户待定时记录，不归入本日或上述实验。']
+        lines += ['', '时间未校准的观察：以下仅为待定时记录，不归入本日或上述实验。']
         for activity in pending_time['activities']:
             lines.extend(activity_lines(activity))
         if pending_time.get('truncated'):
@@ -105,7 +105,11 @@ def render_report(report):
 
 
 def activity_lines(activity):
-    source = {'video': '视频观察', 'speech': '录音转写', 'ocr': '面板识别', 'reviewed_note': '人工复核'}[activity['source_type']]
+    source = {'video': '视频观察', 'speech': '录音转写', 'ocr': '面板识别', 'reviewed_note': '声明／解释记录'}[activity['source_type']]
+    if activity.get('payload', {}).get('scan_intake'):
+        source = '扫码证据（未作操作确认）'
+    elif activity.get('payload', {}).get('operator_scan_event'):
+        source = '主动扫码声明'
     lines = [f'  {time_text(activity["start_at"])}—{time_text(activity["end_at"])} [{source}/{activity["kind"]}] {activity["text_content"]}']
     value = activity.get('payload', {}).get('value_candidate')
     if value:
