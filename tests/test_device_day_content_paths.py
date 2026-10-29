@@ -5,7 +5,7 @@ import pytest
 from test_device_day import FakeModels, capture, device_config, item_and_layout
 from visioncortex.device_day import DeviceDayRunner
 from visioncortex.device_day_content_paths import aliases, migrate_stt, migrate_understanding, public_references
-from visioncortex.device_day_contract import artifact, atomic_json, read_json, safe_child, verify_artifact
+from visioncortex.device_day_contract import artifact, atomic_json, safe_child, verify_artifact
 
 __all__ = ['device_config']
 
@@ -21,14 +21,15 @@ def test_relocation_keeps_old_receipt_valid_and_only_one_visible_entry(device_co
     ref = artifact(layout.root, old)
     result = migrate_stt(runner, layout)
     assert len(result) == 1 and not (layout.comments/'Stt').exists()
-    assert verify_artifact(layout.root, ref)
-    new = safe_child(layout.root, ref['path'])
+    assert verify_artifact(layout.root, ref, backend_root=layout.backend_root)
+    from visioncortex.comment_evidence import resolve
+    new = resolve(layout.root, ref['path'], layout.backend_root)
     assert 'Comment/.Evidence/Recognition/' in str(new) and new.parent.name == 'version'
     assert new.read_text() == '原始机器转写\n'
     assert migrate_stt(runner, layout) == []
-    mapped = public_references({'transcript_file': ref}, read_json(layout.comments/'.Evidence/LegacyPaths.json')['aliases'])
+    mapped = public_references({'transcript_file': ref}, aliases(layout.root))
     assert Path(mapped['transcript_file']['path']).parts[1] == '.Evidence'
-    assert verify_artifact(layout.root, mapped['transcript_file'])
+    assert verify_artifact(layout.root, mapped['transcript_file'], backend_root=layout.backend_root)
 
 
 def test_alias_cannot_escape_archive_or_recurse(tmp_path):
@@ -51,7 +52,7 @@ def test_understanding_relocation_preserves_results_and_historical_segment_times
     ref = artifact(layout.root, old)
     result = migrate_understanding(runner, layout)
     assert len(result) == 1 and not (layout.understanding/'ClipUnderstanding').exists()
-    assert verify_artifact(layout.root, ref)
+    assert verify_artifact(layout.root, ref, backend_root=layout.backend_root)
     mapped = public_references({'model_receipt': ref['path']}, aliases(layout.root))
     assert '/.Evidence/' in mapped['model_receipt']
     assert '/Analysis/segment-test/version/window/Result.json' in mapped['model_receipt']

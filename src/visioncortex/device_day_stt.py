@@ -5,7 +5,7 @@ import math
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from .device_day_contract import artifact, atomic_bytes, atomic_json, digest, media_interval_name, read_json
+from .device_day_contract import atomic_bytes, atomic_json, digest, media_interval_name, read_json
 
 
 def transcript_text(recording, source, comments, outcome, *, audio=None):
@@ -164,7 +164,7 @@ def transcribe(config, layout, retention, key):
             original = worker_folder / name
             target = folder / name.capitalize()
             copy_verified(original, target)
-            public_files.append(artifact(layout.root, target))
+            public_files.append(layout.artifact(target))
         execution = [layout.backend_artifact(worker_folder / name)
                      for name in ("request.json", "receipt.json", "execution.json", *receipt["artifacts"])]
         audit_artifacts.extend(execution)
@@ -174,7 +174,7 @@ def transcribe(config, layout, retention, key):
                                  "model": receipt.get("model"), "request_ids": receipt.get("request_ids", []),
                                  "current_execution": receipt.get("execution", {}),
                                  "wall_seconds": receipt["wall_seconds"], "outcome": receipt["outcome"]})
-        artifacts.extend([*public_files, artifact(layout.root, result_path)])
+        artifacts.extend([*public_files, layout.artifact(result_path)])
         for row in transcript["segments"]:
             left = (origin or recording["recording_start_us"]) + round(row["start_seconds"] * 1e6)
             right = (origin or recording["recording_start_us"]) + round(row["end_seconds"] * 1e6)
@@ -209,11 +209,11 @@ def transcribe(config, layout, retention, key):
                if excluded or any(c["outcome"] == "no_transcript" for c in chunks) else "no_speech")
     text_path = root / "Transcript.txt"
     atomic_bytes(text_path, transcript_text(recording, source['retained'], comments, outcome, audio=audio).encode('utf-8'))
-    text_ref = artifact(layout.root, text_path)
+    text_ref = layout.artifact(text_path)
     atomic_json(comment_path, {"source": "machine_transcribed_speech", "comments": comments,
                                "audio_ref": source["retained"], "chunks": chunks,
                                "outcome": outcome, "transcript_file": text_ref})
-    artifacts.extend([artifact(layout.root, comment_path), text_ref])
+    artifacts.extend([layout.artifact(comment_path), text_ref])
     return {"outcome": outcome, "comments": comments, "artifacts": artifacts,
             **({'source_quality': {k: audio.get(k) for k in ('artifact_kind', 'quality_status', 'quality_flags',
                 'quality_evidence', 'capture_clock_verified')}, 'usable_audio_windows': windows,

@@ -58,6 +58,7 @@ def run(config, archive, plan_root, stop, *, apply, public_video_inventory=None)
         Path(config["storage"]["archive_root"]),
         archive[11:],
         start,
+        Path(config["storage"]["local_cache_root"]),
         read_only_originals=True,
     )
     runtime = Path(config["storage"]["local_runtime_root"]) / "device-day"

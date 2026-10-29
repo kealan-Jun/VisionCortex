@@ -275,9 +275,10 @@ def artifact(root: Path, path: Path) -> dict[str, Any]:
             "sha256": file_hash(checked)}
 
 
-def verify_artifact(root: Path, reference: dict[str, Any]) -> bool:
+def verify_artifact(root: Path, reference: dict[str, Any], *, backend_root=None) -> bool:
     try:
-        path = safe_child(root, reference["path"])
+        from .comment_evidence import resolve
+        path = resolve(root, reference['path'], backend_root)
         return (path.is_file() and path.stat().st_size == reference["size_bytes"]
                 and file_hash(path) == reference["sha256"])
     except (KeyError, TypeError, ValueError, OSError):
@@ -342,9 +343,12 @@ class DeviceDayLayout:
         verify_before_submission()
 
     def relative(self, path: Path) -> str:
-        value = path.relative_to(self.root).as_posix()
-        safe_child(self.root, value)
-        return value
+        from .comment_evidence import relative_path
+        return relative_path(self.root, path, self.backend_root)
+
+    def artifact(self, path: Path) -> dict[str, Any]:
+        from .comment_evidence import artifact
+        return artifact(self.root, path, self.backend_root)
 
 
 def validate_config(config: dict[str, Any]) -> None:

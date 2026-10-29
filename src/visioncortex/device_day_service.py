@@ -655,6 +655,7 @@ def install_routes(app, settings_factory, service):
         try:
             from .artifact_reader import resolve
             path = resolve(root, relative, directories=ARTIFACT_DIRECTORIES,
+                           backend_root=Path(settings_factory()["storage"]["local_cache_root"]),
                            suffixes={".json", ".jsonl", ".html", ".jpg", ".png", ".mp4", ".opus", ".wav", ".m4a", ".mp3", ".flac", ".ogg", ".csv", ".txt", ".srt", ".vtt", ".log"})
         except (ValueError, OSError) as exc:
             from .artifact_reader import storage_status

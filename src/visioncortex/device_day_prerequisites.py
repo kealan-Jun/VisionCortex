@@ -3,7 +3,7 @@ import stat
 import threading
 import time
 
-from .device_day_contract import STAGES, digest, safe_child
+from .device_day_contract import STAGES, digest
 
 
 def legacy_prerequisite_failure(result):
@@ -23,7 +23,8 @@ def artifact_metadata_identity(layout, backend_root, receipt):
             references.append((backend_root, item))
         identities = []
         for root, item in references:
-            path = safe_child(root, item['path'])
+            from .comment_evidence import resolve
+            path = resolve(root, item['path'], backend_root if root == layout.root else None)
             info = path.stat()
             if not stat.S_ISREG(info.st_mode) or info.st_size != item['size_bytes']:
                 return None

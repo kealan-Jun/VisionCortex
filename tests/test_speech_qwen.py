@@ -153,7 +153,9 @@ def test_archive_revision_reuses_exact_asr_request_without_mutating_history(tmp_
     assert history == {p.name: p.read_bytes() for p in previous.iterdir() if p.is_file()}
     assert (layout.receipts / "fixture/speech/new/0000/audio.wav").is_file()
     assert result['transcript_file']['path'].endswith('/new/Transcript.txt')
-    text = (layout.root / result['transcript_file']['path']).read_text()
+    from visioncortex.comment_evidence import resolve
+    text = resolve(layout.root, result['transcript_file']['path'], layout.backend_root).read_text()
+    assert not (layout.comments/'.Evidence').exists()
     assert '你好。' in text and '+08:00' in text and '原录音：' in text
 
 

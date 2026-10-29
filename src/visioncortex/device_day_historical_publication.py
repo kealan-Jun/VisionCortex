@@ -129,21 +129,23 @@ def snapshot(config, entry, index=None, *, anchors=None):
         expected = (anchors or {}).get(relative)
         if expected and verify_artifact_cached(root, expected):
             return expected
-        path = safe_child(root, relative)
+        from .comment_evidence import resolve
+        path = resolve(root, relative, layout.backend_root)
         before = path.stat()
-        reference = artifact(root, path)
+        reference = layout.artifact(path)
         after = path.stat()
         _require(all(getattr(before, key) == getattr(after, key) for key in
                      ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns'))
-                 and verify_artifact_cached(root, reference), 'historical_user_file_changed_during_hash')
+                 and verify_artifact_cached(root, reference, backend_root=layout.backend_root), 'historical_user_file_changed_during_hash')
         return reference
 
     def json_file(relative):
-        path = safe_child(root, relative)
+        from .comment_evidence import resolve
+        path = resolve(root, relative, layout.backend_root)
         _require(path.stat().st_size <= 128*1024**2, 'historical_user_document_exceeds_bound')
         value, checksum = _document(path)
         reference = {'path': relative, 'sha256': checksum, 'size_bytes': path.stat().st_size}
-        _require(verify_artifact_cached(root, reference), 'historical_user_document_changed_during_read')
+        _require(verify_artifact_cached(root, reference, backend_root=layout.backend_root), 'historical_user_document_changed_during_read')
         files[relative] = reference
         return value
 
@@ -255,7 +257,7 @@ def snapshot(config, entry, index=None, *, anchors=None):
     expected_files['photo_index_observed_at'] = time_index.get('photo_index_observed_at')
     _require(time_index == expected_files, 'time_index_native_source_or_selected_interval_reference_changed')
     _require(read_bundle(config, entry, layout, context_reader=context_reader) == bundle, 'native_bundle_changed_during_publication')
-    _require(len(files) <= 20000 and all(verify_artifact_cached(root, value) for value in files.values()),
+    _require(len(files) <= 20000 and all(verify_artifact_cached(root, value, backend_root=layout.backend_root) for value in files.values()),
              'historical_publication_artifacts_changed_or_exceeded_bound')
     return {'schema_version': VERSION, 'archive': entry['archive'], 'recording_id': entry['recording_id'],
         'reader_key': entry['reader_key'], 'reader_identity': entry['reader']['identity'],

@@ -316,7 +316,8 @@ def execute(runner, layout, record, *, stage, retry):
                     raise ValueError('Unknown audit artifact storage root')
                 references.append((runner.backend_root, reference))
             for root, reference in references:
-                output = safe_child(root, reference['path'])
+                from .comment_evidence import resolve
+                output = resolve(root, reference['path'], runner.backend_root if root == layout.root else None)
                 with output.open('rb') as handle:
                     os.fsync(handle.fileno())
                 sync_directory(output.parent)

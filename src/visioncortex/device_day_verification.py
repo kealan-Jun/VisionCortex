@@ -20,9 +20,13 @@ class ArtifactVerifier:
         stat = path.stat()
         return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
 
-    def verify(self, root: Path, reference: dict) -> bool:
+    def verify(self, root: Path, reference: dict, *, backend_root=None) -> bool:
         try:
-            path = safe_child(root, reference['path'])
+            if backend_root is None:
+                path = safe_child(root, reference['path'])
+            else:
+                from .comment_evidence import resolve
+                path = resolve(root, reference['path'], backend_root)
             if not path.is_file():
                 return False
             expected = (reference['size_bytes'], reference['sha256'])

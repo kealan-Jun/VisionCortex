@@ -107,6 +107,81 @@ def vision_runner(config, runner_type, *, backend=None):
     return VisionRunner()
 
 
+def storage_runner(config, runner_type, stage, *, backend=None):
+    """Read old STT with its actual producer; new calls use the new build key.
+
+    Moving storage must not reissue completed ASR. The old owner has a key-only
+    transport; a reserved completion that loses any evidence stops closed.
+    """
+    if stage not in {'stt', 'report'}:
+        raise ValueError('Storage rollout supports only STT and report owners')
+    own_stage = stage
+    setting = config.get('device_day', {}).get(stage+'_completed_key_owner')
+    if not setting:
+        return runner_type(config) if backend is None else runner_type(config, backend=backend)
+    from .device_day_publication_worker import FrozenReceiptKeyOwner
+    from .device_day_bindings import CompletedBindingInvalid
+
+    class STTRunner(runner_type):
+        def __init__(self):
+            super().__init__(config, backend=backend)
+            self.previous_owner = FrozenReceiptKeyOwner(setting)
+            self.reserved_completions = {}
+            self.parent_owners = {name: FrozenReceiptKeyOwner(value) for name, value in
+                self.settings.get('storage_parent_key_owners', {}).items()}
+
+        def _key(self, stage, recording, inputs, *, _binding=True):
+            if _binding and self._completed_execution_bindings.historical_candidate(stage, recording):
+                return super()._key(stage, recording, inputs, _binding=_binding)
+            if stage != own_stage:
+                owner = self.parent_owners.get(stage)
+                if owner is not None:
+                    key = owner.key(stage, recording, inputs, binding=_binding)
+                    path = self._receipt(self.layout(recording), recording, stage)
+                    if path.is_file():
+                        import ijson
+                        with path.open('rb') as handle:
+                            actual = next(ijson.items(handle, 'key'), None)
+                        if actual == key:
+                            return key
+                return self.previous_owner.key(stage, recording, inputs, binding=_binding)
+            if stage == own_stage:
+                path = self._receipt(self.layout(recording), recording, stage)
+                if path.is_file():
+                    if path.stat().st_size > 64*1024**2:
+                        raise CompletedBindingInvalid('Completed receipt exceeds its storage reader bound')
+                    saved = read_json(path)
+                    if saved.get('status') == 'completed':
+                        previous = self.previous_owner.key(stage, recording, inputs, binding=_binding)
+                        if self._accepts_receipt(saved, previous):
+                            self.reserved_completions[(str(path), previous)] = digest(saved)
+                            return previous
+            return super()._key(stage, recording, inputs, _binding=_binding)
+
+        def _load_verified(self, path, key, layout):
+            value = super()._load_verified(path, key, layout)
+            expected = self.reserved_completions.get((str(path), key))
+            if expected and (value is None or digest(value) != expected):
+                raise CompletedBindingInvalid('Reserved completion lost its evidence; no provider fallback')
+            return value
+
+        def process(self, recording, *, stage='all', **kwargs):
+            if stage != own_stage:
+                raise ValueError('Storage rollout cannot execute another producer')
+            return super().process(recording, stage=stage, **kwargs)
+
+        def close(self):
+            self.previous_owner.close()
+            for owner in self.parent_owners.values():
+                owner.close()
+
+    return STTRunner()
+
+
+def stt_runner(config, runner_type, *, backend=None):
+    return storage_runner(config, runner_type, 'stt', backend=backend)
+
+
 class RetentionWorker:
     """Bounded concurrent claims; existing execution still validates every input."""
 
@@ -772,6 +847,8 @@ def serve(config_path, stop, *, stage='retention'):
                         runner = vision_runner(config, runner_type, backend=create_backend(config))
                     elif stage == 'vision':
                         runner = vision_runner(config, runner_type)
+                    elif stage in {'stt', 'report'}:
+                        runner = storage_runner(config, runner_type, stage)
                     else:
                         runner = runner_type(config)
                     generation = key

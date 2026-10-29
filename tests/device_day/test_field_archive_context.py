@@ -200,7 +200,7 @@ def test_field_only_day_is_discovered_and_published_without_creating_raw_directo
     from visioncortex.application.field_archive_context import archive_days, day_context, publish_context
     config, _, _, _ = archive(tmp_path/'Field')
     output = tmp_path/'VisionCortex'
-    config['storage'] = {'archive_root': str(output)}
+    config['storage'] = {'archive_root': str(output), 'local_cache_root': str(tmp_path/'Cache')}
     assert archive_days(config) == {'2026-09-16_camera-1': us('2026-09-16T00:00:00+08:00')}
     events = day_context(config, '2026-09-16_camera-1')
     index = {'archive': '2026-09-16_camera-1', 'recordings': [], 'context': {
@@ -212,11 +212,11 @@ def test_field_only_day_is_discovered_and_published_without_creating_raw_directo
     index['context']['events'] = []
     second = publish_context(config, index)
     assert first['revision'] != second['revision']
-    snapshots = list((output/index['archive']/'Comment/.Evidence/FieldRecognition').glob('*.json'))
+    snapshots = list((tmp_path/'Cache/device-day-comment-evidence'/index['archive']/'Comment/.Evidence/FieldRecognition').glob('*.json'))
     assert len(snapshots) == 2
     assert not (output/index['archive']/'MetaData').exists()
     assert not (output/index['archive']/'MetaVideo').exists()
-    first_snapshot = output/index['archive']/'Comment/.Evidence/FieldRecognition'/(first['revision']+'.json')
+    first_snapshot = tmp_path/'Cache/device-day-comment-evidence'/index['archive']/'Comment/.Evidence/FieldRecognition'/(first['revision']+'.json')
     first_snapshot.write_bytes(b'{"corrupt": true}')
     index['context']['events'] = events['events']
     with pytest.raises(ValueError, match='identity changed'):
@@ -246,5 +246,5 @@ def test_file_publisher_discovers_late_field_only_inputs_and_revisions_without_m
     assert publisher.tick()['published'] == 1
     assert len(json.loads((root/'Comment/FieldEvents.json').read_text())['events']) == 3
     assert len(json.loads(report.read_text())['全天记录']['现场事件时间线']) == 3
-    assert len(list((root/'Comment/.Evidence/FieldRecognition').glob('*.json'))) == 2
+    assert len(list((tmp_path/'Cache/device-day-comment-evidence'/root.name/'Comment/.Evidence/FieldRecognition').glob('*.json'))) == 2
     assert not (root/'MetaData').exists() and not (root/'MetaVideo').exists()

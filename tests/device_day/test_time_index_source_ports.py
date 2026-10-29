@@ -1,5 +1,6 @@
 """Optional TimeIndex provenance without copying or guessing capture facts."""
 from copy import deepcopy
+from pathlib import Path
 
 from visioncortex.application.field_archive_context import publish_context
 from visioncortex.device_day_contract import atomic_json, digest, read_json
@@ -10,7 +11,7 @@ def fixture(tmp_path):
     name = '2026-10-19_camera'
     root = tmp_path/name
     root.mkdir()
-    config = {'storage': {'archive_root': str(tmp_path), 'local_runtime_root': str(tmp_path/'Runtime')},
+    config = {'storage': {'archive_root': str(tmp_path), 'local_runtime_root': str(tmp_path/'Runtime'), 'local_cache_root': str(tmp_path/'Cache')},
         'collection_ingest': {'source_root': str(tmp_path/'Captures')},
         'device_day': {'field_recognition': {'enabled': False, 'archive_context_enabled': True}}}
     index = {'archive': name, 'recordings': [{'recording_id': 'r', 'start_us': 1, 'end_us': 2,
@@ -45,7 +46,9 @@ def test_field_pointer_requires_current_native_publication_evidence_and_real_byt
     index['context']['events'][0]['payload']['status'] = 'revised'
     assert 'field_events_file' not in publish_file_index(config, index, {})
     published = read_json(root/'Comment/FieldEvents.json')
-    saved = root/'Comment/.Evidence/FieldRecognition'/(digest(published)+'.json')
+    from visioncortex.comment_evidence import backend_path
+    saved = backend_path(root, 'Comment/.Evidence/FieldRecognition/'+digest(published)+'.json',
+                         Path(config['storage']['local_cache_root']))
     saved.unlink()
     assert 'field_events_file' not in publish_file_index(config, original, {})
     atomic_json(saved, published)

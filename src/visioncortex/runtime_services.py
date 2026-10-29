@@ -435,7 +435,7 @@ class NativeInfrastructureVerifier:
 
     def _verify(self, config, stage, row, kind, stop, *, readmission=False, normal_handoff=False):
         from .device_day import DeviceDayRunner, visual_input
-        from .device_day_contract import dependencies_for, file_hash, read_json, safe_child
+        from .device_day_contract import dependencies_for, file_hash, read_json
         from .device_day_inputs import binding
         from .input_availability import _IntegrityBytes, _PacedInput, configured_record
         from .nas_recordings import _inspect
@@ -527,7 +527,8 @@ class NativeInfrastructureVerifier:
                 for ref in refs:
                     if base == runner.backend_root and ref.get('storage_root') != 'local_cache_root':
                         raise ValueError('Current parent storage is not verified')
-                    target = safe_child(base, ref['path'])
+                    from .comment_evidence import resolve
+                    target = resolve(base, ref['path'], runner.backend_root if base == layout.root else None)
                     if not verifier(target, ref):
                         raise ValueError('Current parent artifact is not verified')
                     snapshots[target] = self._identity(target)

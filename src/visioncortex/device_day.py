@@ -524,7 +524,8 @@ class DeviceDayRunner:
             from .device_day_inputs import verify_content
             verified = all(verify_content(safe_child(root, r['path']), r) for root, r in references)
         else:
-            verified = all(verify_artifact_cached(root, r) for root, r in references)
+            verified = all(verify_artifact_cached(root, r, backend_root=layout.backend_root if root == layout.root else None)
+                           for root, r in references)
         if not verified:
             return None
         return receipt

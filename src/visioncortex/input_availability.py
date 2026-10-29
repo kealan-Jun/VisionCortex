@@ -796,7 +796,6 @@ class IntegrityMonitor:
         return len(artifacts), len(missing)
 
     def _derived(self, record, verify):
-        from .device_day_contract import safe_child
         from .receipt_projection import artifact_manifest
         layout, count = self.runner.layout(record), 0
         for stage in ('vision', 'stt', 'understanding', 'report'):
@@ -818,7 +817,8 @@ class IntegrityMonitor:
                     if ref.get('storage_root') != 'local_cache_root':
                         raise IntegrityIssue('artifact_storage_unverified')
                     base = self.runner.backend_root
-                target = safe_child(base, ref['path'])
+                from .comment_evidence import resolve
+                target = resolve(base, ref['path'], self.runner.backend_root if base == layout.root else None)
                 if not target.is_file():
                     raise IntegrityIssue('derived_artifact_missing')
                 if not verify(target, ref):

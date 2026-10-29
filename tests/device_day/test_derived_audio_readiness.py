@@ -203,5 +203,6 @@ def test_actual_stt_owner_keeps_raw_response_and_marks_or_excludes_gap_text(tmp_
     assert result['comments'][0]['source_clock_verified'] is False
     assert result['comments'][0]['source_quality_ranges'] == [quality[2]]
     assert result['excluded_gap_transcripts'][0]['text'] == '间隙推断'
-    transcript = layout.root/result['comments'][0]['transcript_path']
+    from visioncortex.comment_evidence import resolve
+    transcript = resolve(layout.root, result['comments'][0]['transcript_path'], layout.backend_root)
     assert len(read_json(transcript)['segments']) == 2  # Actual raw response remains intact.
