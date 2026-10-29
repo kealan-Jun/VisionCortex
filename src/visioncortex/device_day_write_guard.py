@@ -43,6 +43,8 @@ class PublicationGuard:
         self.config = config
         self.local_only = bool(config.get('runtime', {}).get('local_only'))
         self.mounts = []
+        self.source_mounts = []
+        self.source_alias = None
         self.aliases = []
         self.local_roots = []
         checks = config.get('device_day', {}).get('publication_storage_checks')
@@ -90,9 +92,10 @@ class PublicationGuard:
             raise
 
     def close(self):
-        for mount in self.mounts:
+        for mount in (*self.mounts, *self.source_mounts):
             os.close(mount.descriptor)
         self.mounts.clear()
+        self.source_mounts.clear()
 
     def validate(self, *, volume=True):
         if self.local_only:
@@ -104,8 +107,12 @@ class PublicationGuard:
                 verify_storage(self.config)
                 if any(lexical.resolve(strict=False) != resolved for lexical, resolved in self.aliases):
                     raise NASUnavailable('Configured publication storage alias changed')
+            if self.source_alias is not None:
+                lexical, resolved = self.source_alias
+                if lexical.resolve(strict=False) != resolved:
+                    raise NASUnavailable('Configured capture storage alias changed')
             actual = mount_snapshot()
-            for mount in self.mounts:
+            for mount in (*self.mounts, *self.source_mounts):
                 observed = actual.get(mount.path)
                 if observed != mount.snapshot or os.fstat(mount.descriptor).st_dev != mount.snapshot['device']:
                     raise NASUnavailable('Publication mount disappeared or changed after it was pinned')
@@ -113,6 +120,53 @@ class PublicationGuard:
             if isinstance(exc, NASUnavailable):
                 raise
             raise NASUnavailable('Publication storage or its volume marker is unavailable') from exc
+
+    def source_mount_for(self, path):
+        """Pin a capture reader without granting that directory publication rights.
+
+        The configured capture tree may contain read-only binds of either
+        verified NAS share. Its nearest mount must have an already approved
+        filesystem/share identity; unrelated mounts and alias escapes fail closed.
+        """
+        if self.local_only:
+            return self.mount_for(path)
+        self.validate(volume=False)
+        configured = self.config.get('collection_ingest', {}).get('source_root')
+        if not configured or not Path(configured).is_absolute() or '..' in Path(configured).parts:
+            raise NASUnavailable('Capture verification requires an explicit source root')
+        lexical = Path(configured).absolute()
+        if self.source_alias is None:
+            self.source_alias = lexical, lexical.resolve(strict=False)
+        root = self.source_alias[1]
+        path = Path(path).absolute()
+        if '..' in path.parts or not (path.is_relative_to(lexical) or path.is_relative_to(root)):
+            raise NASUnavailable('Capture path is outside its configured source root')
+        resolved = path.resolve(strict=False)
+        if not resolved.is_relative_to(root):
+            raise NASUnavailable('Capture path escaped its configured source root')
+        actual = mount_snapshot()
+        candidates = [parent for parent in actual if resolved.is_relative_to(parent)]
+        if not candidates:
+            raise NASUnavailable('Capture path has no verified source mount')
+        parent = max(candidates, key=lambda value: len(value.parts))
+        observed = actual[parent]
+        approved = {(mount.expected['filesystem'], mount.expected['source']) for mount in self.mounts}
+        if observed['filesystem'] != 'cifs' or (observed['filesystem'], observed['source']) not in approved:
+            raise NASUnavailable('Capture source mount identity mismatch')
+        pinned = next((mount for mount in (*self.mounts, *self.source_mounts) if mount.path == parent), None)
+        if pinned is None:
+            try:
+                descriptor = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            except OSError as exc:
+                raise NASUnavailable('Capture source mount cannot be pinned') from exc
+            if os.fstat(descriptor).st_dev != observed['device']:
+                os.close(descriptor)
+                raise NASUnavailable('Capture directory does not belong to its verified mount')
+            pinned = PinnedMount(parent, {'filesystem': observed['filesystem'], 'source': observed['source']},
+                                 observed, descriptor)
+            self.source_mounts.append(pinned)
+        self.validate(volume=False)
+        return pinned, resolved
 
     def mount_for(self, path):
         path = Path(path).absolute()
