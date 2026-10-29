@@ -4,7 +4,7 @@ import os
 
 import pytest
 
-from tests.repo_paths import ROOT
+from repo_paths import ROOT
 from visioncortex.comment_evidence import backend_path
 from visioncortex.device_day_contract import DeviceDayLayout, artifact, atomic_json, read_json
 from visioncortex.device_day_verification import verify_artifact_cached
