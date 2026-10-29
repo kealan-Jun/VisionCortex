@@ -72,6 +72,7 @@ visioncortex lab verify-rules
 | `GET /internal/timeline/trace` | 查询实验活动、来源跨度、绑定及历史修订。查询参数以对应方法/OpenAPI为准。 |
 | `GET /internal/timeline/readouts/{session_id}` | 带字段状态与来源证据的读数会话。 |
 | `GET /internal/timeline/reports/{day}` | 同一数据库派生的日报及修订；日报归档不证明实验已物理结束。 |
+| `GET /internal/timeline/person-days/{person_id}/{day}` | 同一日报快照中的人员事件投影，返回相同 revision／fingerprint；分别标明操作声明、明确证据关联、实验相关证据及历史佩戴来源。 |
 | `GET /internal/timeline/metrics/{day}` | 阶段耗时与预算；缺失实测不能当零耗时或夜间通过。 |
 | `GET /internal/materials/source-lots/{lot_id}/summary` | 来源批次的材料单元、流水及下游关系。 |
 | `GET /internal/materials/process-batches/{batch_id}/summary` | 目标制备批次的明确用料和流量，单位及未知量保持独立。 |
@@ -79,6 +80,8 @@ visioncortex lab verify-rules
 | `GET /internal/media/{media_id}` | 鉴权媒体读取，支持Range；URL可读不等于模型已消费或读数正确。 |
 
 设备业务命令包括 `reserve-equipment-catalogue`、`activate-equipment`；预留与实物核对激活分开。二维码承载永久设备UUID，名称、型号、实验和材料关系保存在私有数据库中；补打不换身份。材料／可复用标签与设备永久码有独立类型和历史。
+
+日报的 `document.person_timelines` 使用 `vc-lab-person-timelines/1`。每条事件沿用活动UUID，关联多个实验不重复计为多个事件；不同视角仍保留独立观察。`direct_operator_declaration` 核对实际扫码事件及正文指纹，`recorded_by` 只说明有效历史佩戴来源，`experiment_related_evidence` 只说明与该人员登记的实验有关；后两种均不证明此人操作或说话。未知时钟不借用当前佩戴关系，跨交接边界不选最新人员。未知人员和未定时事件单独保留，覆盖状态为 partial，不能展示为连续全天轨迹或定位轨迹。
 
 时间线命令包括 `timeline-create-run`、`timeline-bind-qr`、`timeline-label-event`、`timeline-observe-context`、`timeline-context-window`、`timeline-register-temporal-ocr`、`timeline-register-video-qr`。全部命令的唯一装配入口见 [command_methods](../../src/visioncortex/lab/timeline_commands.py)。材料、读数及实验事实的确认／更正走现有Core事务，不能直接改识别原始观察。
 

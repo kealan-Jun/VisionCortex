@@ -13,6 +13,7 @@ from .archive_layout import day_directory, verify_archive_contract
 from .components import pipeline_module
 from .domain import Conflict, clean, fingerprint
 from .media import hash_file, safe_path
+from .native_timeline_links import association_path, build_sidecar
 from .rules import Rules
 from .storage import is_nas, publication_config
 from .timeline import day_bounds
@@ -52,6 +53,11 @@ class TimelinePublication:
             # Reuse the explicit producer camera_id; never strip prefixes or hash names.
             cameras_by_media = {str(m['media_id']): m['capture_receipt'].get('camera_id') or m['stream_key'] for m in media}
             cameras = sorted(set(cameras_by_media.values()))
+            with self.core.db.transaction(readonly=True) as conn:
+                camera_entities=conn.execute("SELECT id,code FROM entity WHERE customer_id=%s AND kind='capture_device' AND (code=ANY(%s) OR id::text=ANY(%s)) LIMIT 1025",
+                    (self.customer,cameras,cameras)).fetchall()
+            if len(camera_entities)>1024:raise ValueError('Native sidecar camera identity query exceeds bound')
+            camera_entity_ids={camera:{str(e['id']) for e in camera_entities if camera in {e['code'],str(e['id'])}} for camera in cameras}
             # Daily views use report day; source media keep their original capture day.
             roots = {camera: day_directory(camera, start) for camera in cameras}
             report = snapshot['document']
@@ -62,9 +68,26 @@ class TimelinePublication:
                      canonical + '.txt': render_report(report).encode()}
             activities = {a['id']: a for e in report['experiments'] for a in e['activities']}
             activities.update({a['id']: a for a in report['unassigned_activities']})
+            projection=report.get('person_timelines') or {}
+            declared_camera_by_activity={}
+            for person in projection.get('persons',[]):
+                for event in person.get('events',[]):
+                    for role in event.get('person_attribution',[]):
+                        if role.get('basis')=='direct_operator_declaration' and role.get('scope_camera_id'):
+                            declared_camera_by_activity.setdefault(event['activity_id'],set()).add(role['scope_camera_id'])
             for camera in cameras:
                 base = roots[camera]
                 scoped = [a for a in activities.values() if any(cameras_by_media.get(e['media_id']) == camera for e in a['evidence'])]
+                explicit_scoped=[a for a in activities.values() if declared_camera_by_activity.get(a['id'],set()) & camera_entity_ids[camera]]
+                sidecar_activities={a['id']:a for a in scoped+explicit_scoped}
+                sidecar=build_sidecar(archive=base,customer_id=self.customer,revision=snapshot['revision'],
+                    snapshot_fingerprint=snapshot['fingerprint'],rules=rules,canonical_report=canonical+'.json',
+                    activities=list(sidecar_activities.values()),person_projection=projection,
+                    media_sources={str(m['media_id']):clean(dict(source_relative_path=m['capture_receipt'].get('relative_path'),
+                        source_sha256=m['verified_sha256'],capture_id=m['capture_id'],stream_key=m['stream_key'],
+                        session_key=m['session_key'],source_kind=m['capture_receipt'].get('source_kind'),time_basis=m['time_basis']))
+                        for m in media if cameras_by_media[str(m['media_id'])]==camera})
+                files[association_path(base,snapshot['revision'],snapshot['fingerprint'],rules['sha256'])]=self._json(sidecar)
                 envelope = dict(schema_version='vc-lab-timeline-published-view/1', report_day=str(snapshot['day']), customer_id=str(self.customer),
                                 snapshot_revision=snapshot['revision'], snapshot_fingerprint=snapshot['fingerprint'],
                                 camera_key=camera, stream_keys=sorted({m['stream_key'] for m in media if cameras_by_media[str(m['media_id'])] == camera}),

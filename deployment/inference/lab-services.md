@@ -8,7 +8,7 @@
 仓库不携带权重、私有配置、令牌或运行回执。
 
 优先复用VC／FR已有模型目录与独立解释器，不重新下载或另训一套模型。
-ASR环境需要现有`qwen_asr`／PyTorch及音频依赖，OCR环境需要现有PaddleOCR及图像依赖，
+ASR环境按显式后端需要现有`qwen_asr`／PyTorch或`faster_whisper`／CTranslate2及音频依赖，OCR环境需要现有PaddleOCR及图像依赖，
 VLM环境使用已有vLLM。轻量业务工程安装不自动安装这三套推理环境。
 服务代码可以运行不表示当前环境／权重已完成质量或容量验收。
 
@@ -31,7 +31,8 @@ VLM环境使用已有vLLM。轻量业务工程安装不自动安装这三套推�
 服务字段：
 
 - 公共字段：`python`、`port`。解释器未显式提供时使用该运行根下对应`envs/<kind>/bin/python`。
-- ASR：`checkpoint`与`aligner_checkpoint`，使用实际已具备的识别／对齐检查点。
+- ASR 默认 `engine=qwen3-asr`：`checkpoint`与`aligner_checkpoint`，使用实际已具备的识别／对齐检查点。
+- ASR 可显式选择 `engine=faster-whisper`，并提供 `checkpoint`、`device`、`cpu_threads`、`compute_type`，可选 `language`。例如既有 small 权重可使用 CPU、2线程、int8；不自动换后端或下载模型。该路径返回模型原生词／段相对时间，`alignment_revision=null`，不能标成独立强制对齐结果。
 - OCR：`detection_checkpoint`、`recognition_checkpoint`、`detection_model_name`、
   `recognition_model_name`和`device`。可以配置现有PP-OCRv5；必须匹配实际权重及PaddleOCR版本。
 - VLM：`checkpoint`、`served_model_name`、`gpu_memory_utilization`、`max_model_len`和`cuda_visible_devices`。
@@ -54,7 +55,9 @@ python tools/inference/lab_model_services.py \
 ASR／OCR监听回环地址，提供`GET /health`及Bearer鉴权的`POST /v1/infer`。
 请求包含`media_base64`，可带`source_kind`。ASR接受最长180秒原音并返回正文、词／段范围、
 对齐版本；OCR返回原文、置信度与框，业务层继续负责面板／字段归属、单位与时序恢复。
+faster-whisper 路径有界解码为16kHz单声道，保留原音字节摘要；输入超过180秒拒绝，服务本身不裁剪原音。
 结果保留源字节SHA、模型及服务源码版本、耗时、实际调用／缓存命中，不能把缓存命中计作新模型执行。
+ASR／OCR 的 health 与结果另提供 `execution_identity`，固定实际校验的完整权重清单及有效后端、设备、精度和线程参数。业务层 `vc-lab-local-providers/1` 可显式固定该64位摘要，健康检查和每次响应都核对；摘要变化应更新提供者配置身份。旧清单仍兼容，但回执明确其未固定服务配置。
 未知读数和物理动作不能由服务返回直接确认，质量标记仍是`NOT_PROVEN`。
 
 传输、媒体、像素、单结果和回执容量有显式上限；忙碌返回429，容量耗尽停止接纳。

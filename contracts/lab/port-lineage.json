@@ -18,13 +18,13 @@
       "path": "src/visioncortex/lab/api.py",
       "upstream_module": "api.py",
       "original_sha256": "2520706ad59b30e8e4e54703419e6fe87c1ee338b23adc560f7bc49c87064c9b",
-      "ported_sha256": "7086c3e9497e0318c965f604507efd7a41cee9844ff975e108a8b62c3b837a3e"
+      "ported_sha256": "d03cd02c286329c6242059120b07bdfc3c44bc9a1271fae85c8b65970c752a31"
     },
     {
       "path": "src/visioncortex/lab/archive_layout.py",
       "upstream_module": "archive_layout.py",
       "original_sha256": "371dd02f81ac7c2029a675dc4e680979b2c6462f8ff2804a31864f76f3e1dc6a",
-      "ported_sha256": "14b5bb055321ce9568cf106ef9841f0ad95bb65956b7816317e662cf1e493b53"
+      "ported_sha256": "ce4d66bae782fc8b65d4fb33fdb5f8008175a112f8e45d8cfd67482dbb90b92e"
     },
     {
       "path": "src/visioncortex/lab/automatic_readout.py",
@@ -193,7 +193,7 @@
       "path": "src/visioncortex/lab/local_provider.py",
       "upstream_module": "local_provider.py",
       "original_sha256": "8e755e983b3011176a4a52e096950a0db2c30e8a14f2d09f1e0214b381fe3a80",
-      "ported_sha256": "67798c99eebd2e53d53444a3d0417f0071a500d044ffa753c8e537b93104e313"
+      "ported_sha256": "87b20ba2bb016c6f95cd0249cd766150cd768a0009bd01f63aaf9c78744f7ff4"
     },
     {
       "path": "src/visioncortex/lab/material_batch.py",
@@ -226,6 +226,13 @@
       "ported_sha256": "6625eea022b8e6cdda1e9d45248a3e199eb08c36f4232bc0d25293390b5a7682"
     },
     {
+      "path": "src/visioncortex/lab/native_linked_layout.py",
+      "upstream_module": null,
+      "original_sha256": null,
+      "origin": "new_neutral_native_association_adapter",
+      "ported_sha256": "1e234d8fd44d9c129d8fcf3a1b5f5abd476321c1e703cb4421331f4cb5aae9ac"
+    },
+    {
       "path": "src/visioncortex/lab/native_ocr.py",
       "upstream_module": "native_ocr.py",
       "original_sha256": "6a40833e7c2fefcd3f904113302c50d6b6adcb4ab827a185d7d7c34ef02a3b5b",
@@ -235,7 +242,14 @@
       "path": "src/visioncortex/lab/native_pipeline.py",
       "upstream_module": "native_pipeline.py",
       "original_sha256": "0ea50b2db0f7b1cba352dc2d20fc4fc22de242340d356e4a3ceb751e99e116db",
-      "ported_sha256": "b89c5d6aa361aa547b2a1ad6ff88b8d0787f8fc77553d561df1d42f740851a02"
+      "ported_sha256": "e530c75fa3addea121ba8a1607d03ad8cf49cb35cfe7b8df67175b9d9bdb315a"
+    },
+    {
+      "path": "src/visioncortex/lab/native_timeline_links.py",
+      "upstream_module": null,
+      "original_sha256": null,
+      "origin": "new_neutral_native_association_adapter",
+      "ported_sha256": "72876d48da8a32a17b337b038dc45df479b23fea130ca1f7f9cce9a1d8358e12"
     },
     {
       "path": "src/visioncortex/lab/native_video.py",
@@ -275,10 +289,17 @@
       "ported_sha256": "c80bfd546bdb1404ccc013dfb5e7165468761a9a7a23791daba950d8b34f5949"
     },
     {
+      "path": "src/visioncortex/lab/person_report.py",
+      "upstream_module": null,
+      "original_sha256": null,
+      "origin": "new_person_evidence_projection",
+      "ported_sha256": "918cd7998aaf1a58a481119dab6c60dc4b8239a5efe3387bf473c2bd561a95e6"
+    },
+    {
       "path": "src/visioncortex/lab/processing.py",
       "upstream_module": "processing.py",
       "original_sha256": "2731aca221e7f6767f9fc4759a38657db30b96fd0ebae4d26e6c88cb696e24f3",
-      "ported_sha256": "e7a524b4790ca835b90e6b166c739cef1c243d000d0900d3db8ae034d6b0aa0a"
+      "ported_sha256": "2b13ca1a14e5058649ec67ea50b7873c655ca7cb767b46e3a354e838c7268245"
     },
     {
       "path": "src/visioncortex/lab/projections.py",
@@ -386,7 +407,7 @@
       "path": "src/visioncortex/lab/timeline_publication.py",
       "upstream_module": "timeline_publication.py",
       "original_sha256": "454c44ad6d04453fb834bd427cac4a264ebc6666f341a3d288efec7977c9db35",
-      "ported_sha256": "18af2f98c141231e4c12c71bbd5c318c28dec2d1e86e1a9f73d2285b0c08c7e3"
+      "ported_sha256": "4e6477a897b83d8f06e1d90d6a8c22d98d2871f5a88c0a8d6f00d1af3f76bb33"
     },
     {
       "path": "src/visioncortex/lab/timeline_readout.py",
@@ -398,7 +419,7 @@
       "path": "src/visioncortex/lab/timeline_report.py",
       "upstream_module": "timeline_report.py",
       "original_sha256": "7d3a173f07a1164b0ab4a418a0e8a66cf470a7dff2b32646bd53e753afb1c5d5",
-      "ported_sha256": "361241ee09362dfcda4aa7dbd9585dab896a4890b43d3a4b11b0f0b453fea8a2"
+      "ported_sha256": "dc04b0374044b2e53eb2b6b472fa169271acb3173b2c7aa25084c141eacc2d34"
     },
     {
       "path": "src/visioncortex/lab/timeline_runner.py",
@@ -428,7 +449,7 @@
       "path": "src/visioncortex/lab/timeline_views.py",
       "upstream_module": "timeline_views.py",
       "original_sha256": "84cd53f9136656fb10d87038a58bb201ab028ab2f2ca63307f9dde1417f030e6",
-      "ported_sha256": "cd0dfcd41af17a54bf9505d0a291923691d2cf1109e2ac5f0a3616a135d61f83"
+      "ported_sha256": "f35c09edfde38f1fab378be5eacdff66f8d4ffd6de46ed81ac8ff3ab93498dd3"
     },
     {
       "path": "src/visioncortex/lab/training.py",
@@ -484,14 +505,17 @@
       "src/visioncortex/lab/media.py",
       "src/visioncortex/lab/native_asr.py",
       "src/visioncortex/lab/native_comment_layout.py",
+      "src/visioncortex/lab/native_linked_layout.py",
       "src/visioncortex/lab/native_ocr.py",
       "src/visioncortex/lab/native_pipeline.py",
+      "src/visioncortex/lab/native_timeline_links.py",
       "src/visioncortex/lab/native_video.py",
       "src/visioncortex/lab/native_vision.py",
       "src/visioncortex/lab/needle_vision.py",
       "src/visioncortex/lab/ocr_fields.py",
       "src/visioncortex/lab/operator_scan.py",
       "src/visioncortex/lab/panel_vision.py",
+      "src/visioncortex/lab/person_report.py",
       "src/visioncortex/lab/processing.py",
       "src/visioncortex/lab/projections.py",
       "src/visioncortex/lab/qr_video.py",
@@ -572,7 +596,8 @@
     "compatible_legacy_namespaces": [
       "visioncortex_lab_legacy",
       "visioncortex_lab_pipeline",
-      "visioncortex_lab_comment"
+      "visioncortex_lab_comment",
+      "visioncortex_lab_linked"
     ],
     "site_catalogues_calibration_and_private_locks_included": false,
     "legacy_algorithm_identity_labels_retained_as_provenance_not_host_imports": true,
@@ -580,6 +605,12 @@
     "operator_scans": "explicit human declarations; passive QR observations remain separate; no quantity or equipment release",
     "comment_transition": "persisted speech/audio/review pins; no NLP; stage/plan preserve run; only reviewed whole completion archives",
     "material_scan_target": "explicit target or immutable exact-scope prior event-time target snapshot; absent context remains pending; no usage",
-    "existing_local_weight_reuse": "private model_root and explicit VC/FR reuse_source; canonical non-NAS roots; full SHA256/byte validation; no discovery/copy/download"
+    "existing_local_weight_reuse": "private model_root and explicit VC/FR reuse_source; canonical non-NAS roots; full SHA256/byte validation; no discovery/copy/download",
+    "archive_metadata_compatibility": "explicit local private manifest; exact root/source/installed SHA pins; three string metadata aliases only; all layout semantics equal; no archive writes",
+    "person_day_projection": "same daily report snapshot; direct declarations, explicit evidence association, run-related and recorded_by remain distinct; no speaker/continuous trajectory/location/action count inference",
+    "native_association_hook": "explicit pure-builder namespace; immutable per-camera association sidecar; original publisher is sole native main writer; timeline-only scheduling remains pending; no native model steps/findings or clips inferred",
+    "person_clock_and_materials": "null replay clock flags never calibrate wearer history; source material units are separate from explicit experiment samples",
+    "private_archive_worker_env": "only explicit VC_LAB_ARCHIVE_COMPATIBILITY_MANIFEST path added to existing worker allowlist",
+    "native_association_nas_reads": "current pinned guard; read-only dirfd traversal and pre/post mount/marker validation; no missing directory creation or fallback"
   }
 }

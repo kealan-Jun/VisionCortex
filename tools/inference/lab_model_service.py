@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import io
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -128,6 +129,78 @@ def service_settings(config, name):
     return value
 
 
+def faster_whisper_settings(config):
+    settings = service_settings(config, 'asr')
+    device = settings.get('device')
+    threads = settings.get('cpu_threads')
+    compute = settings.get('compute_type')
+    if (device not in {'cpu', 'cuda'} or type(threads) is not int or not 1 <= threads <= 64
+            or compute not in {'int8', 'int8_float16', 'int8_float32', 'int8_bfloat16',
+                               'int16', 'float16', 'bfloat16', 'float32'}):
+        raise ValueError('faster-whisper requires explicit device, cpu_threads and compute_type')
+    return dict(engine='faster-whisper', device=device, cpu_threads=threads, compute_type=compute,
+                language=settings.get('language', 'zh'), beam_size=5, word_timestamps=True,
+                local_files_only=True, max_audio_seconds=180)
+
+
+def decode_audio_bounded(raw, *, max_seconds=180):
+    """Decode only one bounded request, with the model's standard 16 kHz mono input."""
+    import av
+    import numpy as np
+    blocks, count = [], 0
+    try:
+        with av.open(io.BytesIO(raw), mode='r') as container:
+            if not container.streams.audio:
+                raise ValueError('Recording has no audio stream')
+            resampler = av.AudioResampler(format='flt', layout='mono', rate=16000)
+            def accept(frames):
+                nonlocal count
+                for frame in frames:
+                    samples = frame.to_ndarray().reshape(-1)
+                    count += len(samples)
+                    if count > 16000 * max_seconds:
+                        raise ValueError('ASR requests must contain at most 180 seconds of audio')
+                    blocks.append(samples.copy())
+            for frame in container.decode(audio=0):
+                accept(resampler.resample(frame))
+            accept(resampler.resample(None))
+    except (av.error.FFmpegError, OSError) as exc:
+        raise ValueError('Unsupported or invalid recording') from exc
+    if count == 0:
+        raise ValueError('Recording contains no audio samples')
+    return np.concatenate(blocks), 16000
+
+
+def make_faster_whisper(root, config, verified=None):
+    settings = faster_whisper_settings(config)
+    source, revision = checkpoint(root, service_settings(config, 'asr').get('checkpoint', 'faster-whisper-small'), config, verified)
+    from faster_whisper import WhisperModel
+    model = WhisperModel(str(source), device=settings['device'], compute_type=settings['compute_type'],
+                         cpu_threads=settings['cpu_threads'], local_files_only=True, num_workers=1)
+    def infer(raw):
+        samples, rate = decode_audio_bounded(raw, max_seconds=settings['max_audio_seconds'])
+        duration = len(samples) / rate
+        if not 0 < duration <= settings['max_audio_seconds']:
+            raise ValueError('ASR requests must contain at most 180 seconds of audio')
+        stream, info = model.transcribe(samples, language=settings['language'],
+                                        beam_size=settings['beam_size'], word_timestamps=True)
+        segments, words = [], []
+        def span(start, end):
+            start, end = float(start), float(end)
+            if not (math.isfinite(start) and math.isfinite(end) and 0 <= start <= end <= duration + .5):
+                raise ValueError('ASR model timestamps escaped the source audio interval')
+            return dict(start_seconds=start, end_seconds=end)
+        for segment in stream:
+            segments.append(dict(text=str(segment.text), **span(segment.start, segment.end)))
+            for word in segment.words or []:
+                words.append(dict(text=str(word.word), **span(word.start, word.end)))
+        return dict(text=''.join(segment['text'] for segment in segments), language=info.language,
+                    duration_seconds=duration, words=words, segments=segments,
+                    time_basis='local_model_timestamps_source_relative', alignment_revision=None,
+                    peak_torch_gpu_bytes=None, asr_engine='faster-whisper', accuracy='NOT_PROVEN')
+    return infer, revision
+
+
 def inference_identity(kind, config, verified):
     """Hash effective model settings and the manifests actually verified at load."""
     settings = service_settings(config, kind)
@@ -138,10 +211,17 @@ def inference_identity(kind, config, verified):
                         device=settings.get('device', 'gpu:0'))
         names = [settings.get('detection_checkpoint', det), settings.get('recognition_checkpoint', rec)]
     elif kind == 'asr':
-        selected = dict(dtype='bfloat16', device_map='cuda:0', attention='sdpa',
-                        max_inference_batch_size=1, max_new_tokens=1024)
-        names = [settings.get('checkpoint', 'Qwen3-ASR-1.7B'),
-                 settings.get('aligner_checkpoint', 'Qwen3-ForcedAligner-0.6B')]
+        engine = settings.get('engine', 'qwen3-asr')
+        if engine == 'faster-whisper':
+            selected = faster_whisper_settings(config)
+            names = [settings.get('checkpoint', 'faster-whisper-small')]
+        elif engine == 'qwen3-asr':
+            selected = dict(engine=engine, dtype='bfloat16', device_map='cuda:0', attention='sdpa',
+                            max_inference_batch_size=1, max_new_tokens=1024)
+            names = [settings.get('checkpoint', 'Qwen3-ASR-1.7B'),
+                     settings.get('aligner_checkpoint', 'Qwen3-ForcedAligner-0.6B')]
+        else:
+            raise ValueError('Unknown explicit ASR engine')
     else:
         raise ValueError('Unknown inference kind')
     selected['cuda_visible_devices'] = settings.get('cuda_visible_devices', '0')
@@ -151,6 +231,11 @@ def inference_identity(kind, config, verified):
 
 
 def make_asr(root, config, verified=None):
+    engine = service_settings(config, 'asr').get('engine', 'qwen3-asr')
+    if engine == 'faster-whisper':
+        return make_faster_whisper(root, config, verified)
+    if engine != 'qwen3-asr':
+        raise ValueError('Unknown explicit ASR engine')
     import torch
     from qwen_asr import Qwen3ASRModel
     settings = service_settings(config, 'asr')

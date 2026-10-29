@@ -121,6 +121,10 @@ def create_app(core: Core, settings):
     def daily_report(day: str):
         return timeline.views.snapshot(day)
 
+    @app.get('/internal/timeline/person-days/{person_id}/{day}')
+    def person_day(person_id: str, day: str):
+        return timeline.views.person_day(person_id, day)
+
     @app.get('/internal/timeline/metrics/{day}')
     def timeline_metrics(day: str):
         return timeline.metrics.day(day)

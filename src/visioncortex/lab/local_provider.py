@@ -12,6 +12,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shutil
 import tempfile
 import time
@@ -28,6 +29,16 @@ from .timeline import seconds
 
 class ProviderUnavailable(RuntimeError):
     pass
+
+
+def execution_pin(model):
+    """Optional serving-configuration pin; old manifests remain readable."""
+    if 'execution_identity' not in model:
+        return None
+    value = model['execution_identity']
+    if not isinstance(value, str) or not re.fullmatch('[0-9a-f]{64}', value):
+        raise ProviderUnavailable('Local execution identity requires an exact SHA256')
+    return value
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -54,6 +65,9 @@ class LocalProviders:
         if not models or set(models) - {'transcription', 'ocr', 'video_understanding'}:
             raise ProviderUnavailable('Unsupported local provider kind')
         for kind, model in models.items():
+            pin = execution_pin(model)
+            if pin is not None and kind == 'video_understanding':
+                raise ProviderUnavailable('Media-infer execution identity does not attest a VLM server')
             if model.get('panel_profiles'):
                 spec=model['panel_profiles']
                 if kind!='ocr' or not isinstance(spec,dict) or len(spec.get('sha256',''))!=64 or not spec.get('path'):
@@ -93,6 +107,7 @@ class LocalProviders:
 class LocalHTTP:
     def __init__(self, model):
         self.model = model
+        self.execution_identity = execution_pin(model)
         token = os.environ.get(model['token_env'])
         if not token:
             raise ProviderUnavailable('Local service token is unavailable')
@@ -127,13 +142,19 @@ class LocalHTTP:
             result, _ = self.call('/health')
             if result.get('status') != 'ready' or result.get('model_revision') != self.model['model_revision'] or result.get('kind') != ('asr' if kind == 'transcription' else 'ocr'):
                 raise ProviderUnavailable('Local service health/revision mismatch')
+            if self.execution_identity is not None and result.get('execution_identity') != self.execution_identity:
+                raise ProviderUnavailable('Local service execution settings differ from the manifest')
 
     def infer(self, raw, source_kind):
         digest = hashlib.sha256(raw).hexdigest()
         result, receipt = self.call('/v1/infer', dict(media_base64=base64.b64encode(raw).decode(), source_kind=source_kind))
         if result.get('source_sha256') != digest or result.get('model_revision') != self.model['model_revision'] or result.get('runtime_revision') != self.model['runtime_revision'] or result.get('actual_model_invocation') is not True or type(result.get('cache_hit')) is not bool:
             raise Conflict('Local service execution receipt differs from the requested bytes/model/runtime')
+        if self.execution_identity is not None and result.get('execution_identity') != self.execution_identity:
+            raise Conflict('Local service execution settings changed or differ from the manifest')
         receipt.update(source_sha256=digest, runtime_revision=result['runtime_revision'],
+                       execution_identity=result.get('execution_identity'),
+                       serving_configuration_pinned=self.execution_identity is not None,
                        execution='cached_model_response' if result['cache_hit'] else 'model_response',
                        model_weights_verification='serving_script_checkpoint_manifest')
         return result, receipt

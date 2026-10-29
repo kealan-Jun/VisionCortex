@@ -303,7 +303,7 @@ class Worker:
                 if not vision or vision['model_revision']!=vision_model['revision'] or any(p['rule_fingerprint']!=job['rule_fingerprint'] for p in parents):
                     raise ModelUnavailable('Native delivery parents differ from the selected customer models/rules')
                 request.update(vision_model=vision_model,parents=clean(parents))
-        env = {k: v for k, v in os.environ.items() if k in {"PATH", "LANG", "LD_LIBRARY_PATH", "VC_LAB_STORAGE_MANIFEST", "VC_LAB_DECODER_PYTHON", "VC_LAB_LEGACY_UNC_ROOT"}}
+        env = {k: v for k, v in os.environ.items() if k in {"PATH", "LANG", "LD_LIBRARY_PATH", "VC_LAB_STORAGE_MANIFEST", "VC_LAB_DECODER_PYTHON", "VC_LAB_LEGACY_UNC_ROOT", "VC_LAB_ARCHIVE_COMPATIBILITY_MANIFEST"}}
         env.update(HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", YOLO_OFFLINE="true", YOLO_AUTOINSTALL="false", OMP_NUM_THREADS="2", OPENBLAS_NUM_THREADS="2", PYTHONDONTWRITEBYTECODE="1", VC_LAB_WORKER_CACHE=str(self.settings.cache / "worker"))
         env.update(XDG_STATE_HOME=str(self.settings.cache / "state"), XDG_CACHE_HOME=str(self.settings.cache / "packages"), YOLO_CONFIG_DIR=str(self.settings.cache / "ultralytics"), VISIONCORTEX_AI_SETTINGS_DIR=str(self.settings.runtime_root / "customer-ai-settings"))
         if job["worker_kind"] in {'asr','understanding'} and self.settings.allow_external_inference:

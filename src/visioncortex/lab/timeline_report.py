@@ -11,6 +11,32 @@ def render_report(report):
     lines = [f'VC Lab 实验室记录日报　{report["day"]}', '时区：Asia/Shanghai',
              f'已关联实验记录：{report["experiment_count"]}；证据观察：{report["activity_count"]}条。',
              '观察条数不代表独立物理动作次数。归档仅代表记录收尾，不能证明设备实际完成。', '']
+    people=report.get('person_timelines',{})
+    if people:
+        lines += ['实验员时间线：仅列已知事件与关系，不能证明全天连续轨迹、位置或动作次数。']
+        labels={'direct_operator_declaration':'主动操作声明','explicit_activity_person_association':'明确证据关联（非说话人证明）',
+                'experiment_related_evidence':'实验相关证据（非该人动作）','recorded_by':'佩戴来源录下（非操作者/说话人）'}
+        for person in people.get('persons',[]):
+            lines.append('人员：'+str(person.get('person_code') or person['person_id']))
+            for event in person['events']:
+                roles='、'.join(dict.fromkeys(labels.get(r['basis'],r['basis']) for r in event['person_attribution']))
+                lines.append(f'  {time_text(event["start_at"])}—{time_text(event["end_at"])} [{roles}] {event["text"]}')
+                switch=event.get('equipment_declaration')
+                if switch:
+                    lines.append(f'    设备声明 {switch.get("from_equipment_id") or "未明确"} → {switch.get("to_equipment_id") or "未明确"}；切换不结束实验。')
+                if event.get('comment_transition'):
+                    lines.append('    Comment解释：'+event['comment_transition']+'；计划不代表已到下一设备。')
+                lines.append('    活动 '+event['activity_id']+'；实验 '+', '.join(str(r['run_id']) for r in event['run_links'])+
+                             '；目标批次 '+', '.join(event['target_batch_ids'])+'；来源批次 '+', '.join(event['source_lot_ids']))
+                for evidence in event['evidence']:
+                    lines.append(f'    证据 {evidence["evidence_id"]}；媒体 {evidence["media_id"]}；源偏移 {evidence["start_seconds"]}—{evidence["end_seconds"]} 秒。')
+            if person['untimed_events']:
+                lines.append(f'  另有{len(person["untimed_events"])}条待定时关联，未归入当天时间序列。')
+        if people.get('unknown_person_events'):
+            lines.append(f'人员未明确：{len(people["unknown_person_events"])}条证据，未填入任何人的轨迹。')
+        if people.get('status')=='needs_attention':lines.append('人员投影待处理：'+people.get('reason','unknown'))
+        lines.append('模型分析完整性与未分析间隙：未知；原始录像覆盖不等于已经理解全部画面。')
+        lines.append('')
     for experiment in report['experiments']:
         record = experiment['record']
         lines += [f'实验：{record["code"]}　类型：{record["experiment_type"]}',

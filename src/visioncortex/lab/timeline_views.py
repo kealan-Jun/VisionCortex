@@ -7,6 +7,7 @@ from .domain import Missing, clean, fingerprint, ident, instant
 from .timeline import Timeline, day_bounds, offset_time
 from .ocr_fields import consensus
 from .context_views import context_evidence
+from .person_report import person_timelines, empty_person
 
 
 class TimelineViews:
@@ -159,11 +160,14 @@ class TimelineViews:
                                     instrument_completion_time=None, result_file_status='not_collected',
                                     closure_is_not_instrument_completion=True))
         sessions = conn.execute("SELECT DISTINCT c.session_id FROM hj_timeline_media m JOIN capture c ON c.customer_id=m.customer_id AND c.id=m.capture_id WHERE m.customer_id=%s AND m.kind='photo' AND m.start_at>=%s AND m.start_at<%s AND c.session_id IS NOT NULL ORDER BY c.session_id", (self.customer, start, end)).fetchall()
+        pending_ids=[r['id'] for r in conn.execute('SELECT id FROM hj_activity WHERE customer_id=%s AND start_at IS NULL ORDER BY created_at DESC,id LIMIT 101',(self.customer,)).fetchall()]
+        pending=self._activities(conn,activity_ids=pending_ids) if pending_ids else []
+        people=person_timelines(conn,self.core,activities,runs,pending)
         jobs = conn.execute('SELECT t.kind,t.status,count(*) AS count FROM hj_timeline_task t JOIN hj_timeline_media m USING(customer_id,media_id) WHERE t.customer_id=%s AND m.start_at<%s AND m.end_at>=%s GROUP BY t.kind,t.status ORDER BY t.kind,t.status', (self.customer, end, start)).fetchall()
         return clean(dict(schema_version='vc-lab-evidence-daily-report/1', day=str(start.date()), timezone='Asia/Shanghai',
                           experiments=experiments, experiment_count=len(experiments), activity_count=len(activities),
                           activity_count_basis='stored_observations_not_distinct_physical_actions',
-                          analysis_jobs=jobs,
+                          analysis_jobs=jobs, person_timelines=people,
                           unassigned_activities=[a for a in activities if not a['run_ids']],
                           readouts=[self._readout(conn, s['session_id']) for s in sessions],
                           unknown_time_temporal_activities=self._untimed_temporal(conn),
@@ -184,6 +188,21 @@ class TimelineViews:
         revision = conn.execute('SELECT COALESCE(MAX(revision),0)+1 AS n FROM hj_daily_report WHERE customer_id=%s AND day=%s', (self.customer, day)).fetchone()['n']
         row = conn.execute('INSERT INTO hj_daily_report(customer_id,day,revision,fingerprint,document) VALUES(%s,%s,%s,%s,%s) RETURNING *', (self.customer, day, revision, digest, Jsonb(document))).fetchone()
         return clean(dict(row, day=str(row['day'])))
+
+    def person_day(self, person_id, day):
+        """Same versioned daily snapshot; membership never attributes actions/speech."""
+        with self.core.db.transaction() as conn:
+            self.timeline.lock(conn)
+            person=self.core._entity(conn,person_id,'person')
+            snapshot=self.snapshot(day,conn)
+            projection=snapshot['document']['person_timelines']
+            selected=next((p for p in projection['persons'] if p['person_id']==str(person['id'])),
+                          empty_person(person['id'],person['code']))
+            return clean(dict(schema_version='vc-lab-person-day/1',day=snapshot['day'],timezone='Asia/Shanghai',
+                snapshot_revision=snapshot['revision'],snapshot_fingerprint=snapshot['fingerprint'],
+                projection_schema=projection['schema_version'],timeline=selected,coverage=projection['coverage'],
+                pending_scope=projection.get('pending_scope'),
+                projection_status=projection.get('status','partial_evidence')))
 
     def refresh_dirty(self, limit=20):
         reports = []

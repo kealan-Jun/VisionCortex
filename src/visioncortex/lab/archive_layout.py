@@ -6,12 +6,15 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import os
+from pathlib import Path
+import re
+import subprocess
 from uuid import uuid4
 
 from .components import ROOT, pipeline_module
 from .domain import Conflict, instant
 from .media import hash_file, safe_path
-from .storage import is_nas, publication_config
+from .storage import is_nas, publication_config, _mount_info, _REMOTE_FS
 
 CONTRACT_PATH = '.System/ArchiveContract.json'
 
@@ -28,10 +31,100 @@ def day_directory(camera_key, moment):
     return pipeline_module('device_day_contract').archive_name(camera_key, micros)
 
 
+def _unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise Conflict('Duplicate archive compatibility JSON key')
+        result[key] = value
+    return result
+
+
+def _json_contract(raw):
+    def invalid_constant(value):
+        raise Conflict('Nonfinite archive compatibility JSON value')
+    document = json.loads(raw, object_pairs_hook=_unique_object, parse_constant=invalid_constant)
+    if not isinstance(document, dict):
+        raise Conflict('Archive compatibility JSON must be an object')
+    return document
+
+
+def _compatible_contract(root, path, actual, size, expected):
+    name = os.environ.get('VC_LAB_ARCHIVE_COMPATIBILITY_MANIFEST')
+    if not name:
+        return False
+    manifest = Path(name)
+    try:
+        # This private configuration stays local, even when the archive is NAS.
+        if (not manifest.is_absolute() or str(manifest) != name or '..' in manifest.parts or
+                is_nas(manifest) or manifest.resolve(strict=True) != manifest or not manifest.is_file()):
+            raise Conflict('Archive compatibility manifest must be a canonical local non-NAS file')
+        mounts = _mount_info(manifest)
+        if (len(mounts) != 1 or not mounts[0].get('fstype') or
+                mounts[0]['fstype'] in _REMOTE_FS or str(mounts[0].get('source', '')).startswith('//')):
+            raise Conflict('Archive compatibility manifest local filesystem is unverified')
+        digest, length = hash_file(manifest, 64 * 1024)
+        with manifest.open('rb') as stream:
+            raw = stream.read(64 * 1024 + 1)
+        if len(raw) != length or hashlib.sha256(raw).hexdigest() != digest:
+            raise Conflict('Archive compatibility manifest changed while reading')
+        document = _json_contract(raw)
+        if set(document) != {'schema_version', 'bindings'} or document['schema_version'] != 'vc-lab-archive-compatibility/1':
+            raise Conflict('Unsupported archive compatibility manifest')
+        bindings = document['bindings']
+        if not isinstance(bindings, list) or not 1 <= len(bindings) <= 32:
+            raise Conflict('Bounded explicit archive compatibility bindings required')
+        selected, seen = [], set()
+        installed = hashlib.sha256(expected).hexdigest()
+        for binding in bindings:
+            if not isinstance(binding, dict) or set(binding) != {'archive_root', 'source_sha256', 'installed_contract_sha256', 'metadata_aliases'}:
+                raise Conflict('Incomplete archive compatibility binding')
+            archive = binding['archive_root']
+            if (type(archive) is not str or not Path(archive).is_absolute() or
+                    str(Path(archive)) != archive or '..' in Path(archive).parts):
+                raise Conflict('Archive compatibility binding requires an exact absolute root')
+            for key in ('source_sha256', 'installed_contract_sha256'):
+                if type(binding[key]) is not str or not re.fullmatch('[0-9a-f]{64}', binding[key]):
+                    raise Conflict('Archive compatibility binding requires exact SHA256 pins')
+            aliases = binding['metadata_aliases']
+            if (not isinstance(aliases, dict) or not 1 <= len(aliases) <= 3 or
+                    set(aliases) - {'project', 'schema_version', 'supersedes'} or
+                    any(type(value) is not str or not value or len(value.encode()) > 4096 for value in aliases.values())):
+                raise Conflict('Only explicit project/schema_version/supersedes string aliases are allowed')
+            identity = (archive, binding['source_sha256'], binding['installed_contract_sha256'])
+            if identity in seen:
+                raise Conflict('Ambiguous duplicate archive compatibility bindings')
+            seen.add(identity)
+            if identity == (str(root), actual, installed):
+                selected.append(binding)
+        if len(selected) != 1:
+            return False
+        with path.open('rb') as stream:
+            raw = stream.read(128 * 1024 + 1)
+        if len(raw) != size or hashlib.sha256(raw).hexdigest() != actual:
+            raise Conflict('Archive source contract changed while reading')
+        source, target = _json_contract(raw), _json_contract(expected)
+        for key, old_value in selected[0]['metadata_aliases'].items():
+            if source.get(key) != old_value or key not in target:
+                raise Conflict('Archive metadata alias differs from the pinned source contract')
+            source[key] = target[key]
+        # JSON preserves types: True must not compare equal to the integer 1.
+        canonical = lambda value: json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False, allow_nan=False)
+        return canonical(source) == canonical(target)
+    except Conflict:
+        raise
+    except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as exc:
+        raise Conflict('Archive compatibility manifest or pinned source is unavailable/invalid') from exc
+
+
 def verify_archive_contract(root):
+    root = Path(root)
     path = safe_path(root, CONTRACT_PATH)
     expected = contract_bytes()
-    if path.stat().st_size != len(expected) or hash_file(path, 128 * 1024)[0] != hashlib.sha256(expected).hexdigest():
+    actual, size = hash_file(path, 128 * 1024)
+    if size == len(expected) and actual == hashlib.sha256(expected).hexdigest():
+        return path
+    if not _compatible_contract(root, path, actual, size, expected):
         raise Conflict('NAS archive format differs from the installed unified contract')
     return path
 
