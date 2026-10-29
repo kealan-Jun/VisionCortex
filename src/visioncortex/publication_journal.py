@@ -144,6 +144,13 @@ def revalidate_remounted_seals(runner, record):
             if saved.get('source_signature') != expected_signature:
                 raise ValueError('Remount recovery source signature differs')
             fields = ('recording_id', 'camera_key', 'configured_role', 'recording_start_us', 'recording_end_us')
+            if (stage == 'stt' and saved.get('recording', {}).get('configured_role') is None
+                    and record.get('configured_role') in {'first_person', 'third_person'}):
+                # A verified first view binding preserves the original STT seal.
+                # Reuse its source/role proof before accepting that one difference.
+                from .device_day_inputs import role_supplement
+                role_supplement(runner, record, saved, stage)
+                fields = tuple(name for name in fields if name != 'configured_role')
             if any(saved.get('recording', {}).get(k) != record.get(k) for k in fields):
                 raise ValueError('Remount recovery device/day identity differs')
             updated, changed = deepcopy(saved), False
