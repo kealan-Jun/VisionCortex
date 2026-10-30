@@ -196,10 +196,18 @@ def file_hash(path: Path) -> str:
 
 def read_json(path: Path) -> Any:
     with path.open(encoding="utf-8") as handle:
-        return json.load(handle)
+        value = json.load(handle)
+    from .result_readability import canonical
+    return canonical(value)
 
 
 def atomic_json(path: Path, value: Any) -> None:
+    import os
+    if os.environ.get('VISIONCORTEX_READABLE_RESULTS') == '1':
+        from .result_readability import kind, present
+        category = kind(path)
+        if category:
+            value = present(value, category)
     encoder = json.JSONEncoder(ensure_ascii=False, indent=2, allow_nan=False)
     def blocks():
         yield from _json_blocks(value, encoder)

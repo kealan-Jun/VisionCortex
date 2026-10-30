@@ -153,6 +153,11 @@ def snapshot(config, entry, index=None, *, anchors=None):
     comment_index = json_file('Comment/Audio/Index.json')
     report = json_file('LaboratoryDailyReport/LaboratoryDailyReport.json')
     time_index = json_file('Comment/Audio/TimeIndex.json')
+    # Both long-lived entry points are public. A stale/corrupt root mirror may
+    # not pass merely because the nested Audio index is still readable.
+    if safe_child(root, 'Comment/TimeIndex.json').is_file():
+        _require(json_file('Comment/TimeIndex.json') == time_index,
+                 'time_index_legacy_entry_differs_from_audio')
     for directory, document in [('Comment/Audio', comment_index), ('MultimodalUnderstanding', mu_index)]:
         _require(document == content_index(entry['archive'], directory, document['entries']),
                  'readable_content_index_metadata_or_progress_changed')

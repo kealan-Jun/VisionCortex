@@ -375,7 +375,7 @@ def serve(config_path, stop, *, readable=False):
         atomic_json(state_path, final)
     if runner is not None and hasattr(runner, 'close'):
         runner.close()
-    if readable and replay.publisher is not None:
+    if readable and replay.publisher is not None and hasattr(replay.publisher, 'close'):
         replay.publisher.close()
 
 

@@ -1,6 +1,6 @@
 {
   "schema_version": "vc-lab-rule-bundle/1",
-  "revision": "vc-lab-unified-20261030.3",
+  "revision": "vc-lab-unified-20261030.4",
   "components_sha256": "5be51d3c237058c97919072431ed203e6a8f6dd207137f204fb241b1d71f5af5",
   "files": [
     {
@@ -287,6 +287,10 @@
       "sha256": "c8755c7d7e941f62573b35ced998cd4b9ee7f0547b5a8c376c340234a96b6e93"
     },
     {
+      "path": "src/visioncortex/lab/native_result_layout.py",
+      "sha256": "7d93e81ef65419c7c9da5278e104b2ce2d1385b35c8c4a97cec096671d5139a1"
+    },
+    {
       "path": "src/visioncortex/lab/native_timeline_links.py",
       "sha256": "a252de68652019f64cc785cb1607b7f019c231bcce97a722bc739d4cfd5e7d80"
     },
@@ -349,6 +353,10 @@
     {
       "path": "src/visioncortex/lab/research_evidence_bundle.py",
       "sha256": "df70abdffb0929be1f82b0b558649569f2daa103c71ed5fa2df39316c3719c28"
+    },
+    {
+      "path": "src/visioncortex/lab/result_delivery.py",
+      "sha256": "fb8ac8cc2e662f368d645261b2d18ddc832c1d274e77f264ca38330832e5a830"
     },
     {
       "path": "src/visioncortex/lab/retained_clips.py",
@@ -473,6 +481,10 @@
     {
       "path": "src/visioncortex/lab/value_candidates.py",
       "sha256": "9ab164dfb3fd0fb5b7871765127ab75714c257636b3b67100cba7a40c7191318"
+    },
+    {
+      "path": "src/visioncortex/result_readability.py",
+      "sha256": "fc39249c21505fa406c4b372acd5e5e12ae08d3daaf2c000101fa5f519511d88"
     }
   ],
   "migration_files": [
