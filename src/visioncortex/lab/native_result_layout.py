@@ -19,6 +19,15 @@ _LOCK = threading.RLock()
 
 def bind_source(module, source):
     source = bind_linked(module, source)
+    if module == 'device_day_write_guard':
+        # Association validation and the alternate I/O namespace must see the
+        # same held pin. Share only the context variable, never bypass checks.
+        old = "CURRENT = ContextVar('device_day_publication_storage_guard', default=None)"
+        if source.count(old) != 1:
+            raise ValueError('Pinned result guard hook drift')
+        source = source.replace(old,
+            'from visioncortex.lab.native_linked_layout import module as _guard_owner\n'
+            'CURRENT = _guard_owner("device_day_write_guard").CURRENT')
     if module == 'device_day_contract':
         edits = [
             ('        return json.load(handle)',

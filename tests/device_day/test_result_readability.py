@@ -109,7 +109,10 @@ def test_optional_refresh_bridge_uses_verified_canonical_reads(tmp_path, monkeyp
     relative='MultimodalUnderstanding/existing/Understanding.json'
     original={'archive':root.name,'status':'pending','understanding':None}
     owner=module('device_day_contract');owner.atomic_json(root/relative,original)
+    from visioncortex.lab.native_linked_layout import module as linked
+    assert module('device_day_write_guard').CURRENT is linked('device_day_write_guard').CURRENT
     with module('device_day_write_guard').storage_guard({'runtime':{'local_only':True}}) as guard:
+        assert linked('device_day_write_guard').CURRENT.get() is guard
         saved=result_delivery._BRIDGE._read(root,relative,guard)
     assert saved[0]==original and KEY in json.loads((root/relative).read_text())
     assert cls.__module__=='visioncortex.lab._readable_native_refresh'
