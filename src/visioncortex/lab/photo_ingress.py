@@ -156,7 +156,10 @@ class PhotoIngress:
                     raise Conflict('Photo checkpoint belongs to another customer/source/day floor')
                 if not previous:
                     db.execute('INSERT INTO metadata VALUES(?)', (identity,))
-                    db.commit()
+                columns = {row[1] for row in db.execute('PRAGMA table_info(items)')}
+                if 'member_offset' not in columns:
+                    db.execute('ALTER TABLE items ADD COLUMN member_offset INTEGER NOT NULL DEFAULT 0 CHECK(member_offset BETWEEN 0 AND 16)')
+                db.commit()
                 return self._tick(db, doc)
 
     def _tick(self, db, doc):
@@ -173,7 +176,8 @@ class PhotoIngress:
                     break
                 path = item['path']
                 relative = path.relative_to(root).as_posix()
-                old = db.execute('SELECT signature,status,retry_after FROM items WHERE path=?', (relative,)).fetchone()
+                old = db.execute('SELECT signature,status,retry_after,member_offset FROM items WHERE path=?', (relative,)).fetchone()
+                member_offset = old[3] if old and old[0] == item['signature'] else 0
                 if old and old[0] == item['signature']:
                     if old[1] == 'accepted':
                         summary['skipped'] += 1
@@ -189,30 +193,45 @@ class PhotoIngress:
                         if receipt.get('camera_id') != item['camera'] or not isinstance(photos,list) or not photos:
                             raise Conflict('Photo receipt camera/membership differs from its native path')
                         cost = len(photos)
+                        if cost > 16 or not 0 <= member_offset <= cost:
+                            raise Conflict('Photo receipt membership/progress exceeds its complete group')
                         for photo in photos:
                             location = photo_location((path.parent/photo['filename']).relative_to(root).as_posix())
                             if location.camera != item['camera']:
                                 raise Conflict('Photo receipt member escapes its original camera')
                     else:
                         photo_location(relative)
-                    if cost > doc['max_photos_per_tick']-summary['attempted_photos']:
+                    remaining = doc['max_photos_per_tick']-summary['attempted_photos']
+                    if path.name == 'PhotoReceipt.json':
+                        cost = min(cost - member_offset, remaining)
+                    elif cost > remaining:
                         summary['pending'].append(dict(relative_path=relative,reason='whole_group_exceeds_remaining_photo_budget'))
                         continue
                     if time.time()-path.stat().st_mtime < .5:
                         raise Conflict('Photograph/receipt is still within the stable-write wait')
                     guard.validate()
-                    result = ingress.photo_receipt(path) if path.name == 'PhotoReceipt.json' else ingress.directory_photo(path)
+                    result = (ingress.photo_receipt(path, member_offset=member_offset, member_limit=remaining)
+                              if path.name == 'PhotoReceipt.json' else ingress.directory_photo(path))
                     guard.validate()
                     if not isinstance(result,list) or len(result)>cost:
                         raise Conflict('Original photo admission exceeded its preflight group budget')
                     status, delay = 'accepted', 0
+                    if path.name == 'PhotoReceipt.json':
+                        if len(result) != cost:
+                            raise Conflict('Photo receipt membership changed during bounded admission')
+                        member_offset += len(result)
+                        if member_offset < len(photos):
+                            status = 'partial'
+                            summary['pending'].append(dict(relative_path=relative,
+                                reason='photo_receipt_members_remaining', member_offset=member_offset,
+                                expected_photos=len(photos)))
                 except (ValueError, OSError, Conflict) as exc:
                     summary['errors'].append(dict(relative_path=relative,error_code=type(exc).__name__))
                     status, delay = 'needs_attention', time.time()+2
                 summary['attempted_photos'] = doc['max_photos_per_tick']-ingress.remaining
                 summary['duplicates'] = sum(bool(r.get('duplicate')) for r in ingress.accepted)
                 summary['processed_photos'] = sum(not r.get('duplicate',False) for r in ingress.accepted)
-                db.execute('INSERT INTO items VALUES(?,?,?,?) ON CONFLICT(path) DO UPDATE SET signature=excluded.signature,status=excluded.status,retry_after=excluded.retry_after',
-                    (relative,item['signature'],status,delay))
+                db.execute('INSERT INTO items(path,signature,status,retry_after,member_offset) VALUES(?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET signature=excluded.signature,status=excluded.status,retry_after=excluded.retry_after,member_offset=excluded.member_offset',
+                    (relative,item['signature'],status,delay,member_offset))
                 db.commit()
         return summary

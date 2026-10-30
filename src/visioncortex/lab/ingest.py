@@ -138,7 +138,7 @@ class Ingest:
             self.core._emit(conn, "capture", capture_id, 1, result)
             return clean(result)
 
-    def photo_receipt(self, path):
+    def photo_receipt(self, path, *, member_offset=0, member_limit=None):
         safe_path(self.settings.incoming, path.relative_to(self.settings.incoming).as_posix())
         require_finished_upload(self.settings.incoming, path)
         data = read_json(path)
@@ -146,13 +146,22 @@ class Ingest:
             raise ValueError("Only explicit PhotoReceipt groups are admitted")
         photos = data.get("photos", [])
         measurement = data.get("measurement", {})
-        if not photos or len(photos) > 16 or measurement.get("expected_photos") != len(photos):
+        if not isinstance(photos, list) or not photos or len(photos) > 16 or measurement.get("expected_photos") != len(photos):
             raise ValueError("PhotoReceipt membership/count mismatch")
-        results = []
+        if type(member_offset) is not int or not 0 <= member_offset <= len(photos):
+            raise ValueError('PhotoReceipt member offset is outside the complete group')
+        if member_limit is not None and (type(member_limit) is not int or not 1 <= member_limit <= 16):
+            raise ValueError('PhotoReceipt member limit must be between one and sixteen')
+        # Validate the complete membership before admitting a bounded subset.
+        # The original group size/session and each capture identity stay intact.
         for photo in photos:
             filename = photo["filename"]
             if Path(filename).name != filename:
                 raise ValueError("Photo receipt member must be in its own capture directory")
+        results = []
+        selected = photos[member_offset:] if member_limit is None else photos[member_offset:member_offset + member_limit]
+        for photo in selected:
+            filename = photo["filename"]
             relative = (path.parent / filename).relative_to(self.settings.incoming).as_posix()
             group = dict(group_expected_photos=measurement['expected_photos'], batch_basis='producer_photo_receipt') if self.settings.processing_profile == 'timeline-v1' else {}
             results.append(self.accept(dict(capture_id=photo["capture_id"], source_instance="photo:" + data["camera_id"], source_revision=str(photo.get("revision", "1")), camera_id=data["camera_id"], session_id=measurement.get("burst_id"), kind="photo", relative_path=relative, captured_at=photo["captured_at"], sha256=photo["sha256"], time_basis={"basis": "producer_photo_receipt", "raw": photo["captured_at"]}, source_kind=data.get("source_kind", self.settings.source_kind), **group)))

@@ -1,6 +1,6 @@
 {
   "schema_version": "vc-lab-rule-bundle/1",
-  "revision": "vc-lab-unified-20261029.16",
+  "revision": "vc-lab-unified-20261030.1",
   "components_sha256": "5be51d3c237058c97919072431ed203e6a8f6dd207137f204fb241b1d71f5af5",
   "files": [
     {
@@ -216,7 +216,7 @@
     },
     {
       "path": "src/visioncortex/lab/ingest.py",
-      "sha256": "9c99b709293bfe078b30ed7d008fa5333f0367d211a8e1dbf670bfea1d70332d"
+      "sha256": "a5d60dc1b3187d7e5148f3bd0fe5aeab5789d53528502d25fecb61692cd02f33"
     },
     {
       "path": "src/visioncortex/lab/input_layout.py",
@@ -308,7 +308,7 @@
     },
     {
       "path": "src/visioncortex/lab/photo_ingress.py",
-      "sha256": "0f38362d8c452566154850623098b4c1c64a2f414376f735a1366ec19c7ff337"
+      "sha256": "e184faf46be0a8a6da98032a8732784d3bf0539f5cef591bd8236ee38163a89f"
     },
     {
       "path": "src/visioncortex/lab/processing.py",
@@ -541,5 +541,5 @@
       "sha256": "a3c78f7837195851f74868009d1d14db34f8629ca31457371d8056a1c3c31a73"
     }
   ],
-  "source_lineage_sha256": "8163585368f592385c15a365d0eecbed7dee576050192a7e410d13f9263bd294"
+  "source_lineage_sha256": "94aaf15d10f6acebd27fa957d7c209c98c6b1dcb81d82fdece1b0ab46a726cef"
 }

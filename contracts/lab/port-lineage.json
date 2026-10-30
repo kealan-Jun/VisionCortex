@@ -232,7 +232,7 @@
       "path": "src/visioncortex/lab/ingest.py",
       "upstream_module": "ingest.py",
       "original_sha256": "eba45a76be6f46b9a92647b161fc2967f148480bd8d04c7a59d86d242c024d75",
-      "ported_sha256": "9c99b709293bfe078b30ed7d008fa5333f0367d211a8e1dbf670bfea1d70332d"
+      "ported_sha256": "a5d60dc1b3187d7e5148f3bd0fe5aeab5789d53528502d25fecb61692cd02f33"
     },
     {
       "path": "src/visioncortex/lab/input_layout.py",
@@ -376,7 +376,7 @@
       "path": "src/visioncortex/lab/photo_ingress.py",
       "upstream_module": null,
       "original_sha256": null,
-      "ported_sha256": "0f38362d8c452566154850623098b4c1c64a2f414376f735a1366ec19c7ff337",
+      "ported_sha256": "e184faf46be0a8a6da98032a8732784d3bf0539f5cef591bd8236ee38163a89f",
       "origin": "unified_project_integration"
     },
     {
