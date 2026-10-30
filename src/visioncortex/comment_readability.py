@@ -16,7 +16,7 @@ def transcript_text(document):
     audio = document.get('audio') or {}
     sentences = document.get('sentences') or []
     lines = [f"{document.get('date', '日期未确认')}｜采集设备：{document.get('device', '未确认')}",
-             '说话人：未确认｜以下为自动转写原文，未经人工核对。']
+             '以下为自动转写原文，未经人工核对。']
     basis = audio.get('time_basis')
     unknown = (document.get('capture_time_status') == 'unknown_or_uncalibrated'
                or basis in ('unknown', 'uncalibrated', 'unknown_or_uncalibrated')
@@ -117,19 +117,18 @@ def field_context_document(document):
         return document
     events=document.get('events') or []
     if len(events)>10000:raise ValueError('Historical Comment context exceeds display bound')
-    labels={'instrument_binding':'设备或人员关联记录','scene_binding':'场景关联记录','ocr_observation':'屏幕识别记录'}
+    labels={'instrument_binding':'历史关联记录','scene_binding':'场景关联记录','ocr_observation':'屏幕识别记录'}
     rows=[]
     for event in events:
         payload=event.get('payload') or {};media=event.get('media') or {}
         rows.append(dict(时间=_clock(event.get('start_us')) or '未确认',
             记录类型=labels.get(event.get('type'),event.get('type')),
-            原设备标识=event.get('instrument_id'),佩戴人标识=event.get('wearer_id'),
-            原操作人标识=event.get('operator_id'),原记录状态=payload.get('status'),
+            原设备标识=event.get('instrument_id'),原记录状态=payload.get('status'),
             原记录读数=payload.get('normalized_values') or payload.get('reading_observations') or [],
             原关联依据=payload.get('identity_basis'),原有效起止=[payload.get('valid_from'),payload.get('valid_to')],
             原图=(media.get('photo') or {}).get('path'),原结果文件=media.get('result_file'),
             记录编号=event.get('event_id')))
-    summary=dict(说明='历史二维码关联与屏幕记录；沿用当时的设备、人员和读数，不据此重新绑定、确认操作或扣库存。',
+    summary=dict(说明='历史二维码关联与屏幕记录；沿用当时的设备和读数，不据此重新绑定、确认操作或扣库存。',
                  时间依据='显示原记录时间；校准状态与来源见原 clock 和 evidence_refs。',
                  原记录状态=document.get('status'),记录条数=len(rows),
                  缺失或冲突项=len(document.get('errors') or []),

@@ -71,6 +71,27 @@ def test_daily_sorts_saved_speech_video_and_ocr_without_inventing_links():
     assert canonical(present(value, 'day')) == value
 
 
+def test_person_identity_is_not_needed_or_exposed_in_daily_reading():
+    from visioncortex import result_readability as view
+    value = {'archive': '2026-10-30_fixture-camera', '全天记录': {
+        '设备': 'fixture-camera', '实验员': ['historical-person'], '全天时间线': [
+            {'开始时间': '2026-10-30T13:00:00', '实验员': {'人员ID': 'historical-person'},
+             '状态说明': '处理完成', '实验步骤': ['已有观察'], '仪器与现场记录': [{'读数': '0.2287 g'}]}]}}
+    before = deepcopy(value)
+    for version, builder in [(view.LEGACY_VERSION, view._day_v1), (view.PREVIOUS_VERSION, view._day_v2)]:
+        old = {KEY: {'展示版本': version, '原数据摘要': view._sha(value), '类别': 'day', **builder(value)}, **value}
+        assert canonical(old) == before
+        upgraded = present(old, 'day')
+        summary = upgraded[KEY]
+        assert summary['展示版本'] == view.VERSION
+        assert '实验员' not in summary and all('实验员' not in r for r in summary['按时间查看'])
+        assert summary['按时间查看'][0]['仪器与读数'] == [{'读数': '0.2287 g'}]
+        assert canonical(upgraded) == before and value == before
+        summary['实验员'] = 'injected-person'
+        with pytest.raises(ValueError, match='source projection'):
+            canonical(upgraded)
+
+
 def test_legacy_daily_entries_are_readable_without_hydrating_their_audit_trees():
     value={'archive':'2026-10-29_fixture-camera','entries':[{
         'start_us':1793268966388025,'end_us':1793268996298006,'label':'old candidate',

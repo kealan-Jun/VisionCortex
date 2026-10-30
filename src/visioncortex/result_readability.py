@@ -13,7 +13,8 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 KEY = '阅读摘要'
-VERSION = 'visioncortex-result-reading/2'
+VERSION = 'visioncortex-result-reading/3'
+PREVIOUS_VERSION = 'visioncortex-result-reading/2'
 LEGACY_VERSION = 'visioncortex-result-reading/1'
 
 
@@ -159,7 +160,7 @@ def _day_v1(value):
         '说明': '只展示现有证据覆盖。15分钟发送边界不表示实验结束，未决间隔不拼成连续实验。'}
 
 
-def _day(value):
+def _day_v2(value):
     """Also read older reports whose only timeline is the original entries."""
     result = _day_v1(value)
     rows = result['按时间查看']
@@ -193,6 +194,19 @@ def _day(value):
     return result
 
 
+def _day(value):
+    """Recognition is source/time scoped; people are outside this view's scope.
+
+    Historical machine fields remain untouched. The older builders stay exact
+    so saved v1/v2 views can still be validated before an explicit re-render.
+    """
+    result = _day_v2(value)
+    result.pop('实验员', None)
+    for row in result['按时间查看']:
+        row.pop('实验员', None)
+    return result
+
+
 def present(value, category):
     core = canonical(value)
     if not isinstance(core, dict) or category not in {'retention', 'understanding', 'day'}:
@@ -208,13 +222,13 @@ def canonical(value):
         return value
     core = {key: item for key, item in value.items() if key != KEY}
     summary = value[KEY]
-    if not isinstance(summary, dict) or summary.get('展示版本') not in {VERSION, LEGACY_VERSION} or summary.get('原数据摘要') != _sha(core):
+    if not isinstance(summary, dict) or summary.get('展示版本') not in {VERSION, PREVIOUS_VERSION, LEGACY_VERSION} or summary.get('原数据摘要') != _sha(core):
         raise ValueError('Readable result does not match its saved machine data')
     category = summary.get('类别')
     if category not in {'retention', 'understanding', 'day'}:
         raise ValueError('Unknown readable result category')
     builder = {'retention': _retention, 'understanding': _understanding,
-               'day': _day_v1 if summary['展示版本'] == LEGACY_VERSION else _day}[category]
+               'day': {LEGACY_VERSION: _day_v1, PREVIOUS_VERSION: _day_v2, VERSION: _day}[summary['展示版本']]}[category]
     expected = {'展示版本': summary['展示版本'], '原数据摘要': _sha(core), '类别': category, **builder(core)}
     if summary != expected:
         raise ValueError('Readable summary differs from its source projection')

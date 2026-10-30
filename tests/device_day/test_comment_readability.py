@@ -13,7 +13,7 @@ def test_saved_speech_is_readable_without_changing_json_or_inventing_a_speaker()
                  sentences=[dict(start_us=1793250345760000, end_us=1793250346920000, text='原话保留。')])
     before = deepcopy(value)
     text = transcript_text(value).decode()
-    assert '原话保留。' in text and '说话人：未确认' in text and '13:05:45.760' in text
+    assert '原话保留。' in text and '说话人' not in text and '13:05:45.760' in text
     assert value == before
     value['capture_time_status'] = 'unknown_or_uncalibrated'
     value['sentences'][0].update(source_start_seconds='3.16', source_end_seconds='4.32')
@@ -101,5 +101,5 @@ def test_historical_binding_summary_preserves_original_events_and_unknown_people
     assert value==before and {k:v for k,v in after.items() if k!='中文摘要'}==value
     row=after['中文摘要']['记录'][0]
     assert row['原设备标识']=='old-device' and row['原记录读数']==value['events'][0]['payload']['normalized_values']
-    assert row['原操作人标识'] is None and row['佩戴人标识'] is None
+    assert '原操作人标识' not in row and '佩戴人标识' not in row
     assert after['physical_action_verified'] is False and after['中文摘要']['缺失或冲突项']==1
