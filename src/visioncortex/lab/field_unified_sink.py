@@ -57,8 +57,9 @@ def load_manifest(path):
 
 
 class UnifiedFRSink:
-    def __init__(self, store, manifest):
+    def __init__(self, store, manifest, *, publisher=TimelinePublication):
         self.store, self.manifest = store, dict(manifest)
+        self.publisher = publisher
         self.source = Path(manifest['source_archive_root'])
         self.destination = Path(manifest['destination_root'])
         self.runtime = Path(manifest['runtime_root'])
@@ -124,7 +125,7 @@ class UnifiedFRSink:
             return dict(processed=len(rows),events=outcomes,model_calls=0,raw_media_copied=False)
 
     def _read(self, relative, guard):
-        raw = TimelinePublication._read_bytes(self.source,relative,guard)
+        raw = self.publisher._read_bytes(self.source,relative,guard)
         if raw is None:
             raise FileNotFoundError('Original FR committed artifact is unavailable')
         return raw
@@ -189,7 +190,7 @@ class UnifiedFRSink:
         outputs={}
         for path,raw in member_paths.items():
             if Path(path).name=='Evidence.json':continue
-            outputs[path]=raw if Path(path).name.startswith('Result') else TimelinePublication._json(rewrite(json.loads(raw)))
+            outputs[path]=raw if Path(path).name.startswith('Result') else self.publisher._json(rewrite(json.loads(raw)))
         planned={}
         for path,raw in member_paths.items():
             original=json.loads(raw)
@@ -205,7 +206,7 @@ class UnifiedFRSink:
                     source_archive_uri=self.source.as_uri(),source_event=relative,source_evidence_sha256=evidence_sha,
                     source_receipt_versions=evidence.get('receipt_versions',[]),original_model_and_membership_unchanged=True,
                     source_members=[dict(path=p,sha256=hashlib.sha256(v).hexdigest(),byte_size=len(v)) for p,v in member_paths.items()])
-                published=TimelinePublication._json(document)
+                published=self.publisher._json(document)
             else:published=outputs[path]
             planned[path]=published
         # Source views may change while another owner publishes; never advance
@@ -220,6 +221,6 @@ class UnifiedFRSink:
             if Path(path).name=='Evidence.json':
                 for member,raw in member_paths.items():
                     if self._read(member,guard)!=raw:raise OSError('Original FR member changed before Evidence commit')
-            files.append(TimelinePublication._write(self.destination,mapping[path],planned[path],guard))
+            files.append(self.publisher._write(self.destination,mapping[path],planned[path],guard))
         return dict(sequence=row['seq'],status='projected',directory=folder,files=files,
             source_evidence_sha256=evidence_sha,model_calls=0,raw_media_copied=False)

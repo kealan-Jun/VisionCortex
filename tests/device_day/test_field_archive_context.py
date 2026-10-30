@@ -244,7 +244,7 @@ def test_file_publisher_discovers_late_field_only_inputs_and_revisions_without_m
     data['events'].append(dict(data['events'][1], event_id='late-ocr'))
     write(daily, data)
     assert publisher.tick()['published'] == 1
-    assert len(json.loads((root/'Comment/FieldEvents.json').read_text())['events']) == 3
+    assert len(json.loads((root/'Comment/OCR/FieldEvents.json').read_text())['events']) == 3
     assert len(json.loads(report.read_text())['全天记录']['现场事件时间线']) == 3
     assert len(list((tmp_path/'Cache/device-day-comment-evidence'/root.name/'Comment/.Evidence/FieldRecognition').glob('*.json'))) == 2
     assert not (root/'MetaData').exists() and not (root/'MetaVideo').exists()

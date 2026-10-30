@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import pytest
 
-from visioncortex.comment_readability import readings_document, readings_text, transcript_text
+from visioncortex.comment_readability import field_context_document, readings_document, readings_text, transcript_text
 from visioncortex.lab.comment_presentation import CommentPresentation, supported
 
 
@@ -77,3 +77,29 @@ def test_only_existing_comment_members_change_and_history_is_recoverable(tmp_pat
     assert not supported('day/Comment/Bindings.json')
     assert not supported('../day/Comment/OCR/event/Readings.json')
     assert Path(root/relative).is_file()
+
+
+def test_legacy_fr_rows_preserve_values_identity_and_review_status():
+    value=dict(schema='field-numeric-observations/1',human_verified=False,
+               readings=[dict(value=14.7725,unit='g',measurement_name='质量',instrument_id='historical-id',
+                              result_stage='reviewed',captured_at='2026-10-29T14:52:22+08:00')])
+    before=deepcopy(value);after=readings_document(value)
+    assert value==before and after['readings']==value['readings']
+    assert after['中文摘要']['字段读数'][0]['候选读数']==14.7725
+    assert after['中文摘要']['识别结果'][0]['原记录状态']=='reviewed'
+    assert after['中文摘要']['已确认业务读数'] is None
+    assert '未重新核验' in after['中文摘要']['读数概况']
+    assert readings_document(after)==after
+
+
+def test_historical_binding_summary_preserves_original_events_and_unknown_people():
+    value=dict(schema_version='visioncortex-field-archive-context/1',status='partial_archived_evidence',
+        events=[dict(type='ocr_observation',event_id='original',start_us=1793250345760000,instrument_id='old-device',
+                     payload=dict(normalized_values=[dict(value='0.2287',unit='g')]),clock=dict(uncertainty_us=None))],
+        errors=[dict(reason='source_missing')],physical_action_verified=False)
+    before=deepcopy(value);after=field_context_document(value)
+    assert value==before and {k:v for k,v in after.items() if k!='中文摘要'}==value
+    row=after['中文摘要']['记录'][0]
+    assert row['原设备标识']=='old-device' and row['原记录读数']==value['events'][0]['payload']['normalized_values']
+    assert row['原操作人标识'] is None and row['佩戴人标识'] is None
+    assert after['physical_action_verified'] is False and after['中文摘要']['缺失或冲突项']==1

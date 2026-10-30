@@ -135,7 +135,8 @@ def publish_context(config, index):
             raise ValueError('Saved FieldRecognition context evidence identity changed')
     else:
         atomic_json(saved, value)
-    atomic_json(root/'OCR/FieldEvents.json', value)
+    from ..comment_readability import field_context_document
+    atomic_json(root/'OCR/FieldEvents.json', field_context_document(value))
     return {'path': 'Comment/OCR/FieldEvents.json', 'revision': revision}
 
 
