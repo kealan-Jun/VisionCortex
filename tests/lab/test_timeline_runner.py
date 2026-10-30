@@ -167,7 +167,7 @@ def capture(hj, filename, duration, kind, *, session='burst'):
     path = hj['settings'].incoming/filename
     return Ingest(hj['core'],hj['settings']).accept(dict(capture_id=filename, source_instance='fixture-camera', source_revision='fixture/1',
         kind=kind, session_id=session, group_expected_photos=3 if kind=='photo' else None, relative_path=filename, captured_at=at('09:00:00'),
-        time_basis={'basis':'synthetic_clock','uncertainty_us':0}, start_seconds='0',end_seconds=str(duration),source_kind='fixture',sha256=hashlib.sha256(path.read_bytes()).hexdigest()))
+        time_basis={'basis':'synthetic_fixture_clock','uncertainty_us':0}, start_seconds='0',end_seconds=str(duration),source_kind='fixture',sha256=hashlib.sha256(path.read_bytes()).hexdigest()))
 
 
 def panel(hj, name='panel.png'):
@@ -421,13 +421,17 @@ def test_publication_keeps_immutable_versions_and_evidence_links(hj):
     runtime=TimelineRuntime(hj['core'],settings)
     first=runtime.views.snapshot(DAY)
     result=runtime.publication.tick()
-    assert len(result['files'])==6 and runtime.publication.tick() is None
-    original={f['relative_path']:(root/f['relative_path']).read_bytes() for f in result['files']}
+    assert len(result['files'])==9 and runtime.publication.tick() is None
+    original={f['relative_path']:(root/f['relative_path']).read_bytes()
+              for f in result['files'] if not f.get('mutable_latest')}
+    latest=[f for f in result['files'] if f.get('mutable_latest')]
+    assert len(latest)==1 and latest[0]['relative_path'].endswith('/Comment/Bindings.json')
     activity(hj,'late',m,start=3,end=5,run_ids=[rid],kind='settings')
     second=runtime.views.snapshot(DAY)
     assert second['revision']>first['revision']
     runtime.publication.tick()
     assert all((root/name).read_bytes()==raw for name,raw in original.items())
+    assert json.loads((root/latest[0]['relative_path']).read_text())['snapshot_revision']==second['revision']
     text=render_report(second['document'])
     assert '设备实际结束时间：未知' in text and m['media_id'] in text
     assert not list(root.glob('*/VC')) and not list(root.glob('*/FR'))
@@ -457,12 +461,12 @@ def test_publication_unifies_recorder_photo_and_audio_channels_under_exact_camer
         path.write_bytes(('synthetic transport channel '+kind).encode())
         Ingest(hj['core'],hj['settings']).accept(dict(capture_id=name,source_instance=('recorder:' if kind=='video' else 'photo:' if kind=='photo' else 'voice:')+'camera01',
             source_revision='fixture/1',kind=kind,camera_id='camera01',relative_path=name,captured_at=at('09:00:00'),
-            time_basis={'basis':'synthetic_clock'},source_kind='fixture',end_seconds='0' if kind=='photo' else '30',sha256=hashlib.sha256(path.read_bytes()).hexdigest()))
+            time_basis={'basis':'synthetic_fixture_clock','uncertainty_us':0},source_kind='fixture',end_seconds='0' if kind=='photo' else '30',sha256=hashlib.sha256(path.read_bytes()).hexdigest()))
     root=hj['settings'].incoming
     (root/'.System').mkdir();(root/'.System/ArchiveContract.json').write_bytes(contract_bytes())
     runtime=TimelineRuntime(hj['core'],replace(hj['settings'],source_root=root,unified_archive_required=True,timeline_publish=True))
     runtime.views.snapshot(DAY)
     result=runtime.publication.tick()
-    assert len(result['files'])==6 and all(x['relative_path'].startswith(DAY+'_camera01/') for x in result['files'])
+    assert len(result['files'])==9 and all(x['relative_path'].startswith(DAY+'_camera01/') for x in result['files'])
     view=json.loads((root/next(f['relative_path'] for f in result['files'] if '/Comment/Audio/' in f['relative_path'])).read_text())
     assert set(view['stream_keys'])=={'recorder:camera01','photo:camera01','voice:camera01'}

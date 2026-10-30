@@ -1,0 +1,585 @@
+{
+  "schema_version": "vc-lab-rule-bundle/1",
+  "revision": "vc-lab-unified-20261030.7",
+  "components_sha256": "5be51d3c237058c97919072431ed203e6a8f6dd207137f204fb241b1d71f5af5",
+  "files": [
+    {
+      "path": "archive-layout-v2.json",
+      "sha256": "1fc6e32b7167348b6568fcb717f43632dfb59e932ceefa476b6f5468655cd150"
+    },
+    {
+      "path": "archive-layout.json",
+      "sha256": "7b76d15f6141e272064e3c2bebea2b176b79402310b168e9382c65881cfb5070"
+    },
+    {
+      "path": "automatic-readout-rules-v1.json",
+      "sha256": "0924c815a4c677b04d58db45cae34b7a5de8b7df721b41e285c32e913a6ebdea"
+    },
+    {
+      "path": "camera-operation-rules-v1.json",
+      "sha256": "3ad687e77fafc0af32b5c7da95d1ed64eb02a143221c6be0c08d7c14325d16be"
+    },
+    {
+      "path": "complete-clip-rules-v1.json",
+      "sha256": "a88629d4d5a193732cab1836d524073ca0a66b5a638b9e4c88a1e67a6608ee1b"
+    },
+    {
+      "path": "dynamic-context-rules-v1.json",
+      "sha256": "431ed6e906e2d60fdcfa4c491d6b0bbc6dee9a152066e29dd4fc2a63dc9d30b8"
+    },
+    {
+      "path": "field-rules.json",
+      "sha256": "7f15a0e6f25be0f3e752c1d0a2f88201af23ae6138699b2de71796c541ebc673"
+    },
+    {
+      "path": "material-batch-summary-rules-v1.json",
+      "sha256": "b86f372ab21b644e5d14dc4a1f52f5204cb64f1741b3f8c670cc9cac90291c0b"
+    },
+    {
+      "path": "material-observation-rules-v1.json",
+      "sha256": "a7ac0e9a0ffe968eca26dd41ab7e34617b3f4cb1ada2f653f179ec7d1d3104e7"
+    },
+    {
+      "path": "native-pipeline-rules.json",
+      "sha256": "6698a097fbcf55d333c6e046bf778dd6e33b9d2791721027b9508f6382ec2347"
+    },
+    {
+      "path": "pipeline-rules.json",
+      "sha256": "b0d9cb1dc9ec62a15e618790f5bbb5d9c33c366da2bff8698d7f97cb6b36f17d"
+    },
+    {
+      "path": "temporal-display-rules-v1.json",
+      "sha256": "cee10fe7077be1694492976c7be1d682cd73177f231b837f47dc157ad53a5870"
+    },
+    {
+      "path": "timeline-rules-v1.json",
+      "sha256": "7ace2957c5f5d7dbbadb32d943860806539d60b67dc39bb37e3bb7dbd5c636a6"
+    },
+    {
+      "path": "timeline-runner-rules-v1.json",
+      "sha256": "16a33e3c7425038e91f43178326d4b715e385b0a11e9b86411d06f0480dd5875"
+    },
+    {
+      "path": "video-qr-rules-v1.json",
+      "sha256": "82cd0874512be844d8803dd5aafa1feb10ee33266fc5e5c3f225bd0a76bb273c"
+    },
+    {
+      "path": "vision-rules.json",
+      "sha256": "9c9c79e3878a5d1c59aeeced327402f0aa7603ae1cf09ff9d5f9cf8ae33b9aad"
+    }
+  ],
+  "customer_models_included": false,
+  "adapter_files": [
+    {
+      "path": "src/field_recognition/measurements/measurement_records.py",
+      "sha256": "edd405c4cf10fa2e45833416bc069dfe40dda9f207e2a8a5b53499144238f937"
+    },
+    {
+      "path": "src/field_recognition/measurements/reading_results.py",
+      "sha256": "9bc984ee7c7e4fc38cca750693b82411d40831fb80ccc2835b48d2120f649451"
+    },
+    {
+      "path": "src/field_recognition/measurements/readout_rules.py",
+      "sha256": "60f7e48edfc4ecbe3cc4481d605852f9f3192a67162366bdda3016a1ee2d76ab"
+    },
+    {
+      "path": "src/field_recognition/recognition/vision_display_rules.py",
+      "sha256": "fc7f9188dea6d3035bbdab7e77dabffffb1fef02803ec6f537363d4185de4113"
+    },
+    {
+      "path": "src/visioncortex/comment_layout.py",
+      "sha256": "037dfc9c0e9a45368f9241ad196e58bc3b3a63fef3184a18bf543d8e62b4a1d5"
+    },
+    {
+      "path": "src/visioncortex/comment_readability.py",
+      "sha256": "bad1d38616e80b7b9e13fcf77b6cea08959b41880ed0ecdcb75cdc907557a0d3"
+    },
+    {
+      "path": "src/visioncortex/lab/__init__.py",
+      "sha256": "f2404ad71218003308edee2373240da9da3d497e4f91f5b3f0650e949a4d5e1e"
+    },
+    {
+      "path": "src/visioncortex/lab/__main__.py",
+      "sha256": "6d8b7d7846a845059d7a3107143f11131f63c5511d669b44085b15ec5e3d2279"
+    },
+    {
+      "path": "src/visioncortex/lab/api.py",
+      "sha256": "7e98ff4899ae5c9ab57e42dc9e908b78533341872b482761918f47013fe3efaf"
+    },
+    {
+      "path": "src/visioncortex/lab/archive_layout.py",
+      "sha256": "05d7235818a962b67c876e511635748a3c782d73f881e909a4aa81ee546e5d23"
+    },
+    {
+      "path": "src/visioncortex/lab/audio_source.py",
+      "sha256": "6a07dad6609c8d582dac9190e045616bd6afce532e45c1ff64bcd0d92ed1bfb6"
+    },
+    {
+      "path": "src/visioncortex/lab/automatic_readout.py",
+      "sha256": "474f4d46a56be966a7dbe94d85b134eea052557b4b111769ad22a2e4eddd9ac6"
+    },
+    {
+      "path": "src/visioncortex/lab/cache.py",
+      "sha256": "c51d854cf91626bcc45d6a5dfa133ff496e7d62078aa67d1f4f786c697bd8bb4"
+    },
+    {
+      "path": "src/visioncortex/lab/capture_context.py",
+      "sha256": "a3e61a93310778e0f933ce936f22c4cfbdcf5a84e1babe4031221b914ea067b1"
+    },
+    {
+      "path": "src/visioncortex/lab/capture_equipment_intake.py",
+      "sha256": "06a76a6d5decef6a19de8f308f6e06dc15cc03895569f9150625bdb4e464019d"
+    },
+    {
+      "path": "src/visioncortex/lab/cli.py",
+      "sha256": "4fda24eb1ea19a5cd59603a7de5b0890525932b79090f1c7a4dc69c9e65f673c"
+    },
+    {
+      "path": "src/visioncortex/lab/coarse_fine_native.py",
+      "sha256": "1130b7ed207f0f92cf8a4afe7d68dea363f8d5ebc52f98c5356172bd5b96e39b"
+    },
+    {
+      "path": "src/visioncortex/lab/coarse_fine_research.py",
+      "sha256": "2442b8e02d9e8d1ceeaf6b853cfe14f030cc840513c1baf383021b7f47733523"
+    },
+    {
+      "path": "src/visioncortex/lab/comment_fr_presentation.py",
+      "sha256": "fd73efbe729a669eb7b6b0133caa1f0b7a674f5bcb9e3f2e06a1dd334b01e710"
+    },
+    {
+      "path": "src/visioncortex/lab/comment_intake.py",
+      "sha256": "b10a9c0014ff06ea256846f3eeb7b349ec1a60f8a3d2b70d1e931be5e5338f0a"
+    },
+    {
+      "path": "src/visioncortex/lab/comment_presentation.py",
+      "sha256": "d3792762c7e0e05e2d9f4d617a6f9ba3ffa7f5749648e130b63fa313b47bcaf6"
+    },
+    {
+      "path": "src/visioncortex/lab/comment_transition.py",
+      "sha256": "041a44e0e491ed0d21a71dea6638b0b9adc58f78f71a6c5b4b24de28cb9b6a5a"
+    },
+    {
+      "path": "src/visioncortex/lab/components.py",
+      "sha256": "e0533f05a68f7fc5a22bfcb74dbd13d9c3de6ea2ee77bc2bb52e2c334b033f2e"
+    },
+    {
+      "path": "src/visioncortex/lab/config.py",
+      "sha256": "c8c3437ca42033a2bd4a1ec81a6b2ff9d59833d68e84c8851304fde05e0c38af"
+    },
+    {
+      "path": "src/visioncortex/lab/context_views.py",
+      "sha256": "63bed01e24eade5e6e54c90893b0a2d73f87f37147d4b51c7906ae64cf7bbc77"
+    },
+    {
+      "path": "src/visioncortex/lab/db.py",
+      "sha256": "7dc8e10ae58362bacd16d89a65cff115f10107cd3810f14bf1d3b5bc0fb8c926"
+    },
+    {
+      "path": "src/visioncortex/lab/delivery.py",
+      "sha256": "4d5a9392ad58f21d2f5c0edec68946bd64b4c0eeebe49db3885fbf694238df88"
+    },
+    {
+      "path": "src/visioncortex/lab/display_pixels.py",
+      "sha256": "834219e70a1ab6fbc1ccfad5ebdfdeebcefa1320abfca8184dbea777db25378d"
+    },
+    {
+      "path": "src/visioncortex/lab/domain.py",
+      "sha256": "d86f3feec83a766cc90219039a9f73e1d35c8ab8160cab5ad97ec8f03748a94e"
+    },
+    {
+      "path": "src/visioncortex/lab/dynamic_context.py",
+      "sha256": "09d58fb5e9ada24e6ea516d2ea0d33491940a2caacffe05f5e7e2d2fbc34b975"
+    },
+    {
+      "path": "src/visioncortex/lab/dynamic_video.py",
+      "sha256": "8e4e2007c2112462f183cf7c217c27a8847d0a60acd6bc5c58adc0bb6ac07ab3"
+    },
+    {
+      "path": "src/visioncortex/lab/dynamic_vision.py",
+      "sha256": "eaf80f5d9d03f3dbe3db73e8963b18ca83053d0db5b761b50a29b871a311ce3e"
+    },
+    {
+      "path": "src/visioncortex/lab/engine_process.py",
+      "sha256": "9cfdba5e63955fa47ee43116acdeba8b02b0c9b72fed90d3c8f91d6236101bba"
+    },
+    {
+      "path": "src/visioncortex/lab/equipment.py",
+      "sha256": "b4758f53526e9461c34e3a35f4dbf1bcb620ad6ef9d6ec68d5912fd50b1ed558"
+    },
+    {
+      "path": "src/visioncortex/lab/existing_archive_binding.py",
+      "sha256": "c83f7b816a2d7407ba0e537fc7e4e6331c6d0bae2aa487d4357e14c4dc2690ca"
+    },
+    {
+      "path": "src/visioncortex/lab/field_source.py",
+      "sha256": "e296feef3bdc25d30bf949d5b6c70c59a9eed9565fbefe652914374af61e4e56"
+    },
+    {
+      "path": "src/visioncortex/lab/field_unified_sink.py",
+      "sha256": "960f15fdc3a739cfcbca63f437a44ecc0a57c3201292e482b76f319c980b484a"
+    },
+    {
+      "path": "src/visioncortex/lab/fields.py",
+      "sha256": "35abb605d432df2d31e0f974a9f55e9969fb08e282a0f547c0ab2f0ea874b3a3"
+    },
+    {
+      "path": "src/visioncortex/lab/gauge.py",
+      "sha256": "1845f19871ae11d955ccc0b2e66a89d2ed9447a91a2d2457611a7dfec542515e"
+    },
+    {
+      "path": "src/visioncortex/lab/importer.py",
+      "sha256": "3f354206db6fc255678ff2a741518d7e3867a8d000fe356cca79be0911df97d5"
+    },
+    {
+      "path": "src/visioncortex/lab/ingest.py",
+      "sha256": "a5d60dc1b3187d7e5148f3bd0fe5aeab5789d53528502d25fecb61692cd02f33"
+    },
+    {
+      "path": "src/visioncortex/lab/input_layout.py",
+      "sha256": "ed664cc392236fb206ca97a84959fa5fb93d0cc035d2053b4485b623387a28e1"
+    },
+    {
+      "path": "src/visioncortex/lab/live.py",
+      "sha256": "6ea8ac2ee150b96e9e6b5ac7e2e2d2f45cc89d82ae8430ff123174b9e178b647"
+    },
+    {
+      "path": "src/visioncortex/lab/live_process.py",
+      "sha256": "65aaa7875c164c954b57b59bd2d20fc526daa0e114f49580f55bc068ed61fda4"
+    },
+    {
+      "path": "src/visioncortex/lab/local_provider.py",
+      "sha256": "4177eb49afd0dd3285e0013e9baf4a36fb966c97674a06e4f04a19474fe78431"
+    },
+    {
+      "path": "src/visioncortex/lab/material_batch.py",
+      "sha256": "0437ddcd6a4cf8613b0d1cf1400ace6346cd23760d12636562cdad8c0a7be0ad"
+    },
+    {
+      "path": "src/visioncortex/lab/material_trace.py",
+      "sha256": "7d7ff20ebff791aa822d441a7ad9d119aaa8f75ccf7912e755018b20ba0206c3"
+    },
+    {
+      "path": "src/visioncortex/lab/media.py",
+      "sha256": "2a388d94fa81250869c68e55f615fc4b70ae4760613f4cb6e3fda7f4ec0651da"
+    },
+    {
+      "path": "src/visioncortex/lab/native_asr.py",
+      "sha256": "275505063482c4773f74e9c6d42a627826d4f4be355d501db80c4c2860ba873f"
+    },
+    {
+      "path": "src/visioncortex/lab/native_comment_layout.py",
+      "sha256": "f7e0f6df6cc56546eaf29d8040e87fd2300c6f76b77e563cba10715882d39f24"
+    },
+    {
+      "path": "src/visioncortex/lab/native_linked_layout.py",
+      "sha256": "1e234d8fd44d9c129d8fcf3a1b5f5abd476321c1e703cb4421331f4cb5aae9ac"
+    },
+    {
+      "path": "src/visioncortex/lab/native_ocr.py",
+      "sha256": "6a40833e7c2fefcd3f904113302c50d6b6adcb4ab827a185d7d7c34ef02a3b5b"
+    },
+    {
+      "path": "src/visioncortex/lab/native_pipeline.py",
+      "sha256": "e530c75fa3addea121ba8a1607d03ad8cf49cb35cfe7b8df67175b9d9bdb315a"
+    },
+    {
+      "path": "src/visioncortex/lab/native_refresh.py",
+      "sha256": "c8755c7d7e941f62573b35ced998cd4b9ee7f0547b5a8c376c340234a96b6e93"
+    },
+    {
+      "path": "src/visioncortex/lab/native_result_layout.py",
+      "sha256": "6da8079a4c91dc6df770da18d07493d7d32dbef9b74ec4f71d9ef3caccc8ae61"
+    },
+    {
+      "path": "src/visioncortex/lab/native_timeline_links.py",
+      "sha256": "a252de68652019f64cc785cb1607b7f019c231bcce97a722bc739d4cfd5e7d80"
+    },
+    {
+      "path": "src/visioncortex/lab/native_video.py",
+      "sha256": "d3a892a175fdb6492c57524903ef08d6d2c516a5e27f465c7628437ffb193747"
+    },
+    {
+      "path": "src/visioncortex/lab/native_vision.py",
+      "sha256": "d5b9d8957e8ec47dcf635ab848c68696d4175c7cb3f2de4d144766a82365ff0c"
+    },
+    {
+      "path": "src/visioncortex/lab/needle_vision.py",
+      "sha256": "8e0ac58fef3e42190d86fde4b4fefa87f5993173706c50ec53efb4aa02d42fb6"
+    },
+    {
+      "path": "src/visioncortex/lab/ocr_fields.py",
+      "sha256": "a8bea286da0d11935ea77943f62163ef000d4e8f016d0c02500caf23b3ffb903"
+    },
+    {
+      "path": "src/visioncortex/lab/operation_segments.py",
+      "sha256": "0aed6c43ca0542bde1b42bc262d6aafa3e2f71fd85c8ed2153d8fa00e1f115f0"
+    },
+    {
+      "path": "src/visioncortex/lab/operator_scan.py",
+      "sha256": "4edc0de1b95a65514a75c144a419a64370479e36e3d0205527aa2d4ea6efe6ad"
+    },
+    {
+      "path": "src/visioncortex/lab/panel_fields.py",
+      "sha256": "8dd54ec4400326cbe8ce787e3386ba1d1a73bd58c570052cedaf211fd13be96d"
+    },
+    {
+      "path": "src/visioncortex/lab/panel_vision.py",
+      "sha256": "c80bfd546bdb1404ccc013dfb5e7165468761a9a7a23791daba950d8b34f5949"
+    },
+    {
+      "path": "src/visioncortex/lab/person_report.py",
+      "sha256": "918cd7998aaf1a58a481119dab6c60dc4b8239a5efe3387bf473c2bd561a95e6"
+    },
+    {
+      "path": "src/visioncortex/lab/photo_ingress.py",
+      "sha256": "e184faf46be0a8a6da98032a8732784d3bf0539f5cef591bd8236ee38163a89f"
+    },
+    {
+      "path": "src/visioncortex/lab/processing.py",
+      "sha256": "2b13ca1a14e5058649ec67ea50b7873c655ca7cb767b46e3a354e838c7268245"
+    },
+    {
+      "path": "src/visioncortex/lab/producer_ingress.py",
+      "sha256": "36545de6f57940d33fad9deeb423ca7b1e5a8c6dcfb4bf81054ddccefac7fc26"
+    },
+    {
+      "path": "src/visioncortex/lab/projections.py",
+      "sha256": "b50e373d69674c802f495168e259622deae7c79a99c145e333ee637551116de2"
+    },
+    {
+      "path": "src/visioncortex/lab/qr_video.py",
+      "sha256": "0b1a96d46389fca35c1344f44fed7c8fed1b9e658bfdb5ab00978e9c81262a51"
+    },
+    {
+      "path": "src/visioncortex/lab/readable_readings.py",
+      "sha256": "5e13f0e556e5ed7ce4fcedeed0aab7197b874e7c734f094c49171f6f02a26dbf"
+    },
+    {
+      "path": "src/visioncortex/lab/research_evidence_bundle.py",
+      "sha256": "df70abdffb0929be1f82b0b558649569f2daa103c71ed5fa2df39316c3719c28"
+    },
+    {
+      "path": "src/visioncortex/lab/result_delivery.py",
+      "sha256": "fb8ac8cc2e662f368d645261b2d18ddc832c1d274e77f264ca38330832e5a830"
+    },
+    {
+      "path": "src/visioncortex/lab/retained_clips.py",
+      "sha256": "1d98793322d5fa4394374b8668027b52e0b98902d68dc78168fb105446255273"
+    },
+    {
+      "path": "src/visioncortex/lab/retained_frame_map.py",
+      "sha256": "415f3d00cffe787cd9d3dd53ca20134c9547fc1adb272ff8615602a8cd57e32c"
+    },
+    {
+      "path": "src/visioncortex/lab/retention.py",
+      "sha256": "d275a657010a7f2686d65b3387d32b3075d26ab53cb1db95968fd0e60b7365df"
+    },
+    {
+      "path": "src/visioncortex/lab/rules.py",
+      "sha256": "73680dccc75c8ed16c42ac69482f54fb7448b29c3d7e03f7f8bd7e2c3842ddf2"
+    },
+    {
+      "path": "src/visioncortex/lab/scan_intake.py",
+      "sha256": "b8b921f02db091be403d0cc4281427785b64e448e38401a91e9b92da17410db5"
+    },
+    {
+      "path": "src/visioncortex/lab/scan_source.py",
+      "sha256": "29855289ed3d488bf932b3b96f6d370dea3aa62f5a26fd7858d406bd94f07d8b"
+    },
+    {
+      "path": "src/visioncortex/lab/scan_source_scanner.py",
+      "sha256": "4f23b79e0a98cfc9649c051f599966ae267b298b907c9692416a2e4fe85e6a90"
+    },
+    {
+      "path": "src/visioncortex/lab/speech_candidates.py",
+      "sha256": "f5099da31ebae7d00a2fe88ee1a8ab448f76bbcdaedcd7dd0294a1c98012c99f"
+    },
+    {
+      "path": "src/visioncortex/lab/storage.py",
+      "sha256": "acc22b1aa5f3a0f37dff3d6df4bb1e89e025c7be036f8ab820bd6c947f32582c"
+    },
+    {
+      "path": "src/visioncortex/lab/subprocesses.py",
+      "sha256": "94308bb91ca17e0901b5739bc84057a39f4c24e9e8e35475a70520bc0d48cc45"
+    },
+    {
+      "path": "src/visioncortex/lab/temporal_display.py",
+      "sha256": "f7024a0b7186d470fd3201989e3b22edea3997162a89e5aaa07ebcd197dc7a6e"
+    },
+    {
+      "path": "src/visioncortex/lab/temporal_registration.py",
+      "sha256": "a2aa1b166aa19ddd88041d9969152139b8f82375c31c8067916b7d4e7c0dae70"
+    },
+    {
+      "path": "src/visioncortex/lab/temporal_video.py",
+      "sha256": "2c180c419137be54fda8b0984e9db8c3d11141a4c2603ea701de4aff5be667be"
+    },
+    {
+      "path": "src/visioncortex/lab/timeline.py",
+      "sha256": "0980f8d37ac6c60423531c287cdb65e5c4a694b99324ff4ad8cf435348152a4a"
+    },
+    {
+      "path": "src/visioncortex/lab/timeline_clock.py",
+      "sha256": "c049a1d0fa6b84a0d4f5c967d22db9901010396f7709c00788c317cd9e34b72a"
+    },
+    {
+      "path": "src/visioncortex/lab/timeline_commands.py",
+      "sha256": "54c19c10c55de7dc99d5d99ebcd149770def28143b5a8c1b26fe9660a4b93dea"
+    },
+    {
+      "path": "src/visioncortex/lab/timeline_metrics.py",
+      "sha256": "08337effec6c985b53517292372f8e6057f3eea9eaaec28768d30b7026254048"
+    },
+    {
+      "path": "src/visioncortex/lab/timeline_native_artifacts.py",
+      "sha256": "14c2a2dba3a727b0158519b3afd33c9162c7275139ed4129226f751041d774f2"
+    },
+    {
+      "path": "src/visioncortex/lab/timeline_policy.py",
+      "sha256": "0211d84ff4c95f5855fc46a341b92e65c7543abd62e3590f98ec3de756e91b5d"
+    },
+    {
+      "path": "src/visioncortex/lab/timeline_prior_context.py",
+      "sha256": "d2d835f8b3b004fad4459e673de7ce303290d4a4b040e393e4f5a2cb6122d7a2"
+    },
+    {
+      "path": "src/visioncortex/lab/timeline_publication.py",
+      "sha256": "57cf5592dd5d24248c623442b5c4e8c9d4be2750b56514c662ad74610750603d"
+    },
+    {
+      "path": "src/visioncortex/lab/timeline_readout.py",
+      "sha256": "4f920b253ae298e5015c0eaa48e2601d8266e0ea80f7a883acf6ae3b8293d8f5"
+    },
+    {
+      "path": "src/visioncortex/lab/timeline_report.py",
+      "sha256": "efe91652b21216219ddbd6b9a0627de9e24003cc2f5622874bad949713dc4e26"
+    },
+    {
+      "path": "src/visioncortex/lab/timeline_runner.py",
+      "sha256": "316cbba03b5aa241070243b4e61c550561f103e92f6ee8962d372ab9970005e3"
+    },
+    {
+      "path": "src/visioncortex/lab/timeline_runtime.py",
+      "sha256": "cb278e7ec844757b06c7055c661c03f9c963cd3ec37f68db2e4eb4386bfce0de"
+    },
+    {
+      "path": "src/visioncortex/lab/timeline_source_context.py",
+      "sha256": "bda542256ca1c2a29e8b5ff1d8b0c0cbacbed656a02c18f309e6763b239ee30c"
+    },
+    {
+      "path": "src/visioncortex/lab/timeline_tasks.py",
+      "sha256": "f00e58183c1c1476ae65622c4598565c45d6bcc667d0f94ae6a14702e28ff8b4"
+    },
+    {
+      "path": "src/visioncortex/lab/timeline_timing.py",
+      "sha256": "3e1973700583674a2aace8ce36aa9e3ed19873c2a83e22f1d4d8fb25356348a3"
+    },
+    {
+      "path": "src/visioncortex/lab/timeline_views.py",
+      "sha256": "97810eff58d94eec81ca68561e1f7a3e837ceb1909987f33eee8e70cb1af3a86"
+    },
+    {
+      "path": "src/visioncortex/lab/training.py",
+      "sha256": "15cffbeef54200e66bfd39c69676f300d3dbb66ff5d3e42ebd20ba9a872f6c01"
+    },
+    {
+      "path": "src/visioncortex/lab/value_candidates.py",
+      "sha256": "9ab164dfb3fd0fb5b7871765127ab75714c257636b3b67100cba7a40c7191318"
+    },
+    {
+      "path": "src/visioncortex/result_readability.py",
+      "sha256": "6b884039b815722bc8ae53770101b347d461c8400daa6a714c7a14214e09fedf"
+    },
+    {
+      "path": "tools/inference/lab_model_service.py",
+      "sha256": "6816c3530b27aa5cc59be28e6358c30a9ef928ebb2fbacae1a5a9c1a44ddf428"
+    },
+    {
+      "path": "tools/inference/panel_ocr.py",
+      "sha256": "d462a85ffd83b418cf3dbf785cf2e948b508e02d7244b5dcd83e83065ab19be6"
+    }
+  ],
+  "migration_files": [
+    {
+      "path": "migrations/lab/001_core.sql",
+      "sha256": "1536c2879fd4c3e10b09b19d9504e822cf418b74db4009331005923bd4b525f8"
+    },
+    {
+      "path": "migrations/lab/002_intake.sql",
+      "sha256": "6873b9a4c2332c4759b4ee3d8ae432c3f46859c5d38faa9e2282048221f0442d"
+    },
+    {
+      "path": "migrations/lab/003_rules_retention.sql",
+      "sha256": "3ab86dd7c60493f3ae76fc5987f9ba5203c81d54784e6b1083a9cf9fcbfac8b6"
+    },
+    {
+      "path": "migrations/lab/004_publication_plan.sql",
+      "sha256": "e07f4a2ad2b16133255221340cc25572eb4243d81bc0aff176a93c155e9c81bb"
+    },
+    {
+      "path": "migrations/lab/005_fact_corrections.sql",
+      "sha256": "9d20ac358be613c832f178d5e44299c1d17de279bcda64ccd8607eb85dd7b46d"
+    },
+    {
+      "path": "migrations/lab/006_identity_allocation.sql",
+      "sha256": "4a098eed076bd265b18560f91051a0508dc9e8b4e62c53eccb660400a19e70ea"
+    },
+    {
+      "path": "migrations/lab/007_equipment_identity.sql",
+      "sha256": "055d6c92398068033f25fbb49f47225b8c84a505c4faacbe71e2fd95af0b07b1"
+    },
+    {
+      "path": "migrations/lab/008_processing_dependencies.sql",
+      "sha256": "fefcca41e6c81bb10b1c20c275187fa4b0a852010fb7b36d027f1bf69a09b8fb"
+    },
+    {
+      "path": "migrations/lab/009_capture_context.sql",
+      "sha256": "ec2f17b40c64523eecba031a1424dd2c4cddfb0159ff4b1e99175474ee345b14"
+    },
+    {
+      "path": "migrations/lab/010_timeline.sql",
+      "sha256": "87e4885468ba3c9a66a01b63d2a57fef05617cc7dee7691ff2900bbe4c78ec6f"
+    },
+    {
+      "path": "migrations/lab/011_timeline_reconciliation.sql",
+      "sha256": "4edfec87098a9f8c5f1db2b31a56998f972042c79adbf9b6747067be0191a97d"
+    },
+    {
+      "path": "migrations/lab/012_timeline_runner.sql",
+      "sha256": "e05275ed46c4d95b5403e3690f91199aa3dc7c600aa0b901dd9079cdcbb311e0"
+    },
+    {
+      "path": "migrations/lab/013_timeline_retry_clock.sql",
+      "sha256": "af9f121092bf800e8ab505819196eb1eb9ed692f78da3f06cc06cf34c4fe851e"
+    },
+    {
+      "path": "migrations/lab/014_timeline_timing.sql",
+      "sha256": "aecab8fffe135bdcef4dee22ec696e85d274f3f22c4775e9e7ea986a33e4c380"
+    },
+    {
+      "path": "migrations/lab/015_publication_timing.sql",
+      "sha256": "c699ab63007825227aa84d5d9e5ae00f77b32b9d66cc77b38c9adcd7d29899ca"
+    },
+    {
+      "path": "migrations/lab/016_dynamic_context.sql",
+      "sha256": "f4ab553b8c0e6f4d61a632735276b253b6756d8059221e1e0b0de2c33b3848a0"
+    },
+    {
+      "path": "migrations/lab/017_material_observation.sql",
+      "sha256": "e7d85dac06fef08daf036afe61ed490c3bd038f5252db7854877f89c93404775"
+    },
+    {
+      "path": "migrations/lab/018_report_chronology.sql",
+      "sha256": "6f47521f41814c6eeac4a45fe543df226cbb00dac73d9e4f337957f0674d0e00"
+    },
+    {
+      "path": "migrations/lab/019_video_qr.sql",
+      "sha256": "ae1a06215faa52e256518621adaa7a60519722553a81e8ba999c01dec4db5e2e"
+    },
+    {
+      "path": "migrations/lab/020_operator_scan.sql",
+      "sha256": "a3c78f7837195851f74868009d1d14db34f8629ca31457371d8056a1c3c31a73"
+    }
+  ],
+  "source_lineage_sha256": "94aaf15d10f6acebd27fa957d7c209c98c6b1dcb81d82fdece1b0ab46a726cef"
+}

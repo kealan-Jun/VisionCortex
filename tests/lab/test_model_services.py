@@ -195,6 +195,25 @@ def test_ppv6_onnx_service_explicit_names_and_backend_identity(tmp_path, monkeyp
     assert source.inference_identity('ocr', config, verified) != identity
 
 
+def test_panel_locator_identity_pins_settings_helper_and_its_checkpoint(tmp_path, monkeypatch):
+    source=load('lab_model_service')
+    monkeypatch.setitem(sys.modules,'ppocr_onnx',load('ppocr_onnx'))
+    helper=load('panel_ocr');monkeypatch.setitem(sys.modules,'panel_ocr',helper)
+    _,_,_,_,config,_=setup(tmp_path)
+    config['services']['ocr'].update(engine='ppocr-onnx',device='cpu',input_mode='full_image',
+        detection_model_name='PP-OCRv6_medium_det',recognition_model_name='PP-OCRv6_medium_rec',
+        panel_locator=dict(checkpoint='fixture-panel'))
+    verified={name:dict(manifest_sha256='a'*64,files_sha256='b'*64)
+              for name in ['fixture-det','fixture-rec','fixture-panel']}
+    before=source.inference_identity('ocr',config,verified)
+    config['services']['ocr']['panel_locator']['tiled_detection']=True
+    after=source.inference_identity('ocr',config,verified);assert before!=after
+    verified['fixture-panel']['files_sha256']='c'*64
+    assert source.inference_identity('ocr',config,verified)!=after
+    config['services']['ocr']['engine']='paddleocr'
+    with pytest.raises(ValueError,match='ONNX OCR engine'):source.inference_identity('ocr',config,verified)
+
+
 @pytest.mark.parametrize('mode,polygons,expected', [('field_roi', [], 1), ('full_image', [], 0),
     ('full_image', [[[0, 0], [4, 0], [4, 4], [0, 4]]], 1)])
 def test_onnx_field_is_explicit_and_zero_detection_never_falls_back(mode, polygons, expected):

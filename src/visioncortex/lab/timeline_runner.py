@@ -213,6 +213,7 @@ class TimelineRunner:
                 lambda raw: client.infer(raw, ref['source_kind']), model.get('temporal_display'), window_index=window['index'],
                 query_context=dynamic.query_window,frame_producer=producer)
         ref, fields, receipts, raw_results = window['input_spans'][0], [], [], []
+        panel_mapping = None
         pinned = request.get('frame_registration')
         automatic = None
         if not pinned and model.get('panel_profiles'):
@@ -256,7 +257,12 @@ class TimelineRunner:
             if region:
                 fields.append(field_candidate(region, result,display_rules=model.get('display_rules')))
             else:
-                raw_results = tokens(result)
+                # Keep whole-frame tokens while adding per-display fields.
+                # Panel positions and labels never grant instrument identity.
+                from .panel_fields import detected_fields
+                panel_fields, panel_mapping = detected_fields(result, display_rules=model.get('display_rules'))
+                fields.extend(panel_fields)
+                raw_results = tokens(dict(results=[p for p in result.get('results', []) if not p.get('panel_id')]))
         for gauge in registration.get('gauges', []) if registration else []:
             located = self.media.media.locate(ref['media_id'])
             if located['status'] != 'available' or located['version'] != ref['media_version'] or hash_file(located['path'], self.settings.max_native_bytes)[0] != ref['sha256']:
@@ -266,9 +272,15 @@ class TimelineRunner:
         if not receipts and not fields:
             raise ValueError('No OCR/geometry observations produced')
         payload = dict(fields=fields, raw_tokens=raw_results,
-                       field_mapping='verified_source_registration' if registration else 'unmapped_raw_ocr',
+                       field_mapping='verified_source_registration' if registration else
+                           'detected_panel_ocr' if panel_mapping and panel_mapping['fields'] else 'unmapped_raw_ocr',
                        frame_registration_revision=pinned['revision'] if pinned else None,
                        geometry_only=not receipts)
+        if panel_mapping is not None:
+            payload['panel_mapping'] = panel_mapping
+            payload['panel_localization'] = result.get('panel_localization')
+            payload['panel_executions'] = result.get('panel_executions')
+            payload['panel_ocr_pages'] = result.get('results')
         if automatic:
             payload['automatic_readout']=automatic
         return [dict(kind='reading', text='；'.join(t['text'] for t in raw_results)[:20000] if raw_results else '面板读数候选',

@@ -215,6 +215,12 @@ def inference_identity(kind, config, verified):
         elif settings.get('engine', 'paddleocr') != 'paddleocr':
             raise ValueError('Unknown explicit OCR engine')
         names = [settings.get('detection_checkpoint', det), settings.get('recognition_checkpoint', rec)]
+        if settings.get('panel_locator') is not None:
+            if settings.get('engine') != 'ppocr-onnx':
+                raise ValueError('Panel locator is supported only by the explicit ONNX OCR engine')
+            from panel_ocr import settings as panel_settings
+            selected['panel_locator'] = panel_settings(settings)
+            names.append(selected['panel_locator']['checkpoint'])
     elif kind == 'asr':
         engine = settings.get('engine', 'qwen3-asr')
         if engine == 'faster-whisper':
@@ -295,9 +301,14 @@ def make_ocr(root, config, verified=None):
     rec_name = settings.get('recognition_model_name', 'PP-OCRv5_mobile_rec')
     det, det_revision = checkpoint(root, settings.get('detection_checkpoint', det_name), config, verified)
     rec, rec_revision = checkpoint(root, settings.get('recognition_checkpoint', rec_name), config, verified)
+    panel_revision = None
     if engine == 'ppocr-onnx':
         from ppocr_onnx import PPOCRONNX
         model = PPOCRONNX(det, rec, settings)
+        if settings.get('panel_locator') is not None:
+            from panel_ocr import PanelOCR
+            panel, panel_revision = checkpoint(root, settings['panel_locator']['checkpoint'], config, verified)
+            model = PanelOCR(model, panel, settings)
     elif engine == 'paddleocr':
         from paddleocr import PaddleOCR
         model = PaddleOCR(device=settings.get('device', 'gpu:0'), cpu_threads=2, enable_mkldnn=False,
@@ -330,7 +341,7 @@ def make_ocr(root, config, verified=None):
                     item[key] = np.asarray(value).tolist()
             results.append(item)
         return dict(results=results, recognition_revision=rec_revision, accuracy='NOT_PROVEN', physical_action_confirmed=False)
-    return infer, det_revision+':'+rec_revision
+    return infer, det_revision+':'+rec_revision+(':'+panel_revision if panel_revision else '')
 
 
 def main(argv=None):
