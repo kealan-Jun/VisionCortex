@@ -1,6 +1,6 @@
 {
   "schema_version": "vc-lab-rule-bundle/1",
-  "revision": "vc-lab-unified-20261030.2",
+  "revision": "vc-lab-unified-20261030.3",
   "components_sha256": "5be51d3c237058c97919072431ed203e6a8f6dd207137f204fb241b1d71f5af5",
   "files": [
     {
@@ -85,6 +85,10 @@
     {
       "path": "src/field_recognition/recognition/vision_display_rules.py",
       "sha256": "fc7f9188dea6d3035bbdab7e77dabffffb1fef02803ec6f537363d4185de4113"
+    },
+    {
+      "path": "src/visioncortex/comment_layout.py",
+      "sha256": "037dfc9c0e9a45368f9241ad196e58bc3b3a63fef3184a18bf543d8e62b4a1d5"
     },
     {
       "path": "src/visioncortex/comment_readability.py",
@@ -264,7 +268,7 @@
     },
     {
       "path": "src/visioncortex/lab/native_comment_layout.py",
-      "sha256": "6625eea022b8e6cdda1e9d45248a3e199eb08c36f4232bc0d25293390b5a7682"
+      "sha256": "f7e0f6df6cc56546eaf29d8040e87fd2300c6f76b77e563cba10715882d39f24"
     },
     {
       "path": "src/visioncortex/lab/native_linked_layout.py",

@@ -49,6 +49,21 @@ EDITS = {
         ("'Comment/.Evidence/FieldRecognition/'", "'Comment/OCR/.Evidence/FieldRecognition/'", 1)],
 }
 
+# Keep existing root index entry points current without changing the frozen
+# component bytes. Inject that component's own guarded I/O functions.
+EDITS['device_day_content'].append((
+    "        _write(root / directory / 'Index.json', content_index(index['archive'], directory, entries))",
+    "        value = content_index(index['archive'], directory, entries)\n"
+    "        _write(root / directory / 'Index.json', value)\n"
+    "        if directory == 'Comment/Audio':\n"
+    "            from visioncortex.comment_layout import publish_legacy_index\n"
+    "            publish_legacy_index(root, 'Index.json', value, writer=atomic_json, reader=read_json)", 1))
+EDITS['device_day_file_index'].append((
+    "    atomic_json(root/'Comment/Audio'/'TimeIndex.json', value)",
+    "    atomic_json(root/'Comment/Audio'/'TimeIndex.json', value)\n"
+    "    from visioncortex.comment_layout import publish_legacy_index\n"
+    "    publish_legacy_index(root, 'TimeIndex.json', value, writer=atomic_json, reader=read_json)", 1))
+
 
 def bind_source(module, source):
     for old, new, expected in EDITS.get(module, []):

@@ -238,6 +238,8 @@ def publish_file_index(config, index, photos=None):
     if field_reference:
         value['field_events_file'] = field_reference
     atomic_json(root/'Comment/Audio'/'TimeIndex.json', value)
+    from .comment_layout import publish_legacy_index
+    publish_legacy_index(root, 'TimeIndex.json', value)
     # This is a mutable projection, so do not advertise an immutable content hash.
     index['time_index'] = {'path': 'Comment/Audio/TimeIndex.json', 'schema_version': value['schema_version']}
     return value
@@ -261,16 +263,17 @@ def verified_field_events_reference(config, index, root):
             'status': context.get('field_event_status', 'not_received'), 'events': context.get('events', []),
             'errors': context.get('field_event_errors', []), 'source_references': context.get('field_source_references', []),
             'association_basis': 'same_camera_actual_interval_overlap_not_action_confirmation'}
-        if value != expected:
+        canonical = {key: item for key, item in value.items() if key != '中文摘要'}
+        if canonical != expected:
             return None
         from .comment_evidence import resolve
-        saved_relative = 'Comment/.Evidence/FieldRecognition/'+digest(value)+'.json'
+        saved_relative = 'Comment/.Evidence/FieldRecognition/'+digest(canonical)+'.json'
         backend = Path(config['storage']['local_cache_root'])
         saved = resolve(root, saved_relative, backend)
         if not saved.is_file() or saved.stat().st_size > 8*1024*1024:
             return None
         saved_value, saved_observed = snapshot(saved)
-        if saved_value != value:
+        if saved_value != canonical:
             return None
         reference = observed | {'path': 'Comment/OCR/FieldEvents.json'}
         saved_ref = saved_observed | {'path': saved_relative}

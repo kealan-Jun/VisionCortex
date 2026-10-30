@@ -250,7 +250,8 @@ def snapshot(config, entry, index=None, *, anchors=None):
         expected_field_bytes = {key: field_reference[key] for key in ('path', 'sha256', 'size_bytes')}
         _require(files[field_reference['path']] == expected_field_bytes,
                  'native_field_context_reference_changed_during_read')
-        _require(json_file('Comment/.Evidence/FieldRecognition/'+digest(field_value)+'.json') == field_value
+        field_canonical = {key: item for key, item in field_value.items() if key != '中文摘要'}
+        _require(json_file('Comment/.Evidence/FieldRecognition/'+digest(field_canonical)+'.json') == field_canonical
                  and verify_artifact_cached(root, expected_field_bytes), 'native_field_context_snapshot_changed_during_read')
     # The photo consumer's heartbeat is deliberately excluded by the owning
     # FileIndexPublisher revision. Capture times, facts and refs remain exact.

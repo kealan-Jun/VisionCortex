@@ -195,7 +195,7 @@ def test_first_seal_rejects_field_reference_switch_to_another_owned_historical_s
     assert not FileIndexPublisher(case.config).tick(archives=[case.layout.name])['errors']
     index = with_partial_understandings(case.config, read_json(case.layout.index))
     assert publish(case.config, case.entry, index)['status'] == 'recovered_published'
-    path = case.layout.root/'Comment/FieldEvents.json'
+    path = case.layout.root/'Comment/OCR/FieldEvents.json'
     current = path.read_bytes()
     # Two real owner-produced temporary snapshots; only one belongs to the
     # current association. Valid historical bytes cannot replace that identity.
@@ -231,8 +231,8 @@ def test_late_archived_ocr_keeps_published_native_understanding_and_adds_only_cu
     old_proof = (folder(case.config, case.entry)/'Published.json').read_bytes()
     old_mu = read_json(case.layout.root/'MultimodalUnderstanding/Index.json')['entries'][0]['content']
     before_mu = read_json(safe_child(case.layout.root, old_mu))
-    assert not (case.layout.root/'Comment/FieldEvents.json').is_file() or not read_json(
-        case.layout.root/'Comment/FieldEvents.json')['events']
+    assert not (case.layout.root/'Comment/OCR/FieldEvents.json').is_file() or not read_json(
+        case.layout.root/'Comment/OCR/FieldEvents.json')['events']
     fr = Path(case.config['device_day']['field_recognition']['archive_root'])
     atomic_json(fr/case.layout.name/'DailyReport/DailyReport.json', {'events': [
         {'event_id': 'late-archived-reading', 'category': 'Continuous', 'result': 'Photos/Evidence.json',
@@ -257,7 +257,7 @@ def test_late_archived_ocr_keeps_published_native_understanding_and_adds_only_cu
     assert current_mu['内容记录']['溯源']['历史执行来源'] == before_mu['内容记录']['溯源']['历史执行来源']
     assert current_mu['内容记录']['关联更新状态']['current_association'] == 'pending_verification'
     assert len(current_mu['内容记录']['仪器与现场记录']) == 1
-    field = read_json(case.layout.root/'Comment/FieldEvents.json')
+    field = read_json(case.layout.root/'Comment/OCR/FieldEvents.json')
     event, = field['events']
     assert event['capture_device_id'] == case.record['camera_key'] and event['instrument_id'] == 'instrument-native'
     assert event['payload']['normalized_values'] == [{'name': 'owned synthetic reading', 'value': '12.30', 'unit': None}]
@@ -265,7 +265,7 @@ def test_late_archived_ocr_keeps_published_native_understanding_and_adds_only_cu
     daily = read_json(case.layout.root/'LaboratoryDailyReport/LaboratoryDailyReport.json')
     assert len(daily['全天记录']['现场事件时间线']) == 1
     assert len(daily['全天记录']['全天时间线']) == len(source['segments'])
-    assert read_json(case.layout.root/'Comment/TimeIndex.json')['field_events_file']['path'] == 'Comment/FieldEvents.json'
+    assert read_json(case.layout.root/'Comment/TimeIndex.json')['field_events_file']['path'] == 'Comment/OCR/FieldEvents.json'
     assert (folder(case.config, case.entry)/'Published.json').read_bytes() == old_proof
     assert checked(case.config, case.entry)['status'] == 'publication_verification_pending'
     assert queue_rows(case) == before_queue
@@ -359,7 +359,7 @@ def test_first_publication_proof_refuses_inconsistent_direct_user_fields(deliver
     mu = read_json(case.layout.root/'MultimodalUnderstanding/Index.json')['entries'][0]['content']
     candidate = index['segments'][0]
     if damage == 'field_events':
-        path = case.layout.root/'Comment/FieldEvents.json'
+        path = case.layout.root/'Comment/OCR/FieldEvents.json'
     elif damage.startswith('mu_index_'):
         path = case.layout.root/'MultimodalUnderstanding/Index.json'
     elif damage == 'time_index_entry':

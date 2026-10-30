@@ -81,7 +81,8 @@ def test_atomic_file_publication_keeps_five_directories_and_original_index(tmp_p
     value = publish_file_index(cfg, source)
     assert read_json(root/'Comment/TimeIndex.json') == value
     assert set(p.name for p in root.iterdir()) == set(DIRECTORIES)
-    assert source['time_index']['path'] == 'Comment/TimeIndex.json'
+    assert source['time_index']['path'] == 'Comment/Audio/TimeIndex.json'
+    assert read_json(root/'Comment/Audio/TimeIndex.json') == value
     assert source['recordings'] == index()['recordings']
     assert not list(root.rglob('*.partial'))
 
@@ -148,7 +149,7 @@ def test_readable_cache_drops_dense_cv_but_pointer_update_preserves_canonical(tm
     published = read_json(path)
     pointer = published.pop('time_index')
     assert published == source  # Only the pointer may alter canonical evidence.
-    assert pointer['path'] == 'Comment/TimeIndex.json'
+    assert pointer['path'] == 'Comment/Audio/TimeIndex.json'
     before = path.stat().st_mtime_ns
     assert publisher.tick()['unchanged'] == 1
     assert path.stat().st_mtime_ns == before

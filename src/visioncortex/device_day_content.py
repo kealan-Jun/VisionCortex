@@ -476,6 +476,10 @@ def publish_content(config, index):
                 'model_invoked': False, 'physical_action_confirmed': False})
         visual_entries.append(visual_entry(value, relative))
     for directory, entries in [('Comment/Audio', audio_entries), ('MultimodalUnderstanding', visual_entries)]:
-        _write(root / directory / 'Index.json', content_index(index['archive'], directory, entries))
+        value = content_index(index['archive'], directory, entries)
+        _write(root / directory / 'Index.json', value)
+        if directory == 'Comment/Audio':
+            from .comment_layout import publish_legacy_index
+            publish_legacy_index(root, 'Index.json', value)
     return {'audio': audio_entries, 'multimodal': visual_entries, 'digest': digest([audio_entries, visual_entries]),
             **({'clip_delivery': clip_progress} if clip_progress is not None else {})}
