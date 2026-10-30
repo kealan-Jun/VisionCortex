@@ -1,6 +1,7 @@
 """New clock/snapshot recovery counterexamples; no model, real camera or NAS."""
 from contextlib import contextmanager
 from dataclasses import replace
+from datetime import datetime, timezone
 import hashlib
 import json
 
@@ -25,6 +26,36 @@ def publisher(s):
     (archive / '.System/ArchiveContract.json').write_bytes(contract_bytes())
     settings = replace(s['settings'], source_root=archive, unified_archive_required=True, timeline_publish=True)
     return TimelinePublication(s['runtime'], settings)
+
+
+def test_rollout_cutoff_keeps_old_snapshots_and_publishes_new_revision_only(scene):
+    s=scene
+    source=media(s,'rollout-photo',kind='photo')
+    submit(s,source,'ocr',[dict(kind='reading',text='first candidate',
+        spans=[dict(media_id=source['media_id'],start_seconds='0',end_seconds='0')],
+        payload=dict(raw_tokens=[dict(text='12.3')],fields=[]))])
+    old=s['runtime'].views.snapshot('2026-10-29')
+    configured=publisher(s)
+    cutoff=datetime.now(timezone.utc)
+    rollout=TimelinePublication(s['runtime'],configured.settings,not_before=cutoff)
+    assert rollout.tick() is None
+    second=media(s,'rollout-late-photo',kind='photo')
+    submit(s,second,'ocr',[dict(kind='reading',text='second candidate',
+        spans=[dict(media_id=second['media_id'],start_seconds='0',end_seconds='0')],
+        payload=dict(raw_tokens=[dict(text='12.4')],fields=[]))])
+    new=s['runtime'].views.snapshot('2026-10-29')
+    assert new['revision']>old['revision']
+    actual=rollout.tick();assert actual['revision']==new['revision']
+    assert rollout.tick() is None  # Older unpublished revisions remain excluded.
+    with s['core'].db.transaction(readonly=True) as conn:
+        retained=conn.execute('SELECT document FROM hj_daily_report WHERE customer_id=%s AND day=%s AND revision=%s',
+            (s['core'].customer,'2026-10-29',old['revision'])).fetchone()['document']
+    assert retained==old['document']
+
+
+def test_rollout_cutoff_requires_explicit_timezone(scene):
+    with pytest.raises(ValueError,match='timezone'):
+        TimelinePublication(scene['runtime'],scene['settings'],not_before='2026-10-30T00:00:00')
 
 
 def test_new_reported_but_unverified_legacy_time_publishes_only_received_partition(scene, tmp_path):
@@ -64,7 +95,8 @@ def test_new_reported_but_unverified_legacy_time_publishes_only_received_partiti
     ref = bindings['comment_artifacts'][0]
     evidence = json.loads((archive / ref['evidence']).read_text())
     assert evidence['event_at'] is None and evidence['archive_day_is_not_physical_event_time']
-    assert 'UnknownTime_' in ref['evidence']
+    assert '/09-00-00.000_' in ref['evidence']
+    assert evidence['folder_time_basis']=='source_reported_display_only_uncalibrated'
     assert not (archive / '2001-02-03_fixture-camera-0').exists()
     (tmp_path / 'UnsupportedReportedClockProof.json').write_text(json.dumps(dict(
         snapshot=snapshot, publication=actual, bindings=bindings, actual_model_calls=0), indent=2) + '\n')

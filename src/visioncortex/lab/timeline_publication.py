@@ -12,7 +12,7 @@ from psycopg.types.json import Jsonb
 
 from .archive_layout import day_directory, verify_archive_contract
 from .components import pipeline_module
-from .domain import Conflict, clean, fingerprint
+from .domain import Conflict, clean, fingerprint, instant
 from .media import hash_file, safe_path
 from .native_timeline_links import association_path, build_sidecar
 from .rules import Rules
@@ -25,9 +25,12 @@ from .timeline_native_artifacts import artifact_documents
 
 
 class TimelinePublication:
-    def __init__(self, runtime, settings):
+    def __init__(self, runtime, settings, *, not_before=None):
         self.runtime, self.settings = runtime, settings
         self.core, self.customer = runtime.timeline.core, runtime.timeline.customer
+        # A rollout may opt out of re-publishing older snapshots under its new
+        # rule identity. This is a publication clock, never an event-time claim.
+        self.not_before = instant(not_before) if not_before is not None else None
 
     def tick(self):
         if self.settings.processing_profile != 'timeline-v1' or not self.settings.timeline_publish:
@@ -45,7 +48,7 @@ class TimelinePublication:
         with (self.settings.runtime_root / 'timeline-publication.lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             with self.core.db.transaction(readonly=True) as conn:
-                snapshot = conn.execute('SELECT r.* FROM hj_daily_report r WHERE r.customer_id=%s AND NOT EXISTS(SELECT 1 FROM hj_timeline_publication p WHERE p.customer_id=r.customer_id AND p.day=r.day AND p.revision=r.revision AND p.destination_fingerprint=%s) ORDER BY r.day DESC,r.revision DESC LIMIT 1', (self.customer, destination)).fetchone()
+                snapshot = conn.execute('SELECT r.* FROM hj_daily_report r WHERE r.customer_id=%s AND (%s::timestamptz IS NULL OR r.created_at>=%s) AND NOT EXISTS(SELECT 1 FROM hj_timeline_publication p WHERE p.customer_id=r.customer_id AND p.day=r.day AND p.revision=r.revision AND p.destination_fingerprint=%s) ORDER BY r.day DESC,r.revision DESC LIMIT 1', (self.customer, self.not_before, self.not_before, destination)).fetchone()
                 if not snapshot:
                     return None
                 start, end = day_bounds(snapshot['day'])
