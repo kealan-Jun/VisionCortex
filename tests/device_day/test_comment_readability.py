@@ -1,0 +1,79 @@
+"""Readable Comment preserves words, clocks, machine candidates and paths."""
+from copy import deepcopy
+import json
+from pathlib import Path
+import pytest
+
+from visioncortex.comment_readability import readings_document, readings_text, transcript_text
+from visioncortex.lab.comment_presentation import CommentPresentation, supported
+
+
+def test_saved_speech_is_readable_without_changing_json_or_inventing_a_speaker():
+    value = dict(date='2026-10-29', device='fixture-camera', audio=dict(time_basis='recorder_audio_clock'),
+                 sentences=[dict(start_us=1793250345760000, end_us=1793250346920000, text='原话保留。')])
+    before = deepcopy(value)
+    text = transcript_text(value).decode()
+    assert '原话保留。' in text and '说话人：未确认' in text and '13:05:45.760' in text
+    assert value == before
+    value['capture_time_status'] = 'unknown_or_uncalibrated'
+    value['sentences'][0].update(source_start_seconds='3.16', source_end_seconds='4.32')
+    assert '录音内 3.16—4.32 秒' in transcript_text(value).decode()
+    assert '13:05:45.760' not in transcript_text(value).decode()
+
+
+@pytest.mark.parametrize('status,outcome,audio,expected', [
+    ('completed','no_audio','no_input','未取得音频'),
+    ('failed','error','provided','转写失败'),
+    ('running',None,'provided','尚未完成'),
+    ('completed','transcribed','provided','转写结果为空'),
+])
+def test_missing_failed_pending_and_empty_speech_are_distinct(status,outcome,audio,expected):
+    text = transcript_text(dict(status=status,outcome=outcome,audio=dict(status=audio))).decode()
+    assert expected in text
+
+
+def reading():
+    return dict(schema='field-numeric-observations/1', camera_id='any-camera',
+                event_at=None,capture_time_status='unknown_or_uncalibrated',
+                source_refs={'one':dict(source_reported_at='2026-10-29T17:41:35+08:00',source_relative_path='MetaData/Photos/photo.jpg')},
+                readings=[dict(value=None,unit=None,text='12E8',instrument_id=None)],
+                中文摘要=dict(已确认业务读数=0,候选条数=1,识别结果=[dict(识别原文='12E8',设备归属='未绑定或未核验',待核对原因=['字段未确定'])]))
+
+
+def test_raw_tokens_do_not_become_values_or_calibrated_times():
+    original = reading(); before = deepcopy(original)
+    presented = readings_document(original)
+    assert original == before and presented['readings'] == original['readings']
+    assert '尚未校准' in presented['中文摘要']['时间']
+    assert presented['中文摘要']['识别原文'] == ['12E8']
+    assert presented['中文摘要']['设备归属'] == '未关联或未核验'
+    assert presented['中文摘要']['已确认业务读数'] == 0
+    assert readings_document(presented) == presented
+    encoded=readings_text(original).decode()
+    assert encoded.index('"时间"') < encoded.index('"识别结果"')
+    assert encoded.index('"读数概况"') < encoded.index('"识别结果"')
+    assert readings_document({'schema':'other','readings':[]}) == {'schema':'other','readings':[]}
+
+
+def test_only_existing_comment_members_change_and_history_is_recoverable(tmp_path):
+    root=tmp_path/'archive'; history=tmp_path/'history'; root.mkdir()
+    relative='2026-10-29_camera/Comment/OCR/VoicePhotoReadings/event/Readings.json'
+    path=root/relative; path.parent.mkdir(parents=True)
+    original=(json.dumps(reading(),ensure_ascii=False)+'\n').encode(); path.write_bytes(original)
+    directories={str(p.relative_to(root)) for p in root.rglob('*') if p.is_dir()}
+    class Guard:
+        @staticmethod
+        def guarded_atomic(path,blocks): return False
+    presenter=CommentPresentation(history)
+    first=presenter.write(root,relative,original,Guard)
+    assert first['presentation_revision'] and json.loads(path.read_bytes())['readings']==reading()['readings']
+    assert directories=={str(p.relative_to(root)) for p in root.rglob('*') if p.is_dir()}
+    assert any(p.read_bytes()==original for p in history.glob('*.bytes'))
+    assert presenter.write(root,relative,original,Guard)['sha256']==first['sha256']
+    changed=reading(); changed['readings'][0]['value']='999'
+    with pytest.raises(ValueError,match='machine evidence'):
+        presenter.write(root,relative,json.dumps(changed).encode(),Guard)
+    assert not supported('day/ProcessedClips/Clips/event/Readings.json')
+    assert not supported('day/Comment/Bindings.json')
+    assert not supported('../day/Comment/OCR/event/Readings.json')
+    assert Path(root/relative).is_file()

@@ -11,7 +11,7 @@ from visioncortex.device_day_transcript_publication import TranscriptPublication
 
 @pytest.fixture
 def speech(device_config):  # noqa: F811
-    device_config['device_day']['inplace_preprocessing'] = True
+    device_config['device_day'].update(inplace_preprocessing=True, defer_audio_day_publication=True)
     capture(device_config)
     record, layout = item_and_layout(device_config)
     backend = FakeModels()
@@ -62,7 +62,7 @@ def test_invalid_receipt_never_becomes_readable(speech, damage):
         atomic_json(path, value)
     with pytest.raises(ValueError):
         publish_one(runner, record)
-    assert not list(layout.comments.glob('*/Transcript.json'))
+    assert not list((layout.comments/'Audio').glob('*/Transcript.json'))
 
 
 def test_failed_projection_retries_after_restart_without_retranscription(speech, monkeypatch):
@@ -87,14 +87,14 @@ def test_live_stt_lock_defers_projection(speech):
     with exclusive(runner.runtime_root / 'locks' / f"{record['recording_id']}.stt.lock"):
         result = TranscriptPublication().tick(runner)['results'][0]
     assert result['status'] == 'failed'
-    assert not list(layout.comments.glob('*/Transcript.json'))
+    assert not list((layout.comments/'Audio').glob('*/Transcript.json'))
 
 
 def test_queue_generation_changed_rejects_projection(speech):
     runner, record, layout, _ = speech
     with pytest.raises(ValueError, match='queue generation'):
         publish_one(runner, record, queue_token='stale')
-    assert not list(layout.comments.glob('*/Transcript.json'))
+    assert not list((layout.comments/'Audio').glob('*/Transcript.json'))
 
 
 def test_service_publishes_speech_while_day_index_worker_is_blocked(speech, monkeypatch):
@@ -119,7 +119,7 @@ def test_service_publishes_speech_while_day_index_worker_is_blocked(speech, monk
     try:
         assert blocked.wait(5)
         deadline = time.monotonic() + 5
-        while not list(layout.comments.glob('*/Transcript.json')):
+        while not list((layout.comments/'Audio').glob('*/Transcript.json')):
             assert time.monotonic() < deadline, service.last_result
             time.sleep(.02)
         assert not release.is_set() and not layout.index.exists()
@@ -159,7 +159,7 @@ def test_standalone_finishes_current_projection_after_stop_signal(speech, monkey
     monkeypatch.setattr(module, 'publish_one', publish)
     module.serve('owned-test-config.yaml', stop)
     assert events == ['active'] and len(calls) == 1
-    assert list(layout.comments.glob('*/Transcript.json'))
+    assert list((layout.comments/'Audio').glob('*/Transcript.json'))
     assert read_json(runner.runtime_root / 'TranscriptProjection' / 'Service.json')['status'] == 'stopped'
     assert not layout.index.exists()
 

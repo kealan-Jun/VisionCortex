@@ -250,13 +250,8 @@ def transcript_documents(archive, record, context=None):
     value['录音时间线'] = [{'开始时间': timestamp(s['start_us']), '结束时间': timestamp(s['end_us']),
         '原话': s.get('text'), '实验员': experimenter(context, common['device'], s['start_us'], s['end_us']),
         '转写来源': s.get('transcript_path')} for s in value['sentences']]
-    lines = [f"设备：{common['device']}  日期：{common['date']}",
-             f"录音识别状态：{value['status']} / {value['outcome']}",
-             '自动语音转写。识别为空不证明录音没有语音。', '']
-    for row in value['sentences']:
-        stamp = datetime.fromtimestamp(row['start_us']/1e6, ZoneInfo('Asia/Shanghai')).isoformat(timespec='milliseconds')
-        lines.append(f"[{stamp}] {row['text']}")
-    return value, ('\n'.join(lines) + '\n').encode()
+    from .comment_readability import transcript_text
+    return value, transcript_text(value)
 
 
 def publish_transcript(config, archive, record, context=None):

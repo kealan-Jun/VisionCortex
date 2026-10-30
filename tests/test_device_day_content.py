@@ -105,7 +105,7 @@ def test_background_publisher_preserves_cv_index_and_updates_report(device_confi
     device_config['device_day']['readable_content_enabled'] = True
     FileIndexPublisher(device_config).tick()
     assert read_json(layout.index) == original
-    assert read_json(layout.comments/'TimeIndex.json')['readable_content']['multimodal']
+    assert read_json(layout.comments/'Audio'/'TimeIndex.json')['readable_content']['multimodal']
     assert read_json(layout.reports/'LaboratoryDailyReport.json')['entries'][0]['understanding_status'] == 'completed'
     assert backend.vision_calls == backend.semantic_calls == 1
 
