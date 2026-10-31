@@ -491,6 +491,11 @@ class NumericVideoReader:
                 "Numeric cache key must match exact equipment/panel/field/track scope"
             )
         source_ref, timestamp = _reference(source_ref)
+        physical_context = source_ref.get("dynamic_physical_key")
+        if physical_context is not None and (
+            not isinstance(physical_context, str) or not 0 < len(physical_context) <= 256
+        ):
+            raise ValueError("Bounded physical context key required")
         native_mode = layout.get("numeric_native_ocr") is True
         if native_mode:
             import copy
@@ -537,7 +542,7 @@ class NumericVideoReader:
         boxes = digit_boxes(image, layout)
         signature = hashlib.sha256(
             json.dumps(
-                [identity, layout, source_ref["source_sha256"], image.shape],
+                [identity, layout, source_ref["source_sha256"], image.shape, physical_context],
                 sort_keys=True,
                 allow_nan=False,
             ).encode()
@@ -554,6 +559,7 @@ class NumericVideoReader:
             budget_key = (
                 tuple(key),
                 source_ref["source_sha256"],
+                physical_context,
                 hashlib.sha256(json.dumps(layout, sort_keys=True).encode()).hexdigest(),
             )
             if budget_key not in self.native_costs:
@@ -648,19 +654,74 @@ class NumericVideoReader:
                 or layout.get("numeric_native_projective_decimal") is not True
             ):
                 raise ValueError("Point selection requires typed source-stroke and point verification")
+            change_trigger = layout.get("numeric_native_change_trigger", False)
+            if type(change_trigger) is not bool or change_trigger and not point_selection:
+                raise ValueError("Change trigger requires explicit native point selection")
+            wait_raw = layout.get("numeric_initial_quality_wait_seconds", 0)
+            if type(wait_raw) not in {int, float, str} or len(str(wait_raw)) > 16:
+                raise ValueError("Bounded initial quality wait required")
+            quality_wait = Fraction(str(wait_raw))
+            if not 0 <= quality_wait <= Fraction(".25") or quality_wait and not point_selection:
+                raise ValueError("Initial quality wait requires point selection and at most .25 seconds")
+            change_retry = False
+            change_support = []
+            if (change_trigger or quality_wait) and ocr is not None:
+                frame["native_probe"] = point_probe(native)
+                probe = frame["native_probe"]
+                shape_signature = probe.get("positive_shape_signature")
+                if (change_trigger and probe.get("positive_shape_consistent") is True
+                        and shape_signature != native_budget.get("last_shape_signature")
+                        and native_budget.get("last_shape_signature") is not None
+                        and native_budget.get("last_shape_context") == source_ref.get("dynamic_physical_key")):
+                    change_support = [
+                        other for other in s.frames[:-1]
+                        if timestamp-Fraction(".25") <= other["pts"] < timestamp
+                        and other["source"].get("dynamic_physical_key") == source_ref.get("dynamic_physical_key")
+                        and (other["source"].get("source_frame_pixels_sha256")
+                             or other["source"].get("original_frame_rgb_sha256"))
+                        != (source_ref.get("source_frame_pixels_sha256")
+                            or source_ref.get("original_frame_rgb_sha256"))
+                        and other.get("native_probe", {}).get("positive_shape_consistent") is True
+                        and other["native_probe"].get("positive_shape_signature") == shape_signature
+                    ]
+                    last_retry = native_budget.get("last_change_retry")
+                    change_retry = bool(change_support) and (
+                        last_retry is None or timestamp-last_retry >= 1
+                    )
             has_fallback = fallback or support_view
             # Candidate admission needs native emission, not half a second of
             # uninterrupted tracking. Pixel resets must not replenish budget.
             due = s.count >= 3 and (
                 native_budget["last"] is None or timestamp - native_budget["last"] >= 1
             )
+            change_retry = change_retry and not due
+            due = s.count >= 3 and (due or change_retry)
+            waiting_quality = False
+            if (due and quality_wait and native_budget["last"] is None
+                    and timestamp-s.first < quality_wait and ocr is not None):
+                ready = any(
+                    timestamp-Fraction(".25") <= item["pts"] <= timestamp
+                    and all(part["visible"] for part in item["native_support"])
+                    and item.get("native_probe", {}).get("positive_shape_consistent") is True
+                    and len(item["native_probe"].get("points", [])) == 1
+                    for item in s.frames
+                )
+                waiting_quality = not ready
+                due = due and ready
             if due and s.calls < limit:
                 s.last_infer = timestamp
                 eligible = [
                     f
                     for f in s.frames
                     if all(v["visible"] for v in f["native_support"])
+                    and (not point_selection or timestamp - Fraction(".25") <= f["pts"] <= timestamp)
                 ]
+                if change_retry:
+                    # A brighter old state cannot win a change-triggered read.
+                    # The signature schedules/selects pixels, never a number.
+                    eligible = [item for item in eligible
+                                if item.get("native_probe", {}).get("positive_shape_signature") == shape_signature
+                                and item["native_probe"].get("positive_shape_consistent") is True]
                 best = frame
                 reply = {}
                 replies = []
@@ -688,7 +749,7 @@ class NumericVideoReader:
                     if point_selection and ocr is not None:
                         probed_frames = []
                         for item in sorted(eligible, key=native_rank, reverse=True)[:7]:
-                            probe = point_probe(item["native"])
+                            probe = item.get("native_probe") or point_probe(item["native"])
                             ref = item["native"]["source"]
                             point_probes.append(dict(
                                 source={k: ref[k] for k in (
@@ -715,6 +776,15 @@ class NumericVideoReader:
                         s.calls += 1
                         native_budget["calls"] = s.calls
                         native_budget["last"] = timestamp
+                        if change_trigger:
+                            selected_probe = best.get("native_probe") or point_probe(best["native"])
+                            native_budget["last_shape_signature"] = (
+                                selected_probe.get("positive_shape_signature")
+                                if selected_probe.get("positive_shape_consistent") is True else None
+                            )
+                            native_budget["last_shape_context"] = source_ref.get("dynamic_physical_key")
+                            if change_retry:
+                                native_budget["last_change_retry"] = timestamp
                 assessed = review(best["native"], reply)
                 if eligible and ocr is not None:
                     replies.append(dict(view="native", reply=reply, review=assessed))
@@ -787,8 +857,16 @@ class NumericVideoReader:
                     ocr_score=reply.get("score"),
                     **(dict(ocr_views=replies) if has_fallback else {}),
                     **(dict(native_frame_selection=dict(
-                        method="same_source_positive_shape_and_point_then_emission/2", max_point_probes=7,
+                        method="recent_same_source_positive_shape_and_point/4" if change_trigger else "recent_same_source_positive_shape_and_point/3", max_point_probes=7,
                         probes=point_probes, numeric_pixels_from_one_frame=True,
+                        maximum_anchor_age_seconds=.25,
+                        selected_anchor_age_seconds=float(timestamp - best["pts"]),
+                        **(dict(initial_quality_wait_seconds=float(quality_wait)) if quality_wait else {}),
+                        **(dict(trigger="positive_shape_change" if change_retry else "periodic",
+                                change_support_refs=[item["source"] for item in change_support[-2:]],
+                                positive_shape_is_numeric_answer=False,
+                                additional_change_reads_per_second=1)
+                           if change_trigger else {}),
                     )) if point_selection else {}),
                     best_frame_selection_window_refs=[f["source"] for f in s.frames],
                     fused_digit_pixels=False,
@@ -817,7 +895,8 @@ class NumericVideoReader:
                 selected_span_seconds=0.0,
                 buffer_bytes=self.buffer_bytes,
                 ocr_port_calls=s.calls,
-                rejection_reasons=["collecting_continuous_native_frames"],
+                rejection_reasons=["waiting_for_source_quality" if waiting_quality
+                                   else "collecting_continuous_native_frames"],
             )
         if due and layout.get("glyph_adapter") is not None:
             from .glyph_adapter import recognize

@@ -16,10 +16,16 @@ from .temporal_registration import normalized_box
 
 class SourcePanelTracker:
     def __init__(self, image, roi_box, dynamic_boxes, *, required_boxes=None,
-                 refine_stable_translation=False):
+                 refine_stable_translation=False, motion_digit_boxes=None,
+                 scale_compatible_reacquisition=False):
         if type(refine_stable_translation) is not bool:
             raise ValueError("Explicit stable-refinement boolean required")
         self.refine_stable_translation = refine_stable_translation
+        if type(scale_compatible_reacquisition) is not bool or (
+            scale_compatible_reacquisition and motion_digit_boxes is None
+        ):
+            raise ValueError("Scale-compatible search requires registered field-motion geometry")
+        self.scale_compatible_reacquisition = scale_compatible_reacquisition
         self.shape = image.shape
         if image.dtype != np.uint8 or image.ndim != 3 or image.shape[2] != 3:
             raise ValueError("Source tracker requires uint8 BGR pixels")
@@ -32,6 +38,18 @@ class SourcePanelTracker:
                 "Bounded panel and explicit changing-field exclusions required"
             )
         self.reference_shape = (yy - y, xx - x, 3)
+        if motion_digit_boxes is not None and (
+            not isinstance(motion_digit_boxes, list) or not 1 <= len(motion_digit_boxes) <= 12
+        ):
+            raise ValueError("Bounded registered digit geometry required for field motion")
+        self.motion_digit_boxes = [
+            normalized_box(d.get("box") if isinstance(d, dict) else d, self.reference_shape)
+            for d in motion_digit_boxes
+        ] if motion_digit_boxes is not None else None
+        if self.motion_digit_boxes and any(
+            c-a < 4 or d-b < 12 for a, b, c, d in self.motion_digit_boxes
+        ):
+            raise ValueError("Registered reference digits lack native resolution")
         # Optional source-registered critical fields permit a surrounding
         # faceplate margin to leave the sensor, never any required field pixel.
         self.required_boxes = (
@@ -80,6 +98,7 @@ class SourcePanelTracker:
         self.last_reacquisition = -15
         self.last_failure = None
         self.pending_flow_frames = 0
+        self.flow_reference_matrix = None
         self.reference_sha256 = hashlib.sha256(image.tobytes()).hexdigest()
 
     @property
@@ -91,6 +110,7 @@ class SourcePanelTracker:
             self.reference_points,
             self.current_points,
             self.descriptors,
+            self.flow_reference_matrix,
         ]
         return sum(
             a.nbytes
@@ -101,10 +121,48 @@ class SourcePanelTracker:
     def _fit(self, current, reference, image, method):
         if len(current) < 8:
             return None, "insufficient_stable_structure"
-        matrix, inliers = cv2.findHomography(current, reference, cv2.RANSAC, 1.5)
+        # Consecutive-frame tracking uses a constrained camera-motion model.
+        # Sparse coverage must not extrapolate a free projective distortion.
+        # Verified descriptor/scale recovery still supports projective poses.
+        constrained = bool(self.motion_digit_boxes and method == "source_panel_bidirectional_flow/1")
+        if constrained:
+            target = reference
+            threshold = 1.5
+            if self.flow_reference_matrix is not None:
+                target = cv2.perspectiveTransform(
+                    reference[None], np.linalg.inv(self.flow_reference_matrix)
+                )[0]
+                # RANSAC fits in previous-source pixels, while the public
+                # tolerance is in original-reference pixels. Convert units;
+                # zoom must not silently make that fit tolerance less strict.
+                h = self.flow_reference_matrix
+                denom = target @ h[2, :2] + h[2, 2]
+                if not np.isfinite(denom).all() or np.abs(denom).min() < 1e-8:
+                    return None, "nonfinite_relative_motion_scale"
+                numerator = target @ h[:2, :2].T + h[:2, 2]
+                jacobian = (h[:2, :2][None] * denom[:, None, None]
+                            - numerator[:, :, None] * h[2, :2][None, None]) / denom[:, None, None]**2
+                if not np.isfinite(jacobian).all():
+                    return None, "nonfinite_relative_motion_scale"
+                expansion = float(np.linalg.svd(jacobian, compute_uv=False)[:, 0].max())
+                if not np.isfinite(expansion):
+                    return None, "nonfinite_relative_motion_scale"
+                threshold /= max(1., expansion)
+            matrix, inliers = cv2.estimateAffinePartial2D(
+                current, target, method=cv2.RANSAC, ransacReprojThreshold=threshold
+            )
+            if matrix is not None:
+                matrix = np.vstack([matrix, [0, 0, 1]])
+                if self.flow_reference_matrix is not None:
+                    matrix = self.flow_reference_matrix @ matrix
+        else:
+            matrix, inliers = cv2.findHomography(current, reference, cv2.RANSAC, 1.5)
         if matrix is None or not np.isfinite(matrix).all():
             return None, "degenerate_structure_fit"
         good = inliers.ravel().astype(bool)
+        if constrained:
+            projected = cv2.perspectiveTransform(current[None], matrix)[0]
+            good &= np.linalg.norm(projected-reference, axis=1) <= 1.5
         if good.sum() < 8 or good.mean() < 0.65:
             return None, "insufficient_structure_inliers"
         x, y, xx, yy = self.box
@@ -149,7 +207,25 @@ class SourcePanelTracker:
             if visible_area < cv2.contourArea(polygon) * 0.5:
                 return None, "insufficient_visible_panel_context"
         area_ratio = cv2.contourArea(polygon) / ((xx - x) * (yy - y))
-        if not 0.5 <= area_ratio <= 2:
+        glyph_resolution = []
+        if self.motion_digit_boxes:
+            # A wearable camera can move while the numeric field remains
+            # observable. Use actual source resolution and the existing ROI
+            # byte/pixel budget, retaining every match/appearance/bounds gate.
+            for a, b, c, d in self.motion_digit_boxes:
+                glyph = np.float32([[[x+a, y+b], [x+c, y+b], [x+c, y+d], [x+a, y+d]]])
+                native = cv2.perspectiveTransform(glyph, np.linalg.inv(matrix))[0]
+                if (not np.isfinite(native).all() or not cv2.isContourConvex(native)
+                        or cv2.contourArea(native, oriented=True) <= 0):
+                    return None, "native_registered_digit_geometry"
+                if ((native < 0).any() or (native[:, 0] >= w).any() or (native[:, 1] >= h).any()):
+                    return None, "native_registered_digit_clipped"
+                height = min(np.linalg.norm(native[3]-native[0]), np.linalg.norm(native[2]-native[1]))
+                width = min(np.linalg.norm(native[1]-native[0]), np.linalg.norm(native[2]-native[3]))
+                if height < 12 or width < 4:
+                    return None, "native_registered_digit_resolution"
+                glyph_resolution.append(dict(width=float(width), height=float(height)))
+        elif not 0.5 <= area_ratio <= 2:
             return None, "panel_scale_gate"
         projected = cv2.perspectiveTransform(current[None], matrix)[0]
         error = np.linalg.norm(projected - reference, axis=1)[good]
@@ -208,6 +284,11 @@ class SourcePanelTracker:
                 dynamic_features_excluded=True,
                 equipment_identity_inferred=False,
                 reacquired_after_loss=self.last_failure is not None,
+                **(dict(pose_gate="native_registered_digit_resolution_and_ROI_budget/1",
+                        source_panel_area_ratio=float(area_ratio),
+                        structural_motion_model="relative_similarity" if constrained else "projective",
+                        native_registered_digit_pixels=glyph_resolution)
+                   if self.motion_digit_boxes else {}),
                 **(
                     dict(
                         outer_context_clipped=clipped,
@@ -311,6 +392,12 @@ class SourcePanelTracker:
                 result, reason = self._fit(
                     current, reference, image, "source_panel_descriptor_reacquisition/1"
                 )
+                if result is None and self.scale_compatible_reacquisition:
+                    from .source_reacquisition import reacquire
+
+                    result, reason = reacquire(self, image, gray, current, reference)
+                    diagnostics["scale_compatible_search"] = True
+                    diagnostics["scale_compatible_search_rejection"] = reason
         self.previous_gray = gray
         if result is None:
             self.pending_flow_frames += 1
@@ -333,6 +420,10 @@ class SourcePanelTracker:
         self.current_points = result.pop("current")
         self.reference_points = result.pop("reference")
         matrix = result.pop("matrix_full")
+        # Retain geometry only. Relative camera motion preserves a verified
+        # perspective pose without extrapolating a new projective warp from a
+        # shrinking one-sided feature set. Every current-frame gate still runs.
+        self.flow_reference_matrix = matrix.copy()
         # A monotonically shrinking feature set eventually loses even an
         # unchanged panel. New points must match the original stable structure,
         # rather than accumulating coordinates from a drifting chained fit.
@@ -411,6 +502,7 @@ class SourcePanelTracker:
 def align_native_roi(image, registration, source_ref):
     """Validate the source-bound tracker result before temporal OCR consumes it."""
     from .source_refinement import METHOD, verified
+    from .source_reacquisition import METHOD as SCALE_METHOD, verified as scale_verified
 
     if (
         registration.get("accepted") is not True
@@ -420,9 +512,11 @@ def align_native_roi(image, registration, source_ref):
         not in {
             "source_panel_bidirectional_flow/1",
             "source_panel_descriptor_reacquisition/1",
+            SCALE_METHOD,
             METHOD,
         }
         or registration.get("method") == METHOD and not verified(registration)
+        or registration.get("method") == SCALE_METHOD and not scale_verified(registration)
         or registration.get("input_bgr_sha256")
         != hashlib.sha256(image.tobytes()).hexdigest()
         or registration.get("upright_frame_bgr_sha256")

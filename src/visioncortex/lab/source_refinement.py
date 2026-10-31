@@ -76,11 +76,14 @@ def refine(image, registration, reference, stable_mask):
 
 
 def verified(registration):
+    from .source_reacquisition import METHOD as SCALE_METHOD, verified as scale_verified
+
     proof = registration.get("stable_translation_refinement", {})
     shift = np.asarray(proof.get("translation_pixels"), dtype=float)
     return bool(
-        registration.get("initial_structure_method") in {
+        (registration.get("initial_structure_method") in {
             "source_panel_bidirectional_flow/1", "source_panel_descriptor_reacquisition/1"}
+         or registration.get("initial_structure_method") == SCALE_METHOD and scale_verified(registration))
         and proof.get("accepted") is True and proof.get("digits_excluded") is True
         and proof.get("native_source_pixels_used") is True
         and proof.get("numeric_pixels_supplied") is False

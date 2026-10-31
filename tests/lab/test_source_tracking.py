@@ -23,6 +23,104 @@ def tracker(image):
     return SourcePanelTracker(image, [0.2, 0.2, 0.65, 0.8], [[0.3, 0.3, 0.7, 0.6]])
 
 
+@pytest.mark.parametrize("scale,accepted", [(.6, True), (.1, False)])
+def test_field_motion_uses_registered_source_resolution_without_weakening_matches(scale, accepted):
+    reference = structure()
+    boxes = [[.25, .3, .45, .75], [.55, .3, .75, .75]]
+    kwargs = dict(required_boxes=[[.2, .2, .8, .8]])
+    obj = SourcePanelTracker(reference, [.2, .2, .65, .8], [[.3, .3, .7, .6]],
+                             motion_digit_boxes=boxes, **kwargs)
+    legacy = SourcePanelTracker(reference, [.2, .2, .65, .8], [[.3, .3, .7, .6]], **kwargs)
+    image = cv2.warpAffine(reference, np.float32([[scale, 0, 10], [0, scale, 10]]), (360, 240))
+    points = np.float32([[x, y] for y in [60, 100, 180] for x in [80, 140, 220]])
+    current = points * scale + [10, 10]
+    result, reason = obj._fit(current.astype(np.float32), points, image, "fixture")
+    assert (result is not None) is accepted
+    if accepted:
+        assert result["registration"]["stable_inliers"] == 9
+        assert result["registration"]["error_p95_pixels"] <= 1.5
+        assert all(p["height"] >= 12 and p["width"] >= 4
+                   for p in result["registration"]["native_registered_digit_pixels"])
+    else:
+        assert reason == "native_registered_digit_resolution"
+    assert legacy._fit(current.astype(np.float32), points, image, "fixture")[1] == "panel_scale_gate"
+
+
+def test_field_motion_cannot_accept_an_out_of_sensor_numeric_region():
+    reference = structure()
+    obj = SourcePanelTracker(reference, [.2, .2, .65, .8], [[.3, .3, .7, .6]],
+                             required_boxes=[[.2, .2, .8, .8]],
+                             motion_digit_boxes=[[.25, .3, .45, .75]])
+    points = np.float32([[x, y] for y in [60, 100, 180] for x in [80, 140, 220]])
+    result, reason = obj._fit(points + [350, 0], points, reference, "fixture")
+    assert result is None and "clipped" in reason
+
+
+def test_field_motion_still_enforces_the_native_roi_pixel_budget():
+    gray = np.random.default_rng(41).integers(20, 220, (800, 1280), np.uint8)
+    reference = cv2.cvtColor(cv2.GaussianBlur(gray, (5, 5), 1), cv2.COLOR_GRAY2BGR)
+    obj = SourcePanelTracker(reference, [.1, .1, .3, .42], [[.3, .3, .7, .6]],
+                             required_boxes=[[.2, .2, .8, .8]],
+                             motion_digit_boxes=[[.25, .3, .45, .75]])
+    image = cv2.warpAffine(reference, np.float32([[2.1, 0, 0], [0, 2.1, 0]]), (1280, 800))
+    points = np.float32([[x, y] for y in [100, 200, 300] for x in [150, 230, 350]])
+    result, reason = obj._fit(points * 2.1, points, image, "fixture")
+    assert result is None and reason == "tracked_native_ROI_exceeds_budget"
+
+
+@pytest.mark.parametrize("boxes", [[], [[.1, .1, .11, .11]]])
+def test_field_motion_requires_resolvable_reference_geometry(boxes):
+    with pytest.raises(ValueError):
+        SourcePanelTracker(structure(), [.2, .2, .65, .8], [[.3, .3, .7, .6]],
+                           motion_digit_boxes=boxes)
+
+
+def test_registered_motion_flow_cannot_extrapolate_free_projective_distortion():
+    reference = structure()
+    obj = SourcePanelTracker(reference, [.15, .15, .8, .85], [[.3, .3, .7, .6]],
+                             motion_digit_boxes=[[.35, .3, .65, .7]])
+    points = np.float32([[x, y] for y in [45, 120, 190] for x in [60, 180, 280]])
+    affine = cv2.getRotationMatrix2D((180, 120), -8, .7)
+    image = cv2.warpAffine(reference, affine, (360, 240))
+    current = cv2.transform(points[None], affine)[0]
+    fit, reason = obj._fit(current, points, image, "source_panel_bidirectional_flow/1")
+    assert reason is None
+    assert fit["registration"]["structural_motion_model"] == "relative_similarity"
+    matrix = fit["matrix_full"]
+    assert np.allclose(matrix[2], [0, 0, 1])
+    assert np.allclose(matrix[:2, :2].T @ matrix[:2, :2], np.eye(2)/.7**2, atol=1e-4)
+    perspective = np.array([[.7, -.1, 70], [.1, .7, 20], [.001, 0, 1.]])
+    current = cv2.perspectiveTransform(points[None], perspective)[0]
+    image = cv2.warpPerspective(reference, perspective, (360, 240))
+    assert obj._fit(current, points, image, "source_panel_bidirectional_flow/1")[0] is None
+    fit, reason = obj._fit(current, points, image, "source_panel_descriptor_reacquisition/1")
+    assert reason is None and fit["registration"]["structural_motion_model"] == "projective"
+    # Preserve an independently fitted perspective pose while constraining the
+    # next relative motion; the camera need not face a frontoparallel display.
+    obj.flow_reference_matrix = fit["matrix_full"]
+    increment = cv2.getRotationMatrix2D((180, 120), -2, .97)
+    next_pose = np.vstack([increment, [0, 0, 1]]) @ perspective
+    current = cv2.perspectiveTransform(points[None], next_pose)[0]
+    image = cv2.warpPerspective(reference, next_pose, (360, 240))
+    fit, reason = obj._fit(current, points, image, "source_panel_bidirectional_flow/1")
+    assert reason is None and fit["registration"]["error_p95_pixels"] < .01
+
+
+def test_relative_motion_ransac_preserves_reference_pixel_tolerance_after_zoom():
+    image = structure()
+    obj = SourcePanelTracker(image, [.2, .2, .65, .8], [[.3, .3, .7, .6]],
+                             motion_digit_boxes=[[.25, .3, .45, .75]])
+    points = np.float32([[x, y]for x in [80, 120, 170, 220]for y in [60, 95, 135, 180]])
+    pose = np.array([[.5, 0, 25], [0, .5, 30], [0, 0, 1.]])
+    obj.flow_reference_matrix = np.linalg.inv(pose)
+    current = cv2.perspectiveTransform(points[None], pose)[0]
+    current[:3] += [1.2, .4]  # Native-pixel errors exceed 1.5 reference pixels.
+    observed = cv2.warpPerspective(image, pose, (360, 240))
+    fit, reason = obj._fit(current, points, observed, "source_panel_bidirectional_flow/1")
+    assert reason is None and fit["registration"]["stable_inliers"] >= 13
+    assert fit["registration"]["error_p95_pixels"] < .01
+
+
 def test_source_translation_keeps_native_pixels_and_reference_geometry():
     image = structure()
     obj = tracker(image)
@@ -320,6 +418,29 @@ def test_reference_configuration_rejects_future_and_cross_source_geometry():
         ),
     )
     assert validate_registration(document)
+    motion = copy.deepcopy(document)
+    motion["fields"][0]["source_field_motion"] = True
+    motion["fields"][0]["layout"].update(data_type="number", digits=[[.2, .2, .5, .6]])
+    assert validate_registration(motion)
+    scaled = copy.deepcopy(motion)
+    scaled["fields"][0]["source_scale_reacquisition"] = True
+    assert validate_registration(scaled)
+    scaled["fields"][0]["source_field_motion"] = False
+    with pytest.raises(TemporalVideoRejected, match="explicit field motion"):
+        validate_registration(scaled)
+    for change in ("nonboolean", "untyped", "missing_digits", "no_tracking"):
+        invalid = copy.deepcopy(motion)
+        field = invalid["fields"][0]
+        if change == "nonboolean":
+            field["source_field_motion"] = "true"
+        elif change == "untyped":
+            field["layout"]["data_type"] = "clock"
+        elif change == "missing_digits":
+            field["layout"].pop("digits")
+        else:
+            field["source_tracking"] = False
+        with pytest.raises(TemporalVideoRejected):
+            validate_registration(invalid)
     future = copy.deepcopy(document)
     future["source_tracking_reference"]["media_offset_seconds"] = "3"
     with pytest.raises(TemporalVideoRejected, match="must precede"):

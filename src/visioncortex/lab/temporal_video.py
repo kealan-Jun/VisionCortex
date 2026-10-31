@@ -168,6 +168,18 @@ def validate_registration(document, *, media=None, asset=None):
         if (type(spec.get("source_stable_refinement", False)) is not bool
                 or spec.get("source_stable_refinement") and not spec.get("source_tracking")):
             raise TemporalVideoRejected("Stable refinement requires explicit source tracking")
+        if (type(spec.get("source_field_motion", False)) is not bool
+                or spec.get("source_field_motion") and (
+                    not spec.get("source_tracking")
+                    or spec.get("layout", {}).get("data_type") != "number"
+                    or spec.get("layout", {}).get("display_type") != "seven_segment"
+                    or not isinstance(spec.get("layout", {}).get("digits"), list)
+                    or not 1 <= len(spec["layout"]["digits"]) <= 12
+                    or not isinstance(spec.get("layout", {}).get("numeric_field_box"), list))):
+            raise TemporalVideoRejected("Field motion requires typed registered numeric geometry")
+        if (type(spec.get("source_scale_reacquisition", False)) is not bool
+                or spec.get("source_scale_reacquisition") and not spec.get("source_field_motion")):
+            raise TemporalVideoRejected("Scale-compatible search requires explicit field motion")
         if (type(spec.get("source_geometry_translation", False)) is not bool
                 or spec.get("source_geometry_translation") and not spec.get("source_tracking")):
             raise TemporalVideoRejected("LED pose correction requires explicit source tracking")
@@ -779,8 +791,11 @@ class TemporalVideo:
                                     reference_image if use_reference else upright,
                                     field["roi_box"], field["layout"]["dynamic_boxes"],
                                     refine_stable_translation=field.get("source_stable_refinement", False),
+                                    scale_compatible_reacquisition=field.get("source_scale_reacquisition", False),
+                                    **(dict(motion_digit_boxes=field["layout"]["digits"])
+                                       if field.get("source_field_motion") else {}),
                                     **(dict(required_boxes=[field["layout"]["numeric_field_box"]])
-                                       if use_reference else {}),
+                                       if use_reference or field.get("source_field_motion") else {}),
                                 ))
                                 trackers[key][1].layout = None
                                 if use_reference:

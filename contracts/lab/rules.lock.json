@@ -1,6 +1,6 @@
 {
   "schema_version": "vc-lab-rule-bundle/1",
-  "revision": "vc-lab-unified-20261101.29",
+  "revision": "vc-lab-unified-20261101.41",
   "components_sha256": "5be51d3c237058c97919072431ed203e6a8f6dd207137f204fb241b1d71f5af5",
   "files": [
     {
@@ -292,7 +292,7 @@
     },
     {
       "path": "src/visioncortex/lab/native_numeric.py",
-      "sha256": "a3bb309e1dbdea77cacb28307f923b0c3f15054e5ecf959f0c6ebf42b799a05a"
+      "sha256": "dbdde3787ea546797845bf0da4a6d7bda7208568643f85bd61f25a423a4f34a3"
     },
     {
       "path": "src/visioncortex/lab/native_ocr.py",
@@ -427,12 +427,16 @@
       "sha256": "20d43b066a336d7d7f09ceae115ca7435874612d64de4b986b5682cc671c6b04"
     },
     {
+      "path": "src/visioncortex/lab/source_reacquisition.py",
+      "sha256": "f526739a2c11cafa9a35d1ad28dd882cdeae57c54a23a1e0d588d5e977f32be0"
+    },
+    {
       "path": "src/visioncortex/lab/source_refinement.py",
-      "sha256": "dc21126d3686816aa6ec474d24e7f1987fcd2afb81b77c383656e93be27544fd"
+      "sha256": "e0288f926d3168b8a13cb91aab69a46d3bf9e0ac8bb80cdde03229ab888d8ba1"
     },
     {
       "path": "src/visioncortex/lab/source_tracking.py",
-      "sha256": "ad6ea85d0257732d6a3bc4a3e38b9de291a4e2361e3513f6dcd51b8fabd5714b"
+      "sha256": "f828e67f8b5f4290c5b03da2af68c40e345082f6fd9dc0ee2835ccc7ca964106"
     },
     {
       "path": "src/visioncortex/lab/speech_candidates.py",
@@ -464,7 +468,7 @@
     },
     {
       "path": "src/visioncortex/lab/temporal_video.py",
-      "sha256": "c9f754f472a6ed942c4578c17703168554d1da82b88e58fb0787340b5234c9ff"
+      "sha256": "be4e3d71e671242d06bfe4a7227365fd2affa8a866c264ba2b1cdbdb12d29c1f"
     },
     {
       "path": "src/visioncortex/lab/timeline.py",
@@ -540,7 +544,7 @@
     },
     {
       "path": "src/visioncortex/lab/video_numeric.py",
-      "sha256": "85e9193e1ae625be4911d5963dbd7256c2b6b35a415aa9d2e151792ea37e51b0"
+      "sha256": "91ff60096ea77d2b0e4346db0ee578a79c61ce10359773f862db318d2103a1e3"
     },
     {
       "path": "src/visioncortex/lab/weighing.py",
@@ -653,6 +657,6 @@
       "sha256": "a3c78f7837195851f74868009d1d14db34f8629ca31457371d8056a1c3c31a73"
     }
   ],
-  "source_lineage_sha256": "54015b25e16fde5a3baa4cca4d0b740f2772722e3f0eb1cb1bdb2c6e5096af2b",
+  "source_lineage_sha256": "d56744423bd3078a810597020b648eaccc0288da2521340406b33b7df9beaf7e",
   "source_lineage_recipe": "sha256 canonical JSON of adapter_files and migration_files; sorted keys, compact separators; v1"
 }

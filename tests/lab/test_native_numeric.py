@@ -228,6 +228,145 @@ def test_point_selection_uses_one_actual_frame_and_cannot_borrow_a_dot(monkeypat
     assert len(out["native_frame_selection"]["probes"]) == 3
 
 
+def test_later_observation_cannot_keep_choosing_an_old_brighter_value(monkeypatch):
+    reader = NumericVideoReader(TemporalConfig())
+    layout = dict(LAYOUT, data_type="number", numeric_native_stroke_veto=True,
+                  numeric_native_projective_decimal=True, numeric_native_point_selection=True,
+                  numeric_max_ocr_calls=2)
+    calls = []
+    monkeypatch.setattr("visioncortex.lab.native_numeric.point_probe", lambda native: dict(
+        points=[dict(after_digit=0, box=[40, 30, 42, 32])], positive_shape_consistent=True))
+    monkeypatch.setattr("visioncortex.lab.native_numeric.review", lambda native, reply: dict(
+        raw_text=reply["raw_text"], glyph_candidate=reply["raw_text"], numeric_candidate=None,
+        rejection_reasons=[], confirmed=False, value_text=None))
+
+    def ocr(pixels, *, anchor_source):
+        text = "12" if pixels[10, 20, 2] > 200 else "34"
+        calls.append((text, anchor_source))
+        return dict(raw_text=text)
+
+    for i in range(40):
+        im = image()
+        if i >= 10:
+            im[im[:, :, 2] > 0, 2] = 180
+        native = prepare(im, layout, np.eye(3))
+        native["source"] = source(native, ref(i, im), ref(i, im))
+        out = reader.observe(im, key=tuple(IDENTITY.values()), identity=IDENTITY,
+                             source_ref=ref(i, im), layout=layout, ocr=ocr, native=native)
+    assert len(calls) == 2 and [c[0] for c in calls] == ["12", "34"]
+    assert out["raw_text"] == "34" and out["source_refs"][0]["pts"] >= 750000
+    assert out["native_frame_selection"]["selected_anchor_age_seconds"] <= .25
+
+
+@pytest.mark.parametrize("mode", ["enabled", "disabled", "duplicate", "unstable", "cooldown", "budget", "reset", "context"])
+def test_debounced_shape_change_reads_fresh_pixels_without_borrowing_an_old_point(monkeypatch, mode):
+    reader = NumericVideoReader(TemporalConfig())
+    layout = dict(LAYOUT, data_type="number", numeric_native_stroke_veto=True,
+                  numeric_native_projective_decimal=True, numeric_native_point_selection=True,
+                  numeric_native_change_trigger=mode != "disabled",
+                  numeric_max_ocr_calls=1 if mode == "budget" else 4)
+    calls = []
+
+    def probe(native):
+        old = native["image"][10, 20, 2] > 200
+        signature = "a" if old else "c" if native["image"][10, 20, 2] < 160 else "b"
+        if mode == "unstable" and not old:
+            signature = str(native["source"]["pts"])
+        return dict(points=[dict(after_digit=0)] if old else [], positive_shape_consistent=True,
+                    positive_shape_signature=hashlib.sha256(signature.encode()).hexdigest())
+
+    def ocr(pixels, *, anchor_source):
+        text = "12" if pixels[10, 20, 2] > 200 else "34" if pixels[10, 20, 2] > 160 else "56"
+        calls.append((text, anchor_source))
+        return dict(raw_text=text)
+
+    monkeypatch.setattr("visioncortex.lab.native_numeric.point_probe", probe)
+    monkeypatch.setattr("visioncortex.lab.native_numeric.review", lambda native, reply: dict(
+        raw_text=reply["raw_text"], glyph_candidate=reply["raw_text"], numeric_candidate=None,
+        rejection_reasons=["fixture_decimal_unknown"], confirmed=False, value_text=None))
+    for i in range(22):
+        im = image()
+        if mode != "duplicate":
+            im[0, 0, 0] = i
+        if i >= 6:
+            im[im[:, :, 2] > 0, 2] = 150 if mode == "cooldown" and i >= 12 else 180
+        if mode == "reset" and i == 12:
+            reader.reset(tuple(IDENTITY.values()))
+        raw_ref = ref(i, im)
+        if mode == "context":
+            raw_ref["dynamic_physical_key"] = "old" if i < 6 else "new"
+        native = prepare(im, layout, np.eye(3))
+        native["source"] = source(native, raw_ref, raw_ref)
+        out = reader.observe(im, key=tuple(IDENTITY.values()), identity=IDENTITY,
+                             source_ref=raw_ref, layout=layout, ocr=ocr, native=native)
+    extra = mode in {"enabled", "cooldown", "reset", "context"}
+    assert [item[0] for item in calls] == (["12", "34"] if extra else ["12"])
+    if extra:
+        assert calls[1][1]["pts"] >= 6*33333 and calls[1][1]["pts"] < 1_000_000
+        if mode != "reset":
+            assert out["native_frame_selection"]["trigger"] == (
+                "periodic" if mode == "context" else "positive_shape_change")
+            assert out["numeric_candidate"] is None and out["gates"]["confirmed"] is False
+    if mode == "context":
+        assert out["raw_text"] == "34" and out["source_refs"][0]["dynamic_physical_key"] == "new"
+
+
+def test_change_trigger_requires_explicit_native_point_selection():
+    reader = NumericVideoReader(TemporalConfig())
+    im = image()
+    layout = dict(LAYOUT, numeric_native_change_trigger=True)
+    native = prepare(im, layout, np.eye(3))
+    native["source"] = source(native, ref(0, im), ref(0, im))
+    with pytest.raises(ValueError, match="explicit native point selection"):
+        reader.observe(im, key=tuple(IDENTITY.values()), identity=IDENTITY,
+                       source_ref=ref(0, im), layout=layout, ocr=None, native=native)
+
+
+@pytest.mark.parametrize("early_point", [True, False])
+def test_optional_initial_wait_chooses_current_point_or_expires_without_spending_budget(monkeypatch, early_point):
+    reader = NumericVideoReader(TemporalConfig())
+    layout = dict(LAYOUT, data_type="number", numeric_native_stroke_veto=True,
+                  numeric_native_projective_decimal=True, numeric_native_point_selection=True,
+                  numeric_initial_quality_wait_seconds=".2", numeric_max_ocr_calls=1)
+    calls = []
+    monkeypatch.setattr("visioncortex.lab.native_numeric.point_probe", lambda native: dict(
+        points=[dict(after_digit=0)] if early_point and native["source"]["pts"] >= 99999 else [],
+        positive_shape_consistent=True))
+    monkeypatch.setattr("visioncortex.lab.native_numeric.review", lambda native, reply: dict(
+        raw_text=reply["raw_text"], glyph_candidate="12", numeric_candidate=None,
+        rejection_reasons=[], confirmed=False, value_text=None))
+
+    def ocr(pixels, *, anchor_source):
+        calls.append((i, anchor_source))
+        return dict(raw_text="12")
+
+    for i in range(10):
+        im = image()
+        im[im[:, :, 2] > 0, 2] -= i*5
+        native = prepare(im, layout, np.eye(3))
+        native["source"] = source(native, ref(i, im), ref(i, im))
+        out = reader.observe(im, key=tuple(IDENTITY.values()), identity=IDENTITY,
+                             source_ref=ref(i, im), layout=layout, ocr=ocr, native=native)
+        if i == 2:
+            assert calls == [] and out["ocr_port_calls"] == 0
+            assert out["rejection_reasons"] == ["waiting_for_source_quality"]
+    assert len(calls) == 1 and calls[0][0] == (3 if early_point else 7)
+    if early_point:
+        assert calls[0][1]["pts"] == 99999
+
+
+@pytest.mark.parametrize("wait", [-1, ".3", True, "nan", "9"*20])
+def test_initial_quality_wait_rejects_unbounded_or_invalid_configuration(wait):
+    reader = NumericVideoReader(TemporalConfig())
+    im = image()
+    layout = dict(LAYOUT, numeric_initial_quality_wait_seconds=wait)
+    native = prepare(im, layout, np.eye(3))
+    native["source"] = source(native, ref(0, im), ref(0, im))
+    with pytest.raises(ValueError):
+        reader.observe(im, key=tuple(IDENTITY.values()), identity=IDENTITY,
+                       source_ref=ref(0, im), layout=layout, ocr=None, native=native)
+
+
 def test_native_reader_uses_one_real_anchor_and_counts_both_pixel_buffers():
     reader = NumericVideoReader(TemporalConfig())
     calls = []

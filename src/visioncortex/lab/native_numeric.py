@@ -5,6 +5,7 @@ absence veto, not proof of every stroke or correctness of an OCR prediction.
 """
 
 import hashlib
+import json
 import math
 import re
 
@@ -327,14 +328,19 @@ def point_probe(native):
     shape_consistent = bool(lit) and all(
         any(value == set(pattern) for pattern in SEGMENTS.values()) for value in lit
     )
+    signature = hashlib.sha256(json.dumps(
+        [sorted(value) for value in lit], separators=(",", ":")
+    ).encode()).hexdigest()
     cells = [slot["native_cell_polygon"] for slot in evidence["slots"]]
     if len(cells) < 2:
         return dict(points=[], reason="source_cell_geometry_pending", confirmed=False,
-                    positive_shape_consistent=shape_consistent, OFF_inferred=False)
+                    positive_shape_consistent=shape_consistent, OFF_inferred=False,
+                    positive_shape_signature=signature)
     points = observe_points(native["image"], cells, layout["color"])
     return dict(points, source_bgr_sha256=native["metadata"]["native_bgr_sha256"],
                 geometry_method=evidence["geometry"]["method"], numeric_value=None,
                 positive_shape_consistent=shape_consistent,
+                positive_shape_signature=signature,
                 positive_shape_is_digit_correctness=False)
 
 
