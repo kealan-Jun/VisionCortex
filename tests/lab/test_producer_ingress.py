@@ -301,8 +301,16 @@ def add_index(settings, source, *, wrong_hash=False):
 
 
 def test_existing_codec_clip_is_admitted_only_after_late_exact_index_and_keeps_source_ID_alias(
-    core, settings, tmp_path
+    core, settings, tmp_path, monkeypatch
 ):
+    # This test covers exact retained-clip mappings with an explicit fixture
+    # clock. Native self-reported epochs alone no longer establish that clock.
+    from visioncortex.lab.ingest import Ingest
+    class FixtureClockIngest(Ingest):
+        def accept(self, receipt, **kwargs):
+            assert receipt['source_kind']=='fixture'
+            return super().accept(dict(receipt,time_basis=dict(basis='synthetic_fixture_clock',uncertainty_us=0)),**kwargs)
+    monkeypatch.setattr(module,'Ingest',FixtureClockIngest)
     source = recording(settings, "dynamic-source", prefix="ProducerArchive")
     inventory_path = inventory(tmp_path, [source])
     selected = configuration(
@@ -326,7 +334,7 @@ def test_existing_codec_clip_is_admitted_only_after_late_exact_index_and_keeps_s
     saved["clips_next_check"] = 0
     state_path.write_text(json.dumps(state))
     second = adapter.tick()
-    assert second["clips"] == 1 and second["duplicates"] == 1
+    assert second["clips"] == 1 and second["duplicates"] == 1, second
     assert child.is_file()
     with core.db.transaction(readonly=True) as conn:
         derivations = conn.execute(

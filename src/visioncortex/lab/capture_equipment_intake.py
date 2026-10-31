@@ -22,7 +22,7 @@ from psycopg.types.json import Jsonb
 from .domain import Conflict, Missing, clean, fingerprint, ident
 from .dynamic_context import DynamicContext, _source_time
 from .media import Media, hash_file
-from .operator_scan import CAMERA_INTENT, OperatorScans, declaration_activity
+from .operator_scan import CAMERA_INTENT, CAMERA_MATERIAL_INTENT, OperatorScans, declaration_activity
 from .rules import Rules
 from .subprocesses import run_bounded
 from .timeline import Timeline
@@ -391,7 +391,7 @@ def _video(conn, core, frame_id):
     return dict(frame=frame, task=row, receipt=receipt, point=point)
 
 
-def source_proof(conn, core, observation_id, camera_id, qr_value, at, evidence):
+def source_proof(conn, core, observation_id, camera_id, qr_value, at, evidence, *, scan_kind='equipment'):
     """Optional proof port used by existing OperatorScans.record, never a bypass.
 
     None means this is an older explicit source, whose original proof still runs.
@@ -414,8 +414,15 @@ def source_proof(conn, core, observation_id, camera_id, qr_value, at, evidence):
     values = photo['result'].get('decoded_values', []) if photo else [q['value'] for q in video['point']['qr_occurrences']]
     original_evidence = photo['evidence_ids'] if photo else video['frame']['payload']['evidence_ids']
     when = media['start_at'] if photo else video['frame']['event_at']
+    if authorization['policy'].get('material'):
+        ops = OperatorScans(core)
+        selected = [v for v in set(values) if ops._resolve(conn,v,scan_kind,when).get('status') ==
+                    ('declared_equipment' if scan_kind == 'equipment' else 'declared_material')]
+        unique = selected == [qr_value]
+    else:
+        unique = scan_kind == 'equipment' and sorted(set(values)) == [qr_value]
     if (camera['code'] != media['receipt'].get('camera_id') or at is None or at != when
-            or not verified_clock(media['time_basis']) or sorted(set(values)) != [qr_value]
+            or not verified_clock(media['time_basis']) or not unique
             or not evidence or set(map(str, evidence)) != set(map(str, original_evidence))):
         raise Conflict('Generic camera scope, source clock, QR text or evidence does not match')
     if video and str(video['task']['id']) not in authorization['task_ids']:
@@ -485,6 +492,38 @@ class CaptureEquipmentIntake:
             original_camera_code=media['receipt'].get('camera_id'), original_time_basis=media['time_basis'],
             decoded_values=unique, source_reported_at=at, event_time_verified=when is not None,
             evidence_ids=evidence, person_inferred=False, material_quantity_written=False))
+        if authorization['policy'].get('material') and camera is not None and when is not None:
+            # One equipment QR and one material QR in the same frame are useful
+            # independent observations. Multiple identities of the same kind
+            # remain ambiguous. Neither observation is a quantity operation.
+            scans, unresolved = [], []
+            for kind, intent in [('equipment', CAMERA_INTENT), ('material', CAMERA_MATERIAL_INTENT)]:
+                candidates = [(value, ops._resolve(conn,value,kind,when)) for value in unique]
+                candidates = [(v,r) for v,r in candidates if r['status'] ==
+                              ('declared_equipment' if kind == 'equipment' else 'declared_material')]
+                if len(candidates) != 1:
+                    if candidates:
+                        unresolved.append(dict(kind=kind,status='ambiguous_multiple_qr'))
+                    continue
+                value, resolved = candidates[0]
+                previous = conn.execute("""SELECT occurred_at,payload FROM hj_operator_scan_event WHERE customer_id=%s
+                    AND person_id IS NULL AND camera_id=%s AND occurred_at<=%s AND scan_kind=%s
+                    ORDER BY occurred_at DESC,id DESC LIMIT 1""", (self.core.customer,camera['id'],when,kind)).fetchone()
+                target = ops._context(conn,when-timedelta(microseconds=1),None,camera['id'])
+                unchanged_target = kind == 'equipment' or previous and all(
+                    previous['payload'].get(k) == target.get(k) for k in ('run_id','batch_id'))
+                if (previous and previous['payload']['resolution'].get('target_id') == resolved['target_id']
+                        and unchanged_target and 0 <= (when-previous['occurred_at']).total_seconds()
+                        < authorization['policy']['presence_interval_seconds']):
+                    scans.append(dict(scan_kind=kind,status='same_identity_presence_rate_limited'))
+                    continue
+                scans.append(ops.record('capture-'+kind+'-operator:'+str(observation_id), intent=intent,
+                    scan_kind=kind, qr_value=value, occurred_at=clean(when), evidence_ids=list(map(str,evidence)),
+                    camera_id=str(camera['id']), actor='configured automatic capture QR policy',
+                    reason='source-pinned '+kind+' QR observation', source_job_id=str(observation_id)))
+            if scans or unresolved:
+                return dict(status='capture_qr_processed',scans=scans,unresolved=unresolved,evidence=pins,
+                            material_quantity_written=False)
         if status == 'declared_equipment':
             anchored = conn.execute("SELECT 1 FROM hj_operator_scan_event WHERE customer_id=%s AND payload->'source_evidence'->>'authorization_key'=%s LIMIT 1",
                 (self.core.customer, AUTH_PREFIX + str(media['media_id']))).fetchone()

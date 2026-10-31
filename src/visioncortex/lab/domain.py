@@ -433,7 +433,7 @@ class Core:
 
         return self.command(key, body, action)
 
-    def correct_operation(self, key, operation_id, replacement_inputs, *, expected_revision, actor, reason):
+    def correct_operation(self, key, operation_id, replacement_inputs, *, expected_revision, actor, reason, evidence_ids=None):
         if not actor or not reason:
             raise ValueError("Correction actor and reason are required")
         replacement = self._lines(replacement_inputs)
@@ -453,7 +453,11 @@ class Core:
             cid = ident()
             outputs = [l for l in lines if l["direction"] == "output"]
             metadata = {"reason": reason, "output_measurements_preserved": True, "effective_kind": effective_kind}
-            conn.execute("INSERT INTO operation(customer_id,id,kind,batch_id,run_id,occurred_at,actor,evidence_ids,supersedes_id,metadata) VALUES(%s,%s,'correction',%s,%s,%s,%s,%s,%s,%s)", (self.customer, cid, old["batch_id"], old["run_id"], old["occurred_at"], actor, old["evidence_ids"], old["id"], Jsonb(metadata)))
+            for name in ('usage_scope','weighing_session_id','context_snapshot'):
+                if name in old['metadata']:
+                    metadata[name]=old['metadata'][name]
+            correction_evidence = self._evidence(conn, sorted(set(old['evidence_ids']) | {ident(e) for e in (evidence_ids or [])}, key=str))
+            conn.execute("INSERT INTO operation(customer_id,id,kind,batch_id,run_id,occurred_at,actor,evidence_ids,supersedes_id,metadata) VALUES(%s,%s,'correction',%s,%s,%s,%s,%s,%s,%s)", (self.customer, cid, old["batch_id"], old["run_id"], old["occurred_at"], actor, correction_evidence, old["id"], Jsonb(metadata)))
             balances = {}
             for line in replacement:
                 mid = line["material_id"]
@@ -497,7 +501,52 @@ class Core:
             self._emit(conn, "operation", cid, 1, result)
             return result
 
-        return self.command(key, dict(operation=operation_id, inputs=replacement_inputs, expected=expected_revision, actor=actor, reason=reason), action)
+        request = dict(operation=operation_id, inputs=replacement_inputs, expected=expected_revision, actor=actor, reason=reason)
+        if evidence_ids is not None:
+            request['evidence_ids'] = evidence_ids
+        return self.command(key, request, action)
+
+    def cancel_consumption(self, key, operation_id, *, expected_revision, actor, reason, evidence_ids=None):
+        """Explicit full reversal of an unlinked consumption; never delete history."""
+        if not actor or not reason:
+            raise ValueError('Cancellation actor and reason required')
+        request = dict(operation_id=operation_id, expected_revision=expected_revision, actor=actor,
+                       reason=reason, evidence_ids=evidence_ids)
+        def action(conn):
+            old = conn.execute('SELECT * FROM operation WHERE customer_id=%s AND id=%s FOR UPDATE',
+                               (self.customer, ident(operation_id))).fetchone()
+            if (not old or old['status'] != 'confirmed' or old['revision'] != expected_revision
+                    or old['metadata'].get('effective_kind', old['kind']) != 'consume'):
+                raise Conflict('Current consumption operation/version required')
+            if conn.execute("SELECT 1 FROM fact_revision WHERE customer_id=%s AND status='confirmed' AND value->>'operation_id'=%s LIMIT 1",
+                            (self.customer,str(old['id']))).fetchone():
+                raise Conflict('Linked consumption facts require their own explicit correction')
+            lines = conn.execute('SELECT * FROM operation_line WHERE customer_id=%s AND operation_id=%s',
+                                 (self.customer,old['id'])).fetchall()
+            if not lines or any(l['direction'] != 'input' for l in lines):
+                raise Conflict('One current input-only consumption required')
+            states = self._states(conn,[l['material_id'] for l in lines])
+            evidence = self._evidence(conn,sorted(set(old['evidence_ids']) | {ident(e) for e in (evidence_ids or [])},key=str))
+            cid=ident()
+            metadata=dict(reason=reason,effective_kind='consume',consumption_cancelled=True,
+                          cancelled_material_ids=[str(l['material_id']) for l in lines])
+            conn.execute("INSERT INTO operation(customer_id,id,kind,batch_id,run_id,occurred_at,actor,evidence_ids,supersedes_id,metadata) VALUES(%s,%s,'correction',%s,%s,%s,%s,%s,%s,%s)",
+                (self.customer,cid,old['batch_id'],old['run_id'],old['occurred_at'],actor,evidence,old['id'],Jsonb(metadata)))
+            changes={}
+            for line in lines:
+                ledger=conn.execute('SELECT * FROM quantity_ledger_entry WHERE customer_id=%s AND operation_id=%s AND material_id=%s AND reverses_id IS NULL ORDER BY created_at DESC LIMIT 1',
+                                    (self.customer,old['id'],line['material_id'])).fetchone()
+                if not ledger:
+                    raise Conflict('Original consumption ledger entry is unavailable')
+                changes[line['material_id']]=[-ledger['delta'],-ledger['used_delta'],ledger['id']]
+            balances=self._change(conn,cid,states,changes)
+            conn.execute("UPDATE operation SET status='corrected',revision=revision+1 WHERE customer_id=%s AND id=%s",(self.customer,old['id']))
+            result=dict(operation_id=cid,supersedes_id=old['id'],revision=1,balances=balances,
+                        metadata=metadata,evidence_ids=evidence)
+            self._emit(conn,'operation',old['id'],old['revision']+1,dict(operation_id=old['id'],status='corrected',superseded_by=cid))
+            self._emit(conn,'operation',cid,1,result)
+            return result
+        return self.command(key,request,action)
 
     def correct_fact(self, key, fact_id, value, *, expected_revision, actor, reason, evidence_ids):
         if not actor or not reason or not evidence_ids:
@@ -582,7 +631,9 @@ class Core:
             return result
         return self.command(key, dict(candidate=candidate_id, revision=expected_revision, scope=scope, actor=actor, policy_version=policy_version), action)
 
-    def confirm_usage(self, key, candidate_id, *, expected_revision, material_id, batch_id, expected_material_revision, actor, operation_id, reason):
+    def confirm_usage(self, key, candidate_id, *, expected_revision, material_id, batch_id, expected_material_revision, actor, operation_id, reason, reuse_existing=False):
+        if type(reuse_existing) is not bool:
+            raise ValueError('Explicit existing-operation evidence link required')
         def action(conn):
             candidate = conn.execute("SELECT c.*,o.evidence_ids,o.occurred_at FROM field_candidate c JOIN observation o ON o.customer_id=c.customer_id AND o.id=c.observation_id WHERE c.customer_id=%s AND c.id=%s FOR UPDATE OF c", (self.customer, ident(candidate_id))).fetchone()
             if not candidate:
@@ -591,6 +642,10 @@ class Core:
                 raise Conflict("Only an unambiguous actual increment can be confirmed as use")
             if not candidate["evidence_ids"] or not candidate["occurred_at"]:
                 raise Conflict("Usage requires traceable evidence and an established event time")
+            unavailable=conn.execute("SELECT 1 FROM evidence_ref e JOIN media_asset m ON m.customer_id=e.customer_id AND m.id=e.media_id WHERE e.customer_id=%s AND e.id=ANY(%s) AND (m.evidence_status<>'available' OR m.verified_sha256 IS NULL OR e.media_version<>m.version) LIMIT 1",
+                (self.customer,candidate['evidence_ids'])).fetchone()
+            if unavailable:
+                raise Conflict('Usage source evidence is unavailable or superseded')
             value = candidate["value"]
             if value.get("intent") != "actual_increment":
                 raise Conflict("Planned/cumulative/correction speech is not an incremental debit")
@@ -600,13 +655,37 @@ class Core:
                 raise Conflict("Confirmed target batch contradicts the spoken batch")
             type_id = material["metadata"].get("material_type_id")
             type_code = self._entity(conn, type_id, "material_type")["code"] if type_id else material["code"]
-            if value.get("material_code") and value["material_code"] != type_code:
+            if value.get("material_code") and value["material_code"] not in {type_code,material['code']}:
                 raise Conflict("Confirmed material contradicts the spoken material code")
-            result = self.operate(key + ":operation", "consume", [dict(material_id=material_id, quantity=value["quantity"], unit=candidate["unit"], expected_revision=expected_material_revision)], occurred_at=candidate["occurred_at"], actor=actor, operation_id=operation_id, batch_id=batch_id, evidence_ids=candidate["evidence_ids"], metadata={"candidate_id": str(candidate_id), "reason": reason})
+            if reuse_existing:
+                state=self._states(conn,[material_id])[ident(material_id)]
+                if state['revision']!=expected_material_revision:
+                    raise Conflict('Material revision changed before existing use link')
+                operation=conn.execute("SELECT * FROM operation WHERE customer_id=%s AND id=%s FOR UPDATE",
+                                       (self.customer,ident(operation_id))).fetchone()
+                q,u=amount(value['quantity'],candidate['unit'])
+                lines=conn.execute("SELECT * FROM operation_line WHERE customer_id=%s AND operation_id=%s",
+                                   (self.customer,ident(operation_id))).fetchall()
+                if (not operation or operation['status']!='confirmed'
+                        or operation['metadata'].get('effective_kind',operation['kind'])!='consume'
+                        or str(operation['batch_id'])!=str(batch_id) or len(lines)!=1
+                        or lines[0]['direction']!='input' or str(lines[0]['material_id'])!=str(material_id)
+                        or lines[0]['quantity']!=q or lines[0]['unit']!=u):
+                    raise Conflict('Existing operation does not represent the explicitly linked material use')
+                result=dict(operation_id=operation['id'],revision=operation['revision'],kind='consume',
+                            existing_operation_reused=True,quantity_ledger_written=False,
+                            evidence_ids=candidate['evidence_ids'],batch_id=batch_id)
+            else:
+                usage_scope=candidate['association'].get('usage_scope')
+                metadata={"candidate_id":str(candidate_id),"reason":reason}
+                if usage_scope:metadata['usage_scope']=usage_scope
+                result = self.operate(key + ":operation", "consume", [dict(material_id=material_id, quantity=value["quantity"], unit=candidate["unit"], expected_revision=expected_material_revision)], occurred_at=candidate["occurred_at"], actor=actor, operation_id=operation_id, batch_id=batch_id, run_id=usage_scope.get('run_id') if usage_scope else None, evidence_ids=candidate["evidence_ids"], metadata=metadata)
             fid = ident()
             conn.execute("INSERT INTO fact_revision(customer_id,id,candidate_id,revision,scope,value,unit,actor) VALUES(%s,%s,%s,1,'material_consumption',%s,%s,%s)", (self.customer, fid, candidate["id"], Jsonb(dict(value, material_id=str(material_id), batch_id=str(batch_id), operation_id=str(operation_id))), candidate["unit"], actor))
             conn.execute("INSERT INTO confirmation(customer_id,id,fact_id,scope,actor,evidence_ids) VALUES(%s,%s,%s,'material_consumption',%s,%s)", (self.customer, ident(), fid, actor, candidate["evidence_ids"]))
             conn.execute("UPDATE field_candidate SET status='confirmed',revision=revision+1 WHERE customer_id=%s AND id=%s", (self.customer, candidate["id"]))
             self._emit(conn, "fact", fid, 1, dict(fact_id=fid, scope="material_consumption", operation_id=operation_id, value=value))
             return dict(result, fact_id=str(fid))
-        return self.command(key, dict(candidate=candidate_id, expected=expected_revision, material=material_id, batch=batch_id, material_revision=expected_material_revision, actor=actor, operation=operation_id, reason=reason), action)
+        request=dict(candidate=candidate_id, expected=expected_revision, material=material_id, batch=batch_id, material_revision=expected_material_revision, actor=actor, operation=operation_id, reason=reason)
+        if reuse_existing:request['reuse_existing']=True
+        return self.command(key,request,action)

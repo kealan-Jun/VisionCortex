@@ -48,6 +48,24 @@ def authorization(s, media_id):
             (s['core'].customer, AUTH_PREFIX + str(media_id))).fetchone()['result']
 
 
+def test_opt_in_equipment_and_material_QRs_in_same_photo_keep_independent_context_without_debit(scene,tmp_path):
+    s=scene
+    enable(s,tmp_path,material=True)
+    s['runtime'].operator_scans.record('target',intent='operator_scan',scan_kind='equipment',
+        qr_value=s['devices'][0],occurred_at=at('09:00:00'),evidence_ids=[],actor='fixture',reason='explicit fixture target',
+        camera_id=s['cameras'][0],run_id=s['run'])
+    source(s,'equipment-material',[s['devices'][0],'fixture-reusable-label'],when='09:00:01')
+    outcome=s['runtime'].scan_intake.tick()['automatic_equipment_qr']
+    assert outcome['photo_outcomes'][0]['status']=='capture_qr_processed'
+    context=s['runtime'].operator_scans.context(as_of=at('09:00:02'),camera_id=s['cameras'][0])
+    assert context['equipment_id']==s['devices'][0]
+    assert context['materials'][-1]['resolution']['target_id']==s['materials'][0]
+    material=context['materials'][-1]
+    assert material['resolution']['source_lot_id']==s['lots'][0]
+    assert material['batch_id']==s['batches'][0]
+    assert rows(s,'quantity_ledger_entry')==[]
+
+
 def test_new_partition_15_minute_packet_exactly_90_nonoverlapping_tasks():
     plan = partition(Decimal(900), config())
     assert len(plan) == 90 and plan[0] == dict(start_seconds='0', end_seconds='10')

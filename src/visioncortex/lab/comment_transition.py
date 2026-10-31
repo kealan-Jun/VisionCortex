@@ -61,9 +61,18 @@ class CommentTransitions:
             if (row['kind'] != 'audio' and not (row['kind'] == 'video' and
                     receipt.get('native_record', {}).get('embedded_audio') is True)):
                 raise Conflict('Comment requires original audio or explicitly registered embedded audio')
+            native = receipt.get('native_record') or {}
+            native_audio = native.get('audio') or {}
+            native_hash_at_intake = (row['kind'] == 'audio' and receipt.get('kind') == 'audio'
+                and native.get('processable') is True and native.get('capture_complete') is True
+                and native_audio.get('status') == 'provided' and native_audio.get('capture_complete') is True
+                and native_audio.get('source_signature') == receipt.get('source_revision')
+                and receipt.get('source_instance') == 'recorder:' + str(native.get('camera_key'))
+                and receipt.get('camera_id') == native.get('camera_key'))
             if (row['media_version'] != row['current_version'] or row['evidence_status'] != 'available'
                     or not re.fullmatch('[0-9a-f]{64}', row['verified_sha256'] or '')
-                    or receipt.get('sha256') != row['verified_sha256']):
+                    or (receipt.get('sha256') != row['verified_sha256']
+                        and not (receipt.get('sha256') is None and native_hash_at_intake))):
                 raise Conflict('Comment source version/hash is unavailable or conflicts with the receipt')
             lo, hi = row['start_seconds'], row['end_seconds']
             if lo is None or hi is None or not 0 <= lo < hi <= row['duration_seconds']:
@@ -75,8 +84,10 @@ class CommentTransitions:
                     or basis.get('clock_sync_valid') is False or basis.get('clock_sync_verified') is False
                     or row['media_start_at'] is None):
                 attention.append('unknown_or_uncertain_original_audio_clock')
-            if (fingerprint(basis) != fingerprint(receipt.get('time_basis')) or
-                    (instant(receipt['captured_at']) if receipt.get('captured_at') else None) != row['media_start_at']):
+            from .timeline_clock import source_clock_supported
+            expected_start = (instant(receipt['captured_at']) if receipt.get('captured_at')
+                              and source_clock_supported(basis,row['source_kind']) else None)
+            if (fingerprint(basis) != fingerprint(receipt.get('time_basis')) or expected_start != row['media_start_at']):
                 raise Conflict('Comment source clock metadata differs from the original receipt')
             start = row['media_start_at'] + timedelta(microseconds=int(lo * 1000000)) if row['media_start_at'] else None
             end = row['media_start_at'] + timedelta(microseconds=int(hi * 1000000)) if row['media_start_at'] else None

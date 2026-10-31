@@ -20,6 +20,7 @@ from .rules import Rules
 
 SCHEMA = 'vc-lab-operator-scan/1'
 CAMERA_INTENT = 'camera_equipment_presence'
+CAMERA_MATERIAL_INTENT = 'camera_material_presence'
 
 
 def _text(value,name,limit=512):
@@ -97,7 +98,7 @@ class OperatorScans:
                     source_lot_id=str(lot['id']) if lot else None,source_lot=clean(lot),
                     provenance_status='explicit_registered_source_lot' if lot else 'unknown_source_lot')
 
-    def _camera_source(self,conn,job_id,camera_id,qr_value,at,evidence):
+    def _camera_source(self,conn,job_id,camera_id,qr_value,at,evidence,scan_kind='equipment'):
         """Machine authority requires a completed, independently decoded source.
 
         This also guards direct command/API callers: supplying the new intent
@@ -108,8 +109,10 @@ class OperatorScans:
         if job_id is None or camera_id is None or at is None:
             raise Conflict('Camera equipment presence requires saved QR source and verified event clock')
         from .capture_equipment_intake import source_proof
-        generic=source_proof(conn,self.core,job_id,camera_id,qr_value,at,evidence)
+        generic=source_proof(conn,self.core,job_id,camera_id,qr_value,at,evidence,scan_kind=scan_kind)
         if generic is not None:return generic
+        if scan_kind != 'equipment':
+            raise Conflict('Camera material declarations require a pinned generic material QR policy')
         job=conn.execute('''SELECT j.status,j.result,j.rule_identity,j.rule_fingerprint,
             a.verified_sha256,a.version,c.time_basis,c.occurred_at,i.payload AS receipt,
             d.code AS camera_code,o.evidence_ids
@@ -158,11 +161,12 @@ class OperatorScans:
 
     def record(self,key,*,intent,scan_kind,qr_value,occurred_at,evidence_ids,actor,reason,
                person_id=None,camera_id=None,run_id=None,batch_id=None,source_job_id=None):
-        camera_presence=intent==CAMERA_INTENT
-        if intent not in {'operator_scan',CAMERA_INTENT} or scan_kind not in {'equipment','material'}:
+        camera_presence=intent in {CAMERA_INTENT,CAMERA_MATERIAL_INTENT}
+        equipment_presence=intent==CAMERA_INTENT
+        if intent not in {'operator_scan',CAMERA_INTENT,CAMERA_MATERIAL_INTENT} or scan_kind not in {'equipment','material'}:
             raise ValueError('Only explicit operator_scan equipment/material declarations are accepted')
-        if camera_presence and (scan_kind!='equipment' or person_id is not None or run_id is not None or batch_id is not None):
-            raise ValueError('Natural camera presence declares only equipment in its camera scope; no inferred person/run/batch')
+        if camera_presence and (scan_kind!=('equipment' if equipment_presence else 'material') or person_id is not None or run_id is not None or batch_id is not None):
+            raise ValueError('Natural camera presence declares only its QR kind in camera scope; no inferred person/run/batch')
         if not camera_presence and source_job_id is not None:
             raise ValueError('Source job authority applies only to camera equipment presence')
         _text(qr_value,'QR text',4096);_text(actor,'operator declaration actor');_text(reason,'declaration reason')
@@ -176,9 +180,9 @@ class OperatorScans:
         def action(conn):
             self.timeline.lock(conn);self._scope(conn,person_id,camera_id)
             evidence=self.core._evidence(conn,evidence_ids)
-            source=self._camera_source(conn,source_job_id,camera_id,qr_value,at,evidence) if camera_presence else None
+            source=self._camera_source(conn,source_job_id,camera_id,qr_value,at,evidence,scan_kind) if camera_presence else None
             if camera_presence:
-                old=conn.execute("SELECT id,payload FROM hj_operator_scan_event WHERE customer_id=%s AND COALESCE(payload->>'source_observation_id',payload->>'source_qr_job_id')=%s",(self.customer,str(ident(source_job_id)))).fetchone()
+                old=conn.execute("SELECT id,payload FROM hj_operator_scan_event WHERE customer_id=%s AND COALESCE(payload->>'source_observation_id',payload->>'source_qr_job_id')=%s AND scan_kind=%s AND payload->>'qr_value'=%s",(self.customer,str(ident(source_job_id)),scan_kind,qr_value)).fetchone()
                 if old:
                     activity=conn.execute("SELECT id FROM hj_activity WHERE customer_id=%s AND payload->>'operator_scan_event'=%s",(self.customer,str(old['id']))).fetchone()
                     return dict(event_id=str(old['id']),activity_id=str(activity['id']),status=old['payload']['status'],
@@ -200,10 +204,10 @@ class OperatorScans:
                     target_basis=dict(kind='inherited_exact_scope_event_time_target',
                         source_scan_event_ids=prior['target_declaration_event_ids'],inherited_as_of=clean(before),
                         fixed_at_recording=True,late_history_requires_explicit_revision=True)
-            resolution=self._camera_resolution(conn,qr_value,at) if camera_presence else self._resolve(conn,qr_value,scan_kind,at)
+            resolution=self._camera_resolution(conn,qr_value,at) if equipment_presence else self._resolve(conn,qr_value,scan_kind,at)
             status=resolution['status']
-            if camera_presence and status!='declared_equipment':
-                raise Conflict('Natural camera presence requires unique registered equipment active at the event')
+            if camera_presence and status!=('declared_equipment' if equipment_presence else 'declared_material'):
+                raise Conflict('Natural camera presence requires a unique registered identity valid at the event')
             if scan_kind=='material' and status=='declared_material' and not (effective_run or declared_batch):
                 status='needs_material_context'
             payload=clean(dict(schema_version=SCHEMA,processing_rules=Rules().identity(),intent=intent,scan_kind=scan_kind,qr_value=qr_value,
@@ -217,11 +221,11 @@ class OperatorScans:
                 previous=self._context(conn,at-timedelta(microseconds=1),None,camera_id)['equipment_id']
                 payload.update(source_qr_job_id=str(ident(source_job_id)),source_evidence=source,
                     authority='configured_camera_equipment_presence_not_manual_scan',
-                    event_role='equipment_presence' if previous==resolution['target_id'] else
-                        'operation_start' if previous is None else 'operation_phase_switch',
+                    event_role=('equipment_presence' if previous==resolution['target_id'] else
+                        'operation_start' if previous is None else 'operation_phase_switch') if equipment_presence else 'material_association',
                     event_role_basis='event_time_context_known_at_recording_replay_required_for_late_history',
                     origin='camera_qr_machine_evidence',human_review_performed=False,
-                    source_type_presentation='machine_equipment_presence',panel_geometry_verified=False)
+                    source_type_presentation='machine_equipment_presence' if equipment_presence else 'machine_material_presence',panel_geometry_verified=False)
                 if source.get('source_observation_id'):
                     payload.update(source_observation_id=str(source['source_observation_id']),
                         source_qr_job_id=str(source['qr_job_id']),source_frame_event_id=source.get('source_frame_event_id'),

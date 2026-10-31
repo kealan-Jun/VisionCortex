@@ -9,6 +9,11 @@ def command_methods(runtime):
             return method(**body)
         return invoke
     return {
+        'timeline-post-spoken-usage': runtime.spoken_usage.post,
+        'timeline-start-weighing': runtime.weighing.start,
+        'timeline-observe-weighing': runtime.weighing.observe,
+        'timeline-close-weighing': runtime.weighing.close,
+        'timeline-weighing': runtime.weighing.get,
         'timeline-consume-scan': runtime.scan_intake.consume,
         'timeline-operator-scan': runtime.operator_scans.record,
         'timeline-comment-transition': runtime.comment_transitions.apply,

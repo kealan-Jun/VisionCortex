@@ -132,15 +132,24 @@ class TimelinePublication:
                     activities=list(sidecar_activities.values()),person_projection=projection,
                     media_sources=sources,artifact_refs=artifact_refs,operation_projection=phases,
                     bindings_latest_path=base+'/Comment/Bindings.json')
+                weighing=(report.get('context_evidence') or {}).get('weighings') or {}
+                episodes=[w for w in weighing.get('episodes',[]) if str(w['context']['camera_id']) in camera_entity_ids[camera]]
+                pending=[p for p in weighing.get('pending',[]) if p['activity_id'] in sidecar_activities]
+                spoken=[s for s in (report.get('context_evidence') or {}).get('spoken_material_usage',{}).get('entries',[])
+                        if s['activity_id'] in sidecar_activities and str(s['camera_id']) in camera_entity_ids[camera]]
                 history=association_path(base,snapshot['revision'],snapshot['fingerprint'],rules['sha256'])
                 files[history]=self._json(sidecar)
-                latest[base+'/Comment/Bindings.json']=dict(schema_version='vc-lab-camera-bindings/1',
+                latest[base+'/Comment/Bindings.json']=dict(用料记录=[w['阅读摘要'] for w in episodes]+[v for s in spoken for v in s['阅读摘要']],
+                    用料待处理=[dict(读数活动=p['activity_id'],原因=p['result']['reason'],已扣库存=False) for p in pending],
+                    schema_version='vc-lab-camera-bindings/1',
                     archive=base,camera_key=camera,customer_id=str(self.customer),snapshot_revision=snapshot['revision'],
                     snapshot_fingerprint=snapshot['fingerprint'],processing_rules=rules,
                     source_set_basis=source_set_basis,
                     immutable_associations=dict(relative_path=history,sha256=hashlib.sha256(files[history]).hexdigest()),
                     canonical_report=canonical+'.json',observations=sidecar['observations'],media_sources=sources,
-                    operation_segments=phases,comment_artifacts=artifact_refs,material_quantity_written=False,
+                    operation_segments=phases,comment_artifacts=artifact_refs,
+                    weighings=episodes,spoken_material_usage=spoken,
+                    material_quantity_written=any(w['operation_id'] for w in episodes) or any(v['已扣库存'] for s in spoken for v in s['阅读摘要']),
                     physical_panel_or_speaker_inferred=False,unknowns_are_candidates=True)
                 envelope = dict(schema_version='vc-lab-timeline-published-view/1', report_day=str(snapshot['day']), customer_id=str(self.customer),
                                 snapshot_revision=snapshot['revision'], snapshot_fingerprint=snapshot['fingerprint'],

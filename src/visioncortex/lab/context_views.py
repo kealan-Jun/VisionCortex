@@ -21,6 +21,8 @@ def mark_context_interval_dirty(conn, customer, start, end):
 
 
 def context_evidence(conn, customer, start, end):
+    from .weighing_view import projection
+    from .spoken_usage_view import projection as spoken_projection
     dynamic = conn.execute('''WITH latest AS (
       SELECT DISTINCT ON(media_id,source_session_key)
         id,media_id,source_session_key,revision,processed_at,
@@ -51,4 +53,6 @@ def context_evidence(conn, customer, start, end):
         row['range_assignment'] = 'unknown_time_not_assigned_to_requested_day' if row['event_start'] is None else 'event_time_in_requested_range'
     return clean(dict(dynamic_contexts=dynamic[:20], dynamic_contexts_truncated=len(dynamic)>20,
                       material_observations=materials[:100], material_observations_truncated=len(materials)>100,
-                      material_quantities_authority='Core.operate', recognition_consumption=False))
+                      material_quantities_authority='Core.operate', recognition_consumption=False,
+                      weighings=projection(conn,customer,start,end),
+                      spoken_material_usage=spoken_projection(conn,customer,start,end)))

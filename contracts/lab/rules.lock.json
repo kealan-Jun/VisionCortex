@@ -1,6 +1,6 @@
 {
   "schema_version": "vc-lab-rule-bundle/1",
-  "revision": "vc-lab-unified-20261031.3",
+  "revision": "vc-lab-unified-20261031.5",
   "components_sha256": "5be51d3c237058c97919072431ed203e6a8f6dd207137f204fb241b1d71f5af5",
   "files": [
     {
@@ -128,7 +128,7 @@
     },
     {
       "path": "src/visioncortex/lab/capture_equipment_intake.py",
-      "sha256": "06a76a6d5decef6a19de8f308f6e06dc15cc03895569f9150625bdb4e464019d"
+      "sha256": "10a7421667f91353f26e3ca2ef22ce29cbb9f7378b1f6b1153bec619fd5920b4"
     },
     {
       "path": "src/visioncortex/lab/cli.py",
@@ -156,7 +156,7 @@
     },
     {
       "path": "src/visioncortex/lab/comment_transition.py",
-      "sha256": "bf8b1f5b199511f11ab13b7a6f59f2b09579ff0ffd19c82246972c02a360c7a9"
+      "sha256": "e4d92f9792c9c06853ddca5d569eaca231c165b28a4709e6d57efa2c7913a3c9"
     },
     {
       "path": "src/visioncortex/lab/components.py",
@@ -168,7 +168,7 @@
     },
     {
       "path": "src/visioncortex/lab/context_views.py",
-      "sha256": "63bed01e24eade5e6e54c90893b0a2d73f87f37147d4b51c7906ae64cf7bbc77"
+      "sha256": "da9294b187b765bb0df44c81132e91750e22bb0f64640c0a59ca258c3636d71d"
     },
     {
       "path": "src/visioncortex/lab/db.py",
@@ -184,7 +184,7 @@
     },
     {
       "path": "src/visioncortex/lab/domain.py",
-      "sha256": "d86f3feec83a766cc90219039a9f73e1d35c8ab8160cab5ad97ec8f03748a94e"
+      "sha256": "4ffe76d07551393c685d64ae53fb880e940c0eb2c85c5e4c826ab922f614b90a"
     },
     {
       "path": "src/visioncortex/lab/dynamic_context.py",
@@ -267,6 +267,10 @@
       "sha256": "275505063482c4773f74e9c6d42a627826d4f4be355d501db80c4c2860ba873f"
     },
     {
+      "path": "src/visioncortex/lab/native_comment_intake.py",
+      "sha256": "8e1dc0984768e7e6e93e09e461c56b107db8e3fdb210c1cd55c1cd3aa436cd9b"
+    },
+    {
       "path": "src/visioncortex/lab/native_comment_layout.py",
       "sha256": "f7e0f6df6cc56546eaf29d8040e87fd2300c6f76b77e563cba10715882d39f24"
     },
@@ -316,7 +320,7 @@
     },
     {
       "path": "src/visioncortex/lab/operator_scan.py",
-      "sha256": "4edc0de1b95a65514a75c144a419a64370479e36e3d0205527aa2d4ea6efe6ad"
+      "sha256": "f4ab8b09062b6c3ec22691f6cd41053bef7a4b56074010d2151402590cd8f8ed"
     },
     {
       "path": "src/visioncortex/lab/panel_fields.py",
@@ -392,7 +396,15 @@
     },
     {
       "path": "src/visioncortex/lab/speech_candidates.py",
-      "sha256": "f5099da31ebae7d00a2fe88ee1a8ab448f76bbcdaedcd7dd0294a1c98012c99f"
+      "sha256": "26d7835449141fd50a28eb0682d6a77045ad1c88933f5c43b4216409fb987708"
+    },
+    {
+      "path": "src/visioncortex/lab/spoken_usage.py",
+      "sha256": "a9872faea35f0f7b0ddd10259f9327d81341bb33eb8c61d352fd54ca8b42a744"
+    },
+    {
+      "path": "src/visioncortex/lab/spoken_usage_view.py",
+      "sha256": "7e5ce24034d9c3ad574a9e26d07bec8bfa5fe52833e19125fec7f64d0bb703c4"
     },
     {
       "path": "src/visioncortex/lab/storage.py",
@@ -424,7 +436,7 @@
     },
     {
       "path": "src/visioncortex/lab/timeline_commands.py",
-      "sha256": "54c19c10c55de7dc99d5d99ebcd149770def28143b5a8c1b26fe9660a4b93dea"
+      "sha256": "d8e24f241bf3f5d5005c1c6a3c1a3e154bbddb6ae91ec0bf030a4bd7f4e08d03"
     },
     {
       "path": "src/visioncortex/lab/timeline_metrics.py",
@@ -432,11 +444,11 @@
     },
     {
       "path": "src/visioncortex/lab/timeline_native_artifacts.py",
-      "sha256": "758a80b47f353381e987c674fddef83e4aa002a7625cc4405f58bf4d82041140"
+      "sha256": "6229d22a7e991886dfdc1b6dd27bbcfdd128cb3759e97d012bcd02e0f12b3b5e"
     },
     {
       "path": "src/visioncortex/lab/timeline_policy.py",
-      "sha256": "0211d84ff4c95f5855fc46a341b92e65c7543abd62e3590f98ec3de756e91b5d"
+      "sha256": "a676c81e645a33c7c3905bdff9647dfc05b49a6de4e2ef8bd595b4e08e333f42"
     },
     {
       "path": "src/visioncortex/lab/timeline_prior_context.py",
@@ -444,7 +456,7 @@
     },
     {
       "path": "src/visioncortex/lab/timeline_publication.py",
-      "sha256": "95cb1a00380f4dc5ce9b8c599c5bdf9e5773c4325e7b375bcb191392563354ec"
+      "sha256": "2313cb7ba3c33e3349f9359790d0e4e95c1c47d563c250ffd9cb611295c6cf00"
     },
     {
       "path": "src/visioncortex/lab/timeline_readout.py",
@@ -452,7 +464,7 @@
     },
     {
       "path": "src/visioncortex/lab/timeline_report.py",
-      "sha256": "efe91652b21216219ddbd6b9a0627de9e24003cc2f5622874bad949713dc4e26"
+      "sha256": "a61e43277a2ddf2ebb5fddb3466de2fbc754a9720ee068bd7cb29917dd21333a"
     },
     {
       "path": "src/visioncortex/lab/timeline_runner.py",
@@ -460,7 +472,7 @@
     },
     {
       "path": "src/visioncortex/lab/timeline_runtime.py",
-      "sha256": "cb278e7ec844757b06c7055c661c03f9c963cd3ec37f68db2e4eb4386bfce0de"
+      "sha256": "3b9938bad7118b3ec2978fe3dcd723611a2ef64929725a39b4d6952e9e368e08"
     },
     {
       "path": "src/visioncortex/lab/timeline_source_context.py",
@@ -485,6 +497,18 @@
     {
       "path": "src/visioncortex/lab/value_candidates.py",
       "sha256": "9ab164dfb3fd0fb5b7871765127ab75714c257636b3b67100cba7a40c7191318"
+    },
+    {
+      "path": "src/visioncortex/lab/weighing.py",
+      "sha256": "9cdeeb7bd45e5a47dd192e452cc4e92b7ce630e25cbe9c47ba9d68c3d6684c02"
+    },
+    {
+      "path": "src/visioncortex/lab/weighing_intake.py",
+      "sha256": "326aa7b123a19ba0b54ff944296ceb8c0d848ece8b28d53669b063abcb51ff42"
+    },
+    {
+      "path": "src/visioncortex/lab/weighing_view.py",
+      "sha256": "f90588219f4421b6c1b22f70eca520178c93209dda17e634af2daf468ec1126f"
     },
     {
       "path": "src/visioncortex/result_readability.py",

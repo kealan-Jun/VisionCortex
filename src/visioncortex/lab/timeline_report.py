@@ -91,6 +91,21 @@ def render_report(report):
                              f'来源批次 {resolved.get("source_lot_id") or "未知"}；容器 {resolved.get("container_id") or "未知"}；{resolved.get("association_status")}。')
             event = snap.get('event_context', {})
             lines.append(f'    用于目标批次 {event.get("target_batch_id") or "未知"}；实验 {event.get("run_id") or "未知"}；待核验项：{", ".join(snap.get("reasons", [])) or "候选仍未确认为使用事实"}。')
+    weighings = context.get('weighings', {}).get('episodes', [])
+    if weighings:
+        lines += ['', '称量与用料：同一次称量按累计用量记账，重复照片不重复扣量。']
+        for item in weighings:
+            view = item['阅读摘要']
+            lines.append(f'  {time_text(view["时间"])} {view["设备"]}；材料 {view["材料"]} / 来源批次 {view["来源批次"]} → 目标批次 {view["目标批次"]}。')
+            lines.append(f'    原始读数 {view["原始读数"]}；基准 {view["基准读数"]}；累计用量 {view["累计用量"]} {view["单位"]}；{view["状态"]}。')
+            lines.append(f'    原图 {view["原图"]}；账本操作 {view["账本操作"] or "尚未扣量"}。')
+    spoken=context.get('spoken_material_usage',{}).get('entries',[])
+    if spoken:
+        lines += ['', '口述用料与剩余量：']
+        for entry in spoken:
+            for view in entry['阅读摘要']:
+                lines.append(f'  {time_text(view["时间"])} {view["记录类型"]}：“{view["原话"]}”；{view["数量"]} {view["单位"]}。')
+                lines.append(f'    材料 {view["材料"]} → 目标批次 {view["目标批次"]}；{view["状态"]}；原始录音 {view["原始录音"]}。')
     lines += ['', '三连拍/读数记录：']
     for readout in report['readouts']:
         lines.append(f'  批次 {readout["source_burst_id"]}：收到 {readout["received_photos"]} 张，状态 {readout["burst_status"]}。')
@@ -109,7 +124,9 @@ def render_report(report):
     for job in report['analysis_jobs']:
         lines.append(f'  {job["kind"]}：{job["status"]}，{job["count"]} 项。')
     lines += ['完整性：仅覆盖当前已入库证据，不能证明全天记录完整。',
-              '识别质量：尚未通过客户真实数据验收。OCR为候选读数，未执行确认、飞书填表或材料记账。',
+              ('识别质量：尚未通过客户真实数据验收。符合明确称量规则的用量已通过原账本记账；未经人工核实。'
+               if any(w['operation_id'] for w in weighings) or any(v['已扣库存'] for s in spoken for v in s['阅读摘要']) else
+               '识别质量：尚未通过客户真实数据验收。OCR为候选读数，未执行确认、飞书填表或材料记账。'),
               '每条观察附原媒体ID、片段偏移和证据ID，可通过配套JSON追溯原始录音、视频或照片。']
     return '\n'.join(lines) + '\n'
 

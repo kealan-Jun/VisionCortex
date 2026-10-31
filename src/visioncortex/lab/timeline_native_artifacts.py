@@ -78,6 +78,10 @@ def artifact_documents(core, *, archive, camera, activities, media_sources, rule
                    if str(e['media_id']) in media_sources}
         if not sources:
             continue
+        if activity['source_type'] == 'speech' and payload.get('native_transcript_reference'):
+            from .native_comment_intake import retained_reference
+            references.append(retained_reference(core,activity,sources,camera))
+            continue
         task = tasks.get(payload.get('task_id'))
         if task and (task['status'] != 'completed' or activity['id'] not in (task['result'] or {}).get('activity_ids', [])):
             raise ValueError('Comment activity differs from its completed original task')

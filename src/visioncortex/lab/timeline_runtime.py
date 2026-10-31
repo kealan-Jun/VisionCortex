@@ -13,6 +13,9 @@ from .material_trace import MaterialTrace
 from .operator_scan import OperatorScans
 from .comment_transition import CommentTransitions
 from .scan_intake import ScanIntake
+from .weighing import Weighing
+from .weighing_intake import WeighingIntake
+from .spoken_usage import SpokenUsage
 
 
 class TimelineRuntime:
@@ -24,6 +27,9 @@ class TimelineRuntime:
         self.operator_scans = OperatorScans(core)
         self.comment_transitions = CommentTransitions(core)
         self.scan_intake = ScanIntake(core, settings)
+        self.weighing = Weighing(core)
+        self.weighing_intake = WeighingIntake(core, settings)
+        self.spoken_usage = SpokenUsage(core, settings)
         self.tasks = TimelineTasks(self.timeline)
         self.views = TimelineViews(self.timeline)
         self.readouts = TimelineReadouts(self.timeline)
@@ -35,7 +41,10 @@ class TimelineRuntime:
     def tick(self, now=None):
         if self.settings.processing_profile != 'timeline-v1':
             return dict(enabled=False)
-        return dict(enabled=True, scans=self.scan_intake.tick(), association=self.timeline.reconcile_pending(), closure=self.timeline.close_due(now), **self.views.refresh_dirty())
+        scans = self.scan_intake.tick()
+        weighing = self.weighing_intake.tick()
+        spoken = self.spoken_usage.tick()
+        return dict(enabled=True, scans=scans, weighing=weighing, spoken_material_usage=spoken, association=self.timeline.reconcile_pending(), closure=self.timeline.close_due(now), **self.views.refresh_dirty())
 
     def status(self):
         if self.settings.processing_profile != 'timeline-v1':

@@ -35,8 +35,24 @@ class TimelinePolicies:
         document = document or {'schema_version': 'vc-lab-timeline-policy/1'}
         if document.get('schema_version') not in {'vc-lab-timeline-policy/1','vc-lab-timeline-policy/2'}:
             raise ValueError('Unknown timeline policy version')
-        if set(document) - {'schema_version', 'defaults', 'instruments', 'experiments', 'window_seconds', 'context_seconds','video_input_unit','preceding_context_seconds', 'multimodal_prior_context', 'operation_segments', 'automatic_equipment_qr'}:
+        if set(document) - {'schema_version', 'defaults', 'instruments', 'experiments', 'window_seconds', 'context_seconds','video_input_unit','preceding_context_seconds', 'multimodal_prior_context', 'operation_segments', 'automatic_equipment_qr', 'weighing', 'spoken_material_usage'}:
             raise ValueError('Unknown timeline policy setting')
+        spoken = document.get('spoken_material_usage')
+        if spoken is not None and (type(spoken) is not dict
+                or set(spoken) != {'enabled','revision','max_activities_per_tick','post_actual_declarations'}
+                or type(spoken['enabled']) is not bool or type(spoken['post_actual_declarations']) is not bool
+                or type(spoken['revision']) is not str or not 1 <= len(spoken['revision']) <= 64
+                or type(spoken['max_activities_per_tick']) is not int
+                or not 1 <= spoken['max_activities_per_tick'] <= 20):
+            raise ValueError('Explicit bounded spoken material policy required')
+        weighing = document.get('weighing')
+        if weighing is not None and (type(weighing) is not dict
+                or set(weighing) != {'enabled', 'revision', 'max_activities_per_tick'}
+                or type(weighing['enabled']) is not bool
+                or type(weighing['revision']) is not str or not 1 <= len(weighing['revision']) <= 64
+                or type(weighing['max_activities_per_tick']) is not int
+                or not 1 <= weighing['max_activities_per_tick'] <= 20):
+            raise ValueError('Explicit bounded automatic weighing policy required')
         prior = document.get('multimodal_prior_context')
         if prior is not None:
             if (type(prior) is not dict or set(prior) != {
@@ -59,7 +75,8 @@ class TimelinePolicies:
                         'max_packet_seconds', 'max_packet_tasks', 'max_admissions_per_tick',
                         'max_observations_per_tick', 'rotation_degrees_clockwise',
                         'orientation_basis', 'source_kinds', 'presence_interval_seconds'}
-            if (type(automatic) is not dict or set(automatic) != required
+            if (type(automatic) is not dict or not required <= set(automatic) or set(automatic)-required-{'material'}
+                    or 'material' in automatic and type(automatic['material']) is not bool
                     or any(type(automatic[k]) is not bool for k in ('enabled', 'photo', 'video'))
                     or type(automatic['revision']) is not str or not 1 <= len(automatic['revision'].encode()) <= 48
                     or type(automatic['orientation_basis']) is not str
