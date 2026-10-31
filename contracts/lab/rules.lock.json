@@ -1,6 +1,6 @@
 {
   "schema_version": "vc-lab-rule-bundle/1",
-  "revision": "vc-lab-unified-20261101.25",
+  "revision": "vc-lab-unified-20261101.27",
   "components_sha256": "5be51d3c237058c97919072431ed203e6a8f6dd207137f204fb241b1d71f5af5",
   "files": [
     {
@@ -304,7 +304,7 @@
     },
     {
       "path": "src/visioncortex/lab/native_points.py",
-      "sha256": "41f9c402bf9f54639332ea56cbbebbe1e25ac0d75439cace30f1dfa51d8e5a96"
+      "sha256": "cd35aaa68190b6530a961f02a47ca42d9d0d28d02f3a4a381830fcf8c8d8fc39"
     },
     {
       "path": "src/visioncortex/lab/native_refresh.py",
@@ -460,7 +460,7 @@
     },
     {
       "path": "src/visioncortex/lab/temporal_registration.py",
-      "sha256": "a2aa1b166aa19ddd88041d9969152139b8f82375c31c8067916b7d4e7c0dae70"
+      "sha256": "2c1ea5d17caaedd6db769ebc782319a25bd8473db0915dbe64959d9187b402f1"
     },
     {
       "path": "src/visioncortex/lab/temporal_video.py",

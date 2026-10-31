@@ -63,10 +63,15 @@ def observe(image, quads, color, *, glyph_margin=1):
             np.float32([[[0, .8], [0, 1.25]]]), transforms[i + 1]
         )[0]
         gap = np.float32([left[0], right[0], right[1], left[1]])
+        diagnostic = dict(after_digit=i, gap=gap.tolist(), status="pending")
+        diagnostics.append(diagnostic)
         if not cv2.isContourConvex(gap) or cv2.contourArea(gap, oriented=True) <= 0:
+            diagnostic["reason"] = "source_glyph_gap_not_established"
             continue
         mask = polygon_mask(image.shape, gap) & ~excluded
+        diagnostic["native_gap_pixels"] = int(mask.sum())
         if mask.sum() < 9:
+            diagnostic["reason"] = "insufficient_native_gap_pixels"
             continue
         background_rgb = np.percentile(channels[mask], 30, axis=0)
         residual = channels - background_rgb
@@ -74,11 +79,15 @@ def observe(image, quads, color, *, glyph_margin=1):
             np.delete(residual, primary, axis=2), axis=2
         ) > 25
         chromatic_core = core[mask & colored]
+        diagnostic["chromatic_core_pixels"] = len(chromatic_core)
         if len(chromatic_core) < 2:
+            diagnostic["reason"] = "insufficient_chromatic_point_pixels"
             continue
         background = float(np.percentile(core[mask], 30))
         contrast = float(chromatic_core.max()) - background
+        diagnostic["local_core_contrast"] = contrast
         if contrast < 16:
+            diagnostic["reason"] = "insufficient_native_point_contrast"
             continue
         height = min(
             np.linalg.norm(qs[i][3] - qs[i][0]),
@@ -123,9 +132,14 @@ def observe(image, quads, color, *, glyph_margin=1):
                 ))
         # Preserve multiple points as ambiguity; do not silently discard them.
         out.extend(accepted)
-        diagnostics.append(dict(
-            after_digit=i, gap=gap.tolist(), native_gap_pixels=int(mask.sum()),
+        diagnostic.update(
             independent_component_candidates=len(accepted),
-        ))
+            actual_threshold_levels=sorted(levels),
+            candidate_components_before_persistence=len(candidates),
+            status="observed_candidate" if len(accepted) == 1 else "pending",
+            reason="single_source_point_candidate" if len(accepted) == 1
+            else "multiple_source_point_candidates" if accepted
+            else "no_persistent_isolated_source_point",
+        )
     return dict(points=out, gaps=diagnostics, confirmed=False, OFF_inferred=False,
                 numeric_value=None, resampled=False)

@@ -66,3 +66,19 @@ def test_missing_or_full_frame_dynamic_exclusion_fails_closed():
         stable_feature_mask((100, 160, 3), [])
     with pytest.raises(ValueError):
         stable_feature_mask((100, 160, 3), [[0, 0, 1, 1]])
+@pytest.mark.parametrize("width,height", [(76, 58), (190, 125), (300, 165), (1280, 800)])
+def test_integer_pixel_boxes_survive_normalization_and_json_roundtrip(width, height):
+    import json
+    from visioncortex.lab.temporal_registration import normalized_box
+
+    for right in range(2, width):
+        left = max(0, right - 12)
+        box = json.loads(json.dumps([left / width, 9 / height, right / width, 41 / height]))
+        assert normalized_box(box, (height, width)) == (left, 9, right, 41)
+
+
+def test_genuine_fractional_edges_keep_conservative_coverage_and_tiny_boxes():
+    from visioncortex.lab.temporal_registration import normalized_box
+
+    assert normalized_box([.101, .201, .399, .799], (100, 100)) == (10, 20, 40, 80)
+    assert normalized_box([1e-13, 1e-13, 2e-13, 2e-13], (100, 100)) == (0, 0, 1, 1)

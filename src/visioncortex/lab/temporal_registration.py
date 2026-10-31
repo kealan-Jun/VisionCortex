@@ -17,7 +17,24 @@ def normalized_box(box, shape):
     x1, y1, x2, y2 = map(float, box)
     if not 0 <= x1 < x2 <= 1 or not 0 <= y1 < y2 <= 1:
         raise ValueError('Normalized box outside ROI')
-    return (int(x1*w), int(y1*h), min(w, math.ceil(x2*w)), min(h, math.ceil(y2*h)))
+    def pixel(value, extent, upper):
+        scaled = value * extent
+        nearest = round(scaled)
+        # Integer pixel coordinates must survive normalization and JSON float
+        # roundtrips. Snap only sub-nanopixel representation error; retain
+        # conservative floor/ceil coverage for genuinely fractional edges.
+        if abs(scaled - nearest) <= 1e-9:
+            scaled = nearest
+        return math.ceil(scaled) if upper else math.floor(scaled)
+
+    left, right = pixel(x1, w, False), min(w, pixel(x2, w, True))
+    top, bottom = pixel(y1, h, False), min(h, pixel(y2, h, True))
+    # A valid tiny subpixel box must not collapse after representation snapping.
+    if right <= left:
+        left, right = math.floor(x1 * w), min(w, math.ceil(x2 * w))
+    if bottom <= top:
+        top, bottom = math.floor(y1 * h), min(h, math.ceil(y2 * h))
+    return left, top, right, bottom
 
 
 def stable_feature_mask(shape, dynamic_boxes):
