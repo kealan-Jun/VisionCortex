@@ -1,6 +1,6 @@
 {
   "schema_version": "vc-lab-rule-bundle/1",
-  "revision": "vc-lab-unified-20261031.11",
+  "revision": "vc-lab-unified-20261031.12",
   "components_sha256": "5be51d3c237058c97919072431ed203e6a8f6dd207137f204fb241b1d71f5af5",
   "files": [
     {
@@ -49,7 +49,7 @@
     },
     {
       "path": "temporal-display-rules-v1.json",
-      "sha256": "48973b54b11ac83fd8831025f05297a95aba211353fdef78f8a11beca97ee5fa"
+      "sha256": "1257c4cf97ede49b46e59beab138fc741bd17b516a558e4a607defc2570b3cfb"
     },
     {
       "path": "timeline-rules-v1.json",
@@ -225,6 +225,10 @@
     {
       "path": "src/visioncortex/lab/gauge.py",
       "sha256": "1845f19871ae11d955ccc0b2e66a89d2ed9447a91a2d2457611a7dfec542515e"
+    },
+    {
+      "path": "src/visioncortex/lab/glyph_adapter.py",
+      "sha256": "5b234746b836aa7ab6d9d4010db93e42fd6730f06f8c680d93f9dc45649154e8"
     },
     {
       "path": "src/visioncortex/lab/importer.py",
@@ -504,7 +508,7 @@
     },
     {
       "path": "src/visioncortex/lab/video_numeric.py",
-      "sha256": "b2fc00be7c82cd3a2766ef6916cbbaaf9c0ba1e50f77e2daceb239c14ff9d034"
+      "sha256": "89235760b3a02f5ff60942b8e4ecf7d01de11ed71a0c02104236991d9728d340"
     },
     {
       "path": "src/visioncortex/lab/weighing.py",
@@ -613,6 +617,6 @@
       "sha256": "a3c78f7837195851f74868009d1d14db34f8629ca31457371d8056a1c3c31a73"
     }
   ],
-  "source_lineage_sha256": "919329cebc44b02270a327858ca5eed7265fcab91e5a25127f7c67567fec4954",
+  "source_lineage_sha256": "e4a434b664f2ffd887d358c35110573a8fdc09b00bea765830ba11b2b825fac9",
   "source_lineage_recipe": "sha256 canonical JSON of adapter_files and migration_files; sorted keys, compact separators; v1"
 }

@@ -282,3 +282,26 @@ def test_existing_event_projection_displays_candidate_without_business_confirmat
     assert event["fields"][0]["tentative_value"] == "001.20"
     assert event["payload"]["business_confirmation"] is False
     assert event["spans"][0]["start_seconds"] == "0.100000"
+
+
+def test_decimal_point_requires_native_gap_pixels_not_vertical_stroke_or_model_only():
+    from visioncortex.lab.video_numeric import resolve_decimal_tokens
+
+    image = np.zeros((61, 105, 3), np.uint8)
+    boxes = [[8, 7, 34, 54], [39, 7, 64, 54], [68, 7, 96, 54]]
+    layout = dict(
+        color="red",
+        digits=[[x / 105, y / 61, xx / 105, yy / 61] for x, y, xx, yy in boxes],
+    )
+    image[33:44, 30:33] = [60, 40, 240]  # lower glyph stroke, outside the gap
+    absent = resolve_decimal_tokens(image, layout, ["0.00", "000"])
+    assert absent["numeric_candidate"] is None
+    image[46:49, 35:38] = [60, 40, 240]
+    result = resolve_decimal_tokens(image, layout, ["0.00", "000"])
+    assert result["numeric_candidate"] == "0.00"
+    assert result["native_point_evidence"][0]["after_digit"] == 0
+    assert result["confirmed"] is False
+    conflict = resolve_decimal_tokens(image, layout, ["00.0", "000"])
+    assert conflict["numeric_candidate"] is None
+    different_digits = resolve_decimal_tokens(image, layout, ["0.00", "010"])
+    assert different_digits["numeric_candidate"] is None

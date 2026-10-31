@@ -74,6 +74,26 @@
     "automatic_physical_identity": false,
     "shorter_tokens_are_vetoed_not_replaced": true,
     "clock_separators_preserved": true,
-    "real_quality_acceptance": "NOT_PROVEN"
+    "real_quality_acceptance": "NOT_PROVEN",
+    "glyph_adapter": {
+      "enabled_by_default": false,
+      "method": "vc-native-glyph-prototypes/1",
+      "single_glyph_labels_only": true,
+      "max_prototypes": 12,
+      "max_shared_translation_pixels": 2,
+      "minimum_similarity": 0.85,
+      "minimum_class_margin": 0.12,
+      "unknown_glyphs_preserved": true,
+      "decimal_requires_same_source_pixel_evidence": true,
+      "neural_training_required": false,
+      "independent_quality": "NOT_PROVEN"
+    },
+    "strict_decimal_evidence": {
+      "enabled_by_default": false,
+      "method": "native_interglyph_core_island/1",
+      "source_pixels_only": true,
+      "exclude_glyph_strokes": true,
+      "model_only_decimal_is_not_evidence": true
+    }
   }
 }

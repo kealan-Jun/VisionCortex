@@ -317,6 +317,136 @@ def decimal_peaks(image, layout):
     return found
 
 
+def decimal_gap_peaks(image, layout):
+    """Observe isolated native luminous points between, never inside, glyphs.
+
+    The unsaturated channel suppresses red/green lens bloom. A point must be
+    near the digit baseline and survive two local thresholds. This is a source
+    observation, not proof that a missing point was OFF or a business value.
+    """
+    import cv2
+    import numpy as np
+
+    color = layout.get("color")
+    if color not in {"red", "green"}:
+        return []
+    boxes = digit_boxes(image, layout)
+    channels = image.astype(float)
+    primary = 2 if color == "red" else 1
+    others = np.delete(channels, primary, axis=2)
+    core = np.min(others, axis=2)
+    colored = channels[:, :, primary] - np.max(others, axis=2) > 25
+    found = []
+    for index, (_x, y, xx, yy) in enumerate(boxes[:-1]):
+        height = yy - y
+        left, right = xx, boxes[index + 1][0]
+        top, bottom = (
+            max(0, int(y + 0.80 * height)),
+            min(image.shape[0], math.ceil(yy + 0.10 * height)),
+        )
+        if right - left < 2 or bottom - top < 3:
+            continue
+        patch = core[top:bottom, left:right]
+        background, peak = float(np.percentile(patch, 30)), float(patch.max())
+        if peak - background < 16:
+            continue
+        candidates = []
+        for fraction in (0.4, 0.55, 0.7):
+            binary = np.uint8(
+                (patch > background + fraction * (peak - background))
+                & colored[top:bottom, left:right]
+            )
+            _, _, stats, _ = cv2.connectedComponentsWithStats(binary, 8)
+            for a, b, w, h, area in stats[1:]:
+                if not (
+                    2 <= area <= max(8, height * height * 0.025)
+                    and 0.5 <= w / h <= 2
+                    and w <= height * 0.18
+                    and h <= height * 0.18
+                ):
+                    continue
+                if a == 0 or a + w == right - left or b == 0 or b + h == bottom - top:
+                    continue  # A stroke clipped by the search window is not a dot.
+                candidates.append(
+                    dict(
+                        after_digit=index,
+                        box=[
+                            int(left + a),
+                            int(top + b),
+                            int(left + a + w),
+                            int(top + b + h),
+                        ],
+                        threshold_fraction=fraction,
+                        area=int(area),
+                    )
+                )
+        for candidate in candidates:
+            support = [
+                p
+                for p in candidates
+                if p["threshold_fraction"] != candidate["threshold_fraction"]
+                and max(
+                    abs(
+                        (p["box"][j] + p["box"][j + 2])
+                        - (candidate["box"][j] + candidate["box"][j + 2])
+                    )
+                    / 2
+                    for j in (0, 1)
+                )
+                <= 1.5
+            ]
+            if support:
+                found.append(
+                    dict(
+                        candidate,
+                        method="native_interglyph_core_island/1",
+                        local_contrast=peak - background,
+                        threshold_support=sorted(
+                            {
+                                candidate["threshold_fraction"],
+                                *[p["threshold_fraction"] for p in support],
+                            }
+                        ),
+                    )
+                )
+                break
+    return found
+
+
+def resolve_decimal_tokens(image, layout, texts):
+    """Reconcile same-frame OCR dot omission using actual gap pixels only."""
+    tokens = [number(t) for t in texts]
+    points = decimal_gap_peaks(image, layout)
+    result = dict(
+        numeric_candidate=None,
+        decimal_status="unknown",
+        native_point_evidence=points,
+        value_text=None,
+        confirmed=False,
+        raw_texts=texts,
+    )
+    if (
+        not tokens
+        or any(t is None for t in tokens)
+        or len({t.replace(".", "") for t in tokens}) != 1
+    ):
+        return dict(result, reason="same_source_digits_disagree")
+    digits = tokens[0].replace(".", "")
+    if len(digits) != len(digit_boxes(image, layout)):
+        return dict(result, reason="incomplete_digit_slots")
+    observed = {p["after_digit"] for p in points}
+    model = {t.index(".") - 1 for t in tokens if "." in t}
+    if len(observed) != 1 or (model and model != observed):
+        return dict(result, reason="decimal_missing_or_conflicting")
+    after = next(iter(observed)) + 1
+    return dict(
+        result,
+        numeric_candidate=digits[:after] + "." + digits[after:],
+        decimal_status="observed_same_source_pixel_island",
+        reason="same_digits_and_native_point",
+    )
+
+
 @dataclass
 class _Window:
     signature: str
@@ -399,7 +529,11 @@ class NumericVideoReader:
             energy=energy,
             contrast=contrast,
             digest=hashlib.sha256(image.tobytes()).hexdigest(),
-            decimal=decimal_peaks(image, layout),
+            decimal=(
+                decimal_gap_peaks
+                if layout.get("strict_decimal_evidence")
+                else decimal_peaks
+            )(image, layout),
         )
         s.frames.append(frame)
         while len(s.frames) > 30 or timestamp - s.frames[0]["pts"] > Fraction(
@@ -423,6 +557,97 @@ class NumericVideoReader:
         limit = layout.get("numeric_max_ocr_calls", 8)
         if type(limit) is not int or not 1 <= limit <= 64:
             raise ValueError("Explicit bounded numeric OCR call limit required")
+        if due and layout.get("glyph_adapter") is not None:
+            from .glyph_adapter import recognize
+
+            s.last_infer = timestamp
+            evaluations = [
+                (f, recognize(f["image"], layout, layout["glyph_adapter"]))
+                for f in s.frames
+            ]
+            best, decoded = max(
+                evaluations,
+                key=lambda item: (
+                    sum(g["glyph"] is not None for g in item[1]["glyphs"]),
+                    min(g["similarity"] for g in item[1]["glyphs"]),
+                    sum(g["similarity"] for g in item[1]["glyphs"]),
+                ),
+            )
+            pattern = decoded["glyph_pattern"]
+            decimal = (
+                resolve_decimal_tokens(best["image"], layout, [pattern])
+                if decoded["complete"]
+                else None
+            )
+            proposed = decimal.get("numeric_candidate") if decimal else None
+            reconciliation = None
+            ocr_geometry = None
+            if (
+                layout.get("glyph_ocr_reconcile") is True
+                and ocr is not None
+                and s.calls < limit
+            ):
+                from .glyph_adapter import reconcile
+
+                native_views, ocr_geometry = views(best["image"], layout)
+                native = native_views[0][1]
+                reply = ocr(native, anchor_source=best["source"])
+                s.calls += 1
+                reconciliation = reconcile(
+                    dict(identity=identity, source_ref=best["source"], result=decoded),
+                    dict(
+                        identity=identity,
+                        source_ref=best["source"],
+                        raw_text=reply.get("raw_text"),
+                    ),
+                )
+            s.result = dict(
+                schema_version="vc-lab-temporal-display/1",
+                method=decoded["method"],
+                identity=identity,
+                status="uncertain",
+                value_text=None,
+                raw_text=pattern,
+                candidates=[proposed or pattern] if decoded["complete"] else [],
+                numeric_candidate=proposed,
+                glyph_candidate=pattern,
+                display_text=proposed
+                or pattern
+                + ("（小数点未确认）" if decoded["complete"] else "（笔画未确认）"),
+                reading_status="recognized_candidate"
+                if proposed
+                else "glyphs_only"
+                if decoded["complete"]
+                else "pending_numeric",
+                source_refs=[best["source"]],
+                selected_frame_count=1,
+                selected_span_seconds=0.0,
+                observation_time_start=dict(
+                    pts=best["source"]["pts"], time_base=best["source"]["time_base"]
+                ),
+                observation_time_end=dict(
+                    pts=best["source"]["pts"], time_base=best["source"]["time_base"]
+                ),
+                rejection_reasons=[
+                    "decimal_observed_not_business_confirmation"
+                    if proposed
+                    else "decimal_not_established",
+                    "glyph_adapter_not_independent_acceptance_truth",
+                ],
+                gates=dict(confirmed=False),
+                registration=dict(accepted=True),
+                glyph_adapter=decoded,
+                native_decimal_evidence=decimal,
+                ocr_reconciliation=reconciliation,
+                ocr_preprocessing=ocr_geometry,
+                fused_digit_pixels=False,
+                quality_score_calibrated=False,
+                best_frame_selection_window_refs=[f["source"] for f in s.frames],
+                input_frame_count=s.count,
+                buffer_bytes=self.buffer_bytes,
+                ocr_port_calls=s.calls,
+            )
+            return dict(s.result)
         if due and ocr is not None and s.calls + 2 <= limit:
             s.last_infer = timestamp
             effective_layout = layout
@@ -521,6 +746,20 @@ class NumericVideoReader:
                 reasons.append("same_frame_OCR_views_disagree_on_digits")
             else:
                 reasons.append("no_complete_numeric_token")
+            if layout.get("strict_decimal_evidence"):
+                resolved = (
+                    resolve_decimal_tokens(
+                        best["image"],
+                        effective_layout,
+                        [r["raw_text"] for r in replies],
+                    )
+                    if replies
+                    else None
+                )
+                chosen = resolved.get("numeric_candidate") if resolved else None
+                if resolved and chosen is None:
+                    reasons.append(resolved["reason"])
+                proof = resolved["native_point_evidence"] if resolved else []
             # Even repeated OCR is not whole-glyph/OFF truth. Store traceable
             # numbers for review, never upgrade them to confirmed facts.
             raw = chosen or (
