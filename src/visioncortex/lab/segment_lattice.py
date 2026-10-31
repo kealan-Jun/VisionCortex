@@ -113,6 +113,8 @@ def fit(native, positive_masks):
         evaluated.items(), key=lambda item: item[1][0], reverse=True
     ):
         top, width, height, shear, *offsets = parameters
+        if np.ptp(offsets) > 0.125:
+            continue
         cells = []
         for left, matrix in zip(offsets, transforms, strict=True):
             points = []
@@ -134,13 +136,14 @@ def fit(native, positive_masks):
         ):
             continue
         return cells, dict(
-            method="shared_positive_segment_lattice/1",
+            method="shared_positive_segment_lattice_coupled/2",
             status="geometry_candidate",
             parameters=list(parameters),
             score=value,
             coverage=coverage,
             geometry_component_models=list(selected),
             evaluated_geometries=len(evaluated),
+            maximum_relative_slot_offset_spread=0.125,
             digit_labels_used=False,
             OCR_hypothesis_used=False,
             geometry_objective_resampled=True,

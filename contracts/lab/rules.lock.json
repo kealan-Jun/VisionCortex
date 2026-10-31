@@ -1,6 +1,6 @@
 {
   "schema_version": "vc-lab-rule-bundle/1",
-  "revision": "vc-lab-unified-20261031.19",
+  "revision": "vc-lab-unified-20261031.21",
   "components_sha256": "5be51d3c237058c97919072431ed203e6a8f6dd207137f204fb241b1d71f5af5",
   "files": [
     {
@@ -49,7 +49,7 @@
     },
     {
       "path": "temporal-display-rules-v1.json",
-      "sha256": "f018dd74445c2d21609328ea7d5dd3775c8872cd036feb212ba4828d2ccd5841"
+      "sha256": "debd6c037c1c5759ec7f3d28b30eac048fd691aca99fe0a2c50776aacc4dd713"
     },
     {
       "path": "timeline-rules-v1.json",
@@ -416,7 +416,7 @@
     },
     {
       "path": "src/visioncortex/lab/segment_lattice.py",
-      "sha256": "1025d600fdbdc09eb1eca53d27a4c2ead19241529775c1707efc0a6b20be6d50"
+      "sha256": "0da01eace4c1e2830db63d654d10fd6bc1727e24f96b79bc75ed985606005be2"
     },
     {
       "path": "src/visioncortex/lab/source_tracking.py",
@@ -548,7 +548,7 @@
     },
     {
       "path": "tools/evaluation/replay_display_ocr.py",
-      "sha256": "df487cad8bbad97b3fb6a57e3e18788c23fac99e550587fbafaf97dbdcc42264"
+      "sha256": "24c5fef5e1d712e812c8d6489ce2468f1a759a81104946e10a907017dba17e7b"
     },
     {
       "path": "tools/inference/lab_model_service.py",

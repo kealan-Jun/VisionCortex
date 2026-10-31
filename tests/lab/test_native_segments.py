@@ -116,4 +116,7 @@ def test_geometry_fit_never_mutates_input_or_uses_an_OCR_hypothesis():
     assert np.array_equal(value["image"], before)
     assert evidence["geometry"]["evaluated_geometries"] <= 512
     assert evidence["geometry"]["OCR_hypothesis_used"] is False
+    offsets = evidence["geometry"]["parameters"][4:]
+    assert max(offsets) - min(offsets) <= 0.125
+    assert evidence["geometry"]["maximum_relative_slot_offset_spread"] == 0.125
     assert evidence["OFF_inferred"] is False

@@ -202,6 +202,7 @@ def main(argv=None):
     model_signature = None
     new_calls = hits = attempts = unknown_calls = 0
     actual = []
+    input_members = {}
     verified = {}
     if args.mode != "geometry":
         if args.model_services is None:
@@ -245,6 +246,24 @@ def main(argv=None):
                 bgr=hashlib.sha256(pixels.tobytes()).hexdigest(),
             )
         )
+        input_name = "OCRInput-" + key + ".png"
+        if key not in input_members:
+            if (
+                sum(v["png_bytes"] for v in input_members.values()) + len(raw)
+                > 4 * 1024**2
+            ):
+                raise ValueError("Replay exact-input evidence exceeds 4 MiB")
+            (output / input_name).write_bytes(raw)
+            input_members[key] = dict(
+                path=input_name,
+                png_bytes=len(raw),
+                png_sha256=hashlib.sha256(raw).hexdigest(),
+                bgr_sha256=hashlib.sha256(pixels.tobytes()).hexdigest(),
+                shape=list(pixels.shape),
+            )
+            (output / "OCRInputs.json").write_text(
+                json.dumps(input_members, indent=2) + "\n"
+            )
         if key in cache:
             hits += 1
             return cache[key]["result"], dict(
@@ -252,6 +271,7 @@ def main(argv=None):
                 actual_neural_calls=0,
                 original_execution=cache[key]["execution"],
                 cache_key=key,
+                input_evidence=input_name,
             )
         if args.mode == "replay":
             raise RuntimeError("Recorded OCR unavailable for exact input: " + key)
@@ -308,6 +328,7 @@ def main(argv=None):
             input_bgr_sha256=hashlib.sha256(pixels.tobytes()).hexdigest(),
             shape=list(pixels.shape),
             cache_key=key,
+            input_evidence=input_name,
             worker_runtime={k: response[k] for k in ["python", "opencv", "numpy"]},
         )
         cache[key] = dict(result=result, execution=execution)
@@ -391,6 +412,7 @@ def main(argv=None):
         exact_input_cache_hits=hits,
         models=model,
         actual_executions=actual,
+        exact_input_evidence=list(input_members.values()),
         wall_seconds=time.monotonic() - started,
         independent_accuracy=None,
         database_writes=0,

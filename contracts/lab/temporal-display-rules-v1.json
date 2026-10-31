@@ -129,7 +129,9 @@
         "negative_opportunity_inferred": false,
         "physical_identity_inferred": false,
         "business_confirmation": false,
-        "decimal": "same_original_frame_island_between_fitted_cells_only"
+        "decimal": "same_original_frame_island_between_fitted_cells_only",
+        "maximum_relative_slot_offset_spread": 0.125,
+        "layout_filter": "one_shared_field_geometry_without_independent_slot_drift"
       }
     },
     "engineering_replay": {
@@ -138,7 +140,8 @@
       "template_corrections_prohibited": true,
       "default_mode": "exact_input_receipt_replay",
       "business_writes": false,
-      "cache_identity": "verified_checkpoint_manifest_and_files_settings_backend_and_exact_native_input_pixels"
+      "cache_identity": "verified_checkpoint_manifest_and_files_settings_backend_and_exact_native_input_pixels",
+      "exact_input_PNG_evidence_budget_bytes": 4194304
     },
     "source_panel_tracking": {
       "enabled_by_default": false,
