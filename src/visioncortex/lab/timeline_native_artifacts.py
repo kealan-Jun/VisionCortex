@@ -84,7 +84,11 @@ def artifact_documents(core, *, archive, camera, activities, media_sources, rule
         model = dict(model_revision=activity.get('model_revision'), task_id=payload.get('task_id'),
                      execution_verification=payload.get('execution_verification', 'supplied_not_independently_verified'),
                      accuracy='NOT_PROVEN', actual_task=task)
-        identity = fingerprint(dict(activity=activity, sources=sources, model=model, publisher_rules=rules))
+        # A new publication release must not clone unchanged OCR/ASR results
+        # into another visible folder. The completed task owns its execution
+        # rules; the publisher still records its own rules in the daily view.
+        observation_rules = (task.get('request', {}).get('processing_rules') if task else None) or rules
+        identity = fingerprint(dict(activity=activity, sources=sources, model=model, publisher_rules=observation_rules))
         stamp = 'UnknownTime'
         known_event_time = bool(activity.get('start_at')) and all(source_clock_supported(s.get('time_basis'),s.get('source_kind')) for s in sources.values())
         if known_event_time:
@@ -92,7 +96,7 @@ def artifact_documents(core, *, archive, camera, activities, media_sources, rule
         event_id = 'timeline:' + activity['id'] + ':' + identity[:16]
         common = clean(dict(event_id=event_id, camera_id=camera, timeline_activity_id=activity['id'],
             record_scope='candidate', human_verified=False, business_confirmation=False,
-            processing_rules=rules, model=model, evidence=activity.get('evidence', []), source_refs=sources,
+            processing_rules=observation_rules, model=model, evidence=activity.get('evidence', []), source_refs=sources,
             event_at=activity.get('start_at') if known_event_time else None,
             source_reported_event_at=(activity.get('source_reported_interval') or {}).get('start_at',activity.get('start_at')),
             capture_time_status='verified' if known_event_time else 'unknown_or_uncalibrated',

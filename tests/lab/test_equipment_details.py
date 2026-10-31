@@ -68,6 +68,25 @@ def test_reserved_QR_returns_registered_details_without_physical_activation(clie
     assert not doc['physical_presence_or_operation_proven'] and not doc['activation_performed']
 
 
+def test_authorized_catalogue_activation_resolves_QR_without_claiming_sticker_placement(core, reserved):
+    from visioncortex.lab.equipment import resolve_qr
+    args = dict(verified_at=at(10), actor='fixture catalogue owner',
+                evidence={'authorization': 'enable all registered fixture equipment'},
+                activation_basis='authorized_catalogue')
+    first = core.activate_equipment('catalogue-activation', reserved, **args)
+    assert core.activate_equipment('catalogue-activation', reserved, **args) == first
+    value = equipment_details(core, reserved, as_of=at(11))
+    assert value['state_as_of'] == 'active'
+    assert value['registered_metadata']['catalogue_activation']['physical_placement_verified'] is False
+    assert 'physical_verification' not in value['registered_metadata']
+    assert resolve_qr(core, reserved, at(11))['target_id'] == reserved
+    assert resolve_qr(core, reserved, at(9))['target_id'] is None
+    with core.db.transaction(readonly=True) as conn:
+        for table in ('hj_operator_scan_event', 'hj_experiment_record', 'quantity_ledger_entry'):
+            assert conn.execute('SELECT count(*) AS n FROM '+table+' WHERE customer_id=%s',
+                                (core.customer,)).fetchone()['n'] == 0
+
+
 @pytest.mark.parametrize('hour,state,bound', [(9, 'not_activated', False), (10, 'active', True),
                                             (11, 'active', True), (12, 'retired', False)])
 def test_as_of_uses_effective_half_open_lifecycle_not_current_retired_state(client, settings, retired, hour, state, bound):

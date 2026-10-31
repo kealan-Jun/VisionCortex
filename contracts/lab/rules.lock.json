@@ -1,6 +1,6 @@
 {
   "schema_version": "vc-lab-rule-bundle/1",
-  "revision": "vc-lab-unified-20261031.2",
+  "revision": "vc-lab-unified-20261031.3",
   "components_sha256": "5be51d3c237058c97919072431ed203e6a8f6dd207137f204fb241b1d71f5af5",
   "files": [
     {
@@ -204,7 +204,7 @@
     },
     {
       "path": "src/visioncortex/lab/equipment.py",
-      "sha256": "b4758f53526e9461c34e3a35f4dbf1bcb620ad6ef9d6ec68d5912fd50b1ed558"
+      "sha256": "478dacf03ac7f4183017dcf8eb94e10c6fb4b017cc4e6d865c0d7cc638fdbbc6"
     },
     {
       "path": "src/visioncortex/lab/existing_archive_binding.py",
@@ -432,7 +432,7 @@
     },
     {
       "path": "src/visioncortex/lab/timeline_native_artifacts.py",
-      "sha256": "14c2a2dba3a727b0158519b3afd33c9162c7275139ed4129226f751041d774f2"
+      "sha256": "758a80b47f353381e987c674fddef83e4aa002a7625cc4405f58bf4d82041140"
     },
     {
       "path": "src/visioncortex/lab/timeline_policy.py",

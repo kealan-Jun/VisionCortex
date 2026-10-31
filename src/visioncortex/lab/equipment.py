@@ -68,27 +68,45 @@ def issue_equipment(core, key, *, metadata=None, actor):
     return core.command(key, dict(action='issue_equipment', metadata=metadata, actor=actor), action)
 
 
-def activate_equipment(core, key, device_id, *, verified_at, actor, evidence, metadata=None):
+def activate_equipment(core, key, device_id, *, verified_at, actor, evidence, metadata=None,
+                       activation_basis='physical_verification'):
     at = instant(verified_at)
+    if activation_basis not in {'physical_verification', 'authorized_catalogue'}:
+        raise ValueError('Explicit equipment activation basis required')
     if not actor or not isinstance(evidence, dict) or not evidence:
-        raise ValueError('Physical verification actor and evidence are required')
+        raise ValueError('Equipment activation actor and evidence are required')
     def action(conn):
         row = conn.execute('SELECT * FROM equipment_identity WHERE customer_id=%s AND device_id=%s FOR UPDATE', (core.customer, ident(device_id))).fetchone()
         if not row:
             raise Missing('Device UUID is not reserved for this customer')
         if row['state'] != 'reserved':
             raise Conflict('Device already activated or retired; preserve its identity/history')
-        values = dict(row['metadata'], **(metadata or {}), device_id=str(row['device_id']), device_code=row['device_code'], identity_scheme='device-uuid/1', physical_verification=dict(at=clean(at), actor=actor, evidence=evidence))
+        values = dict(row['metadata'], **(metadata or {}), device_id=str(row['device_id']),
+                      device_code=row['device_code'], identity_scheme='device-uuid/1')
+        proof = dict(at=clean(at), actor=actor, evidence=evidence)
+        if activation_basis == 'physical_verification':
+            values['physical_verification'] = proof
+        else:
+            # Catalogue registration allows deployment before stickers are put
+            # on the instruments. It does not manufacture a placement check.
+            values.pop('physical_verification', None)
+            values['catalogue_activation'] = dict(proof, physical_placement_verified=False)
         existing = conn.execute('SELECT id FROM entity WHERE customer_id=%s AND kind=\'instrument\' AND code=%s', (core.customer, row['device_code'])).fetchone()
         if existing and existing['id'] != row['device_id']:
             raise Conflict('Visible equipment code already identifies another UUID')
         target = core._register(conn, 'instrument', row['device_code'], values, entity_id=row['device_id'])
         tag = core.register(key + ':label', 'tag', str(row['device_id']), {'mode': 'permanent', 'identity_scheme': 'device-uuid/1'})
-        core.assign_tag(key + ':binding', tag['id'], target['id'], at, actor=actor, reason='verified permanent device UUID')
+        core.assign_tag(key + ':binding', tag['id'], target['id'], at, actor=actor,
+                        reason='verified permanent device UUID' if activation_basis == 'physical_verification'
+                        else 'authorized permanent device catalogue mapping')
         conn.execute("UPDATE equipment_identity SET state='active',verified_at=%s,actor=%s,metadata=%s WHERE customer_id=%s AND device_id=%s", (at, actor, Jsonb(clean(values)), core.customer, row['device_id']))
         core._emit(conn, 'entity', target['id'], target['revision'], target)
         return dict(device_id=target['id'], device_code=row['device_code'], qr_payload=str(target['id']), state='active', label_id=tag['id'])
-    return core.command(key, dict(action='activate_equipment', device_id=device_id, verified_at=verified_at, actor=actor, evidence=evidence, metadata=metadata), action)
+    request = dict(action='activate_equipment', device_id=device_id, verified_at=verified_at,
+                   actor=actor, evidence=evidence, metadata=metadata)
+    if activation_basis != 'physical_verification':
+        request['activation_basis'] = activation_basis
+    return core.command(key, request, action)
 
 
 def retire_equipment(core, key, device_id, *, at, actor, reason):

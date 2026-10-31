@@ -112,6 +112,29 @@ def revised(p):
     return path, old, path.read_bytes(), current
 
 
+def test_publisher_release_does_not_clone_unchanged_completed_observation(prepared):
+    from visioncortex.lab.timeline_native_artifacts import artifact_documents
+    from visioncortex.lab.rules import Rules
+
+    p = prepared
+    p['publication'].tick()
+    bindings = json.loads((p['archive'] / '2026-10-29_fixture-camera-0/Comment/Bindings.json').read_text())
+    reference = next(r for r in bindings['comment_artifacts'] if r['source_type'] == 'ocr')
+    value = json.loads((p['archive'] / reference['readings']).read_text())
+    with p['s']['core'].db.transaction(readonly=True) as conn:
+        task = conn.execute('SELECT request,result FROM hj_timeline_task WHERE customer_id=%s AND id=%s',
+                            (p['s']['core'].customer, value['model']['task_id'])).fetchone()
+    # Reuse the exact report activity/source snapshot used by publication.
+    activities = p['snapshot']['document']['unassigned_activities']
+    activity = next(a for a in activities if a['id'] == reference['activity_id'])
+    args = dict(archive='2026-10-29_fixture-camera-0', camera='fixture-camera-0',
+                activities=[activity], media_sources=value['source_refs'])
+    original = artifact_documents(p['s']['core'], **args, rules=task['request']['processing_rules'])
+    changed = artifact_documents(p['s']['core'], **args, rules=dict(Rules().identity(), revision='fixture-later-publisher', sha256='f'*64))
+    assert changed == original
+    assert reference['readings'] in changed[0]
+
+
 @pytest.mark.parametrize('case', ['old_valid_revision', 'changed_same_revision'])
 def test_new_latest_revision_guard_rejects_rollback_and_hash_tampering(prepared, case):
     p = prepared
