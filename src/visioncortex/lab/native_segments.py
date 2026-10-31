@@ -70,6 +70,40 @@ def positive_pixels(image, quad, color, *, expanded=False):
     return supported, span, minimum
 
 
+def connected_support(pixels, polygon, axis):
+    """One connected source trace must support a stroke, not scattered spots."""
+    components, labels, stats, _ = cv2.connectedComponentsWithStats(np.uint8(pixels), 8)
+    projection = cv2.getPerspectiveTransform(
+        polygon.astype(np.float32), np.float32([[0, 0], [1, 0], [1, 1], [0, 1]])
+    )
+    best = None
+    # Bound noise work. Never join, close or draw source pixels.
+    for component in sorted(
+        range(1, components),
+        key=lambda k: int(stats[k, cv2.CC_STAT_AREA]),
+        reverse=True,
+    )[:8]:
+        x, y, width, height, _ = map(int, stats[component])
+        yy, xx = np.nonzero(labels[y : y + height, x : x + width] == component)
+        if len(xx) < 2:
+            continue
+        points = np.float32(np.column_stack([xx + x + 0.5, yy + y + 0.5]))
+        longitudinal = cv2.perspectiveTransform(points[None], projection)[0][:, axis]
+        extent = float(np.percentile(longitudinal, 95) - np.percentile(longitudinal, 5))
+        middle = int(((longitudinal >= 1 / 3) & (longitudinal <= 2 / 3)).sum())
+        occupied = len(set(np.clip(np.floor(longitudinal * 3).astype(int), 0, 2)))
+        score = (bool(middle), extent, len(xx))
+        if best is None or score > best[0]:
+            best = (score, extent, middle, occupied, len(xx))
+    return dict(
+        extent=best[1] if best else 0.0,
+        middle=best[2] if best else 0,
+        occupied=best[3] if best else 0,
+        pixels=best[4] if best else 0,
+        components=components - 1,
+    )
+
+
 def observe(native, *, expanded=False):
     image, layout = native["image"], native["layout"]
     if (
@@ -183,47 +217,33 @@ def observe(native, *, expanded=False):
             selected = cell & mask
             count = int((cell_core & mask).sum())
             lit = int((positive & selected).sum())
-            yy, xx = np.nonzero(positive & selected)
-            extent = 0.0
-            occupied = middle = 0
-            if len(xx) >= 2:
-                unit = np.float32([[0, 0], [1, 0], [1, 1], [0, 1]])
-                projected = cv2.perspectiveTransform(
-                    np.float32(np.column_stack([xx + 0.5, yy + 0.5]))[None],
-                    cv2.getPerspectiveTransform(polygon.astype(np.float32), unit),
-                )[0]
-                axis = 0 if name in "adg" else 1
-                longitudinal = projected[:, axis]
-                occupied = len(
-                    set(np.clip(np.floor(longitudinal * 3).astype(int), 0, 2))
-                )
-                middle = int(((longitudinal >= 1 / 3) & (longitudinal <= 2 / 3)).sum())
-                extent = float(
-                    np.percentile(projected[:, axis], 95)
-                    - np.percentile(projected[:, axis], 5)
-                )
+            support = connected_support(
+                positive & selected, polygon, 0 if name in "adg" else 1
+            )
             on = (
                 height >= (16 if expanded else 12)
                 and span >= 35
                 and count >= 2
-                and lit >= 2
-                and lit / max(1, count) >= (0.2 if expanded else 0.3)
-                and extent >= 0.45
-                and middle >= 1
-                and (not expanded or occupied >= 2)
+                and support["pixels"] >= 2
+                and support["pixels"] / max(1, count) >= (0.2 if expanded else 0.3)
+                and support["extent"] >= 0.45
+                and support["middle"] >= 1
+                and (not expanded or support["occupied"] >= 2)
             )
             cells[name] = dict(
                 state="ON" if on else "UNKNOWN",
                 source_pixels=count,
                 observed_active_pixels=lit,
-                longitudinal_extent=extent,
-                native_middle_pixels=middle,
+                connected_support_pixels=support["pixels"],
+                source_component_count=support["components"],
+                longitudinal_extent=support["extent"],
+                native_middle_pixels=support["middle"],
                 native_polygon=polygon.tolist(),
                 **(
                     dict(
                         tolerance_support_pixels=int(selected.sum()),
                         source_pixel_edge_tolerance=2.0,
-                        longitudinal_bins_occupied=occupied,
+                        longitudinal_bins_occupied=support["occupied"],
                     )
                     if expanded
                     else {}

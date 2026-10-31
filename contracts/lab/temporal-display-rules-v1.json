@@ -147,6 +147,13 @@
           "candidate_only": true,
           "OCR_digits_replaced": false,
           "decimal_support_expanded": false
+        },
+        "connected_source_support": {
+          "maximum_components_examined": 8,
+          "disconnected_spots_combined": false,
+          "source_pixels_drawn_or_closed": false,
+          "same_component_contains_middle_and_longitudinal_extent": true,
+          "nonemitting_cells_remain": "unknown"
         }
       }
     },

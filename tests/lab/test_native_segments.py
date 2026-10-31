@@ -155,9 +155,38 @@ def test_two_lit_endpoints_cannot_invent_a_missing_middle_stroke():
     ).hexdigest()
     result = review(value, dict(raw_text="47", score=1.0))
     cell = result["native_segment_evidence"]["slots"][0]["segments"]["g"]
-    assert cell["observed_active_pixels"] > 0 and cell["longitudinal_extent"] > 0.45
+    assert cell["observed_active_pixels"] > 0 and cell["source_component_count"] >= 2
+    assert cell["connected_support_pixels"] < cell["observed_active_pixels"]
     assert cell["native_middle_pixels"] == 0 and cell["state"] == "UNKNOWN"
     assert result["glyph_candidate"] is None and result["confirmed"] is False
+
+
+def test_disconnected_end_and_middle_spots_do_not_form_a_continuous_stroke():
+    import hashlib
+
+    value = native("47", omitted=[(0, "g")])
+    a, b, c, d = SEGMENT_BOXES["g"]
+    matrix = cv2.getPerspectiveTransform(
+        np.float32([[0, 0], [1, 0], [1, 1], [0, 1]]),
+        np.asarray(value["quads"][0], np.float32),
+    )
+    for lo, hi in [(0, 0.22), (0.4, 0.6), (0.78, 1)]:
+        left, right = a + (c - a) * lo, a + (c - a) * hi
+        polygon = cv2.perspectiveTransform(
+            np.float32([[[left, b], [right, b], [right, d], [left, d]]]), matrix
+        )[0]
+        cv2.fillConvexPoly(
+            value["image"], np.rint(polygon).astype(np.int32), (25, 40, 240)
+        )
+    value["metadata"]["native_bgr_sha256"] = hashlib.sha256(
+        value["image"].tobytes()
+    ).hexdigest()
+    result = review(value, dict(raw_text="47", score=1.0))
+    cell = result["native_segment_evidence"]["slots"][0]["segments"]["g"]
+    assert cell["native_middle_pixels"] > 0 and cell["source_component_count"] >= 3
+    assert cell["connected_support_pixels"] < cell["observed_active_pixels"]
+    assert cell["state"] == "UNKNOWN" and result["glyph_candidate"] is None
+    assert result["raw_text"] == "47" and result["confirmed"] is False
 
 
 def test_alternate_geometry_never_replaces_explicit_registered_cells():
