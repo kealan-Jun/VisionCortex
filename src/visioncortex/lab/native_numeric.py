@@ -200,7 +200,13 @@ def review(native, reply):
     stroke_veto = native["layout"].get("numeric_native_stroke_veto", False)
     if type(stroke_veto) is not bool:
         raise ValueError("Explicit native stroke-veto boolean required")
+    alternate = native["layout"].get("numeric_native_alternate_geometry", False)
+    if type(alternate) is not bool or alternate and not stroke_veto:
+        raise ValueError(
+            "Alternate geometry requires explicit source-stroke verification"
+        )
     stroke_evidence = stroke_assessment = None
+    geometry_hypotheses = []
     decimal_layout = native["layout"]
     if glyphs and stroke_veto:
         if native["layout"].get("display_type") != "seven_segment":
@@ -211,6 +217,21 @@ def review(native, reply):
 
         stroke_evidence = observe(native)
         stroke_assessment = assess(stroke_evidence, glyphs)
+        if alternate:
+            geometry_hypotheses.append(
+                dict(evidence=stroke_evidence, assessment=stroke_assessment)
+            )
+            if not stroke_assessment["supported"] and not any(
+                isinstance(d, dict) and d.get("segments")
+                for d in native["layout"]["digits"]
+            ):
+                alternative = observe(native, expanded=True)
+                assessment = assess(alternative, glyphs)
+                geometry_hypotheses.append(
+                    dict(evidence=alternative, assessment=assessment)
+                )
+                if assessment["supported"]:
+                    stroke_evidence, stroke_assessment = alternative, assessment
         if not stroke_assessment["supported"]:
             glyphs = None
             reasons.append("OCR_required_strokes_not_established_from_source")
@@ -268,6 +289,7 @@ def review(native, reply):
             if stroke_veto
             else {}
         ),
+        **(dict(source_geometry_hypotheses=geometry_hypotheses) if alternate else {}),
     )
 
 

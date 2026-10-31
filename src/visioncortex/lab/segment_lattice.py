@@ -11,7 +11,16 @@ import numpy as np
 from .temporal_display import SEGMENT_BOXES, SEGMENTS
 
 
-def fit(native, positive_masks):
+def expanded_quad(quad):
+    """A bounded vertical search envelope; never synthesize source pixels."""
+    q = np.asarray(quad, np.float32)
+    return cv2.perspectiveTransform(
+        np.float32([[[0, -0.25], [1, -0.25], [1, 1.25], [0, 1.25]]]),
+        cv2.getPerspectiveTransform(np.float32([[0, 0], [1, 0], [1, 1], [0, 1]]), q),
+    )[0]
+
+
+def fit(native, positive_masks, *, expanded=False):
     image = native["image"]
     if len(positive_masks) != len(native["quads"]):
         raise ValueError("One source-positive mask per native slot required")
@@ -20,7 +29,7 @@ def fit(native, positive_masks):
     signals = []
     transforms = []
     for value, positive in zip(native["quads"], positive_masks, strict=True):
-        q = np.asarray(value, np.float32)
+        q = expanded_quad(value) if expanded else np.asarray(value, np.float32)
         matrix = cv2.getPerspectiveTransform(q, target)
         patch = cv2.warpPerspective(positive.astype(np.float32), matrix, (W, H))
         patch[:, :2] = 0
@@ -150,5 +159,12 @@ def fit(native, positive_masks):
             OCR_pixels_resampled=False,
             physical_identity_inferred=False,
             quality_calibrated=False,
+            **(
+                dict(
+                    vertical_search_margin=0.25, hypothesis="expanded_source_envelope/1"
+                )
+                if expanded
+                else {}
+            ),
         )
     return None, dict(status="pending", reason="shared_cell_geometry_escapes_source")

@@ -131,7 +131,23 @@
         "business_confirmation": false,
         "decimal": "same_original_frame_island_between_fitted_cells_only",
         "maximum_relative_slot_offset_spread": 0.125,
-        "layout_filter": "one_shared_field_geometry_without_independent_slot_drift"
+        "layout_filter": "one_shared_field_geometry_without_independent_slot_drift",
+        "requires_native_stroke_middle_pixels": true,
+        "alternate_geometry": {
+          "enabled_by_default": false,
+          "activation": "numeric_native_alternate_geometry",
+          "maximum_hypotheses": 2,
+          "explicit_registered_cells_replaced": false,
+          "vertical_search_margin": 0.25,
+          "source_contrast_fixed_before_fit": true,
+          "minimum_digit_height_pixels": 16,
+          "maximum_native_pixel_support_distance": 2,
+          "minimum_middle_pixels": 1,
+          "minimum_longitudinal_bins_occupied": 2,
+          "candidate_only": true,
+          "OCR_digits_replaced": false,
+          "decimal_support_expanded": false
+        }
       }
     },
     "engineering_replay": {

@@ -34,7 +34,7 @@ def polygon_mask(shape, quad):
     return mask
 
 
-def positive_pixels(image, quad, color):
+def positive_pixels(image, quad, color, *, expanded=False):
     """Measure original coarse-slot contrast once, before fitting geometry.
 
     A slot's color anchor permits bright achromatic appearance evidence too;
@@ -43,9 +43,15 @@ def positive_pixels(image, quad, color):
     """
     channel = 2 if color == "red" else 1
     q = np.asarray(quad, np.float32)
-    mask = polygon_mask(image.shape, q)
+    measurement_mask = polygon_mask(image.shape, q)
+    if expanded:
+        from .segment_lattice import expanded_quad
+
+        mask = polygon_mask(image.shape, expanded_quad(q))
+    else:
+        mask = measurement_mask
     colors = image.astype(np.int16)
-    values = colors[:, :, channel][mask > 0]
+    values = colors[:, :, channel][measurement_mask > 0]
     background, upper = np.percentile(values, [25, 98])
     span = float(upper - background)
     minimum = float(background + max(25, 0.55 * span))
@@ -53,7 +59,9 @@ def positive_pixels(image, quad, color):
     core = (mask > 0) & (colors[:, :, channel] >= minimum)
     glare = (colors.min(axis=2) > 235) & (colors.max(axis=2) - colors.min(axis=2) < 20)
     core &= ~glare
-    seeds = core & (signal > 20)
+    seeds = core & (signal > 20) & measurement_mask
+    if expanded:
+        core &= measurement_mask | (signal >= -10)
     # Protective tinted glass can shift a bright stroke toward white/blue.
     # Its measured same-slot contrast remains useful appearance evidence even
     # when a scan stripe disconnects it from the colored part. This supplies
@@ -62,7 +70,7 @@ def positive_pixels(image, quad, color):
     return supported, span, minimum
 
 
-def observe(native):
+def observe(native, *, expanded=False):
     image, layout = native["image"], native["layout"]
     if (
         layout.get("color") not in {"red", "green"}
@@ -94,9 +102,14 @@ def observe(native):
     from .segment_lattice import fit as fit_lattice
 
     source_observations = [
-        positive_pixels(image, q, layout["color"]) for q in native["quads"]
+        positive_pixels(image, q, layout["color"], expanded=expanded)
+        for q in native["quads"]
     ]
     if any(isinstance(d, dict) and d.get("segments") for d in layout["digits"]):
+        if expanded:
+            raise ValueError(
+                "Explicit segment cells cannot be replaced by fitted geometry"
+            )
         quads, fit = (
             native["quads"],
             dict(
@@ -106,7 +119,11 @@ def observe(native):
             ),
         )
     else:
-        quads, fit = fit_lattice(native, [v[0] for v in source_observations])
+        quads, fit = fit_lattice(
+            native,
+            [v[0] for v in source_observations],
+            **(dict(expanded=True) if expanded else {}),
+        )
     if quads is None:
         return dict(
             method="native_seven_segment_positive_support/1",
@@ -154,12 +171,21 @@ def observe(native):
             polygon = cv2.perspectiveTransform(
                 np.float32([[[x, y], [xx, y], [xx, yy], [x, yy]]]), transform
             )[0]
-            cell = polygon_mask(image.shape, polygon)
+            cell_core = polygon_mask(image.shape, polygon)
+            cell = (
+                cv2.distanceTransform(
+                    (~cell_core).astype(np.uint8), cv2.DIST_L2, cv2.DIST_MASK_PRECISE
+                )
+                <= 2.0
+                if expanded
+                else cell_core
+            )
             selected = cell & mask
-            count = int(selected.sum())
+            count = int((cell_core & mask).sum())
             lit = int((positive & selected).sum())
             yy, xx = np.nonzero(positive & selected)
             extent = 0.0
+            occupied = middle = 0
             if len(xx) >= 2:
                 unit = np.float32([[0, 0], [1, 0], [1, 1], [0, 1]])
                 projected = cv2.perspectiveTransform(
@@ -167,24 +193,41 @@ def observe(native):
                     cv2.getPerspectiveTransform(polygon.astype(np.float32), unit),
                 )[0]
                 axis = 0 if name in "adg" else 1
+                longitudinal = projected[:, axis]
+                occupied = len(
+                    set(np.clip(np.floor(longitudinal * 3).astype(int), 0, 2))
+                )
+                middle = int(((longitudinal >= 1 / 3) & (longitudinal <= 2 / 3)).sum())
                 extent = float(
                     np.percentile(projected[:, axis], 95)
                     - np.percentile(projected[:, axis], 5)
                 )
             on = (
-                height >= 12
+                height >= (16 if expanded else 12)
                 and span >= 35
                 and count >= 2
                 and lit >= 2
-                and lit / max(1, count) >= 0.3
+                and lit / max(1, count) >= (0.2 if expanded else 0.3)
                 and extent >= 0.45
+                and middle >= 1
+                and (not expanded or occupied >= 2)
             )
             cells[name] = dict(
                 state="ON" if on else "UNKNOWN",
                 source_pixels=count,
                 observed_active_pixels=lit,
                 longitudinal_extent=extent,
+                native_middle_pixels=middle,
                 native_polygon=polygon.tolist(),
+                **(
+                    dict(
+                        tolerance_support_pixels=int(selected.sum()),
+                        source_pixel_edge_tolerance=2.0,
+                        longitudinal_bins_occupied=occupied,
+                    )
+                    if expanded
+                    else {}
+                ),
             )
         rows.append(
             dict(

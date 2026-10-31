@@ -120,3 +120,59 @@ def test_geometry_fit_never_mutates_input_or_uses_an_OCR_hypothesis():
     assert max(offsets) - min(offsets) <= 0.125
     assert evidence["geometry"]["maximum_relative_slot_offset_spread"] == 0.125
     assert evidence["OFF_inferred"] is False
+
+
+def test_alternate_geometry_preserves_missing_and_contradictory_source_strokes():
+    for text, omitted in [("47", [(0, "g")]), ("97", [])]:
+        value = native(text, omitted=omitted)
+        value["layout"]["digits"] = [d["box"] for d in value["layout"]["digits"]]
+        value["layout"]["numeric_native_alternate_geometry"] = True
+        result = review(value, dict(raw_text="47", score=1.0))
+        assert result["glyph_candidate"] is None and result["confirmed"] is False
+        assert result["raw_text"] == "47"
+        assert 1 <= len(result["source_geometry_hypotheses"]) <= 2
+        assert result["numeric_candidate"] is None
+
+
+def test_two_lit_endpoints_cannot_invent_a_missing_middle_stroke():
+    import hashlib
+
+    value = native("47", omitted=[(0, "g")])
+    a, b, c, d = SEGMENT_BOXES["g"]
+    matrix = cv2.getPerspectiveTransform(
+        np.float32([[0, 0], [1, 0], [1, 1], [0, 1]]),
+        np.asarray(value["quads"][0], np.float32),
+    )
+    for left, right in [(a, a + (c - a) * 0.2), (c - (c - a) * 0.2, c)]:
+        polygon = cv2.perspectiveTransform(
+            np.float32([[[left, b], [right, b], [right, d], [left, d]]]), matrix
+        )[0]
+        cv2.fillConvexPoly(
+            value["image"], np.rint(polygon).astype(np.int32), (25, 40, 240)
+        )
+    value["metadata"]["native_bgr_sha256"] = hashlib.sha256(
+        value["image"].tobytes()
+    ).hexdigest()
+    result = review(value, dict(raw_text="47", score=1.0))
+    cell = result["native_segment_evidence"]["slots"][0]["segments"]["g"]
+    assert cell["observed_active_pixels"] > 0 and cell["longitudinal_extent"] > 0.45
+    assert cell["native_middle_pixels"] == 0 and cell["state"] == "UNKNOWN"
+    assert result["glyph_candidate"] is None and result["confirmed"] is False
+
+
+def test_alternate_geometry_never_replaces_explicit_registered_cells():
+    value = native("47", omitted=[(0, "g")])
+    value["layout"]["numeric_native_alternate_geometry"] = True
+    result = review(value, dict(raw_text="47"))
+    assert result["glyph_candidate"] is None
+    assert len(result["source_geometry_hypotheses"]) == 1
+    with pytest.raises(ValueError, match="Explicit segment cells"):
+        observe(value, expanded=True)
+
+
+@pytest.mark.parametrize("activation", ["true", 1, None])
+def test_alternate_geometry_requires_a_boolean(activation):
+    value = native("47")
+    value["layout"]["numeric_native_alternate_geometry"] = activation
+    with pytest.raises(ValueError, match="Alternate geometry"):
+        review(value, dict(raw_text="47"))
