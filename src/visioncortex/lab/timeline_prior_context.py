@@ -18,7 +18,10 @@ SCHEMA = 'vc-lab-multimodal-prior-context/1'
 _PAYLOAD_KEYS = ('fields', 'value_candidate', 'comment_candidate',
                  'comment_interpretation_review', 'operator_scan', 'operator_context',
                  'scan_intake', 'status', 'conflicts', 'temporal_world_clock_status',
-                 'text', 'tokens', 'decoded_values', 'raw_text', 'readings', 'video_qr')
+                 'text', 'tokens', 'decoded_values', 'raw_text', 'readings', 'video_qr',
+                 'normalized_fields', 'source_activity_id', 'original_audio_sha256',
+                 'source_start_seconds', 'source_end_seconds', 'native_transcript_reference',
+                 'native_asr_models', 'native_alignment_status', 'unaligned_units')
 
 
 def _bytes(value):

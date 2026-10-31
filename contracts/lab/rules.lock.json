@@ -1,6 +1,6 @@
 {
   "schema_version": "vc-lab-rule-bundle/1",
-  "revision": "vc-lab-unified-20261031.6",
+  "revision": "vc-lab-unified-20261031.7",
   "components_sha256": "5be51d3c237058c97919072431ed203e6a8f6dd207137f204fb241b1d71f5af5",
   "files": [
     {
@@ -184,7 +184,7 @@
     },
     {
       "path": "src/visioncortex/lab/domain.py",
-      "sha256": "4ffe76d07551393c685d64ae53fb880e940c0eb2c85c5e4c826ab922f614b90a"
+      "sha256": "f1643ea5f54f6de68358987d23869df9a8c3e09144dc009f10015fe4ecbb885a"
     },
     {
       "path": "src/visioncortex/lab/dynamic_context.py",
@@ -257,6 +257,10 @@
     {
       "path": "src/visioncortex/lab/material_trace.py",
       "sha256": "7d7ff20ebff791aa822d441a7ad9d119aaa8f75ccf7912e755018b20ba0206c3"
+    },
+    {
+      "path": "src/visioncortex/lab/material_use_context.py",
+      "sha256": "3fc6e042be136ad8509e0e5fd7752904a0b1b53434b8586bc8cb8b49b1be25ad"
     },
     {
       "path": "src/visioncortex/lab/media.py",
@@ -400,11 +404,11 @@
     },
     {
       "path": "src/visioncortex/lab/spoken_usage.py",
-      "sha256": "a9872faea35f0f7b0ddd10259f9327d81341bb33eb8c61d352fd54ca8b42a744"
+      "sha256": "7c9edb8309276a4da2178f6c23685fffd54763e0731383269a59083dcf93f0a7"
     },
     {
       "path": "src/visioncortex/lab/spoken_usage_view.py",
-      "sha256": "7e5ce24034d9c3ad574a9e26d07bec8bfa5fe52833e19125fec7f64d0bb703c4"
+      "sha256": "13f809e915c501fc7ae11df4ae4a532fc2c5e8c0481a287152bc0f61bf6a6704"
     },
     {
       "path": "src/visioncortex/lab/storage.py",
@@ -452,7 +456,7 @@
     },
     {
       "path": "src/visioncortex/lab/timeline_prior_context.py",
-      "sha256": "d2d835f8b3b004fad4459e673de7ce303290d4a4b040e393e4f5a2cb6122d7a2"
+      "sha256": "11346316be7e8b438f25acb4991f771743bdb9438d57525208fd5b000d95401c"
     },
     {
       "path": "src/visioncortex/lab/timeline_publication.py",
@@ -500,7 +504,7 @@
     },
     {
       "path": "src/visioncortex/lab/weighing.py",
-      "sha256": "9cdeeb7bd45e5a47dd192e452cc4e92b7ce630e25cbe9c47ba9d68c3d6684c02"
+      "sha256": "1cf1996adf5d21da133cf87df140e8a1a580d1135e27b52527f59c7116023e65"
     },
     {
       "path": "src/visioncortex/lab/weighing_intake.py",
@@ -508,7 +512,7 @@
     },
     {
       "path": "src/visioncortex/lab/weighing_view.py",
-      "sha256": "f90588219f4421b6c1b22f70eca520178c93209dda17e634af2daf468ec1126f"
+      "sha256": "c5f1e2b11492c019ede46b59de3f9a934b912646e766b03af55ac9a0c2b93064"
     },
     {
       "path": "src/visioncortex/result_readability.py",

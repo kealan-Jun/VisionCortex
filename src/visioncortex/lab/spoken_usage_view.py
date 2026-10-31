@@ -1,5 +1,6 @@
 """Shallow reading projection of source-pinned oral use; no new ledger writer."""
-from .domain import clean
+from .domain import clean, ident
+from .material_use_context import reading_base, accounting
 from .spoken_usage import PREFIX
 
 NAMES={'actual_increment':'实际取用声明','balance':'口述剩余量','planned':'计划用量',
@@ -8,16 +9,18 @@ NAMES={'actual_increment':'实际取用声明','balance':'口述剩余量','plan
 
 def readable(statement):
     context=statement['context'];stock=statement.get('inventory') or {}
-    return dict(时间=statement['occurred_at'],记录类型=NAMES[statement['semantics']],
-        原话=statement['source_text'],数量=statement['quantity'],单位=statement['unit'],
-        设备=context.get('instrument_code','未关联'),材料=context.get('material_code','未关联'),
-        来源批次=(context.get('source_lot') or {}).get('code','未登记'),
-        目标批次=context.get('batch_code','未关联'),账后库存=stock.get('balance'),
-        已扣库存=statement['quantity_ledger_written'],
-        状态='已按实际取用声明记账' if statement['quantity_ledger_written'] else '已记录；未扣库存',
-        待核对原因=statement['reasons'],原始录音=statement['source_path'],
-        录音内开始秒=context.get('source_start_seconds'),录音内结束秒=context.get('source_end_seconds'),
-        账本操作=(statement.get('operation') or {}).get('operation_id'),人工核实=False)
+    ledger=statement.get('accounting')
+    operation_id=ledger['operation_id'] if ledger else (statement.get('operation') or {}).get('operation_id')
+    result=reading_base(context,at=statement['occurred_at'],kind=NAMES[statement['semantics']],
+        quantity=statement['quantity'],unit=statement['unit'],operation_id=operation_id,debited=bool(operation_id))
+    result.update(原话=statement['source_text'],账后库存=stock.get('balance'),库存单位=stock.get('unit'),
+        状态='已关联用料账；同一操作不重复扣量' if ledger else
+            '已按实际取用声明记账' if statement['quantity_ledger_written'] else '已记录；未扣库存',
+        待核对原因=[] if ledger else statement['reasons'],原始录音=statement['source_path'],
+        录音内开始秒=context.get('source_start_seconds'),录音内结束秒=context.get('source_end_seconds'))
+    if ledger:
+        result.update(账本用量=ledger['quantity'],账本单位=ledger['unit'],库存单位=ledger['unit'],当前库存=ledger['current_stock'],账本已更正=ledger['corrected'])
+    return result
 
 
 def projection(conn,customer,start,end):
@@ -30,6 +33,12 @@ def projection(conn,customer,start,end):
     entries=[]
     for row in rows[:100]:
         item=dict(row['result'])
+        item['statements']=[dict(s) for s in item['statements']]
+        for statement in item['statements']:
+            fact=conn.execute("SELECT value FROM fact_revision WHERE customer_id=%s AND candidate_id=%s AND scope='material_consumption' AND status='confirmed' ORDER BY revision DESC LIMIT 1",
+                (customer,ident(statement['candidate_id']))).fetchone()
+            if fact:
+                statement['accounting']=accounting(conn,customer,fact['value']['operation_id'],fact['value']['material_id'])
         item['阅读摘要']=[readable(s) for s in item['statements']]
         entries.append(item)
     return clean(dict(entries=entries,truncated=len(rows)>100,ledger_authority='Core.confirm_usage',human_verified=False))

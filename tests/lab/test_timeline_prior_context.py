@@ -18,6 +18,27 @@ from .test_timeline import DAY, activity, hj as fixture, media, run
 POLICY = dict(enabled=True, max_items=16, max_utf8_bytes=32768, lookback_seconds=1800)
 
 
+def test_normalized_material_declarations_are_shared_with_video_model_as_candidates(hj):
+    from visioncortex.lab.processing import insert_observation
+    from visioncortex.lab.speech_candidates import parse_usage_statements
+    m=source(hj,'oral-material-record','09:01:00',kind='audio')
+    a=activity(hj,'oral-material-activity',m,source_type='speech',run_ids=[hj['rid']])
+    fields=parse_usage_statements('取了2g，还剩98g',segment_id='fixture-original-segment')
+    with hj['core'].db.transaction() as conn:
+        insert_observation(hj['core'],conn,event_id='fixture-oral-material',revision='fixture-parser/1',
+            kind='asr_segment',source_kind='fixture',occurred_at=f'{DAY}T09:01:00+08:00',
+            evidence_ids=a['evidence_ids'],payload=dict(analysis_outcome='observations',
+                normalized_fields=fields,text='取了2g，还剩98g',source_activity_id=a['id']))
+    request,window=claim(hj)
+    result=prior(hj,request,window)
+    entry=next(e for e in result['historical_prior'] if e.get('activity_id')==a['id'])
+    shared=entry['observations'][0]['original_candidate_payload']['normalized_fields']
+    assert [f['semantics'] for f in shared]==['actual_increment','balance']
+    assert shared[0]['value']['quantity']=='2' and shared[1]['value']['quantity']=='98'
+    assert entry['observations'][0]['confirmed_fact_revisions_asof']==[]
+    assert 'not_new_observation' in entry['status']
+
+
 @pytest.fixture(name='hj')
 def context(core, settings):
     value = fixture.__wrapped__(core, settings)

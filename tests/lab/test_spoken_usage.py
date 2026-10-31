@@ -92,6 +92,12 @@ def test_photo_then_speech_links_one_use_without_a_second_debit(oral):
     s['core'].correct_operation('correct-linked',posted['operation_id'],
         [dict(material_id=s['material'],quantity='1.5',unit='g')],expected_revision=1,actor='fixture',reason='verified correction')
     assert balance(s)==Decimal('98.5')
+    report=s['runtime'].views.snapshot('2026-10-29')['document']['context_evidence']
+    spoken=report['spoken_material_usage']['entries'][0]['阅读摘要'][0]
+    weighed=report['weighings']['episodes'][0]['阅读摘要']
+    assert Decimal(spoken['账本用量'])==Decimal(weighed['账本用量'])==Decimal('1.5')
+    assert spoken['账本操作']==weighed['账本操作']
+    assert Decimal(spoken['当前库存'])==Decimal(weighed['当前库存'])==Decimal('98.5')
 
 
 def test_speech_then_photo_requires_occurrence_link_and_never_silently_sums(oral):
@@ -102,6 +108,20 @@ def test_speech_then_photo_requires_occurrence_link_and_never_silently_sums(oral
         observe(s,h,mass)
     linked=observe(s,h,mass,existing_operation_id=operation,expected_sequence=0)
     assert linked['status']=='existing_usage_linked_no_new_debit' and balance(s)==98
+
+
+def test_closed_weighing_and_later_speech_share_the_same_duplicate_guard(oral):
+    s=oral;head=start(s,photo(s,'tare',3,'0'));final=observe(s,head,photo(s,'mass',4,'2'))
+    s['weighing'].close('close',head['session_id'],expected_sequence=final['sequence'],actor='fixture',reason='finished weighing')
+    result,_,_=consume(s,'取了2g')
+    assert result['statements'][0]['quantity_ledger_written'] is False and balance(s)==98
+    assert result['statements'][0]['context']['label_snapshot']==head['context']['label_snapshot']
+
+
+def test_new_evidenced_tare_after_previous_oral_use_is_a_new_occurrence(oral):
+    s=oral;consume(s,'取了2g')
+    h=start(s,photo(s,'new-tare',5,'0'));observe(s,h,photo(s,'new-taking',6,'3'))
+    assert balance(s)==95
 
 
 def test_other_equipment_still_accepts_oral_volume_use_and_NAS_reading_projection(oral):

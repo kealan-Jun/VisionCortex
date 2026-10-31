@@ -10,7 +10,7 @@ from decimal import Decimal
 from uuid import uuid5
 
 from .domain import Conflict, Missing, amount, clean, fingerprint, ident, instant
-from .operator_scan import OperatorScans
+from . import material_use_context as usage_context
 from .rules import Rules
 from .timeline import Timeline
 from .timeline_clock import source_clock_supported
@@ -105,6 +105,7 @@ class Weighing:
         self.core._entity(conn, iid, 'instrument')
         return clean(dict(activity_id=activity['id'], field_key=field_key, value=value, unit=unit,
             displayed_value=field.get('value_text', field['value']), instrument_id=iid,
+            source_unit=field.get('unit'),
             camera_id=camera['id'], camera_code=camera['code'], occurred_at=activity['start_at'],
             media_id=source['media_id'], source_sha256=source['verified_sha256'], media_version=source['version'],
             source_path=source['receipt']['relative_path'], evidence_ids=activity['evidence_ids'],
@@ -112,28 +113,10 @@ class Weighing:
             source_key=fingerprint(dict(sha256=source['verified_sha256'], field_key=field_key))))
 
     def _context(self, conn, reading):
-        context = OperatorScans(self.core)._context(conn, instant(reading['occurred_at']), None, reading['camera_id'])
-        if context['equipment_id'] != reading['instrument_id'] or not context['batch_id']:
-            raise Conflict('Equipment and target batch must be declared in this exact capture scope')
-        materials = context['materials']
-        if not materials:
-            raise Conflict('No declared material in the equipment/target context')
-        latest = max(m['occurred_at'] for m in materials)
-        selected = [m for m in materials if m['occurred_at'] == latest]
-        identities = {m['resolution']['target_id'] for m in selected}
-        if len(identities) != 1:
-            raise Conflict('Simultaneous different materials cannot be assigned to one scale reading')
-        selected = sorted(selected, key=lambda m: m['event_id'])[-1]
-        resolved = selected['resolution']
-        instrument = self.core._entity(conn, context['equipment_id'], 'instrument')
-        batch = self.core._entity(conn, context['batch_id'], 'process_batch')
-        run = Timeline(self.core)._run(conn, context['run_id']) if context['run_id'] else None
-        samples = [self.core._entity(conn, sid, 'material_unit') for sid in run['sample_ids']] if run else []
-        return clean(dict(instrument_id=context['equipment_id'], camera_id=reading['camera_id'],
-            batch_id=context['batch_id'], run_id=context['run_id'], material_id=resolved['target_id'],
-            source_lot_id=resolved.get('source_lot_id'), material_scan_event_id=selected['event_id'],
-            label_snapshot=resolved, instrument_snapshot=instrument, target_batch_snapshot=batch,
-            target_samples=samples, target_scan_event_ids=context['target_declaration_event_ids']))
+        context,reasons=usage_context.resolve(self.core,conn,reading['camera_id'],instant(reading['occurred_at']))
+        if reasons or context.get('instrument_id')!=reading['instrument_id']:
+            raise Conflict('Equipment/material/target context required: '+','.join(reasons))
+        return context
 
     def _head(self, conn, session_id):
         row = conn.execute('SELECT result FROM command_receipt WHERE customer_id=%s AND key=%s',
@@ -217,8 +200,7 @@ class Weighing:
             context = self._context(conn, reading)
             if not same_context(context, head['context']) or reading['camera_id'] != head['reading']['camera_id']:
                 raise Conflict('Equipment/material/target history changed; start a separate episode')
-            conn.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s,0))',
-                ('material-use:'+str(self.customer)+':'+context['camera_id']+':'+context['material_scan_event_id'],))
+            usage_context.lock(self.core,conn,context)
             if reading['unit'] != head['unit']:
                 raise Conflict('Scale unit changed within this weighing episode')
             event_key = EVENT + sid + ':' + fingerprint(request)[:40]
@@ -246,16 +228,8 @@ class Weighing:
             if existing_operation_id:
                 if previous['operation_id'] or correction:
                     raise Conflict('Explicit existing-use link requires an unposted weighing episode')
-                operation=conn.execute('SELECT * FROM operation WHERE customer_id=%s AND id=%s',
-                                       (self.customer,ident(existing_operation_id))).fetchone()
-                lines=conn.execute('SELECT * FROM operation_line WHERE customer_id=%s AND operation_id=%s',
-                                   (self.customer,ident(existing_operation_id))).fetchall()
-                if (not operation or operation['status']!='confirmed'
-                        or operation['metadata'].get('effective_kind',operation['kind'])!='consume'
-                        or str(operation['batch_id'])!=context['batch_id'] or len(lines)!=1
-                        or str(lines[0]['material_id'])!=context['material_id']
-                        or lines[0]['direction']!='input' or lines[0]['quantity']!=desired or lines[0]['unit']!=head['unit']):
-                    raise Conflict('Explicit cross-modal link differs in material, target, quantity or current operation')
+                operation=self.core.existing_consumption(conn,existing_operation_id,context['material_id'],
+                    context['batch_id'],str(desired),head['unit'])
                 result.update(quantity=str(desired),operation_id=str(operation['id']),operation_revision=operation['revision'],
                               status='existing_usage_linked_no_new_debit',linked_existing=True,state='open')
                 apply=False
@@ -271,8 +245,7 @@ class Weighing:
                         expected_revision=previous['operation_revision'], actor=actor,
                         reason=reason + '; weighing evidence ' + fingerprint(reading), evidence_ids=evidence)
                 else:
-                    duplicate=conn.execute("SELECT 1 FROM operation WHERE customer_id=%s AND status='confirmed' AND metadata#>>'{usage_scope,camera_id}'=%s AND metadata#>>'{usage_scope,material_scan_event_id}'=%s LIMIT 1",
-                                           (self.customer,context['camera_id'],context['material_scan_event_id'])).fetchone()
+                    duplicate=usage_context.other_channel(self.core,conn,context,'ocr',baseline_at=instant(head['baseline']['occurred_at']))
                     if duplicate:
                         raise Conflict('Potential speech/photo duplicate: link the explicit existing use occurrence first')
                     operation = self.core.operate(event_key + ':ledger', 'consume', [line],

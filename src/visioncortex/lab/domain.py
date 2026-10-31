@@ -499,6 +499,9 @@ class Core:
             conn.execute("UPDATE field_snapshot SET stale=true WHERE customer_id=%s AND input_revisions ? %s", (self.customer, str(old["id"])))
             result = dict(operation_id=cid, supersedes_id=old["id"], revision=1, balances=balances, metadata=metadata, outputs=outputs)
             self._emit(conn, "operation", cid, 1, result)
+            if linked_facts or old['metadata'].get('weighing_session_id') or old['metadata'].get('usage_scope'):
+                from .context_views import mark_context_dirty
+                mark_context_dirty(conn,self.customer,old['occurred_at'])
             return result
 
         request = dict(operation=operation_id, inputs=replacement_inputs, expected=expected_revision, actor=actor, reason=reason)
@@ -631,6 +634,24 @@ class Core:
             return result
         return self.command(key, dict(candidate=candidate_id, revision=expected_revision, scope=scope, actor=actor, policy_version=policy_version), action)
 
+    def existing_consumption(self, conn, operation_id, material_id, batch_id, value, unit, *, expected_material_revision=None):
+        """Shared exact-occurrence validation; this method never debits stock."""
+        operation=conn.execute('SELECT * FROM operation WHERE customer_id=%s AND id=%s FOR UPDATE',
+                               (self.customer,ident(operation_id))).fetchone()
+        q,u=amount(value,unit)
+        lines=conn.execute('SELECT * FROM operation_line WHERE customer_id=%s AND operation_id=%s',
+                           (self.customer,ident(operation_id))).fetchall()
+        if (not operation or operation['status']!='confirmed'
+                or operation['metadata'].get('effective_kind',operation['kind'])!='consume'
+                or str(operation['batch_id'])!=str(batch_id) or len(lines)!=1
+                or lines[0]['direction']!='input' or str(lines[0]['material_id'])!=str(material_id)
+                or lines[0]['quantity']!=q or lines[0]['unit']!=u):
+            raise Conflict('Existing operation differs in material, target, quantity or current operation')
+        state=self._states(conn,[material_id])[ident(material_id)]
+        if expected_material_revision is not None and state['revision']!=expected_material_revision:
+            raise Conflict('Material revision changed before existing use link')
+        return operation
+
     def confirm_usage(self, key, candidate_id, *, expected_revision, material_id, batch_id, expected_material_revision, actor, operation_id, reason, reuse_existing=False):
         if type(reuse_existing) is not bool:
             raise ValueError('Explicit existing-operation evidence link required')
@@ -658,20 +679,8 @@ class Core:
             if value.get("material_code") and value["material_code"] not in {type_code,material['code']}:
                 raise Conflict("Confirmed material contradicts the spoken material code")
             if reuse_existing:
-                state=self._states(conn,[material_id])[ident(material_id)]
-                if state['revision']!=expected_material_revision:
-                    raise Conflict('Material revision changed before existing use link')
-                operation=conn.execute("SELECT * FROM operation WHERE customer_id=%s AND id=%s FOR UPDATE",
-                                       (self.customer,ident(operation_id))).fetchone()
-                q,u=amount(value['quantity'],candidate['unit'])
-                lines=conn.execute("SELECT * FROM operation_line WHERE customer_id=%s AND operation_id=%s",
-                                   (self.customer,ident(operation_id))).fetchall()
-                if (not operation or operation['status']!='confirmed'
-                        or operation['metadata'].get('effective_kind',operation['kind'])!='consume'
-                        or str(operation['batch_id'])!=str(batch_id) or len(lines)!=1
-                        or lines[0]['direction']!='input' or str(lines[0]['material_id'])!=str(material_id)
-                        or lines[0]['quantity']!=q or lines[0]['unit']!=u):
-                    raise Conflict('Existing operation does not represent the explicitly linked material use')
+                operation=self.existing_consumption(conn,operation_id,material_id,batch_id,value['quantity'],candidate['unit'],
+                    expected_material_revision=expected_material_revision)
                 result=dict(operation_id=operation['id'],revision=operation['revision'],kind='consume',
                             existing_operation_reused=True,quantity_ledger_written=False,
                             evidence_ids=candidate['evidence_ids'],batch_id=batch_id)

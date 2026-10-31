@@ -9,7 +9,7 @@ from decimal import Decimal
 from uuid import uuid5
 
 from .domain import Conflict, Missing, amount, clean, fingerprint, ident, instant
-from .operator_scan import OperatorScans
+from . import material_use_context as usage_context
 from .processing import insert_observation
 from .speech_candidates import RULE_VERSION, parse_usage_statements
 from .timeline import Timeline
@@ -66,32 +66,16 @@ class SpokenUsage:
         return a,source,camera
 
     def _context(self,conn,camera,at,field):
-        reasons=[]
-        if at is None:
-            return {},['source_clock_unknown_no_current_label_fallback']
-        context=OperatorScans(self.core)._context(conn,at,None,camera['id'])
-        values=context['materials']
-        if not values or not context['batch_id']:
-            return {},['material_and_target_batch_required']
-        newest=max(v['occurred_at'] for v in values)
-        selected=[v for v in values if v['occurred_at']==newest]
-        if len({v['resolution']['target_id'] for v in selected})!=1:
-            return {},['ambiguous_material_labels']
-        selected=sorted(selected,key=lambda v:v['event_id'])[-1]
-        resolved=selected['resolution'];material=resolved['material_unit']
-        batch=self.core._entity(conn,context['batch_id'],'process_batch')
-        supplied=field['value']
+        context,reasons=usage_context.resolve(self.core,conn,camera['id'],at)
+        if reasons:return context,reasons
+        material=context['label_snapshot']['material_unit'];supplied=field['value']
         type_id=material['metadata'].get('material_type_id')
         type_code=self.core._entity(conn,type_id,'material_type')['code'] if type_id else material['code']
         if supplied.get('material_code') and supplied['material_code'] not in {type_code,material['code']}:
             reasons.append('spoken_material_conflicts_with_QR_batch')
-        if supplied.get('batch_code') and supplied['batch_code']!=batch['code']:
+        if supplied.get('batch_code') and supplied['batch_code']!=context['batch_code']:
             reasons.append('spoken_target_conflicts_with_registered_target')
-        return clean(dict(camera_id=camera['id'],camera_code=camera['code'],instrument_id=context['equipment_id'],
-            instrument_code=self.core._entity(conn,context['equipment_id'],'instrument')['code'] if context['equipment_id'] else '未关联',
-            material_id=resolved['target_id'],material_code=material['code'],source_lot_id=resolved.get('source_lot_id'),
-            source_lot=resolved.get('source_lot'),batch_id=context['batch_id'],batch_code=batch['code'],
-            run_id=context['run_id'],material_scan_event_id=selected['event_id'],label_snapshot=resolved)),reasons
+        return context,reasons
 
     def post(self,key,candidate_id,*,expected_revision,expected_material_revision,actor,reason,existing_operation_id=None):
         request=dict(candidate_id=str(candidate_id),expected_revision=expected_revision,
@@ -103,9 +87,9 @@ class SpokenUsage:
             if not row or not row['association'].get('usage_scope'):
                 raise Conflict('A source-pinned oral use candidate with resolved QR context is required')
             scope=row['association']['usage_scope']
-            conn.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s,0))',
-                ('material-use:'+str(self.core.customer)+':'+scope['camera_id']+':'+scope['material_scan_event_id'],))
-            if not existing_operation_id and scope.get('instrument_id') and Weighing(self.core).active(conn,scope['camera_id'],scope['instrument_id']):
+            usage_context.lock(self.core,conn,scope)
+            if not existing_operation_id and (usage_context.other_channel(self.core,conn,scope,'speech')
+                    or scope.get('instrument_id') and Weighing(self.core).active(conn,scope['camera_id'],scope['instrument_id'])):
                 raise Conflict('Existing weighing requires an explicit existing use occurrence link')
             operation_id=existing_operation_id or str(uuid5(self.core.customer,'spoken-use:'+row['value']['source_segment_id']))
             result=self.core.confirm_usage(key+':confirm',candidate_id,expected_revision=expected_revision,
@@ -201,8 +185,7 @@ class SpokenUsage:
                         quantity_ledger_written=False,source_path=source['receipt']['relative_path'])
                     if (config['post_actual_declarations'] and field['semantics']=='actual_increment'
                             and not field['conflicts'] and scope):
-                        conn.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s,0))',
-                            ('material-use:'+str(self.core.customer)+':'+scope['camera_id']+':'+scope['material_scan_event_id'],))
+                        usage_context.lock(self.core,conn,scope)
                         existing=conn.execute("SELECT 1 FROM operation WHERE customer_id=%s AND metadata->>'candidate_id'=%s LIMIT 1",
                                               (self.core.customer,str(candidate['id']))).fetchone()
                         overlap=conn.execute("""SELECT metadata->'usage_scope' AS scope FROM operation
@@ -215,7 +198,7 @@ class SpokenUsage:
                             Decimal(o['scope']['source_start_seconds'])==lo and Decimal(o['scope']['source_end_seconds'])==hi
                             and o['scope'].get('source_statement_index')!=field['statement_index']) for o in overlap)
                         active=Weighing(self.core).active(conn,camera['id'],scope['instrument_id']) if scope['instrument_id'] else None
-                        if active:
+                        if active or usage_context.other_channel(self.core,conn,scope,'speech'):
                             result['reasons']=['existing_weighing_requires_explicit_occurrence_link']
                         elif existing:
                             result['status']='already_posted'
