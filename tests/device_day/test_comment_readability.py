@@ -45,13 +45,13 @@ def test_raw_tokens_do_not_become_values_or_calibrated_times():
     presented = readings_document(original)
     assert original == before and presented['readings'] == original['readings']
     assert '尚未校准' in presented['中文摘要']['时间']
-    assert presented['中文摘要']['识别原文'] == ['12E8']
-    assert presented['中文摘要']['设备归属'] == '未关联或未核验'
-    assert presented['中文摘要']['已确认业务读数'] == 0
+    assert presented['中文摘要']['数值'] == []
+    assert presented['中文摘要']['识别结果'] == '未读清'
+    assert set(presented['中文摘要']) == {'时间', '数值', '原图或视频', '识别结果'}
     assert readings_document(presented) == presented
     encoded=readings_text(original).decode()
-    assert encoded.index('"时间"') < encoded.index('"识别结果"')
-    assert encoded.index('"读数概况"') < encoded.index('"识别结果"')
+    assert encoded.index('"时间"') < encoded.index('"readings"')
+    assert encoded.index('"数值"') < encoded.index('"readings"')
     assert readings_document({'schema':'other','readings':[]}) == {'schema':'other','readings':[]}
 
 
@@ -85,11 +85,46 @@ def test_legacy_fr_rows_preserve_values_identity_and_review_status():
                               result_stage='reviewed',captured_at='2026-10-29T14:52:22+08:00')])
     before=deepcopy(value);after=readings_document(value)
     assert value==before and after['readings']==value['readings']
-    assert after['中文摘要']['字段读数'][0]['候选读数']==14.7725
-    assert after['中文摘要']['识别结果'][0]['原记录状态']=='reviewed'
-    assert after['中文摘要']['已确认业务读数'] is None
-    assert '未重新核验' in after['中文摘要']['读数概况']
+    assert after['中文摘要']['数值']==['14.7725']
+    assert set(after['中文摘要']) == {'时间', '数值', '原图或视频'}
     assert readings_document(after)==after
+
+
+def test_number_and_decimal_are_saved_without_unit_role_or_sign_gates():
+    value=reading()
+    value['readings']=[dict(value=None,raw_field=dict(
+        raw_tokens=[dict(text='-',score=.1),dict(text='0.07130',score=.99),dict(text='g',score=.1)],
+        issues=['ambiguous_sign','ambiguous_unit_neighbours','field_role_not_observed']))]
+    before=deepcopy(value);after=readings_document(value)
+    assert after['中文摘要']['数值']==['0.07130']
+    assert {k:v for k,v in after.items() if k!='中文摘要'} == {k:v for k,v in before.items() if k!='中文摘要'}
+    assert value==before
+
+
+def test_no_digit_join_decimal_invention_or_low_confidence_number():
+    value=reading()
+    value['readings']=[dict(raw_field=dict(raw_tokens=tokens)) for tokens in [
+        [dict(text='12',score=.99),dict(text='34',score=.99)],
+        [dict(text='14:36',score=.99)], [dict(text='EQ-000001',score=.99)],
+        [dict(text='1.23',score=.2)]]]
+    value['readings'].append(dict(raw_field=dict(raw_tokens=[dict(text='00713',score=.99)],
+                                                issues=['integer_or_missing_decimal_unresolved'])))
+    assert readings_document(value)['中文摘要']['数值']==[]
+    value['readings']=[dict(raw_token=dict(text='61.20%',score=.99)),
+                       dict(raw_field=dict(raw_tokens=[dict(text='0',score=.99)])),
+                       dict(raw_token=dict(text='1436',score=.99))]
+    assert readings_document(value)['中文摘要']['数值']==['61.20','0']
+
+
+def test_conflicting_digits_never_selected_and_sign_conflict_keeps_same_number():
+    value=reading()
+    def row(text,box):
+        return dict(raw_field=dict(raw_tokens=[dict(text=text,score=.99)],source_pixel_box=box,
+                                   issues=['ocr_view_conflict']))
+    value['readings']=[row('1.23',[0,0,80,20]),row('12.3',[0,0,80,20]),
+                       row('-4.560',[0,30,80,50]),row('4.560',[0,30,80,50]),
+                       dict(raw_token=dict(text='1.23',score=.99))]
+    assert readings_document(value)['中文摘要']['数值']==['4.560']
 
 
 def test_historical_binding_summary_preserves_original_events_and_unknown_people():

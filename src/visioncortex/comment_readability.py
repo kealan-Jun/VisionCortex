@@ -2,6 +2,8 @@
 from copy import deepcopy
 from datetime import datetime
 import json
+import math
+import re
 from zoneinfo import ZoneInfo
 
 
@@ -47,62 +49,107 @@ def transcript_text(document):
     return ('\n'.join(lines) + '\n').encode('utf-8')
 
 
+_NUMBER = re.compile(
+    r'(?:(?:PV|SV)\s*[:：]?\s*)?([+\-−]?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+))'
+    r'\s*(mg|kg|g|℃|°C|℉|°F|rpm|r/min|MPa|kPa|Pa|%RH|%|V|A)?')
+_DECIMAL_BLOCKERS = {'decimal_uncertain', 'decimal_scale_conflict',
+    'visible_decimal_missing_in_ocr', 'display_precision_mismatch',
+    'verified_display_precision_mismatch', 'integer_or_missing_decimal_unresolved'}
+
+
+def _number(row):
+    """Read one saved numeric token, without joining digits or placing a dot.
+
+    Signs, units and field roles do not gate this reading view. The signed
+    machine value, raw evidence and their original decisions remain untouched.
+    """
+    field = row.get('raw_field') or {}
+    if field.get('data_type') in {'text', 'clock'}:
+        return None
+    issues = set(row.get('quality_issues') or []) | set(field.get('issues') or [])
+    if issues & _DECIMAL_BLOCKERS:
+        return None
+    tokens = field.get('raw_tokens') or ([row['raw_token']] if row.get('raw_token') else [])
+    if not tokens:
+        value = row.get('value')
+        if value is None:
+            return None
+        tokens = [dict(text=str(value), score=1)]
+    numbers = []
+    for token in tokens:
+        match = _NUMBER.fullmatch(str(token.get('text', '')).strip())
+        if not match:
+            continue
+        if not field and row.get('value') is None and '.' not in match[1] and not match[2]:
+            return None  # An unmapped whole-photo integer may be a clock or ID.
+        try:
+            score = float(token.get('score', 0))
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(score) or not .8 <= score <= 1:
+            return None
+        numbers.append(match[1].lstrip('+-−'))
+    if len(numbers) != 1:
+        return None  # Never concatenate two tokens into an invented reading.
+    normalization = field.get('normalization') or {}
+    if (normalization.get('method') in {'registered_fixed_decimal_v1', 'registered_fixed_decimal_v2'}
+            and field.get('value') is not None):
+        normalized = _NUMBER.fullmatch(str(field['value']))
+        if normalized:
+            return normalized[1].lstrip('+-−')
+    return numbers[0]
+
+
+def _same_region(left, right):
+    a = (left.get('raw_field') or {}).get('source_pixel_box')
+    b = (right.get('raw_field') or {}).get('source_pixel_box')
+    if not a or not b:
+        return False
+    area = min((a[2]-a[0])*(a[3]-a[1]), (b[2]-b[0])*(b[3]-b[1]))
+    overlap = max(0, min(a[2], b[2])-max(a[0], b[0])) * max(0, min(a[3], b[3])-max(a[1], b[1]))
+    return area > 0 and overlap / area > .65
+
+
 def readings_document(document):
-    """Only improve an existing Chinese summary; all other fields stay equal."""
+    """Show time, recorded numbers and source; preserve all machine members."""
     if not isinstance(document, dict):
         return document
     if document.get('schema') not in ('field-numeric-observations/1', 'field-unbound-readings/1'):
         return document
-    summary = document.get('中文摘要')
-    historical = not isinstance(summary, dict) or str(summary.get('说明','')).startswith(('历史FR识别结果','历史识别结果'))
-    if not isinstance(summary, dict):
-        # Historical FR rows already have their own identity/quality decisions.
-        # Reflect them verbatim instead of applying a new numeric/confirmation rule.
-        rows=[]
-        for index, row in enumerate(document.get('readings') or []):
-            rows.append(dict(序号=index+1,字段=row.get('measurement_name') or '未映射文字',
-                识别原文=row.get('raw_text',row.get('text',row.get('display_value',''))),
-                候选值=row.get('value'),单位=row.get('unit'),设备归属=row.get('instrument_id') or '未绑定或未核验',
-                原记录时间=row.get('captured_at') or row.get('observed_at'),
-                原记录状态=row.get('result_stage') or row.get('status'),
-                原确认标记=row.get('human_verified',document.get('human_verified')),
-                原质量标记=row.get('quality_issues') or [],状态='沿用原记录状态；本次未重新核验'))
-        summary=dict(说明='历史识别结果；字段、设备、批次与确认状态沿用原记录，展示层不重新绑定或确认。',
-                     候选条数=len(rows),已确认业务读数=None,识别结果=rows)
-    rows = summary.get('识别结果') or []
+    rows = document.get('readings') or []
+    if len(rows) > 4224:
+        raise ValueError('Readable OCR record count exceeds bound')
     sources = list((document.get('source_refs') or {}).values())
     times = list(dict.fromkeys(str(s['source_reported_at']) for s in sources if s.get('source_reported_at')))
     if not times:
-        times=list(dict.fromkeys(str(r['原记录时间']) for r in rows if r.get('原记录时间')))
+        times=list(dict.fromkeys(str(r.get('captured_at') or r.get('observed_at'))
+                                for r in rows if r.get('captured_at') or r.get('observed_at')))
     if document.get('capture_time_status') == 'verified' and document.get('event_at'):
-        at = str(document['event_at']) + '（有源时钟依据，详见证据）'
+        at = str(document['event_at'])
     elif times:
-        at = '；'.join(times) + '（来源标记时间，尚未校准）'
+        at = '；'.join(times) + '（采集端时间，尚未校准）'
     else:
-        at = '未确认；目录日期不代表实际发生时刻'
-    devices = list(dict.fromkeys(str(r['设备归属']) for r in rows if r.get('设备归属') not in (None, '未绑定或未核验')))
-    raw = list(dict.fromkeys(r['识别原文'] for r in rows if r.get('识别原文')))
-    reasons = []
-    if any(str(r.get('字段', '')).startswith('未映射') for r in rows):
-        reasons.append('尚未对应到具体屏幕字段')
-    if rows and any(r.get('单位') is None for r in rows):
-        reasons.append('单位尚未确定')
-    if not devices:
-        reasons.append('设备归属未确认')
-    reasons.append('沿用历史状态，本次未重新核验' if historical else '识别内容尚未核对，具体问题见下方逐条结果')
+        at = '时间未确认'
     paths = list(dict.fromkeys(s['source_relative_path'] for s in sources if s.get('source_relative_path')))
-    confirmed = summary.get('已确认业务读数', 0)
-    candidates = [dict(字段=r.get('字段'),候选读数=r.get('候选值'),单位=r.get('单位'),状态=r.get('状态'))
-                  for r in rows if r.get('候选值') is not None and not str(r.get('字段','')).startswith('未映射')]
-    overview = (f'历史字段读数 {len(candidates)} 条；原状态保留，本次未重新核验' if historical
-                else f'已确认业务读数 {confirmed} 条；字段候选 {len(candidates)} 条') if candidates else '尚未形成可靠读数'
-    headline = dict(时间=at, 设备归属='、'.join(devices) if devices else '未关联或未核验',
-                    读数概况=overview,
-                    字段读数=candidates,
-                    识别原文=raw, 待核对原因=reasons or ['暂无可核实的字段读数'],
-                    原图或视频=paths or ['来源位置见 Evidence.json'])
+    mapped_tokens = {str(t.get('text', '')).strip() for row in rows
+                     for t in (row.get('raw_field') or {}).get('raw_tokens', [])}
+    numbers = [None if row.get('raw_token') and str(row['raw_token'].get('text', '')).strip() in mapped_tokens
+               else _number(row) for row in rows]
+    # Conflicting crop/whole-frame predictions remain unreadable. A sign or
+    # unit difference alone need not suppress an identical digit sequence.
+    for index, row in enumerate(rows):
+        if 'ocr_view_conflict' not in (row.get('raw_field') or {}).get('issues', []):
+            continue
+        peers = [numbers[i] for i, other in enumerate(rows) if i != index and _same_region(row, other)]
+        if not peers or any(number != numbers[index] for number in peers):
+            numbers[index] = None
+    # This is a per-source reading summary, not a field/operation count.
+    headline = dict(时间=at, 数值=list(dict.fromkeys(number for number in numbers if number is not None)),
+                    原图或视频=paths or ['Evidence.json'])
+    if not headline['数值']:
+        headline['识别结果'] = '未读清'
     value = deepcopy(document)
-    value['中文摘要'] = {**headline, **{k: v for k, v in summary.items() if k not in headline}}
+    value['中文摘要'] = headline
     return {'中文摘要': value.pop('中文摘要'), **value}
 
 

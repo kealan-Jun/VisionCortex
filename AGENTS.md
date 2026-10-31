@@ -2,6 +2,8 @@
 
 ## Scope and authority
 
+- Current OCR reading views show capture time, recognized digits with their decimal point, and the original image/video reference. Unit, sign and PV/SV interpretation must not suppress an otherwise readable digit sequence or clutter this view. Preserve exact digits and trailing zeros; do not join separate numbers, invent a decimal point, or present unresolved digit/decimal conflicts as readings. Existing machine members, source/time evidence and historical receipts retain compatibility; this presentation change does not establish new model accuracy.
+
 - This project does not receive or wait for upstream experimentalist/wearer identity information. Identity binding belongs entirely to the hardware and Agent teams. Our responsibility is recognition/processing, experimental-equipment/panel attribution, sample/material/batch association and evidence retention under the exact capture-source/session/time scope. Do not request or integrate person identity, infer cross-camera person continuity, or make person binding/handover an acceptance gate. Remove personnel-attribution placeholders from human reading views; preserve legacy fields/APIs and immutable history for compatibility without changing the fixed FR six-field schema or NAS paths.
 
 - This is one unified project for video, FieldRecognition, display OCR, QR operation context, oral Comment, material batches and evidence retention. A private local directory may use a customer name; Git remains customer-neutral. Keep site identity catalogues, real UUIDs/batches, media, paths, addresses and runtime evidence outside Git. Preserve the unified `Comment/Audio` and `Comment/OCR` contract without moving recorder originals.
