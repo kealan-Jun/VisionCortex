@@ -52,3 +52,18 @@ def test_manifest_is_not_limited_to_selected_cameras_or_devices():
     document["cases"][1]["split"] = ""
     with pytest.raises(ValueError, match="holdout"):
         module.validate_manifest(document)
+
+
+def test_same_model_name_cannot_reuse_cache_after_checkpoint_bytes_change():
+    verified = {
+        name: dict(manifest_sha256="a" * 64, files_sha256="b" * 64)
+        for name in ["PP-OCRv6_medium_det", "PP-OCRv6_medium_rec"]
+    }
+    first = module.model_descriptor(["same-model-name"], dict(mode="fixture"), verified)
+    changed = copy.deepcopy(verified)
+    changed["PP-OCRv6_medium_rec"]["files_sha256"] = "c" * 64
+    second = module.model_descriptor(["same-model-name"], dict(mode="fixture"), changed)
+    assert module.digest(first) != module.digest(second)
+    assert first["verified_checkpoints"] == verified
+    with pytest.raises(ValueError, match="fingerprints"):
+        module.model_descriptor(["same-model-name"], {}, {})

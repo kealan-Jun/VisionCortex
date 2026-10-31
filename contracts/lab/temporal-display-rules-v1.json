@@ -119,7 +119,8 @@
       "runner": "TemporalVideo.run",
       "template_corrections_prohibited": true,
       "default_mode": "exact_input_receipt_replay",
-      "business_writes": false
+      "business_writes": false,
+      "cache_identity": "verified_checkpoint_manifest_and_files_settings_backend_and_exact_native_input_pixels"
     }
   }
 }

@@ -1,6 +1,6 @@
 {
   "schema_version": "vc-lab-rule-bundle/1",
-  "revision": "vc-lab-unified-20261031.14",
+  "revision": "vc-lab-unified-20261031.15",
   "components_sha256": "5be51d3c237058c97919072431ed203e6a8f6dd207137f204fb241b1d71f5af5",
   "files": [
     {
@@ -49,7 +49,7 @@
     },
     {
       "path": "temporal-display-rules-v1.json",
-      "sha256": "0ae150a7d5ae88b5eea1693fd1d81f90332a222172ff412e9b363f3384dc3920"
+      "sha256": "3269427cd832b8a93737a66826f376400e9a7221c735f03848b1f6f8c34a0502"
     },
     {
       "path": "timeline-rules-v1.json",
@@ -532,7 +532,7 @@
     },
     {
       "path": "tools/evaluation/replay_display_ocr.py",
-      "sha256": "b8e0fa771d020aca156599b125d8db8464be3f1af0148909344e7acda3faf165"
+      "sha256": "df487cad8bbad97b3fb6a57e3e18788c23fac99e550587fbafaf97dbdcc42264"
     },
     {
       "path": "tools/inference/lab_model_service.py",
@@ -625,6 +625,6 @@
       "sha256": "a3c78f7837195851f74868009d1d14db34f8629ca31457371d8056a1c3c31a73"
     }
   ],
-  "source_lineage_sha256": "4130ae200981c2867bfc4e26dd38979eaaf9e951a09462719ac5a20f3cad98c9",
+  "source_lineage_sha256": "b707f67d44c30727ac1bf35b772563aa1dfbfd376643658005caadbaadc29393",
   "source_lineage_recipe": "sha256 canonical JSON of adapter_files and migration_files; sorted keys, compact separators; v1"
 }

@@ -14,6 +14,7 @@ import subprocess
 import sys
 import time
 import platform
+import re
 
 from visioncortex.lab.config import Settings
 from visioncortex.lab.rules import Rules
@@ -30,6 +31,24 @@ def read(path, limit):
     if path.stat().st_size > limit:
         raise ValueError("Replay document exceeds its byte bound")
     return json.loads(path.read_text())
+
+
+def model_descriptor(revisions, configuration, verified):
+    """A reused model name cannot authorize a cache for different weights."""
+    required = {"PP-OCRv6_medium_det", "PP-OCRv6_medium_rec"}
+    if set(verified) != required or any(
+        not isinstance(item, dict)
+        or not isinstance(item.get(key), str)
+        or not re.fullmatch("[0-9a-f]{64}", item[key])
+        for item in verified.values()
+        for key in ("manifest_sha256", "files_sha256")
+    ):
+        raise ValueError("Complete verified checkpoint fingerprints required")
+    return dict(
+        revisions=revisions,
+        settings=configuration,
+        verified_checkpoints=copy.deepcopy(verified),
+    )
 
 
 def validate_manifest(document):
@@ -96,7 +115,9 @@ def worker(configuration_path):
     configuration = dict(
         config["services"]["ocr"], input_mode="field_roi", cpu_threads=1
     )
-    signature = digest(dict(revisions=[dr, rr], settings=model_settings(configuration)))
+    signature = digest(
+        model_descriptor([dr, rr], model_settings(configuration), verified)
+    )
     cv2.setNumThreads(1)
     result = PPOCRONNX(det, rec, configuration).predict(pixels)
     print(
@@ -199,9 +220,8 @@ def main(argv=None):
         configuration = dict(
             config["services"]["ocr"], input_mode="field_roi", cpu_threads=1
         )
-        model = dict(
-            revisions=[det_revision, rec_revision],
-            settings=model_settings(configuration),
+        model = model_descriptor(
+            [det_revision, rec_revision], model_settings(configuration), verified
         )
         model_signature = digest(model)
         if args.cache:
