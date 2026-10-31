@@ -25,7 +25,8 @@ def native(core,settings):
         stream.setparams((1,2,8000,0,'NONE','not compressed'));stream.writeframes(b'\0\0'*16000)
     digest=hashlib.sha256(audio.read_bytes()).hexdigest();recording='fixture-retained-recording'
     record=dict(recording_id=recording,camera_key=camera,relative_path=archive+'/MetaData/090000/rgb.mp4',
-        processable=True,capture_complete=True,audio=dict(status='provided',capture_complete=True,source_signature='fixture-audio-signature'))
+        processable=True,capture_complete=True,audio=dict(status='provided',capture_complete=True,source_signature='fixture-audio-signature',
+            start_us=1793235600000000,end_us=1793235602000000))
     accepted=Ingest(core,settings).accept(dict(capture_id=recording+':audio',source_instance='recorder:'+camera,
         source_revision='fixture-audio-signature',camera_id=camera,kind='audio',relative_path=archive+'/MetaData/090000/audio.wav',
         captured_at='2026-10-29T09:00:00+08:00',source_kind='fixture',time_basis={'basis':'uncalibrated_native_clock'},
@@ -35,6 +36,7 @@ def native(core,settings):
     text='这是保留转写，不是已核实的实验指令。'
     model=dict(provider='fixture',model='retained-synthetic-ASR-not-invoked',revision='fixture/1')
     document=dict(recording_id=recording,device=camera,status='completed',outcome='transcribed',
+        start_us=record['audio']['start_us'],end_us=record['audio']['end_us'],
         audio=dict(status='provided',capture_complete=True,source_signature='fixture-audio-signature',
                    artifacts=[dict(path='MetaData/090000/audio.wav',sha256=digest)]),
         original_transcript=dict(path=original,sha256=hashlib.sha256(text.encode()).hexdigest()),
@@ -47,6 +49,25 @@ def native(core,settings):
     (base/'Comment/Audio/Index.json').write_text(json.dumps(dict(entries=[dict(recording_id=recording,content=event+'/Transcript.json')])))
     return dict(core=core,settings=settings,runtime=TimelineRuntime(core,settings),accepted=accepted,
                 intake=NativeCommentIntake(core,settings),document=document,base=base,event=event,archive=archive)
+
+
+@pytest.mark.parametrize('missing_index',[False,True])
+def test_completed_transcript_precedes_index_but_requires_exact_source_envelope(native,missing_index):
+    n=native
+    index=n['base']/'Comment/Audio/Index.json'
+    if missing_index:
+        index.unlink()
+    else:
+        index.write_text('{"entries":[]}')
+    transcript=n['base']/n['event']/'Transcript.json'
+    wrong=dict(n['document'],end_us=n['document']['end_us']+1)
+    transcript.write_text(json.dumps(wrong))
+    with pytest.raises(Conflict,match='exact recorder audio envelope'):
+        n['intake'].consume(n['accepted']['media_id'])
+    transcript.write_text(json.dumps(n['document']))
+    result=n['intake'].consume(n['accepted']['media_id'])
+    assert result['status']=='retained_native_ASR_linked' and result['new_model_calls']==0
+    assert result['results'][0]['reference']['transcript']==n['archive']+'/'+n['event']+'/Transcript.json'
 
 
 def test_retained_native_ASR_joins_timeline_without_new_inference_or_Audio_folder(native):

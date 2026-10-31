@@ -143,16 +143,29 @@ class NativeCommentIntake:
         plans=[]
         with guard_module.storage_guard(publication_config(self.settings)) as guard:
             raw=_read(root,archive+'/Comment/Audio/Index.json',guard,8*1024**2)
-            if raw is None:
-                return dict(status='pending_native_ASR',media_id=str(media_id),new_model_calls=0)
-            index=json.loads(raw)
+            index=json.loads(raw) if raw is not None else {}
             entries=[e for e in index.get('entries',[]) if e.get('recording_id') in recording_ids]
+            # Native publication can retain a completed transcript before its
+            # mutable index catches up. Resolve only the exact recorder audio
+            # envelope using the existing owner's naming function; never scan
+            # folders or join nearby timestamps. prepare() still checks the
+            # original recording ID, audio signature, hash and sentence refs.
+            audio=source['receipt']['native_record'].get('audio') or {}
+            lo,hi=audio.get('start_us'),audio.get('end_us')
+            fallback=None
+            if type(lo) is int and type(hi) is int and 0<lo<hi:
+                folder=pipeline_module('device_day_content').time_folder(lo,hi)
+                fallback='Comment/Audio/'+folder+'/Transcript.json'
+                if not any(e.get('content')==fallback for e in entries):
+                    entries.append(dict(content=fallback))
             if len(entries)>16:
                 raise Conflict('Native audio import exceeds 16 original transcript spans')
+            seen=set()
             for entry in entries:
                 content=entry.get('content','')
-                if not content.startswith('Comment/Audio/'):
+                if not content.startswith('Comment/Audio/') or content in seen:
                     continue
+                seen.add(content)
                 relative=archive+'/'+_relative(content)
                 raw=_read(root,relative,guard,4*1024**2)
                 if raw is None:
@@ -160,6 +173,8 @@ class NativeCommentIntake:
                 document=json.loads(raw)
                 if document.get('status')!='completed' or document.get('outcome')!='transcribed':
                     continue
+                if content==fallback and (document.get('start_us'),document.get('end_us'))!=(lo,hi):
+                    raise Conflict('Native transcript differs from its exact recorder audio envelope')
                 plan=prepare(document,source,relative)
                 original=_read(root,plan['reference']['original_transcript'],guard,4*1024**2)
                 if original is None or hashlib.sha256(original).hexdigest()!=plan['reference']['original_transcript_sha256']:
