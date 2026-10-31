@@ -70,6 +70,28 @@ def test_completed_transcript_precedes_index_but_requires_exact_source_envelope(
     assert result['results'][0]['reference']['transcript']==n['archive']+'/'+n['event']+'/Transcript.json'
 
 
+def test_configured_native_evidence_backend_keeps_logical_refs_and_rejects_damaged_bytes(native):
+    from visioncortex.comment_evidence import NAMESPACE
+    n=native
+    backend=n['settings'].runtime_root/'native-comment-backend'
+    settings=replace(n['settings'],native_comment_backend_root=backend)
+    intake=NativeCommentIntake(n['core'],settings)
+    relative=n['document']['original_transcript']['path']
+    old=n['base']/relative
+    target=backend/NAMESPACE/n['archive']/relative
+    target.parent.mkdir(parents=True)
+    original=old.read_bytes()
+    target.write_bytes(b'damaged backend; valid old archive must not mask damage')
+    with pytest.raises(Conflict,match='text hash differs'):
+        intake.consume(n['accepted']['media_id'])
+    target.write_bytes(original)
+    old.unlink()
+    linked=intake.consume(n['accepted']['media_id'])
+    assert linked['status']=='retained_native_ASR_linked' and linked['new_model_calls']==0
+    assert linked['results'][0]['reference']['original_transcript']==n['archive']+'/'+relative
+    assert target.read_bytes()==original and not old.exists()
+
+
 def test_retained_native_ASR_joins_timeline_without_new_inference_or_Audio_folder(native):
     n=native;core=n['core'];mid=n['accepted']['media_id']
     before=sorted(str(p) for p in n['settings'].incoming.rglob('*'))

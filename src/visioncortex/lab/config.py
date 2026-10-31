@@ -45,10 +45,13 @@ class Settings:
     timeline_providers_path: Path | None = None
     timeline_publish: bool = False
     producer_ingress_manifest: Path | None = None
+    native_comment_backend_root: Path | None = None
 
     def __post_init__(self):
         if self.processing_profile not in {'native', 'timeline-v1'}:
             raise ValueError('Unknown VC Lab processing profile')
+        if self.native_comment_backend_root is not None and not self.native_comment_backend_root.is_absolute():
+            raise ValueError('Native Comment evidence backend requires an explicit absolute root')
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -78,7 +81,8 @@ class Settings:
                    timeline_policy_path=Path(os.environ['VC_LAB_TIMELINE_POLICY']).absolute() if os.environ.get('VC_LAB_TIMELINE_POLICY') else None,
                    timeline_providers_path=Path(os.environ['VC_LAB_TIMELINE_PROVIDERS']).absolute() if os.environ.get('VC_LAB_TIMELINE_PROVIDERS') else None,
                    timeline_publish=os.environ.get('VC_LAB_TIMELINE_PUBLISH') == '1',
-                   producer_ingress_manifest=Path(os.environ['VC_LAB_PRODUCER_INGRESS_MANIFEST']).absolute() if os.environ.get('VC_LAB_PRODUCER_INGRESS_MANIFEST') else None)
+                   producer_ingress_manifest=Path(os.environ['VC_LAB_PRODUCER_INGRESS_MANIFEST']).absolute() if os.environ.get('VC_LAB_PRODUCER_INGRESS_MANIFEST') else None,
+                   native_comment_backend_root=Path(os.environ['VC_LAB_NATIVE_COMMENT_BACKEND_ROOT']).absolute() if os.environ.get('VC_LAB_NATIVE_COMMENT_BACKEND_ROOT') else None)
 
     @property
     def incoming(self) -> Path:

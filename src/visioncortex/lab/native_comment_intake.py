@@ -176,7 +176,17 @@ class NativeCommentIntake:
                 if content==fallback and (document.get('start_us'),document.get('end_us'))!=(lo,hi):
                     raise Conflict('Native transcript differs from its exact recorder audio envelope')
                 plan=prepare(document,source,relative)
-                original=_read(root,plan['reference']['original_transcript'],guard,4*1024**2)
+                backend=self.settings.native_comment_backend_root
+                if backend is not None:
+                    # The native owner's configured Comment evidence store is
+                    # a capability, never a path selected by transcript text.
+                    # Retain logical references; do not relocate or regenerate
+                    # original text. A configured backend fails closed instead
+                    # of silently using an older archive copy.
+                    from visioncortex.comment_evidence import NAMESPACE
+                    original=_read(backend,NAMESPACE+'/'+plan['reference']['original_transcript'],guard,4*1024**2)
+                else:
+                    original=_read(root,plan['reference']['original_transcript'],guard,4*1024**2)
                 if original is None or hashlib.sha256(original).hexdigest()!=plan['reference']['original_transcript_sha256']:
                     raise Conflict('Original retained transcript text hash differs')
                 if _read(root,plan['reference']['text'],guard,4*1024**2) is None:
