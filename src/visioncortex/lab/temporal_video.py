@@ -740,7 +740,7 @@ class TemporalVideo:
                             dynamic_context_revision=context.get("revision"),
                         )
 
-                        def ocr(pixels):
+                        def ocr(pixels, *, anchor_source=None):
                             nonlocal ocr_seconds
                             tick = time.monotonic()
                             ok, encoded = cv2.imencode(".png", pixels)
@@ -757,7 +757,7 @@ class TemporalVideo:
                                     execution=execution,
                                     derivation=dict(
                                         kind="temporal_field_roi",
-                                        source=source_ref,
+                                        source=anchor_source if anchor_source is not None else source_ref,
                                         derived_sha256=hashlib.sha256(raw).hexdigest(),
                                         derived_bytes=len(raw),
                                         field_key=field["field_key"],
@@ -813,6 +813,7 @@ class TemporalVideo:
                                     "value_text",
                                     "candidates",
                                     "method",
+                                    "observation_time_start",
                                 )
                             }
                         )
@@ -968,7 +969,7 @@ class TemporalVideo:
             value=value,
             value_text=value,
             status=result["status"],
-            tentative_value=None,
+            tentative_value=result.get("numeric_candidate"),
             candidates=result.get("candidates", []),
             raw_text=result.get("raw_text", ""),
             method=result.get("method"),
@@ -977,11 +978,12 @@ class TemporalVideo:
             profile_id=field["profile_id"],
             auto_confirmed=False,
             accuracy="NOT_PROVEN",
-            reading_status=result["status"],
+            reading_status=result.get("reading_status", result["status"]),
             association_status=context["association_status"],
             dynamic_context=context,
         )
-        text = f"时序面板候选 {field['field_key']}：{value if value is not None else '读数未确定'}；{result['status']}"
+        shown = value or result.get("display_text") or result.get("numeric_candidate")
+        text = f"时序面板候选 {field['field_key']}：{shown if shown is not None else '读数未确定'}；{result['status']}"
         return dict(
             kind="reading",
             text=text,

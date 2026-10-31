@@ -1,6 +1,6 @@
 {
   "schema_version": "vc-lab-rule-bundle/1",
-  "revision": "vc-lab-unified-20261031.10",
+  "revision": "vc-lab-unified-20261031.11",
   "components_sha256": "5be51d3c237058c97919072431ed203e6a8f6dd207137f204fb241b1d71f5af5",
   "files": [
     {
@@ -49,7 +49,7 @@
     },
     {
       "path": "temporal-display-rules-v1.json",
-      "sha256": "cee10fe7077be1694492976c7be1d682cd73177f231b837f47dc157ad53a5870"
+      "sha256": "48973b54b11ac83fd8831025f05297a95aba211353fdef78f8a11beca97ee5fa"
     },
     {
       "path": "timeline-rules-v1.json",
@@ -420,7 +420,7 @@
     },
     {
       "path": "src/visioncortex/lab/temporal_display.py",
-      "sha256": "f7024a0b7186d470fd3201989e3b22edea3997162a89e5aaa07ebcd197dc7a6e"
+      "sha256": "10ce93f0ea668f7d001e8961b353eb7d22f38f7431abdf204098437a1a792cd3"
     },
     {
       "path": "src/visioncortex/lab/temporal_registration.py",
@@ -428,7 +428,7 @@
     },
     {
       "path": "src/visioncortex/lab/temporal_video.py",
-      "sha256": "2c180c419137be54fda8b0984e9db8c3d11141a4c2603ea701de4aff5be667be"
+      "sha256": "305e34687ce87e9de867768343a30f09fa0102120c43af1dea0810d995f066e1"
     },
     {
       "path": "src/visioncortex/lab/timeline.py",
@@ -501,6 +501,10 @@
     {
       "path": "src/visioncortex/lab/value_candidates.py",
       "sha256": "9ab164dfb3fd0fb5b7871765127ab75714c257636b3b67100cba7a40c7191318"
+    },
+    {
+      "path": "src/visioncortex/lab/video_numeric.py",
+      "sha256": "b2fc00be7c82cd3a2766ef6916cbbaaf9c0ba1e50f77e2daceb239c14ff9d034"
     },
     {
       "path": "src/visioncortex/lab/weighing.py",
@@ -609,5 +613,6 @@
       "sha256": "a3c78f7837195851f74868009d1d14db34f8629ca31457371d8056a1c3c31a73"
     }
   ],
-  "source_lineage_sha256": "94aaf15d10f6acebd27fa957d7c209c98c6b1dcb81d82fdece1b0ab46a726cef"
+  "source_lineage_sha256": "919329cebc44b02270a327858ca5eed7265fcab91e5a25127f7c67567fec4954",
+  "source_lineage_recipe": "sha256 canonical JSON of adapter_files and migration_files; sorted keys, compact separators; v1"
 }

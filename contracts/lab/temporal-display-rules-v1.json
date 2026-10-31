@@ -59,5 +59,21 @@
   ],
   "original_components_changed": false,
   "customer_source_activation": false,
-  "production_service_switch": false
+  "production_service_switch": false,
+  "source_frame_numeric": {
+    "enabled_by_default": false,
+    "explicit_field_option": "layout.numeric_anchor",
+    "method": "vc-video-numeric-anchor/3",
+    "requires_versioned_digit_slot_layout": true,
+    "pixels_from_one_original_frame": true,
+    "max_window_frames": 30,
+    "max_window_seconds": 1,
+    "source_aware_OCR_receipts": true,
+    "candidate_only": true,
+    "confirmed": false,
+    "automatic_physical_identity": false,
+    "shorter_tokens_are_vetoed_not_replaced": true,
+    "clock_separators_preserved": true,
+    "real_quality_acceptance": "NOT_PROVEN"
+  }
 }

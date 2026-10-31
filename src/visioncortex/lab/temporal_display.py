@@ -361,17 +361,22 @@ class TemporalDisplay:
     def __init__(self, config=None):
         self.config = config or TemporalConfig()
         self.states = {}
+        self.numeric_reader = None
 
     @property
     def buffer_bytes(self):
-        return sum(s.registrar.memory_bytes+sum(f.image.nbytes for f in s.frames) for s in self.states.values())
+        return sum(s.registrar.memory_bytes+sum(f.image.nbytes for f in s.frames) for s in self.states.values()) + (self.numeric_reader.buffer_bytes if self.numeric_reader else 0)
 
     def reset(self, identity, reason='explicit_track_reset'):
         key, _ = _identity(identity)
         self.states.pop(key, None)
+        if self.numeric_reader:
+            self.numeric_reader.reset(key)
         return dict(reset=True, reason=reason)
 
     def _new(self, key, image, layout, ref):
+        if self.numeric_reader:
+            self.numeric_reader.reset(key)
         boxes = list(layout.get('dynamic_boxes') or [_digit_box(d) for d in layout.get('digits', [])])
         boxes += [s['box'] for s in layout.get('symbols', [])]
         if layout.get('state_witness'):
@@ -380,7 +385,10 @@ class TemporalDisplay:
         state = _State(registrar, hashlib.sha256(json.dumps(layout, sort_keys=True).encode()).hexdigest(),
                        ref['source_sha256'], time.monotonic())
         if len(self.states) >= self.config.max_sessions:
-            self.states.pop(min(self.states, key=lambda k: self.states[k].touched))
+            oldest = min(self.states, key=lambda k: self.states[k].touched)
+            self.states.pop(oldest)
+            if self.numeric_reader:
+                self.numeric_reader.reset(oldest)
         self.states[key] = state
         return state
 
@@ -389,10 +397,10 @@ class TemporalDisplay:
         clocks = dict(ocr_callback_seconds=0., ocr_invocations=0,
                       registration_seconds=None, local_quality_and_segments_seconds=None,
                       local_fusion_and_decoding_enclosing_seconds=None)
-        def timed_ocr(image):
+        def timed_ocr(image, **kwargs):
             tick = time.perf_counter()
             try:
-                return ocr(image)
+                return ocr(image, **kwargs)
             finally:
                 clocks['ocr_callback_seconds'] += time.perf_counter()-tick
                 clocks['ocr_invocations'] += 1
@@ -423,6 +431,8 @@ class TemporalDisplay:
         now = time.monotonic(); resets = []
         for expired in [k for k, v in self.states.items() if now-v.touched > self.config.session_ttl_seconds]:
             self.states.pop(expired)
+            if self.numeric_reader:
+                self.numeric_reader.reset(expired)
         state = self.states.get(key)
         layout_sha = hashlib.sha256(json.dumps(layout, sort_keys=True).encode()).hexdigest()
         if state and (state.source_sha != ref['source_sha256'] or state.layout_sha != layout_sha):
@@ -430,7 +440,7 @@ class TemporalDisplay:
         if state and state.last_timestamp is not None:
             delta = timestamp-state.last_timestamp
             if delta <= 0:
-                self.states.pop(key)
+                self.reset(identity)
                 return self._rejected(identity, ref, 'duplicate_pts' if delta == 0 else 'reverse_pts', resets+['timestamp_state_reset'])
             if delta > self.config.max_gap_seconds:
                 resets.append('source_pts_gap'); self.states.pop(key); state = None
@@ -441,12 +451,31 @@ class TemporalDisplay:
             aligned, registration = state.registrar.register(image)
             if aligned is None:
                 clocks['registration_seconds'] = time.perf_counter()-registration_tick
-                self.states.pop(key)
+                self.reset(identity)
                 return self._rejected(identity, ref, 'registration_failed', resets+[registration['reason']], registration)
         else:
             state = self._new(key, image, layout, ref); aligned = image.copy()
         clocks['registration_seconds'] = time.perf_counter()-registration_tick
         state.touched = now; state.input_count += 1; state.last_timestamp = timestamp
+        if layout.get('numeric_anchor') is True:
+            # Opt-in source-frame reading reuses this original registration and
+            # exact caller identity. It never changes the legacy fusion default.
+            from dataclasses import replace
+            from .video_numeric import NumericVideoReader
+            other_bytes = self.buffer_bytes - (self.numeric_reader.buffer_bytes if self.numeric_reader else 0)
+            budget = self.config.max_buffer_bytes - other_bytes
+            if budget <= 0:
+                self.reset(identity)
+                return self._rejected(identity, ref, 'roi_byte_budget_exceeded', resets, registration)
+            if self.numeric_reader is None:
+                self.numeric_reader = NumericVideoReader(replace(self.config, max_buffer_bytes=budget))
+            else:
+                self.numeric_reader.config = replace(self.config, max_buffer_bytes=budget)
+            anchor_ref = dict(ref, source_to_roi=(np.asarray(registration['matrix_current_to_reference']) @ np.asarray(ref['source_to_roi'])).tolist(),
+                              registration=registration)
+            result = self.numeric_reader.observe(aligned, key=key, identity=identity, source_ref=anchor_ref, layout=layout, ocr=ocr)
+            result['registration'] = result['source_refs'][0].get('registration', registration)
+            return result
         quality_tick = time.perf_counter()
         observations, quality = _observations(aligned, layout, visibility,
             registration['matrix_current_to_reference'], self.config)
