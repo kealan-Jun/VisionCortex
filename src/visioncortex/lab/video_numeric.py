@@ -686,7 +686,7 @@ class NumericVideoReader:
 
                     best = max(eligible, key=native_rank)
                     if point_selection and ocr is not None:
-                        complete = []
+                        probed_frames = []
                         for item in sorted(eligible, key=native_rank, reverse=True)[:7]:
                             probe = point_probe(item["native"])
                             ref = item["native"]["source"]
@@ -696,11 +696,17 @@ class NumericVideoReader:
                                     "source_to_roi", "dynamic_physical_key") if k in ref},
                                 native_bgr_sha256=probe.get("source_bgr_sha256"),
                                 points=probe["points"], confirmed=False,
+                                positive_shape_consistent=probe.get("positive_shape_consistent", False),
                             ))
-                            if len(probe["points"]) == 1:
-                                complete.append(item)
-                        if complete:
-                            best = max(complete, key=native_rank)
+                            probed_frames.append((item, probe))
+
+                        def source_rank(pair):
+                            item, probe = pair
+                            point = len(probe["points"]) == 1
+                            shape = probe.get("positive_shape_consistent") is True
+                            return (point and shape, shape, point, native_rank(item))
+
+                        best = max(probed_frames, key=source_rank)[0]
                     if ocr is not None:
                         reply = ocr(
                             best["native"]["image"],
@@ -781,7 +787,7 @@ class NumericVideoReader:
                     ocr_score=reply.get("score"),
                     **(dict(ocr_views=replies) if has_fallback else {}),
                     **(dict(native_frame_selection=dict(
-                        method="same_source_point_then_emission/1", max_point_probes=7,
+                        method="same_source_positive_shape_and_point_then_emission/2", max_point_probes=7,
                         probes=point_probes, numeric_pixels_from_one_frame=True,
                     )) if point_selection else {}),
                     best_frame_selection_window_refs=[f["source"] for f in s.frames],

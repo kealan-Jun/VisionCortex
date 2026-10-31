@@ -188,7 +188,7 @@ def test_same_frame_color_view_cannot_replace_source_or_escape_call_budget(monke
     assert out["numeric_candidate"] is None and not out["gates"]["confirmed"]
 
 
-@pytest.mark.parametrize("points", ["one", "absent", "ambiguous"])
+@pytest.mark.parametrize("points", ["one", "absent", "ambiguous", "point_with_missing_stroke"])
 def test_point_selection_uses_one_actual_frame_and_cannot_borrow_a_dot(monkeypatch, points):
     reader = NumericVideoReader(TemporalConfig())
     layout = dict(LAYOUT, data_type="number", numeric_native_stroke_veto=True,
@@ -197,11 +197,14 @@ def test_point_selection_uses_one_actual_frame_and_cannot_borrow_a_dot(monkeypat
 
     def probe(native):
         found = [dict(after_digit=0, box=[40, 30, 42, 32])] if native["source"]["pts"] == 33333 else []
+        if points == "point_with_missing_stroke" and native["source"]["pts"] == 66666:
+            found = [dict(after_digit=0, box=[40, 30, 42, 32])]
         if points == "absent":
             found = []
         elif points == "ambiguous":
             found = found * 2
-        return dict(points=found)
+        return dict(points=found, positive_shape_consistent=not (
+            points == "point_with_missing_stroke" and native["source"]["pts"] == 33333))
 
     def ocr(pixels, *, anchor_source):
         calls.append((pixels.copy(), anchor_source))
@@ -218,7 +221,7 @@ def test_point_selection_uses_one_actual_frame_and_cannot_borrow_a_dot(monkeypat
         native["source"] = source(native, ref(i, im), ref(i, im))
         out = reader.observe(im, key=tuple(IDENTITY.values()), identity=IDENTITY,
                              source_ref=ref(i, im), layout=layout, ocr=ocr, native=native)
-    selected = 33333 if points == "one" else 0
+    selected = 33333 if points == "one" else 66666 if points == "point_with_missing_stroke" else 0
     assert len(calls) == 1 and calls[0][1]["pts"] == selected
     assert out["source_refs"][0]["pts"] == selected
     assert out["numeric_candidate"] is None and out["fused_digit_pixels"] is False

@@ -315,18 +315,27 @@ def point_probe(native):
     """Locate a point for single-frame selection, without reading a value."""
     from .native_segments import observe
     from .native_points import observe as observe_points
+    from .temporal_display import SEGMENTS
 
     layout = native["layout"]
     if (layout.get("data_type") != "number" or layout.get("display_type") != "seven_segment"
             or layout.get("numeric_native_stroke_veto") is not True):
         raise ValueError("Typed source-verified numeric field required for point selection")
     evidence = observe(native)
+    lit = [{name for name, cell in slot["segments"].items() if cell["state"] == "ON"}
+           for slot in evidence["slots"]]
+    shape_consistent = bool(lit) and all(
+        any(value == set(pattern) for pattern in SEGMENTS.values()) for value in lit
+    )
     cells = [slot["native_cell_polygon"] for slot in evidence["slots"]]
     if len(cells) < 2:
-        return dict(points=[], reason="source_cell_geometry_pending", confirmed=False)
+        return dict(points=[], reason="source_cell_geometry_pending", confirmed=False,
+                    positive_shape_consistent=shape_consistent, OFF_inferred=False)
     points = observe_points(native["image"], cells, layout["color"])
     return dict(points, source_bgr_sha256=native["metadata"]["native_bgr_sha256"],
-                geometry_method=evidence["geometry"]["method"], numeric_value=None)
+                geometry_method=evidence["geometry"]["method"], numeric_value=None,
+                positive_shape_consistent=shape_consistent,
+                positive_shape_is_digit_correctness=False)
 
 
 def source(native, native_source_ref, registered_source_ref):

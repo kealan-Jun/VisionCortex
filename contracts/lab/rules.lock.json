@@ -1,6 +1,6 @@
 {
   "schema_version": "vc-lab-rule-bundle/1",
-  "revision": "vc-lab-unified-20261101.28",
+  "revision": "vc-lab-unified-20261101.29",
   "components_sha256": "5be51d3c237058c97919072431ed203e6a8f6dd207137f204fb241b1d71f5af5",
   "files": [
     {
@@ -292,7 +292,7 @@
     },
     {
       "path": "src/visioncortex/lab/native_numeric.py",
-      "sha256": "16a4420d8967d4354ef89d8ee135a648e0b04f28d7a2d124d25f097700761326"
+      "sha256": "a3bb309e1dbdea77cacb28307f923b0c3f15054e5ecf959f0c6ebf42b799a05a"
     },
     {
       "path": "src/visioncortex/lab/native_ocr.py",
@@ -540,7 +540,7 @@
     },
     {
       "path": "src/visioncortex/lab/video_numeric.py",
-      "sha256": "790e170194beaab280f02f6190751ea24eee52f8fc9c660628db74e7ef1f8de1"
+      "sha256": "85e9193e1ae625be4911d5963dbd7256c2b6b35a415aa9d2e151792ea37e51b0"
     },
     {
       "path": "src/visioncortex/lab/weighing.py",
