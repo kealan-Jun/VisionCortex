@@ -1,6 +1,6 @@
 {
   "schema_version": "vc-lab-rule-bundle/1",
-  "revision": "vc-lab-unified-20261031.23",
+  "revision": "vc-lab-unified-20261101.24",
   "components_sha256": "5be51d3c237058c97919072431ed203e6a8f6dd207137f204fb241b1d71f5af5",
   "files": [
     {
@@ -292,7 +292,7 @@
     },
     {
       "path": "src/visioncortex/lab/native_numeric.py",
-      "sha256": "8cb4d0b5d836af6acbd250c843ca2a412b953fdcafa989e048d2a7d2e4deff6a"
+      "sha256": "d0716b44d71f5d345e38a83289786e9a3ec909933edafb7ec4bd55af7084333a"
     },
     {
       "path": "src/visioncortex/lab/native_ocr.py",
@@ -301,6 +301,10 @@
     {
       "path": "src/visioncortex/lab/native_pipeline.py",
       "sha256": "e530c75fa3addea121ba8a1607d03ad8cf49cb35cfe7b8df67175b9d9bdb315a"
+    },
+    {
+      "path": "src/visioncortex/lab/native_points.py",
+      "sha256": "41f9c402bf9f54639332ea56cbbebbe1e25ac0d75439cace30f1dfa51d8e5a96"
     },
     {
       "path": "src/visioncortex/lab/native_refresh.py",
@@ -321,6 +325,10 @@
     {
       "path": "src/visioncortex/lab/native_video.py",
       "sha256": "d3a892a175fdb6492c57524903ef08d6d2c516a5e27f465c7628437ffb193747"
+    },
+    {
+      "path": "src/visioncortex/lab/native_views.py",
+      "sha256": "b15d39f912bb4ac2bcb6a3d19a09e07f62ada6d84498ea03b08f60e407eb02ad"
     },
     {
       "path": "src/visioncortex/lab/native_vision.py",
@@ -528,7 +536,7 @@
     },
     {
       "path": "src/visioncortex/lab/video_numeric.py",
-      "sha256": "409c14816d0a66882a035c7f76c34839e0d7c1607a2d46f30b17d2a8a2c50b07"
+      "sha256": "eb7130939dfbe4e19bec958d99e6fb0d25d209e57dc42cee2ad096b7ee50a292"
     },
     {
       "path": "src/visioncortex/lab/weighing.py",

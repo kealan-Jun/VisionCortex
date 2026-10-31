@@ -415,8 +415,13 @@ def decimal_gap_peaks(image, layout):
 
 def resolve_decimal_tokens(image, layout, texts):
     """Reconcile same-frame OCR dot omission using actual gap pixels only."""
-    tokens = [number(t) for t in texts]
     points = decimal_gap_peaks(image, layout)
+    return resolve_observed_points(texts, len(digit_boxes(image, layout)), points)
+
+
+def resolve_observed_points(texts, digit_count, points):
+    """Reconcile whole replies with one actually observed interdigit point."""
+    tokens = [number(t) for t in texts]
     result = dict(
         numeric_candidate=None,
         decimal_status="unknown",
@@ -432,11 +437,11 @@ def resolve_decimal_tokens(image, layout, texts):
     ):
         return dict(result, reason="same_source_digits_disagree")
     digits = tokens[0].replace(".", "")
-    if len(digits) != len(digit_boxes(image, layout)):
+    if len(digits) != digit_count:
         return dict(result, reason="incomplete_digit_slots")
     observed = {p["after_digit"] for p in points}
     model = {t.index(".") - 1 for t in tokens if "." in t}
-    if len(observed) != 1 or (model and model != observed):
+    if len(points) != 1 or len(observed) != 1 or (model and model != observed):
         return dict(result, reason="decimal_missing_or_conflicting")
     after = next(iter(observed)) + 1
     return dict(
@@ -624,6 +629,12 @@ class NumericVideoReader:
         if native_mode:
             from .native_numeric import review
 
+            fallback = layout.get("numeric_native_color_fallback", False)
+            if type(fallback) is not bool or fallback and (
+                layout.get("numeric_native_stroke_veto") is not True
+                or layout.get("data_type") != "number"
+            ):
+                raise ValueError("Color fallback requires a typed number and source-stroke verification")
             # Candidate admission needs native emission, not half a second of
             # uninterrupted tracking. Pixel resets must not replenish budget.
             due = s.count >= 3 and (
@@ -638,6 +649,7 @@ class NumericVideoReader:
                 ]
                 best = frame
                 reply = {}
+                replies = []
                 if eligible:
                     maximum = np.maximum(
                         np.max(
@@ -667,6 +679,34 @@ class NumericVideoReader:
                         native_budget["calls"] = s.calls
                         native_budget["last"] = timestamp
                 assessed = review(best["native"], reply)
+                if eligible and ocr is not None:
+                    replies.append(dict(view="native", reply=reply, review=assessed))
+                    if fallback and assessed["numeric_candidate"] is None and s.calls < limit:
+                        from .native_views import color_residual
+
+                        prepared, preparation = color_residual(best["native"]["image"])
+                        if preparation["prepared_bgr_sha256"] != preparation["source_bgr_sha256"]:
+                            alternate_reply = ocr(prepared, anchor_source=dict(
+                                best["native"]["source"], ocr_view=preparation,
+                            ))
+                            s.calls += 1
+                            native_budget["calls"] = s.calls
+                            # Source verification always uses the original image.
+                            alternative = review(best["native"], alternate_reply)
+                            replies.append(dict(view="color_residual", preparation=preparation,
+                                                reply=alternate_reply, review=alternative))
+                            if alternative["glyph_candidate"]:
+                                conflict = assessed["glyph_candidate"] and (
+                                    assessed["glyph_candidate"] != alternative["glyph_candidate"]
+                                    or ("." in assessed["raw_text"] and "." in alternative["raw_text"]
+                                        and number(assessed["raw_text"]) != number(alternative["raw_text"]))
+                                )
+                                if conflict:
+                                    assessed = dict(assessed, glyph_candidate=None, numeric_candidate=None,
+                                                    rejection_reasons=[*assessed["rejection_reasons"],
+                                                                       "supported_same_frame_views_conflict"])
+                                elif alternative["numeric_candidate"] or not assessed["glyph_candidate"]:
+                                    assessed, reply = alternative, alternate_reply
                 native_source = best["native"]["source"]
                 glyph = assessed["glyph_candidate"]
                 candidate = assessed["numeric_candidate"]
@@ -701,6 +741,7 @@ class NumericVideoReader:
                     registration=native_source.get("registration", {"accepted": True}),
                     preprocessing=best["native"]["metadata"],
                     ocr_score=reply.get("score"),
+                    **(dict(ocr_views=replies) if fallback else {}),
                     best_frame_selection_window_refs=[f["source"] for f in s.frames],
                     fused_digit_pixels=False,
                     reset_reasons=reset,

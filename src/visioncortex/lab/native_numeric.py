@@ -186,7 +186,7 @@ def emission(native):
 
 
 def review(native, reply):
-    from .video_numeric import number, resolve_decimal_tokens
+    from .video_numeric import number, resolve_decimal_tokens, resolve_observed_points
 
     text = reply.get("raw_text", "")
     token = number(text)
@@ -205,6 +205,11 @@ def review(native, reply):
         raise ValueError(
             "Alternate geometry requires explicit source-stroke verification"
         )
+    projective = native["layout"].get("numeric_native_projective_decimal", False)
+    if type(projective) is not bool or projective and (
+        not stroke_veto or native["layout"].get("data_type") != "number"
+    ):
+        raise ValueError("Projective points require a typed number and source-stroke verification")
     stroke_evidence = stroke_assessment = None
     geometry_hypotheses = []
     decimal_layout = native["layout"]
@@ -253,6 +258,7 @@ def review(native, reply):
                 ],
             )
     decimal = None
+    point_observation = None
     if glyphs:
         try:
             decimal = resolve_decimal_tokens(native["image"], decimal_layout, [text])
@@ -267,6 +273,17 @@ def review(native, reply):
                 confirmed=False,
                 reason="fitted_cell_gap_not_established",
             )
+        if projective and not decimal.get("native_point_evidence") and len(cells) >= 2:
+            from .native_points import observe as observe_points
+
+            point_observation = observe_points(
+                native["image"], cells, native["layout"]["color"],
+                glyph_margin=2 if stroke_evidence.get("geometry", {}).get("hypothesis")
+                == "expanded_source_envelope/1" else 1,
+            )
+            resolved = resolve_observed_points([text], len(cells), point_observation["points"])
+            decimal = dict(resolved, legacy_gap_evidence=decimal,
+                           projective_point_evidence=point_observation)
     candidate = decimal.get("numeric_candidate") if decimal else None
     if glyphs and candidate is None:
         reasons.append("decimal_not_established_from_native_pixels")
@@ -276,6 +293,7 @@ def review(native, reply):
         numeric_candidate=candidate,
         native_emission=support,
         native_decimal_evidence=decimal,
+        **(dict(native_projective_point_observation=point_observation) if projective else {}),
         rejection_reasons=reasons,
         confirmed=False,
         value_text=None,

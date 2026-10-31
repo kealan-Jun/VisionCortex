@@ -119,6 +119,63 @@ def test_reading_digits_and_model_dot_remain_candidates_without_point_evidence()
     assert review(native, dict(raw_text="1 2"))["glyph_candidate"] is None
 
 
+@pytest.mark.parametrize("kind", ["clock", "missing_type", "without_stroke_proof", "nonboolean"])
+def test_projective_points_cannot_be_activated_on_untyped_or_clock_fields(kind):
+    native = payload(image())
+    native["layout"].update(numeric_native_projective_decimal=True,
+                            numeric_native_stroke_veto=True, data_type="number")
+    if kind == "clock":
+        native["layout"]["data_type"] = "clock"
+    elif kind == "missing_type":
+        native["layout"].pop("data_type")
+    elif kind == "without_stroke_proof":
+        native["layout"]["numeric_native_stroke_veto"] = False
+    else:
+        native["layout"]["numeric_native_projective_decimal"] = "true"
+    with pytest.raises(ValueError):
+        review(native, dict(raw_text="1.2"))
+
+
+@pytest.mark.parametrize("mode", ["fallback", "conflict", "one_call_budget"])
+def test_same_frame_color_view_cannot_replace_source_or_escape_call_budget(monkeypatch, mode):
+    reader = NumericVideoReader(TemporalConfig())
+    calls = []
+    layout = dict(LAYOUT, data_type="number", numeric_native_stroke_veto=True,
+                  numeric_native_color_fallback=True,
+                  numeric_max_ocr_calls=1 if mode == "one_call_budget" else 2)
+
+    def ocr(pixels, *, anchor_source):
+        calls.append((pixels.copy(), anchor_source))
+        return dict(raw_text="12" if len(calls) == 1 else "13")
+
+    def assess(native, reply):
+        assert np.array_equal(native["image"], image())
+        text = reply.get("raw_text", "")
+        glyph = text if mode == "conflict" or text == "13" else None
+        return dict(raw_text=text, glyph_candidate=glyph, numeric_candidate=None,
+                    rejection_reasons=[], confirmed=False, value_text=None)
+
+    monkeypatch.setattr("visioncortex.lab.native_numeric.review", assess)
+    for i in range(6):
+        native = prepare(image(), layout, np.eye(3))
+        native["source"] = source(native, ref(i), ref(i))
+        out = reader.observe(image(), key=tuple(IDENTITY.values()), identity=IDENTITY,
+                             source_ref=ref(i), layout=layout, ocr=ocr, native=native)
+    assert len(calls) == (1 if mode == "one_call_budget" else 2)
+    assert out["ocr_port_calls"] == len(calls)
+    if len(calls) == 2:
+        assert not np.array_equal(calls[0][0], calls[1][0])
+        for key in ("pts", "source_sha256", "source_frame_pixels_sha256"):
+            assert calls[0][1][key] == calls[1][1][key]
+        assert "ocr_view" in calls[1][1]
+    if mode == "conflict":
+        assert out["glyph_candidate"] is None
+        assert "supported_same_frame_views_conflict" in out["rejection_reasons"]
+    elif mode == "fallback":
+        assert out["glyph_candidate"] == "13"
+    assert out["numeric_candidate"] is None and not out["gates"]["confirmed"]
+
+
 def test_native_reader_uses_one_real_anchor_and_counts_both_pixel_buffers():
     reader = NumericVideoReader(TemporalConfig())
     calls = []
