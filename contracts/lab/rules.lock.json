@@ -1,6 +1,6 @@
 {
   "schema_version": "vc-lab-rule-bundle/1",
-  "revision": "vc-lab-unified-20261101.24",
+  "revision": "vc-lab-unified-20261101.25",
   "components_sha256": "5be51d3c237058c97919072431ed203e6a8f6dd207137f204fb241b1d71f5af5",
   "files": [
     {
@@ -427,8 +427,12 @@
       "sha256": "20d43b066a336d7d7f09ceae115ca7435874612d64de4b986b5682cc671c6b04"
     },
     {
+      "path": "src/visioncortex/lab/source_refinement.py",
+      "sha256": "dc21126d3686816aa6ec474d24e7f1987fcd2afb81b77c383656e93be27544fd"
+    },
+    {
       "path": "src/visioncortex/lab/source_tracking.py",
-      "sha256": "8aa07846b6000ab2139cff989c011b0925edcb01e55dc4d15deb98e2e9040834"
+      "sha256": "ad6ea85d0257732d6a3bc4a3e38b9de291a4e2361e3513f6dcd51b8fabd5714b"
     },
     {
       "path": "src/visioncortex/lab/speech_candidates.py",
@@ -460,7 +464,7 @@
     },
     {
       "path": "src/visioncortex/lab/temporal_video.py",
-      "sha256": "1d1b48255f74f3c121b14eb20e7a4759f9ba4babb47b2650d1dca498d2b9457f"
+      "sha256": "c9f754f472a6ed942c4578c17703168554d1da82b88e58fb0787340b5234c9ff"
     },
     {
       "path": "src/visioncortex/lab/timeline.py",

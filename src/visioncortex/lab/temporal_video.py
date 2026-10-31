@@ -165,6 +165,9 @@ def validate_registration(document, *, media=None, asset=None):
             raise TemporalVideoRejected("Source-reference tracking requires explicit critical field geometry")
         if type(spec.get("source_tracking", False)) is not bool:
             raise TemporalVideoRejected("Explicit source tracking boolean required")
+        if (type(spec.get("source_stable_refinement", False)) is not bool
+                or spec.get("source_stable_refinement") and not spec.get("source_tracking")):
+            raise TemporalVideoRejected("Stable refinement requires explicit source tracking")
         if (type(spec.get("source_geometry_translation", False)) is not bool
                 or spec.get("source_geometry_translation") and not spec.get("source_tracking")):
             raise TemporalVideoRejected("LED pose correction requires explicit source tracking")
@@ -775,6 +778,7 @@ class TemporalVideo:
                                 trackers[key] = (physical_key, SourcePanelTracker(
                                     reference_image if use_reference else upright,
                                     field["roi_box"], field["layout"]["dynamic_boxes"],
+                                    refine_stable_translation=field.get("source_stable_refinement", False),
                                     **(dict(required_boxes=[field["layout"]["numeric_field_box"]])
                                        if use_reference else {}),
                                 ))

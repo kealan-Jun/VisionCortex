@@ -15,7 +15,11 @@ from .temporal_registration import normalized_box
 
 
 class SourcePanelTracker:
-    def __init__(self, image, roi_box, dynamic_boxes, *, required_boxes=None):
+    def __init__(self, image, roi_box, dynamic_boxes, *, required_boxes=None,
+                 refine_stable_translation=False):
+        if type(refine_stable_translation) is not bool:
+            raise ValueError("Explicit stable-refinement boolean required")
+        self.refine_stable_translation = refine_stable_translation
         self.shape = image.shape
         if image.dtype != np.uint8 or image.ndim != 3 or image.shape[2] != 3:
             raise ValueError("Source tracker requires uint8 BGR pixels")
@@ -393,11 +397,21 @@ class SourcePanelTracker:
         self.last_failure = None
         self.pending_flow_frames = 0
         result["registration"]["tracking_diagnostics"] = diagnostics
+        if self.refine_stable_translation:
+            from .source_refinement import refine
+
+            x, y, xx, yy = self.box
+            result["registration"] = refine(
+                result["image"], result["registration"],
+                self.reference_gray[y:yy, x:xx], self.mask[y:yy, x:xx],
+            )
         return dict(status="tracked", **result)
 
 
 def align_native_roi(image, registration, source_ref):
     """Validate the source-bound tracker result before temporal OCR consumes it."""
+    from .source_refinement import METHOD, verified
+
     if (
         registration.get("accepted") is not True
         or registration.get("dynamic_features_excluded") is not True
@@ -406,7 +420,9 @@ def align_native_roi(image, registration, source_ref):
         not in {
             "source_panel_bidirectional_flow/1",
             "source_panel_descriptor_reacquisition/1",
+            METHOD,
         }
+        or registration.get("method") == METHOD and not verified(registration)
         or registration.get("input_bgr_sha256")
         != hashlib.sha256(image.tobytes()).hexdigest()
         or registration.get("upright_frame_bgr_sha256")
