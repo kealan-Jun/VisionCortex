@@ -1,6 +1,6 @@
 {
   "schema_version": "vc-lab-rule-bundle/1",
-  "revision": "vc-lab-unified-20261031.5",
+  "revision": "vc-lab-unified-20261031.6",
   "components_sha256": "5be51d3c237058c97919072431ed203e6a8f6dd207137f204fb241b1d71f5af5",
   "files": [
     {
@@ -268,7 +268,7 @@
     },
     {
       "path": "src/visioncortex/lab/native_comment_intake.py",
-      "sha256": "8e1dc0984768e7e6e93e09e461c56b107db8e3fdb210c1cd55c1cd3aa436cd9b"
+      "sha256": "25f69e57dffd8659af4fc453fc32b9a3be835a0d437dab816722bf28b5d468e4"
     },
     {
       "path": "src/visioncortex/lab/native_comment_layout.py",

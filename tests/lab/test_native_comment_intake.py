@@ -97,3 +97,34 @@ def test_native_audio_provenance_is_retained_but_uncalibrated_clock_cannot_compl
     assert 'unknown_comment_event_time' in result['attention_reasons']
     assert 'original_audio_provenance_unavailable_or_conflicting' not in result['attention_reasons']
     assert result['status']=='pending_interpretation' and result['quantity_ledger_written'] is False
+
+
+def test_explicit_inventory_root_alias_preserves_original_transcript_identity(native):
+    from visioncortex.lab.native_comment_intake import inventory_alias
+    n=native;source=n['intake'].source(n['accepted']['media_id'])
+    record=source['receipt']['native_record']
+    record.update(recording_session_id='fixture-session',recording_start_us=1,recording_end_us=2)
+    row=dict(record,relative_path='ProducerArchive/'+record['relative_path'],recording_id='original-root-recording',
+             source_signature='original-root-video-signature',audio=dict(source_signature='original-root-audio-signature'))
+    source['recording_aliases']=[inventory_alias(source,row,'ProducerArchive')]
+    document=json.loads(json.dumps(n['document']));document['recording_id']=row['recording_id']
+    document['audio']['source_signature']=row['audio']['source_signature']
+    document['original_transcript']['path']=document['original_transcript']['path'].replace('fixture-retained-recording',row['recording_id'])
+    plan=prepare(document,source,n['archive']+'/'+n['event']+'/Transcript.json')
+    assert plan['recording_id']==row['recording_id'] and plan['native_recording_id']=='fixture-retained-recording'
+    assert plan['audio_sha256']==source['verified_sha256']
+    for name,value in [('camera_key','another-camera'),('recording_session_id','another-session'),('recording_start_us',3)]:
+        with pytest.raises(Conflict):inventory_alias(source,dict(row,**{name:value}),'ProducerArchive')
+    document['sentences'][0]['audio_ref']['sha256']='0'*64
+    with pytest.raises(Conflict):prepare(document,source,n['archive']+'/'+n['event']+'/Transcript.json')
+
+
+def test_one_out_of_bounds_sentence_is_retained_unaligned_without_widening_audio(native):
+    n=native;source=n['intake'].source(n['accepted']['media_id'])
+    document=json.loads(json.dumps(n['document']))
+    document['sentences'].append(dict(document['sentences'][0],text='原文保留；此句时间待核对',audio_start_seconds='1.8',audio_end_seconds='2.013'))
+    plan=prepare(document,source,n['archive']+'/'+n['event']+'/Transcript.json')
+    assert len(plan['aligned_units'])==1 and len(plan['unaligned_units'])==1
+    assert plan['unaligned_units'][0]['reported_end_seconds']=='2.013'
+    assert plan['source_end_seconds']=='2.000000' and '时间待核对' in plan['text']
+    assert plan['alignment_status']=='partial_original_sentence_bounds'
