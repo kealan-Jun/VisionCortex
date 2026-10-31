@@ -108,10 +108,13 @@ def prepare(image, layout, current_to_reference, *, reference_shape=None):
     native_quads = [q - [x, y] for q in quads]
     h, w = crop.shape[:2]
     native_boxes = []
-    for q in native_quads:
+    for q, original_digit in zip(native_quads, digits, strict=True):
         left, top = np.maximum(0, np.floor(q.min(axis=0))).astype(int)
         right, bottom = np.minimum([w, h], np.ceil(q.max(axis=0))).astype(int)
-        native_boxes.append([left / w, top / h, right / w, bottom / h])
+        box = [left / w, top / h, right / w, bottom / h]
+        native_boxes.append(
+            dict(original_digit, box=box) if isinstance(original_digit, dict) else box
+        )
     return dict(
         image=crop,
         quads=[q.tolist() for q in native_quads],
@@ -194,11 +197,55 @@ def review(native, reply):
     if token is None or len(token.replace(".", "")) != len(support):
         reasons.append("OCR_does_not_cover_native_digit_slots")
     glyphs = token.replace(".", "") if token and not reasons else None
-    decimal = (
-        resolve_decimal_tokens(native["image"], native["layout"], [text])
-        if glyphs
-        else None
-    )
+    stroke_veto = native["layout"].get("numeric_native_stroke_veto", False)
+    if type(stroke_veto) is not bool:
+        raise ValueError("Explicit native stroke-veto boolean required")
+    stroke_evidence = stroke_assessment = None
+    decimal_layout = native["layout"]
+    if glyphs and stroke_veto:
+        if native["layout"].get("display_type") != "seven_segment":
+            raise ValueError(
+                "Seven-segment source layout required for stroke verification"
+            )
+        from .native_segments import observe, assess
+
+        stroke_evidence = observe(native)
+        stroke_assessment = assess(stroke_evidence, glyphs)
+        if not stroke_assessment["supported"]:
+            glyphs = None
+            reasons.append("OCR_required_strokes_not_established_from_source")
+        else:
+            h, w = native["image"].shape[:2]
+            cells = [
+                np.asarray(s["native_cell_polygon"]) for s in stroke_evidence["slots"]
+            ]
+            decimal_layout = dict(
+                decimal_layout,
+                digits=[
+                    [
+                        float(q[:, 0].min() / w),
+                        float(q[:, 1].min() / h),
+                        float(q[:, 0].max() / w),
+                        float(q[:, 1].max() / h),
+                    ]
+                    for q in cells
+                ],
+            )
+    decimal = None
+    if glyphs:
+        try:
+            decimal = resolve_decimal_tokens(native["image"], decimal_layout, [text])
+        except ValueError:
+            if not stroke_veto:
+                raise
+            # Slanted cells can have overlapping axis-aligned extents. Such
+            # geometry cannot establish the strict native gap; keep it unknown.
+            decimal = dict(
+                numeric_candidate=None,
+                decimal_status="unknown",
+                confirmed=False,
+                reason="fitted_cell_gap_not_established",
+            )
     candidate = decimal.get("numeric_candidate") if decimal else None
     if glyphs and candidate is None:
         reasons.append("decimal_not_established_from_native_pixels")
@@ -213,6 +260,14 @@ def review(native, reply):
         value_text=None,
         model_score_is_accuracy=False,
         full_glyph_correctness_proven=False,
+        **(
+            dict(
+                native_segment_evidence=stroke_evidence,
+                native_stroke_assessment=stroke_assessment,
+            )
+            if stroke_veto
+            else {}
+        ),
     )
 
 

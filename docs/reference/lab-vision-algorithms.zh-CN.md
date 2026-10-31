@@ -174,3 +174,5 @@ OCR 回调复用已有本地提供者，保留实际 token、输入图像指纹�
 | 查询与发布 | [`api.py`](../../src/visioncortex/lab/api.py)、[`timeline_commands.py`](../../src/visioncortex/lab/timeline_commands.py)、[`timeline_views.py`](../../src/visioncortex/lab/timeline_views.py)、[`timeline_report.py`](../../src/visioncortex/lab/timeline_report.py) |
 
 通用规则、冻结兼容组件和数据库迁移分别位于 [`contracts/lab`](../../contracts/lab)、[`components/lab`](../../components/lab)、[`migrations/lab`](../../migrations/lab)。部署资产与实际现场规则不从历史配置自动继承。
+
+原像素分支可显式开启 `numeric_native_stroke_veto`（默认关闭，仅七段数码管）。它从同帧原像素拟合共享的字格几何，以通用七段拓扑核对 OCR 声称的关键笔画；不读取预期读数、不使用客户字形样本，也不替换模型原文。几何搜索中的重采样只用于定位，OCR 输入与笔画检查仍保留原始像素。测得的槽内对比在拟合前固定，避免候选几何改变自己的证据。缺证、额外亮笔画或无法建立的字格都保留未知；通过此检查仍不证明未亮区域为 OFF，不自动确认业务读数。小数点继续要求该帧、拟合字格之间的独立亮点证据；不扩大到字内搜索，也不借用其他时刻的小数点。

@@ -112,7 +112,25 @@
       "full_glyph_quality": "NOT_PROVEN",
       "early_candidate_frames": 3,
       "maximum_recognition_frequency_hz": 1,
-      "call_budget_survives_pixel_tracking_resets": true
+      "call_budget_survives_pixel_tracking_resets": true,
+      "positive_stroke_veto": {
+        "default": false,
+        "activation": "numeric_native_stroke_veto",
+        "display_type": "seven_segment",
+        "source_measurement": "fixed_original_coarse_slot_contrast_before_geometry_fit",
+        "geometry": "shared_parametric_segment_lattice",
+        "site_font_examples": false,
+        "expected_readings": false,
+        "learned_weights": false,
+        "geometry_search_limit": 512,
+        "geometry_template_cache_limit": 512,
+        "geometry_resampling_is_not_OCR_input": true,
+        "critical_missing_strokes": "unknown",
+        "negative_opportunity_inferred": false,
+        "physical_identity_inferred": false,
+        "business_confirmation": false,
+        "decimal": "same_original_frame_island_between_fitted_cells_only"
+      }
     },
     "engineering_replay": {
       "entry": "tools/evaluation/replay_display_ocr.py",

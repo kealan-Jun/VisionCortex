@@ -1,6 +1,6 @@
 {
   "schema_version": "vc-lab-rule-bundle/1",
-  "revision": "vc-lab-unified-20261031.17",
+  "revision": "vc-lab-unified-20261031.18",
   "components_sha256": "5be51d3c237058c97919072431ed203e6a8f6dd207137f204fb241b1d71f5af5",
   "files": [
     {
@@ -49,7 +49,7 @@
     },
     {
       "path": "temporal-display-rules-v1.json",
-      "sha256": "e5f22da12d85a667ba1e26f2ee9385a5a673c39d5d7616f2b383f178308a648f"
+      "sha256": "ceabbbefef1b95b1642702832827f722def63f8df5d2b8d0460ade1b98c730c3"
     },
     {
       "path": "timeline-rules-v1.json",
@@ -292,7 +292,7 @@
     },
     {
       "path": "src/visioncortex/lab/native_numeric.py",
-      "sha256": "b72fd271981e79c5643b2df2caaafc1ba5457ecfbd05a80793bf7964163ad2cd"
+      "sha256": "8fcbc156ff6c200ea0279f6d50a47e76b2e015c68f343b2b3909971aa3870732"
     },
     {
       "path": "src/visioncortex/lab/native_ocr.py",
@@ -309,6 +309,10 @@
     {
       "path": "src/visioncortex/lab/native_result_layout.py",
       "sha256": "6da8079a4c91dc6df770da18d07493d7d32dbef9b74ec4f71d9ef3caccc8ae61"
+    },
+    {
+      "path": "src/visioncortex/lab/native_segments.py",
+      "sha256": "7ef8f1b28b75e7f7c090079f4fedff07336f6ed7ff00c0e27fd2ff3e3a9cf81e"
     },
     {
       "path": "src/visioncortex/lab/native_timeline_links.py",
@@ -409,6 +413,10 @@
     {
       "path": "src/visioncortex/lab/scan_source_scanner.py",
       "sha256": "4f23b79e0a98cfc9649c051f599966ae267b298b907c9692416a2e4fe85e6a90"
+    },
+    {
+      "path": "src/visioncortex/lab/segment_lattice.py",
+      "sha256": "1025d600fdbdc09eb1eca53d27a4c2ead19241529775c1707efc0a6b20be6d50"
     },
     {
       "path": "src/visioncortex/lab/source_tracking.py",
@@ -633,6 +641,6 @@
       "sha256": "a3c78f7837195851f74868009d1d14db34f8629ca31457371d8056a1c3c31a73"
     }
   ],
-  "source_lineage_sha256": "82e7223d541e8b892f93451e6b74fad11fe3d8f323a891682f1bd8e60926ce0c",
+  "source_lineage_sha256": "54015b25e16fde5a3baa4cca4d0b740f2772722e3f0eb1cb1bdb2c6e5096af2b",
   "source_lineage_recipe": "sha256 canonical JSON of adapter_files and migration_files; sorted keys, compact separators; v1"
 }
