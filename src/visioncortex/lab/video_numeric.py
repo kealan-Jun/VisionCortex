@@ -627,7 +627,7 @@ class NumericVideoReader:
         if type(limit) is not int or not 1 <= limit <= 64:
             raise ValueError("Explicit bounded numeric OCR call limit required")
         if native_mode:
-            from .native_numeric import review
+            from .native_numeric import review, point_probe
 
             fallback = layout.get("numeric_native_color_fallback", False)
             if type(fallback) is not bool or fallback and (
@@ -635,6 +635,20 @@ class NumericVideoReader:
                 or layout.get("data_type") != "number"
             ):
                 raise ValueError("Color fallback requires a typed number and source-stroke verification")
+            support_view = layout.get("numeric_native_support_crop", False)
+            point_selection = layout.get("numeric_native_point_selection", False)
+            if type(support_view) is not bool or support_view and (
+                fallback or layout.get("data_type") != "number"
+                or layout.get("numeric_native_stroke_veto") is not True
+            ):
+                raise ValueError("Native support crop requires a typed verified number and one fallback mode")
+            if type(point_selection) is not bool or point_selection and (
+                layout.get("data_type") != "number"
+                or layout.get("numeric_native_stroke_veto") is not True
+                or layout.get("numeric_native_projective_decimal") is not True
+            ):
+                raise ValueError("Point selection requires typed source-stroke and point verification")
+            has_fallback = fallback or support_view
             # Candidate admission needs native emission, not half a second of
             # uninterrupted tracking. Pixel resets must not replenish budget.
             due = s.count >= 3 and (
@@ -650,6 +664,7 @@ class NumericVideoReader:
                 best = frame
                 reply = {}
                 replies = []
+                point_probes = []
                 if eligible:
                     maximum = np.maximum(
                         np.max(
@@ -670,6 +685,22 @@ class NumericVideoReader:
                         return float(ratios.min() * 2 + ratios.mean())
 
                     best = max(eligible, key=native_rank)
+                    if point_selection and ocr is not None:
+                        complete = []
+                        for item in sorted(eligible, key=native_rank, reverse=True)[:7]:
+                            probe = point_probe(item["native"])
+                            ref = item["native"]["source"]
+                            point_probes.append(dict(
+                                source={k: ref[k] for k in (
+                                    "source_sha256", "pts", "time_base", "source_frame_pixels_sha256",
+                                    "source_to_roi", "dynamic_physical_key") if k in ref},
+                                native_bgr_sha256=probe.get("source_bgr_sha256"),
+                                points=probe["points"], confirmed=False,
+                            ))
+                            if len(probe["points"]) == 1:
+                                complete.append(item)
+                        if complete:
+                            best = max(complete, key=native_rank)
                     if ocr is not None:
                         reply = ocr(
                             best["native"]["image"],
@@ -681,19 +712,26 @@ class NumericVideoReader:
                 assessed = review(best["native"], reply)
                 if eligible and ocr is not None:
                     replies.append(dict(view="native", reply=reply, review=assessed))
-                    if fallback and assessed["numeric_candidate"] is None and s.calls < limit:
-                        from .native_views import color_residual
+                    needs_fallback = (support_view and assessed["glyph_candidate"] is None
+                                      or fallback and assessed["numeric_candidate"] is None)
+                    if needs_fallback and s.calls < limit:
+                        from .native_views import color_residual, support_crop
 
-                        prepared, preparation = color_residual(best["native"]["image"])
-                        if preparation["prepared_bgr_sha256"] != preparation["source_bgr_sha256"]:
-                            alternate_reply = ocr(prepared, anchor_source=dict(
-                                best["native"]["source"], ocr_view=preparation,
-                            ))
+                        prepared, preparation = (support_crop(best["native"]) if support_view
+                                                 else color_residual(best["native"]["image"]))
+                        if prepared is not None and preparation["prepared_bgr_sha256"] != preparation["source_bgr_sha256"]:
+                            view_source = dict(best["native"]["source"], ocr_view=preparation)
+                            if "native_to_prepared" in preparation:
+                                view_source["source_to_roi"] = (
+                                    np.asarray(preparation["native_to_prepared"])
+                                    @ np.asarray(view_source["source_to_roi"])
+                                ).tolist()
+                            alternate_reply = ocr(prepared, anchor_source=view_source)
                             s.calls += 1
                             native_budget["calls"] = s.calls
                             # Source verification always uses the original image.
                             alternative = review(best["native"], alternate_reply)
-                            replies.append(dict(view="color_residual", preparation=preparation,
+                            replies.append(dict(view="native_support_crop" if support_view else "color_residual", preparation=preparation,
                                                 reply=alternate_reply, review=alternative))
                             if alternative["glyph_candidate"]:
                                 conflict = assessed["glyph_candidate"] and (
@@ -741,7 +779,11 @@ class NumericVideoReader:
                     registration=native_source.get("registration", {"accepted": True}),
                     preprocessing=best["native"]["metadata"],
                     ocr_score=reply.get("score"),
-                    **(dict(ocr_views=replies) if fallback else {}),
+                    **(dict(ocr_views=replies) if has_fallback else {}),
+                    **(dict(native_frame_selection=dict(
+                        method="same_source_point_then_emission/1", max_point_probes=7,
+                        probes=point_probes, numeric_pixels_from_one_frame=True,
+                    )) if point_selection else {}),
                     best_frame_selection_window_refs=[f["source"] for f in s.frames],
                     fused_digit_pixels=False,
                     reset_reasons=reset,

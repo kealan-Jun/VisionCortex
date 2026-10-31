@@ -311,6 +311,24 @@ def review(native, reply):
     )
 
 
+def point_probe(native):
+    """Locate a point for single-frame selection, without reading a value."""
+    from .native_segments import observe
+    from .native_points import observe as observe_points
+
+    layout = native["layout"]
+    if (layout.get("data_type") != "number" or layout.get("display_type") != "seven_segment"
+            or layout.get("numeric_native_stroke_veto") is not True):
+        raise ValueError("Typed source-verified numeric field required for point selection")
+    evidence = observe(native)
+    cells = [slot["native_cell_polygon"] for slot in evidence["slots"]]
+    if len(cells) < 2:
+        return dict(points=[], reason="source_cell_geometry_pending", confirmed=False)
+    points = observe_points(native["image"], cells, layout["color"])
+    return dict(points, source_bgr_sha256=native["metadata"]["native_bgr_sha256"],
+                geometry_method=evidence["geometry"]["method"], numeric_value=None)
+
+
 def source(native, native_source_ref, registered_source_ref):
     """Carry the crop transform without changing its original frame or clock."""
     raw, raw_time = _reference(native_source_ref)

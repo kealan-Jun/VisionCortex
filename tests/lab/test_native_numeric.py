@@ -136,13 +136,23 @@ def test_projective_points_cannot_be_activated_on_untyped_or_clock_fields(kind):
         review(native, dict(raw_text="1.2"))
 
 
-@pytest.mark.parametrize("mode", ["fallback", "conflict", "one_call_budget"])
+@pytest.mark.parametrize("mode", ["fallback", "conflict", "one_call_budget", "support_crop"])
 def test_same_frame_color_view_cannot_replace_source_or_escape_call_budget(monkeypatch, mode):
     reader = NumericVideoReader(TemporalConfig())
     calls = []
     layout = dict(LAYOUT, data_type="number", numeric_native_stroke_veto=True,
                   numeric_native_color_fallback=True,
                   numeric_max_ocr_calls=1 if mode == "one_call_budget" else 2)
+    if mode == "support_crop":
+        layout.update(numeric_native_color_fallback=False, numeric_native_support_crop=True)
+
+        def crop_view(native):
+            view = native["image"][4:-4, 3:-3].copy()
+            return view, dict(source_bgr_sha256=hashlib.sha256(native["image"].tobytes()).hexdigest(),
+                              prepared_bgr_sha256=hashlib.sha256(view.tobytes()).hexdigest(),
+                              native_to_prepared=[[1, 0, -3], [0, 1, -4], [0, 0, 1]])
+
+        monkeypatch.setattr("visioncortex.lab.native_views.support_crop", crop_view)
 
     def ocr(pixels, *, anchor_source):
         calls.append((pixels.copy(), anchor_source))
@@ -168,12 +178,51 @@ def test_same_frame_color_view_cannot_replace_source_or_escape_call_budget(monke
         for key in ("pts", "source_sha256", "source_frame_pixels_sha256"):
             assert calls[0][1][key] == calls[1][1][key]
         assert "ocr_view" in calls[1][1]
+        if mode == "support_crop":
+            assert calls[1][1]["source_to_roi"] == [[1, 0, -3], [0, 1, -4], [0, 0, 1]]
     if mode == "conflict":
         assert out["glyph_candidate"] is None
         assert "supported_same_frame_views_conflict" in out["rejection_reasons"]
-    elif mode == "fallback":
+    elif mode in {"fallback", "support_crop"}:
         assert out["glyph_candidate"] == "13"
     assert out["numeric_candidate"] is None and not out["gates"]["confirmed"]
+
+
+@pytest.mark.parametrize("points", ["one", "absent", "ambiguous"])
+def test_point_selection_uses_one_actual_frame_and_cannot_borrow_a_dot(monkeypatch, points):
+    reader = NumericVideoReader(TemporalConfig())
+    layout = dict(LAYOUT, data_type="number", numeric_native_stroke_veto=True,
+                  numeric_native_projective_decimal=True, numeric_native_point_selection=True)
+    calls = []
+
+    def probe(native):
+        found = [dict(after_digit=0, box=[40, 30, 42, 32])] if native["source"]["pts"] == 33333 else []
+        if points == "absent":
+            found = []
+        elif points == "ambiguous":
+            found = found * 2
+        return dict(points=found)
+
+    def ocr(pixels, *, anchor_source):
+        calls.append((pixels.copy(), anchor_source))
+        return dict(raw_text="12")
+
+    monkeypatch.setattr("visioncortex.lab.native_numeric.point_probe", probe)
+    monkeypatch.setattr("visioncortex.lab.native_numeric.review", lambda native, reply: dict(
+        raw_text=reply["raw_text"], glyph_candidate="12", numeric_candidate=None,
+        rejection_reasons=[], confirmed=False, value_text=None))
+    for i in range(3):
+        im = image()
+        im[im[:, :, 2] > 0, 2] -= i * 10
+        native = prepare(im, layout, np.eye(3))
+        native["source"] = source(native, ref(i, im), ref(i, im))
+        out = reader.observe(im, key=tuple(IDENTITY.values()), identity=IDENTITY,
+                             source_ref=ref(i, im), layout=layout, ocr=ocr, native=native)
+    selected = 33333 if points == "one" else 0
+    assert len(calls) == 1 and calls[0][1]["pts"] == selected
+    assert out["source_refs"][0]["pts"] == selected
+    assert out["numeric_candidate"] is None and out["fused_digit_pixels"] is False
+    assert len(out["native_frame_selection"]["probes"]) == 3
 
 
 def test_native_reader_uses_one_real_anchor_and_counts_both_pixel_buffers():
