@@ -1,6 +1,6 @@
 {
   "schema_version": "vc-lab-rule-bundle/1",
-  "revision": "vc-lab-unified-20261031.12",
+  "revision": "vc-lab-unified-20261031.14",
   "components_sha256": "5be51d3c237058c97919072431ed203e6a8f6dd207137f204fb241b1d71f5af5",
   "files": [
     {
@@ -49,7 +49,7 @@
     },
     {
       "path": "temporal-display-rules-v1.json",
-      "sha256": "1257c4cf97ede49b46e59beab138fc741bd17b516a558e4a607defc2570b3cfb"
+      "sha256": "0ae150a7d5ae88b5eea1693fd1d81f90332a222172ff412e9b363f3384dc3920"
     },
     {
       "path": "timeline-rules-v1.json",
@@ -287,6 +287,10 @@
       "sha256": "1e234d8fd44d9c129d8fcf3a1b5f5abd476321c1e703cb4421331f4cb5aae9ac"
     },
     {
+      "path": "src/visioncortex/lab/native_numeric.py",
+      "sha256": "b72fd271981e79c5643b2df2caaafc1ba5457ecfbd05a80793bf7964163ad2cd"
+    },
+    {
       "path": "src/visioncortex/lab/native_ocr.py",
       "sha256": "6a40833e7c2fefcd3f904113302c50d6b6adcb4ab827a185d7d7c34ef02a3b5b"
     },
@@ -424,7 +428,7 @@
     },
     {
       "path": "src/visioncortex/lab/temporal_display.py",
-      "sha256": "10ce93f0ea668f7d001e8961b353eb7d22f38f7431abdf204098437a1a792cd3"
+      "sha256": "1be2366be211f244f6bad1fdf0b0f9ef5cc4a24514063d21ecc69ce62ad6c246"
     },
     {
       "path": "src/visioncortex/lab/temporal_registration.py",
@@ -508,7 +512,7 @@
     },
     {
       "path": "src/visioncortex/lab/video_numeric.py",
-      "sha256": "89235760b3a02f5ff60942b8e4ecf7d01de11ed71a0c02104236991d9728d340"
+      "sha256": "409c14816d0a66882a035c7f76c34839e0d7c1607a2d46f30b17d2a8a2c50b07"
     },
     {
       "path": "src/visioncortex/lab/weighing.py",
@@ -525,6 +529,10 @@
     {
       "path": "src/visioncortex/result_readability.py",
       "sha256": "6b884039b815722bc8ae53770101b347d461c8400daa6a714c7a14214e09fedf"
+    },
+    {
+      "path": "tools/evaluation/replay_display_ocr.py",
+      "sha256": "b8e0fa771d020aca156599b125d8db8464be3f1af0148909344e7acda3faf165"
     },
     {
       "path": "tools/inference/lab_model_service.py",
@@ -617,6 +625,6 @@
       "sha256": "a3c78f7837195851f74868009d1d14db34f8629ca31457371d8056a1c3c31a73"
     }
   ],
-  "source_lineage_sha256": "e4a434b664f2ffd887d358c35110573a8fdc09b00bea765830ba11b2b825fac9",
+  "source_lineage_sha256": "4130ae200981c2867bfc4e26dd38979eaaf9e951a09462719ac5a20f3cad98c9",
   "source_lineage_recipe": "sha256 canonical JSON of adapter_files and migration_files; sorted keys, compact separators; v1"
 }

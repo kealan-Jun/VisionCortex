@@ -1,0 +1,255 @@
+"""Preserve native source pixels for an opt-in registered LED-field reader.
+
+Registration locates the crop; it does not resample its glyphs. Emission is an
+absence veto, not proof of every stroke or correctness of an OCR prediction.
+"""
+
+import hashlib
+import math
+import re
+
+import numpy as np
+
+from .temporal_display import _reference
+from .temporal_registration import normalized_box
+
+
+def same_transform(first, second):
+    a, b = np.asarray(first, dtype=float), np.asarray(second, dtype=float)
+    if (
+        a.shape != (3, 3)
+        or b.shape != (3, 3)
+        or not np.isfinite(a).all()
+        or not np.isfinite(b).all()
+    ):
+        return False
+    index = np.unravel_index(np.argmax(np.abs(a)), a.shape)
+    if abs(a[index]) < 1e-12 or abs(b[index]) < 1e-12:
+        return False
+    return bool(np.allclose(a, b * (a[index] / b[index]), rtol=1e-7, atol=1e-8))
+
+
+def prepare(image, layout, current_to_reference, *, reference_shape=None):
+    import cv2
+
+    if (
+        image.dtype != np.uint8
+        or image.ndim != 3
+        or image.shape[2] != 3
+        or image.shape[0] * image.shape[1]
+        > (1048576 if reference_shape is not None else 262144)
+    ):
+        raise ValueError("Bounded native uint8 BGR field required")
+    if layout.get("color") not in {"red", "green"}:
+        raise ValueError("Native emission reader requires an explicit LED color")
+    digits = layout.get("digits", [])
+    if not 1 <= len(digits) <= 12:
+        raise ValueError("One to twelve registered digit slots required")
+    shape = tuple(reference_shape) if reference_shape is not None else image.shape
+    if len(shape) < 2 or min(shape[:2]) < 8 or shape[0] * shape[1] > 262144:
+        raise ValueError("Bounded explicit reference geometry required")
+    boxes = [
+        normalized_box(d.get("box") if isinstance(d, dict) else d, shape)
+        for d in digits
+    ]
+    matrix = np.asarray(current_to_reference, dtype=float)
+    if (
+        matrix.shape != (3, 3)
+        or not np.isfinite(matrix).all()
+        or abs(np.linalg.det(matrix)) < 1e-8
+    ):
+        raise ValueError("Invertible finite registration required")
+    inverse = np.linalg.inv(matrix)
+    quads = []
+    for x, y, xx, yy in boxes:
+        q = cv2.perspectiveTransform(
+            np.float32([[[x, y], [xx, y], [xx, yy], [x, yy]]]), inverse
+        )[0]
+        if (
+            not np.isfinite(q).all()
+            or not cv2.isContourConvex(q)
+            or cv2.contourArea(q) < 8
+            or (q < 0).any()
+            or (q[:, 0] > image.shape[1]).any()
+            or (q[:, 1] > image.shape[0]).any()
+        ):
+            raise ValueError("Native digit polygon clipped or degenerate")
+        quads.append(q)
+    all_points = np.concatenate(quads)
+    pad = max(2, math.ceil(min(b[3] - b[1] for b in boxes) * 0.14))
+    if layout.get("numeric_field_box") is not None:
+        left, top, right, bottom = normalized_box(layout["numeric_field_box"], shape)
+        if any(
+            not (left <= x < xx <= right and top <= y < yy <= bottom)
+            for x, y, xx, yy in boxes
+        ):
+            raise ValueError("Digit geometry escapes its declared native field")
+        all_points = cv2.perspectiveTransform(
+            np.float32([[[left, top], [right, top], [right, bottom], [left, bottom]]]),
+            inverse,
+        )[0]
+        if (
+            not np.isfinite(all_points).all()
+            or not cv2.isContourConvex(all_points)
+            or (all_points < 0).any()
+            or (all_points[:, 0] > image.shape[1]).any()
+            or (all_points[:, 1] > image.shape[0]).any()
+        ):
+            raise ValueError("Declared native field clipped by source")
+        pad = 2
+    x, y = np.maximum(0, np.floor(all_points.min(axis=0) - pad)).astype(int)
+    xx, yy = np.minimum(
+        [image.shape[1], image.shape[0]],
+        np.ceil(all_points.max(axis=0) + pad),
+    ).astype(int)
+    crop = image[y:yy, x:xx].copy()
+    if crop.shape[0] * crop.shape[1] > 262144:
+        raise ValueError("Native crop exceeds its retained pixel budget")
+    native_quads = [q - [x, y] for q in quads]
+    h, w = crop.shape[:2]
+    native_boxes = []
+    for q in native_quads:
+        left, top = np.maximum(0, np.floor(q.min(axis=0))).astype(int)
+        right, bottom = np.minimum([w, h], np.ceil(q.max(axis=0))).astype(int)
+        native_boxes.append([left / w, top / h, right / w, bottom / h])
+    return dict(
+        image=crop,
+        quads=[q.tolist() for q in native_quads],
+        layout=dict(layout, digits=native_boxes),
+        metadata=dict(
+            method="native_registered_crop/1",
+            crop_box=[int(x), int(y), int(xx), int(yy)],
+            current_to_crop=[[1, 0, -int(x)], [0, 1, -int(y)], [0, 0, 1]],
+            current_to_reference=matrix.tolist(),
+            native_bgr_sha256=hashlib.sha256(crop.tobytes()).hexdigest(),
+            digit_quadrilaterals=[q.tolist() for q in native_quads],
+            resampled=False,
+            strokes_completed=False,
+        ),
+    )
+
+
+def emission(native):
+    """Do not match the blue casing/background of an extinguished red digit."""
+    import cv2
+
+    image, layout = native["image"], native["layout"]
+    if (
+        image.dtype != np.uint8
+        or image.ndim != 3
+        or image.shape[2] != 3
+        or image.shape[0] * image.shape[1] > 262144
+        or layout.get("color") not in {"red", "green"}
+        or not 1 <= len(native["quads"]) <= 12
+        or hashlib.sha256(image.tobytes()).hexdigest()
+        != native["metadata"]["native_bgr_sha256"]
+    ):
+        raise ValueError("Invalid bounded native pixel evidence")
+    channel = 2 if layout["color"] == "red" else 1
+    pixels = image.astype(float)
+    signal = pixels[:, :, channel] - np.max(np.delete(pixels, channel, axis=2), axis=2)
+    rows = []
+    for q in native["quads"]:
+        q = np.asarray(q, dtype=float)
+        if (
+            q.shape != (4, 2)
+            or not np.isfinite(q).all()
+            or (q < 0).any()
+            or (q[:, 0] > image.shape[1]).any()
+            or (q[:, 1] > image.shape[0]).any()
+        ):
+            raise ValueError("Native emission polygon escapes source pixels")
+        mask = np.zeros(image.shape[:2], np.uint8)
+        cv2.fillConvexPoly(mask, np.rint(q).astype(np.int32), 1)
+        values = signal[mask > 0]
+        if not values.size:
+            raise ValueError("Native slot has no source pixels")
+        area = int((values > 20).sum())
+        percentile = float(np.percentile(values, 95))
+        height = float((np.linalg.norm(q[3] - q[0]) + np.linalg.norm(q[2] - q[1])) / 2)
+        rows.append(
+            dict(
+                visible=height >= 12
+                and percentile >= 20
+                and area >= max(2, math.ceil(values.size * 0.02)),
+                native_digit_height=height,
+                positive_color_area=area,
+                chroma95=percentile,
+                energy=float(np.maximum(values - 20, 0).mean()),
+                complete_glyph_proven=False,
+            )
+        )
+    return rows
+
+
+def review(native, reply):
+    from .video_numeric import number, resolve_decimal_tokens
+
+    text = reply.get("raw_text", "")
+    token = number(text)
+    support = emission(native)
+    reasons = []
+    if any(not slot["visible"] for slot in support):
+        reasons.append("native_digit_slot_not_emitting")
+    if token is None or len(token.replace(".", "")) != len(support):
+        reasons.append("OCR_does_not_cover_native_digit_slots")
+    glyphs = token.replace(".", "") if token and not reasons else None
+    decimal = (
+        resolve_decimal_tokens(native["image"], native["layout"], [text])
+        if glyphs
+        else None
+    )
+    candidate = decimal.get("numeric_candidate") if decimal else None
+    if glyphs and candidate is None:
+        reasons.append("decimal_not_established_from_native_pixels")
+    return dict(
+        raw_text=text,
+        glyph_candidate=glyphs,
+        numeric_candidate=candidate,
+        native_emission=support,
+        native_decimal_evidence=decimal,
+        rejection_reasons=reasons,
+        confirmed=False,
+        value_text=None,
+        model_score_is_accuracy=False,
+        full_glyph_correctness_proven=False,
+    )
+
+
+def source(native, native_source_ref, registered_source_ref):
+    """Carry the crop transform without changing its original frame or clock."""
+    raw, raw_time = _reference(native_source_ref)
+    aligned, aligned_time = _reference(registered_source_ref)
+    if raw_time != aligned_time or raw["source_sha256"] != aligned["source_sha256"]:
+        raise ValueError("Native crop and registration refer to different frames")
+    matched = []
+    for key in ("source_frame_pixels_sha256", "original_frame_rgb_sha256"):
+        if raw.get(key) != aligned.get(key):
+            raise ValueError(
+                "Native crop and registration have different source pixels"
+            )
+        if isinstance(raw.get(key), str) and re.fullmatch("[0-9a-f]{64}", raw[key]):
+            matched.append(key)
+    if not matched:
+        raise ValueError("Original source pixel fingerprint required for native OCR")
+    expected = np.asarray(native["metadata"]["current_to_reference"]) @ np.asarray(
+        raw["source_to_roi"]
+    )
+    if not same_transform(expected, aligned["source_to_roi"]):
+        raise ValueError(
+            "Native pixels and registered digit geometry belong to different ROIs"
+        )
+    if raw.get("dynamic_physical_key") != aligned.get("dynamic_physical_key"):
+        raise ValueError(
+            "Native pixels and registration have different physical contexts"
+        )
+    return dict(
+        raw,
+        source_to_roi=(
+            np.asarray(native["metadata"]["current_to_crop"])
+            @ np.asarray(raw["source_to_roi"])
+        ).tolist(),
+        registered_source_to_roi=aligned["source_to_roi"],
+        registration=aligned.get("registration", {"accepted": True}),
+        native_crop=native["metadata"],
+    )

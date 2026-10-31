@@ -473,7 +473,15 @@ class TemporalDisplay:
                 self.numeric_reader.config = replace(self.config, max_buffer_bytes=budget)
             anchor_ref = dict(ref, source_to_roi=(np.asarray(registration['matrix_current_to_reference']) @ np.asarray(ref['source_to_roi'])).tolist(),
                               registration=registration)
-            result = self.numeric_reader.observe(aligned, key=key, identity=identity, source_ref=anchor_ref, layout=layout, ocr=ocr)
+            native = None
+            if layout.get('numeric_native_ocr') is True:
+                from .native_numeric import prepare, source
+                try:
+                    native = prepare(image, layout, registration['matrix_current_to_reference'])
+                    native['source'] = source(native, ref, anchor_ref)
+                except ValueError as exc:
+                    return self._rejected(identity, ref, 'native_digit_crop_rejected', resets+[str(exc)], registration)
+            result = self.numeric_reader.observe(aligned, key=key, identity=identity, source_ref=anchor_ref, layout=layout, ocr=ocr, native=native)
             result['registration'] = result['source_refs'][0].get('registration', registration)
             return result
         quality_tick = time.perf_counter()

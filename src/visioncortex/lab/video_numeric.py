@@ -464,15 +464,20 @@ class NumericVideoReader:
     def __init__(self, config):
         self.config = config
         self.states = {}
+        self.native_costs = {}
 
     @property
     def buffer_bytes(self):
-        return sum(f["image"].nbytes for s in self.states.values() for f in s.frames)
+        return sum(
+            f["image"].nbytes + (f["native"]["image"].nbytes if f.get("native") else 0)
+            for s in self.states.values()
+            for f in s.frames
+        )
 
     def reset(self, key):
         self.states.pop(key, None)
 
-    def observe(self, image, *, key, identity, source_ref, layout, ocr):
+    def observe(self, image, *, key, identity, source_ref, layout, ocr, native=None):
         import numpy as np
 
         expected_key, identity = _identity(identity)
@@ -481,6 +486,42 @@ class NumericVideoReader:
                 "Numeric cache key must match exact equipment/panel/field/track scope"
             )
         source_ref, timestamp = _reference(source_ref)
+        native_mode = layout.get("numeric_native_ocr") is True
+        if native_mode:
+            import copy
+            from .native_numeric import emission, same_transform
+
+            if native is None:
+                raise ValueError("Explicit unresampled native crop required")
+            native_ref, native_time = _reference(native["source"])
+            if (
+                native_time != timestamp
+                or native_ref["source_sha256"] != source_ref["source_sha256"]
+            ):
+                raise ValueError("Native crop cannot come from another source frame")
+            if not same_transform(
+                native_ref.get("registered_source_to_roi"), source_ref["source_to_roi"]
+            ):
+                raise ValueError(
+                    "Native crop cannot come from another registered panel"
+                )
+            if any(
+                native_ref.get(k) != source_ref.get(k)
+                for k in (
+                    "source_frame_pixels_sha256",
+                    "original_frame_rgb_sha256",
+                    "dynamic_physical_key",
+                )
+            ):
+                raise ValueError(
+                    "Native crop cannot come from other pixels or physical context"
+                )
+            if native["layout"].get("color") != layout.get("color") or len(
+                native["quads"]
+            ) != len(layout.get("digits", [])):
+                raise ValueError("Native evidence differs from registered field layout")
+            native = copy.deepcopy(native)
+            native_support = emission(native)
         if (
             image.dtype != np.uint8
             or image.ndim != 3
@@ -497,6 +538,25 @@ class NumericVideoReader:
             ).encode()
         ).hexdigest()
         now = time.monotonic()
+        native_budget = None
+        if native_mode:
+            for old in [
+                k
+                for k, v in self.native_costs.items()
+                if now - v["touched"] > self.config.session_ttl_seconds
+            ]:
+                self.native_costs.pop(old)
+            budget_key = (
+                tuple(key),
+                source_ref["source_sha256"],
+                hashlib.sha256(json.dumps(layout, sort_keys=True).encode()).hexdigest(),
+            )
+            if budget_key not in self.native_costs:
+                if len(self.native_costs) >= self.config.max_sessions:
+                    raise ValueError("Native OCR call-budget scope limit reached")
+                self.native_costs[budget_key] = dict(calls=0, last=None, touched=now)
+            native_budget = self.native_costs[budget_key]
+            native_budget["touched"] = now
         for old in [
             k
             for k, s in self.states.items()
@@ -521,6 +581,8 @@ class NumericVideoReader:
         s.touched = now
         s.last = timestamp
         s.count += 1
+        if native_mode:
+            s.calls = native_budget["calls"]
         energy, contrast = visibility(image, layout)
         frame = dict(
             image=image.copy(),
@@ -535,6 +597,8 @@ class NumericVideoReader:
                 else decimal_peaks
             )(image, layout),
         )
+        if native_mode:
+            frame.update(native=native, native_support=native_support)
         s.frames.append(frame)
         while len(s.frames) > 30 or timestamp - s.frames[0]["pts"] > Fraction(
             str(self.config.max_window_seconds)
@@ -557,6 +621,115 @@ class NumericVideoReader:
         limit = layout.get("numeric_max_ocr_calls", 8)
         if type(limit) is not int or not 1 <= limit <= 64:
             raise ValueError("Explicit bounded numeric OCR call limit required")
+        if native_mode:
+            from .native_numeric import review
+
+            # Candidate admission needs native emission, not half a second of
+            # uninterrupted tracking. Pixel resets must not replenish budget.
+            due = s.count >= 3 and (
+                native_budget["last"] is None or timestamp - native_budget["last"] >= 1
+            )
+            if due and s.calls < limit:
+                s.last_infer = timestamp
+                eligible = [
+                    f
+                    for f in s.frames
+                    if all(v["visible"] for v in f["native_support"])
+                ]
+                best = frame
+                reply = {}
+                if eligible:
+                    maximum = np.maximum(
+                        np.max(
+                            [
+                                [v["energy"] for v in f["native_support"]]
+                                for f in eligible
+                            ],
+                            axis=0,
+                        ),
+                        1.0,
+                    )
+
+                    def native_rank(f):
+                        ratios = (
+                            np.asarray([v["energy"] for v in f["native_support"]])
+                            / maximum
+                        )
+                        return float(ratios.min() * 2 + ratios.mean())
+
+                    best = max(eligible, key=native_rank)
+                    if ocr is not None:
+                        reply = ocr(
+                            best["native"]["image"],
+                            anchor_source=best["native"]["source"],
+                        )
+                        s.calls += 1
+                        native_budget["calls"] = s.calls
+                        native_budget["last"] = timestamp
+                assessed = review(best["native"], reply)
+                native_source = best["native"]["source"]
+                glyph = assessed["glyph_candidate"]
+                candidate = assessed["numeric_candidate"]
+                s.result = dict(
+                    assessed,
+                    schema_version="vc-lab-temporal-display/1",
+                    method="native_registered_crop/1",
+                    identity=identity,
+                    status="uncertain",
+                    candidates=[candidate or glyph] if glyph else [],
+                    reading_status="recognized_candidate"
+                    if candidate
+                    else "glyphs_only"
+                    if glyph
+                    else "pending_numeric",
+                    display_text=candidate
+                    or (
+                        (assessed["raw_text"] + "（小数点未确认）")
+                        if glyph
+                        else "读数未确认"
+                    ),
+                    source_refs=[native_source],
+                    observation_time_start=dict(
+                        pts=native_source["pts"], time_base=native_source["time_base"]
+                    ),
+                    observation_time_end=dict(
+                        pts=native_source["pts"], time_base=native_source["time_base"]
+                    ),
+                    selected_frame_count=1,
+                    selected_span_seconds=0.0,
+                    gates=dict(confirmed=False),
+                    registration=native_source.get("registration", {"accepted": True}),
+                    preprocessing=best["native"]["metadata"],
+                    ocr_score=reply.get("score"),
+                    best_frame_selection_window_refs=[f["source"] for f in s.frames],
+                    fused_digit_pixels=False,
+                    reset_reasons=reset,
+                )
+            if s.result is not None:
+                return dict(
+                    s.result,
+                    input_frame_count=s.count,
+                    buffer_bytes=self.buffer_bytes,
+                    ocr_port_calls=s.calls,
+                )
+            return dict(
+                schema_version="vc-lab-temporal-display/1",
+                method="native_registered_crop/1",
+                identity=identity,
+                status="uncertain",
+                value_text=None,
+                raw_text="",
+                candidates=[],
+                numeric_candidate=None,
+                source_refs=[native["source"]],
+                gates=dict(confirmed=False),
+                input_frame_count=s.count,
+                selected_frame_count=0,
+                selected_span_seconds=0.0,
+                buffer_bytes=self.buffer_bytes,
+                ocr_port_calls=s.calls,
+                rejection_reasons=["collecting_continuous_native_frames"],
+            )
         if due and layout.get("glyph_adapter") is not None:
             from .glyph_adapter import recognize
 
