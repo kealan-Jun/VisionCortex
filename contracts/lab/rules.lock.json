@@ -1,6 +1,6 @@
 {
   "schema_version": "vc-lab-rule-bundle/1",
-  "revision": "vc-lab-unified-20261031.7",
+  "revision": "vc-lab-unified-20261031.8",
   "components_sha256": "5be51d3c237058c97919072431ed203e6a8f6dd207137f204fb241b1d71f5af5",
   "files": [
     {
@@ -128,7 +128,7 @@
     },
     {
       "path": "src/visioncortex/lab/capture_equipment_intake.py",
-      "sha256": "10a7421667f91353f26e3ca2ef22ce29cbb9f7378b1f6b1153bec619fd5920b4"
+      "sha256": "ea45d460c1d5fc9f7073202fc9559513fded6fb0ec55ca0590f0d3f9581e301a"
     },
     {
       "path": "src/visioncortex/lab/cli.py",

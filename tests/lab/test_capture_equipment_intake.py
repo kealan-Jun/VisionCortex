@@ -24,6 +24,28 @@ from .test_scan_intake import source
 __all__ = ['scene']
 
 
+def test_fragmented_recorder_mp4_counts_real_frames_and_keeps_envelope_tail_unknown(scene,tmp_path):
+    s = scene
+    settings = enable(s, tmp_path)
+    original,_,receipt,_,_=native_video(s,settings,[s['devices'][0]]*2,clock=False)
+    fragmented=original.with_name('fragmented.mp4')
+    subprocess.run(['ffmpeg','-v','error','-nostdin','-i',str(original),'-c','copy',
+        '-movflags','frag_keyframe+empty_moov',str(fragmented)],check=True,timeout=10)
+    digest=hashlib.sha256(fragmented.read_bytes()).hexdigest()
+    second=dict(receipt,capture_id='fragmented-source',source_revision='fragmented/1',
+        relative_path=fragmented.relative_to(settings.incoming).as_posix(),end_seconds='1.1',
+        native_record=dict(fixture_only=True,processable=True,capture_complete=True,duration_seconds='1.1'))
+    admitted=Ingest(s['core'],settings).accept(second,native_original=True)
+    proof=authorization(s,admitted['media_id'])
+    assert proof['status']=='authorized'
+    assert proof['technical_probe']['declared_frame_count']==2
+    assert proof['technical_probe']['frame_count_basis']=='bounded_ffprobe_decoded_frames'
+    assert Decimal(proof['source_intervals'][-1]['end_seconds'])==1
+    assert proof['recording_envelope_tail']['status']=='outside_encoded_video_no_physical_activity_claim'
+    assert hashlib.sha256(fragmented.read_bytes()).hexdigest()==digest
+    assert rows(s,'quantity_ledger_entry')==[] and rows(s,'hj_operator_scan_event')==[]
+
+
 def config(**changes):
     result = dict(enabled=True, revision='generated-generic-capture/1', photo=True, video=True,
         video_window_seconds=10, max_packet_seconds=900, max_packet_tasks=90,

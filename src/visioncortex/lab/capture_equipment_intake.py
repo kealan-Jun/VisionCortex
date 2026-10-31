@@ -75,7 +75,21 @@ def _probe(path, settings, expected_sha):
             raise ValueError('One bounded original video stream required')
         stream = streams[0]
         duration = Fraction(int(stream['duration_ts'])) * Fraction(stream['time_base'])
-        count = int(stream['nb_frames'])
+        count_basis='declared_nb_frames'
+        if stream.get('nb_frames') in {None,'N/A'}:
+            # Recorder fragmented MP4 often has no declared frame count. Count
+            # decoded frames once, under the same source guard and hard budget;
+            # this is technical validation, not model inference or sampling.
+            counted=run_bounded(['ffprobe','-v','error','-threads','1','-select_streams','v:0','-count_frames',
+                '-show_entries','stream=nb_read_frames','-of','json',str(path)],'',
+                env={'PATH':os.environ.get('PATH','/usr/bin:/bin')},timeout=120,max_bytes=16384)
+            values=json.loads(counted).get('streams',[])
+            if len(values) != 1:
+                raise ValueError('One counted original video stream required')
+            count = int(values[0]['nb_read_frames'])
+            count_basis = 'bounded_ffprobe_decoded_frames'
+        else:
+            count = int(stream['nb_frames'])
         if not 0 < duration <= 900 or not 1 <= count <= 54000:
             raise ValueError('Original packet exceeds 900 seconds/54000 frames or has unknown coverage')
         if hash_file(path, settings.max_native_bytes)[0] != expected_sha:
@@ -86,7 +100,7 @@ def _probe(path, settings, expected_sha):
         if stat(before) != stat(after):
             raise Conflict('Original packet changed across QR technical probe/hash')
         return dict(method='ffprobe_stream_metadata_not_model', stream=stream,
-                    native_duration_fraction=str(duration), declared_frame_count=count,
+                    native_duration_fraction=str(duration), declared_frame_count=count,frame_count_basis=count_basis,
                     stream_metadata_sha256=hashlib.sha256(raw.encode()).hexdigest(),
                     source_sha256=expected_sha, source_stable=True)
 
@@ -140,8 +154,14 @@ def admit(conn, core, settings, media, receipt, *, verified_path=None):
                 raise ValueError('Original packet location unavailable for bounded technical probe')
             probe = _probe(verified_path, settings, asset['verified_sha256'])
             actual = Fraction(probe['native_duration_fraction'])
-            if actual != Fraction(media['duration_seconds']):
-                raise ValueError('Native stream duration differs from admitted original-media range')
+            envelope=Fraction(media['duration_seconds'])
+            native=receipt.get('native_record') or {}
+            if actual != envelope:
+                if (not native.get('processable') or not native.get('capture_complete')
+                        or actual>envelope or Fraction(str(native.get('duration_seconds',0)))!=envelope):
+                    raise ValueError('Native stream duration differs from admitted original-media range')
+                document['recording_envelope_tail']=dict(start_fraction=str(actual),end_fraction=str(envelope),
+                    status='outside_encoded_video_no_physical_activity_claim')
             if actual > config['max_packet_seconds']:
                 raise ValueError('Native packet exceeds its explicit private duration limit')
             document['technical_probe'] = probe
@@ -154,7 +174,8 @@ def admit(conn, core, settings, media, receipt, *, verified_path=None):
             else:
                 document['state_namespace_basis'] = 'provided_source_session_not_experiment_identity'
             document['source_session_key'] = media['session_key']
-            intervals = partition(media['duration_seconds'], config)
+            duration=(Decimal(actual.numerator)/Decimal(actual.denominator)).quantize(Decimal('.000001'),rounding='ROUND_CEILING')
+            intervals = partition(duration, config)
             from .qr_video import validate_registration
             from .scan_intake import verified_clock
 
@@ -181,7 +202,7 @@ def admit(conn, core, settings, media, receipt, *, verified_path=None):
                 conn.execute("INSERT INTO hj_timeline_task(customer_id,id,media_id,kind,analysis_revision,request) VALUES(%s,%s,%s,'qr',%s,%s)",
                              (core.customer, task_id, media['media_id'], revision, Jsonb(clean(pending))))
             document.update(task_ids=[str(t[0]) for t in tasks], source_intervals=intervals,
-                coverage_plan='entire_verified_stream_duration_partition_no_sampling',
+                coverage_plan='entire_verified_encoded_stream_partition_no_sampling',
                 whole_media_decoded=False, throughput_or_quality_proven=False)
         except (ValueError, KeyError, OSError, RuntimeError, TimeoutError) as exc:
             document.update(status='needs_attention', reason=str(exc)[:512], error_code=type(exc).__name__,
