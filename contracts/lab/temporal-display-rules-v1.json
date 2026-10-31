@@ -121,6 +121,33 @@
       "default_mode": "exact_input_receipt_replay",
       "business_writes": false,
       "cache_identity": "verified_checkpoint_manifest_and_files_settings_backend_and_exact_native_input_pixels"
+    },
+    "source_panel_tracking": {
+      "enabled_by_default": false,
+      "entry": "TemporalVideo.run",
+      "configuration": [
+        "source_tracking",
+        "source_geometry_translation"
+      ],
+      "reference": "first_source_frame_stable_structure",
+      "changing_digits_excluded": true,
+      "nearby_faceplate_context_fraction": 0.5,
+      "forward_backward_error_pixels": 0.7,
+      "minimum_structure_inliers": 8,
+      "minimum_inlier_fraction": 0.65,
+      "maximum_reprojection_error_pixels": 1.5,
+      "descriptor_reacquisition_interval_frames": 15,
+      "reference_verified_feature_replenishment": true,
+      "maximum_source_pixels": 1048576,
+      "maximum_tracks": 4,
+      "retained_tracker_budget_bytes": 16777216,
+      "stale_ROI_reused_after_loss": false,
+      "OCR_resamples_native_pixels": false,
+      "pose_correction": "bounded_common_translation_of_registered_slots_from_positive_LED_emission",
+      "expected_readings": false,
+      "physical_identity_inferred": false,
+      "automatic_screen_discovery": false,
+      "maximum_pending_flow_hypothesis_frames": 5
     }
   }
 }

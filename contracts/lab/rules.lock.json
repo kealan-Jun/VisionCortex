@@ -1,6 +1,6 @@
 {
   "schema_version": "vc-lab-rule-bundle/1",
-  "revision": "vc-lab-unified-20261031.15",
+  "revision": "vc-lab-unified-20261031.17",
   "components_sha256": "5be51d3c237058c97919072431ed203e6a8f6dd207137f204fb241b1d71f5af5",
   "files": [
     {
@@ -49,7 +49,7 @@
     },
     {
       "path": "temporal-display-rules-v1.json",
-      "sha256": "3269427cd832b8a93737a66826f376400e9a7221c735f03848b1f6f8c34a0502"
+      "sha256": "e5f22da12d85a667ba1e26f2ee9385a5a673c39d5d7616f2b383f178308a648f"
     },
     {
       "path": "timeline-rules-v1.json",
@@ -197,6 +197,10 @@
     {
       "path": "src/visioncortex/lab/dynamic_vision.py",
       "sha256": "eaf80f5d9d03f3dbe3db73e8963b18ca83053d0db5b761b50a29b871a311ce3e"
+    },
+    {
+      "path": "src/visioncortex/lab/emission_geometry.py",
+      "sha256": "41af99793ed20909c0709a90e44596533b0409643ec3c21e5c4469cc851174b6"
     },
     {
       "path": "src/visioncortex/lab/engine_process.py",
@@ -407,6 +411,10 @@
       "sha256": "4f23b79e0a98cfc9649c051f599966ae267b298b907c9692416a2e4fe85e6a90"
     },
     {
+      "path": "src/visioncortex/lab/source_tracking.py",
+      "sha256": "3065f5a1a87629a1c76cf7b082b7a4d050be39a9cc18835343d10a2bd424e2ef"
+    },
+    {
       "path": "src/visioncortex/lab/speech_candidates.py",
       "sha256": "26d7835449141fd50a28eb0682d6a77045ad1c88933f5c43b4216409fb987708"
     },
@@ -428,7 +436,7 @@
     },
     {
       "path": "src/visioncortex/lab/temporal_display.py",
-      "sha256": "1be2366be211f244f6bad1fdf0b0f9ef5cc4a24514063d21ecc69ce62ad6c246"
+      "sha256": "040650176b665e73fc4fc9315ca66abfcbefc27a8a90d4094c90f7d0e1731717"
     },
     {
       "path": "src/visioncortex/lab/temporal_registration.py",
@@ -436,7 +444,7 @@
     },
     {
       "path": "src/visioncortex/lab/temporal_video.py",
-      "sha256": "305e34687ce87e9de867768343a30f09fa0102120c43af1dea0810d995f066e1"
+      "sha256": "4596b499e3dcc65dc2cf2ba9885c8fef861a3433b9b585b67f0e0e8201e67982"
     },
     {
       "path": "src/visioncortex/lab/timeline.py",
@@ -625,6 +633,6 @@
       "sha256": "a3c78f7837195851f74868009d1d14db34f8629ca31457371d8056a1c3c31a73"
     }
   ],
-  "source_lineage_sha256": "b707f67d44c30727ac1bf35b772563aa1dfbfd376643658005caadbaadc29393",
+  "source_lineage_sha256": "82e7223d541e8b892f93451e6b74fad11fe3d8f323a891682f1bd8e60926ce0c",
   "source_lineage_recipe": "sha256 canonical JSON of adapter_files and migration_files; sorted keys, compact separators; v1"
 }

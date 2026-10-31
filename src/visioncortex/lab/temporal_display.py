@@ -392,7 +392,7 @@ class TemporalDisplay:
         self.states[key] = state
         return state
 
-    def observe(self, image_bgr, *, identity, source_ref, layout, ocr=None, visibility=None):
+    def observe(self, image_bgr, *, identity, source_ref, layout, ocr=None, visibility=None, source_registration=None):
         started = time.perf_counter()
         clocks = dict(ocr_callback_seconds=0., ocr_invocations=0,
                       registration_seconds=None, local_quality_and_segments_seconds=None,
@@ -405,7 +405,8 @@ class TemporalDisplay:
                 clocks['ocr_callback_seconds'] += time.perf_counter()-tick
                 clocks['ocr_invocations'] += 1
         result = self._observe(image_bgr, identity=identity, source_ref=source_ref, layout=layout,
-                               ocr=timed_ocr if ocr else None, visibility=visibility, clocks=clocks)
+                               ocr=timed_ocr if ocr else None, visibility=visibility, clocks=clocks,
+                               source_registration=source_registration)
         clocks['whole_observe_seconds'] = time.perf_counter()-started
         result['stage_seconds'] = clocks
         result['stage_clock_semantics'] = 'OCR inside local fusion/baseline controls is nested; enclosing stages must not be added'
@@ -414,7 +415,7 @@ class TemporalDisplay:
             raise ValueError('Temporal evidence result exceeds 2MiB bounded checkpoint')
         return result
 
-    def _observe(self, image_bgr, *, identity, source_ref, layout, ocr, visibility, clocks):
+    def _observe(self, image_bgr, *, identity, source_ref, layout, ocr, visibility, clocks, source_registration=None):
         cv, np = libraries()
         key, identity = _identity(identity)
         ref, timestamp = _reference(source_ref)
@@ -447,7 +448,16 @@ class TemporalDisplay:
         registration_tick = time.perf_counter()
         registration = dict(status='reference', accepted=True, method='reference_identity',
                             matrix_current_to_reference=np.eye(3).tolist(), dynamic_features_excluded=True)
-        if state:
+        reference_shape = None
+        if source_registration is not None:
+            if not layout.get('numeric_native_ocr') or not layout.get('numeric_anchor'):
+                raise ValueError('Tracked source geometry requires the native numeric path')
+            from .source_tracking import align_native_roi
+            aligned, reference_shape = align_native_roi(image, source_registration, ref)
+            registration = dict(source_registration)
+            if state is None:
+                state = self._new(key, aligned, layout, ref)
+        elif state:
             aligned, registration = state.registrar.register(image)
             if aligned is None:
                 clocks['registration_seconds'] = time.perf_counter()-registration_tick
@@ -477,7 +487,8 @@ class TemporalDisplay:
             if layout.get('numeric_native_ocr') is True:
                 from .native_numeric import prepare, source
                 try:
-                    native = prepare(image, layout, registration['matrix_current_to_reference'])
+                    native = prepare(image, layout, registration['matrix_current_to_reference'],
+                                     reference_shape=reference_shape)
                     native['source'] = source(native, ref, anchor_ref)
                 except ValueError as exc:
                     return self._rejected(identity, ref, 'native_digit_crop_rejected', resets+[str(exc)], registration)

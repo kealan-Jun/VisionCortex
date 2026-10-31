@@ -113,6 +113,7 @@ def validate_registration(document, *, media=None, asset=None):
     if not isinstance(fields, list) or not 1 <= len(fields) <= 16:
         raise TemporalVideoRejected("One to 16 explicit registered fields required")
     keys = set()
+    tracked_fields = 0
     dynamic = document.get("dynamic_context")
     if dynamic is not None:
         if not isinstance(dynamic, dict) or dynamic.get("enabled") is not True:
@@ -141,6 +142,14 @@ def validate_registration(document, *, media=None, asset=None):
             "Pixel producer requires explicit dynamic context, committed single-frame batches and half-cache bound"
         )
     for spec in fields:
+        if type(spec.get("source_tracking", False)) is not bool:
+            raise TemporalVideoRejected("Explicit source tracking boolean required")
+        if (type(spec.get("source_geometry_translation", False)) is not bool
+                or spec.get("source_geometry_translation") and not spec.get("source_tracking")):
+            raise TemporalVideoRejected("LED pose correction requires explicit source tracking")
+        tracked_fields += int(spec.get("source_tracking", False))
+        if tracked_fields > 4:
+            raise TemporalVideoCapacityExceeded("At most four bounded source panel tracks")
         key = tuple(
             _text(spec.get(n), n) for n in ("screen_id", "field_key", "profile_id")
         )
@@ -522,6 +531,11 @@ class TemporalVideo:
         algorithm_seconds = 0
         ocr_seconds = 0
         core_budget = CACHE_BYTES // 2 if frame_producer is not None else CACHE_BYTES
+        tracker_budget = 16 * 1024**2 if any(f.get("source_tracking") for f in registration["fields"]) else 0
+        core_budget -= tracker_budget
+        trackers = {}
+        tracking_peak = tracking_failures = 0
+        tracked_frames = geometry_pending = reacquisitions = 0
         engine = TemporalDisplay(
             TemporalConfig(max_buffer_bytes=core_budget, max_window_seconds=1.0)
         )
@@ -694,6 +708,50 @@ class TemporalVideo:
                         left, top = int(x1 * w), int(y1 * h)
                         right, bottom = math.ceil(x2 * w), math.ceil(y2 * h)
                         roi = np.ascontiguousarray(upright[top:bottom, left:right])
+                        active_layout = field["layout"]
+                        tracked_registration = None
+                        tracking_failure = None
+                        if field.get("source_tracking"):
+                            from .source_tracking import SourcePanelTracker
+                            if key not in trackers or trackers[key][0] != physical_key:
+                                trackers[key] = (physical_key, SourcePanelTracker(
+                                    upright, field["roi_box"], field["layout"]["dynamic_boxes"]
+                                ))
+                                trackers[key][1].layout = None
+                            tracker = trackers[key][1]
+                            if gap:
+                                tracker.current_points = None
+                            tracked = tracker.observe(upright)
+                            used = sum(t.buffer_bytes for _, t in trackers.values())
+                            tracking_peak = max(tracking_peak, used)
+                            if used > tracker_budget:
+                                raise TemporalVideoCapacityExceeded("Source tracker memory bound exceeded")
+                            if tracked["status"] == "tracked":
+                                tracked_frames += 1
+                                reacquisitions += int(tracked["registration"]["reacquired_after_loss"])
+                                roi = tracked["image"]
+                                left, top, right, bottom = tracked["box"]
+                                tracked_registration = tracked["registration"]
+                                if field.get("source_geometry_translation"):
+                                    if tracker.layout is None:
+                                        from .emission_geometry import reanchor
+                                        rectified = cv2.warpPerspective(roi,
+                                            np.asarray(tracked_registration["matrix_current_to_reference"]),
+                                            (tracker.reference_shape[1], tracker.reference_shape[0]))
+                                        tracker.layout, geometry = reanchor(rectified, field["layout"])
+                                        if tracker.layout is None:
+                                            tracking_failure = "initial_LED_geometry_pending:" + geometry["reason"]
+                                            geometry_pending += 1
+                                        else:
+                                            tracker.layout["initial_geometry_observation"].update(
+                                                original_source_bgr_sha256=source_hash,
+                                                source_pts=meta["pts"], source_time_base=meta["time_base"],
+                                                geometry_input_was_rectified=True,
+                                                OCR_input_was_rectified=False)
+                                    if tracker.layout is not None:
+                                        active_layout = tracker.layout
+                            else:
+                                tracking_failure = tracked["reason"]
                         if not roi.size or roi.shape[0] * roi.shape[1] > 262144:
                             raise TemporalVideoCapacityExceeded(
                                 "Temporal field ROI exceeds native pixel bound"
@@ -732,6 +790,8 @@ class TemporalVideo:
                             media_id=ref["media_id"],
                             media_offset_seconds=str(offset),
                             source_frame_pixels_sha256=source_hash,
+                            **(dict(upright_frame_pixels_sha256=hashlib.sha256(upright.tobytes()).hexdigest())
+                               if field.get("source_tracking") else {}),
                             source_frame_pixels_format="bgr24",
                             source_to_roi=transform,
                             source_to_upright=matrix.tolist(),
@@ -776,14 +836,22 @@ class TemporalVideo:
                             )
 
                         tick = time.monotonic()
-                        result = engine.observe(
-                            roi,
-                            identity=identity,
-                            source_ref=source_ref,
-                            layout=field["layout"],
-                            ocr=ocr if infer is not None else None,
-                            visibility=None,
-                        )
+                        if tracking_failure:
+                            tracking_failures += 1
+                            engine.reset(identity, reason="source_panel_tracking_lost")
+                            result = engine._rejected(identity, source_ref,
+                                "source_panel_tracking_lost", [tracking_failure])
+                        else:
+                            result = engine.observe(
+                                roi,
+                                identity=identity,
+                                source_ref=source_ref,
+                                layout=active_layout,
+                                ocr=ocr if infer is not None else None,
+                                visibility=None,
+                                **(dict(source_registration=tracked_registration)
+                                   if tracked_registration is not None else {}),
+                            )
                         algorithm_seconds += time.monotonic() - tick
                         actual_buffer_peak = max(
                             actual_buffer_peak, engine.buffer_bytes
@@ -876,6 +944,14 @@ class TemporalVideo:
             provider_fingerprint=fingerprint(provider),
             original_pts_preserved=True,
             original_media_copied=False,
+            **(dict(source_tracking=dict(peak_buffer_bytes=tracking_peak,
+                                         limit_bytes=tracker_budget,
+                                         pending_frame_fields=tracking_failures,
+                                         tracked_frame_fields=tracked_frames,
+                                         geometry_pending_frame_fields=geometry_pending,
+                                         reacquisitions=reacquisitions,
+                                         physical_identity_inferred=False))
+               if tracker_budget else {}),
             ocr_provider_invocations=sum(1 for r in receipts if r.get("execution")),
             ocr_mode="not_invoked_geometry_only"
             if infer is None
