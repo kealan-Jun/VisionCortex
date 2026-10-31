@@ -1,6 +1,6 @@
 {
   "schema_version": "vc-lab-rule-bundle/1",
-  "revision": "vc-lab-unified-20261031.1",
+  "revision": "vc-lab-unified-20261031.2",
   "components_sha256": "5be51d3c237058c97919072431ed203e6a8f6dd207137f204fb241b1d71f5af5",
   "files": [
     {
@@ -116,7 +116,7 @@
     },
     {
       "path": "src/visioncortex/lab/automatic_readout.py",
-      "sha256": "474f4d46a56be966a7dbe94d85b134eea052557b4b111769ad22a2e4eddd9ac6"
+      "sha256": "882d1efd01274693622dff2743c2c70fde6b8a8845b07af9d55a474506627b8e"
     },
     {
       "path": "src/visioncortex/lab/cache.py",
@@ -148,7 +148,7 @@
     },
     {
       "path": "src/visioncortex/lab/comment_intake.py",
-      "sha256": "b10a9c0014ff06ea256846f3eeb7b349ec1a60f8a3d2b70d1e931be5e5338f0a"
+      "sha256": "1d95a2952ec9729c807dae58d24ab329dc7e70ba494ee80c50f71c307113d29e"
     },
     {
       "path": "src/visioncortex/lab/comment_presentation.py",
@@ -156,7 +156,7 @@
     },
     {
       "path": "src/visioncortex/lab/comment_transition.py",
-      "sha256": "041a44e0e491ed0d21a71dea6638b0b9adc58f78f71a6c5b4b24de28cb9b6a5a"
+      "sha256": "bf8b1f5b199511f11ab13b7a6f59f2b09579ff0ffd19c82246972c02a360c7a9"
     },
     {
       "path": "src/visioncortex/lab/components.py",

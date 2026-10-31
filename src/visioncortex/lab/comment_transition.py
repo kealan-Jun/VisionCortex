@@ -127,7 +127,7 @@ class CommentTransitions:
                 raise Conflict('Comment text or SHA differs from the original speech activity')
             if source['sample_id'] and source['sample_id'] != ident(sample_id):
                 raise Conflict('Comment source sample conflicts with the declared sample')
-            if source['person_id'] and source['person_id'] != (ident(person_id) if person_id else None):
+            if person_id is not None and source['person_id'] != ident(person_id):
                 raise Conflict('Comment person scope conflicts with the explicit speech person')
             linked = conn.execute('SELECT run_id FROM hj_activity_run WHERE customer_id=%s AND activity_id=%s',
                                   (self.customer, source['id'])).fetchall()

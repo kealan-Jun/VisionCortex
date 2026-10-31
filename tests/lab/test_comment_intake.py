@@ -94,8 +94,29 @@ def test_wearer_or_review_scope_never_fills_unknown_speech_speaker(scene, settin
     note = reviewed(scene, unknown, 'experiment_complete')
     result = CommentIntake(scene['core']).consume(raw['id'], review_activity_id=note['review_activity_id'])
     assert result['status'] == 'pending_interpretation'
-    assert 'speaker_identity_unknown' in result['attention_reasons']
+    assert 'speaker_scope_missing_or_conflicting' in result['attention_reasons']
     assert run_row(scene)['record_status'] == 'open'
+
+
+@pytest.mark.parametrize('legacy_source_person', [False, True])
+def test_capture_scoped_comment_does_not_require_or_consume_person_identity(scene, settings, legacy_source_person):
+    from .test_comment_transition import body
+    known=source(scene,settings)
+    speech=known['activity'] if legacy_source_person else scene['runtime'].timeline.add_activity(
+        'capture-only-speech','speech','speech','当前步骤完成。',known['spans'],model_revision='fixture-asr/1')
+    src=dict(activity=speech,spans=known['spans'],hash=hashlib.sha256(speech['text_content'].encode()).hexdigest())
+    data=body(scene,src,person_id=None)
+    pin={k:data[k] for k in ('source_activity_id','source_text_sha256','interpretation','run_id','sample_id','batch_id','person_id','camera_id')}
+    pin.update(source_evidence_ids=sorted(data['source_evidence_ids']),status='reviewed',
+               actor='fixture source-scoped interpretation',reason='fixture only, not ASR quality evidence')
+    review=scene['runtime'].timeline.add_activity('capture-only-review','settings','reviewed_note',
+        'Source-scoped fixture interpretation',src['spans'],payload={'comment_interpretation_review':pin})
+    result=CommentIntake(scene['core']).consume(speech['id'],review_activity_id=review['id'])
+    assert result['status']=='applied_reviewed_interpretation'
+    assert result['transition']['snapshot']['person_id'] is None
+    assert result['transition']['snapshot']['camera_id']==scene['cameras'][0]
+    assert not result['attention_reasons'] and run_row(scene)['record_status']=='open'
+    assert rows(scene,'quantity_ledger_entry')==[]
 
 
 def test_unknown_audio_clock_remains_pending_with_real_relative_evidence(scene, settings):

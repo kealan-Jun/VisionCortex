@@ -123,6 +123,14 @@ class AutomaticReadout:
                 computed=read_automatic_gauge(calibration,needle,source_sha256=source_sha256)
                 value.update(computed,needle=needle)
             fields.append(value)
+        if instrument_id and identity_method=='registered_panel_qr_region':
+            # The QR belongs to this reviewed panel region, not to the current
+            # operation focus. Carry its exact source/layout proof per field.
+            for field in fields:
+                field.update(association_status='spatial_identity_supported',
+                    dynamic_context=dict(instrument_id=instrument_id,source_sha256=source_sha256,
+                        layout_profile_id=profile['id'],layout_fingerprint=self.profiles.fingerprint,
+                        identity_basis='registered_panel_qr_region',qr_region=profile['identity_qr_box']))
         return dict(status='candidate',fields=fields,registration=located,invocations=receipts,instrument_id=instrument_id,
                     physical_instrument_identity=identity_method,
                     raw_fallback_required=False,accuracy='NOT_PROVEN')

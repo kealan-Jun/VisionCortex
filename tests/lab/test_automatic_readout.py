@@ -100,6 +100,39 @@ def test_automatic_fields_are_source_pinned_candidates_and_fallback_is_explicit(
     assert result['raw_fallback_required'] and not result['fields'] and len(calls)==1
 
 
+def test_panel_attached_qr_identity_reaches_retained_reading_without_using_current_focus(tmp_path):
+    from types import SimpleNamespace
+    from uuid import uuid4
+    from visioncortex.lab.timeline_native_artifacts import artifact_documents
+    from .test_timeline_native_artifacts import NoTaskDB
+    image,path,doc=template(tmp_path)
+    doc['profiles'][0]['identity_qr_box']=[.05,.05,.15,.15]
+    profiles=load(path,doc)
+    instrument=str(uuid4())
+    def infer(raw):
+        return dict(results=[dict(rec_texts=['26.2'],rec_scores=[.99])]),dict(fixture=True)
+    reader=AutomaticReadout(profiles)
+    result=reader.run(image,'a'*64,infer,instrument_resolver=lambda patch:instrument)
+    field=result['fields'][0]
+    assert field['association_status']=='spatial_identity_supported'
+    assert field['dynamic_context']['source_sha256']=='a'*64
+    assert field['dynamic_context']['instrument_id']==instrument
+    assert field['dynamic_context']['layout_fingerprint']==profiles.fingerprint
+    media_id,activity_id=str(uuid4()),str(uuid4())
+    activity=dict(id=activity_id,kind='reading',source_type='ocr',start_at=None,end_at=None,
+        instrument_id=instrument,model_revision='fixture-only',
+        payload=dict(fields=result['fields'],field_mapping='automatic_registered_layout'),
+        evidence=[dict(media_id=media_id,kind='photo',start_seconds='0',end_seconds='0')])
+    files,refs=artifact_documents(SimpleNamespace(db=NoTaskDB(),customer=uuid4()),
+        archive='2026-10-31_fixture-camera',camera='fixture-camera',activities=[activity],
+        media_sources={media_id:dict(kind='photo',source_sha256='a'*64,time_basis={},source_kind='fixture')},
+        rules=dict(revision='fixture',sha256='c'*64))
+    assert files[refs[0]['readings']]['readings'][0]['instrument_id']==instrument
+    assert refs[0]['unbound_readings'] is None
+    no_code=reader.run(image,'a'*64,infer,instrument_id=instrument)
+    assert not no_code['fields'][0].get('association_status')
+
+
 def numeric(text):
     return field_candidate(dict(field_key='reading',role='displayed_value',box=['0','0','1','1']),
                            dict(results=[dict(rec_texts=[text],rec_scores=[.99])]))

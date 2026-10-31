@@ -24,7 +24,7 @@ def transcript_candidate(ref, spans, execution, *, aligned, original_asr_text=No
         original_asr_text=original_asr_text,
         original_asr_text_scope='whole_prepared_input_may_include_context',
         asr_execution=execution, semantic_interpretation=None, speaker_identity=None,
-        attention_reasons=['persisted_structured_interpretation_required', 'speaker_identity_unknown'],
+        attention_reasons=['persisted_structured_interpretation_required'],
         physical_action_confirmed=False, whole_experiment_completed=False))
 
 
@@ -53,8 +53,6 @@ class CommentIntake:
                 provenance_error = type(exc).__name__
             else:
                 provenance_error = None
-            if source['person_id'] is None:
-                reasons.append('speaker_identity_unknown')
             if source['start_at'] is None or source['end_at'] is None:
                 reasons.append('unknown_comment_event_time')
             if (source['payload'].get('contains_context') or
@@ -79,12 +77,16 @@ class CommentIntake:
                       or not declared.get('reason')):
                     reasons.append('interpretation_is_pending_or_ambiguous')
                 else:
-                    # These are explicit upstream identities, never current
-                    # scanner/wearer context or tokens guessed from ASR prose.
+                    # Current recognition is scoped by the original capture
+                    # source. A legacy person-scoped review remains supported,
+                    # but a camera-scoped review never requires a person.
                     if not declared.get('run_id') or not declared.get('sample_id'):
                         reasons.append('explicit_run_and_sample_required')
-                    if declared.get('person_id') != str(source['person_id']):
+                    if (declared.get('person_id') is not None
+                            and declared['person_id'] != str(source['person_id'])):
                         reasons.append('speaker_scope_missing_or_conflicting')
+                    if declared.get('person_id') is None and not declared.get('camera_id'):
+                        reasons.append('capture_source_scope_required')
                     if not reasons:
                         try:
                             # A rejected upstream interpretation cannot leave a
