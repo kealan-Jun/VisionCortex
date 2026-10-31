@@ -165,7 +165,21 @@
       "expected_readings": false,
       "physical_identity_inferred": false,
       "automatic_screen_discovery": false,
-      "maximum_pending_flow_hypothesis_frames": 5
+      "maximum_pending_flow_hypothesis_frames": 5,
+      "earlier_source_reference": {
+        "enabled_by_default": false,
+        "reference_schema": "vc-source-panel-reference/1",
+        "maximum_additional_decoded_frames": 1,
+        "requires_same_source_hash_version_and_exact_frame_pixels": true,
+        "must_precede_requested_window": true,
+        "reference_reaches_OCR": false,
+        "reference_reaches_numeric_evidence": false,
+        "physical_context_mismatch": "pending_without_ROI_fallback",
+        "outer_context_clipping": "allowed_only_with_complete_registered_numeric_field",
+        "partial_context_visible_area_minimum": 0.5,
+        "required_field_clipping": "reject",
+        "retained_reference_in_tracker_byte_budget": true
+      }
     }
   }
 }

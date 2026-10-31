@@ -15,7 +15,7 @@ from .temporal_registration import normalized_box
 
 
 class SourcePanelTracker:
-    def __init__(self, image, roi_box, dynamic_boxes):
+    def __init__(self, image, roi_box, dynamic_boxes, *, required_boxes=None):
         self.shape = image.shape
         if image.dtype != np.uint8 or image.ndim != 3 or image.shape[2] != 3:
             raise ValueError("Source tracker requires uint8 BGR pixels")
@@ -28,6 +28,13 @@ class SourcePanelTracker:
                 "Bounded panel and explicit changing-field exclusions required"
             )
         self.reference_shape = (yy - y, xx - x, 3)
+        # Optional source-registered critical fields permit a surrounding
+        # faceplate margin to leave the sensor, never any required field pixel.
+        self.required_boxes = (
+            [normalized_box(b, self.reference_shape) for b in required_boxes]
+            if required_boxes
+            else None
+        )
         mask = np.zeros(image.shape[:2], np.uint8)
         # Include nearby faceplate lettering and borders: a bare LED window
         # and protruding knobs alone need not supply enough planar structure.
@@ -110,11 +117,33 @@ class SourcePanelTracker:
             not np.isfinite(polygon).all()
             or not cv2.isContourConvex(polygon)
             or cv2.contourArea(polygon, oriented=True) <= 0
-            or (polygon < 0).any()
-            or (polygon[:, 0] >= w).any()
-            or (polygon[:, 1] >= h).any()
         ):
             return None, "tracked_panel_clipped_or_mirrored"
+        clipped = bool(
+            (polygon < 0).any()
+            or (polygon[:, 0] >= w).any()
+            or (polygon[:, 1] >= h).any()
+        )
+        if clipped:
+            if not self.required_boxes:
+                return None, "tracked_panel_clipped_or_mirrored"
+            for a, b, c, d in self.required_boxes:
+                critical = np.float32(
+                    [[[x + a, y + b], [x + c, y + b], [x + c, y + d], [x + a, y + d]]]
+                )
+                native = cv2.perspectiveTransform(critical, np.linalg.inv(matrix))[0]
+                if (
+                    not np.isfinite(native).all()
+                    or (native < 0).any()
+                    or (native[:, 0] >= w).any()
+                    or (native[:, 1] >= h).any()
+                ):
+                    return None, "required_numeric_field_clipped"
+            visible_area = cv2.intersectConvexConvex(
+                polygon, np.float32([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]])
+            )[0]
+            if visible_area < cv2.contourArea(polygon) * 0.5:
+                return None, "insufficient_visible_panel_context"
         area_ratio = cv2.contourArea(polygon) / ((xx - x) * (yy - y))
         if not 0.5 <= area_ratio <= 2:
             return None, "panel_scale_gate"
@@ -127,11 +156,28 @@ class SourcePanelTracker:
         aligned = cv2.warpPerspective(
             cv2.cvtColor(image, cv2.COLOR_BGR2GRAY), to_panel, (xx - x, yy - y)
         )
+        if clipped:
+            visible = cv2.warpPerspective(
+                np.ones((h, w), np.uint8),
+                to_panel,
+                (xx - x, yy - y),
+                flags=cv2.INTER_NEAREST,
+            )
+            stable &= visible > 0
+            if int(stable.sum()) < 64:
+                return None, "insufficient_visible_stable_structure"
         difference = np.abs(aligned.astype(float) - self.reference_gray[y:yy, x:xx])
         if not stable.any() or np.median(difference[stable]) > 35:
             return None, "stable_panel_appearance_changed"
         left, top = np.floor(polygon.min(axis=0)).astype(int)
         right, bottom = np.ceil(polygon.max(axis=0)).astype(int)
+        if clipped:
+            left, top, right, bottom = (
+                max(0, left),
+                max(0, top),
+                min(w, right),
+                min(h, bottom),
+            )
         if (right - left) * (bottom - top) > 262144:
             return None, "tracked_native_ROI_exceeds_budget"
         crop = np.ascontiguousarray(image[top:bottom, left:right])
@@ -158,6 +204,14 @@ class SourcePanelTracker:
                 dynamic_features_excluded=True,
                 equipment_identity_inferred=False,
                 reacquired_after_loss=self.last_failure is not None,
+                **(
+                    dict(
+                        outer_context_clipped=clipped,
+                        required_field_pixels_complete=True,
+                    )
+                    if self.required_boxes
+                    else {}
+                ),
             ),
             current=current[good].reshape(-1, 1, 2),
             reference=reference[good].reshape(-1, 1, 2),

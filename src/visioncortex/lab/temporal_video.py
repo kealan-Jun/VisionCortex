@@ -109,6 +109,22 @@ def validate_registration(document, *, media=None, asset=None):
             raise TemporalVideoRejected("Temporal interval escaped registered media")
     if total > 120:
         raise TemporalVideoRejected("Temporal task source duration exceeds 120 seconds")
+    reference = document.get("source_tracking_reference")
+    if reference is not None:
+        if (not isinstance(reference, dict)
+                or reference.get("schema_version") != "vc-source-panel-reference/1"
+                or reference.get("source_sha256") != document["source_sha256"]
+                or reference.get("media_version") != document["media_version"]
+                or type(reference.get("pts")) is not int
+                or not re.fullmatch("[0-9a-f]{64}", reference.get("source_frame_pixels_sha256", ""))):
+            raise TemporalVideoRejected("Pinned same-source panel geometry reference required")
+        try:
+            position = Fraction(reference["media_offset_seconds"])
+            time_base = Fraction(reference["time_base"])
+        except (KeyError, ValueError, TypeError, ZeroDivisionError) as exc:
+            raise TemporalVideoRejected("Exact reference frame time required") from exc
+        if not 0 <= position < Fraction(intervals[0]["start_seconds"]) or time_base <= 0:
+            raise TemporalVideoRejected("Geometry reference must precede the requested source window")
     fields = document.get("fields")
     if not isinstance(fields, list) or not 1 <= len(fields) <= 16:
         raise TemporalVideoRejected("One to 16 explicit registered fields required")
@@ -142,6 +158,11 @@ def validate_registration(document, *, media=None, asset=None):
             "Pixel producer requires explicit dynamic context, committed single-frame batches and half-cache bound"
         )
     for spec in fields:
+        if (type(spec.get("use_source_reference", False)) is not bool
+                or spec.get("use_source_reference") and (
+                    reference is None or not spec.get("source_tracking")
+                    or not isinstance(spec.get("layout", {}).get("numeric_field_box"), list))):
+            raise TemporalVideoRejected("Source-reference tracking requires explicit critical field geometry")
         if type(spec.get("source_tracking", False)) is not bool:
             raise TemporalVideoRejected("Explicit source tracking boolean required")
         if (type(spec.get("source_geometry_translation", False)) is not bool
@@ -468,6 +489,40 @@ def decode_frames(path, start, end, provider):
         process.stdout.close()
 
 
+def geometry_reference(path, spec, registration, provider):
+    """Decode one pinned earlier original frame for stable geometry only.
+
+    The reference never enters OCR, numeric evidence or event source times.
+    Dynamic pixels are excluded by the existing source tracker.
+    """
+    import numpy as np
+
+    offset = Fraction(spec["media_offset_seconds"])
+    with closing(decode_frames(path, str(offset), str(offset + Fraction(1, 1000000)),
+                               dict(provider, max_input_frames=1))) as frames:
+        try:
+            image, meta = next(frames)
+        except StopIteration as exc:
+            raise TemporalVideoRejected("Pinned reference frame unavailable") from exc
+    if (image.shape[0] * image.shape[1] > 1048576
+            or meta["pts"] != spec["pts"]
+            or Fraction(meta["time_base"]) != Fraction(spec["time_base"])
+            or Fraction(meta["media_offset"]) != offset
+            or hashlib.sha256(image.tobytes()).hexdigest() != spec["source_frame_pixels_sha256"]):
+        raise TemporalVideoRejected("Original geometry reference identity changed")
+    upright = (np.ascontiguousarray(image[::-1, ::-1])
+               if registration["rotation_degrees_clockwise"] == 180 else image)
+    return upright, dict(spec, use="stable_structure_only", OCR_invocations=0,
+                          numerical_evidence=False, physical_identity_inferred=False,
+                          retained_bytes=upright.nbytes)
+
+
+def context_identity(context):
+    return fingerprint({k: context.get(k) for k in (
+        "association_status", "instrument_id", "epoch", "ocr_identity_key", "reset_notifications"
+    )})
+
+
 class TemporalVideo:
     def __init__(self, settings):
         self.settings = settings
@@ -540,11 +595,18 @@ class TemporalVideo:
             TemporalConfig(max_buffer_bytes=core_budget, max_window_seconds=1.0)
         )
         original_stat = None
+        reference_image = reference_receipt = None
+        reference_contexts = {}
         with source_guard(path, self.settings):
             before = hash_file(Path(path), self.settings.max_native_bytes)
             if before[0] != ref["sha256"]:
                 raise Conflict("Original temporal source changed")
             original_stat = Path(path).stat()
+            if registration.get("source_tracking_reference") is not None:
+                tick = time.monotonic()
+                reference_image, reference_receipt = geometry_reference(path,
+                    registration["source_tracking_reference"], registration, provider)
+                decode_seconds += time.monotonic() - tick
             with closing(
                 decode_frames(path, str(start), str(end), provider)
             ) as iterator:
@@ -673,18 +735,7 @@ class TemporalVideo:
                             if frame_producer is not None
                             else None,
                         )
-                        physical_key = fingerprint(
-                            {
-                                k: context.get(k)
-                                for k in (
-                                    "association_status",
-                                    "instrument_id",
-                                    "epoch",
-                                    "ocr_identity_key",
-                                    "reset_notifications",
-                                )
-                            }
-                        )
+                        physical_key = context_identity(context)
                         previous = contexts.get(key)
                         reset = (
                             previous is not None
@@ -713,16 +764,31 @@ class TemporalVideo:
                         tracking_failure = None
                         if field.get("source_tracking"):
                             from .source_tracking import SourcePanelTracker
+                            use_reference = field.get("use_source_reference", False)
+                            if use_reference and key not in reference_contexts:
+                                pos = Fraction(reference_receipt["media_offset_seconds"])
+                                reference_contexts[key] = context_identity(resolve_dynamic_context(
+                                        query_context, field, ref, registration, pos, pos,
+                                        revision=marker.get("revision") if frame_producer is not None else None,
+                                    ))
                             if key not in trackers or trackers[key][0] != physical_key:
                                 trackers[key] = (physical_key, SourcePanelTracker(
-                                    upright, field["roi_box"], field["layout"]["dynamic_boxes"]
+                                    reference_image if use_reference else upright,
+                                    field["roi_box"], field["layout"]["dynamic_boxes"],
+                                    **(dict(required_boxes=[field["layout"]["numeric_field_box"]])
+                                       if use_reference else {}),
                                 ))
                                 trackers[key][1].layout = None
+                                if use_reference:
+                                    trackers[key][1].current_points = None
                             tracker = trackers[key][1]
                             if gap:
                                 tracker.current_points = None
-                            tracked = tracker.observe(upright)
-                            used = sum(t.buffer_bytes for _, t in trackers.values())
+                            tracked = (dict(status="pending", reason="reference_panel_context_changed")
+                                       if use_reference and reference_contexts[key] != physical_key
+                                       else tracker.observe(upright))
+                            used = sum(t.buffer_bytes for _, t in trackers.values()) + (
+                                reference_image.nbytes if reference_image is not None else 0)
                             tracking_peak = max(tracking_peak, used)
                             if used > tracker_budget:
                                 raise TemporalVideoCapacityExceeded("Source tracker memory bound exceeded")
@@ -957,6 +1023,8 @@ class TemporalVideo:
             if infer is None
             else "existing_provider_callback",
             input_frame_count=count,
+            **(dict(geometry_reference=reference_receipt, additional_reference_frames=1)
+               if reference_receipt is not None else {}),
             roi_ring_upper_bound_bytes=roi_peak,
             actual_roi_buffer_peak_bytes=actual_buffer_peak,
             combined_producer_roi_peak_bytes=combined_buffer_peak

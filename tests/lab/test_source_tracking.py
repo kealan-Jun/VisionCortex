@@ -179,3 +179,152 @@ def test_brief_fit_failure_keeps_only_hypotheses_and_requires_new_valid_fit(
     recovered = obj.observe(image)
     assert recovered["status"] == "tracked"
     assert recovered["registration"]["reacquired_after_loss"] is True
+
+
+def test_clipped_faceplate_context_requires_complete_critical_source_field():
+    image = structure()
+    moved = cv2.warpAffine(image, np.float32([[1, 0, 0], [0, 1, -60]]), (360, 240))
+    reference = np.float32(
+        [
+            [90, 80],
+            [130, 80],
+            [180, 80],
+            [220, 80],
+            [90, 140],
+            [130, 140],
+            [180, 140],
+            [220, 140],
+        ]
+    )
+    current = reference - [0, 60]
+    args = (image, [0.2, 0.2, 0.65, 0.8], [[0.3, 0.3, 0.7, 0.6]])
+    obj = SourcePanelTracker(*args, required_boxes=[[0.3, 0.4, 0.7, 0.6]])
+    result, reason = obj._fit(
+        current.astype(np.float32),
+        reference,
+        moved,
+        "source_panel_descriptor_reacquisition/1",
+    )
+    assert reason is None
+    assert result["registration"]["outer_context_clipped"] is True
+    assert result["registration"]["required_field_pixels_complete"] is True
+    assert result["box"][1] == 0
+    assert np.array_equal(
+        result["image"], moved[: result["box"][3], result["box"][0] : result["box"][2]]
+    )
+    # The old path stays strict, and losing a required field never falls back.
+    default = SourcePanelTracker(*args)
+    assert (
+        default._fit(current.astype(np.float32), reference, moved, "fixture")[0] is None
+    )
+    clipped_field = SourcePanelTracker(*args, required_boxes=[[0.3, 0, 0.7, 0.1]])
+    rejected, reason = clipped_field._fit(
+        current.astype(np.float32), reference, moved, "fixture"
+    )
+    assert rejected is None and reason == "required_numeric_field_clipped"
+
+
+def test_geometry_reference_checks_original_pixels_and_never_runs_OCR(monkeypatch):
+    from visioncortex.lab import temporal_video as module
+
+    image = structure()
+    spec = dict(
+        pts=1200000,
+        time_base="1/1000000",
+        media_offset_seconds="1.2",
+        source_frame_pixels_sha256=hashlib.sha256(image.tobytes()).hexdigest(),
+    )
+    meta = dict(pts=1200000, time_base="1/1000000", media_offset="6/5")
+    calls = []
+
+    def decode(path, start, end, provider):
+        calls.append((start, end, provider["max_input_frames"]))
+        yield image, meta
+
+    monkeypatch.setattr(module, "decode_frames", decode)
+    pixels, receipt = module.geometry_reference(
+        "unused", spec, dict(rotation_degrees_clockwise=180), {}
+    )
+    assert np.array_equal(pixels, image[::-1, ::-1])
+    assert receipt["OCR_invocations"] == 0 and receipt["numerical_evidence"] is False
+    assert calls[0][2] == 1
+    with pytest.raises(module.TemporalVideoRejected, match="identity changed"):
+        module.geometry_reference(
+            "unused",
+            dict(spec, source_frame_pixels_sha256="a" * 64),
+            dict(rotation_degrees_clockwise=0),
+            {},
+        )
+
+
+def test_reference_context_cannot_cross_equipment_or_epoch():
+    from visioncortex.lab.temporal_video import context_identity
+
+    first = dict(
+        instrument_id="equipment-a",
+        epoch=2,
+        association_status="spatial_identity_supported",
+    )
+    assert context_identity(first) == context_identity(
+        dict(first, irrelevant_display_name="changed")
+    )
+    assert context_identity(first) != context_identity(
+        dict(first, instrument_id="equipment-b")
+    )
+    assert context_identity(first) != context_identity(dict(first, epoch=3))
+
+
+def test_reference_configuration_rejects_future_and_cross_source_geometry():
+    import copy
+    from visioncortex.lab.temporal_video import (
+        validate_registration,
+        TemporalVideoRejected,
+    )
+
+    document = dict(
+        schema_version="vc-lab-temporal-video-ocr/1",
+        enabled=True,
+        revision="fixture/1",
+        source_stream_key="arbitrary-source",
+        source_sha256="a" * 64,
+        media_version=1,
+        rotation_degrees_clockwise=0,
+        orientation_basis="fixture source",
+        world_clock_status="uncalibrated",
+        time_basis="original_media_pts",
+        source_intervals=[dict(start_seconds="2", end_seconds="3")],
+        fields=[
+            dict(
+                screen_id="panel",
+                field_key="digits",
+                profile_id="layout",
+                role="process_value",
+                roi_box=["0.2", "0.2", "0.7", "0.8"],
+                source_tracking=True,
+                use_source_reference=True,
+                layout=dict(
+                    revision="fixture/1",
+                    display_type="seven_segment",
+                    numeric_field_box=[0.1, 0.2, 0.8, 0.6],
+                ),
+            )
+        ],
+        source_tracking_reference=dict(
+            schema_version="vc-source-panel-reference/1",
+            source_sha256="a" * 64,
+            media_version=1,
+            pts=1000000,
+            time_base="1/1000000",
+            media_offset_seconds="1",
+            source_frame_pixels_sha256="b" * 64,
+        ),
+    )
+    assert validate_registration(document)
+    future = copy.deepcopy(document)
+    future["source_tracking_reference"]["media_offset_seconds"] = "3"
+    with pytest.raises(TemporalVideoRejected, match="must precede"):
+        validate_registration(future)
+    other = copy.deepcopy(document)
+    other["source_tracking_reference"]["source_sha256"] = "c" * 64
+    with pytest.raises(TemporalVideoRejected, match="same-source"):
+        validate_registration(other)
